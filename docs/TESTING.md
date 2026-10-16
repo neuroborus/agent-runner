@@ -318,6 +318,15 @@ retirement refusals and first causes through redacted reports. Fresh native CI
 must establish underlying cause and closure; no new slow-tier guarantee applies.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
+Windows socket regressions execute the actual transfer/input body and native
+destination predicate with injected calls, including duplication error 10022,
+PID-only/malformed input, changed or reused destination birth/token, interrupted
+carriers, acknowledgment loss and separate socket cleanup failure. The driver
+loop requires persisted target/provider evidence before duplication and persisted
+socket intent before its original connect. Creation flags remain zero; strict
+10013 denial, outside nonce/closed-port controls and independent retirement stay
+mandatory. Portable coverage establishes neither native transfer support nor a
+cause for 10022 and adds no slow-tier assignment.
 Darwin portable coverage protects narrow policy grants and literal quoting,
 matching-worker dispatch, missing native records, audit-token argument binding
 and the distinction between recorded process retirement and full domain recovery.

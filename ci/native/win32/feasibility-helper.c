@@ -72,6 +72,13 @@ static HANDLE wfpEngine, wfpToken;
 static TOKEN_STATISTICS wfpTokenIdentity;
 static ULONGLONG wfpPreparedAt, wfpPreparedTick, wfpOwnerBirth;
 static USHORT wfpRemotePort, wfpLocalPort;
+/* Data only: the payload receives no process handle or additional capability. */
+struct socket_target { DWORD version, pid; ULONGLONG birth; LUID token, authentication, modified; };
+_Static_assert(sizeof(struct socket_target) == 40, "Fixed socket destination");
+struct socket_offer { struct socket_target target; WSAPROTOCOL_INFOW source, protocol; };
+static struct socket_target wfpTarget;
+static WSAPROTOCOL_INFOW wfpProtocol;
+static volatile LONG wfpTargetReady, wfpTransferReady, wfpDuplicateReleased;
 static BOOL wfp_close(void);
 #endif
 static SRWLOCK transportLock = SRWLOCK_INIT;
@@ -534,6 +541,7 @@ static BOOL wfp_line(const BYTE *line, DWORD size) {
 }
 #ifndef NATIVE_COMMAND_EXPERIMENT
 #define SOCKET_PREFIX "native-windows-socket: "
+_Static_assert(2 * sizeof(struct socket_offer) + sizeof(SOCKET_PREFIX) + 2 <= 4096, "Bounded socket transfer line");
 static void wfp_prepare(const BYTE *line, DWORD size);
 static void wfp_snapshot(const BYTE *line, DWORD size);
 #endif
@@ -657,6 +665,25 @@ static BOOL caller_directory(const WCHAR *value, DWORD size) {
   }
   return TRUE;
 }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+static struct socket_target socket_target(void) {
+  struct socket_target value = {0}; value.version = 1; value.pid = GetCurrentProcessId(); value.birth = creation(GetCurrentProcess());
+  HANDLE token = NULL; TOKEN_STATISTICS statistics; DWORD used, container;
+  win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "observer-owner-token");
+  win32_check(GetTokenInformation(token, TokenStatistics, &statistics, sizeof(statistics), &used), "observer-owner-token");
+  invariant(used == sizeof(statistics) && statistics.TokenType == TokenPrimary, "observer-owner-token");
+  win32_check(GetTokenInformation(token, TokenIsAppContainer, &container, sizeof(container), &used), "observer-owner-token");
+  invariant(used == sizeof(container) && !container, "observer-owner-token");
+  win32_check(CloseHandle(token), "observer-owner-close");
+  value.token = statistics.TokenId; value.authentication = statistics.AuthenticationId; value.modified = statistics.ModifiedId; return value;
+}
+static void socket_target_binding(const struct socket_target *expected) {
+  struct socket_target actual = socket_target();
+  invariant(!memcmp(expected, &actual, sizeof(actual)), "observer-owner-binding");
+  DWORD waited = WaitForSingleObject(GetCurrentProcess(), 0); win32_check(waited != WAIT_FAILED, "observer-owner-wait");
+  invariant(waited == WAIT_TIMEOUT, "observer-owner-binding");
+}
+#endif
 static void child_environment(WCHAR environment[8192]) {
   WCHAR local[4096] = {0}, windows[4096] = {0}, actual[4096] = {0};
   DWORD localSize = GetEnvironmentVariableW(L"LOCALAPPDATA", local, 4096);
@@ -677,7 +704,9 @@ static void child_environment(WCHAR environment[8192]) {
   n = swprintf_s(environment + at, 8192 - at, L"LOCALAPPDATA=%ls", local); invariant(n > 0, "environment-bound"); at += (size_t)n + 1;
 #ifndef NATIVE_COMMAND_EXPERIMENT
   if (workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
-    n = swprintf_s(environment + at, 8192 - at, L"NATIVE_FEASIBILITY_SOCKET_OWNER=%lu", GetCurrentProcessId());
+    wfpTarget = socket_target(); WCHAR encoded[2 * sizeof(wfpTarget) + 1];
+    for (unsigned i = 0; i < sizeof(wfpTarget); i++) swprintf_s(encoded + 2*i, 3, L"%02x", ((const BYTE *)&wfpTarget)[i]);
+    n = swprintf_s(environment + at, 8192 - at, L"NATIVE_FEASIBILITY_SOCKET_OWNER=%ls", encoded);
     invariant(n > 0 && (size_t)n + 2 <= 8192 - at, "environment-bound"); at += (size_t)n + 1;
   }
 #endif
@@ -946,6 +975,16 @@ static void launch(int argc, WCHAR **argv) {
       if (!settle_transport()) closed = FALSE;
       if (!closed || InterlockedCompareExchange(&failing, 0, 0)) failure(126); puts("{\"event\":\"closed\"}"); return;
     }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+    if (command == 'O' && workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
+      invariant(!InterlockedCompareExchange(&wfpTargetReady, 0, 0), "observer-owner-once");
+      socket_target_binding(&wfpTarget); InterlockedExchange(&wfpTargetReady, 1);
+    }
+    if (command == 'D' && workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
+      invariant(InterlockedCompareExchange(&wfpTransferReady, 0, 0) && !InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
+      socket_target_binding(&wfpTarget); InterlockedExchange(&wfpDuplicateReleased, 1);
+    }
+#endif
     AcquireSRWLockExclusive(&transportLock);
     if (InterlockedCompareExchange(&failing, 0, 0)) {
       ReleaseSRWLockExclusive(&transportLock); failure(126);
@@ -1087,25 +1126,68 @@ static void wfp_binding(void) {
   invariant(size && size < 4096 && !_wcsicmp(expected, actual), "observer-image");
   if (wfpSocket != INVALID_SOCKET) wfp_exclusive();
 }
+static BOOL socket_protocol(const WSAPROTOCOL_INFOW *value) {
+  const GUID empty = {0};
+  return value->iAddressFamily == AF_INET && value->iSocketType == SOCK_STREAM && value->iProtocol == IPPROTO_TCP &&
+    value->dwCatalogEntryId && memcmp(&value->ProviderId, &empty, sizeof(empty)) &&
+    value->ProtocolChain.ChainLen > 0 && value->ProtocolChain.ChainLen <= MAX_PROTOCOL_CHAIN;
+}
+static BOOL socket_protocol_same(const WSAPROTOCOL_INFOW *a, const WSAPROTOCOL_INFOW *b) {
+  /* dwProviderReserved is the destination-specific Winsock transfer ticket. */
+  return socket_protocol(a) && socket_protocol(b) && a->dwCatalogEntryId == b->dwCatalogEntryId &&
+    !memcmp(&a->ProviderId, &b->ProviderId, sizeof(GUID)) && a->ProtocolChain.ChainLen == b->ProtocolChain.ChainLen &&
+    !memcmp(a->ProtocolChain.ChainEntries, b->ProtocolChain.ChainEntries, a->ProtocolChain.ChainLen * sizeof(DWORD)) &&
+    a->dwServiceFlags1 == b->dwServiceFlags1 && a->dwServiceFlags2 == b->dwServiceFlags2 &&
+    a->dwServiceFlags3 == b->dwServiceFlags3 && a->dwServiceFlags4 == b->dwServiceFlags4 && a->dwProviderFlags == b->dwProviderFlags &&
+    a->iVersion == b->iVersion && a->iMinSockAddr == b->iMinSockAddr && a->iMaxSockAddr == b->iMaxSockAddr &&
+    a->iProtocolMaxOffset == b->iProtocolMaxOffset && a->iNetworkByteOrder == b->iNetworkByteOrder &&
+    a->iSecurityScheme == b->iSecurityScheme && a->dwMessageSize == b->dwMessageSize;
+}
+static void socket_transfer_identity(FILE *output) {
+  fprintf(output, "\"transfer\":{\"destination\":{\"pid\":%lu,\"creationTime\":\"%llu\",\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"modifiedId\":\"%08lx%08lx\"},\"providerId\":\"",
+    wfpTarget.pid, wfpTarget.birth, (DWORD)wfpTarget.token.HighPart, wfpTarget.token.LowPart,
+    (DWORD)wfpTarget.authentication.HighPart, wfpTarget.authentication.LowPart, (DWORD)wfpTarget.modified.HighPart, wfpTarget.modified.LowPart);
+  wfp_key(output, &wfpProtocol.ProviderId);
+  fprintf(output, "\",\"catalogId\":%lu,\"creationFlags\":0,\"addressFamily\":%d,\"socketType\":%d,\"protocol\":%d}",
+    wfpProtocol.dwCatalogEntryId, wfpProtocol.iAddressFamily, wfpProtocol.iSocketType, wfpProtocol.iProtocol);
+}
 static void wfp_identity(FILE *output) {
-  fprintf(output, "\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"owner\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"sid\":\"%ls\",\"userSid\":\"%ls\",\"image\":{\"identity\":\"%s\",\"sha256\":\"%s\",\"private\":false},\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"preparedAt\":\"%llu\",\"exclusive\":true",
+  fprintf(output, "\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"owner\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"sid\":\"%ls\",\"userSid\":\"%ls\",\"image\":{\"identity\":\"%s\",\"sha256\":\"%s\",\"private\":false},\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"preparedAt\":\"%llu\",\"exclusive\":true,",
     wfpChildPid, wfpChildBirth, GetCurrentProcessId(), wfpOwnerBirth, appText, userText, wfpImageId, wfpImageHash,
     (DWORD)wfpTokenIdentity.TokenId.HighPart, wfpTokenIdentity.TokenId.LowPart,
     (DWORD)wfpTokenIdentity.AuthenticationId.HighPart, wfpTokenIdentity.AuthenticationId.LowPart, wfpPreparedAt);
+  socket_transfer_identity(output);
 }
 static void wfp_prepare(const BYTE *line, DWORD size) {
   wfp_binding(); invariant(!wfpPreparedAt && wfpSocket == INVALID_SOCKET && !wfpEngine && !wfpToken, "observer-once");
   DWORD offset = sizeof(SOCKET_PREFIX) - 1, end = size - 1; if (end && line[end - 1] == '\r') end--;
-  WSAPROTOCOL_INFOW protocol = {0};
-  invariant(size && line[size - 1] == '\n' && end == offset + 2 * sizeof(protocol), "observer-carrier");
-  for (unsigned i = 0; i < sizeof(protocol); i++) {
+  struct socket_offer offer = {0};
+  invariant(size && line[size - 1] == '\n' && end == offset + 2 * sizeof(offer), "observer-carrier");
+  for (unsigned i = 0; i < sizeof(offer); i++) {
     BYTE a = line[offset + 2 * i], b = line[offset + 2 * i + 1];
     invariant(((a >= '0' && a <= '9') || (a >= 'a' && a <= 'f')) && ((b >= '0' && b <= '9') || (b >= 'a' && b <= 'f')), "observer-carrier");
-    ((BYTE *)&protocol)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
+    ((BYTE *)&offer)[i] = (BYTE)(((a <= '9' ? a - '0' : a - 'a' + 10) << 4) | (b <= '9' ? b - '0' : b - 'a' + 10));
   }
-  invariant(protocol.iAddressFamily == AF_INET && protocol.iSocketType == SOCK_STREAM && protocol.iProtocol == IPPROTO_TCP, "observer-protocol");
-  wfpSocket = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &protocol, 0, 0);
+  invariant(InterlockedCompareExchange(&wfpTargetReady, 0, 0) && !memcmp(&offer.target, &wfpTarget, sizeof(wfpTarget)), "observer-owner-binding");
+  socket_target_binding(&offer.target);
+  if (!InterlockedCompareExchange(&wfpTransferReady, 0, 0)) {
+    const WSAPROTOCOL_INFOW empty = {0};
+    invariant(socket_protocol(&offer.source) && !memcmp(&offer.protocol, &empty, sizeof(empty)), "observer-protocol");
+    wfpProtocol = offer.source; InterlockedExchange(&wfpTransferReady, 1);
+    printf("{\"event\":\"tcp-transfer-ready\",\"child\":{\"pid\":%lu,\"creationTime\":\"%llu\"},\"owner\":{\"pid\":%lu,\"creationTime\":\"%llu\"},", wfpChildPid, wfpChildBirth, wfpTarget.pid, wfpTarget.birth);
+    socket_transfer_identity(stdout); puts("}"); return;
+  }
+  invariant(InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
+  invariant(socket_protocol_same(&offer.source, &wfpProtocol), "observer-protocol");
+  invariant(socket_protocol_same(&offer.source, &offer.protocol), "observer-protocol");
+  wfpSocket = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &offer.protocol, 0, 0);
   if (wfpSocket == INVALID_SOCKET) { remember("observer-socket", "win32", WSAGetLastError()); failure(126); }
+  WSAPROTOCOL_INFOW actual = {0}; int actualSize = sizeof(actual);
+  if (getsockopt(wfpSocket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&actual, &actualSize) == SOCKET_ERROR) {
+    remember("observer-protocol", "win32", WSAGetLastError()); failure(126);
+  }
+  invariant(actualSize == sizeof(actual) && socket_protocol_same(&actual, &offer.source), "observer-protocol");
+  socket_target_binding(&offer.target); wfpProtocol = actual;
   wfp_exclusive();
   struct sockaddr_in local = {0}, remote = {0}; int length = sizeof(local);
   int result = getsockname(wfpSocket, (struct sockaddr *)&local, &length); if (result) { remember("observer-local", "win32", WSAGetLastError()); failure(126); }
@@ -1145,16 +1227,35 @@ static BOOL tcp_ack(char expected, ULONGLONG end, struct diagnosis *problem) {
 }
 static BOOL wfp_transfer(SOCKET socket, ULONGLONG end, struct diagnosis *problem, BOOL *transferred) {
   if (wcscmp(role, L"bundle") || !workspaceRole || wcscmp(workspaceRole, L"null-probe") == 0) return TRUE;
-  WCHAR target[16]; DWORD count = GetEnvironmentVariableW(L"NATIVE_FEASIBILITY_SOCKET_OWNER", target, 16);
+  struct socket_offer offer = {0}; WCHAR target[2 * sizeof(offer.target) + 1];
+  SetLastError(ERROR_SUCCESS);
+  DWORD count = GetEnvironmentVariableW(L"NATIVE_FEASIBILITY_SOCKET_OWNER", target, sizeof(target) / sizeof(WCHAR));
   if (!count) { *problem = (struct diagnosis){"observer-owner", "win32", GetLastError()}; return FALSE; }
-  if (count >= 16 || wcsspn(target, L"0123456789") != count) { *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE; }
-  ULONGLONG pid = _wcstoui64(target, NULL, 10);
-  if (!pid || pid > MAXDWORD || pid == GetCurrentProcessId()) { *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE; }
-  WSAPROTOCOL_INFOW protocol = {0};
-  if (WSADuplicateSocketW(socket, (DWORD)pid, &protocol) == SOCKET_ERROR) { *problem = (struct diagnosis){"observer-transfer", "win32", WSAGetLastError()}; return FALSE; }
-  *transferred = TRUE;
-  fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(protocol); i++) fprintf(stderr, "%02x", ((BYTE *)&protocol)[i]); fputc('\n', stderr); fflush(stderr);
-  return tcp_ack('T', end, problem);
+  if (count != 2 * sizeof(offer.target) || wcsspn(target, L"0123456789abcdef") != count) { *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE; }
+  for (unsigned i = 0; i < sizeof(offer.target); i++) {
+    WCHAR a = target[2*i], b = target[2*i + 1];
+    ((BYTE *)&offer.target)[i] = (BYTE)(((a <= L'9' ? a - L'0' : a - L'a' + 10) << 4) | (b <= L'9' ? b - L'0' : b - L'a' + 10));
+  }
+  if (offer.target.version != 1 || !offer.target.pid || offer.target.pid == GetCurrentProcessId() || !offer.target.birth) {
+    *problem = (struct diagnosis){"observer-owner", "invariant", 0}; return FALSE;
+  }
+  int protocolSize = sizeof(offer.source);
+  if (getsockopt(socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&offer.source, &protocolSize) == SOCKET_ERROR) {
+    *problem = (struct diagnosis){"observer-protocol", "win32", WSAGetLastError()}; return FALSE;
+  }
+  if (protocolSize != sizeof(offer.source) || !socket_protocol(&offer.source)) { *problem = (struct diagnosis){"observer-protocol", "invariant", 0}; return FALSE; }
+  if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+  for (unsigned phase = 0; phase < 2; phase++) {
+    if (phase) {
+      if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
+      if (WSADuplicateSocketW(socket, offer.target.pid, &offer.protocol) == SOCKET_ERROR) { *problem = (struct diagnosis){"observer-transfer", "win32", WSAGetLastError()}; return FALSE; }
+      *transferred = TRUE;
+    }
+    fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(offer); i++) fprintf(stderr, "%02x", ((BYTE *)&offer)[i]); fputc('\n', stderr); fflush(stderr);
+    if (ferror(stderr)) { *problem = (struct diagnosis){"observer-carrier", "invariant", 0}; return FALSE; }
+    if (!tcp_ack(phase ? 'T' : 'D', end, problem)) return FALSE;
+  }
+  return TRUE;
 }
 static void wfp_snapshot(const BYTE *line, DWORD size) {
   const char *prefix = WFP_PREFIX " tuple="; DWORD offset = (DWORD)strlen(prefix);
@@ -1195,7 +1296,7 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
     tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.localFamily == AF_INET && tuple.remoteFamily == AF_INET &&
     tuple.localAddress == INADDR_LOOPBACK && tuple.remoteAddress == INADDR_LOOPBACK && tuple.localPort && tuple.remotePort;
   if (wfpPreparedAt) {
-    wfp_binding(); TOKEN_STATISTICS token; DWORD used; HANDLE current = NULL;
+    wfp_binding(); socket_target_binding(&wfpTarget); TOKEN_STATISTICS token; DWORD used; HANDLE current = NULL;
     win32_check(OpenProcessToken(transport.child.hProcess, TOKEN_QUERY, &current), "observer-token");
     BOOL read = GetTokenInformation(current, TokenStatistics, &token, sizeof(token), &used); DWORD error = read ? 0 : GetLastError();
     if (!read) remember("observer-token", "win32", error);

@@ -569,6 +569,7 @@ const NATIVE_OPERATIONS = new Set(
   tcp-endpoint tcp-exclusive observer-child observer-job observer-image observer-once observer-carrier
   observer-protocol observer-socket observer-local observer-unconnected observer-token
   observer-engine observer-collection observer-owner observer-transfer observer-socket-close observer-engine-close observer-enum-close observer-token-close
+  observer-owner-token observer-owner-close observer-owner-binding observer-owner-once observer-owner-wait
 `
     .trim()
     .split(/\s+/u)
@@ -1097,6 +1098,7 @@ const tcpBindingKeys = [
   "authenticationId",
   "preparedAt",
   "exclusive",
+  "transfer",
 ];
 const tcpEndpoint = (value, port) =>
   wfpClosed(value, ["address", "port"]) &&
@@ -1106,12 +1108,6 @@ const tcpEndpoint = (value, port) =>
   value.port <= 65535 &&
   (port === undefined || value.port === port);
 function assertTcpBinding(row, receipt) {
-  for (const key of ["child", "owner"])
-    need(
-      wfpClosed(row[key], ["pid", "creationTime"]) &&
-        row[key].pid === receipt[key].pid &&
-        row[key].creationTime === receipt[key].creationTime,
-    );
   need(
     row.exclusive === true &&
       row.sid === receipt.sid &&
@@ -1129,6 +1125,62 @@ function assertTcpBinding(row, receipt) {
       wfpTime(row.preparedAt) &&
       BigInt(row.preparedAt) >= BigInt(receipt.child.creationTime),
   );
+  assertTcpTransfer(row, receipt);
+}
+function assertTcpTransfer(row, receipt) {
+  for (const key of ["child", "owner"])
+    need(
+      wfpClosed(row[key], ["pid", "creationTime"]) &&
+        row[key].pid === receipt[key].pid &&
+        row[key].creationTime === receipt[key].creationTime,
+    );
+  const transfer = row.transfer,
+    destination = transfer?.destination;
+  need(
+    wfpClosed(transfer, [
+      "destination",
+      "providerId",
+      "catalogId",
+      "creationFlags",
+      "addressFamily",
+      "socketType",
+      "protocol",
+    ]) &&
+      wfpClosed(destination, [
+        "pid",
+        "creationTime",
+        "tokenId",
+        "authenticationId",
+        "modifiedId",
+      ]) &&
+      destination.pid === receipt.owner.pid &&
+      destination.creationTime === receipt.owner.creationTime &&
+      [destination.tokenId, destination.authenticationId].every(
+        (value) =>
+          typeof value === "string" &&
+          /^[a-f0-9]{16}$/u.test(value) &&
+          !/^0+$/u.test(value),
+      ) &&
+      typeof destination.modifiedId === "string" &&
+      /^[a-f0-9]{16}$/u.test(destination.modifiedId) &&
+      typeof transfer.providerId === "string" &&
+      /^[a-f0-9]{32}$/u.test(transfer.providerId) &&
+      !/^0+$/u.test(transfer.providerId) &&
+      wfpUint(transfer.catalogId) &&
+      transfer.catalogId > 0 &&
+      transfer.creationFlags === 0 &&
+      transfer.addressFamily === 2 &&
+      transfer.socketType === 1 &&
+      transfer.protocol === 6,
+  );
+}
+export function assertWindowsFeasibilityTcpTransfer(row, receipt) {
+  need(
+    wfpClosed(row, ["event", "child", "owner", "transfer"]) &&
+      row.event === "tcp-transfer-ready",
+  );
+  assertTcpTransfer(row, receipt);
+  return row;
 }
 export function assertWindowsFeasibilityTcpObserver(row, receipt, endpoint) {
   need(
@@ -1200,8 +1252,8 @@ function assertWindowsFeasibilityTcpAttribution(
   );
   assertTcpBinding(row, receipt);
   need(
-    ["tokenId", "authenticationId", "preparedAt"].every(
-      (key) => row[key] === prepared[key],
+    ["tokenId", "authenticationId", "preparedAt", "transfer"].every(
+      (key) => JSON.stringify(row[key]) === JSON.stringify(prepared[key]),
     ),
   );
   for (const event of row.matches)
@@ -3125,15 +3177,16 @@ export async function runWindowsFeasibility(
             need((await nextRun()).event === "payload-canceled");
           },
           closePayload: async () => {
-            await closeWorkspaceLaunch(run, nextRun, () => runRows, 24, [
+            await closeWorkspaceLaunch(run, nextRun, () => runRows, 25, [
               "ready",
               "attempt",
               "completed",
               "git-started",
               "tcp-observer-ready",
+              "tcp-transfer-ready",
               "tcp-attribution",
             ]);
-            if (complete) need(runRows === 24);
+            if (complete) need(runRows === 25);
           },
           complete: () => complete,
         });
@@ -3237,13 +3290,29 @@ export async function runWindowsFeasibility(
           }
           if (operation === "tcp") {
             run.session.send("O");
+            const transfer = await nextRun();
+            assertWindowsFeasibilityTcpTransfer(transfer, run.receipt);
+            // Bind the actual destination and provider before the one native
+            // duplication. Neither PID-only input nor a lost reply can advance.
+            run.tcpAttribution = {
+              transfer,
+              requestedEndpoint: tcpEndpoint,
+              pending: true,
+            };
+            await persist(`${mode}-tcp-transfer`, run.tcpAttribution);
+            run.session.send("D");
             const prepared = await nextRun();
             assertWindowsFeasibilityTcpObserver(
               prepared,
               run.receipt,
               tcpEndpoint,
             );
+            need(
+              JSON.stringify(prepared.transfer) ===
+                JSON.stringify(transfer.transfer),
+            );
             run.tcpAttribution = {
+              transfer,
               prepared,
               requestedEndpoint: tcpEndpoint,
               pending: true,

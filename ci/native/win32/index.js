@@ -163,6 +163,7 @@ export {
   windowsFeasibilityHelperSession,
   observeWindowsFeasibilityWfp,
   assertWindowsFeasibilityTcpObserver,
+  assertWindowsFeasibilityTcpTransfer,
   assertWindowsFeasibilityTcpDenial,
   assertWindowsFeasibilityWitness,
   observeWindowsGitNullProbe,

@@ -87,6 +87,7 @@ import {
   windowsFeasibilityHelperSession,
   observeWindowsFeasibilityWfp,
   assertWindowsFeasibilityTcpObserver,
+  assertWindowsFeasibilityTcpTransfer,
   assertWindowsFeasibilityTcpDenial,
   WINDOWS_LITERAL_ARGUMENTS,
   quoteWindowsArgument,
@@ -5922,6 +5923,369 @@ test("TCP setup and observer failures retain native causes and close each acquir
   }
 });
 
+test("original socket transfer validates its actual input and retains 10022 and partial-transfer cleanup", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const transferStart = source.indexOf("static BOOL wfp_transfer(");
+  const transfer = source.slice(
+    transferStart,
+    source.indexOf("static void wfp_snapshot(", transferStart),
+  );
+  assert.ok(transfer.includes("WSADuplicateSocketW("));
+  const ownerLoop = source.slice(
+    source.indexOf("  char command; DWORD used;\n  for (;;)"),
+    source.indexOf("static void observe("),
+  );
+  assert.ok(
+    ownerLoop.indexOf("socket_target_binding(&wfpTarget)") <
+      ownerLoop.indexOf("AcquireSRWLockExclusive(&transportLock)"),
+  );
+  const binding =
+    /static void socket_target_binding\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
+  const received =
+    /invariant\((InterlockedCompareExchange\(&wfpTargetReady, 0, 0\) && !memcmp\(&offer.target, &wfpTarget, sizeof\(wfpTarget\)\)), "observer-owner-binding"\);/u.exec(
+      source,
+    )[1];
+  const protocol =
+    /static BOOL socket_protocol\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)[1];
+  const native = (text) =>
+    text
+      .replace(
+        /\(struct diagnosis\)\{"([a-z-]+)", "(win32|invariant)", ([^}]+)\}/gu,
+        '{operation:"$1",domain:"$2",value:$3}',
+      )
+      .replace(/\*problem = ([^;]+);/gu, "Object.assign(problem, $1);")
+      .replaceAll("*transferred", "transferState.value")
+      .replaceAll("->", ".")
+      .replace(/\(const BYTE \*\)|\(BYTE\)|\(DWORD\)|\(int\)|\(char \*\)/gu, "")
+      .replaceAll('L"', '"')
+      .replace(/L'([^'])'/gu, (_match, value) => String(value.charCodeAt(0)));
+  const transferBody = native(
+    transfer.slice(transfer.indexOf("{") + 1, transfer.lastIndexOf("}")),
+  )
+    .replace(
+      "struct socket_offer offer = {0}; WCHAR target[2 * sizeof(offer.target) + 1];",
+      "const offer = {target:{},source:{},protocol:{}}; const target = [], targetBytes = Buffer.alloc(40);",
+    )
+    .replaceAll("sizeof(target) / sizeof(WCHAR)", "81")
+    .replaceAll("sizeof(offer.target)", "40")
+    .replaceAll("sizeof(offer.source)", "628")
+    .replaceAll("sizeof(offer)", "1296")
+    .replaceAll("((BYTE *)&offer.target)[i]", "targetBytes[i]")
+    .replaceAll("((BYTE *)&offer)[i]", "offerByte(offer, i)")
+    .replace(
+      "if (offer.target.version",
+      "decodeTarget(targetBytes, offer.target); if (offer.target.version",
+    )
+    .replace("WCHAR a", "const a")
+    .replace("DWORD count", "const count")
+    .replace("int protocolSize = 628;", "const protocolSize = {value:628};")
+    .replaceAll("&offer.source", "offer.source")
+    .replaceAll("&offer.protocol", "offer.protocol")
+    .replaceAll("&protocolSize", "protocolSize")
+    .replace("protocolSize != 628", "protocolSize.value != 628")
+    .replaceAll("unsigned i", "let i")
+    .replace("unsigned phase", "let phase");
+  const ownerBinding = native(binding)
+    .replace("struct socket_target actual", "const actual")
+    .replace("DWORD waited", "const waited")
+    .replaceAll("&actual", "actual")
+    .replaceAll("sizeof(actual)", "40");
+  const receiveBinding = received
+    .replaceAll("&offer.target", "offer.target")
+    .replaceAll("&wfpTarget", "wfpTarget")
+    .replaceAll("sizeof(wfpTarget)", "40");
+  const protocolBody = native(protocol)
+    .replace("const GUID empty = {0};", "const empty = {};")
+    .replaceAll("&value.ProviderId", "value.ProviderId")
+    .replaceAll("&empty", "empty")
+    .replaceAll("sizeof(empty)", "16");
+  const tcp = source.slice(
+    source.indexOf("static int tcp_connection("),
+    source.indexOf("static int connection("),
+  );
+  const close = native(
+    tcp.slice(tcp.indexOf("done:") + 5, tcp.lastIndexOf("}")),
+  )
+    .replace(
+      "struct diagnosis acknowledgment = {0};",
+      "const acknowledgment = {};",
+    )
+    .replaceAll("&acknowledgment", "acknowledgment")
+    .replace(/\b(?:int|BOOL)\b/gu, "let")
+    .replace(/#(?:ifndef NATIVE_COMMAND_EXPERIMENT|endif)/gu, "")
+    .replace(/fprintf\(stderr, TCP_PREFIX " end\\n"\); fflush\(stderr\);/u, "");
+  const script =
+    new Script(`function socket_protocol(value) {${protocolBody}} function socket_target_binding(expected) {${ownerBinding}}
+    function wfp_transfer(socket, end, problem) {${transferBody}}
+    function close() {${close}} transferred = wfp_transfer(socket, end, problem) && transferState.value;
+    transferred = transferState.value; result = close();`);
+  for (const fault of [
+    null,
+    "pid-only",
+    "bad-input",
+    "self",
+    "wrong-pid",
+    "protocol",
+    "10022",
+    "10022-close",
+    "birth",
+    "token",
+    "exited",
+    "reused",
+    "input-partial",
+    "input-ack",
+    "partial",
+    "ack",
+    "close",
+  ]) {
+    const target = {
+      version: 1,
+      pid: 41,
+      birth: 90,
+      token: 1,
+      authentication: 2,
+      modified: 3,
+    };
+    const bytes = Buffer.alloc(40);
+    bytes.writeUInt32LE(1);
+    bytes.writeUInt32LE(
+      fault === "self" ? 43 : fault === "wrong-pid" ? 42 : 41,
+      4,
+    );
+    bytes.writeBigUInt64LE(90n, 8);
+    for (const [at, value] of [
+      [16, 1],
+      [24, 2],
+      [32, 3],
+    ])
+      bytes.writeUInt32LE(value, at);
+    const events = [],
+      failures = [],
+      secondary = [];
+    let lastError = 0,
+      offer;
+    const context = {
+      Buffer,
+      role: "bundle",
+      workspaceRole: "read",
+      socket: 17,
+      end: 5000,
+      started: 1,
+      attempted: false,
+      transferred: false,
+      problem: {},
+      nativeReceipt: false,
+      transferState: { value: false },
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      SOCKET_ERROR: -1,
+      AF_INET: 2,
+      SOCK_STREAM: 1,
+      IPPROTO_TCP: 6,
+      MAX_PROTOCOL_CHAIN: 7,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
+      SOL_SOCKET: 0xffff,
+      SO_PROTOCOL_INFOW: 0x2005,
+      SOCKET_PREFIX: "native-windows-socket: ",
+      stderr: {},
+      GetEnvironmentVariableW(key, value, capacity) {
+        assert.equal(key, "NATIVE_FEASIBILITY_SOCKET_OWNER");
+        assert.equal(capacity, 81);
+        value.push(
+          ...[
+            ...(fault === "pid-only"
+              ? "41"
+              : fault === "bad-input"
+                ? "x".repeat(80)
+                : bytes.toString("hex")),
+          ].map((c) => c.charCodeAt(0)),
+        );
+        return value.length;
+      },
+      wcsspn: (text, allowed) =>
+        text.findIndex((c) => !allowed.includes(String.fromCharCode(c))) < 0
+          ? text.length
+          : 0,
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      GetCurrentProcessId: () => 43,
+      GetCurrentProcess: () => 41,
+      GetTickCount64: () => 10,
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      WSAGetLastError: () => lastError,
+      getsockopt(socket, level, option, value, size) {
+        assert.equal(socket, 17);
+        assert.equal(level, 0xffff);
+        assert.equal(option, 0x2005);
+        assert.equal(size.value, 628);
+        events.push("protocol");
+        Object.assign(value, {
+          iAddressFamily: 2,
+          iSocketType: 1,
+          iProtocol: 6,
+          dwCatalogEntryId: 7,
+          ProviderId: { id: 1 },
+          ProtocolChain: { ChainLen: 1 },
+        });
+        if (fault === "protocol") value.iProtocol = 17;
+        return 0;
+      },
+      decodeTarget(data, value) {
+        Object.assign(value, {
+          version: data.readUInt32LE(0),
+          pid: data.readUInt32LE(4),
+          birth: Number(data.readBigUInt64LE(8)),
+          token: data.readUInt32LE(16),
+          authentication: data.readUInt32LE(24),
+          modified: data.readUInt32LE(32),
+        });
+      },
+      WSADuplicateSocketW(socket, pid, value) {
+        assert.equal(socket, 17);
+        assert.equal(pid, 41);
+        events.push("duplicate");
+        if (["10022", "10022-close"].includes(fault)) {
+          lastError = 10022;
+          return -1;
+        }
+        value.ticket = 1;
+        return 0;
+      },
+      offerByte(value) {
+        offer = value;
+        return 0;
+      },
+      fputs: () => events.push("carrier"),
+      fprintf: () => {},
+      fputc: () => {},
+      fflush: () => {},
+      ferror: () =>
+        fault === "input-partial" ||
+        (fault === "partial" && context.transferState.value),
+      memcmp: (a, b) => (JSON.stringify(a) === JSON.stringify(b) ? 0 : 1),
+      InterlockedCompareExchange: (value) => value,
+      socket_target: () => ({
+        ...target,
+        ...(fault === "birth" ||
+        (fault === "reused" && context.transferState.value)
+          ? { birth: 91 }
+          : fault === "token"
+            ? { token: 9 }
+            : {}),
+      }),
+      WaitForSingleObject: () => (fault === "exited" ? 0 : 258),
+      invariant(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      win32_check(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      tcp_ack(expected, deadline, problem) {
+        events.push(expected);
+        if (
+          ["D", "T"].includes(expected) &&
+          !(fault === "ack" && expected === "T") &&
+          !(fault === "input-ack" && expected === "D")
+        ) {
+          try {
+            new Script(
+              `const wfpTargetReady = true; invariant(${receiveBinding}, "observer-owner-binding"); socket_target_binding(offer.target);`,
+            ).runInNewContext({
+              ...context,
+              offer,
+              wfpTarget: target,
+              socket_target_binding: new Script(
+                `expected => {${ownerBinding}}`,
+              ).runInNewContext(context),
+            });
+          } catch (error) {
+            Object.assign(problem, {
+              operation: error.message,
+              domain: "invariant",
+              value: 0,
+            });
+            return false;
+          }
+          return true;
+        }
+        if (["ack", "input-ack"].includes(fault)) {
+          Object.assign(problem, {
+            operation: "ack-read",
+            domain: "win32",
+            value: 109,
+          });
+          return false;
+        }
+        return true;
+      },
+      tcp_observe: () => {},
+      wfp_tuple: () => events.push("tuple"),
+      closesocket(socket) {
+        assert.equal(socket, 17);
+        events.push("close");
+        lastError = 10038;
+        return ["close", "10022-close"].includes(fault) ? -1 : 0;
+      },
+      remember(...facts) {
+        if (!failures.length) failures.push(facts);
+      },
+      cleanup_error: (...facts) => secondary.push(facts),
+      failure() {
+        throw new Error("Native refusal");
+      },
+    };
+    if (fault)
+      assert.throws(
+        () => script.runInNewContext(context),
+        /Native refusal/u,
+        fault,
+      );
+    else {
+      script.runInNewContext(context);
+      assert.equal(context.result, 0);
+    }
+    assert.equal(
+      events.filter((event) => event === "duplicate").length,
+      [
+        "pid-only",
+        "bad-input",
+        "self",
+        "wrong-pid",
+        "protocol",
+        "birth",
+        "token",
+        "exited",
+        "input-partial",
+        "input-ack",
+      ].includes(fault)
+        ? 0
+        : 1,
+      fault,
+    );
+    assert.equal(events.filter((event) => event === "close").length, 1, fault);
+    assert.equal(events.includes("U"), context.transferState.value, fault);
+    if (["10022", "10022-close"].includes(fault))
+      assert.deepEqual(failures[0], ["observer-transfer", "win32", 10022]);
+    if (["wrong-pid", "birth", "token", "exited", "reused"].includes(fault))
+      assert.equal(failures[0][0], "observer-owner-binding");
+    if (["partial", "input-partial"].includes(fault))
+      assert.equal(failures[0][0], "observer-carrier");
+    if (["ack", "input-ack"].includes(fault))
+      assert.deepEqual(failures[0], ["ack-read", "win32", 109]);
+    if (["close", "10022-close"].includes(fault))
+      assert.deepEqual(secondary[0], ["tcp-close", "win32", 10038]);
+  }
+});
+
 test("native TCP acknowledgments use bounded pipe reads and retain their actual failures", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
@@ -6105,12 +6469,33 @@ function tcpDenialFixture(
     authenticationId: "0000000000000002",
     preparedAt: "1000",
     exclusive: true,
+    transfer: {
+      destination: {
+        pid: receipt.owner.pid,
+        creationTime: receipt.owner.creationTime,
+        tokenId: "0000000000000003",
+        authenticationId: "0000000000000002",
+        modifiedId: "0000000000000004",
+      },
+      providerId: "a".repeat(32),
+      catalogId: 7,
+      creationFlags: 0,
+      addressFamily: 2,
+      socketType: 1,
+      protocol: 6,
+    },
   };
   const requested = { address: 0x7f000001, port: 32100 };
   const local = { address: 0x7f000001, port: 45678 };
   return {
     receipt,
     endpoint: "32100",
+    transfer: {
+      event: "tcp-transfer-ready",
+      child: structuredClone(binding.child),
+      owner: structuredClone(binding.owner),
+      transfer: structuredClone(binding.transfer),
+    },
     prepared: {
       event: "tcp-observer-ready",
       ...structuredClone(binding),
@@ -6188,6 +6573,12 @@ test("feasibility requires socket-bound ALE attribution and actual 10013 without
     (v) => (v.tokenId = "0000000000000003"),
     (v) => (v.authenticationId = "0000000000000003"),
     (v) => (v.preparedAt = "1001"),
+    (v) => v.transfer.destination.pid++,
+    (v) => (v.transfer.destination.creationTime = "91"),
+    (v) => (v.transfer.destination.tokenId = "0000000000000005"),
+    (v) => (v.transfer.providerId = "b".repeat(32)),
+    (v) => v.transfer.catalogId++,
+    (v) => (v.transfer.creationFlags = 1),
     (v) => v.requested.port++,
     (v) => v.requested.address++,
     (v) => v.local.port++,
@@ -6388,44 +6779,53 @@ test("TCP intent persistence failure cannot acknowledge the original connect", a
   );
   const start = driver.indexOf("for (const operation of OPERATIONS)");
   const loop = driver.slice(start, driver.indexOf("complete = true;", start));
-  const f = tcpDenialFixture(),
-    sent = [],
-    persisted = [];
-  const rows = [
-    { event: "attempt", operation: "tcp" },
-    f.prepared,
-    f.attribution,
-    { event: "completed", operation: "tcp", error: 10013 },
-  ];
-  const original = new Error("Intent write failed");
-  const run = {
-    receipt: f.receipt,
-    session: { send: (value) => sent.push(value) },
-  };
-  await assert.rejects(
-    new Script(`(async () => {${loop}})()`).runInNewContext({
-      OPERATIONS: ["tcp"],
-      mode: "read",
-      run,
-      tcpEndpoint: f.endpoint,
-      nextRun: async () => rows.shift(),
-      need: (value) => assert.ok(value),
-      nativeException: () => {},
-      assertWindowsFeasibilityTcpObserver,
-      assertWindowsFeasibilityTcpDenial,
-      observeWindowsFeasibilityWfp: async () => {},
-      operations: [],
-      persist: async (name) => {
-        persisted.push(name);
-        throw original;
-      },
-    }),
-    (error) => error === original && error.operation === "tcp",
-  );
-  assert.deepEqual(sent, ["O"]);
-  assert.deepEqual(persisted, ["read-tcp-intent"]);
-  assert.equal(rows.length, 2);
-  assert.equal(run.tcpAttribution.pending, true);
+  for (const failAt of ["read-tcp-transfer", "read-tcp-intent"]) {
+    const f = tcpDenialFixture(),
+      sent = [],
+      persisted = [];
+    const rows = [
+      { event: "attempt", operation: "tcp" },
+      f.transfer,
+      f.prepared,
+      f.attribution,
+      { event: "completed", operation: "tcp", error: 10013 },
+    ];
+    const original = new Error("Intent write failed");
+    const run = {
+      receipt: f.receipt,
+      session: { send: (value) => sent.push(value) },
+    };
+    await assert.rejects(
+      new Script(`(async () => {${loop}})()`).runInNewContext({
+        OPERATIONS: ["tcp"],
+        mode: "read",
+        run,
+        tcpEndpoint: f.endpoint,
+        nextRun: async () => rows.shift(),
+        need: (value) => assert.ok(value),
+        nativeException: () => {},
+        assertWindowsFeasibilityTcpObserver,
+        assertWindowsFeasibilityTcpTransfer,
+        assertWindowsFeasibilityTcpDenial,
+        observeWindowsFeasibilityWfp: async () => {},
+        operations: [],
+        persist: async (name) => {
+          persisted.push(name);
+          if (name === failAt) throw original;
+        },
+      }),
+      (error) => error === original && error.operation === "tcp",
+    );
+    assert.deepEqual(sent, failAt === "read-tcp-transfer" ? ["O"] : ["O", "D"]);
+    assert.deepEqual(
+      persisted,
+      failAt === "read-tcp-transfer"
+        ? ["read-tcp-transfer"]
+        : ["read-tcp-transfer", "read-tcp-intent"],
+    );
+    assert.equal(rows.length, failAt === "read-tcp-transfer" ? 3 : 2);
+    assert.equal(run.tcpAttribution.pending, true);
+  }
 });
 
 test("original outside and closed-port controls remain mandatory around attributed denial", async () => {
@@ -10021,7 +10421,9 @@ test("shared workspace confines release and rejects pending, timeout and other T
     const rows = operations.flatMap((operation) => [
       { event: "attempt", operation },
       ...(operation === "git-status" ? [f.started] : []),
-      ...(operation === "tcp" ? [tcp.prepared, tcp.attribution] : []),
+      ...(operation === "tcp"
+        ? [tcp.transfer, tcp.prepared, tcp.attribution]
+        : []),
       {
         event: "completed",
         operation,
@@ -10043,6 +10445,7 @@ test("shared workspace confines release and rejects pending, timeout and other T
       OPERATIONS: operations,
       tcpEndpoint: "32100",
       assertWindowsFeasibilityTcpObserver,
+      assertWindowsFeasibilityTcpTransfer,
       assertWindowsFeasibilityTcpDenial,
       mode,
       run: f.run,
@@ -10103,7 +10506,9 @@ test("shared workspace confines release and rejects pending, timeout and other T
     assert.equal(rows.length, !tcpAccepted ? 2 : 0);
     assert.equal(f.order.filter((item) => item === "wfp-observed").length, 1);
     for (const [before, after] of [
-      ["payload:O", `${mode}-tcp-intent`],
+      ["payload:O", `${mode}-tcp-transfer`],
+      [`${mode}-tcp-transfer`, "payload:D"],
+      ["payload:D", `${mode}-tcp-intent`],
       [`${mode}-tcp-intent`, "payload:T"],
       ["payload:T", `${mode}-tcp-observed`],
       [`${mode}-tcp-observed`, "payload:U"],

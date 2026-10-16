@@ -816,8 +816,18 @@ Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
 For each original read/edit bundle, the held launcher independently imports a
 `WSADuplicateSocketW` transfer of the child's bound, unconnected socket before
-connect. The fixed target PID is supplied only in that launcher's closed child
-environment. The launcher retains the socket, child process, exact token and
+connect. The closed child environment supplies a fixed destination record with
+the original launcher PID, birth and primary-token identifiers. Before duplication,
+the launcher rejoins that record against its live self and the original child,
+records the source's `SO_PROTOCOL_INFOW` contract, and emits `tcp-transfer-ready`.
+The driver persists this observation before its one-shot `D` acknowledgment.
+The imported socket must rejoin the same provider, catalog, protocol chain and
+destination; both original creation and import retain flags zero. Birth/token
+drift, PID-only input and incomplete carriers fail without another attempt.
+No process handle, capability or additional transport is granted to the payload.
+Native 10022 remains the immediate duplication failure, not a permission,
+flag-mismatch or unsupported-provider diagnosis. These joins require native CI.
+The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native
 image identity. Exclusive binding prevents another socket from sharing its tuple.
 It verifies the actual local loopback endpoint and unconnected peer status, opens
