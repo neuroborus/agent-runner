@@ -797,7 +797,12 @@ export async function settleWindowsCommandCustody(effects) {
     failure,
     restorationReady = false,
     emergency = false;
-  const retain = (error) => {
+  const retain = (error, operation) => {
+    if (failure && failure !== error)
+      failure.feasibilityCleanup ??= error.feasibilityCleanup ?? {
+        code: "cleanup-unobserved",
+        detail: `Windows command ${operation} remains unproved.`,
+      };
     failure ??= error;
     emergency ||= error.emergency === true;
   };
@@ -808,22 +813,22 @@ export async function settleWindowsCommandCustody(effects) {
     restorationReady = true;
   } catch (error) {
     nativeException("win32/feasibility-command-effects.js:exception", error);
-    retain(error);
+    retain(error, "domain retirement");
   }
   try {
     stopped = await effects.closeObserver();
     need(stopped.captureRetired === true);
   } catch (error) {
     nativeException("win32/feasibility-command-effects.js:exception", error);
-    retain(error);
+    retain(error, "capture retirement");
   }
   try {
     observed = await effects.verifyObserver();
     need(observed.completeDomain === true);
-    if (observed.failure) retain(observed.failure);
+    if (observed.failure) retain(observed.failure, "observer retirement");
   } catch (error) {
     nativeException("win32/feasibility-command-effects.js:exception", error);
-    retain(error);
+    retain(error, "observer retirement");
   }
   let final;
   if (restorationReady && observed?.completeDomain === true) {
@@ -831,14 +836,14 @@ export async function settleWindowsCommandCustody(effects) {
       final = await effects.finish();
     } catch (error) {
       nativeException("win32/feasibility-command-effects.js:exception", error);
-      retain(error);
+      retain(error, "policy restoration");
     }
   } else {
     try {
       await effects.abandonFinish();
     } catch (error) {
       nativeException("win32/feasibility-command-effects.js:exception", error);
-      retain(error);
+      retain(error, "recovery custody retirement");
     }
   }
   if (failure) {
@@ -999,9 +1004,28 @@ export async function openWindowsCommandWatcher(
       need(!next.done && next.value.length < 1048576);
       return JSON.parse(next.value);
     },
-    async finish(active = signal) {
+    async finish(active = signal, verifyRestoration) {
       need(!active.aborted);
-      child.stdin.end("R");
+      if (verifyRestoration) {
+        child.stdin.write("R");
+        try {
+          const next = await iterator.next();
+          if (next.done) await done;
+          need(
+            !next.done &&
+              next.value.length < 1048576 &&
+              JSON.parse(next.value).restorationReady === true,
+          );
+          await verifyRestoration();
+          need(!active.aborted);
+          child.stdin.end("V");
+        } catch (error) {
+          // EOF keeps the writer from deleting fixtures after a failed read.
+          child.stdin.end();
+          await done.catch(() => {});
+          throw error;
+        }
+      } else child.stdin.end("R");
       for await (const line of { [Symbol.asyncIterator]: () => iterator }) {
         need(line.length < 1048576 && frames.length < 4);
         frames.push(JSON.parse(line));
@@ -1031,6 +1055,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     start,
     watcher,
     cleanupReader,
+    restorationReader,
+    restorationVerifier,
     cleanupReady = false,
     readerVerifier,
     observerVerifier,
@@ -1480,19 +1506,47 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             /^[a-f0-9]{64}$/u.test(original.nullSha256) &&
             /^[1-9][0-9]{0,19}$/u.test(original.nullHandle),
         );
-        await cleanupReader.initialize(
+        const custodyInput =
           `${original.systemSha256} ${original.nullSha256} ${original.nullHandle} ${original.intentHandle} ${original.closedHandle}\n` +
-            original.files
-              .map((file) => {
-                need(
-                  /^[1-9][0-9]{0,19}$/u.test(file.handle) &&
-                    /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
-                    /^(?:[a-f0-9]{2})+$/u.test(file.baselineHex) &&
-                    /^(?:[a-f0-9]{2})*$/u.test(file.saclHex),
-                );
-                return `${file.handle} ${file.identity} ${file.baselineHex} ${file.saclHex || "-"}\n`;
-              })
-              .join(""),
+          original.files
+            .map((file) => {
+              need(
+                /^[1-9][0-9]{0,19}$/u.test(file.handle) &&
+                  /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
+                  /^(?:[a-f0-9]{2})+$/u.test(file.baselineHex) &&
+                  /^(?:[a-f0-9]{2})*$/u.test(file.saclHex),
+              );
+              return `${file.handle} ${file.identity} ${file.baselineHex} ${file.saclHex || "-"}\n`;
+            })
+            .join("");
+        await cleanupReader.initialize(custodyInput);
+        restorationReader = await watch(
+          [
+            "command-verify",
+            String(value.observer.pid),
+            value.observer.creationTime,
+            value.helperSha256,
+            value.nonce,
+            value.jobHandle,
+          ],
+          signal,
+        );
+        need(
+          !sameWindowsIdentity(
+            restorationReader.identity,
+            cleanupReader.identity,
+          ),
+        );
+        await restorationReader.initialize(custodyInput);
+        restorationVerifier = await watch(
+          [
+            "command-watch",
+            String(restorationReader.identity.pid),
+            restorationReader.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
         );
         cleanupReady = true;
         readerVerifier = await watch(
@@ -1681,9 +1735,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           observerVerifier,
           cleanupReader,
           readerVerifier,
+          restorationReader,
+          restorationVerifier,
         ]) {
           try {
-            if (owner === cleanupReader) await owner?.abandon();
+            if ([cleanupReader, restorationReader].includes(owner))
+              await owner?.abandon();
             else await owner?.finish(signal);
           } catch (error) {
             nativeException(
@@ -1823,18 +1880,65 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             );
             failure ??= error;
           }
+          for (const [owner, method] of [
+            [restorationReader, "abandon"],
+            [restorationVerifier, "finish"],
+          ]) {
+            try {
+              await owner?.[method](signal);
+            } catch (error) {
+              failure ??= error;
+            }
+          }
           if (failure) throw failure;
         },
         async finish() {
-          let restored, reader, failure;
+          let restored,
+            reader,
+            failure,
+            restorationStarted = false;
           try {
-            restored = await cleanupReader.finish(signal);
+            restored = await cleanupReader.finish(signal, async () => {
+              restorationStarted = true;
+              let failure;
+              try {
+                const actual = await restorationReader.finish(signal);
+                need(actual.independent === true && actual.restored === true);
+              } catch (error) {
+                failure = error;
+              }
+              try {
+                const settled = await restorationVerifier.finish(signal);
+                need(settled.retired === true && settled.exitCode === 0);
+              } catch (error) {
+                failure ??= error;
+              }
+              if (failure) throw failure;
+            });
           } catch (error) {
             nativeException(
               "win32/feasibility-command-effects.js:exception",
               error,
             );
             failure = error;
+          }
+          if (!restorationStarted) {
+            // A writer failure before the barrier still leaves both early
+            // restoration owners to settle independently.
+            for (const [owner, method] of [
+              [restorationReader, "abandon"],
+              [restorationVerifier, "finish"],
+            ]) {
+              try {
+                await owner[method](signal);
+              } catch (error) {
+                nativeException(
+                  "win32/feasibility-command-effects.js:exception",
+                  error,
+                );
+                failure ??= error;
+              }
+            }
           }
           try {
             reader = await readerVerifier.finish(signal);

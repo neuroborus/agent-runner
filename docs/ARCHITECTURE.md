@@ -625,6 +625,12 @@ windows and an audited completed-I/O gate whose protected DACL remains unchanged
 by inherited workspace grants. The bounded native publisher mapping
 and reused XmlLite/record decoder supply observations, never review approvals.
 Per-user audit inclusion and owned fixture SACL changes preserve system policy.
+Separate finish and restoration readers hold the original Job, objects, audit
+baseline, intent and NUL descriptor before effects. The finish writer restores
+only owned audit changes and refuses altered DACLs. Its fixture deletion waits
+for the independent restoration reader's complete baseline check and separately
+observed retirement. Capture and original command failures still fail settlement;
+later cleanup uncertainty is recorded separately without replacing the cause.
 After owned per-user inclusion, independent native reads bind
 AuditComputeEffectivePolicyByToken to the held administrative broker's actual
 primary token, principal/logon and creation identity. A matching delivered Security
@@ -1953,6 +1959,21 @@ verified unchanged task with zero instances and retired held owners may be
 removed. Component receipts precede outer-observer closure and cannot claim
 whole-run retirement. Native Windows proof and independent source acceptance
 remain external.
+Native audit setup now flushes a bounded System-only baseline containing the
+complete category inventory, system policy, absent principal and original
+file identities/descriptors before its first setter. Source-derived policy
+descriptors and network intents use the existing protected object records;
+observed filter IDs and registry metadata remain required when those objects
+survive. Cold recovery validates principal and Job emptiness before restoration,
+rejoins every descriptor, and removes only the original supported WFP graph.
+An interrupted restoration accepts only baseline or exact owned states; missing
+observed identities and foreign substitutions retain exclusion. Fresh category
+enumeration before and after restoration rejects additions as well as changes.
+Completed audit restoration retains a protected baseline-bound marker. Later
+recovery checks the full policy and principal absence without replaying the
+intermediate installed descriptors after their owning policy has been restored.
+Initial object/security reads, principal absence, registry/WFP absence, tasks,
+sentinels and final custody settlement remain mandatory independent checks.
 The Windows policy owner binds three restricted-token profiles to a closed
 private DACL manifest. Workspace roots grant creation without delete-child or
 root deletion. Admission requires independent source/native evidence that both

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-16 — Verify Windows restoration through retained independent custody
+
+Command cleanup admits a separate restoration reader before audit effects. It
+rechecks the original objects, complete audit policy and NUL descriptor after
+the writer restores its owned SACLs and inclusion; only that acknowledgement
+releases fixture deletion. Changed DACLs are refused rather than overwritten.
+Protected native audit and policy baselines support cold reconstruction after
+creator retirement and audit drain. Original file identities, endpoint tuples,
+observed filter IDs and registry observations constrain restoration; incomplete
+or substituted evidence retains exclusion. Cleanup failures remain separate
+from the original cause. Matching-host acceptance remains supervisor-owned and
+pending; portable results and local completion supply no native or production GO.
+
 ## 2026-10-16 — Bind model-free Windows commands to complete audit coverage
 
 Independent baseline and installed reads now cover all four held object SACLs,

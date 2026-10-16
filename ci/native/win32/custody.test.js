@@ -2451,3 +2451,23 @@ test("Windows experiment custody retains native Job and handle protection requir
   };
   await assert.rejects(k.verifier.verifyTransfer(k.helperTransfer));
 });
+
+test("cold account recovery cannot signal a Job reopened by name or remove a surviving principal", async () => {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required) {",
+  );
+  const body = source.slice(start, source.indexOf("int wmain", start));
+  assert.ok(start > 0);
+  assert.doesNotMatch(
+    body,
+    /operation_stop_job|TerminateJobObject|TerminateProcess/u,
+  );
+  assert.ok(
+    body.indexOf("need(!members)") < body.indexOf("LsaRemoveAccountRights"),
+  );
+  assert.match(body, /operation_empty\(job\)/u);
+});

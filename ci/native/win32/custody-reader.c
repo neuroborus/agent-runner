@@ -414,6 +414,7 @@ static void build(void) {
     RegCloseKey(key) == ERROR_SUCCESS);
   printf("{\"major\":%lu,\"minor\":%lu,\"build\":%lu,\"sdkRootHex\":\"", os.dwMajorVersion, os.dwMinorVersion, os.dwBuildNumber); hex((BYTE *)sdk, size-2); printf("\"}");
 }
+static void audit_recovery_save(void);
 #include "effective-reader.h"
 /* A reviewed certificate is data, not an inherited signing credential. The
  * compiled image must match the reviewed unsigned pin and every signed image
@@ -774,6 +775,7 @@ static BOOL ownership_policy_restored;
 static BOOL package_mode;
 static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
 static GUID ownership_provider, ownership_layer, ownership_filters[4];
+static UINT64 ownership_filter_ids[4];
 static char ownership_last_job_pin[65];
 static void ownership_keys(void) {
   GUID *keys[] = {&ownership_provider, &ownership_layer, &ownership_filters[0], &ownership_filters[1], &ownership_filters[2], &ownership_filters[3]};
@@ -849,9 +851,10 @@ static void ownership_network(BOOL remove, BOOL observe) {
         actual->numFilterConditions == 1 && IsEqualGUID(&actual->filterCondition[0].fieldKey, &condition.fieldKey) &&
         actual->filterCondition[0].matchType == FWP_MATCH_EQUAL && actual->filterCondition[0].conditionValue.type == FWP_SECURITY_DESCRIPTOR_TYPE &&
         actual->filterCondition[0].conditionValue.sd->size == size && !memcmp(actual->filterCondition[0].conditionValue.sd->data, relative, size));
+      need(!remove || (ownership_filter_ids[i] && actual->filterId == ownership_filter_ids[i]));
       FwpmFreeMemory0((void **)&actual); ownership_wfp_security(&value.filterKey, 2);
       if (remove) need(FwpmFilterDeleteByKey0(wfp_engine, &value.filterKey) == ERROR_SUCCESS);
-    } else { UINT64 id; need(FwpmFilterAdd0(wfp_engine, &value, sd, &id) == ERROR_SUCCESS); }
+    } else { UINT64 id; need(FwpmFilterAdd0(wfp_engine, &value, sd, &id) == ERROR_SUCCESS && id); ownership_filter_ids[i] = id; }
   }
   /* A complete provider census rejects unplanned additional filters. */
   if (observe) {
@@ -865,6 +868,12 @@ static void ownership_network(BOOL remove, BOOL observe) {
   if (!observe) need(FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
   free(relative); LocalFree(acl); LocalFree(user); LocalFree(restricting); LocalFree(sd);
 }
+static void policy_recovery_save(unsigned index,PSECURITY_DESCRIPTOR before,PSECURITY_DESCRIPTOR wanted);
+static void policy_network_intent(unsigned kind,const unsigned *ports);
+static void policy_filter_save(unsigned kind);
+static void operation_record(const wchar_t *leaf,unsigned index,const BYTE *bytes,DWORD size);
+static HKEY policy_registry_owned(unsigned custody,const char *context);
+static void policy_registry_remove(HKEY key);
 static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
   struct entry *entry = &entries[i+1]; need(entry->file.handle);
   HANDLE file = ReOpenFile(entry->file.handle, READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
@@ -886,7 +895,8 @@ static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
   }
   if (!inspectOnly) {
     if (!restore) { need(!ownership_before[i]); char hash[65]; security(file, SE_FILE_OBJECT, TRUE, hash);
-      sum((BYTE *)actual, GetSecurityDescriptorLength(actual), ownership_baseline[i]); ownership_before[i] = actual; actual = NULL; ownership_installed[i] = wanted; wanted = NULL; }
+      sum((BYTE *)actual, GetSecurityDescriptorLength(actual), ownership_baseline[i]); ownership_before[i] = actual; actual = NULL; ownership_installed[i] = wanted; wanted = NULL;
+      policy_recovery_save(i+1,ownership_before[i],ownership_installed[i]); }
     PSECURITY_DESCRIPTOR target = restore ? ownership_before[i] : ownership_installed[i]; need(target && GetSecurityDescriptorDacl(target, &present, &acl, &defaulted) && present);
     need(SetSecurityInfo(file, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, acl, NULL) == ERROR_SUCCESS);
     if (i == 3) { PACL label; need(GetSecurityDescriptorSacl(target, &present, &label, &defaulted));
@@ -1278,7 +1288,7 @@ static void access_registry_parent(void) {
   need(RegOpenKeyExW(HKEY_LOCAL_MACHINE,L"SOFTWARE\\NativeProof",0,READ_CONTROL | KEY_WOW64_64KEY,&parent)==ERROR_SUCCESS);
   security(parent,SE_REGISTRY_KEY,TRUE,hash); need(RegCloseKey(parent)==ERROR_SUCCESS);
 }
-static void access_policy_begin(const wchar_t *profile) {
+static void access_policy_begin(const wchar_t *profile,const unsigned ports[8]) {
   need(access_object_count && !access_policy_possible && !ownership_policy_installed && ownership_stage == 3);
   BOOL writable = !wcscmp(profile, L"workspace-write") || !wcscmp(profile, L"trusted-command"); need(writable || !wcscmp(profile, L"read-only"));
   access_registry_parent(); need(!access_registry_present()); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
@@ -1298,7 +1308,9 @@ static void access_policy_begin(const wchar_t *profile) {
       need(!wcscat_s(text, 2048, inherited)); }
     if (writable && (i == 2 || i == 3)) need(!wcscat_s(text, 2048, L"S:(ML;OICI;NW;;;LW)"));
     access_wanted[i] = descriptor(text);
+    policy_recovery_save(access_indices[i],access_before[i],access_wanted[i]);
   }
+  policy_network_intent(2,ports);
   access_policy_possible = TRUE; printf("{\"possible\":true}");
 }
 static BOOL access_acl_equal(PSECURITY_DESCRIPTOR a, PSECURITY_DESCRIPTOR b, BOOL sacl) {
@@ -1311,7 +1323,13 @@ static void access_policy_installed(const char *hexBytes) {
   need(access_policy_possible && !ownership_policy_installed && !ownership_released && ownership_stage == 3 && strlen(hexBytes) <= 65536);
   for (unsigned i = 0; i < access_object_count; i++) { PSECURITY_DESCRIPTOR actual = file_sd(entries[access_indices[i]].file.handle, SE_FILE_OBJECT);
     need(access_acl_equal(actual, access_wanted[i], FALSE) && access_acl_equal(actual, access_wanted[i], TRUE)); LocalFree(actual); }
-  need(access_registry_present()); size_t size = strlen(hexBytes); need(size && !(size % 2)); BYTE *data = calloc(size / 2, 1); need(data);
+  need(access_registry_present());policy_filter_save(2);
+  wchar_t registryName[256];HKEY registry;FILETIME written;char registryHash[65];
+  need(swprintf_s(registryName,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0 && RegOpenKeyExW(HKEY_LOCAL_MACHINE,registryName,0,KEY_READ|ACCESS_SYSTEM_SECURITY|KEY_WOW64_64KEY,&registry)==ERROR_SUCCESS);
+  security(registry,SE_REGISTRY_KEY,TRUE,registryHash);need(RegQueryInfoKeyW(registry,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,&written)==ERROR_SUCCESS&&RegCloseKey(registry)==ERROR_SUCCESS);
+  BYTE registryRecord[sizeof(written)+65];memcpy(registryRecord,&written,sizeof(written));memcpy(registryRecord+sizeof(written),registryHash,65);
+  operation_record(L"policy-registry.observed",case_custody,registryRecord,sizeof(registryRecord));
+  size_t size = strlen(hexBytes); need(size && !(size % 2)); BYTE *data = calloc(size / 2, 1); need(data);
   for (size_t i = 0; i < size / 2; i++) data[i] = (BYTE)(nibble(hexBytes[i * 2]) * 16 + nibble(hexBytes[i * 2 + 1]));
   HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
   need(WriteFile(file, data, (DWORD)size / 2, &used, NULL) && used == size / 2 && FlushFileBuffers(file) && CloseHandle(file)); free(data);
@@ -1339,15 +1357,12 @@ static void access_policy_restore(void) {
       layer->providerKey && IsEqualGUID(layer->providerKey, &providerKey) && !layer->providerData.size); FwpmFreeMemory0((void **)&provider); FwpmFreeMemory0((void **)&layer);
     ownership_wfp_security(&providerKey, 0); ownership_wfp_security(&layerKey, 1);
   }
-  wchar_t name[256]; need(swprintf_s(name, 256, L"SOFTWARE\\NativeProof\\%hs", nonce) > 0); HKEY registry = NULL;
-  if (access_registry_present()) { need(RegOpenKeyExW(HKEY_LOCAL_MACHINE, name, 0, KEY_ALL_ACCESS | ACCESS_SYSTEM_SECURITY | KEY_WOW64_64KEY, &registry) == ERROR_SUCCESS);
-    DWORD children, values; need(RegQueryInfoKeyW(registry, NULL, NULL, NULL, &children, NULL, NULL, &values, NULL, NULL, NULL, NULL) == ERROR_SUCCESS && !children && !values);
-    char hash[65]; security(registry, SE_REGISTRY_KEY, TRUE, hash); }
+  HKEY registry = policy_registry_owned(case_custody,case_record.context);
   if (p == ERROR_SUCCESS) need(FwpmTransactionBegin0(wfp_engine, 0) == ERROR_SUCCESS && FwpmSubLayerDeleteByKey0(wfp_engine, &layerKey) == ERROR_SUCCESS &&
     FwpmProviderDeleteByKey0(wfp_engine, &providerKey) == ERROR_SUCCESS && FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
   if (registry) { if (registry_key) { need(RegCloseKey(registry_key) == ERROR_SUCCESS); registry_key = NULL; }
     if (registry_changed) { need(CloseHandle(registry_changed)); registry_changed = NULL; }
-    need(RegDeleteKeyExW(HKEY_LOCAL_MACHINE, name, KEY_WOW64_64KEY, 0) == ERROR_SUCCESS && RegCloseKey(registry) == ERROR_SUCCESS); }
+    policy_registry_remove(registry); }
   for (unsigned i = 0; i < access_object_count; i++) { PACL dacl, sacl; BOOL present, defaulted;
     need(GetSecurityDescriptorDacl(access_before[i], &present, &dacl, &defaulted) && present &&
       GetSecurityDescriptorSacl(access_before[i], &present, &sacl, &defaulted));
@@ -1970,6 +1985,8 @@ static void verify_access_peer_policy(unsigned sourceSlot,unsigned custody,unsig
   printf("{\"parked\":true,\"imageSha256\":\"%s\",\"signatureSha256\":\"%s\"}",entries[6].pin,sig); need(CloseHandle(process) && CloseHandle(token) && CloseHandle(source));
 }
 static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required);
+static void recovery_audit(unsigned custody,const char *context,const char *caseNonce,BOOL verifyOnly);
+static void recovery_policy(unsigned custody,const char *context,const char *caseNonce);
 static void verification(char **values, unsigned n) {
     if (!strcmp(values[0]+7,"access-peer-policy")) { need(n==6); verify_access_peer_policy(bounded_number(values[2],127),bounded_number(values[3],count-1),bounded_number(values[4],127),values[5]);
     } else if (!strcmp(values[0]+7,"access-peer-retired")) { need(n==4); verify_access_peer_retired(bounded_number(values[2],127),bounded_number(values[3],count-1));
@@ -1986,6 +2003,10 @@ static void verification(char **values, unsigned n) {
     } else if (!strcmp(values[0]+7, "case-retired")) { need(n == 4); verify_case_retired(bounded_number(values[2], count-1), values[3]);
     } else if (!strcmp(values[0]+7, "case-recover")) {
       need(n == 6); recovery_case(bounded_number(values[2], count-1), values[3], values[4], bounded_number(values[5], 1));
+    } else if (!strcmp(values[0]+7, "policy-recover")) {
+      need(n==5);recovery_policy(bounded_number(values[2],count-1),values[3],values[4]);
+    } else if (!strcmp(values[0]+7, "audit-recover") || !strcmp(values[0]+7, "audit-check")) {
+      need(n==5);recovery_audit(bounded_number(values[2],count-1),values[3],values[4],!strcmp(values[0]+7,"audit-check"));
     } else if (!strcmp(values[0]+7, "recovery-object")) {
       need(n == 3); struct entry entry = entries[bounded_number(values[2], count-1)];
       entry.file = hold_shared(entry.path, !strcmp(entry.kind,"directory"), TRUE, GENERIC_READ | ACCESS_SYSTEM_SECURITY, !strcmp(entry.kind,"mutable"));
@@ -2384,6 +2405,183 @@ static void operation_record(const wchar_t *leaf,unsigned index,const BYTE *byte
   file=account_file(entries[case_custody].path,leaf,GENERIC_READ,OPEN_EXISTING); BYTE *read=calloc(size,1); need(read);
   need(ReadFile(file,&actual,sizeof(actual),&used,NULL) && used==sizeof(actual) && !memcmp(&actual,&header,sizeof(header)) && ReadFile(file,read,size,&used,NULL) && used==size && !memcmp(bytes,read,size) && CloseHandle(file));
   SecureZeroMemory(read,size); free(read);
+}
+static BOOL policy_saved[SLOTS];
+struct policy_recovery_pair { DWORD before,wanted; };
+struct policy_recovery_network { DWORD version,kind,ports[8]; };
+static void policy_recovery_save(unsigned index,PSECURITY_DESCRIPTOR before,PSECURITY_DESCRIPTOR wanted) {
+  need(index<count && before && wanted);if(policy_saved[index])return;
+  struct policy_recovery_pair pair={GetSecurityDescriptorLength(before),GetSecurityDescriptorLength(wanted)};
+  DWORD size=sizeof(pair)+pair.before+pair.wanted;need(size<=262144);BYTE *bytes=calloc(size,1);need(bytes);
+  memcpy(bytes,&pair,sizeof(pair));memcpy(bytes+sizeof(pair),before,pair.before);memcpy(bytes+sizeof(pair)+pair.before,wanted,pair.wanted);
+  wchar_t leaf[64];need(swprintf_s(leaf,64,L"policy-%u.baseline",index)>0);operation_record(leaf,index,bytes,size);free(bytes);policy_saved[index]=TRUE;
+}
+static void policy_network_intent(unsigned kind,const unsigned *ports) {
+  struct policy_recovery_network value={0};value.version=1;value.kind=kind;need(kind==1||kind==2);
+  if(kind==2)for(unsigned i=0;i<8;i++){need(ports[i]>=1024&&ports[i]<=65535);for(unsigned j=0;j<i;j++)need(ports[i]!=ports[j]);value.ports[i]=ports[i];}
+  operation_record(L"policy-network.intent",case_custody,(BYTE *)&value,sizeof(value));
+}
+struct policy_recovery_filters { DWORD kind,count; UINT64 ids[52]; };
+static void policy_filter_save(unsigned kind) {
+  struct policy_recovery_filters value={0};value.kind=kind;value.count=kind==1?4:52;need(kind==1||kind==2);
+  ownership_keys();for(unsigned i=0;i<value.count;i++){GUID key;if(kind==1)key=ownership_filters[i];else access_key(i+2,&key);FWPM_FILTER0 *filter;
+    need(FwpmFilterGetByKey0(wfp_engine,&key,&filter)==ERROR_SUCCESS&&filter->filterId);
+    if(kind==1)need(filter->filterId==ownership_filter_ids[i]);value.ids[i]=filter->filterId;FwpmFreeMemory0((void **)&filter);}
+  operation_record(L"policy-filters.observed",case_custody,(BYTE *)&value,sizeof(value));
+}
+static BYTE *policy_record_read(unsigned custody,const wchar_t *leaf,unsigned index,const char *context,DWORD *size) {
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\%ls",entries[custody].path,leaf)>0);
+  if(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES){need(GetLastError()==ERROR_FILE_NOT_FOUND);return NULL;}
+  HANDLE file=account_file(entries[custody].path,leaf,GENERIC_READ,OPEN_EXISTING);struct operation_record_header header;LARGE_INTEGER length;DWORD used;
+  need(GetFileSizeEx(file,&length)&&length.QuadPart>sizeof(header)&&length.QuadPart<=sizeof(header)+262144&&
+    ReadFile(file,&header,sizeof(header),&used,NULL)&&used==sizeof(header)&&header.version==1&&header.index==index&&
+    header.context[64]==0&&header.sha256[64]==0&&!strcmp(header.context,context)&&header.size==length.QuadPart-sizeof(header));
+  BYTE *bytes=calloc(header.size,1);need(bytes&&ReadFile(file,bytes,header.size,&used,NULL)&&used==header.size&&CloseHandle(file));
+  FILE_ID_INFO actual;need(GetFileInformationByHandleEx(entries[index].file.handle,FileIdInfo,&actual,sizeof(actual))&&!memcmp(&actual,&header.object,sizeof(actual)));
+  char hash[65];sum(bytes,header.size,hash);need(!strcmp(hash,header.sha256));*size=header.size;return bytes;
+}
+static HKEY policy_registry_owned(unsigned custody,const char *context) {
+  if(!access_registry_present())return NULL;
+  DWORD size;BYTE *identity=policy_record_read(custody,L"policy-registry.observed",custody,context,&size);
+  need(identity&&size==sizeof(FILETIME)+65&&identity[size-1]==0);
+  wchar_t name[256];HKEY key;FILETIME written;char hash[65];DWORD children,values;
+  need(swprintf_s(name,256,L"SOFTWARE\\NativeProof\\%hs",nonce)>0&&
+    RegOpenKeyExW(HKEY_LOCAL_MACHINE,name,0,KEY_ALL_ACCESS|ACCESS_SYSTEM_SECURITY|KEY_WOW64_64KEY,&key)==ERROR_SUCCESS);
+  security(key,SE_REGISTRY_KEY,TRUE,hash);
+  need(RegQueryInfoKeyW(key,NULL,NULL,NULL,&children,NULL,NULL,&values,NULL,NULL,NULL,&written)==ERROR_SUCCESS&&
+    !children&&!values&&!memcmp(identity,&written,sizeof(written))&&!strcmp((char *)identity+sizeof(written),hash));
+  free(identity);return key;
+}
+static void policy_registry_remove(HKEY key) {
+  /* Delete the verified object through its handle. A replacement under the
+   * original name must never acquire deletion authority from that name. */
+  typedef NTSTATUS (NTAPI *delete_key)(HANDLE);
+  delete_key remove=(delete_key)GetProcAddress(GetModuleHandleW(L"ntdll.dll"),"NtDeleteKey");
+  need(remove&&!remove(key)&&RegCloseKey(key)==ERROR_SUCCESS);
+  need(!access_registry_present());
+}
+struct policy_recovery_sentinel { FILE_ID_INFO object;char sha256[65],security[65]; };
+static BOOL policy_sentinel_saved;
+static void policy_sentinel_save(void) {
+  if(policy_sentinel_saved)return;struct policy_recovery_sentinel value={0};
+  need(GetFileInformationByHandleEx(ownership_sentinel.handle,FileIdInfo,&value.object,sizeof(value.object)));
+  DWORD size;BYTE *bytes=read_file(&ownership_sentinel,64,&size);need(size==64&&!memcmp(bytes,case_record.context,64));sum(bytes,size,value.sha256);free(bytes);
+  security(ownership_sentinel.handle,SE_FILE_OBJECT,TRUE,value.security);
+  operation_record(L"outside-sentinel.observed",0,(BYTE *)&value,sizeof(value));policy_sentinel_saved=TRUE;
+}
+static void recovery_sentinel(unsigned custody,const char *context) {
+  need(!entries[0].file.handle);entries[0].file=hold(entries[0].path,TRUE,TRUE,GENERIC_READ);
+  DWORD size;BYTE *bytes=policy_record_read(custody,L"outside-sentinel.observed",0,context,&size);
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\outside-%hs.sentinel",entries[0].path,context)>0);
+  if(!bytes){need(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES&&GetLastError()==ERROR_FILE_NOT_FOUND);close_file(&entries[0].file);return;}
+  struct policy_recovery_sentinel saved;need(size==sizeof(saved));memcpy(&saved,bytes,size);free(bytes);need(saved.sha256[64]==0&&saved.security[64]==0);
+  struct held_file file=hold(name,FALSE,TRUE,GENERIC_READ);char hash[65];need(!memcmp(&file.id,&saved.object,sizeof(saved.object)));pin(&file,saved.sha256);
+  security(file.handle,SE_FILE_OBJECT,TRUE,hash);need(!strcmp(hash,saved.security));close_file(&file);close_file(&entries[0].file);
+}
+/* One protected, self-contained baseline precedes every audit setter. Raw
+ * descriptors remain in System-only custody; Node retains only receipt joins. */
+struct audit_recovery_header {
+  DWORD version,objects,categories,sidSize,payload;
+  char candidate[41],nonce[33],context[65],sha256[65];
+  BYTE sid[SECURITY_MAX_SID_SIZE];
+  GUID keys[128]; AUDIT_POLICY_INFORMATION system[128];
+};
+struct audit_recovery_object { DWORD index,baseline,wanted; FILE_ID_INFO identity; };
+static void audit_recovery_save(void) {
+  need(case_token && audit_object_count && audit_count && audit_sid);
+  BYTE *bytes=calloc(1048576,1);need(bytes);struct audit_recovery_header *header=(void *)bytes;
+  header->version=1;header->objects=audit_object_count;header->categories=audit_count;header->sidSize=GetLengthSid(audit_sid);
+  need(header->sidSize<=sizeof(header->sid));memcpy(header->sid,audit_sid,header->sidSize);
+  strcpy_s(header->candidate,41,candidate);strcpy_s(header->nonce,33,nonce);strcpy_s(header->context,65,case_record.context);
+  memcpy(header->keys,audit_categories,audit_count*sizeof(GUID));memcpy(header->system,audit_system,audit_count*sizeof(*audit_system));
+  DWORD size=sizeof(*header);
+  for(unsigned i=0;i<audit_object_count;i++) {
+    struct audit_recovery_object item={0};item.index=(DWORD)(audit_objects[i].entry-entries);
+    item.baseline=GetSecurityDescriptorLength(audit_objects[i].baseline);item.wanted=audit_objects[i].wanted->AclSize;
+    need(item.index<count && size+sizeof(item)+item.baseline+item.wanted<=1048576 &&
+      GetFileInformationByHandleEx(entries[item.index].file.handle,FileIdInfo,&item.identity,sizeof(item.identity)));
+    memcpy(bytes+size,&item,sizeof(item));size+=sizeof(item);
+    memcpy(bytes+size,audit_objects[i].baseline,item.baseline);size+=item.baseline;
+    memcpy(bytes+size,audit_objects[i].wanted,item.wanted);size+=item.wanted;
+  }
+  header->payload=size-sizeof(*header);sum(bytes+sizeof(*header),header->payload,header->sha256);
+  HANDLE file=account_file(entries[case_custody].path,L"audit-recovery.baseline",GENERIC_WRITE,CREATE_NEW);DWORD used;
+  need(WriteFile(file,bytes,size,&used,NULL)&&used==size&&FlushFileBuffers(file)&&CloseHandle(file));
+  file=account_file(entries[case_custody].path,L"audit-recovery.baseline",GENERIC_READ,OPEN_EXISTING);BYTE *actual=calloc(size,1);LARGE_INTEGER length;need(actual);
+  need(GetFileSizeEx(file,&length)&&length.QuadPart==size&&ReadFile(file,actual,size,&used,NULL)&&used==size&&!memcmp(actual,bytes,size)&&CloseHandle(file));
+  SecureZeroMemory(bytes,size);SecureZeroMemory(actual,size);free(bytes);free(actual);
+}
+static void recovery_principal_empty(const struct case_account_record *record) {
+  struct ownership_view census={0};census.record=*record;ownership_census(&census);
+  for(unsigned i=0;i<process_count;i++)need(WaitForSingleObject(processes[i],0)==WAIT_OBJECT_0);
+  wchar_t name[96];need(swprintf_s(name,96,L"Local\\NativeProof-%hs",record->nonce)>0);
+  HANDLE job=OpenJobObjectW(JOB_OBJECT_QUERY|READ_CONTROL,FALSE,name);
+  if(!job){need(GetLastError()==ERROR_FILE_NOT_FOUND);return;}
+  char hash[65];security(job,SE_KERNEL_OBJECT,TRUE,hash);
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;BYTE buffer[sizeof(JOBOBJECT_BASIC_PROCESS_ID_LIST)+32*sizeof(ULONG_PTR)];JOBOBJECT_BASIC_PROCESS_ID_LIST *members=(void *)buffer;
+  need(QueryInformationJobObject(job,JobObjectBasicAccountingInformation,&accounting,sizeof(accounting),NULL)&&!accounting.ActiveProcesses&&
+    QueryInformationJobObject(job,JobObjectBasicProcessIdList,members,sizeof(buffer),NULL)&&!members->NumberOfAssignedProcesses&&!members->NumberOfProcessIdsInList&&CloseHandle(job));
+}
+static void recovery_audit(unsigned custody,const char *context,const char *caseNonce,BOOL verifyOnly) {
+  need(preparation_only && custody==2 && strlen(context)==64 && strlen(caseNonce)==32 && !audit_owned);
+  struct case_account_record account={0};account_record(entries[custody].path,&account);
+  need(!strcmp(account.context,context)&&!strcmp(account.nonce,caseNonce));
+  recovery_principal_empty(&account);
+  wchar_t name[4096];need(swprintf_s(name,4096,L"%ls\\audit-recovery.baseline",entries[custody].path)>0);
+  DWORD attributes=GetFileAttributesW(name);
+  if(attributes==INVALID_FILE_ATTRIBUTES) {
+    need(!verifyOnly&&GetLastError()==ERROR_FILE_NOT_FOUND);PSID sid;need(ConvertStringSidToSidW(account.accountSid,&sid)&&!audit_principal_exists(sid));LocalFree(sid);
+    printf("{\"restored\":true,\"admission\":\"not-started\"}");return;
+  }
+  HANDLE file=account_file(entries[custody].path,L"audit-recovery.baseline",GENERIC_READ,OPEN_EXISTING);LARGE_INTEGER length;DWORD used;
+  need(GetFileSizeEx(file,&length)&&length.QuadPart>=sizeof(struct audit_recovery_header)&&length.QuadPart<=1048576);
+  BYTE *bytes=calloc((size_t)length.QuadPart,1);need(bytes&&ReadFile(file,bytes,(DWORD)length.QuadPart,&used,NULL)&&used==length.QuadPart&&CloseHandle(file));
+  struct audit_recovery_header *header=(void *)bytes;char hash[65];
+  need(header->version==1 && header->objects && header->objects<=44 && header->categories && header->categories<=128 &&
+    header->candidate[40]==0 && header->nonce[32]==0 && header->context[64]==0 && header->sha256[64]==0 &&
+    !strcmp(header->candidate,candidate)&&!strcmp(header->nonce,caseNonce)&&!strcmp(header->context,context)&&
+    header->payload==used-sizeof(*header)&&header->sidSize<=sizeof(header->sid)&&IsValidSid(header->sid)&&GetLengthSid(header->sid)==header->sidSize);
+  PSID sid;need(ConvertStringSidToSidW(account.accountSid,&sid)&&EqualSid(sid,header->sid));LocalFree(sid);
+  sum(bytes+sizeof(*header),header->payload,hash);need(!strcmp(hash,header->sha256));
+  audit_count=header->categories;memcpy(audit_categories,header->keys,audit_count*sizeof(GUID));audit_enumerate();
+  need(AuditQuerySystemPolicy(audit_categories,audit_count,&audit_system)&&!memcmp(audit_system,header->system,audit_count*sizeof(*audit_system)));
+  char journalHash[65];sum(bytes,used,journalHash);
+  need(swprintf_s(name,4096,L"%ls\\audit-recovery.restored",entries[custody].path)>0);
+  BOOL completed=GetFileAttributesW(name)!=INVALID_FILE_ATTRIBUTES;
+  if(completed) {
+    HANDLE marker=account_file(entries[custody].path,L"audit-recovery.restored",GENERIC_READ,OPEN_EXISTING);char saved[65];DWORD count;LARGE_INTEGER size;
+    need(GetFileSizeEx(marker,&size)&&size.QuadPart==65&&ReadFile(marker,saved,65,&count,NULL)&&count==65&&!memcmp(saved,journalHash,65)&&CloseHandle(marker));
+  } else need(GetLastError()==ERROR_FILE_NOT_FOUND);
+  if(verifyOnly||completed) {
+    need(!audit_principal_exists(header->sid));AuditFree(audit_system);audit_system=NULL;SecureZeroMemory(bytes,used);free(bytes);
+    printf("{\"restored\":true,\"admission\":\"possible\"}");return;
+  }
+  audit_sid=LocalAlloc(LPTR,header->sidSize);need(audit_sid);memcpy(audit_sid,header->sid,header->sidSize);
+  DWORD offset=sizeof(*header);audit_object_count=header->objects;
+  for(unsigned i=0;i<audit_object_count;i++) {
+    struct audit_recovery_object item;need(offset+sizeof(item)<=used);memcpy(&item,bytes+offset,sizeof(item));offset+=sizeof(item);
+    need(item.index<count && item.baseline>=SECURITY_DESCRIPTOR_MIN_LENGTH && item.baseline<=65536 && item.wanted>=sizeof(ACL) && item.wanted<=65535 &&
+      item.baseline+item.wanted<=used-offset);
+    for(unsigned j=0;j<i;j++)need(audit_objects[j].entry!=&entries[item.index]);
+    struct entry *entry=&entries[item.index];need(!entry->file.handle);
+    entry->file=hold_shared(entry->path,!strcmp(entry->kind,"directory"),FALSE,GENERIC_READ|ACCESS_SYSTEM_SECURITY,!strcmp(entry->kind,"mutable"));
+    need(!memcmp(&entry->file.id,&item.identity,sizeof(item.identity))&&entry->file.links==1);audit_objects[i].entry=entry;
+    PSECURITY_DESCRIPTOR baseline=LocalAlloc(LPTR,item.baseline);PACL wanted=LocalAlloc(LPTR,item.wanted);need(baseline&&wanted);
+    memcpy(baseline,bytes+offset,item.baseline);offset+=item.baseline;memcpy(wanted,bytes+offset,item.wanted);offset+=item.wanted;
+    need(IsValidSecurityDescriptor(baseline)&&GetSecurityDescriptorLength(baseline)==item.baseline&&IsValidAcl(wanted)&&wanted->AclSize==item.wanted);
+    PACL before;BOOL present,defaulted;need(GetSecurityDescriptorSacl(baseline,&present,&before,&defaulted));
+    audit_objects[i].baseline=baseline;audit_objects[i].wanted=wanted;
+    if(present&&before){audit_objects[i].before=LocalAlloc(LPTR,before->AclSize);need(audit_objects[i].before);memcpy(audit_objects[i].before,before,before->AclSize);}
+  }
+  need(offset==used);SecureZeroMemory(bytes,used);free(bytes);
+  /* The caller's protected recovery command and independently proved drain
+   * precede this write. Every current descriptor must still be baseline/owned. */
+  recovery_principal_empty(&account);audit_used=audit_owned=TRUE;audit_restore(FALSE);
+  recovery_principal_empty(&account);
+  for(unsigned i=0;i<audit_object_count;i++)close_file(&audit_objects[i].entry->file);
+  HANDLE marker=account_file(entries[custody].path,L"audit-recovery.restored",GENERIC_WRITE,CREATE_NEW);DWORD written;
+  need(WriteFile(marker,journalHash,65,&written,NULL)&&written==65&&FlushFileBuffers(marker)&&CloseHandle(marker));
+  printf("{\"restored\":true,\"admission\":\"possible\"}");
 }
 static unsigned operation_creations;
 struct operation_creation { DWORD version,sequence,image,pid,session; ULONGLONG birth; wchar_t job[128],sid[256]; };
@@ -2843,6 +3041,7 @@ static void git_acl(unsigned index,DWORD mask,BOOL install) {
     if(!git_before[index]) { char hash[65]; wchar_t leaf[64]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash); git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
       need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index])); }
     need(!git_wanted[index]); git_wanted[index]=wanted; wanted=NULL;
+    policy_recovery_save(index,git_before[index],git_wanted[index]);
     set_file_security(entries[index].file.handle,DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,NULL,acl);
   } else {
     PSECURITY_DESCRIPTOR actual=file_sd(entries[index].file.handle,SE_FILE_OBJECT); PACL read; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
@@ -2859,6 +3058,10 @@ static void git_baselines(void) {
     char hash[65]; security(entries[index].file.handle,SE_FILE_OBJECT,TRUE,hash);
     git_before[index]=file_sd(entries[index].file.handle,SE_FILE_OBJECT);
     wchar_t leaf[64]; need(swprintf_s(leaf,64,L"git-policy-%u.baseline",index)>0); operation_record(leaf,index,(BYTE *)git_before[index],GetSecurityDescriptorLength(git_before[index]));
+    FILE_STANDARD_INFO info;need(GetFileInformationByHandleEx(entries[index].file.handle,FileStandardInfo,&info,sizeof(info)));
+    wchar_t text[2048];DWORD mask=FILE_GENERIC_READ|(info.Directory?FILE_TRAVERSE:0);
+    need(swprintf_s(text,2048,L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)",mask,case_record.accountSid,mask,case_record.restrictingSid)>0);
+    PSECURITY_DESCRIPTOR wanted=descriptor(text);policy_recovery_save(index,git_before[index],wanted);LocalFree(wanted);
   }
 }
 static void git_base_install(void) {
@@ -2878,7 +3081,7 @@ static void git_base_install(void) {
    * policy remains separate from metadata authority. */
   if(pointer==count) for(unsigned i=0;i<count;i++) if(entries[i].file.handle && !wcscmp(entries[i].path,name)) pointer=i;
   need(pointer<count && !git_inventory(pointer)); git_acl(pointer,FILE_GENERIC_READ,TRUE);
-  ownership_network_absent(); ownership_network(FALSE,FALSE); git_network_owned=TRUE;
+  ownership_network_absent();policy_network_intent(1,NULL); ownership_network(FALSE,FALSE);policy_filter_save(1); git_network_owned=TRUE;
   printf("{\"installed\":true}");
 }
 static void operation_no_creators(void) {
@@ -3198,6 +3401,99 @@ static BOOL operation_dispatch(char **v,unsigned n) {
   else return FALSE;
   return TRUE;
 }
+/* Recovery derives the same finite WFP graph as the original writer. A
+ * transaction validates every object before removing any publicly visible rule. */
+static void recovery_filter(unsigned index,const GUID *layer,unsigned family,unsigned protocol,int local,int remote,BOOL principal,FWP_ACTION_TYPE action,UINT64 weight,FWP_BYTE_BLOB *token,UINT64 identity) {
+  GUID key;access_key(index+2,&key);FWPM_FILTER0 *actual;need(FwpmFilterGetByKey0(wfp_engine,&key,&actual)==ERROR_SUCCESS);
+  GUID provider,sublayer;access_key(0,&provider);access_key(1,&sublayer);
+  need(actual->filterId==identity&&actual->providerKey&&IsEqualGUID(actual->providerKey,&provider)&&IsEqualGUID(&actual->subLayerKey,&sublayer)&&IsEqualGUID(&actual->layerKey,layer)&&
+    actual->flags==(FWPM_FILTER_FLAG_PERSISTENT|FWPM_FILTER_FLAG_CLEAR_ACTION_RIGHT)&&actual->action.type==action&&actual->weight.type==FWP_UINT64&&actual->weight.uint64&&*actual->weight.uint64==weight&&
+    !actual->providerData.size&&!actual->rawContext&&!actual->reserved&&actual->displayData.name&&!wcscmp(actual->displayData.name,L"NativeProof owned policy")&&!actual->displayData.description);
+  FWPM_FILTER_CONDITION0 expected[6]={0};unsigned count=0;
+  if(principal){expected[count].fieldKey=FWPM_CONDITION_ALE_USER_ID;expected[count].conditionValue.type=FWP_SECURITY_DESCRIPTOR_TYPE;expected[count++].conditionValue.sd=token;}
+  if(protocol){expected[count].fieldKey=FWPM_CONDITION_IP_PROTOCOL;expected[count].conditionValue.type=FWP_UINT8;expected[count++].conditionValue.uint8=(UINT8)protocol;}
+  FWP_BYTE_ARRAY16 address={0};address.byteArray16[15]=1;
+  for(unsigned side=0;side<2;side++){int port=side?remote:local;if(port<0)continue;
+    expected[count].fieldKey=side?FWPM_CONDITION_IP_REMOTE_ADDRESS:FWPM_CONDITION_IP_LOCAL_ADDRESS;expected[count].conditionValue.type=family==4?FWP_UINT32:FWP_BYTE_ARRAY16_TYPE;
+    if(family==4)expected[count].conditionValue.uint32=0x7f000001;else expected[count].conditionValue.byteArray16=&address;count++;
+    expected[count].fieldKey=side?FWPM_CONDITION_IP_REMOTE_PORT:FWPM_CONDITION_IP_LOCAL_PORT;expected[count].conditionValue.type=FWP_UINT16;expected[count++].conditionValue.uint16=(UINT16)port;
+  }
+  need(actual->numFilterConditions==count);
+  for(unsigned i=0;i<count;i++){unsigned matches=0;for(unsigned j=0;j<count;j++)if(IsEqualGUID(&expected[i].fieldKey,&actual->filterCondition[j].fieldKey)){
+      FWP_CONDITION_VALUE0 *a=&actual->filterCondition[j].conditionValue,*b=&expected[i].conditionValue;need(++matches==1&&actual->filterCondition[j].matchType==FWP_MATCH_EQUAL&&a->type==b->type);
+      if(b->type==FWP_UINT8)need(a->uint8==b->uint8);else if(b->type==FWP_UINT16)need(a->uint16==b->uint16);else if(b->type==FWP_UINT32)need(a->uint32==b->uint32);
+      else if(b->type==FWP_BYTE_ARRAY16_TYPE)need(a->byteArray16&&!memcmp(a->byteArray16,b->byteArray16,16));
+      else need(b->type==FWP_SECURITY_DESCRIPTOR_TYPE&&a->sd&&a->sd->size==b->sd->size&&!memcmp(a->sd->data,b->sd->data,b->sd->size));
+    }need(matches==1);}
+  FwpmFreeMemory0((void **)&actual);ownership_wfp_security(&key,2);
+}
+static void recovery_access_network(const struct policy_recovery_network *plan,const struct policy_recovery_filters *identities) {
+  GUID providerKey,layerKey;access_key(0,&providerKey);access_key(1,&layerKey);wfp_open();
+  need(FwpmTransactionBegin0(wfp_engine,0)==ERROR_SUCCESS);
+  FWPM_PROVIDER0 *provider;FWPM_SUBLAYER0 *layer;DWORD p=FwpmProviderGetByKey0(wfp_engine,&providerKey,&provider),l=FwpmSubLayerGetByKey0(wfp_engine,&layerKey,&layer);
+  need((p==FWP_E_PROVIDER_NOT_FOUND&&l==FWP_E_SUBLAYER_NOT_FOUND)||(p==ERROR_SUCCESS&&l==ERROR_SUCCESS));
+  if(p==ERROR_SUCCESS){need(provider->flags==FWPM_PROVIDER_FLAG_PERSISTENT&&!provider->providerData.size&&!provider->serviceName&&provider->displayData.name&&!wcscmp(provider->displayData.name,L"NativeProof private provider")&&!provider->displayData.description&&
+      layer->providerKey&&IsEqualGUID(layer->providerKey,&providerKey)&&layer->flags==FWPM_SUBLAYER_FLAG_PERSISTENT&&layer->weight==65535&&!layer->providerData.size&&layer->displayData.name&&!wcscmp(layer->displayData.name,L"NativeProof private sublayer")&&!layer->displayData.description);
+    FwpmFreeMemory0((void **)&provider);FwpmFreeMemory0((void **)&layer);ownership_wfp_security(&providerKey,0);ownership_wfp_security(&layerKey,1);}
+  FWPM_FILTER_ENUM_TEMPLATE0 selection={0};selection.providerKey=&providerKey;HANDLE enumeration;FWPM_FILTER0 **filters;UINT32 count;
+  need(FwpmFilterCreateEnumHandle0(wfp_engine,&selection,&enumeration)==ERROR_SUCCESS&&FwpmFilterEnum0(wfp_engine,enumeration,53,&filters,&count)==ERROR_SUCCESS&&(count==0||(p==ERROR_SUCCESS&&count==52)));
+  FwpmFreeMemory0((void **)&filters);need(FwpmFilterDestroyEnumHandle0(wfp_engine,enumeration)==ERROR_SUCCESS);
+  if(count){
+    need(identities&&identities->kind==2&&identities->count==52);
+    PSID user,restricting;need(ConvertStringSidToSidW(case_record.accountSid,&user)&&ConvertStringSidToSidW(case_record.restrictingSid,&restricting));
+    EXPLICIT_ACCESSW access[2]={0};PACL acl;for(unsigned i=0;i<2;i++){access[i].grfAccessPermissions=FWP_ACTRL_MATCH_FILTER;access[i].grfAccessMode=GRANT_ACCESS;access[i].Trustee.TrusteeForm=TRUSTEE_IS_SID;access[i].Trustee.ptstrName=i?restricting:user;}
+    need(SetEntriesInAclW(2,access,NULL,&acl)==ERROR_SUCCESS);SECURITY_DESCRIPTOR sd;need(InitializeSecurityDescriptor(&sd,SECURITY_DESCRIPTOR_REVISION)&&SetSecurityDescriptorDacl(&sd,TRUE,acl,FALSE));
+    DWORD size=0;MakeSelfRelativeSD(&sd,NULL,&size);need(size&&size<=4096);BYTE *relative=calloc(size,1);need(relative&&MakeSelfRelativeSD(&sd,relative,&size));FWP_BYTE_BLOB token={size,relative};
+    const GUID *layers[]={&FWPM_LAYER_ALE_AUTH_CONNECT_V4,&FWPM_LAYER_ALE_AUTH_CONNECT_V6,&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V4,&FWPM_LAYER_ALE_AUTH_RECV_ACCEPT_V6};unsigned index=0;
+    for(unsigned i=0;i<4;i++){unsigned family=i%2?6:4;recovery_filter(index,layers[i],family,0,-1,-1,TRUE,FWP_ACTION_BLOCK,10,&token,identities->ids[index]);index++;
+      for(unsigned protocol=0;protocol<2;protocol++){unsigned offset=(family==4?0:4)+protocol*2,ip=protocol?17:6;
+        for(unsigned port=0;port<2;port++)for(unsigned side=0;side<2;side++){recovery_filter(index,layers[i],family,ip,side?-1:plan->ports[offset+port],side?plan->ports[offset+port]:-1,FALSE,FWP_ACTION_BLOCK,50,&token,identities->ids[index]);index++;}
+        recovery_filter(index,layers[i],family,ip,plan->ports[offset],plan->ports[offset+1],TRUE,FWP_ACTION_PERMIT,100,&token,identities->ids[index]);index++;recovery_filter(index,layers[i],family,ip,plan->ports[offset+1],plan->ports[offset],TRUE,FWP_ACTION_PERMIT,100,&token,identities->ids[index]);index++;
+      }}
+    need(index==52);free(relative);LocalFree(acl);LocalFree(user);LocalFree(restricting);
+    for(unsigned i=0;i<52;i++){GUID key;access_key(i+2,&key);need(FwpmFilterDeleteByKey0(wfp_engine,&key)==ERROR_SUCCESS);}
+  }
+  if(p==ERROR_SUCCESS)need(FwpmSubLayerDeleteByKey0(wfp_engine,&layerKey)==ERROR_SUCCESS&&FwpmProviderDeleteByKey0(wfp_engine,&providerKey)==ERROR_SUCCESS);
+  need(FwpmTransactionCommit0(wfp_engine)==ERROR_SUCCESS);
+}
+static void recovery_policy(unsigned custody,const char *context,const char *caseNonce) {
+  need(preparation_only&&custody==2&&strlen(context)==64&&strlen(caseNonce)==32&&!audit_owned);
+  struct case_account_record saved=case_record;account_record(entries[custody].path,&case_record);need(!strcmp(case_record.context,context)&&!strcmp(case_record.nonce,caseNonce));
+  recovery_principal_empty(&case_record);
+  char savedNonce[33];strcpy_s(savedNonce,33,nonce);strcpy_s(nonce,33,caseNonce);
+  HANDLE held[SLOTS]={0};PSECURITY_DESCRIPTOR before[SLOTS]={0},wanted[SLOTS]={0};
+  for(unsigned i=0;i<count;i++){
+    wchar_t leaf[64],name[4096];need(swprintf_s(leaf,64,L"policy-%u.baseline",i)>0&&swprintf_s(name,4096,L"%ls\\%ls",entries[custody].path,leaf)>0);
+    if(GetFileAttributesW(name)==INVALID_FILE_ATTRIBUTES){need(GetLastError()==ERROR_FILE_NOT_FOUND);continue;}
+    need(!entries[i].file.handle);entries[i].file=hold_shared(entries[i].path,!strcmp(entries[i].kind,"directory"),FALSE,GENERIC_READ|ACCESS_SYSTEM_SECURITY,!strcmp(entries[i].kind,"mutable"));
+    DWORD size;BYTE *bytes=policy_record_read(custody,leaf,i,context,&size);need(bytes&&size>=sizeof(struct policy_recovery_pair));struct policy_recovery_pair pair;memcpy(&pair,bytes,sizeof(pair));
+    need(pair.before>=SECURITY_DESCRIPTOR_MIN_LENGTH&&pair.wanted>=SECURITY_DESCRIPTOR_MIN_LENGTH&&pair.before<=65536&&pair.wanted<=65536&&sizeof(pair)+pair.before+pair.wanted==size);
+    before[i]=LocalAlloc(LPTR,pair.before);wanted[i]=LocalAlloc(LPTR,pair.wanted);need(before[i]&&wanted[i]);memcpy(before[i],bytes+sizeof(pair),pair.before);memcpy(wanted[i],bytes+sizeof(pair)+pair.before,pair.wanted);free(bytes);
+    need(IsValidSecurityDescriptor(before[i])&&GetSecurityDescriptorLength(before[i])==pair.before&&IsValidSecurityDescriptor(wanted[i])&&GetSecurityDescriptorLength(wanted[i])==pair.wanted);
+    PSECURITY_DESCRIPTOR current=file_sd(entries[i].file.handle,SE_FILE_OBJECT);PSID a,b;BOOL def;SECURITY_DESCRIPTOR_CONTROL flags,old;DWORD revision;
+    need(GetSecurityDescriptorOwner(current,&a,&def)&&GetSecurityDescriptorOwner(before[i],&b,&def)&&EqualSid(a,b)&&GetSecurityDescriptorGroup(current,&a,&def)&&GetSecurityDescriptorGroup(before[i],&b,&def)&&EqualSid(a,b)&&
+      GetSecurityDescriptorControl(current,&flags,&revision)&&GetSecurityDescriptorControl(before[i],&old,&revision)&&!((flags^old)&(SE_DACL_PROTECTED|SE_SACL_PROTECTED))&&
+      (access_acl_equal(current,before[i],FALSE)||access_acl_equal(current,wanted[i],FALSE))&&(access_acl_equal(current,before[i],TRUE)||access_acl_equal(current,wanted[i],TRUE)));LocalFree(current);
+    held[i]=entries[i].file.handle;
+  }
+  BOOL openedCustody=!entries[custody].file.handle;if(openedCustody)entries[custody].file=hold(entries[custody].path,TRUE,TRUE,GENERIC_READ);
+  DWORD size;BYTE *bytes=policy_record_read(custody,L"policy-network.intent",custody,context,&size);struct policy_recovery_network network={0};
+  if(bytes){need(size==sizeof(network));memcpy(&network,bytes,size);free(bytes);need(network.version==1&&(network.kind==1||network.kind==2));if(network.kind==2)for(unsigned i=0;i<8;i++){need(network.ports[i]>=1024&&network.ports[i]<=65535);for(unsigned j=0;j<i;j++)need(network.ports[i]!=network.ports[j]);}}
+  struct policy_recovery_filters identities={0};BOOL identitiesPresent=FALSE;
+  bytes=policy_record_read(custody,L"policy-filters.observed",custody,context,&size);
+  if(bytes){need(size==sizeof(identities));memcpy(&identities,bytes,size);free(bytes);need(identities.kind==network.kind&&identities.count==(network.kind==1?4:52));for(unsigned i=0;i<identities.count;i++){need(identities.ids[i]);for(unsigned j=0;j<i;j++)need(identities.ids[i]!=identities.ids[j]);}identitiesPresent=TRUE;}
+  HKEY registry=network.kind==2?policy_registry_owned(custody,context):NULL;
+  if(network.kind==1){ownership_keys();FWPM_PROVIDER0 *provider;wfp_open();DWORD status=FwpmProviderGetByKey0(wfp_engine,&ownership_provider,&provider);if(status==ERROR_SUCCESS){FwpmFreeMemory0((void **)&provider);need(identitiesPresent);memcpy(ownership_filter_ids,identities.ids,sizeof(ownership_filter_ids));ownership_network(FALSE,TRUE);ownership_network(TRUE,FALSE);}else need(status==FWP_E_PROVIDER_NOT_FOUND);ownership_network_absent();}
+  else if(network.kind==2)recovery_access_network(&network,identitiesPresent?&identities:NULL);
+  if(registry)policy_registry_remove(registry);
+  for(unsigned i=0;i<count;i++)if(before[i]){PACL dacl,sacl;BOOL present,def;SECURITY_DESCRIPTOR_CONTROL flags;DWORD revision;need(GetSecurityDescriptorDacl(before[i],&present,&dacl,&def)&&present&&GetSecurityDescriptorSacl(before[i],&present,&sacl,&def)&&GetSecurityDescriptorControl(before[i],&flags,&revision));
+    set_file_security(held[i],DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION|LABEL_SECURITY_INFORMATION|(flags&SE_DACL_PROTECTED?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION)|(flags&SE_SACL_PROTECTED?PROTECTED_SACL_SECURITY_INFORMATION:UNPROTECTED_SACL_SECURITY_INFORMATION),dacl,present?sacl:NULL);
+    PSECURITY_DESCRIPTOR actual=file_sd(held[i],SE_FILE_OBJECT);need(GetSecurityDescriptorLength(actual)==GetSecurityDescriptorLength(before[i])&&!memcmp(actual,before[i],GetSecurityDescriptorLength(actual)));LocalFree(actual);LocalFree(before[i]);LocalFree(wanted[i]);close_file(&entries[i].file);
+  }
+  recovery_principal_empty(&case_record);
+  if(openedCustody)close_file(&entries[custody].file);strcpy_s(nonce,33,savedNonce);case_record=saved;
+  printf("{\"restored\":true}");
+}
 /* Cold recovery uses the independently approved observer's case plan. Node
  * first proves all possible System creators and observers retired through held
  * creation identities. This lane separately rejoins the account, whole Job and
@@ -3223,11 +3519,13 @@ static void recovery_case(unsigned custody, const char *context, const char *cas
     DWORD present=GetFileAttributesW(entries[i].path);
     if (present==INVALID_FILE_ATTRIBUTES) { need(GetLastError()==ERROR_FILE_NOT_FOUND || GetLastError()==ERROR_PATH_NOT_FOUND); continue; }
     struct held_file file=hold_shared(entries[i].path,!strcmp(entries[i].kind,"directory"),TRUE,GENERIC_READ | ACCESS_SYSTEM_SECURITY,!strcmp(entries[i].kind,"mutable"));
+    if(strcmp(entries[i].kind,"directory")&&strcmp(entries[i].kind,"mutable"))pin(&file,entries[i].pin);
     PSECURITY_DESCRIPTOR sd=file_sd(file.handle,SE_FILE_OBJECT); PACL sacl; BOOL has,defaulted;
     need(GetSecurityDescriptorSacl(sd,&has,&sacl,&defaulted));
     if (has && sacl) for (unsigned j=0;j<sacl->AceCount;j++) { ACE_HEADER *ace; need(GetAce(sacl,j,(void **)&ace) && ace->AceType==SYSTEM_MANDATORY_LABEL_ACE_TYPE); }
     LocalFree(sd); close_file(&file);
   }
+  if(recorded)recovery_sentinel(custody,context);
   ownership_network_absent(); wfp_open(); GUID key; FWPM_PROVIDER0 *provider; FWPM_SUBLAYER0 *layer; FWPM_FILTER0 *filter;
   access_key(0,&key); need(FwpmProviderGetByKey0(wfp_engine,&key,&provider)==FWP_E_PROVIDER_NOT_FOUND);
   access_key(1,&key); need(FwpmSubLayerGetByKey0(wfp_engine,&key,&layer)==FWP_E_SUBLAYER_NOT_FOUND);
@@ -3248,7 +3546,8 @@ static void recovery_case(unsigned custody, const char *context, const char *cas
         need(job && ++members<=32 && process_session(process)==0 && IsProcessInJob(process,job,&belongs) && belongs); }
       LocalFree(actual); need(CloseHandle(token) && CloseHandle(process));
     } while (Process32NextW(census,&entry)); need(GetLastError()==ERROR_NO_MORE_FILES && CloseHandle(census));
-    if (job) operation_stop_job(job);
+    /* A reopened name is observation only, never termination authority. */
+    need(!members);if (job) operation_empty(job);
     LSA_OBJECT_ATTRIBUTES attributes={0}; attributes.Length=sizeof(attributes); LSA_HANDLE policy;
     need(LsaOpenPolicy(NULL,&attributes,POLICY_LOOKUP_NAMES,&policy)==0 && LsaRemoveAccountRights(policy,sid,TRUE,NULL,0)==0 && LsaClose(policy)==0);
     need(NetUserDel(NULL,name)==NERR_Success);
@@ -3354,7 +3653,7 @@ int wmain(int argc, wchar_t **argv) {
         printf("{\"retired\":true}");
       }
     } else if (!strcmp(values[0], "access-inventory")) { need(!preparation_only); access_inventory(values, n);
-    } else if (!strcmp(values[0], "access-policy-begin")) { need(n == 3 && !preparation_only); wchar_t profile[32]; decode_bounded(values[2], profile, 32); access_policy_begin(profile);
+    } else if (!strcmp(values[0], "access-policy-begin")) { need(n == 11 && !preparation_only); wchar_t profile[32]; unsigned ports[8];decode_bounded(values[2], profile, 32);for(unsigned i=0;i<8;i++)ports[i]=bounded_number(values[3+i],65535);access_policy_begin(profile,ports);
     } else if (!strcmp(values[0], "access-policy-installed")) { need(n == 3 && !preparation_only); access_policy_installed(values[2]);
     } else if (!strcmp(values[0], "access-policy-restore")) { need(n == 2 && !preparation_only); access_policy_restore();
     } else if (!strcmp(values[0], "access-jobs-close")) {
@@ -3501,7 +3800,8 @@ int wmain(int argc, wchar_t **argv) {
       HANDLE file = account_file(entries[case_custody].path, L"policy", GENERIC_WRITE, CREATE_NEW); DWORD used;
       need(WriteFile(file, data, (DWORD)size/2, &used, NULL) && used == size/2 && FlushFileBuffers(file) && CloseHandle(file));
       wchar_t name[4096]; need(swprintf_s(name, 4096, L"%ls\\policy", entries[case_custody].path) > 0); ownership_policy_file = hold(name, FALSE, TRUE, GENERIC_READ);
-      ownership_network(FALSE, FALSE); for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, FALSE); ownership_policy_installed = TRUE; printf("{\"installed\":true}");
+      ownership_network_absent();policy_network_intent(1,NULL);
+      ownership_network(FALSE, FALSE);policy_filter_save(1); for (unsigned i = 0; i < 6; i++) ownership_acl(i, FALSE, FALSE); ownership_policy_installed = TRUE; printf("{\"installed\":true}");
     } else if (!strcmp(values[0], "ownership-outside")) {
       need(n == 2 && case_token); struct case_account_record record = {0}; account_record(entries[case_custody].path, &record); need(!memcmp(&record, &case_record, sizeof(record)));
       if (!ownership_sentinel.handle) {
@@ -3510,6 +3810,7 @@ int wmain(int argc, wchar_t **argv) {
         need(WriteFile(file, record.context, 64, &used, NULL) && used == 64 && FlushFileBuffers(file) && CloseHandle(file));
         need(swprintf_s(name, 4096, L"%ls\\%ls", entries[0].path, leaf) > 0); ownership_sentinel = hold(name, FALSE, TRUE, GENERIC_READ);
       }
+      policy_sentinel_save();
       char sentinelHash[65]; DWORD sentinelSize; BYTE *sentinel = read_file(&ownership_sentinel, 64, &sentinelSize); need(sentinelSize == 64); sum(sentinel, sentinelSize, sentinelHash); free(sentinel);
       char hash[65]; sum((BYTE *)&record, sizeof(record), hash); printf("{\"record\":\"%s\",\"sentinel\":{\"identity\":\"", hash); file_id(&ownership_sentinel); printf("\",\"sha256\":\"%s\"},\"objects\":[", sentinelHash);
       for (unsigned i = 1; i <= 6; i++) { if (i > 1) putchar(','); putchar('"'); file_id(&entries[i].file); putchar('"'); }

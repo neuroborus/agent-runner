@@ -958,18 +958,25 @@ test("native custody retains live handles, original NUL and saved ACL protection
     finish,
     /GetSecurityDescriptorControl\(baselines\[i\],&control,&revision\)/u,
   );
-  for (const kind of ["DACL", "SACL"]) {
-    assert.match(
-      finish,
-      new RegExp(
-        `control&SE_${kind}_PROTECTED\\?PROTECTED_${kind}_SECURITY_INFORMATION:UNPROTECTED_${kind}_SECURITY_INFORMATION`,
-        "u",
-      ),
-    );
-  }
   assert.match(
     finish,
-    /\(control\^actualControl\)&\(SE_DACL_PROTECTED\|SE_SACL_PROTECTED\)/u,
+    /control&SE_SACL_PROTECTED\?PROTECTED_SACL_SECURITY_INFORMATION:UNPROTECTED_SACL_SECURITY_INFORMATION/u,
+  );
+  assert.doesNotMatch(
+    finish,
+    /SetSecurityInfo\([^;]+DACL_SECURITY_INFORMATION/u,
+  );
+  const owned = source.slice(
+    source.indexOf("static void command_owned_sacl("),
+    source.indexOf("static BOOL command_owned_policy(BOOL authorized) {"),
+  );
+  assert.match(
+    owned,
+    /GetSecurityDescriptorDacl[\s\S]*command_same_acl\(dacl,oldDacl\)/u,
+  );
+  assert.match(owned, /\(current\^saved\)&~SE_SACL_PRESENT/u);
+  assert.ok(
+    finish.indexOf("ack('V')") < finish.indexOf("FILE_DISPOSITION_INFO"),
   );
 });
 
@@ -4956,5 +4963,147 @@ test("the actual finish reader admits only live original baselines before any in
       );
       assert.equal(admitted, false);
     }
+  }
+});
+
+test("owned command fixture deletion waits for independent restoration, and refusal closes without release", async () => {
+  for (const refused of [false, true]) {
+    const writes = [],
+      child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const close = async (code) => {
+      const ended = once(child.stderr, "end");
+      child.stdout.end();
+      child.stderr.end();
+      await ended;
+      child.emit("close", code, null);
+    };
+    child.stdin = new Writable({
+      write(value, _encoding, done) {
+        writes.push(value.toString());
+        if (value.toString() === "R")
+          child.stdout.write('{"restorationReady":true}\n');
+        else {
+          assert.equal(value.toString(), "V");
+          child.stdout.write(
+            '{"retired":true,"completeDomain":true,"restored":true}\n',
+          );
+        }
+        done();
+      },
+      final(done) {
+        done();
+        queueMicrotask(() => close(refused ? 126 : 0));
+      },
+    });
+    const launch = () => {
+      queueMicrotask(() =>
+        child.stdout.write(JSON.stringify({ ready: true, identity }) + "\n"),
+      );
+      return child;
+    };
+    const signal = new AbortController().signal;
+    const owner = await openWindowsCommandWatcher(
+      "C:\\fixture\\helper.exe",
+      [],
+      {},
+      signal,
+      launch,
+    );
+    const failure = new Error("independent SACL mismatch");
+    const settling = owner.finish(signal, async () => {
+      assert.deepEqual(writes, ["R"]);
+      if (refused) throw failure;
+    });
+    if (refused) await assert.rejects(settling, (error) => error === failure);
+    else assert.equal((await settling).restored, true);
+    assert.deepEqual(writes, refused ? ["R"] : ["R", "V"]);
+  }
+});
+
+test("command settlement preserves its original failure and a separate cleanup cause", async () => {
+  const original = new Error("lost payload reply");
+  await assert.rejects(
+    settleWindowsCommandCustody({
+      retireDomain: async () => {
+        throw original;
+      },
+      closeObserver: async () => {
+        throw new Error("capture could not drain");
+      },
+      verifyObserver: async () => ({ completeDomain: true }),
+      abandonFinish: async () => {},
+    }),
+    (error) =>
+      error === original &&
+      error.feasibilityCleanup.code === "cleanup-unobserved" &&
+      error.feasibilityCleanup.detail.includes("capture retirement"),
+  );
+});
+
+test("a failed restoration writer settles both early readers without replacing the first failure", async () => {
+  const source = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const start = source.lastIndexOf("        async finish() {"),
+    end = source.indexOf("\n      }).catch", start);
+  assert.ok(start > 0 && end > start);
+  const finish = new Script(`({${source.slice(start, end)}}).finish()`);
+  for (const phase of ["writer", "reader"]) {
+    const calls = [],
+      failure = new Error(`${phase} failed`);
+    const context = {
+      signal: new AbortController().signal,
+      failed: undefined,
+      fixturesRetired: false,
+      nativeException: () => {},
+      need: assert.ok,
+      cleanupReader: {
+        async finish(_signal, verify) {
+          calls.push("writer");
+          if (phase === "writer") throw failure;
+          await verify();
+          assert.fail("failed verification cannot release fixture deletion");
+        },
+      },
+      restorationReader: {
+        async finish() {
+          calls.push("read");
+          throw failure;
+        },
+        async abandon() {
+          calls.push("abandon");
+          throw new Error("reader exited without verification");
+        },
+      },
+      restorationVerifier: {
+        async finish() {
+          calls.push("reader-retired");
+          return { retired: true, exitCode: phase === "reader" ? 126 : 0 };
+        },
+      },
+      readerVerifier: {
+        async finish() {
+          calls.push("writer-retired");
+          return { retired: true };
+        },
+      },
+    };
+    await assert.rejects(
+      finish.runInNewContext(context),
+      (error) => error === failure,
+    );
+    assert.deepEqual(calls, [
+      "writer",
+      phase === "writer" ? "abandon" : "read",
+      "reader-retired",
+      "writer-retired",
+    ]);
+    assert.equal(context.fixturesRetired, false);
   }
 });

@@ -815,15 +815,14 @@ export function createWindowsCustodyVerifier(
         )
       ) {
         requireWindows(
-          nativeRecords.some((record) => record.phase === "audit-restored") &&
-            nativeRecords.some(
-              (record) =>
-                ["access-observer-retired", "access-observer-absent"].includes(
-                  record.phase,
-                ) &&
-                record.scoped?.drained === true &&
-                record.scoped?.independent === true,
-            ),
+          nativeRecords.some(
+            (record) =>
+              ["access-observer-retired", "access-observer-absent"].includes(
+                record.phase,
+              ) &&
+              record.scoped?.drained === true &&
+              record.scoped?.independent === true,
+          ),
         );
       }
       if (nativeRecords.some((record) => record.kind === "git-audit-possible"))
@@ -868,6 +867,42 @@ export function createWindowsCustodyVerifier(
       );
       for (const identity of unique) {
         observations.push(await empty(identity), await empty(identity));
+      }
+      if (
+        nativeRecords.some(
+          (record) => record.phase === "audit-install-possible",
+        )
+      ) {
+        // The admitted bootstrap reader reopens only the protected original
+        // baseline and matching held identities. A lost setter reply cannot
+        // turn possible admission into an unstarted lane.
+        const restored = await call(
+          nativeRecords.some((record) => record.phase === "audit-restored")
+            ? "audit-check"
+            : "audit-recover",
+          [2, contextSha256, original.nonce],
+        );
+        closed(restored, ["restored", "admission"]);
+        requireWindows(
+          restored.restored === true &&
+            ["not-started", "possible"].includes(restored.admission),
+        );
+        observations.push(restored);
+      }
+      if (
+        records.some((record) =>
+          ["ownership-policy", "access-policy-begin"].includes(record.phase),
+        ) ||
+        nativeRecords.some((record) => record.kind === "git-policy-possible")
+      ) {
+        const restored = await call("policy-recover", [
+          2,
+          contextSha256,
+          original.nonce,
+        ]);
+        closed(restored, ["restored"]);
+        requireWindows(restored.restored === true);
+        observations.push(restored);
       }
       // Creator retirement precedes payload Job settlement. Native recovery
       // rejoins the owned account record and complete SID census, and touches

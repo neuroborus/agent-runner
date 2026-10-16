@@ -2394,6 +2394,25 @@ function rawPreparation() {
       assert.equal(digest(data), args[2]);
       return { hex: data.toString("hex") };
     }
+    if (
+      [
+        "verify-policy-recover",
+        "verify-audit-recover",
+        "verify-audit-check",
+      ].includes(operation)
+    ) {
+      const account = f.accounts.get(selected[Number(args[0])].path);
+      assert.ok(
+        !account || account.retired,
+        "Original creators must retire before recovery setters",
+      );
+      assert.ok(!account || account.contextSha256 === args[1]);
+      if (["partial-restoration", "policy-substitution"].includes(f.coldDamage))
+        throw new Error("Native restoration interrupted or changed");
+      return operation !== "verify-policy-recover"
+        ? { restored: true, admission: "possible" }
+        : { restored: true };
+    }
     if (operation === "verify-case-recover") {
       const account = f.accounts.get(selected[Number(args[0])].path);
       assert.ok(
@@ -4341,6 +4360,8 @@ test("Windows fixed-entry recovery rejects task substitution and missing records
     "reader",
     "case-record",
     "receipt",
+    "partial-restoration",
+    "policy-substitution",
   ]) {
     const f = rawPreparation(),
       { recipe, binding } = provisionCase(f, "ownership.detached", true);

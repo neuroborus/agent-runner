@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import { observationDigest } from "../index.js";
 import {
   createWindowsAuditDecoder,
@@ -750,4 +752,174 @@ test("Windows private binary capture drains bounded records before independent h
   );
   assert.equal(commands.at(-1), "A");
   await assert.rejects(blocked.barrier());
+});
+
+test("a partial restoration preserves the installation cause and exposes cleanup failure separately", async () => {
+  const f = setupFixture(),
+    original = new Error("observer admission reply lost"),
+    cleanup = new Error("foreign policy substitution");
+  f.reader.openObserver = async () => {
+    throw original;
+  };
+  await assert.rejects(f.owner.install(), (error) => error === original);
+  const verify = f.options.verifyRetirement;
+  f.options.verifyRetirement = async (input) => ({
+    ...(await verify(input)),
+    currentSha256: input.current.sha256,
+  });
+  f.reader.restoreAudit = async () => {
+    throw cleanup;
+  };
+  f.closed();
+  await assert.rejects(
+    f.owner.recover(retired(f.value), {
+      ...retired(f.value, f.helper),
+      drained: true,
+    }),
+    (error) => error === original,
+  );
+  assert.equal(f.owner.cause, original);
+  assert.equal(f.owner.cleanupCause, cleanup);
+  assert.equal(f.owner.possible, true);
+});
+
+test("native audit restoration rereads the whole category inventory and rejects additions, replacements and duplicates", async () => {
+  const source = await readFile(
+    new URL("./effective-reader.h", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("static void audit_enumerate(void) {");
+  const body = source
+    .slice(start, source.indexOf("static BOOL audit_principal_exists", start))
+    .replace("static void audit_enumerate(void)", "function audit_enumerate()")
+    .replace("GUID *categories; ULONG count;", "let categories, count;")
+    .replace(
+      "AuditEnumerateSubCategories(NULL, TRUE, &categories, &count)",
+      "(categories=read(), count=categories.length, true)",
+    )
+    .replaceAll("sizeof(GUID)", "1")
+    .replaceAll("unsigned ", "let ")
+    .replaceAll("ULONG ", "let ")
+    .replaceAll("&categories[", "categories[")
+    .replace(
+      "memcpy(audit_categories, categories, count*1)",
+      "audit_categories=categories.slice()",
+    );
+  for (const current of [
+    ["one", "two"],
+    ["one", "two", "three"],
+    ["one", "other"],
+    ["one", "one"],
+  ]) {
+    let reads = 0,
+      freed = 0;
+    const context = {
+      audit_count: 2,
+      audit_categories: ["one", "two"],
+      TRUE: true,
+      read: () => {
+        reads++;
+        return current;
+      },
+      need: (value) => assert.ok(value),
+      memcmp: (a, b) => (JSON.stringify(a) === JSON.stringify(b) ? 0 : 1),
+      IsEqualGUID: (a, b) => a === b,
+      AuditFree: () => freed++,
+    };
+    const operation = new Script(body + "audit_enumerate();");
+    if (current.join() === "one,two") {
+      operation.runInNewContext(context);
+      assert.equal(freed, 1);
+    } else assert.throws(() => operation.runInNewContext(context));
+    assert.equal(reads, 1);
+  }
+});
+
+test("cold native audit recovery treats only proved absent baseline and principal as unstarted", async () => {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "  if(attributes==INVALID_FILE_ATTRIBUTES)",
+    source.indexOf(
+      "static void recovery_audit(unsigned custody,const char *context,const char *caseNonce,BOOL verifyOnly) {",
+    ),
+  );
+  assert.ok(start > 0);
+  const body = source
+    .slice(start, source.indexOf("  HANDLE file=account_file", start))
+    .replace("PSID sid;", "let sid;")
+    .replace(
+      "ConvertStringSidToSidW(account.accountSid,&sid)",
+      "(sid=account.accountSid,true)",
+    );
+  for (const [error, principal, accepted, verifyOnly = false] of [
+    [2, false, true],
+    [5, false, false],
+    [2, true, false],
+    [2, false, false, true],
+  ]) {
+    const observations = [];
+    const context = {
+      attributes: -1,
+      verifyOnly,
+      INVALID_FILE_ATTRIBUTES: -1,
+      ERROR_FILE_NOT_FOUND: 2,
+      GetLastError: () => error,
+      account: { accountSid: "S-1-5-21-1-2-3-1001" },
+      need: (value) => assert.ok(value),
+      audit_principal_exists: () => principal,
+      LocalFree: () => {},
+      printf: (line) => observations.push(JSON.parse(line)),
+    };
+    const operation = new Script(`(function(){${body}})()`);
+    if (accepted) operation.runInNewContext(context);
+    else assert.throws(() => operation.runInNewContext(context));
+    assert.deepEqual(
+      observations,
+      accepted ? [{ restored: true, admission: "not-started" }] : [],
+    );
+  }
+});
+
+test("completed cold audit recovery verifies absence without replaying the intermediate installed descriptors", async () => {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf("  if(verifyOnly||completed) {");
+  assert.ok(start > 0);
+  const body = source
+    .slice(start, source.indexOf("  audit_sid=", start))
+    .replaceAll("->", ".");
+  for (const completed of [false, true])
+    for (const principal of [false, true]) {
+      const observed = [];
+      const context = {
+        verifyOnly: !completed,
+        completed,
+        header: { sid: "original" },
+        audit_system: {},
+        bytes: [],
+        used: 0,
+        NULL: null,
+        audit_principal_exists: () => principal,
+        need: (value) => assert.ok(value),
+        AuditFree: () => observed.push("free"),
+        SecureZeroMemory: () => {},
+        free: () => {},
+        printf: () => observed.push("verified"),
+      };
+      const operation = new Script(
+        `(function(){${body}throw new Error("restoration replayed");})()`,
+      );
+      if (principal) {
+        assert.throws(() => operation.runInNewContext(context));
+        assert.deepEqual(observed, []);
+      } else {
+        operation.runInNewContext(context);
+        assert.deepEqual(observed, ["free", "verified"]);
+      }
+    }
 });

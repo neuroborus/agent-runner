@@ -188,6 +188,7 @@ export function createWindowsAuditCustody(
     finished = false,
     failed = false,
     firstCause,
+    cleanupCause,
     busy = false;
   const snapshot = async () => {
     requireWindows(
@@ -351,6 +352,7 @@ export function createWindowsAuditCustody(
         /* Diagnostics cannot replace the first cause or release the failure latch. */
       }
       failed = true;
+      if (firstCause && firstCause !== error) cleanupCause ??= error;
       firstCause ??= error;
       throw firstCause;
     } finally {
@@ -361,6 +363,9 @@ export function createWindowsAuditCustody(
     snapshot,
     get cause() {
       return firstCause;
+    },
+    get cleanupCause() {
+      return cleanupCause;
     },
     get possible() {
       return possible;

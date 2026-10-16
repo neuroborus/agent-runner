@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import {
   buildWindowsPolicy,
   assertWindowsPolicyInstallation,
@@ -1292,4 +1294,339 @@ test("Windows access binds owner/helper loss to held identities and retains poli
       );
     }
   }
+});
+
+test("cold native filter reconstruction preserves the complete original tuple graph and filter identities", async () => {
+  const { input, plan } = fixture();
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "    for(unsigned i=0;i<4;i++){unsigned family=i%2?6:4;recovery_filter",
+  );
+  assert.ok(start > 0);
+  const body = source
+    .slice(start, source.indexOf("    need(index==52);", start))
+    .replace(/\bunsigned /gu, "let ")
+    .replaceAll("&token", "token")
+    .replaceAll("->", ".");
+  const observed = [],
+    ids = Array.from({ length: 52 }, (_, index) => index + 1001);
+  new Script(body).runInNewContext({
+    index: 0,
+    layers: [...new Set(plan.manifest.filters.map((filter) => filter.layer))],
+    plan: {
+      ports: input.endpoints.flatMap((endpoint) => [
+        endpoint.clientPort,
+        endpoint.serverPort,
+      ]),
+    },
+    identities: { ids },
+    token: {},
+    TRUE: true,
+    FALSE: false,
+    FWP_ACTION_BLOCK: "BLOCK",
+    FWP_ACTION_PERMIT: "PERMIT",
+    recovery_filter(
+      index,
+      layer,
+      family,
+      protocol,
+      local,
+      remote,
+      principal,
+      action,
+      weight,
+      _token,
+      identity,
+    ) {
+      assert.equal(identity, ids[index]);
+      const address = family === 4 ? "127.0.0.1" : "::1",
+        conditions = {};
+      if (protocol) conditions.protocol = protocol === 6 ? "tcp" : "udp";
+      if (local >= 0) {
+        conditions.localAddress = address;
+        conditions.localPort = local;
+      }
+      if (remote >= 0) {
+        conditions.remoteAddress = address;
+        conditions.remotePort = remote;
+      }
+      observed.push({
+        layer,
+        principal: principal ? input.accountSid : null,
+        action,
+        weight,
+        conditions,
+      });
+    },
+  });
+  assert.deepEqual(
+    observed,
+    plan.manifest.filters.map(
+      ({ layer, principal, action, weight, conditions }) => ({
+        layer,
+        principal,
+        action,
+        weight,
+        conditions,
+      }),
+    ),
+  );
+});
+
+test("ownership removal rejects recreated filters inside its transaction despite identical descriptors", async () => {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+      "static void ownership_network(BOOL remove, BOOL observe) {",
+    ),
+    body = source.slice(
+      start,
+      source.indexOf("static void policy_recovery_save", start),
+    ),
+    query = body.indexOf("      FWPM_FILTER0 *actual;"),
+    end = body.indexOf("    } else { UINT64 id;", query);
+  assert.ok(start > 0 && query > 0 && end > query);
+  assert.ok(body.indexOf("FwpmTransactionBegin0") < query);
+  assert.ok(body.indexOf("FwpmTransactionCommit0") > end);
+  const operation = new Script(
+    body
+      .slice(query, end)
+      .replace("FWPM_FILTER0 *actual;", "let actual;")
+      .replace("(void **)&actual", "actual")
+      .replaceAll("&actual->", "actual->")
+      .replace("&actual", "value=>actual=value")
+      .replace("*actual->weight.uint64", "actual->weight.uint64")
+      .replaceAll("&value.filterKey", "value.filterKey")
+      .replaceAll("&ownership_provider", "ownership_provider")
+      .replaceAll("&ownership_layer", "ownership_layer")
+      .replace("&condition.fieldKey", "condition.fieldKey")
+      .replaceAll("->", "."),
+  );
+  for (const [expected, actual] of [
+    [1001, 1001],
+    [1001, 1002],
+    [0, 1001],
+  ]) {
+    const removed = [],
+      filter = {
+        filterId: actual,
+        providerKey: "provider",
+        subLayerKey: "sublayer",
+        layerKey: "layer",
+        flags: 9,
+        action: { type: "BLOCK" },
+        weight: { type: "UINT64", uint64: 10 },
+        providerData: { size: 0 },
+        rawContext: 0,
+        reserved: null,
+        displayData: { name: "owned deny", description: null },
+        numFilterConditions: 1,
+        filterCondition: [
+          {
+            fieldKey: "user",
+            matchType: 0,
+            conditionValue: {
+              type: "SD",
+              sd: { size: 5, data: "token" },
+            },
+          },
+        ],
+      };
+    const context = {
+      remove: true,
+      i: 0,
+      ownership_filter_ids: [expected],
+      ownership_provider: "provider",
+      ownership_layer: "sublayer",
+      layers: ["layer"],
+      value: {
+        filterKey: "key",
+        flags: 9,
+        action: { type: "BLOCK" },
+        displayData: { name: "owned deny" },
+      },
+      condition: { fieldKey: "user" },
+      size: 5,
+      weight: 10,
+      relative: "token",
+      ERROR_SUCCESS: 0,
+      FWP_UINT64: "UINT64",
+      FWP_MATCH_EQUAL: 0,
+      FWP_SECURITY_DESCRIPTOR_TYPE: "SD",
+      wfp_engine: {},
+      need: assert.ok,
+      IsEqualGUID: (a, b) => a === b,
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      memcmp: (a, b) => (a === b ? 0 : 1),
+      FwpmFilterGetByKey0(_engine, key, output) {
+        assert.equal(key, "key");
+        output(filter);
+        return 0;
+      },
+      FwpmFreeMemory0: () => {},
+      ownership_wfp_security: () => {},
+      FwpmFilterDeleteByKey0(_engine, key) {
+        removed.push(key);
+        return 0;
+      },
+    };
+    if (expected === actual) operation.runInNewContext(context);
+    else assert.throws(() => operation.runInNewContext(context));
+    assert.deepEqual(removed, expected === actual ? ["key"] : []);
+  }
+  assert.match(body, /ownership_filter_ids\[i\] = id/u);
+  assert.match(
+    source,
+    /memcpy\(ownership_filter_ids,identities.ids,sizeof\(ownership_filter_ids\)\)/u,
+  );
+});
+
+test("normal and cold registry cleanup require the saved observation and delete only the verified handle", async () => {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const start = source.indexOf(
+    "static HKEY policy_registry_owned(unsigned custody,const char *context) {",
+  );
+  assert.ok(start > 0);
+  const body = source
+    .slice(start, source.indexOf("struct policy_recovery_sentinel", start))
+    .replace(
+      "static HKEY policy_registry_owned(unsigned custody,const char *context)",
+      "function policy_registry_owned(custody,context)",
+    )
+    .replace("DWORD size;BYTE *identity=", "let size;let identity=")
+    .replace(
+      "wchar_t name[256];HKEY key;FILETIME written;char hash[65];DWORD children,values;",
+      "let name,key,written,hash,children,values;",
+    )
+    .replace("&size", "v=>size=v")
+    .replace("sizeof(FILETIME)+65", "73")
+    .replace("identity[size-1]", "identity.terminated")
+    .replace("(char *)identity+sizeof(written)", "identity.security")
+    .replace("sizeof(written)", "8")
+    .replace("memcmp(identity,&written,", "memcmp(identity,written,")
+    .replace("swprintf_s(name,", "swprintf_s(v=>name=v,")
+    .replace("&key", "v=>key=v")
+    .replace("TRUE,hash", "TRUE,v=>hash=v")
+    .replace("&children", "v=>children=v")
+    .replace("&values", "v=>values=v")
+    .replace("&written", "v=>written=v")
+    .replace(
+      "static void policy_registry_remove(HKEY key)",
+      "function policy_registry_remove(key)",
+    )
+    .replace("typedef NTSTATUS (NTAPI *delete_key)(HANDLE);", "")
+    .replace("delete_key remove=(delete_key)", "const remove=")
+    .replaceAll('L"', '"');
+  const operation = new Script(
+    `${body}const key=policy_registry_owned(2,"context");if(key){beforeRemove();policy_registry_remove(key);}`,
+  );
+  for (const mode of [
+    "absent",
+    "original",
+    "missing-record",
+    "changed-time",
+    "changed-security",
+    "populated",
+    "replacement",
+  ]) {
+    const original = { deleted: false },
+      replacement = { deleted: false };
+    let live = mode === "absent" ? null : original;
+    const context = {
+      nonce: "nonce",
+      NULL: null,
+      TRUE: true,
+      HKEY_LOCAL_MACHINE: "machine",
+      KEY_ALL_ACCESS: 1,
+      ACCESS_SYSTEM_SECURITY: 2,
+      KEY_WOW64_64KEY: 4,
+      SE_REGISTRY_KEY: 1,
+      ERROR_SUCCESS: 0,
+      need: assert.ok,
+      access_registry_present: () => live !== null,
+      policy_record_read(custody, leaf, index, binding, size) {
+        assert.deepEqual(
+          [custody, leaf, index, binding],
+          [2, "policy-registry.observed", 2, "context"],
+        );
+        size(73);
+        return mode === "missing-record"
+          ? null
+          : { terminated: 0, written: 1, security: "original" };
+      },
+      swprintf_s(output) {
+        output("key-path");
+        return 1;
+      },
+      RegOpenKeyExW(_root, _name, _options, rights, output) {
+        assert.equal(rights, 7);
+        output(original);
+        return 0;
+      },
+      security(key, _kind, _private, output) {
+        assert.equal(key, original);
+        output(mode === "changed-security" ? "other" : "original");
+      },
+      RegQueryInfoKeyW(
+        key,
+        _a,
+        _b,
+        _c,
+        children,
+        _d,
+        _e,
+        values,
+        _f,
+        _g,
+        _h,
+        written,
+      ) {
+        assert.equal(key, original);
+        children(0);
+        values(mode === "populated" ? 1 : 0);
+        written(mode === "changed-time" ? 2 : 1);
+        return 0;
+      },
+      memcmp: (saved, written) => (saved.written === written ? 0 : 1),
+      strcmp: (a, b) => (a === b ? 0 : 1),
+      free: () => {},
+      GetModuleHandleW: () => "module",
+      GetProcAddress(_module, name) {
+        assert.equal(name, "NtDeleteKey");
+        return (key) => {
+          assert.equal(key, original);
+          key.deleted = true;
+          if (live === key) live = null;
+          return 0;
+        };
+      },
+      RegCloseKey: () => 0,
+      beforeRemove() {
+        if (mode === "replacement") live = replacement;
+      },
+    };
+    if (["absent", "original"].includes(mode))
+      operation.runInNewContext(context);
+    else assert.throws(() => operation.runInNewContext(context));
+    assert.equal(original.deleted, ["original", "replacement"].includes(mode));
+    assert.equal(replacement.deleted, false);
+  }
+  const normal = source.slice(
+    source.indexOf("static void access_policy_restore(void) {"),
+    source.indexOf("static void access_state("),
+  );
+  assert.match(
+    normal,
+    /policy_registry_owned\(case_custody,case_record.context\)/u,
+  );
+  assert.match(normal, /policy_registry_remove\(registry\)/u);
+  assert.doesNotMatch(normal, /RegDeleteKeyExW/u);
 });

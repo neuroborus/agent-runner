@@ -421,7 +421,13 @@ export function createWindowsAccessEffects(state, current, save, recordPolicy) {
       await reader.sendOwnership("P");
       await controlFrame("setup");
       policyPossible = true;
-      await reader.beginAccessPolicy(plan.value.profile);
+      await reader.beginAccessPolicy(
+        plan.value.profile,
+        plan.value.endpoints.flatMap(({ clientPort, serverPort }) => [
+          clientPort,
+          serverPort,
+        ]),
+      );
       installation = await current.owners.policy({
         persist,
         review: async (_value, approvedSha256) => {

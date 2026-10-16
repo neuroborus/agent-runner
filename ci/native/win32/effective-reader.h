@@ -341,8 +341,10 @@ static void tree_read(struct entry *root, const wchar_t *prefix, unsigned depth,
 }
 
 static void audit_enumerate(void) {
-  if (audit_count) return; GUID *categories; ULONG count;
+  GUID *categories; ULONG count;
   need(AuditEnumerateSubCategories(NULL, TRUE, &categories, &count) && count && count <= 128);
+  if(audit_count) need(count==audit_count && !memcmp(audit_categories,categories,count*sizeof(GUID)));
+  for(ULONG i=0;i<count;i++)for(ULONG j=0;j<i;j++)need(!IsEqualGUID(&categories[i],&categories[j]));
   memcpy(audit_categories, categories, count*sizeof(GUID)); audit_count = count; AuditFree(categories);
 }
 static BOOL audit_principal_exists(PSID sid) {
@@ -414,7 +416,8 @@ static void audit_install_token(HANDLE token, char **values, unsigned n, BOOL em
   sum((BYTE *)again, audit_count*sizeof(*again), hash); need(!strcmp(hash, values[3]) && !audit_principal_exists(audit_sid)); AuditFree(again);
   /* Persisted adapter intent precedes this command. Retain ownership before
    * the first setter; partial failure never attempts automatic restoration. */
-  audit_used = audit_owned = TRUE; audit_object_count = count;
+  audit_object_count = count; audit_recovery_save();
+  audit_used = audit_owned = TRUE;
   const GUID wanted[] = { {0x0cce921d,0x69ae,0x11d9,{0xbe,0xd3,0x50,0x50,0x54,0x50,0x30,0x30}},
     {0x0cce9225,0x69ae,0x11d9,{0xbe,0xd3,0x50,0x50,0x54,0x50,0x30,0x30}}, {0x0cce9226,0x69ae,0x11d9,{0xbe,0xd3,0x50,0x50,0x54,0x50,0x30,0x30}} };
   AUDIT_POLICY_INFORMATION policy[3] = {0}; for (unsigned i = 0; i < 3; i++) { policy[i].AuditSubCategoryGuid = wanted[i]; policy[i].AuditingInformation = PER_USER_AUDIT_SUCCESS_INCLUDE | PER_USER_AUDIT_FAILURE_INCLUDE; }
@@ -433,7 +436,7 @@ static void audit_install(char **values, unsigned n) {
   audit_install_token(tokens[subject],values,n,TRUE);
 }
 static void audit_restore(BOOL emit) {
-  need(audit_owned && !helpers[0].process && !helpers[1].process);
+  need(audit_owned && !helpers[0].process && !helpers[1].process); audit_enumerate();
   for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
   for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
   AUDIT_POLICY_INFORMATION *system, *principal = NULL; need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) &&
@@ -476,6 +479,7 @@ static void audit_restore(BOOL emit) {
   }
   need(!audit_principal_exists(audit_sid));
   AuditFree(system); if (principal) AuditFree(principal);
+  audit_enumerate();
   need(AuditQuerySystemPolicy(audit_categories, audit_count, &system) && !memcmp(system, audit_system, audit_count*sizeof(*system))); AuditFree(system);
   for (unsigned i = 0; i < audit_object_count; i++) {
     LocalFree(audit_objects[i].before); LocalFree(audit_objects[i].wanted); LocalFree(audit_objects[i].baseline);

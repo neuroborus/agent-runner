@@ -96,6 +96,15 @@ export function windowsVerificationArguments(name, values) {
     case "case-retired":
       valid = args.length === 2 && slot(args[0]) && hash(args[1]);
       break;
+    case "policy-recover":
+    case "audit-recover":
+    case "audit-check":
+      valid =
+        args.length === 3 &&
+        slot(args[0]) &&
+        hash(args[1]) &&
+        /^[a-f0-9]{32}$/u.test(args[2]);
+      break;
     case "case-recover":
       valid =
         args.length === 4 &&

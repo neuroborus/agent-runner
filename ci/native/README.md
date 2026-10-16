@@ -2520,9 +2520,9 @@ inheritance. Capture loss, changed sentinels, misattribution or missing
 controls fail. Observation is bounded to 120 seconds and settlement separately
 to 30; cancellable native pipe admission and a watchdog bound partial failure
 without asserting success. Native finish owners expire with the cleanup budget.
-Before audit setters, an independent finish owner duplicates the original Job,
-file/parent, NUL and intent handles and saves their baselines; native watchers
-hold the broker and both reader identities. Complete empty custody and observer
+Before audit setters, separate finish and restoration readers duplicate the original Job,
+file/parent, NUL and intent handles and save their baselines; native watchers
+hold the broker and each reader identity. Complete empty custody and observer
 retirement precede restoration. Before custody readiness, the finish owner
 independently checks the supplied file/parent descriptors, absent inclusion,
 unset intent, system policy and original NUL descriptor against live reads.
@@ -2533,7 +2533,11 @@ terminal gate witness and complete native capture counts. Partial installation
 may leave baseline or exact owned SACLs and absent or exact owned inclusion;
 foreign policy/descriptors refuse restoration. The finish owner verifies original
 identities, unchanged outside/gate sentinels and system/NUL state before restoring
-saved ACL protection and verified owned audit changes, then removing fixtures.
+verified owned SACLs and inclusion. DACL changes refuse restoration and are never
+overwritten. The independently admitted restoration reader then checks complete
+system/per-user policy, original descriptors and NUL state while fixture and Job
+custody remain held. Only its successful closure and independent retirement
+release the finish owner's fixture deletion acknowledgement.
 Broken transport can require independently observed emergency retirement; safe
 restoration is still attempted after complete custody closes, while the first
 cause and cleanup uncertainty remain separate. Recorded PID exit
@@ -8462,15 +8466,38 @@ exact unchanged task hash, zero instances and independently retired held owners.
 Explicit observer-drain or absent-lane evidence remains mandatory for audit setup.
 
 A missing birth, changed object, incomplete audit drain, surviving creator, altered
-task or unavailable baseline retains exclusion. Reconstruction cannot overwrite an
-installed or changed policy without the original protected ownership and unchanged
-restoration proof. The outer observer closes only after component recovery; its
+task or unavailable baseline retains exclusion. Native setup flushes the complete
+audit baseline before inclusion/SACL effects and source-derived descriptor/network
+intents before policy effects. Recovery rejoins protected candidate/context,
+original file identities, all audit subcategories, owned endpoint tuples and
+observed WFP filter IDs. It validates every supported filter's layer, action,
+weight, typed conditions and security before transactional removal; foreign
+filters and substituted IDs cannot authorize cleanup. An unchanged registry
+observation is required before deleting its empty owned key through the verified
+handle; replacement under the original name retains exclusion. Missing observations
+after a lost reply retain exclusion. Partial restoration accepts baseline or
+exact owned descriptors, then checks the complete original baseline independently.
+A protected completion marker binds the original audit baseline; subsequent
+recovery rechecks system policy and principal absence without replaying the
+intermediate installed DACLs. A Job reopened by name supplies observation only:
+surviving members retain exclusion, and account removal requires emptiness.
+No system audit policy or observation setting is changed. The outer observer closes only after component recovery; its
 component receipt cannot assert whole-run retirement while that observer is live.
 Raw fixed-entry regressions cover the complete recipe inventory, missing final
 outputs, partial bootstrap and setup, policy/audit barriers, lost task replies and
 substituted/missing recovery evidence. They close the callback/composition gap, not
 external `R2` acceptance. Actual Windows compilation, privileged settlement,
 independent source review and the native gates remain external and NOT_RUN locally.
+
+Final acceptance belongs to the supervisor after owner release. It must publish
+the accepted exact commits through the normal push boundary and inspect fresh
+Native feasibility and Native PoC workflows on the same final SHA for all three
+declared hosts. Every ordinary native/model-free outcome, all 69 system checks,
+the existing three-artifact joins and independent non-emergency restoration remain
+required without waivers. Portable, build, diagnostic and local DONE results
+establish none of that acceptance. Further concrete native failures require small
+Runner repair plans until both workflows pass. Ordinary experiment success grants
+no reviewed/source/protected/production GO or live paid-provider support.
 
 ### Independent native tool observers
 

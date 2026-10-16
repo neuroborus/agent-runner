@@ -597,9 +597,13 @@ static BYTE *command_unhex(const char *text, DWORD *length) {
 }
 static BOOL command_same_acl(PACL a,PACL b) { return (!a&&!b)||(a&&b&&a->AclSize==b->AclSize&&!memcmp(a,b,a->AclSize)); }
 static void command_owned_sacl(HANDLE file,PSECURITY_DESCRIPTOR baseline,PACL wanted,BOOL authorized) {
-  PSECURITY_DESCRIPTOR sd=command_sd(file,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION);PACL sacl,old;PSID owner;BOOL present,def;SECURITY_DESCRIPTOR_CONTROL current,saved;DWORD revision;
-  need(GetSecurityDescriptorOwner(sd,&owner,&def)&&EqualSid(owner,userSid)&&GetSecurityDescriptorSacl(sd,&present,&sacl,&def)&&GetSecurityDescriptorSacl(baseline,&present,&old,&def)&&GetSecurityDescriptorControl(sd,&current,&revision)&&GetSecurityDescriptorControl(baseline,&saved,&revision)&&!((current^saved)&SE_SACL_PROTECTED));
-  need(command_same_acl(sacl,old)||(authorized&&wanted&&command_same_acl(sacl,wanted)));LocalFree(sd);
+  PSECURITY_DESCRIPTOR sd=command_sd(file,SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION);
+  PACL sacl,old,dacl,oldDacl;PSID owner,oldOwner;BOOL present,oldPresent,def,oldDef;SECURITY_DESCRIPTOR_CONTROL current,saved;DWORD revision;
+  need(GetSecurityDescriptorOwner(sd,&owner,&def)&&GetSecurityDescriptorOwner(baseline,&oldOwner,&oldDef)&&def==oldDef&&EqualSid(owner,oldOwner)&&EqualSid(owner,userSid)&&
+    GetSecurityDescriptorDacl(sd,&present,&dacl,&def)&&GetSecurityDescriptorDacl(baseline,&oldPresent,&oldDacl,&oldDef)&&present==oldPresent&&def==oldDef&&command_same_acl(dacl,oldDacl)&&
+    GetSecurityDescriptorSacl(sd,&present,&sacl,&def)&&GetSecurityDescriptorSacl(baseline,&oldPresent,&old,&oldDef)&&def==oldDef&&
+    GetSecurityDescriptorControl(sd,&current,&revision)&&GetSecurityDescriptorControl(baseline,&saved,&revision)&&!((current^saved)&~SE_SACL_PRESENT));
+  need((present==oldPresent&&command_same_acl(sacl,old))||(authorized&&present&&wanted&&command_same_acl(sacl,wanted)));LocalFree(sd);
 }
 static BOOL command_owned_policy(BOOL authorized) {
   BOOL present=command_principal_exists();if(!present)return FALSE;need(authorized);
@@ -607,6 +611,7 @@ static BOOL command_owned_policy(BOOL authorized) {
   for(ULONG i=0;i<command_category_count;i++)if(!IsEqualGUID(&policy[i].AuditSubCategoryGuid,&command_categories[i])||policy[i].AuditingInformation!=(IsEqualGUID(&command_categories[i],&command_category)?(PER_USER_AUDIT_SUCCESS_INCLUDE|PER_USER_AUDIT_FAILURE_INCLUDE):0))equal=FALSE;AuditFree(policy);invariant(equal,"command-policy-principal-match");return TRUE;
 }
 static void command_finish(int argc,WCHAR **argv) {
+  BOOL verifyOnly=!wcscmp(role,L"command-verify");
   need(argc==7);HANDLE owner=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|PROCESS_DUP_HANDLE|PROCESS_TERMINATE|SYNCHRONIZE,FALSE,(DWORD)number(argv[2]));need(owner&&creation(owner)==number(argv[3])&&WaitForSingleObject(owner,0)==WAIT_TIMEOUT);
   char expected[65];need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[4],-1,expected,65,NULL,NULL)==65);command_image_read(owner,expected,FALSE);
   HANDLE job;need(DuplicateHandle(owner,(HANDLE)(ULONG_PTR)number(argv[6]),GetCurrentProcess(),&job,JOB_OBJECT_QUERY|JOB_OBJECT_TERMINATE,FALSE,0));command_limits(job);need(!command_members(job));
@@ -629,14 +634,14 @@ static void command_finish(int argc,WCHAR **argv) {
   PSECURITY_DESCRIPTOR initial=command_sd(null,SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION);command_sum(initial,GetSecurityDescriptorLength(initial),initialHash);LocalFree(initial);invariant(!strcmp(initialHash,nullHash),"command-cleanup-baseline");
   for(unsigned i=0;i<6;i++){initial=command_sd(files[i],SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION);DWORD length=GetSecurityDescriptorLength(initial);BOOL equal=length==GetSecurityDescriptorLength(baselines[i])&&!memcmp(initial,baselines[i],length);LocalFree(initial);invariant(equal,"command-cleanup-baseline");}
   puts("{\"custodyReady\":true}");BOOL emergency=FALSE;
-  for(;;){char request;DWORD count;need(ReadFile(GetStdHandle(STD_INPUT_HANDLE),&request,1,&count,NULL)&&count==1);if(request=='R')break;need(request=='D');command_cleanup_begin();
+  for(;;){char request;DWORD count;need(ReadFile(GetStdHandle(STD_INPUT_HANDLE),&request,1,&count,NULL)&&count==1);if(request=='R')break;need(request=='D'&&!verifyOnly);command_cleanup_begin();
     if(WaitForSingleObject(owner,0)==WAIT_TIMEOUT&&WaitForSingleObject(closed,0)!=WAIT_OBJECT_0){need(TerminateProcess(owner,126)&&WaitForSingleObject(owner,25000)==WAIT_OBJECT_0&&TerminateJobObject(job,126));emergency=TRUE;}
     if(WaitForSingleObject(owner,0)==WAIT_OBJECT_0&&command_members(job)){need(TerminateJobObject(job,126));emergency=TRUE;}
     while(command_members(job)){command_bound();Sleep(1);}need(WaitForSingleObject(owner,0)==WAIT_OBJECT_0||WaitForSingleObject(closed,0)==WAIT_OBJECT_0);
     BOOL retired=WaitForSingleObject(owner,0)==WAIT_OBJECT_0;DWORD code;if(retired){need(GetExitCodeProcess(owner,&code)&&code!=STILL_ACTIVE);emergency|=code==124||code==126;}
     printf("{\"empty\":true,\"admissionsClosed\":true,\"ownerRetired\":%s,\"emergency\":%s,\"files\":[",retired?"true":"false",emergency?"true":"false");for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot_handle(files[i],ids[i]);}puts("]}");
   }
-  command_cleanup_begin();need(WaitForSingleObject(owner,25000)==WAIT_OBJECT_0);DWORD code;need(GetExitCodeProcess(owner,&code)&&code!=STILL_ACTIVE&&!command_members(job)&&CloseHandle(job));job=NULL;
+  command_cleanup_begin();need(WaitForSingleObject(owner,25000)==WAIT_OBJECT_0);DWORD code;need(GetExitCodeProcess(owner,&code)&&code!=STILL_ACTIVE&&!command_members(job));
   /* Re-enumerate at restoration too: retaining the early snapshot must not hide
    * a newly introduced subcategory or policy after provider admission. */
   AuditFree(command_system);command_system=NULL;AuditFree(command_categories);command_categories=NULL;
@@ -645,14 +650,18 @@ static void command_finish(int argc,WCHAR **argv) {
   PSECURITY_DESCRIPTOR sd=command_sd(null,SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION);command_sum(sd,GetSecurityDescriptorLength(sd),actual);need(!strcmp(actual,nullHash));LocalFree(sd);
   // Validate the complete original handle/descriptor set before any restoration.
   for(unsigned i=0;i<6;i++){char id[50];fileid(files[i],id);need(!strcmp(id,ids[i]));command_owned_sacl(files[i],baselines[i],i<4?wanted[i]:NULL,authorized==WAIT_OBJECT_0);}
-  const unsigned order[6]={4,5,0,1,2,3};
-  for(unsigned k=0;k<6;k++){unsigned i=order[k];PSID ownerSid;PACL dacl,sacl;BOOL present,def;SECURITY_DESCRIPTOR_CONTROL control;DWORD revision;need(GetSecurityDescriptorOwner(baselines[i],&ownerSid,&def)&&GetSecurityDescriptorDacl(baselines[i],&present,&dacl,&def)&&GetSecurityDescriptorSacl(baselines[i],&present,&sacl,&def)&&GetSecurityDescriptorControl(baselines[i],&control,&revision));
-    SECURITY_INFORMATION protection=(control&SE_DACL_PROTECTED?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION)|(control&SE_SACL_PROTECTED?PROTECTED_SACL_SECURITY_INFORMATION:UNPROTECTED_SACL_SECURITY_INFORMATION);
-    command_owned_sacl(files[i],baselines[i],i<4?wanted[i]:NULL,authorized==WAIT_OBJECT_0);need(SetSecurityInfo(files[i],SE_FILE_OBJECT,DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION|protection,NULL,NULL,dacl,present?sacl:NULL)==ERROR_SUCCESS);
-    sd=command_sd(files[i],SE_FILE_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION|SACL_SECURITY_INFORMATION);PSID actualOwner;PACL actualDacl,actualSacl;BOOL actualPresent;SECURITY_DESCRIPTOR_CONTROL actualControl;need(GetSecurityDescriptorControl(sd,&actualControl,&revision)&&!((control^actualControl)&(SE_DACL_PROTECTED|SE_SACL_PROTECTED))&&GetSecurityDescriptorOwner(sd,&actualOwner,&def)&&EqualSid(ownerSid,actualOwner)&&GetSecurityDescriptorDacl(sd,&actualPresent,&actualDacl,&def)&&actualPresent&&actualDacl&&dacl&&actualDacl->AclSize==dacl->AclSize&&!memcmp(actualDacl,dacl,dacl->AclSize)&&GetSecurityDescriptorSacl(sd,&actualPresent,&actualSacl,&def));need((!sacl&&!actualSacl)||(sacl&&actualSacl&&sacl->AclSize==actualSacl->AclSize&&!memcmp(sacl,actualSacl,sacl->AclSize)));LocalFree(sd);
+  if(!verifyOnly) {
+    const unsigned order[6]={4,5,0,1,2,3};
+    for(unsigned k=0;k<6;k++){unsigned i=order[k];PACL sacl;BOOL present,def;SECURITY_DESCRIPTOR_CONTROL control;DWORD revision;
+      need(GetSecurityDescriptorSacl(baselines[i],&present,&sacl,&def)&&GetSecurityDescriptorControl(baselines[i],&control,&revision));
+      SECURITY_INFORMATION protection=control&SE_SACL_PROTECTED?PROTECTED_SACL_SECURITY_INFORMATION:UNPROTECTED_SACL_SECURITY_INFORMATION;
+      command_owned_sacl(files[i],baselines[i],i<4?wanted[i]:NULL,authorized==WAIT_OBJECT_0);
+      /* DACLs are not an owned audit effect. Never overwrite a changed DACL. */
+      need(SetSecurityInfo(files[i],SE_FILE_OBJECT,SACL_SECURITY_INFORMATION|protection,NULL,NULL,NULL,present?sacl:NULL)==ERROR_SUCCESS);
+    }
   }
   need(command_owned_policy(authorized==WAIT_OBJECT_0)==policyPresent);
-  if(policyPresent) {
+  if(policyPresent&&!verifyOnly) {
     struct audit_remove_result removal;
     if(!audit_remove_owned_policy(userSid,&removal)) {
       remember("audit-remove","win32",removal.error?removal.error:removal.cleanup);
@@ -661,6 +670,16 @@ static void command_finish(int argc,WCHAR **argv) {
     }
   }
   need(!command_principal_exists());command_policy_equal();
+  for(unsigned i=0;i<6;i++)command_owned_sacl(files[i],baselines[i],NULL,FALSE);
+  if(verifyOnly) {
+    for(unsigned i=0;i<6;i++)need(CloseHandle(files[i]));
+    need(CloseHandle(job)&&CloseHandle(null)&&CloseHandle(intent)&&CloseHandle(closed)&&CloseHandle(owner));
+    puts("{\"retired\":true,\"completeDomain\":true,\"restored\":true,\"independent\":true}");return;
+  }
+  /* The separately admitted reader must verify restoration and release its
+   * original held objects before this writer can delete any fixture. */
+  puts("{\"restorationReady\":true}");need(fflush(stdout)==0);ack('V');
+  need(!command_members(job)&&CloseHandle(job));job=NULL;
   for(unsigned i=0;i<4;i++){FILE_DISPOSITION_INFO deletion={TRUE};need(SetFileInformationByHandle(files[i],FileDispositionInfo,&deletion,sizeof(deletion))&&CloseHandle(files[i]));}for(unsigned i=4;i<6;i++)need(CloseHandle(files[i]));
   sd=command_sd(null,SE_KERNEL_OBJECT,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION);command_sum(sd,GetSecurityDescriptorLength(sd),actual);need(!strcmp(actual,nullHash));LocalFree(sd);need(CloseHandle(null)&&CloseHandle(intent)&&CloseHandle(closed)&&CloseHandle(owner));
   puts("{\"retired\":true,\"completeDomain\":true,\"restored\":true,\"fixturesRemoved\":true}");
@@ -680,7 +699,7 @@ static int command_main(int argc,WCHAR **argv) {
   if(!wcscmp(role,L"command-case")){command_case(argc,argv);return 0;}
   WCHAR ci[8],os[16];host_environment(L"GITHUB_ACTIONS",L"true",ci,8,"command-host-actions");host_environment(L"RUNNER_OS",L"Windows",os,16,"command-host-os");
   command_cleanup_timer=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_cleanup_timer!=NULL,"command-timer-create");
-  if(!wcscmp(role,L"command-watch")||!wcscmp(role,L"command-check")||!wcscmp(role,L"command-broker-check")||!wcscmp(role,L"command-finish")){principal();command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);if(!wcscmp(role,L"command-check"))command_check(argc,argv);else if(!wcscmp(role,L"command-broker-check"))command_broker_check(argc,argv);else if(!wcscmp(role,L"command-finish"))command_finish(argc,argv);else command_watch(argc,argv);return 0;}
+  if(!wcscmp(role,L"command-watch")||!wcscmp(role,L"command-check")||!wcscmp(role,L"command-broker-check")||!wcscmp(role,L"command-finish")||!wcscmp(role,L"command-verify")){principal();command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);if(!wcscmp(role,L"command-check"))command_check(argc,argv);else if(!wcscmp(role,L"command-broker-check"))command_broker_check(argc,argv);else if(!wcscmp(role,L"command-finish")||!wcscmp(role,L"command-verify"))command_finish(argc,argv);else command_watch(argc,argv);return 0;}
   if(!wcscmp(role,L"command-broker")){HANDLE timer=CreateThread(NULL,0,command_expire,NULL,0,NULL);win32_check(timer!=NULL,"command-timer-thread");if(!close_handle(timer,"thread-close"))failure(126);}
   BOOL emit=!wcscmp(role,L"command-preflight");if(emit)invariant(argc==2,"command-preflight-arguments");
   HRESULT initialized=CoInitializeEx(NULL,COINIT_MULTITHREADED);if(FAILED(initialized)){remember("command-com-initialize","hresult",(DWORD)initialized);failure(126);}command_preflight_owned.comReady=TRUE;

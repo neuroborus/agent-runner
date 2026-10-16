@@ -1159,12 +1159,21 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(proof.independent);
       return { ...actual, nativeEventSha256: proof.nativeEventSha256 };
     },
-    async beginAccessPolicy(profile) {
+    async beginAccessPolicy(profile, ports) {
       requireWindows(
         !cleanup &&
-          ["read-only", "workspace-write", "trusted-command"].includes(profile),
+          ["read-only", "workspace-write", "trusted-command"].includes(
+            profile,
+          ) &&
+          dense(ports, 8).length === 8 &&
+          ports.every((port) => integer(port, 65535) && port >= 1024) &&
+          new Set(ports).size === 8,
       );
-      const result = await observe("access-policy-begin", encode(profile));
+      const result = await observe(
+        "access-policy-begin",
+        encode(profile),
+        ...ports,
+      );
       closed(result, ["possible"]);
       requireWindows(result.possible === true);
     },
