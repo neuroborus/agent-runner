@@ -771,8 +771,8 @@ through both bundles and every remaining original case, then uses the existing
 identity-bound deletion, absence and cleanup-evidence aggregation.
 
 The shared TCP transaction uses `FIONBIO` and one monotonic 5000 ms budget
-across socket setup, literal `127.0.0.1:0` binding, connection, partial sends and
-partial receives. The original nonblocking socket binds before its single
+across socket setup, exclusive literal `127.0.0.1:0` binding, connection, partial
+sends and receives. The original nonblocking socket binds before its single
 `connect`, without resetting the deadline. A failed bind retains the immediate
 Winsock error as `tcp-bind`, closes through the existing cleanup, and leaves
 connect unattempted; it supplies no connect receipt, including for 10013.
@@ -794,39 +794,51 @@ Capture completion describes the observation stream, never transaction success.
 Observations neither authorize receipts nor replace the first validated refusal.
 Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
-The original launcher also takes one read-only WFP snapshot outside the
-AppContainer when it forwards the child's fixed socket tuple/time carrier.
-Its own 4 KiB channel leaves receipts and the TCP budget unchanged. Actual
-`getsockname`/`getpeername` statuses and host-order values are retained; failed,
-unspecified or partial endpoints leave the tuple unproved. The parked child's
-verified birth, held image and zero-capability package/user bindings remain
-retained until snapshot completion, including on a native TCP failure.
-Installed SDK declarations, helper source, `fwpuclnt.lib` linkage and the actual
-loader image are inventoried. Initial reads and post-build hash rechecks bind
-`fwpmu.h` from `um` and `fwpmtypes.h` from `shared` within the exact selected SDK
-version, without alternate-directory discovery. The fixed AppId/window enum template reads only
-pre-enumerator logged events through `FwpmNetEventCreateEnumHandle0` and
-`FwpmNetEventEnum2`: at most 256 events, eight matches and a finite deadline.
-Only complete SDK flags, IPv4/TCP loopback tuples, AppId/SIDs, window and actual
-filter/layer lookups can publish matching numeric/key observations. No unrelated
-host events are published. Disabled logging, unknown fields/statuses, lookup
-failure and exhausted enumeration remain unproved, without a valid prefix.
-All SDK buffers are freed; enum destruction and engine closure retain their
-actual independent statuses. Uncertain observer closure fences progress and
-cannot replace the primary Winsock failure. No collection option, policy,
-filter, audit setting, capability, exemption or map changes. These diagnostics
-provide no denial, readiness, PASS or GO; the original 10013 assertion remains.
-The source port comes from the original socket's actual `getsockname`, never a
-guessed port or constructed tuple. Literal loopback binding corrects the source
-tuple without granting capabilities or exemptions. Pending 10035, deadline
-expiry, empty WFP snapshots and zero deliveries cannot prove denial or supply
-a fabricated 10013; the distinct closed-port 10061 control remains required.
-Transport denial stays FAIL until fresh independently bound native evidence
-satisfies the original accepted API contract. This repair supplies no firewall
-change, WFP engine or reviewed-input/source/provider approval for the full PoC.
-Portable source and injected regressions establish no native compilation,
-actual denial or explanation of the previously unobserved stalled API. Matching
-hosted Windows CI and the separate Darwin/reviewed-input blockers remain required.
+For each original read/edit bundle, the held launcher independently imports a
+`WSADuplicateSocketW` transfer of the child's bound, unconnected socket before
+connect. The fixed target PID is supplied only in that launcher's closed child
+environment. The launcher retains the socket, child process, exact token and
+immutable image, rechecking birth, Job, zero-capability package/user and native
+image identity. Exclusive binding prevents another socket from sharing its tuple.
+It verifies the actual local loopback endpoint and unconnected peer status, opens
+the WFP reader and requires already-enabled event collection.
+It changes no collection setting, audit setting, policy or capability. Disabled
+or unreadable collection refuses admission rather than supplying denial proof.
+
+The driver acknowledges the original TCP attempt, persists the observer's actual
+socket/identity binding and frozen remote endpoint, and only then releases its
+single connect. The socket remains held until independent observation finishes,
+including transfers whose connect was never attempted. Transfer and acknowledgment
+failures reach checked socket closure; pipe acknowledgments obey the original
+5000 ms transaction and 15000 ms response windows.
+The installed SDK AppId/window enum reads pre-enumerator logged events through
+`FwpmNetEventCreateEnumHandle0` and `FwpmNetEventEnum2`: at most 256 events, eight
+matches and a finite deadline. Actual SDK flags, IPv4/TCP tuple, AppId, user and
+package SIDs, outbound `ALE_AUTH_CONNECT_V4`, filter/layer identities and native
+BLOCK action must all match. The requested remote address comes from the frozen
+connect vector; it is never fabricated as a successful connected-peer read.
+Actual `getsockname`/`getpeername` statuses remain separate diagnostics, and the
+launcher rechecks local ownership through its held socket even when the denied
+socket has no connected peer. The birth, token and image must remain unchanged.
+
+The acceptance record is separate from the 4 KiB WFP diagnostic snapshot. Both
+retain actual enum/engine closure statuses; acceptance also requires checked
+socket/token closure and subsequent actual 10013 completion in the original
+5000 ms transaction budget. Nonzero `SO_ERROR` is an actual completion error for
+write, exception or combined readiness; readiness alone supplies no refusal.
+Pending 10035, closed-port 10061, timeout, empty snapshots, unrelated events,
+lookup failure, missing fields and exhausted enumeration remain unsuccessful.
+Uncertain observer or Job/map retirement fences progress. Outside nonce-echo
+controls before/after, closed-port controls and sentinels remain mandatory. The
+full-PoC independently socket-correlated kernel DROP allowance is unchanged and
+does not apply to feasibility. SDK declarations, fixed source, import library
+and actual loader image remain inventoried. Initial reads and post-build hash
+rechecks bind `fwpmu.h` from `um` and `fwpmtypes.h` from `shared` within the exact
+selected SDK version, without alternate-directory discovery.
+The shared profile remains alive through both bundles and remaining original
+cases before existing end-of-run retirement aggregation. Matching Windows 2025
+must still prove native completion, attribution and complete retirement. This
+supplies no reviewed-input, source or provider approval for the full PoC.
 
 The mapped diagnostic also creates the unnamed directory with an actual `NULL`
 shadow. It derives and deduplicates only fixture-root and fixed SystemRoot letters,

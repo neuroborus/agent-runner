@@ -1627,6 +1627,8 @@ test(
     timeout: 5_000,
   },
   async (t) => {
+    // Registration owns an inert supervisor; inspection budgets have separate coverage.
+    t.mock.method(performance, "now", () => 0);
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-registration-cancel-"),
     );
@@ -1684,7 +1686,8 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
+    t.mock.method(performance, "now", () => 0);
     const failure = Object.assign(new Error("registration failed"), {
       code: "ERR_TEST_REGISTRATION",
     });

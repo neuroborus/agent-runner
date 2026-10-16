@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-16 — Bind Windows feasibility TCP denial to the original socket
+
+The original read/edit socket is independently held before its single connect.
+Durable observer intent, frozen endpoints and checked WFP filter/layer readback
+join the held child birth, image, token and AppContainer identity. Actual 10013
+completion remains mandatory; pending, timeout and unrelated DROP evidence cannot
+pass. Failed peer reads remain diagnostic facts. The observer requires existing
+event collection and changes no host settings. Original controls and retirement
+remain, as does the full-PoC DROP allowance. Windows 2025 acceptance is pending.
+
 ## 2026-10-16 — Recover the original Darwin feasibility fault domains
 
 The existing detached cancellation and owner-loss recipes now use separately

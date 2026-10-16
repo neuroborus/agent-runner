@@ -159,6 +159,7 @@ test("Windows fixed Git native guards retain separate calls and original API res
       "static DWORD native_image(",
       "static void emit_held_file(",
     ),
+    observer = between("static void wfp_binding(", "static void wfp_identity("),
     held = between("static void emit_held_file(", "static void emitfile("),
     trusted = between("static void emitfile(", "static void observe_git_file("),
     restricted = between(
@@ -371,13 +372,22 @@ test("Windows fixed Git native guards retain separate calls and original API res
     verifier,
     /HANDLE executable = expected_executable\(expected\); native_image\(executable, native\)/u,
   );
+  assert.match(observer, /native_image\(transport.executable, expected\)/u);
+  assert.match(
+    observer,
+    /win32_check\(QueryFullProcessImageNameW\(transport.child.hProcess, PROCESS_NAME_NATIVE, actual, &size\), "observer-image"\)/u,
+  );
+  assert.match(
+    observer,
+    /invariant\(size && size < 4096 && !_wcsicmp\(expected, actual\), "observer-image"\)/u,
+  );
   assert.equal(
     [...source.matchAll(/\bQueryFullProcessImageNameW\(/gu)].length,
-    4,
+    5,
   );
-  assert.equal([...source.matchAll(/\bnative_image\(/gu)].length, 5);
+  assert.equal([...source.matchAll(/\bnative_image\(/gu)].length, 6);
   assert.doesNotMatch(
-    original + launch + verifier + bundle + native,
+    original + launch + verifier + bundle + native + observer,
     /QueryDosDevice|PROCESS_NAME_WIN32|FILE_NAME_OPENED/u,
   );
   // Git captures and latches the original result before data-only formatting.

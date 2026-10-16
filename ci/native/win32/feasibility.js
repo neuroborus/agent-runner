@@ -556,6 +556,9 @@ const NATIVE_OPERATIONS = new Set(
   git-diagnostic-pipe git-diagnostic-inherit git-diagnostic-close git-diagnostic-read git-diagnostic-bound
   git-dubious-owner git-repository-read git-config-read git-user-name git-cwd-read
   git-home-missing git-path-read git-path-normalize executable-close
+  tcp-endpoint tcp-exclusive observer-child observer-job observer-image observer-once observer-carrier
+  observer-protocol observer-socket observer-local observer-unconnected observer-token
+  observer-engine observer-collection observer-owner observer-transfer observer-socket-close observer-engine-close observer-enum-close observer-token-close
 `
     .trim()
     .split(/\s+/u)
@@ -622,6 +625,10 @@ export function windowsFeasibilityDiagnostics(output) {
         "thread-close",
         "winsock-cleanup",
         "tcp-close",
+        "observer-socket-close",
+        "observer-engine-close",
+        "observer-enum-close",
+        "observer-token-close",
         "null-close",
         "null-remove",
       ].includes(match[2]) &&
@@ -650,6 +657,10 @@ export function windowsFeasibilityDiagnostics(output) {
         "process-wait",
         "winsock-cleanup",
         "tcp-close",
+        "observer-socket-close",
+        "observer-engine-close",
+        "observer-enum-close",
+        "observer-token-close",
         "command-token-close",
         "command-null-close",
         "command-event-close",
@@ -1064,6 +1075,173 @@ export async function observeWindowsFeasibilityWfp(run, persist) {
   }
   return evidence;
 }
+// The feasibility gate requires WSAEACCES, even when the full PoC separately
+// permits a socket-correlated kernel DROP. Diagnostic snapshots have no authority.
+const tcpBindingKeys = [
+  "child",
+  "owner",
+  "sid",
+  "userSid",
+  "image",
+  "tokenId",
+  "authenticationId",
+  "preparedAt",
+  "exclusive",
+];
+const tcpEndpoint = (value, port) =>
+  wfpClosed(value, ["address", "port"]) &&
+  value.address === 0x7f000001 &&
+  Number.isSafeInteger(value.port) &&
+  value.port > 0 &&
+  value.port <= 65535 &&
+  (port === undefined || value.port === port);
+function assertTcpBinding(row, receipt) {
+  for (const key of ["child", "owner"])
+    need(
+      wfpClosed(row[key], ["pid", "creationTime"]) &&
+        row[key].pid === receipt[key].pid &&
+        row[key].creationTime === receipt[key].creationTime,
+    );
+  need(
+    row.exclusive === true &&
+      row.sid === receipt.sid &&
+      row.userSid === receipt.child.userSid &&
+      wfpClosed(row.image, ["identity", "sha256", "private"]) &&
+      row.image.private === false &&
+      row.image.identity === receipt.image.identity &&
+      row.image.sha256 === receipt.image.sha256 &&
+      [row.tokenId, row.authenticationId].every(
+        (value) =>
+          typeof value === "string" &&
+          /^[a-f0-9]{16}$/u.test(value) &&
+          !/^0+$/u.test(value),
+      ) &&
+      wfpTime(row.preparedAt) &&
+      BigInt(row.preparedAt) >= BigInt(receipt.child.creationTime),
+  );
+}
+export function assertWindowsFeasibilityTcpObserver(row, receipt, endpoint) {
+  need(
+    wfpClosed(row, [
+      "event",
+      ...tcpBindingKeys,
+      "local",
+      "requested",
+      "collectionEnabled",
+      "peerStatus",
+    ]) &&
+      row.event === "tcp-observer-ready" &&
+      row.collectionEnabled === true &&
+      row.peerStatus === 10057 &&
+      typeof endpoint === "string" &&
+      /^[1-9][0-9]{0,4}$/u.test(endpoint) &&
+      tcpEndpoint(row.requested, Number(endpoint)) &&
+      tcpEndpoint(row.local),
+  );
+  assertTcpBinding(row, receipt);
+  return row;
+}
+function assertWindowsFeasibilityTcpAttribution(
+  row,
+  prepared,
+  receipt,
+  endpoint,
+) {
+  assertWindowsFeasibilityTcpObserver(prepared, receipt, endpoint);
+  need(
+    wfpClosed(row, [
+      "event",
+      ...tcpBindingKeys,
+      "requested",
+      "local",
+      "localStatus",
+      "peerStatus",
+      "startedAt",
+      "endedAt",
+      "socketClose",
+      "tokenClosed",
+      "status",
+      "reason",
+      "nativeStatus",
+      "enumClose",
+      "engineClose",
+      "matches",
+    ]) &&
+      row.event === "tcp-attribution" &&
+      row.status === "matched" &&
+      row.reason === "none" &&
+      row.nativeStatus === 0 &&
+      row.enumClose === 0 &&
+      row.engineClose === 0 &&
+      row.socketClose === 0 &&
+      row.tokenClosed === true &&
+      row.localStatus === 0 &&
+      wfpUint(row.peerStatus) &&
+      tcpEndpoint(row.local, prepared.local.port) &&
+      tcpEndpoint(row.requested, Number(endpoint)) &&
+      wfpTime(row.startedAt) &&
+      wfpTime(row.endedAt) &&
+      BigInt(row.startedAt) >= BigInt(prepared.preparedAt) &&
+      BigInt(row.endedAt) >= BigInt(row.startedAt) &&
+      BigInt(row.endedAt) - BigInt(prepared.preparedAt) <= 50000000n &&
+      Array.isArray(row.matches) &&
+      row.matches.length > 0 &&
+      row.matches.length <= 8,
+  );
+  assertTcpBinding(row, receipt);
+  need(
+    ["tokenId", "authenticationId", "preparedAt"].every(
+      (key) => row[key] === prepared[key],
+    ),
+  );
+  for (const event of row.matches)
+    need(
+      wfpClosed(event, [
+        "filterId",
+        "layerId",
+        "direction",
+        "actionType",
+        "flags",
+        "isLoopback",
+        "time",
+        "filterKey",
+        "layerKey",
+      ]) &&
+        wfpTime(event.filterId) &&
+        Number.isSafeInteger(event.layerId) &&
+        event.layerId > 0 &&
+        event.layerId <= 65535 &&
+        event.layerKey === "d1578dc3a705334c904f7fbceee60e82" &&
+        event.direction === 0 &&
+        event.actionType === 0x1001 &&
+        wfpUint(event.flags) &&
+        (event.flags & 0x57f) === 0x57f &&
+        !(event.flags & ~0x7ff) &&
+        event.isLoopback === true &&
+        wfpTime(event.time) &&
+        BigInt(event.time) >= BigInt(row.startedAt) &&
+        BigInt(event.time) <= BigInt(row.endedAt) &&
+        typeof event.filterKey === "string" &&
+        /^[a-f0-9]{32}$/u.test(event.filterKey) &&
+        !/^0+$/u.test(event.filterKey),
+    );
+  return row;
+}
+export function assertWindowsFeasibilityTcpDenial(
+  row,
+  prepared,
+  receipt,
+  endpoint,
+  result,
+) {
+  need(result === 10013);
+  return assertWindowsFeasibilityTcpAttribution(
+    row,
+    prepared,
+    receipt,
+    endpoint,
+  );
+}
 const isTcpLine = (bytes) => {
   const text = bytes.toString("utf8");
   return (
@@ -1100,7 +1278,7 @@ function tcpCapture() {
         return;
       }
       const row =
-        /^native-windows-tcp: api=(WSASocketW|ioctlsocket|bind|connect|select|getsockopt|send|recv|closesocket|transaction) phase=(enter|complete|pending|failed) value=(0|[1-9][0-9]{0,9})\r?\n$/u.exec(
+        /^native-windows-tcp: api=(WSASocketW|ioctlsocket|bind|connect|select|getsockopt|setsockopt|send|recv|closesocket|transaction) phase=(enter|complete|pending|failed) value=(0|[1-9][0-9]{0,9})\r?\n$/u.exec(
           text,
         );
       if (!row) return incomplete();
@@ -1796,7 +1974,12 @@ export function windowsFeasibilityHelperSession(
     send: (value) => {
       if (exit && !error) reject(new Error("Native stream ended"), "eof");
       if (error) throw attach(error);
-      need(/^[RAGFWQNS]$/u.test(value));
+      need(
+        /^[RAGFWQNS]$/u.test(value) ||
+          (rootedLaunch &&
+            ["read", "edit"].includes(args[0]) &&
+            /^[OTU]$/u.test(value)),
+      );
       child.stdin.write(value);
     },
     sendTarget: (started) => {
@@ -2906,6 +3089,7 @@ export async function runWindowsFeasibility(
           writeControls.indexMutationReady === true &&
           hash(await files(...SENTINELS)) === hash(before),
       );
+      const tcpEndpoint = servers[0].address;
       const controlsBefore = [];
       for (const c of servers)
         controlsBefore.push(await native("control", c.kind, c.address));
@@ -2931,13 +3115,15 @@ export async function runWindowsFeasibility(
             need((await nextRun()).event === "payload-canceled");
           },
           closePayload: async () => {
-            await closeWorkspaceLaunch(run, nextRun, () => runRows, 22, [
+            await closeWorkspaceLaunch(run, nextRun, () => runRows, 24, [
               "ready",
               "attempt",
               "completed",
               "git-started",
+              "tcp-observer-ready",
+              "tcp-attribution",
             ]);
-            if (complete) need(runRows === 22);
+            if (complete) need(runRows === 24);
           },
           complete: () => complete,
         });
@@ -2954,7 +3140,8 @@ export async function runWindowsFeasibility(
           "bundle",
           root,
           nonce,
-          ...servers.map((c) => c.address),
+          tcpEndpoint,
+          servers[1].address,
           mode,
           trusted.identity,
           trusted.nativePathUtf16,
@@ -3038,6 +3225,31 @@ export async function runWindowsFeasibility(
             heldWorkspace.releasingGit();
             run.session.send("G");
           }
+          if (operation === "tcp") {
+            run.session.send("O");
+            const prepared = await nextRun();
+            assertWindowsFeasibilityTcpObserver(
+              prepared,
+              run.receipt,
+              tcpEndpoint,
+            );
+            run.tcpAttribution = {
+              prepared,
+              requestedEndpoint: tcpEndpoint,
+              pending: true,
+            };
+            // Persist the actual socket/observer and frozen endpoint before the
+            // one original connect. A lost acknowledgment never replays it.
+            await persist(`${mode}-tcp-intent`, run.tcpAttribution);
+            run.session.send("T");
+            const attribution = await nextRun();
+            // This acknowledgment permits closure, never another connect or
+            // case. Keep the original completion even when attribution fails.
+            need(attribution.event === "tcp-attribution");
+            run.tcpAttribution = { ...run.tcpAttribution, attribution };
+            await persist(`${mode}-tcp-observed`, run.tcpAttribution);
+            run.session.send("U");
+          }
           completed = await nextRun();
           checkReceipt(() => {
             need(
@@ -3069,6 +3281,21 @@ export async function runWindowsFeasibility(
             escape: completed.error === 0,
             wfpCleanup: run.wfpObservation?.cleanup === "UNCERTAIN",
           });
+        if (operation === "tcp") {
+          try {
+            assertWindowsFeasibilityTcpDenial(
+              run.tcpAttribution.attribution,
+              run.tcpAttribution.prepared,
+              run.receipt,
+              tcpEndpoint,
+              completed.error,
+            );
+          } catch (error) {
+            throw Object.assign(error, { operation });
+          }
+          run.tcpAttribution.pending = false;
+          await persist(`${mode}-tcp-denial`, run.tcpAttribution);
+        }
         if (operation === "tcp" && run.wfpObservation?.cleanup === "UNCERTAIN")
           throw Object.assign(
             new Error("WFP observation resources remain unproved"),
@@ -3105,6 +3332,7 @@ export async function runWindowsFeasibility(
         controlsAfter,
         retirement,
         wfpObservation: run.wfpObservation,
+        tcpAttribution: run.tcpAttribution,
       });
       workspaceRefusal = null;
     }

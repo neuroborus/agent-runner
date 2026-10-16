@@ -501,18 +501,31 @@ unavailable data through later refusals; malformed or partial capture supplies
 no acceptance authority and cannot replace a validated primary cause.
 Capture completeness never proves transaction success or denial. Portable checks
 establish no actual stalled API, native compilation or matching-CI acceptance.
-The held launcher separately snapshots installed WFP event logging when the
-original child emits its native socket tuple/window, before failure forwarding
-or lifecycle retirement. The fixed helper AppId template and bounded SDK enum
-join complete flags, host-order endpoints, TCP/loopback direction, package/user
-SIDs and retained child birth/image. Only matching actual filter/layer records
-are published through a separate 4 KiB diagnostic carrier. Partial endpoints,
-disabled logging, unknown fields, lookup failure and enumeration exhaustion
-remain unproved; pending 10035 and expiry still cannot satisfy the 10013 gate.
-SDK buffers, enum handles and engine handles require complete checked closure,
-with returned statuses separate from the primary TCP result. This read-only
-observer changes no policy, collection option, audit setting, capability or map.
-It adds no admission/acceptance authority or native development-host effects.
+The original Windows read/edit feasibility bundles require a separate
+socket-bound TCP attribution record. Before the original connect, the held
+launcher imports a documented Winsock duplicate from that exact child's bound,
+unconnected socket, checks its exclusive local tuple, retains the child
+token/image/Job bindings and opens a read-only WFP observer. Already-enabled event collection is
+a prerequisite; no host collection, policy or audit setting changes. The driver
+persists the frozen requested endpoint and actual observer binding before
+acknowledging connect. A second barrier keeps transferred sockets alive during
+readback even when connect was never attempted. Transfer/acknowledgment failures
+use checked socket cleanup, with bounded reads in the original transaction and
+response windows.
+
+A complete bounded AppId/time query must join the actual local socket, requested
+remote endpoint, TCP/loopback, user and package SIDs with an outbound
+`ALE_AUTH_CONNECT_V4` BLOCK and actual filter/layer identities. Child birth,
+image and token are revalidated. Failed `getpeername` remains a failed read;
+independent local ownership does not depend on a connected peer. The diagnostic
+snapshot retains its own 4 KiB channel and has no acceptance authority. Checked
+observer socket/token/enum/engine closure precedes release; actual 10013 native
+completion and existing independent Job/map/profile retirement are still required.
+Pending, timeout, closed-port errors, empty or unrelated WFP events and uncertain
+closure cannot pass. The full-PoC socket-correlated DROP allowance is unchanged.
+Outside nonce controls, closed-port controls, original deadlines and partial-I/O
+validation remain mandatory. Portable regressions do not establish matching
+Windows 2025 acceptance or native completion.
 
 Hosted Windows evidence recorded `file-path` Win32 5 before Git release during
 the restricted normalized-name query. The repair preserves that first cause and

@@ -162,6 +162,8 @@ export {
   windowsFeasibilityDiagnostics,
   windowsFeasibilityHelperSession,
   observeWindowsFeasibilityWfp,
+  assertWindowsFeasibilityTcpObserver,
+  assertWindowsFeasibilityTcpDenial,
   assertWindowsFeasibilityWitness,
   observeWindowsGitNullProbe,
 } from "./feasibility.js";
