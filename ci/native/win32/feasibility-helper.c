@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <errno.h>
 #include <wchar.h>
 #include <fcntl.h>
@@ -79,6 +80,7 @@ struct socket_offer { struct socket_target target; WSAPROTOCOL_INFOW source, pro
 static struct socket_target wfpTarget;
 static WSAPROTOCOL_INFOW wfpProtocol;
 static volatile LONG wfpTargetReady, wfpTransferReady, wfpDuplicateReleased;
+static WORD socketVersion, socketHighVersion;
 static BOOL wfp_close(void);
 #endif
 static SRWLOCK transportLock = SRWLOCK_INIT;
@@ -1133,7 +1135,7 @@ static BOOL socket_protocol(const WSAPROTOCOL_INFOW *value) {
     value->ProtocolChain.ChainLen > 0 && value->ProtocolChain.ChainLen <= MAX_PROTOCOL_CHAIN;
 }
 static BOOL socket_protocol_same(const WSAPROTOCOL_INFOW *a, const WSAPROTOCOL_INFOW *b) {
-  /* dwProviderReserved is the destination-specific Winsock transfer ticket. */
+  /* Destination-specific provider storage is opaque and excluded from joins. */
   return socket_protocol(a) && socket_protocol(b) && a->dwCatalogEntryId == b->dwCatalogEntryId &&
     !memcmp(&a->ProviderId, &b->ProviderId, sizeof(GUID)) && a->ProtocolChain.ChainLen == b->ProtocolChain.ChainLen &&
     !memcmp(a->ProtocolChain.ChainEntries, b->ProtocolChain.ChainEntries, a->ProtocolChain.ChainLen * sizeof(DWORD)) &&
@@ -1142,6 +1144,75 @@ static BOOL socket_protocol_same(const WSAPROTOCOL_INFOW *a, const WSAPROTOCOL_I
     a->iVersion == b->iVersion && a->iMinSockAddr == b->iMinSockAddr && a->iMaxSockAddr == b->iMaxSockAddr &&
     a->iProtocolMaxOffset == b->iProtocolMaxOffset && a->iNetworkByteOrder == b->iNetworkByteOrder &&
     a->iSecurityScheme == b->iSecurityScheme && a->dwMessageSize == b->dwMessageSize;
+}
+/* -1 means an observation was not attempted. Successful short reads leave the
+ * associated value unavailable, rather than interpreting zero-filled storage. */
+struct socket_token_observation {
+  LONGLONG status[5]; TOKEN_STATISTICS statistics; DWORD container;
+  BOOL statisticsRead, containerRead, restricted;
+};
+static void socket_token_observe(HANDLE process, struct socket_token_observation *value) {
+  HANDLE token = NULL; DWORD used = 0;
+  BOOL opened = OpenProcessToken(process, TOKEN_QUERY, &token);
+  value->status[0] = opened ? 0 : GetLastError();
+  if (!opened) return;
+  BOOL read = GetTokenInformation(token, TokenStatistics, &value->statistics, sizeof(value->statistics), &used);
+  value->status[1] = read ? 0 : GetLastError();
+  value->statisticsRead = read && used == sizeof(value->statistics);
+  used = 0; read = GetTokenInformation(token, TokenIsAppContainer, &value->container, sizeof(value->container), &used);
+  value->status[2] = read ? 0 : GetLastError();
+  value->containerRead = read && used == sizeof(value->container);
+  SetLastError(ERROR_SUCCESS); value->restricted = IsTokenRestricted(token);
+  value->status[3] = value->restricted ? 0 : GetLastError();
+  BOOL closed = CloseHandle(token); DWORD error = closed ? 0 : GetLastError();
+  value->status[4] = error;
+  if (!closed) cleanup_error("observer-diagnostic-token-close", "win32", error);
+}
+static void socket_status(LONGLONG value) {
+  if (value < 0) fputs("null", stderr); else fprintf(stderr, "%llu", (ULONGLONG)value);
+}
+static void socket_token_write(const struct socket_token_observation *value) {
+  fputs("{\"status\":[", stderr);
+  for (unsigned i = 0; i < 5; i++) { if (i) fputc(',', stderr); socket_status(value->status[i]); }
+  fputs("],\"identity\":", stderr);
+  if (value->statisticsRead) {
+    const TOKEN_STATISTICS *s = &value->statistics;
+    fprintf(stderr, "[\"%08lx%08lx\",\"%08lx%08lx\",\"%08lx%08lx\",%u]",
+      (DWORD)s->TokenId.HighPart, s->TokenId.LowPart, (DWORD)s->AuthenticationId.HighPart, s->AuthenticationId.LowPart,
+      (DWORD)s->ModifiedId.HighPart, s->ModifiedId.LowPart, (unsigned)s->TokenType);
+  } else fputs("null", stderr);
+  fputs(",\"appContainer\":", stderr);
+  if (value->containerRead) fprintf(stderr, "%lu", value->container); else fputs("null", stderr);
+  fprintf(stderr, ",\"restricted\":%s}", value->status[0] || value->status[3] ? "null" : value->restricted ? "true" : "false");
+}
+/* Observe the original failed call without a second transfer or new payload
+ * rights. These query-only reads cannot diagnose which parameter caused 10022.
+ * Close every acquired diagnostic handle before writing optional output. */
+static void socket_transfer_observe(const struct socket_offer *offer, DWORD error) {
+  struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};
+  FILETIME born = {0}, exited, kernel, user; LONGLONG timeStatus = -1, closeStatus = -1;
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, offer->target.pid);
+  DWORD openStatus = process ? 0 : GetLastError();
+  if (process) {
+    BOOL read = GetProcessTimes(process, &born, &exited, &kernel, &user); timeStatus = read ? 0 : GetLastError();
+    socket_token_observe(process, &destination);
+    BOOL closed = CloseHandle(process); DWORD closeError = closed ? 0 : GetLastError(); closeStatus = closeError;
+    if (!closed) cleanup_error("observer-diagnostic-process-close", "win32", closeError);
+  }
+  socket_token_observe(GetCurrentProcess(), &source);
+  fprintf(stderr, TCP_PREFIX " transfer={\"error\":%lu,\"winsock\":[%u,%u],\"creationFlags\":0,\"destination\":{\"pid\":%lu,\"access\":%lu,\"status\":[%lu,",
+    error, (unsigned)socketVersion, (unsigned)socketHighVersion, offer->target.pid, (DWORD)PROCESS_QUERY_LIMITED_INFORMATION, openStatus);
+  socket_status(timeStatus); fputc(',', stderr); socket_status(closeStatus);
+  fputs("],\"birth\":", stderr);
+  if (!timeStatus) fprintf(stderr, "\"%llu\"", wfp_time(born)); else fputs("null", stderr);
+  fputs(",\"token\":", stderr); socket_token_write(&destination);
+  fprintf(stderr, "},\"source\":{\"pid\":%lu,\"token\":", GetCurrentProcessId()); socket_token_write(&source);
+  fputs("},\"provider\":\"", stderr);
+  /* Public numeric protocol fields, GUID, catalog and complete chain only;
+   * never inspect, synthesize or publish provider-private transfer storage. */
+  _Static_assert(offsetof(WSAPROTOCOL_INFOW, dwProviderReserved) == 112, "Public protocol prefix");
+  for (unsigned i = 0; i < offsetof(WSAPROTOCOL_INFOW, dwProviderReserved); i++) fprintf(stderr, "%02x", ((const BYTE *)&offer->source)[i]);
+  fputs("\"}\n", stderr); fflush(stderr);
 }
 static void socket_transfer_identity(FILE *output) {
   fprintf(output, "\"transfer\":{\"destination\":{\"pid\":%lu,\"creationTime\":\"%llu\",\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"modifiedId\":\"%08lx%08lx\"},\"providerId\":\"",
@@ -1248,7 +1319,11 @@ static BOOL wfp_transfer(SOCKET socket, ULONGLONG end, struct diagnosis *problem
   for (unsigned phase = 0; phase < 2; phase++) {
     if (phase) {
       if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
-      if (WSADuplicateSocketW(socket, offer.target.pid, &offer.protocol) == SOCKET_ERROR) { *problem = (struct diagnosis){"observer-transfer", "win32", WSAGetLastError()}; return FALSE; }
+      if (WSADuplicateSocketW(socket, offer.target.pid, &offer.protocol) == SOCKET_ERROR) {
+        DWORD error = WSAGetLastError(); *problem = (struct diagnosis){"observer-transfer", "win32", error};
+        remember("observer-transfer", "win32", error);
+        socket_transfer_observe(&offer, error); return FALSE;
+      }
       *transferred = TRUE;
     }
     fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(offer); i++) fprintf(stderr, "%02x", ((BYTE *)&offer)[i]); fputc('\n', stderr); fflush(stderr);
@@ -1890,6 +1965,9 @@ int wmain(int argc, WCHAR **argv) {
     host_environment(L"RUNNER_ENVIRONMENT", L"github-hosted", worker, 32, "host-worker"); host_environment(L"RUNNER_OS", L"Windows", os, 16, "host-os"); principal(); derive();
   }
   HANDLE timer = CreateThread(NULL, 0, deadline, NULL, 0, NULL); win32_check(timer != NULL, "deadline-create"); win32_check(CloseHandle(timer), "thread-close"); WSADATA sockets; status_check((DWORD)WSAStartup(MAKEWORD(2, 2), &sockets), "winsock-start");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  socketVersion = sockets.wVersion; socketHighVersion = sockets.wHighVersion;
+#endif
   if (!wcscmp(argv[1], L"seal") && argc == 4) { protect(root, 0, TRUE); WCHAR path[4096]; name(path, L"control"); grant_tree(path, 0); name(path, L"storage"); grant_tree(path, 0); name(path, L"outside"); grant_tree(path, 0); puts("{\"sealed\":true}"); }
   else if (!wcscmp(argv[1], L"profile-create") && argc == 5) profile_create(argv[4]);
   else if (!wcscmp(argv[1], L"profile-delete") && argc == 4) profile_delete();

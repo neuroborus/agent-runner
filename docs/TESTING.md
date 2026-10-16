@@ -342,18 +342,29 @@ retirement refusals and first causes through redacted reports. Fresh native CI
 must establish underlying cause and closure; no new slow-tier guarantee applies.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
-Windows socket regressions execute the actual transfer/input body and native
-destination predicate with injected calls, including duplication error 10022,
-PID-only/malformed input, changed or reused destination birth/token, interrupted
-carriers, acknowledgment loss and separate socket cleanup failure. The driver
-loop requires persisted target/provider evidence before duplication and persisted
-socket intent before its original connect. The actual loop also uses the guarded
-helper session through injected child streams for both rooted read/edit bundles.
-Failed persistence withholds the next `D/T/U` acknowledgment without replay;
-unrelated helper roles and unknown commands remain rejected. Creation flags
-remain zero; strict 10013 denial, outside nonce/closed-port controls and
-independent retirement stay mandatory. Portable coverage establishes neither
-native transfer support nor a cause for 10022 and adds no slow-tier assignment.
+Windows socket regressions execute the actual source transfer, destination
+input/import and destination-binding bodies with injected OS calls. The production
+operation loop uses the guarded helper session for both original read/edit roles
+and persists the target/provider record before `D`. Original `10022` reaches
+bounded prerequisite collection, checked source closure and the unchanged
+failure transport without import, connect or admission. Query-only destination
+access failures, failed/short token reads, failed restriction queries,
+diagnostic-output failure and separate diagnostic/source closure failures
+preserve the original cause. The same caller
+coverage protects destination drift, lost acknowledgment and failed import;
+malformed/PID-only carriers, partial writes and original pipe bounds retain their
+existing regressions. No changed transfer boundary is replaced by an idealized
+success callback.
+
+The optional prerequisite record retains exact public provider bytes and
+negotiated Winsock versions within the unchanged 2 KiB TCP budget; missing or
+malformed observations supply no proof. Actual application socket copying through
+`DuplicateHandle` is not an admitted route, and injected API success cannot prove
+native reference accounting. Failed persistence withholds the next `D/T/U`
+acknowledgment without replay. Flags remain zero; strict actual `10013` denial,
+outside nonce, closed-port `10061`, full-PoC DROP semantics and independent
+retirement remain mandatory. Portable coverage establishes neither native
+transfer compatibility nor a cause for `10022` and adds no slow-tier assignment.
 Darwin portable coverage protects narrow policy grants and literal quoting,
 matching-worker dispatch, missing native records, audit-token argument binding
 and the distinction between recorded process retirement and full domain recovery.

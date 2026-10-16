@@ -512,9 +512,22 @@ Capture completeness never proves transaction success or denial. Portable checks
 establish no actual stalled API, native compilation or matching-CI acceptance.
 The original Windows read/edit feasibility bundles require a separate
 socket-bound TCP attribution record. Before the original connect, the held
-launcher imports a documented Winsock duplicate from that exact child's bound,
-unconnected socket, checks its exclusive local tuple, retains the child
-token/image/Job bindings and opens a read-only WFP observer. Already-enabled event collection is
+launcher imports a source-side `WSADuplicateSocketW` transfer of that exact
+child's bound, unconnected socket through destination-side `WSASocketW`. The
+destination birth/token and public provider/catalog/chain joins are persisted
+before the one-shot duplication barrier; original creation and import flags are
+zero. No application `DuplicateHandle` socket route or extra payload authority
+is admitted. At original duplication failure, bounded query-only destination,
+source/destination token, Winsock-version, creation-flag and public-provider
+observations enter the existing 2 KiB TCP diagnostic capture. Unavailable reads
+remain explicit, the immediate original error survives and every diagnostic
+handle receives independent checked closure. Diagnostic output failure cannot
+replace that error, and closure failures retain separate cleanup causes.
+Original `10022` still fails before connect without admission; its cause and
+functional compatibility remain unproved pending matching Windows CI. The
+launcher checks the imported socket's exclusive local tuple, retains the child
+token/image/Job bindings and opens a read-only WFP observer. Already-enabled
+event collection is
 a prerequisite; no host collection, policy or audit setting changes. The driver
 persists the frozen requested endpoint and actual observer binding before
 acknowledging connect. A second barrier keeps transferred sockets alive during

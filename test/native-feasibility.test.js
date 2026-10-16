@@ -5791,6 +5791,8 @@ test("TCP setup and observer failures retain native causes and close each acquir
     { bindError: 10013, closeError: 10038 },
     { now: 5000 },
     { transferError: 10013 },
+    { transferError: 10022 },
+    { transferError: 10022, closeError: 10038 },
     { expireAfterTransfer: true },
     { acknowledged: false },
     { acknowledged: false, connectError: 10013 },
@@ -5986,6 +5988,11 @@ test("original socket transfer validates its actual input and retains 10022 and 
     )
     .replace("WCHAR a", "const a")
     .replace("DWORD count", "const count")
+    .replace("DWORD error", "const error")
+    .replaceAll(
+      "socket_transfer_observe(&offer,",
+      "socket_transfer_observe(offer,",
+    )
     .replace("int protocolSize = 628;", "const protocolSize = {value:628};")
     .replaceAll("&offer.source", "offer.source")
     .replaceAll("&offer.protocol", "offer.protocol")
@@ -6162,6 +6169,10 @@ test("original socket transfer validates its actual input and retains 10022 and 
         }
         value.ticket = 1;
         return 0;
+      },
+      socket_transfer_observe(_offer, error) {
+        assert.equal(error, 10022);
+        lastError = 5; // Optional observations cannot replace the saved failure.
       },
       offerByte(value) {
         offer = value;
@@ -6772,6 +6783,869 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
       change !== null,
       change?.toString(),
     );
+  }
+});
+
+test("original TCP caller retains source duplication failures and bounded prerequisites", async () => {
+  const [source, driver] = await Promise.all([
+    readFile(
+      new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+      "utf8",
+    ),
+    readFile(
+      new URL("../ci/native/win32/feasibility.js", import.meta.url),
+      "utf8",
+    ),
+  ]);
+  const body = (name) =>
+    new RegExp(
+      `static (?:BOOL|void) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  // Translate syntax and pointer carriers only. Acquisition, failed-call
+  // observation, transfer/import predicates and cleanup retain their C bodies.
+  const native = (text) =>
+    text
+      .replace(
+        /\(struct diagnosis\)\{"([a-z-]+)", "(win32|invariant)", ([^}]+)\}/gu,
+        '{operation:"$1",domain:"$2",value:$3}',
+      )
+      .replace(/\*problem = ([^;]+);/gu, "Object.assign(problem, $1);")
+      .replaceAll("*transferred", "transferState.value")
+      .replaceAll("((BYTE *)&offer.target)[i]", "targetBytes[i]")
+      .replaceAll("((BYTE *)&offer)[i]", "carrier[i]")
+      .replaceAll(
+        "((const BYTE *)&offer->source)[i]",
+        "protocolBytes(offer.source)[i]",
+      )
+      .replaceAll("->", ".")
+      .replaceAll("sizeof(DWORD)", "4")
+      .replace(
+        /\((?:const )?(?:BYTE|char|DWORD|int|ULONGLONG|unsigned)(?: \*)?\)/gu,
+        "",
+      )
+      .replace(/&(?=[a-zA-Z_])/gu, "")
+      .replaceAll('L"', '"')
+      .replace(/L'([^'])'/gu, (_match, value) => String(value.charCodeAt(0)))
+      .replace(/'(\\[rn]|[^'])'/gu, (_match, value) =>
+        String(
+          (value === "\\r" ? "\r" : value === "\\n" ? "\n" : value).charCodeAt(
+            0,
+          ),
+        ),
+      )
+      .replaceAll('TCP_PREFIX "', 'TCP_PREFIX + "')
+      .replaceAll("sizeof(GUID)", "16")
+      .replaceAll("sizeof(wfpTarget)", "40")
+      .replaceAll("sizeof(actual)", "40")
+      .replaceAll("sizeof(offer.target)", "40")
+      .replaceAll("sizeof(offer.source)", "628")
+      .replaceAll("sizeof(offer.protocol)", "628")
+      .replaceAll("sizeof(offer)", "1296")
+      .replaceAll("offsetof(WSAPROTOCOL_INFOW, dwProviderReserved)", "112")
+      .replace(
+        /\b(?:BOOL|DWORD|HANDLE|SOCKET|LONGLONG|BYTE|unsigned)\b/gu,
+        "let",
+      );
+  const protocol = native(body("socket_protocol"))
+    .replace("const GUID empty = {0};", 'const empty = {hex:"0".repeat(32)};')
+    .replaceAll("sizeof(empty)", "16");
+  const binding = native(body("socket_target_binding")).replace(
+    "struct socket_target actual",
+    "const actual",
+  );
+  const transfer = native(body("wfp_transfer"))
+    .replace(
+      "struct socket_offer offer = {0}; WCHAR target[2 * 40 + 1];",
+      "const offer = {target:{},source:{},protocol:{}}; const target = [], targetBytes = Buffer.alloc(40);",
+    )
+    .replaceAll("sizeof(target) / sizeof(WCHAR)", "81")
+    .replace(
+      "if (offer.target.version",
+      "decodeTarget(targetBytes, offer.target); if (offer.target.version",
+    )
+    .replace("WCHAR a", "const a")
+    .replace("int protocolSize = 628;", "const protocolSize = {value:628};")
+    .replace("protocolSize != 628", "protocolSize.value != 628")
+    .replaceAll("carrier[i]", "offerByte(offer, i)")
+    .replaceAll("!tcp_ack(", "!await tcp_ack(");
+  const preparation = native(body("wfp_prepare").split("  wfp_exclusive();")[0])
+    .replace(
+      "let offset = sizeof(SOCKET_PREFIX) - 1, end = size - 1;",
+      "let offset = SOCKET_PREFIX.length, end = size - 1;",
+    )
+    .replace(
+      "struct socket_offer offer = {0};",
+      "const offer = {target:{},source:{},protocol:{}}; const carrier = Buffer.alloc(1296);",
+    )
+    .replace(
+      "invariant(InterlockedCompareExchange(wfpTargetReady",
+      "decodeOffer(carrier, offer); invariant(InterlockedCompareExchange(wfpTargetReady",
+    )
+    .replace("const WSAPROTOCOL_INFOW empty = {0};", "const empty = {};")
+    .replaceAll("sizeof(empty)", "628")
+    .replace(
+      "WSAPROTOCOL_INFOW actual = {0}; int actualSize = 40;",
+      "const actual = {}, actualSize = {value:628};",
+    )
+    .replace("actualSize == 40", "actualSize.value == 628");
+  const tokenRead = native(body("socket_token_observe"))
+    .replace(
+      "let token = NULL; let used = 0;",
+      "const token = {value:null}, used = {value:0};",
+    )
+    .replaceAll("sizeof(value.statistics)", "56")
+    .replaceAll("sizeof(value.container)", "4")
+    .replaceAll(
+      "GetTokenInformation(token,",
+      "GetTokenInformation(token.value,",
+    )
+    .replace("value.container, 4, used", "value, 4, used")
+    .replaceAll("used ==", "used.value ==")
+    .replace("used = 0; read", "used.value = 0; read")
+    .replace("IsTokenRestricted(token)", "IsTokenRestricted(token.value)")
+    .replace("CloseHandle(token)", "CloseHandle(token.value)");
+  const tokenWrite = native(body("socket_token_write")).replace(
+    "const TOKEN_STATISTICS *s",
+    "const s",
+  );
+  const observation = native(body("socket_transfer_observe"))
+    .replace(
+      "struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};",
+      "const source = tokenObservation(), destination = tokenObservation();",
+    )
+    .replace(
+      "FILETIME born = {0}, exited, kernel, user;",
+      "const born = {}, exited = {}, kernel = {}, user = {};",
+    )
+    .replace(/_Static_assert\([^;]+;/u, "");
+  const tcp = source.slice(
+    source.indexOf("static int tcp_connection("),
+    source.indexOf("static int connection("),
+  );
+  const close = native(
+    tcp.slice(tcp.indexOf("done:") + 5, tcp.lastIndexOf("}")),
+  )
+    .replace(
+      "struct diagnosis acknowledgment = {0};",
+      "const acknowledgment = {};",
+    )
+    .replace(/#(?:ifndef NATIVE_COMMAND_EXPERIMENT|endif)/gu, "")
+    .replace(/\bint\b/gu, "let")
+    .replaceAll("!tcp_ack(", "!await tcp_ack(");
+  const script = new Script(`
+    function socket_protocol(value) {${protocol}}
+    function socket_protocol_same(a,b) {${native(body("socket_protocol_same"))}}
+    function socket_target_binding(expected) {${binding}}
+    function socket_status(value) {${native(body("socket_status"))}}
+    function socket_token_observe(process,value) {${tokenRead}}
+    function socket_token_write(value) {${tokenWrite}}
+    function socket_transfer_observe(offer,error) {${observation}}
+    async function wfp_transfer(socket,end,problem) {${transfer}}
+    function wfp_prepare(line,size) {${preparation} observerReady();}
+    function wfp_close() {${native(body("wfp_close"))}}
+    async function closeSource() {${close}}
+    async function runSource() {
+      if (await wfp_transfer(socket,end,problem)) {
+        attempted = true; problem = {operation:"tcp-connect",domain:"win32",value:10013}; nativeReceipt = true;
+      }
+      transferred = transferState.value; return closeSource();
+    }
+    ({prepare:wfp_prepare, run:runSource, close:wfp_close, bind:socket_target_binding});
+  `);
+  const loopStart = driver.indexOf("for (const operation of OPERATIONS)");
+  const loop = driver.slice(
+    loopStart,
+    driver.indexOf("complete = true;", loopStart),
+  );
+  const protocolFields = [
+    ["dwServiceFlags1", 0],
+    ["dwServiceFlags2", 4],
+    ["dwServiceFlags3", 8],
+    ["dwServiceFlags4", 12],
+    ["dwProviderFlags", 16],
+    ["dwCatalogEntryId", 36],
+    ["iVersion", 72],
+    ["iAddressFamily", 76],
+    ["iMaxSockAddr", 80],
+    ["iMinSockAddr", 84],
+    ["iSocketType", 88],
+    ["iProtocol", 92],
+    ["iProtocolMaxOffset", 96],
+    ["iNetworkByteOrder", 100],
+    ["iSecurityScheme", 104],
+    ["dwMessageSize", 108],
+  ];
+  for (const [mode, fault] of [
+    ...[
+      null,
+      "10022",
+      "destination-open",
+      "destination-time",
+      "token-open",
+      "token-read",
+      "token-short",
+      "restricted-read",
+      "diagnostic-close",
+      "diagnostic-output",
+      "diagnostic-form",
+      "diagnostic-private",
+      "10022-close",
+      "birth",
+      "token",
+      "ack",
+      "import",
+    ].map((fault) => ["read", fault]),
+    ["edit", "10022"],
+  ]) {
+    const f = tcpDenialFixture(),
+      order = [],
+      primary = [],
+      cleanup = [],
+      saved = new Map(),
+      acknowledgments = new Map();
+    let lastError = 0,
+      rows = 0,
+      ended = false,
+      ready = false,
+      sourceTask,
+      offerCarrier,
+      output = "",
+      launcherFailed = false,
+      inLauncher = false;
+    const failsTransfer = ![null, "birth", "token", "ack", "import"].includes(
+      fault,
+    );
+    const protocol = {
+      iAddressFamily: 2,
+      iSocketType: 1,
+      iProtocol: 6,
+      ProviderId: { hex: "a".repeat(32) },
+      dwCatalogEntryId: 7,
+      ProtocolChain: { ChainLen: 1, ChainEntries: [7, 0, 0, 0, 0, 0, 0] },
+      dwServiceFlags1: 0x20000,
+      dwServiceFlags2: 0,
+      dwServiceFlags3: 0,
+      dwServiceFlags4: 0,
+      dwProviderFlags: 0,
+      iVersion: 2,
+      iMinSockAddr: 16,
+      iMaxSockAddr: 16,
+      iProtocolMaxOffset: 0,
+      iNetworkByteOrder: 0,
+      iSecurityScheme: 0,
+      dwMessageSize: 0,
+    };
+    const target = {
+      version: 1,
+      pid: 41,
+      birth: 90,
+      token: { HighPart: 0, LowPart: 3 },
+      authentication: { HighPart: 0, LowPart: 2 },
+      modified: { HighPart: 0, LowPart: 4 },
+    };
+    const targetBytes = Buffer.alloc(40);
+    targetBytes.writeUInt32LE(1);
+    targetBytes.writeUInt32LE(41, 4);
+    targetBytes.writeBigUInt64LE(90n, 8);
+    targetBytes.writeUInt32LE(3, 16);
+    targetBytes.writeUInt32LE(2, 24);
+    targetBytes.writeUInt32LE(4, 32);
+    const protocolBytes = (value) => {
+      const bytes = Buffer.alloc(628);
+      if (!value.ProviderId) return bytes;
+      for (const [key, at] of protocolFields)
+        bytes.writeUInt32LE(value[key], at);
+      Buffer.from(value.ProviderId.hex, "hex").copy(bytes, 20);
+      bytes.writeInt32LE(value.ProtocolChain.ChainLen, 40);
+      value.ProtocolChain.ChainEntries.forEach((entry, index) =>
+        bytes.writeUInt32LE(entry, 44 + 4 * index),
+      );
+      return bytes;
+    };
+    const decodeProtocol = (bytes) => {
+      if (bytes.every((byte) => byte === 0)) return {};
+      const value = {};
+      for (const [key, at] of protocolFields)
+        value[key] = bytes.readUInt32LE(at);
+      value.ProviderId = { hex: bytes.subarray(20, 36).toString("hex") };
+      value.ProtocolChain = {
+        ChainLen: bytes.readInt32LE(40),
+        ChainEntries: Array.from({ length: 7 }, (_, index) =>
+          bytes.readUInt32LE(44 + 4 * index),
+        ),
+      };
+      return value;
+    };
+    const decodeTarget = (bytes, value) => {
+      Object.assign(value, {
+        version: bytes.readUInt32LE(0),
+        pid: bytes.readUInt32LE(4),
+        birth: Number(bytes.readBigUInt64LE(8)),
+      });
+      for (const [key, at] of [
+        ["token", 16],
+        ["authentication", 24],
+        ["modified", 32],
+      ])
+        value[key] = {
+          HighPart: bytes.readInt32LE(at + 4),
+          LowPart: bytes.readUInt32LE(at),
+        };
+    };
+    const format = (text, values) => {
+      let at = 0;
+      return text.replace(
+        /%(?:0(2|8))?(?:ll|l)?([xuds])/gu,
+        (_match, width, kind) => {
+          const value = values[at++];
+          return kind === "x"
+            ? Number(value)
+                .toString(16)
+                .padStart(Number(width ?? 0), "0")
+            : String(value);
+        },
+      );
+    };
+    const write = (stream, text) => {
+      if (stream === context.stdout) return text.length;
+      output += text;
+      const diagnosticWrite = output.startsWith(
+        context.TCP_PREFIX + " transfer=",
+      );
+      for (let end; (end = output.indexOf("\n")) >= 0;) {
+        const line = output.slice(0, end + 1);
+        output = output.slice(end + 1);
+        if (line.startsWith(context.SOCKET_PREFIX)) {
+          const input = Buffer.from(line);
+          inLauncher = true;
+          try {
+            nativeCalls.prepare(input, input.length);
+          } catch (error) {
+            if (error.message !== "Native refusal") throw error;
+            launcherFailed = true;
+          } finally {
+            inLauncher = false;
+          }
+        } else if (line.startsWith(context.TCP_PREFIX + " transfer=")) {
+          let observed = line;
+          if (fault === "diagnostic-output")
+            observed = context.TCP_PREFIX + " incomplete\n";
+          if (fault === "diagnostic-form")
+            observed = context.TCP_PREFIX + " transfer={\n";
+          if (fault === "diagnostic-private") {
+            const value = JSON.parse(
+              line.slice((context.TCP_PREFIX + " transfer=").length),
+            );
+            value.provider += "00000000";
+            observed =
+              context.TCP_PREFIX + " transfer=" + JSON.stringify(value) + "\n";
+          }
+          transport.child.stderr.write(observed);
+        } else transport.child.stderr.write(line);
+      }
+      return fault === "diagnostic-output" && diagnosticWrite
+        ? -1
+        : text.length;
+    };
+    const context = {
+      Buffer,
+      transport: { child: { hProcess: 43 } },
+      role: "bundle",
+      workspaceRole: mode,
+      socket: 17,
+      end: 5000,
+      started: 1,
+      attempted: false,
+      transferred: false,
+      problem: {},
+      nativeReceipt: false,
+      transferState: { value: false },
+      wfpTarget: target,
+      wfpTargetReady: { value: 1 },
+      wfpTransferReady: { value: 0 },
+      wfpDuplicateReleased: { value: 0 },
+      wfpPreparedAt: 0,
+      wfpSocket: -1,
+      wfpEngine: null,
+      wfpToken: null,
+      wfpCleanupFailed: false,
+      wfpProtocol: {},
+      wfpChildPid: 43,
+      wfpChildBirth: 100,
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      INVALID_SOCKET: -1,
+      SOCKET_ERROR: -1,
+      FROM_PROTOCOL_INFO: -1,
+      AF_INET: 2,
+      SOCK_STREAM: 1,
+      IPPROTO_TCP: 6,
+      MAX_PROTOCOL_CHAIN: 7,
+      SOL_SOCKET: 0xffff,
+      SO_PROTOCOL_INFOW: 0x2005,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
+      TOKEN_QUERY: 8,
+      TokenStatistics: 10,
+      TokenIsAppContainer: 29,
+      PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
+      SOCKET_PREFIX: "native-windows-socket: ",
+      TCP_PREFIX: "native-windows-tcp:",
+      stdout: {},
+      stderr: {},
+      socketVersion: 514,
+      socketHighVersion: 514,
+      decodeTarget,
+      protocolBytes,
+      tokenObservation: () => ({
+        status: [-1, -1, -1, -1, -1],
+        statistics: {},
+        container: 0,
+        statisticsRead: false,
+        containerRead: false,
+        restricted: false,
+      }),
+      offerByte(offer, i) {
+        if (!i)
+          offerCarrier = Buffer.concat([
+            targetBytes,
+            protocolBytes(offer.source),
+            protocolBytes(offer.protocol),
+          ]);
+        return offerCarrier[i];
+      },
+      decodeOffer(bytes, offer) {
+        decodeTarget(bytes.subarray(0, 40), offer.target);
+        offer.source = decodeProtocol(bytes.subarray(40, 668));
+        offer.protocol = decodeProtocol(bytes.subarray(668, 1296));
+      },
+      memcmp: (a, b) => (observationDigest(a) === observationDigest(b) ? 0 : 1),
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      wcsspn: (text, allowed) =>
+        text.every((c) => allowed.includes(String.fromCharCode(c)))
+          ? text.length
+          : 0,
+      GetEnvironmentVariableW(key, value, capacity) {
+        assert.equal(key, "NATIVE_FEASIBILITY_SOCKET_OWNER");
+        assert.equal(capacity, 81);
+        value.push(
+          ...[...targetBytes.toString("hex")].map((c) => c.charCodeAt(0)),
+        );
+        return value.length;
+      },
+      socket_target: () => ({
+        ...structuredClone(target),
+        ...(ready && fault === "birth"
+          ? { birth: 91 }
+          : ready && fault === "token"
+            ? { token: { HighPart: 0, LowPart: 5 } }
+            : {}),
+      }),
+      GetCurrentProcess: () => (inLauncher ? 41 : 43),
+      GetCurrentProcessId: () => (inLauncher ? 41 : 43),
+      WaitForSingleObject(process) {
+        assert.equal(process, 41);
+        return 258;
+      },
+      GetTickCount64: () => 10,
+      SetLastError(value) {
+        lastError = value;
+      },
+      GetLastError: () => lastError,
+      WSAGetLastError: () => lastError,
+      InterlockedCompareExchange(value, exchange, comparand) {
+        const before = value.value;
+        if (before === comparand) value.value = exchange;
+        return before;
+      },
+      InterlockedExchange(value, exchange) {
+        value.value = exchange;
+      },
+      invariant(ok, operation) {
+        if (!ok) {
+          context.remember(operation, "invariant", 0);
+          context.failure();
+        }
+      },
+      win32_check(ok, operation) {
+        if (!ok) {
+          context.remember(operation, "win32", lastError);
+          context.failure();
+        }
+      },
+      wfp_binding: () => order.push("child-binding"),
+      remember(...value) {
+        if (!primary.length) primary.push(value);
+      },
+      cleanup_error: (...value) => cleanup.push(value),
+      failure: () => {
+        throw new Error("Native refusal");
+      },
+      getsockopt(socket, level, option, actual, size) {
+        assert.ok([17, 73].includes(socket));
+        assert.equal(level, 0xffff);
+        assert.equal(option, 0x2005);
+        assert.equal(size.value, 628);
+        Object.assign(actual, structuredClone(protocol));
+        return 0;
+      },
+      WSADuplicateSocketW(socket, pid, ticket) {
+        assert.deepEqual([socket, pid], [17, 41]);
+        assert.ok(saved.has(`${mode}-tcp-transfer`));
+        order.push("duplicate");
+        if (failsTransfer) {
+          lastError = 10022;
+          return -1;
+        }
+        Object.assign(ticket, structuredClone(protocol));
+        return 0;
+      },
+      WSASocketW(af, type, ip, ticket, group, flags) {
+        assert.deepEqual([af, type, ip, group, flags], [-1, -1, -1, 0, 0]);
+        assert.equal(ticket.dwCatalogEntryId, 7);
+        order.push("import");
+        if (fault === "import") {
+          lastError = 10022;
+          return -1;
+        }
+        return 73;
+      },
+      DuplicateHandle: () =>
+        assert.fail("Application socket copying is forbidden"),
+      OpenProcess(access, inherit, pid) {
+        assert.deepEqual([access, inherit, pid], [0x1000, false, 41]);
+        assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
+        order.push("destination-open");
+        lastError = 5;
+        return fault === "destination-open" ? null : 61;
+      },
+      GetProcessTimes(process, born) {
+        assert.equal(process, 61);
+        lastError = 6;
+        born.value = 90;
+        return fault !== "destination-time";
+      },
+      wfp_time: (value) => value.value,
+      OpenProcessToken(process, access, token) {
+        assert.ok([43, 61].includes(process));
+        assert.equal(access, 8);
+        order.push(`token-open:${process}`);
+        lastError = 5;
+        if (fault === "token-open") return false;
+        token.value = process + 100;
+        return true;
+      },
+      GetTokenInformation(token, kind, value, size, used) {
+        assert.ok([143, 161].includes(token));
+        used.value = size;
+        lastError = 5;
+        if (fault === "token-read") return false;
+        if (kind === 10) {
+          Object.assign(value, {
+            TokenId: { HighPart: 0, LowPart: token === 143 ? 5 : 3 },
+            AuthenticationId: { HighPart: 0, LowPart: 2 },
+            ModifiedId: { HighPart: 0, LowPart: 4 },
+            TokenType: 1,
+          });
+          if (fault === "token-short") used.value = 0;
+        } else {
+          assert.equal(kind, 29);
+          value.container = token === 143 ? 1 : 0;
+        }
+        return true;
+      },
+      IsTokenRestricted(token) {
+        assert.equal(lastError, 0);
+        if (fault === "restricted-read") {
+          lastError = 5;
+          return false;
+        }
+        return token === 143;
+      },
+      CloseHandle(handle) {
+        assert.ok([61, 143, 161].includes(handle));
+        order.push(`handle-close:${handle}`);
+        lastError = 6;
+        return fault !== "diagnostic-close";
+      },
+      closesocket(socket) {
+        assert.ok([17, 73].includes(socket));
+        order.push(`socket-close:${socket}`);
+        lastError = 10038;
+        return socket === 17 && fault === "10022-close" ? -1 : 0;
+      },
+      FwpmEngineClose0: () =>
+        assert.fail("No engine acquired in this boundary"),
+      release_handle: () => true,
+      fprintf: (stream, text, ...values) => write(stream, format(text, values)),
+      fputs: (text, stream) => write(stream, text),
+      fputc: (value, stream) => write(stream, String.fromCharCode(value)),
+      fflush: () => {},
+      ferror: () => false,
+      printf: () => {},
+      socket_transfer_identity: () => {},
+      puts() {
+        ready = true;
+        order.push("ready");
+        emit(f.transfer);
+      },
+      observerReady: () => emit(f.prepared),
+      tcp_observe: (api, phase, value) =>
+        write(
+          context.stderr,
+          `${context.TCP_PREFIX} api=${api} phase=${phase} value=${value}\n`,
+        ),
+      wfp_tuple() {
+        if (context.transferred && !launcherFailed) {
+          nativeCalls.close();
+          emit(f.attribution);
+        }
+      },
+      tcp_ack: async (expected, deadline, problem) => {
+        expected = String.fromCharCode(expected);
+        assert.equal(deadline, expected === "U" ? 15000 : 5000);
+        const accepted = launcherFailed
+          ? false
+          : await new Promise((resolve) =>
+              acknowledgments.set(expected, resolve),
+            );
+        if (!accepted)
+          Object.assign(problem, {
+            operation: "ack-read",
+            domain: "win32",
+            value: 109,
+          });
+        return accepted;
+      },
+    };
+    const nativeCalls = script.runInNewContext(context);
+    const emit = (value) =>
+      transport.child.stdout.write(JSON.stringify(value) + "\n");
+    const stopNative = () => {
+      if (ended) return;
+      ended = true;
+      nativeCalls.close();
+      const [operation, domain, value] = primary[0];
+      transport.child.stderr.write(windowsDiagnostic(operation, domain, value));
+      if (cleanup.length) {
+        const [operation, domain, value] = cleanup[0];
+        transport.child.stderr.write(
+          `native-windows-cleanup: operation=${operation} domain=${domain} value=${value}\n`,
+        );
+      }
+      transport.close(126);
+    };
+    const transport = windowsSessionFixture(
+      windowsCallerEnvironment,
+      () => {},
+      undefined,
+      true,
+      {
+        launchCase: mode,
+        onSend(command) {
+          order.push(command);
+          if (command === "O") {
+            for (const api of [
+              "WSASocketW",
+              "ioctlsocket",
+              "setsockopt",
+              "bind",
+            ]) {
+              context.tcp_observe(api, "enter", 0);
+              context.tcp_observe(api, "complete", 0);
+            }
+            sourceTask = nativeCalls
+              .run()
+              .then((error) =>
+                emit({ event: "completed", operation: "tcp", error }),
+              )
+              .catch((error) => {
+                if (error.message !== "Native refusal") {
+                  transport.child.emit("error", error);
+                  return;
+                }
+                stopNative();
+              });
+            return;
+          }
+          if (command === "D") {
+            inLauncher = true;
+            try {
+              nativeCalls.bind(target);
+              context.wfpDuplicateReleased.value = 1;
+            } catch (error) {
+              assert.match(error.message, /Native refusal/u);
+              acknowledgments.get("D")(false);
+              return;
+            } finally {
+              inLauncher = false;
+            }
+          }
+          assert.ok(acknowledgments.has(command), command);
+          acknowledgments.get(command)(!(fault === "ack" && command === "T"));
+        },
+      },
+    );
+    const caller = {
+      OPERATIONS: ["tcp"],
+      mode,
+      run: { receipt: f.receipt, session: transport.session },
+      tcpEndpoint: f.endpoint,
+      operations: [],
+      nextRun: async () => {
+        const row = await transport.session.next();
+        rows++;
+        return row;
+      },
+      need: assert.ok,
+      nativeException: () => {},
+      assertWindowsFeasibilityTcpTransfer,
+      assertWindowsFeasibilityTcpObserver,
+      assertWindowsFeasibilityTcpDenial,
+      observeWindowsFeasibilityWfp: async () => {},
+      persist: async (name, value) => {
+        order.push(name);
+        saved.set(name, structuredClone(value));
+      },
+    };
+    try {
+      emit({ event: "attempt", operation: "tcp" });
+      const execution = new Script(`(async()=>{${loop}})()`).runInNewContext(
+        caller,
+      );
+      if (fault)
+        await assert.rejects(execution, (error) => {
+          const diagnostic = windowsFeasibilityDiagnostics(error.stderr);
+          if (!diagnostic) throw error;
+          assert.deepEqual(diagnostic.failure, {
+            operation: primary[0][0],
+            domain: primary[0][1],
+            value: primary[0][2],
+          });
+          assert.deepEqual(
+            diagnostic.cleanup,
+            cleanup.length
+              ? {
+                  operation: cleanup[0][0],
+                  domain: cleanup[0][1],
+                  value: cleanup[0][2],
+                }
+              : null,
+          );
+          if (failsTransfer) {
+            assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
+            const observation = error.tcpObservation;
+            assert.equal(
+              observation.status,
+              [
+                "diagnostic-output",
+                "diagnostic-form",
+                "diagnostic-private",
+              ].includes(fault)
+                ? "incomplete"
+                : "complete",
+            );
+            if (
+              ![
+                "diagnostic-output",
+                "diagnostic-form",
+                "diagnostic-private",
+              ].includes(fault)
+            ) {
+              assert.equal(observation.transfer.error, 10022);
+              assert.deepEqual(observation.transfer.winsock, [514, 514]);
+              assert.equal(observation.transfer.creationFlags, 0);
+              assert.equal(observation.transfer.destination.access, 0x1000);
+              assert.equal(
+                observation.transfer.provider,
+                protocolBytes(protocol).subarray(0, 112).toString("hex"),
+              );
+              if (fault === "destination-open")
+                assert.deepEqual(observation.transfer.destination.status, [
+                  5,
+                  null,
+                  null,
+                ]);
+              if (fault === "destination-time")
+                assert.equal(observation.transfer.destination.birth, null);
+              if (["token-open", "token-read", "token-short"].includes(fault))
+                assert.equal(observation.transfer.source.token.identity, null);
+              if (fault === "restricted-read") {
+                assert.equal(
+                  observation.transfer.source.token.restricted,
+                  null,
+                );
+                assert.deepEqual(
+                  observation.transfer.source.token.status,
+                  [0, 0, 0, 5, 0],
+                );
+              }
+              if (fault === "diagnostic-close")
+                assert.deepEqual(
+                  observation.transfer.source.token.status,
+                  [0, 0, 0, 0, 6],
+                );
+            }
+          }
+          return true;
+        });
+      else await execution;
+      await sourceTask;
+      assert.equal(caller.operations.length, fault ? 0 : 1);
+      assert.equal(
+        order.filter((value) => value === "duplicate").length,
+        ["birth", "token"].includes(fault) ? 0 : 1,
+      );
+      assert.equal(
+        order.filter((value) => value === "socket-close:17").length,
+        1,
+      );
+      if (failsTransfer) {
+        assert.equal(order.includes("import"), false);
+        assert.equal(context.attempted, false);
+        assert.equal(saved.has(`${mode}-tcp-intent`), false);
+      }
+      if (fault === "diagnostic-close") {
+        for (const handle of [61, 143, 161])
+          assert.ok(order.includes(`handle-close:${handle}`));
+        assert.deepEqual(
+          cleanup.map((value) => value[0]),
+          [
+            "observer-diagnostic-token-close",
+            "observer-diagnostic-process-close",
+            "observer-diagnostic-token-close",
+          ],
+        );
+      }
+      if (fault === "10022-close")
+        assert.deepEqual(cleanup[0], ["tcp-close", "win32", 10038]);
+      assert.ok(order.indexOf("ready") < order.indexOf(`${mode}-tcp-transfer`));
+      if (order.includes("duplicate"))
+        assert.ok(
+          order.indexOf(`${mode}-tcp-transfer`) < order.indexOf("D") &&
+            order.indexOf("D") < order.indexOf("duplicate"),
+        );
+    } finally {
+      launcherFailed = true;
+      for (const resolve of acknowledgments.values()) resolve(false);
+      try {
+        await sourceTask;
+      } finally {
+        try {
+          nativeCalls.close();
+        } finally {
+          if (!ended) {
+            transport.close(0);
+            ended = true;
+          }
+          if (fault) await assert.rejects(transport.session.finish(rows));
+          else await transport.session.finish(rows);
+        }
+      }
+    }
   }
 });
 

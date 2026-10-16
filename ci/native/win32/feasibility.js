@@ -569,6 +569,7 @@ const NATIVE_OPERATIONS = new Set(
   tcp-endpoint tcp-exclusive observer-child observer-job observer-image observer-once observer-carrier
   observer-protocol observer-socket observer-local observer-unconnected observer-token
   observer-engine observer-collection observer-owner observer-transfer observer-socket-close observer-engine-close observer-enum-close observer-token-close
+  observer-diagnostic-token-close observer-diagnostic-process-close
   observer-owner-token observer-owner-close observer-owner-binding observer-owner-once observer-owner-wait
 `
     .trim()
@@ -640,6 +641,8 @@ export function windowsFeasibilityDiagnostics(output) {
         "observer-engine-close",
         "observer-enum-close",
         "observer-token-close",
+        "observer-diagnostic-token-close",
+        "observer-diagnostic-process-close",
         "null-close",
         "null-remove",
       ].includes(match[2]) &&
@@ -672,6 +675,8 @@ export function windowsFeasibilityDiagnostics(output) {
         "observer-engine-close",
         "observer-enum-close",
         "observer-token-close",
+        "observer-diagnostic-token-close",
+        "observer-diagnostic-process-close",
         "command-token-close",
         "command-null-close",
         "command-event-close",
@@ -1311,11 +1316,84 @@ const isTcpLine = (bytes) => {
     (text.startsWith(TCP_PREFIX) || TCP_PREFIX.startsWith(text))
   );
 };
+// This closed, optional record describes prerequisites of the failed original
+// call. Neither successful reads nor complete framing supply admission proof.
+function tcpTransferObservation(value) {
+  const status = (values, length) =>
+    Array.isArray(values) &&
+    values.length === length &&
+    values.every((entry) => entry === null || wfpUint(entry));
+  const token = (row) =>
+    wfpClosed(row, ["status", "identity", "appContainer", "restricted"]) &&
+    status(row.status, 5) &&
+    (row.identity === null ||
+      (row.status[1] === 0 &&
+        Array.isArray(row.identity) &&
+        row.identity.length === 4 &&
+        row.identity
+          .slice(0, 3)
+          .every(
+            (entry) =>
+              typeof entry === "string" && /^[a-f0-9]{16}$/u.test(entry),
+          ) &&
+        wfpUint(row.identity[3]))) &&
+    (row.appContainer === null ||
+      (row.status[2] === 0 && wfpUint(row.appContainer))) &&
+    (row.status[0] === 0
+      ? row.status.every((entry) => entry !== null) &&
+        (row.status[3] === 0
+          ? typeof row.restricted === "boolean"
+          : row.restricted === null)
+      : row.status.slice(1).every((entry) => entry === null) &&
+        row.identity === null &&
+        row.appContainer === null &&
+        row.restricted === null);
+  const destination = value?.destination,
+    source = value?.source;
+  return (
+    wfpClosed(value, [
+      "error",
+      "winsock",
+      "creationFlags",
+      "destination",
+      "source",
+      "provider",
+    ]) &&
+    wfpUint(value.error) &&
+    value.creationFlags === 0 &&
+    Array.isArray(value.winsock) &&
+    value.winsock.length === 2 &&
+    value.winsock.every((entry) => wfpUint(entry) && entry <= 65535) &&
+    wfpClosed(destination, ["pid", "access", "status", "birth", "token"]) &&
+    wfpUint(destination.pid) &&
+    destination.pid > 0 &&
+    destination.access === 0x1000 &&
+    status(destination.status, 3) &&
+    destination.status[0] !== null &&
+    (destination.status[1] === 0
+      ? wfpTime(destination.birth)
+      : destination.birth === null) &&
+    token(destination.token) &&
+    (destination.status[0] === 0
+      ? destination.status.every((entry) => entry !== null) &&
+        destination.token.status[0] !== null
+      : destination.status.slice(1).every((entry) => entry === null) &&
+        destination.token.status[0] === null) &&
+    wfpClosed(source, ["pid", "token"]) &&
+    wfpUint(source.pid) &&
+    source.pid > 0 &&
+    token(source.token) &&
+    source.token.status[0] !== null &&
+    typeof value.provider === "string" &&
+    /^[a-f0-9]{224}$/u.test(value.provider)
+  );
+}
 function tcpCapture() {
   const calls = [];
   let bytes = 0,
     invalid = false,
-    ended = false;
+    ended = false,
+    transfer;
   const incomplete = () => {
     invalid = true;
   };
@@ -1325,6 +1403,18 @@ function tcpCapture() {
       bytes += line.length;
       if (invalid || bytes > 2048 || ended) return incomplete();
       const text = line.toString("utf8");
+      const observation =
+        /^native-windows-tcp: transfer=(\{[^\r\n]+\})\r?\n$/u.exec(text);
+      if (observation) {
+        try {
+          const value = JSON.parse(observation[1]);
+          if (transfer || !tcpTransferObservation(value)) return incomplete();
+          transfer = value;
+        } catch {
+          incomplete();
+        }
+        return;
+      }
       if (/^native-windows-tcp: end\r?\n$/u.test(text)) {
         const first = calls[0],
           last = calls.at(-1);
@@ -1363,6 +1453,7 @@ function tcpCapture() {
             ? "incomplete"
             : "unavailable",
       calls: calls.map((call) => ({ ...call })),
+      ...(transfer ? { transfer: structuredClone(transfer) } : {}),
     }),
   };
 }

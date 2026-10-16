@@ -841,21 +841,50 @@ Capture completion describes the observation stream, never transaction success.
 Observations neither authorize receipts nor replace the first validated refusal.
 Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
-For each original read/edit bundle, the held launcher independently imports a
-`WSADuplicateSocketW` transfer of the child's bound, unconnected socket before
-connect. The closed child environment supplies a fixed destination record with
-the original launcher PID, birth and primary-token identifiers. Before duplication,
-the launcher rejoins that record against its live self and the original child,
-records the source's `SO_PROTOCOL_INFOW` contract, and emits `tcp-transfer-ready`.
-The driver persists this observation before its one-shot `D` acknowledgment.
-The helper transport admits `O/D/T/U` only for the original rooted read/edit
-roles; unrelated roles and unknown commands remain rejected.
-The imported socket must rejoin the same provider, catalog, protocol chain and
-destination; both original creation and import retain flags zero. Birth/token
-drift, PID-only input and incomplete carriers fail without another attempt.
-No process handle, capability or additional transport is granted to the payload.
-Native 10022 remains the immediate duplication failure, not a permission,
-flag-mismatch or unsupported-provider diagnosis. These joins require native CI.
+For each original read/edit bundle, the source transfers its original bound,
+unconnected socket with `WSADuplicateSocketW`; the designated held launcher
+consumes its opaque protocol information once with `WSASocketW`. The child
+receives only the launcher's PID, birth and primary-token data. The launcher
+rejoins that destination and the original child, records the source's
+`SO_PROTOCOL_INFOW` contract and emits `tcp-transfer-ready`. The driver persists
+this record before its one-shot `D` acknowledgment. Creation and import flags
+remain zero. Birth/token drift, PID-only input, incomplete carriers and changed
+provider/catalog/chain joins refuse admission without replay. The helper admits
+`O/D/T/U` only for the original rooted read/edit roles.
+
+At a failed original source duplication, the immediate `WSAGetLastError` is saved
+before any diagnostic operation. An optional `tcpObservation.transfer` records
+that error, the original negotiated/high Winsock versions, creation flags and
+public provider bytes. Destination reads request only
+`PROCESS_QUERY_LIMITED_INFORMATION`, retaining the requested PID/access mask,
+process-open, creation-time and handle-close results. Source and destination
+token observations retain token-open, statistics, AppContainer and close results;
+available statistics include token/authentication/modified identifiers, token
+type, alongside restricted-token and AppContainer reads. Process-token
+observations omit the inapplicable impersonation-level member.
+Status arrays use `null` for unattempted operations, zero for API success and the
+saved native error for failure. A successful short read leaves its value `null`.
+Destination process statuses are ordered open/time/close; token statuses are
+ordered open/statistics/AppContainer/restriction/close. A failed restriction
+query retains its native error and leaves `restricted` unavailable. The provider
+field is the exact 112-byte public numeric/GUID/catalog/chain prefix of
+`WSAPROTOCOL_INFOW`, encoded
+as lowercase hex in the checked Windows x64 SDK layout. Provider-private storage
+and protocol-name text are excluded.
+
+These finite observations share the unchanged 2 KiB TCP capture budget and have
+no admission authority. Malformed, missing or failed diagnostic output remains
+incomplete/unavailable evidence; it cannot replace the original failure. Every
+acquired diagnostic handle receives an independent close attempt before output;
+failed diagnostic closure retains a separate cleanup cause. No process DACL,
+capability or payload grant changes. Application `DuplicateHandle` socket copying
+is rejected by its documented reference-accounting warning; API injection or
+successful `getsockopt` cannot establish safe native accounting.
+An original `10022` still fails before connect without a receipt. Neither a
+permission defect nor a catalog defect is established, and matching flags were
+already zero. The functional handoff repair remains outstanding pending original
+Windows CI evidence under the documented
+[Winsock sharing contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw).
 The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native
 image identity. Exclusive binding prevents another socket from sharing its tuple.
@@ -4953,9 +4982,10 @@ ordinary `npm run check` gate, necessary effect-free harness coverage with
 changes need no wording-only tests or unrelated slow coverage. Selected exact trusted commands remain
 Runner-owned: agent turns report `NOT_RUN` with their frozen Runner identities,
 and the Runner executes the persisted exact vectors during FINALIZE.
-Only the Runner-authorized COMMIT boundary stages, checks staged whitespace,
-and creates the exact subject-only local commit using existing identity,
-without authorship trailers or remote writes. Native system/protected
+Only the Runner-authorized COMMIT or polishing HANDOFF boundary stages and
+checks staged whitespace. Polishing leaves the result uncommitted; a separately
+authorized commit uses the existing identity and exact subject without authorship
+trailers or remote writes. Native system/protected
 acceptance never enters a local FINALIZE inventory.
 
 The implemented local, effect-free protocol tests use
