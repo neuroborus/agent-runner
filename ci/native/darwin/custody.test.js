@@ -306,7 +306,9 @@ function fixture({
             object: { ...object(4), mode: 0o444, bytes: 1073741824 },
             runtime: {
               ...(failure === "runtime-hash" ? {} : { sha256: hash }),
-              cacheUuid: "e".repeat(32),
+              cacheUuid: (failure === "runtime-cache-uuid" ? "0" : "e").repeat(
+                32,
+              ),
               imageUuid:
                 failure === "runtime-uuid" ? "f".repeat(32) : metadata.uuid,
               signatureSha256: hash,
@@ -321,8 +323,11 @@ function fixture({
         if (op === "cache")
           value = {
             ...(purpose === "experiment" ? { sha256: hash } : {}),
-            cacheUuid: "e".repeat(32),
-            imageUuid: metadata.uuid,
+            cacheUuid: (failure === "runtime-cache-uuid" ? "0" : "e").repeat(
+              32,
+            ),
+            imageUuid:
+              failure === "runtime-uuid" ? "f".repeat(32) : metadata.uuid,
             signatureSha256: hash,
             macho: metadata,
           };
@@ -434,37 +439,41 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     substituted.reader.readBuildInput("/Library/Developer/input.h", hash),
   );
   await substituted.reader.close();
-  const changedRuntime = fixture({
-    purpose: "experiment",
-    build: true,
-    failure: "runtime-uuid",
-  });
-  await changedRuntime.reader.start();
-  await assert.rejects(
-    changedRuntime.reader.readBuildRuntime(
-      "/System/Library/dyld/dyld_shared_cache_x86_64h",
-      "/usr/lib/libfixture.dylib",
-    ),
-  );
-  await changedRuntime.reader.close();
-  const missingHash = fixture({
-    purpose: "experiment",
-    build: true,
-    failure: "runtime-hash",
-  });
-  await missingHash.reader.start();
-  await assert.rejects(
-    missingHash.reader.readBuildRuntime(
-      "/System/Library/dyld/dyld_shared_cache_x86_64h",
-      "/usr/lib/libfixture.dylib",
-    ),
-  );
-  await missingHash.reader.close();
+  for (const failure of [
+    "runtime-uuid",
+    "runtime-cache-uuid",
+    "runtime-hash",
+  ]) {
+    const changedRuntime = fixture({
+      purpose: "experiment",
+      build: true,
+      failure,
+    });
+    await changedRuntime.reader.start();
+    await assert.rejects(
+      changedRuntime.reader.readBuildRuntime(
+        "/System/Library/dyld/dyld_shared_cache_x86_64h",
+        "/usr/lib/libfixture.dylib",
+      ),
+    );
+    await changedRuntime.reader.close();
+  }
   const reviewed = fixture({ build: true });
   await assert.rejects(
     reviewed.reader.readBuildInput("/Library/Developer/input.h", hash),
   );
   assert.deepEqual(reviewed.events, []);
+});
+test("Darwin cache custody rejects absent cache UUIDs and substituted image UUIDs in both purposes", async () => {
+  for (const purpose of ["reviewed", "experiment"])
+    for (const failure of ["runtime-cache-uuid", "runtime-uuid"]) {
+      const value = fixture({ purpose, failure });
+      await value.reader.start();
+      await value.reader.open(0);
+      await assert.rejects(value.reader.cache(0, "/usr/lib/libfixture.dylib"));
+      assert.ok(value.events.includes("fault"));
+      assert.equal((await value.reader.close()).status, "RETAINED");
+    }
 });
 test("Darwin experimental custody binds purpose before admission and never supplies review references", async () => {
   for (const failure of [undefined, "signature", "purpose"]) {

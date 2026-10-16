@@ -901,6 +901,18 @@ substituted or shadowed binding-header dependencies. These portable tests compil
 no native helper. Matching macOS must compile/inspect all ten helpers and exercise
 positive/negative SPI controls; compilation supplies no PF runtime evidence.
 
+Darwin cache regressions execute the repository loader-query body with injected
+task and memory reads. They reject failed queries, incomplete counts, unknown
+formats, short/wrapped records or reads, old versions and substituted UUID/base
+observations. Source-derived predicates reject slid-address and mapped-range
+overflow; custody fixtures retain cache/image UUID requirements in both purposes
+and mandatory mapped-text hashes for experiment builds. SDK layouts remain
+symbolic in these portable tests: actual SDK compilation/linking and loaded-cache
+joins require matching macOS CI. Existing preparation coverage also freezes both
+loader SDK headers in the compiler dependency inventory and rejects substitution
+on cold load. These cases use existing fast discovery and the selected native
+harness, adding no slow-tier requirement.
+
 Linux interpreter regressions inject source/running-inode and byte-window
 substitution, sealed-image/loader replacement, missing or mismatched original
 owner/intent evidence, interrupted publication and lost replies. Cold rejoin

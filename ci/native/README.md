@@ -69,7 +69,17 @@ operation that actually supplied its result. Original and independent cleanup
 diagnostics remain separate, without changing the stdout protocol. Portable
 transport coverage supplies no native HRESULT or scheduler-success evidence.
 Darwin shared-cache UUID collection uses a mutable Block-captured struct while
-retaining the complete 16-byte copy and unique-image match. Windows private desktop
+retaining the complete 16-byte copy and unique-image match. Its loaded slide comes
+from the SDK-declared self-task `TASK_DYLD_INFO` query, without linking
+`_dyld_get_all_image_infos`. The reader validates the returned count, 64-bit format
+and record extent before copying only the SDK-defined prefix through the
+version-15 cache base. Loader UUID/base must join the held cache UUID and mapped
+range. Checked slide/range arithmetic bounds every image read; final loader and
+range reads rejoin the same binding after stable mapped-text hashing. Compiler
+dependency reads bind the SDK headers through the existing build and cold-load
+inventory, without adding a source file or changing reviewed/experiment purposes.
+Portable regressions establish no selected-SDK linking or native cache evidence.
+Windows private desktop
 creation names the [documented desktop and standard rights](https://learn.microsoft.com/en-us/windows/win32/winstation/desktop-security-and-access-rights)
 instead of an unavailable aggregate macro; payload DACLs, low labels, window
 station isolation and Job UI restrictions retain their existing contracts.

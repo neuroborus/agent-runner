@@ -15,12 +15,14 @@
 #include <limits.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <mach/task_info.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld_images.h>
 #include <poll.h>
 #include <signal.h>
 #include <spawn.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,7 +54,6 @@ extern bool _dyld_get_shared_cache_uuid(unsigned char uuid[16]);
 extern const void *_dyld_get_shared_cache_range(size_t *length);
 extern int dyld_shared_cache_iterate_text(const unsigned char uuid[16], void (^callback)(const struct cache_text *));
 extern const struct mach_header_64 _mh_execute_header;
-extern const struct dyld_all_image_infos *_dyld_get_all_image_infos(void);
 
 #define SLOTS 128
 #define FRAME 262144
@@ -375,12 +376,33 @@ static void transfer(struct entry *helper, struct entry *root, struct entry *bas
   }
   need(!close(input[0]) && !close(output[1]) && !close(decision[1])); file_decision = decision[0]; file_in = input[1]; file_out = output[0]; printf("{\"pid\":%d}", file_pid);
 }
+static bool cache_contains(uint64_t base, uint64_t length, uint64_t address, uint64_t size) {
+  return base && length && size && length <= UINT64_MAX - base && address >= base &&
+    address - base <= length && size <= length - (address - base);
+}
+static struct dyld_all_image_infos cache_loader(const unsigned char uuid[16], uint64_t base) {
+  task_dyld_info_data_t info = {0}; mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+  need(task_info(mach_task_self(), TASK_DYLD_INFO, (task_info_t)&info, &count) == KERN_SUCCESS);
+  struct dyld_all_image_infos images = {0};
+  /* Read only the SDK-defined prefix through the version-15 cache base. The
+   * kernel's record may have a newer tail; no private layout or export is used. */
+  const size_t size = offsetof(struct dyld_all_image_infos, sharedCacheBaseAddress) + sizeof(images.sharedCacheBaseAddress);
+  need(count == TASK_DYLD_INFO_COUNT && info.all_image_info_format == TASK_DYLD_ALL_IMAGE_INFO_64 &&
+    info.all_image_info_addr && info.all_image_info_size >= size &&
+    info.all_image_info_size <= UINT64_MAX - info.all_image_info_addr);
+  mach_vm_size_t actual = 0;
+  need(mach_vm_read_overwrite(mach_task_self(), info.all_image_info_addr, size, (mach_vm_address_t)&images, &actual) == KERN_SUCCESS && actual == size);
+  need(images.version >= 15 && images.sharedCacheBaseAddress == base &&
+    !memcmp(images.sharedCacheUUID, uuid, sizeof(images.sharedCacheUUID)));
+  return images;
+}
 static void cache_image(struct entry *entry, const char *name) {
   need(!strcmp(entry->kind, "cache")); unsigned char header[104], uuid[16]; read_at(entry->fd, header, sizeof(header), 0);
   need((!memcmp(header, "dyld_v1  x86_64", 16) || !memcmp(header, "dyld_v1 x86_64h", 16)) &&
     _dyld_get_shared_cache_uuid(uuid) && !memcmp(header + 88, uuid, 16));
   uint64_t offset, length; memcpy(&offset, header + 40, 8); memcpy(&length, header + 48, 8);
-  need(length && length <= 134217728 && offset + length <= (uint64_t)entry->stat.st_size); char signature_hash[65]; sha_range(entry->fd, offset, length, signature_hash);
+  need(length && length <= 134217728 && offset <= (uint64_t)entry->stat.st_size &&
+    length <= (uint64_t)entry->stat.st_size - offset); char signature_hash[65]; sha_range(entry->fd, offset, length, signature_hash);
   __block unsigned matched = 0; __block uint64_t address = 0, text_size = 0;
   __block struct { unsigned char bytes[16]; } image_uuid = {{0}};
   need(!dyld_shared_cache_iterate_text(uuid, ^(const struct cache_text *info) {
@@ -388,18 +410,21 @@ static void cache_image(struct entry *entry, const char *name) {
     if (!strcmp(info->dylibPath, name)) { matched++; address = info->loadAddress; text_size = info->textSegmentSize; memcpy(image_uuid.bytes, info->dylibUuid, 16); }
   }) && matched == 1);
   size_t range_size = 0; const void *range = _dyld_get_shared_cache_range(&range_size);
-  const struct dyld_all_image_infos *images = _dyld_get_all_image_infos(); need(range && range_size && images && images->version >= 15);
-  address += images->sharedCacheSlide; need(address >= (uintptr_t)range && address + sizeof(struct mach_header_64) <= (uintptr_t)range + range_size);
+  uint64_t base = (uintptr_t)range; need(cache_contains(base, range_size, base, sizeof(struct mach_header_64)));
+  struct dyld_all_image_infos images = cache_loader(uuid, base);
+  need(address <= UINT64_MAX - images.sharedCacheSlide); address += images.sharedCacheSlide;
+  need(cache_contains(base, range_size, address, sizeof(struct mach_header_64)));
   struct mach_header_64 image_header; mach_vm_size_t actual;
   need(mach_vm_read_overwrite(mach_task_self(), address, sizeof(image_header), (mach_vm_address_t)&image_header, &actual) == KERN_SUCCESS && actual == sizeof(image_header) && image_header.sizeofcmds <= 1048576);
-  size_t size = sizeof(image_header) + image_header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes && address + size <= (uintptr_t)range + range_size);
+  size_t size = sizeof(image_header) + image_header.sizeofcmds; need(cache_contains(base, range_size, address, size));
+  unsigned char *bytes = malloc(size); need(bytes);
   need(mach_vm_read_overwrite(mach_task_self(), address, size, (mach_vm_address_t)bytes, &actual) == KERN_SUCCESS && actual == size);
   char id[33], image_id[33]; hex(uuid, 16, id); hex(image_uuid.bytes, 16, image_id);
   printf("{\"cacheUuid\":\"%s\",\"imageUuid\":\"%s\",\"signatureSha256\":\"%s\",\"macho\":", id, image_id, signature_hash); macho(bytes, size);
 #ifdef NATIVE_CI_EXPERIMENT
   /* The experiment pins actual immutable mapped Mach-O text, separately from
    * the held cache's UUID and CodeDirectory bytes. Never invent a file hash. */
-  need(text_size >= size && text_size <= 134217728 && address + text_size <= (uintptr_t)range + range_size);
+  need(text_size >= size && text_size <= 134217728 && cache_contains(base, range_size, address, text_size));
   unsigned char *text = malloc(text_size); need(text); unsigned char sums[2][CC_SHA256_DIGEST_LENGTH];
   for (unsigned pass = 0; pass < 2; pass++) {
     need(mach_vm_read_overwrite(mach_task_self(), address, text_size, (mach_vm_address_t)text, &actual) == KERN_SUCCESS && actual == text_size);
@@ -408,6 +433,8 @@ static void cache_image(struct entry *entry, const char *name) {
   need(!memcmp(sums[0], sums[1], sizeof(sums[0]))); char text_hash[65]; hex(sums[0], sizeof(sums[0]), text_hash);
   printf(",\"sha256\":\"%s\"", text_hash); free(text);
 #endif
+  struct dyld_all_image_infos after = cache_loader(uuid, base); size_t after_size = 0;
+  need(after.sharedCacheSlide == images.sharedCacheSlide && _dyld_get_shared_cache_range(&after_size) == range && after_size == range_size);
   putchar('}'); free(bytes); stable(entry);
 }
 static bool owned_access_socket(const char *name, const struct stat *st);

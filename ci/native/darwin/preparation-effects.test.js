@@ -577,7 +577,7 @@ function experimentBuildFixture(failure = null) {
           name = path.basename(file).replace(/\.deps$/u, ""),
           data = dependencies
             ? Buffer.from(
-                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h" : ""}\n`,
+                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h /fixture/sdk/usr/include/mach/task_info.h /fixture/sdk/usr/include/mach-o/dyld_images.h" : ""}\n`,
               )
             : image;
         return {
@@ -1264,24 +1264,31 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
     }),
   );
   const createReader = f.options.createReader;
-  let substituted = false;
-  f.options.createReader = (...args) => {
-    const reader = createReader(...args),
-      read = reader.readBuildInput;
-    reader.readBuildInput = async (file, pin) => {
-      const value = await read(file, pin);
-      if (file.endsWith("SDKSettings.json")) {
-        substituted = true;
-        value.sha256 = "e".repeat(64);
-      }
-      return value;
+  for (const input of [
+    "/fixture/sdk/SDKSettings.json",
+    "/fixture/sdk/usr/include/mach/task_info.h",
+    "/fixture/sdk/usr/include/mach-o/dyld_images.h",
+  ]) {
+    assert.ok(result.build.sdk.inputs.some((value) => value.path === input));
+    let substituted = false;
+    f.options.createReader = (...args) => {
+      const reader = createReader(...args),
+        read = reader.readBuildInput;
+      reader.readBuildInput = async (file, pin) => {
+        const value = await read(file, pin);
+        if (file === input) {
+          substituted = true;
+          value.sha256 = "e".repeat(64);
+        }
+        return value;
+      };
+      return reader;
     };
-    return reader;
-  };
-  await assert.rejects(
-    loadDarwinExperimentBuild(result.job, directory, f.options),
-  );
-  assert.equal(substituted, true);
+    await assert.rejects(
+      loadDarwinExperimentBuild(result.job, directory, f.options),
+    );
+    assert.equal(substituted, true, input);
+  }
   f.options.createReader = createReader;
   const selector = f.files.get(
     path.join(directory, "darwin-experiment-build-selector.json"),

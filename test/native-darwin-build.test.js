@@ -719,6 +719,248 @@ test("Darwin PF route authority preserves policy while ignoring documented usage
   assert.match(source, /pf_route_digest\(routes, size, route_hash\)/u);
 });
 
+test("Darwin cache loader queries validate SDK records and reject substituted UUID or base before image reads", async () => {
+  const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    body =
+      /static struct dyld_all_image_infos cache_loader\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1];
+  assert.ok(body);
+  assert.doesNotMatch(source, /\b_dyld_get_all_image_infos\b/u);
+  assert.match(source, /#include <mach\/task_info\.h>/u);
+  assert.match(source, /#include <mach-o\/dyld_images\.h>/u);
+  assert.match(
+    body,
+    /offsetof\(struct dyld_all_image_infos, sharedCacheBaseAddress\) \+ sizeof\(images\.sharedCacheBaseAddress\)/u,
+  );
+  const script = new Script(
+    `(uuid, base) => {${body
+      .replace("task_dyld_info_data_t info = {0};", "const info = {};")
+      .replace("mach_msg_type_number_t count", "let count")
+      .replace("(task_info_t)&info", "info")
+      .replace("&count", "value => { count = value; }")
+      .replace(
+        "struct dyld_all_image_infos images = {0};",
+        "const images = {};",
+      )
+      .replace(/const size_t size = [^;]+;/u, "const size = sdkPrefix;")
+      .replace("mach_vm_size_t actual = 0;", "let actual = 0n;")
+      .replace("(mach_vm_address_t)&images", "images")
+      .replace("&actual", "value => { actual = value; }")
+      .replace(
+        "sizeof(images.sharedCacheUUID)",
+        "images.sharedCacheUUID.length",
+      )}}`,
+  );
+  // Counts and sizes are symbolic here; only the matching SDK supplies layouts.
+  const sdkCount = 7,
+    sdkPrefix = 64n,
+    base = 0x10000n,
+    uuid = Buffer.alloc(16, 1),
+    maximum = (1n << 64n) - 1n;
+  for (const [fault, change, reads] of [
+    ["valid", () => {}, 1],
+    [
+      "valid newer tail",
+      (value) => {
+        value.images.version = 17;
+        value.info.all_image_info_size += sdkPrefix;
+      },
+      1,
+    ],
+    [
+      "task failure",
+      (value) => {
+        value.taskResult = 1;
+      },
+      0,
+    ],
+    [
+      "short count",
+      (value) => {
+        value.count--;
+      },
+      0,
+    ],
+    [
+      "unknown format",
+      (value) => {
+        value.info.all_image_info_format = 0;
+      },
+      0,
+    ],
+    [
+      "null address",
+      (value) => {
+        value.info.all_image_info_addr = 0n;
+      },
+      0,
+    ],
+    [
+      "short record",
+      (value) => {
+        value.info.all_image_info_size = sdkPrefix - 1n;
+      },
+      0,
+    ],
+    [
+      "wrapped extent",
+      (value) => {
+        value.info.all_image_info_addr = maximum - sdkPrefix + 1n;
+      },
+      0,
+    ],
+    [
+      "read failure",
+      (value) => {
+        value.readResult = 1;
+      },
+      1,
+    ],
+    [
+      "short read",
+      (value) => {
+        value.actual--;
+      },
+      1,
+    ],
+    [
+      "old version",
+      (value) => {
+        value.images.version = 14;
+      },
+      1,
+    ],
+    [
+      "substituted UUID",
+      (value) => {
+        value.images.sharedCacheUUID = Buffer.alloc(16, 2);
+      },
+      1,
+    ],
+    [
+      "substituted base",
+      (value) => {
+        value.images.sharedCacheBaseAddress++;
+      },
+      1,
+    ],
+  ]) {
+    const value = {
+        taskResult: 0,
+        readResult: 0,
+        count: sdkCount,
+        actual: sdkPrefix,
+        info: {
+          all_image_info_addr: 0x1000n,
+          all_image_info_size: sdkPrefix,
+          all_image_info_format: 1,
+        },
+        images: {
+          version: 15,
+          sharedCacheUUID: uuid,
+          sharedCacheBaseAddress: base,
+          sharedCacheSlide: 0x100n,
+        },
+      },
+      calls = [];
+    change(value);
+    const loader = script.runInNewContext({
+      sdkPrefix,
+      TASK_DYLD_INFO_COUNT: sdkCount,
+      TASK_DYLD_INFO: 17,
+      TASK_DYLD_ALL_IMAGE_INFO_64: 1,
+      KERN_SUCCESS: 0,
+      UINT64_MAX: maximum,
+      mach_task_self: () => "self",
+      task_info(self, flavor, result, count) {
+        assert.equal(self, "self");
+        assert.equal(flavor, 17);
+        calls.push("task");
+        Object.assign(result, value.info);
+        count(value.count);
+        return value.taskResult;
+      },
+      mach_vm_read_overwrite(self, address, size, result, actual) {
+        assert.equal(self, "self");
+        assert.equal(address, value.info.all_image_info_addr);
+        assert.equal(size, sdkPrefix);
+        calls.push("read");
+        Object.assign(result, value.images);
+        actual(value.actual);
+        return value.readResult;
+      },
+      memcmp: (left, right, size) =>
+        left.subarray(0, size).compare(right.subarray(0, size)),
+      need: (condition) => {
+        assert.ok(condition, fault);
+      },
+    });
+    if (fault.startsWith("valid"))
+      assert.deepEqual({ ...loader(uuid, base) }, value.images);
+    else
+      assert.throws(() => loader(uuid, base), { code: "ERR_ASSERTION" }, fault);
+    assert.deepEqual(calls, ["task", ...Array(reads).fill("read")], fault);
+  }
+});
+
+test("Darwin cache image reads reject wrapped slides and ranges while retaining stable mapped text", async () => {
+  const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    body = /static bool cache_contains\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1],
+    image = source.slice(
+      source.indexOf("static void cache_image("),
+      source.indexOf("static bool owned_access_socket("),
+    );
+  assert.ok(body);
+  const maximum = (1n << 64n) - 1n,
+    contains = new Script(
+      `(base, length, address, size) => !!(() => {${body}})()`,
+    ).runInNewContext({ UINT64_MAX: maximum });
+  for (const [base, length, address, size, expected] of [
+    [16n, 32n, 16n, 32n, true],
+    [16n, 32n, 40n, 8n, true],
+    [16n, 32n, 40n, 9n, false],
+    [16n, 32n, 15n, 1n, false],
+    [16n, 32n, 49n, 1n, false],
+    [16n, 32n, 16n, maximum, false],
+    [maximum - 7n, 8n, maximum - 7n, 1n, false],
+    [0n, 32n, 16n, 1n, false],
+    [16n, 0n, 16n, 1n, false],
+    [16n, 32n, 16n, 0n, false],
+  ])
+    assert.equal(contains(base, length, address, size), expected);
+  const slide =
+    /need\((address <= UINT64_MAX - images\.sharedCacheSlide)\)/u.exec(
+      image,
+    )?.[1];
+  assert.ok(slide);
+  const canSlide = new Script(`(address, images) => ${slide}`).runInNewContext({
+    UINT64_MAX: maximum,
+  });
+  assert.equal(canSlide(maximum - 1n, { sharedCacheSlide: 1n }), true);
+  assert.equal(canSlide(maximum, { sharedCacheSlide: 1n }), false);
+  assert.equal(canSlide(16n, { sharedCacheSlide: 0n }), true);
+  for (const size of ["sizeof(struct mach_header_64)", "size", "text_size"])
+    assert.ok(
+      image.includes(`cache_contains(base, range_size, address, ${size})`),
+    );
+  assert.match(image, /address \+= images\.sharedCacheSlide/u);
+  assert.match(image, /matched == 1/u);
+  assert.match(image, /memcmp\(header \+ 88, uuid, 16\)/u);
+  assert.match(image, /length <= \(uint64_t\)entry->stat.st_size - offset/u);
+  assert.match(
+    image,
+    /pass < 2[\s\S]*CC_SHA256\(text,[\s\S]*memcmp\(sums\[0\], sums\[1\]/u,
+  );
+  assert.match(
+    image,
+    /after\.sharedCacheSlide == images\.sharedCacheSlide && _dyld_get_shared_cache_range\(&after_size\) == range && after_size == range_size/u,
+  );
+  assert.match(image, /stable\(entry\)/u);
+});
+
 test("Darwin bootstrap reads bind only fixed protected tools before experiment custody", async () => {
   const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
     guard = source.match(/\(index == 0 \? ([^\n]+)\)\);/u)?.[1];
