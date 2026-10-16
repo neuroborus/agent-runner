@@ -636,6 +636,17 @@ also checks the diagnostic query's original FILETIME interval, shared capture
 limits and independent query/event closure. A query candidate cannot satisfy the
 subscription control. These injections establish no Windows event generation,
 native XPath/SDK acceptance or hosted audit delivery.
+The production coverage sequence also drives the actual policy/SACL installer,
+gate open/read, bounded delivery loop and capture/bookmark bodies together.
+Injected APIs verify the fresh `CreateFileW` pathname open under the held broker
+token independently of whether the fixture delivers an event. A completed
+32-byte read with zero delivered records still blocks. Changed token, object,
+event time or logon and a substituted file ID cannot admit probes. Installed
+policy/SACL readback precedes the new open, and file identity precedes I/O.
+Rejected-coverage retirement additionally attempts every independent reader and
+restoration barrier after capture, writer or abandon failure, retaining separate
+first and cleanup causes. These fast regressions add no slow-tier requirement;
+matching Windows CI must establish actual generation and subscription delivery.
 Custody/channel source execution covers original overlapped completion before
 event release, cancellation settlement within the original operation deadline,
 process failure without releasing unsettled I/O storage, distinct bridge

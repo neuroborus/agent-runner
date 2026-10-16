@@ -657,7 +657,14 @@ After owned per-user inclusion, independent native reads bind
 AuditComputeEffectivePolicyByToken to the held administrative broker's actual
 primary token, principal/logon and creation identity. A matching delivered Security
 4663 gate-read success in a fresh bounded capture window must precede every Codex
-launch, including version/schema probes. System bits remain preservation evidence;
+launch, including version/schema probes. The control requests a fresh
+`CreateFileW` pathname access check after independent installed-policy/SACL
+inspection, impersonating that same held token. Original file and parent handles
+remain held; `OPEN_EXISTING`, `FILE_FLAG_OPEN_REPARSE_POINT` and a matching file ID
+before the one nonce read preserve object attribution. This replaces the
+`ReOpenFile` control without diagnosing the previous missing delivery.
+The original-interval query remains diagnostic-only, and even a completed read
+with no delivered records refuses admission. System bits remain preservation evidence;
 unavailable coverage blocks with zero Codex effects. Inclusion can add auditing;
 the Administrators exception applies to exclusion, as documented by the
 [primary Microsoft references](../ci/native/README.md#separate-minimal-feasibility-experiment).

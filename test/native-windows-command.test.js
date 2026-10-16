@@ -689,7 +689,7 @@ test("coverage binds the original administrative token and held gate, not an inc
     /AuditComputeEffectivePolicyByToken\(token,&command_category,1,&policy\)/u,
   );
   assert.match(source, /ImpersonateLoggedOnUser\(command_broker_token\)/u);
-  assert.match(source, /ReOpenFile\(command_files\[3\],GENERIC_READ/u);
+  assert.match(source, /CreateFileW\(command_paths\[3\],GENERIC_READ/u);
   for (const operation of ["V", "A"])
     assert.match(
       source,
@@ -3802,7 +3802,7 @@ test("failure collection uses the original cleanup deadline and retains the firs
   assert.deepEqual(f.deadlines, [120000, 30000]);
 });
 
-test("actual gate-read source captures the first API cause before independent handle closure and reversal", async () => {
+async function commandGateReadProgram() {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
@@ -3821,6 +3821,11 @@ test("actual gate-read source captures the first API cause before independent ha
     )
     .replace("&command_preflight_owned.gateRead", "command_preflight_owned")
     .replace("nonce,-1,expected,33", "nonce,-1,value=>expected=value,33");
+  return { source, gate, program: new Script(gate) };
+}
+
+test("actual gate-read source captures the first API cause before independent handle closure and reversal", async () => {
+  const { source, gate, program } = await commandGateReadProgram();
   assert.doesNotMatch(gate, /\bneed\(/u);
   for (const mode of [
     "ok",
@@ -3854,15 +3859,30 @@ test("actual gate-read source captures the first API cause before independent ha
       FILE_SHARE_READ: 1,
       FILE_SHARE_WRITE: 2,
       FILE_SHARE_DELETE: 4,
+      OPEN_EXISTING: 3,
+      FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
       command_preflight_owned: owned,
       command_broker_token: 7,
       command_gate_bytes: 0,
       command_files: [0, 0, 0, 8],
+      command_paths: [null, null, null, "C:\\fixture\\gate"],
       command_ids: [0, 0, 0, "original"],
       nonce: "n".repeat(32),
       GetLastError: () => lastError,
       ImpersonateLoggedOnUser: () => true,
-      ReOpenFile: () => 9,
+      CreateFileW: (...args) => {
+        assert.deepEqual(args, [
+          "C:\\fixture\\gate",
+          3,
+          7,
+          null,
+          3,
+          0x200000,
+          null,
+        ]);
+        assert.equal(owned.impersonating, true);
+        return 9;
+      },
       fileid: (_handle, output) =>
         output(mode === "identity" ? "substitution" : "original"),
       strcmp: (a, b) => (a === b ? 0 : 1),
@@ -3917,7 +3937,7 @@ test("actual gate-read source captures the first API cause before independent ha
       },
     };
     try {
-      new Script(gate).runInNewContext(api);
+      program.runInNewContext(api);
       assert.equal(mode, "ok");
     } catch (code) {
       assert.equal(code, 126);
@@ -4000,7 +4020,27 @@ async function commandCaptureProgram() {
     /command_(?:preflight_owned\.event|event)=CreateEventW\([^;]+\);/gu,
   );
   assert.equal(creations.length, 2);
-  return { dispatch, createEvents: new Script(creations.join("\n")), source };
+  const selectionBody =
+      /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(source)[1],
+    probeBody = source
+      .split("\n")
+      .find((line) => line.trim().startsWith("if(command_probing&&process"));
+  return {
+    dispatch,
+    createEvents: new Script(creations.join("\n")),
+    source,
+    selection: new Script(
+      `(() => {${selectionBody.replace(/\bL(?=")/gu, "").replace(/\b(?:BOOL|unsigned)\b/gu, "let")} return selected;})()`,
+    ),
+    probe: new Script(
+      probeBody
+        .replace(/\bL(?=")/gu, "")
+        .replace("WCHAR *end;", "let end;")
+        .replace(/ULONGLONG (pid|rights)/gu, "let $1")
+        .replaceAll("&end", "value=>end=value")
+        .replaceAll("!*end", "!end"),
+    ),
+  };
 }
 
 function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
@@ -4454,7 +4494,7 @@ test("coverage admission and retirement preserve immediate errors and independen
   );
 });
 
-test("actual coverage rejects stale baselines before installation and joins all held SACLs before probes", async () => {
+async function commandCoverageOwnerProgram() {
   const source = await readFile(
       new URL(
         "../ci/native/win32/feasibility-command-effects.js",
@@ -4474,12 +4514,16 @@ test("actual coverage rejects stale baselines before installation and joins all 
       source.indexOf("return observation;", start) +
       "return observation;".length;
   assert.ok(start > 0 && end > start);
-  const program = new Script(`(async () => {
+  return new Script(`(async () => {
     ${guards}
     let operation;
     try { ${source.slice(start, end)} }
     catch (error) { throw commandCoverageFailure(operation, error); }
   })()`);
+}
+
+test("actual coverage rejects stale baselines before installation and joins all held SACLs before probes", async () => {
+  const program = await commandCoverageOwnerProgram();
   for (const fault of [
     null,
     "baseline",
@@ -4664,7 +4708,7 @@ test("coverage operation labels preserve native failure classes and bounded repo
   }
 });
 
-test("native audit installation records intent first and preserves exact setter and wait errors", async () => {
+async function commandAuditInstallProgram() {
   const source = await readFile(
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
       "utf8",
@@ -4683,6 +4727,11 @@ test("native audit installation records intent first and preserves exact setter 
         .replace(/\b(?:DWORD|unsigned)\b/gu, "let")
         .replace("&policy", "policy") + "install();",
     );
+  return script;
+}
+
+test("native audit installation records intent first and preserves exact setter and wait errors", async () => {
+  const script = await commandAuditInstallProgram();
   for (const fault of [null, "wait", "intent", "policy", 0, 1, 2, 3]) {
     const calls = [];
     let first;
@@ -5149,23 +5198,8 @@ test("broker subscription retains Windows name variants through native capture, 
     queryProgram = new Script(
       `(query, interval) => {${queryBody.replace(/\bL(?=")/gu, "")}}`,
     ),
-    selectionBody = /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(
-      program.source,
-    )[1],
-    selection = new Script(
-      `(() => {${selectionBody.replace(/\bL(?=")/gu, "").replace(/\b(?:BOOL|unsigned)\b/gu, "let")} return selected;})()`,
-    ),
-    probeBody = program.source
-      .split("\n")
-      .find((line) => line.trim().startsWith("if(command_probing&&process")),
-    probe = new Script(
-      probeBody
-        .replace(/\bL(?=")/gu, "")
-        .replace("WCHAR *end;", "let end;")
-        .replace(/ULONGLONG (pid|rights)/gu, "let $1")
-        .replaceAll("&end", "value=>end=value")
-        .replaceAll("!*end", "!end"),
-    );
+    selection = program.selection,
+    probe = program.probe;
   let selected;
   const buildQuery = queryProgram.runInNewContext({
     userText: identity.userSid,
@@ -5571,7 +5605,7 @@ test("failed delivery queries only its original interval within capture bounds a
   }
 });
 
-test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
+async function commandCoverageControlProgram() {
   const source = await readFile(
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
       "utf8",
@@ -5586,6 +5620,11 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
         "emit(command_coverage_seen",
       ),
     program = new Script(body);
+  return program;
+}
+
+test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
+  const program = await commandCoverageControlProgram();
   for (const fault of [
     null,
     "missing",
@@ -5715,6 +5754,367 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
   );
 });
 
+test("production coverage joins a fresh audited open to native capture and rejects completed reads without delivery", async () => {
+  const [owner, install, gate, control, captureProgram] = await Promise.all([
+    commandCoverageOwnerProgram(),
+    commandAuditInstallProgram(),
+    commandGateReadProgram(),
+    commandCoverageControlProgram(),
+    commandCaptureProgram(),
+  ]);
+  // Delivery is an independent injected observation. The original completed
+  // read and empty query do not identify a particular API as their cause.
+  for (const fault of [
+    null,
+    "missing",
+    "logon",
+    "object",
+    "time",
+    "token",
+    "substitution",
+    "open",
+  ]) {
+    const calls = [];
+    let capture,
+      observed,
+      receipt,
+      admitted = false;
+    const f = fixture(({ effects, prepared }) => {
+      const coverage = effects.coverage;
+      effects.coverage = async () => {
+        await coverage();
+        observed = await brokerCapture(prepared, {
+          SubjectLogonId: fault === "logon" ? "0x2" : "0x1",
+          ObjectName:
+            fault === "object" ? prepared.files.inspect : prepared.gateFile,
+          TimeCreated:
+            fault === "time"
+              ? "2026-10-09T00:00:00.0000300Z"
+              : "2026-10-09T00:00:00.0000100Z",
+        });
+        prepared.jobHandle = "7";
+        prepared.original.cleanup.files.forEach((file, i) => {
+          file.handle = String(i + 10);
+        });
+        capture = commandCaptureFixture(captureProgram);
+        const api = capture.api,
+          wait = api.WaitForSingleObject,
+          release = api.release_handle,
+          pump = api.command_capture,
+          sacls = new Set();
+        let clock = 0,
+          intent = false,
+          policy = false,
+          impersonated = null,
+          reads = 0,
+          barriers = 0;
+        Object.assign(api, {
+          command_audit_intent: "intent",
+          command_category: "file-system",
+          userSid: prepared.observer.userSid,
+          PER_USER_AUDIT_SUCCESS_INCLUDE: 1,
+          PER_USER_AUDIT_FAILURE_INCLUDE: 4,
+          SE_FILE_OBJECT: 1,
+          SACL_SECURITY_INFORMATION: 8,
+          command_files: [0, 1, 2, 3],
+          command_sacls: [4, 5, 6, 7],
+          command_ids: prepared.original.files.map((file) => file.identity),
+          command_paths: [...Object.values(prepared.files), prepared.gateFile],
+          command_broker_token: "held-primary-token",
+          command_gate_bytes: 0,
+          GENERIC_READ: 0x80000000,
+          FILE_READ_ATTRIBUTES: 0x80,
+          FILE_SHARE_READ: 1,
+          FILE_SHARE_WRITE: 2,
+          FILE_SHARE_DELETE: 4,
+          OPEN_EXISTING: 3,
+          FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+          CP_UTF8: 65001,
+          WC_ERR_INVALID_CHARS: 128,
+          nonce: prepared.nonce,
+          stdout: {},
+          fputs: () => {},
+          puts: () => {},
+          command_policy_equal: () => calls.push("system-baseline"),
+          command_principal_exists: () => policy,
+          WaitForSingleObject: (event, timeout) =>
+            event === "intent" ? (intent ? 0 : 258) : wait(event, timeout),
+          SetEvent: (event) => {
+            assert.equal(event, "intent");
+            calls.push("intent");
+            intent = true;
+            return true;
+          },
+          AuditSetPerUserPolicy: (sid, value, count) => {
+            assert.equal(intent, true);
+            assert.equal(sid, prepared.observer.userSid);
+            assert.equal(count, 1);
+            assert.equal(value.AuditSubCategoryGuid, "file-system");
+            assert.equal(value.AuditingInformation, 5);
+            calls.push("policy");
+            policy = true;
+            return true;
+          },
+          SetSecurityInfo: (file, kind, mask, owner, group, dacl, sacl) => {
+            assert.equal(policy, true);
+            assert.deepEqual(
+              [kind, mask, owner, group, dacl, sacl],
+              [1, 8, null, null, null, file + 4],
+            );
+            calls.push(`sacl-${file}`);
+            sacls.add(file);
+            return 0;
+          },
+          status_check: (status) => assert.equal(status, 0),
+          ImpersonateLoggedOnUser: (token) => {
+            assert.equal(token, "held-primary-token");
+            calls.push("impersonate");
+            impersonated = token;
+            return true;
+          },
+          CreateFileW: (...args) => {
+            assert.equal(impersonated, "held-primary-token");
+            assert.equal(sacls.size, 4);
+            assert.equal(reads, 2);
+            // The C call converts the desired-access bitmask to a DWORD.
+            args[1] >>>= 0;
+            assert.deepEqual(args, [
+              prepared.gateFile,
+              0x80000080,
+              7,
+              null,
+              3,
+              0x200000,
+              null,
+            ]);
+            calls.push("fresh-open");
+            return fault === "open" ? -1 : "gate-access";
+          },
+          fileid: (handle, output) => {
+            assert.equal(handle, "gate-access");
+            calls.push("identity");
+            output(
+              fault === "substitution"
+                ? "foreign"
+                : prepared.original.files[3].identity,
+            );
+          },
+          strcmp: (a, b) => (a === b ? 0 : 1),
+          wcscmp: (a, b) => (a === b ? 0 : 1),
+          _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+          _wcstoui64: (text, end) => {
+            end("");
+            return Number(text);
+          },
+          memcmp: (a, b) => (a === b ? 0 : 1),
+          ReadFile: (handle, output, size, count) => {
+            assert.equal(handle, "gate-access");
+            assert.equal(impersonated, "held-primary-token");
+            assert.equal(size, 32);
+            assert.equal(calls.at(-1), "identity");
+            calls.push("read-32");
+            output(prepared.nonce);
+            count(32);
+            if (fault !== "missing") capture.notify(["original-read"]);
+            return true;
+          },
+          release_handle: (slot, operation) =>
+            release(
+              slot === api.command_preflight_owned
+                ? api.ref(slot, "gateRead")
+                : slot,
+              operation,
+            ),
+          command_revert: () => {
+            impersonated = null;
+            api.command_preflight_owned.impersonating = false;
+            return true;
+          },
+          WideCharToMultiByte: (_cp, _flags, nonce, _length, output) => {
+            output(nonce);
+            return 33;
+          },
+          GetCurrentProcessId: () => prepared.observer.pid,
+          GetTickCount64: () => clock,
+          GetSystemTimePreciseAsFileTime: () => {},
+          command_bound: () => assert.ok(clock < 10000),
+          command_gate_read: () => gate.program.runInNewContext(api),
+          command_capture: (timeout) => {
+            pump(timeout);
+            clock += 5000;
+          },
+          emit: (delivered, startRecords, endRecords, elapsedMs) => {
+            receipt = {
+              event: "P",
+              delivered: delivered === "true",
+              startRecords,
+              endRecords,
+              elapsedMs,
+              query: null,
+            };
+          },
+          command_delivery_query: () => {
+            receipt.query = {
+              from: observed.start.time,
+              to: observed.end.time,
+              records: 0,
+              bytes: 0,
+              candidates: 0,
+              complete: true,
+              error: 0,
+              gateIdentity: prepared.original.files[3].identity,
+              requestedAccess: 0x80000080,
+              performedAccess: 1,
+              readBytes: api.command_gate_bytes,
+              scannedRecords: api.command_scanned,
+              scannedBytes: api.command_scanned_bytes,
+            };
+          },
+          failure: (code) => {
+            api.command_preflight_close(false);
+            const [operation, domain, value] = api.first;
+            throw Object.assign(new Error("Native gate refused"), {
+              code,
+              stderr: `native-windows: operation=${operation} domain=${domain} value=${value}\n`,
+            });
+          },
+        });
+        if (fault === "open") api.GetLastError = () => 5;
+        api.onProject = () => {
+          const event = observed.events[0].raw;
+          Object.assign(api, {
+            process: String(event.pid),
+            object: event.target,
+            eventId: event.opcode,
+            mask: String(event.accessMask),
+          });
+          const selected = captureProgram.selection.runInNewContext(api);
+          if (selected) captureProgram.probe.runInNewContext(api);
+          return selected;
+        };
+        const context = {
+          value: prepared,
+          original: prepared.original.cleanup,
+          admitted: {
+            files: prepared.original.files,
+            tokenHandle: "8",
+            gateHandle: "13",
+          },
+          signal: new AbortController().signal,
+          Buffer,
+          need: assert.ok,
+          digest: sha,
+          windowsFeasibilityCause,
+          windowsCommandBrokerCoverage,
+          sameWindowsIdentity: (a, b) =>
+            JSON.stringify(a) === JSON.stringify(b),
+          native: async () => {
+            calls.push("inspect");
+            const snapshot = structuredClone(
+              reads++ ? observed.before : observed.baseline,
+            );
+            snapshot.audit.included = policy;
+            snapshot.effective.success = snapshot.effective.failure = policy;
+            snapshot.audit.files.forEach((file, i) => {
+              file.saclSha256 = sha(sacls.has(i) ? "owned-acl" : "baseline");
+            });
+            if (fault === "token" && reads === 3)
+              snapshot.token.modifiedId = "00000000:00000009";
+            return snapshot;
+          },
+          call: async (key) => {
+            calls.push(key);
+            if (key === "I") install.runInNewContext(api);
+            if (key === "P") {
+              control.runInNewContext(api);
+              return receipt;
+            }
+            if (key === "B")
+              return {
+                ...(barriers++ ? observed.end : observed.start),
+                records: api.command_records,
+              };
+          },
+          decoder: {
+            state: () => ({
+              ready: true,
+              events: observed.events.slice(0, api.command_records),
+            }),
+          },
+          logons: new Map(
+            observed.events.map((event) => [event.raw.id, event.logonId]),
+          ),
+          failed: null,
+          set coverageAdmitted(value) {
+            admitted = value;
+          },
+        };
+        return owner.runInNewContext(context);
+      };
+    });
+    const result = await f.run();
+    assert.equal(result.status === "PASS", fault === null, fault);
+    assert.equal(admitted, fault === null);
+    assert.equal(f.calls.includes("retire"), true);
+    if (fault) assert.deepEqual(f.requests, []);
+    assert.deepEqual(calls.slice(0, 9), [
+      "inspect",
+      "I",
+      "system-baseline",
+      "intent",
+      "policy",
+      "sacl-0",
+      "sacl-1",
+      "sacl-2",
+      "sacl-3",
+    ]);
+    assert.ok(
+      calls.indexOf("fresh-open") < calls.indexOf("read-32") ||
+        ["open", "substitution"].includes(fault),
+    );
+    if (fault === "missing") {
+      assert.equal(capture.api.command_gate_bytes, 32);
+      assert.equal(capture.api.command_records, 0);
+      assert.equal(receipt.delivered, false);
+      assert.equal(receipt.query.complete, true);
+      assert.equal(receipt.query.records, 0);
+      assert.equal(receipt.query.candidates, 0);
+      assert.equal(receipt.query.readBytes, 32);
+      assert.match(result.cause.detail, /delivery-missing/u);
+    }
+    if (["logon", "time"].includes(fault)) {
+      assert.equal(receipt.delivered, true);
+      assert.equal(capture.api.command_gate_bytes, 32);
+      assert.equal(capture.api.command_records, 1);
+      assert.match(result.cause.detail, /join-rejected/u);
+    }
+    if (fault === "object") {
+      assert.equal(receipt.delivered, false);
+      assert.equal(capture.api.command_records, 1);
+      assert.match(result.cause.detail, /delivery-missing/u);
+    }
+    if (["open", "substitution"].includes(fault)) {
+      assert.equal(calls.includes("read-32"), false);
+      assert.match(
+        result.cause.detail,
+        fault === "open"
+          ? /command-gate-open.*win32=5/u
+          : /command-gate-identity/u,
+      );
+    }
+    assert.equal(capture.api.command_preflight_owned.gateRead, null);
+    assert.equal(capture.api.command_preflight_owned.impersonating, false);
+    if (fault !== "open")
+      assert.equal(capture.closed.includes("gate-access"), true);
+    capture.api.command_preflight_close(false);
+    assert.ok(
+      ["subscription", "bookmark", "notification"].every((handle) =>
+        capture.closed.includes(handle),
+      ),
+    );
+  }
+});
+
 test("actual failed broker reader retains admitted terminal capture and records a separate cleanup error", async () => {
   const source = await readFile(
       new URL(
@@ -5817,7 +6217,16 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
       const effects = {${source.slice(start, end)} }};
       return effects.retire(value, signal);
     })()`);
-  for (const fault of [null, "capture", "watcher", "restoration"]) {
+  for (const fault of [
+    null,
+    "capture",
+    "watcher",
+    "writer",
+    "restoration",
+    "restoration-barrier",
+    "reader-barrier",
+    "abandon",
+  ]) {
     const primary = Object.assign(new Error("coverage delivery absent"), {
         feasibilityCause: {
           code: "prerequisite-unavailable",
@@ -5874,16 +6283,20 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
           },
           finish: async (_signal, verify) => {
             calls.push("restore");
+            if (fault === "writer") throw cleanup;
             await verify();
             calls.push("remove");
             return { restored: true, fixturesRemoved: true };
           },
-          abandon: async () => calls.push("abandon"),
+          abandon: async () => {
+            calls.push("abandon");
+            if (fault === "abandon") throw cleanup;
+          },
         },
         observerVerifier: {
           finish: async () => {
             calls.push("watcher-barrier");
-            if (fault === "watcher") throw cleanup;
+            if (["watcher", "abandon"].includes(fault)) throw cleanup;
             return { retired: true };
           },
         },
@@ -5898,12 +6311,14 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
         restorationVerifier: {
           finish: async () => {
             calls.push("restoration-barrier");
+            if (fault === "restoration-barrier") throw cleanup;
             return { retired: true, exitCode: 0 };
           },
         },
         readerVerifier: {
           finish: async () => {
             calls.push("writer-barrier");
+            if (fault === "reader-barrier") throw cleanup;
             return { retired: true };
           },
         },
@@ -5944,14 +6359,25 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
       "watcher",
       "watcher-barrier",
     ]);
-    if (fault === "watcher") assert.equal(calls.includes("restore"), false);
-    else {
+    assert.equal(calls.includes("writer-barrier"), true);
+    assert.equal(calls.includes("restoration-barrier"), true);
+    if (["watcher", "abandon"].includes(fault)) {
+      assert.equal(calls.includes("restore"), false);
+      assert.equal(calls.includes("abandon"), true);
+      assert.equal(calls.includes("restoration-abandon"), true);
+    } else if (fault === "writer") {
+      assert.equal(calls.includes("restoration-abandon"), true);
+      assert.equal(calls.includes("remove"), false);
+    } else {
       assert.ok(calls.indexOf("restore") > calls.indexOf("watcher-barrier"));
       assert.ok(
         calls.indexOf("restoration-barrier") >
           calls.indexOf("restoration-read"),
       );
-      assert.equal(calls.includes("remove"), fault !== "restoration");
+      assert.equal(
+        calls.includes("remove"),
+        !["restoration", "restoration-barrier"].includes(fault),
+      );
     }
   }
 });

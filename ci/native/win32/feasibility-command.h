@@ -471,10 +471,11 @@ static void command_capture(DWORD timeout) {
   }
 }
 static void command_gate_read(void) {
-  /* Reopen the original held object under the exact queried token. The new
-   * access receives the installed SACL; a pre-installation handle cannot prove it. */
+  /* Request a fresh pathname access check against the installed SACL under the
+   * exact queried token. Keep the original handles held and reject a different
+   * object before I/O; only original subscription delivery can admit coverage. */
   win32_check(ImpersonateLoggedOnUser(command_broker_token),"command-gate-impersonate");command_preflight_owned.impersonating=TRUE;
-  command_preflight_owned.gateRead=ReOpenFile(command_files[3],GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,0);
+  command_preflight_owned.gateRead=CreateFileW(command_paths[3],GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
   DWORD error=command_preflight_owned.gateRead==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
   if(command_preflight_owned.gateRead==INVALID_HANDLE_VALUE){remember("command-gate-open","win32",error);failure(126);}
   char id[50],bytes[32],expected[33];DWORD count=0;fileid(command_preflight_owned.gateRead,id);

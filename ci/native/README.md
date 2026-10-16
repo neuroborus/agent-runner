@@ -2120,8 +2120,9 @@ only the original four held names, and unrelated rows consume the same limits.
 The existing held-object joins remain mandatory: XPath's case-sensitive string
 equality must not discard a native spelling those joins accept. Record, byte,
 token/logon, process-birth, successful-4663, access and acknowledged-time bounds
-remain mandatory. The original gate read still reopens the held file once under
-the queried token; no account or exclusion policy changes establish coverage.
+remain mandatory. The gate requests one fresh pathname open under the queried
+token and checks its file ID against the original held file before reading;
+no account or exclusion policy changes establish coverage.
 When its ten-second delivery control fails, a separate Security query uses only
 that original read interval and the remaining 4096-record/8-MiB capture bounds.
 It reports bounded enumeration/candidate counts, exact errors, completion state
@@ -2585,7 +2586,15 @@ that live broker's actual token, principal/logon and creation identity.
 must establish effective File System success after owned inclusion is installed.
 The query takes the actual held `HANDLE` with `TOKEN_QUERY`, not `HANDLE *`, and
 links with Advapi32; that existing contract is preserved.
-A bounded positive control reopens the original held gate under that exact token.
+A bounded positive control uses
+[CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
+with `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT` under that exact token.
+It requests a new pathname access check against the installed SACL instead of
+using `ReOpenFile` on an access grant acquired before installation. The original
+file and parent handles remain held; the opened file ID must match before its
+single 32-byte nonce read. Checked closure and impersonation reversion remain
+independent. A completed read without original subscription delivery still blocks;
+the empty original-interval diagnostic query identifies no more specific cause.
 The finite decoder additionally requires a delivered Security 4663 success with
 matching PID, principal/logon, read access and fresh acknowledged window, while
 independent before/after reads preserve the original file/DACL/bytes and token.
