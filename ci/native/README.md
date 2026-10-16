@@ -7771,6 +7771,19 @@ acknowledges setup. An administrator token is insufficient. The task adds no
 daemon, shell, UAC prompt or provider credential inheritance; the reader replaces
 its environment, and helper creation supplies only the fixed CI environment.
 
+The bridge retains the original `IRunningTask` GUID, state and engine PID.
+Independent admission enumerates `TASK_ENUM_HIDDEN` by exact registered path and
+retains the separate `GetInstances(0)` count. One original GUID must join the held
+helper birth through its live System engine or direct parent, with unchanged
+image, DACL and task digest. Zero, multiple or unjoined instances fail with bounded
+predicate facts; a matching digest alone supplies no launch authority.
+Rejected admission retains protected original receipts and fences work. A fresh
+verifier under the original deadline rechecks ownership before `X` exits the
+parked helper without plan loading or setup authorization. Independent process/Job
+retirement and exit zero precede `D` task removal, fresh absence reads and outer
+observer release. Interrupted recovery requires original bound births; exit 124
+never settles custody. Admission remains latched; hosted evidence remains required.
+
 Custody and observer task XML omit `LogonType`: the schema has no `ServiceAccount`
 value. `RegisterTask` separately retains `TASK_LOGON_SERVICE_ACCOUNT`, the
 LocalSystem SID `S-1-5-18` and an empty password. Installed principal/runlevel,

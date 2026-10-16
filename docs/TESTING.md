@@ -1153,6 +1153,10 @@ invoking a Windows tool. Its focused invocation is
 `node ci/native/win32/custody.test.js`; it performs no task registration,
 elevation, installation or native build. Matched Windows SDK compilation and
 actual LocalSystem/Task Scheduler/NTFS custody remain external CI requirements.
+It also covers hidden-task GUID/state/engine and birth joins, matching-digest
+zero-instance rejection, durable pre-setup abort receipts and fresh verification
+without clearing admission failure. Lost replies, live Jobs and exit 124 retain
+separate causes; independent task settlement precedes outer observer release.
 The same suite now executes the repository verifier and prerequisite recovery
 using raw framed native replies and filesystem bytes, without supplying verifier
 verdict callbacks. It covers original process/token and transferred-object joins,

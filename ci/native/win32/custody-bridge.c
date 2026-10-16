@@ -192,6 +192,14 @@ static DWORD WINAPI forward(void *unused) {
   }
   return 0;
 }
+static LONG task_active(ITaskService *service, BSTR name) {
+  IRunningTaskCollection *all;LONG count,found=0;wchar_t path[132];need(swprintf_s(path,132,L"\\%ls",name)>0);
+  need_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&all);need_hr(IRunningTaskCollection_get_Count,all,&count);need(count>=0&&count<=4096);
+  for(LONG i=1;i<=count;i++){VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;IRunningTask *running;BSTR actual;
+    need_hr(IRunningTaskCollection_get_Item,all,index,&running);need_hr(IRunningTask_get_Path,running,&actual);
+    if(!_wcsicmp(path,actual))found++;SysFreeString(actual);IRunningTask_Release(running);
+  }IRunningTaskCollection_Release(all);return found;
+}
 int wmain(int argc, wchar_t **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
   if (argc > 1 && !wcscmp(argv[1], L"--experiment-seal")) { require_build(); experiment_seal(argc, argv); return 0; }
@@ -244,6 +252,7 @@ int wmain(int argc, wchar_t **argv) {
   else need(connected || error == ERROR_PIPE_CONNECTED); CloseHandle(connect.hEvent);
   DWORD pid; need(GetNamedPipeClientProcessId(pipe, &pid)); HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | READ_CONTROL | SYNCHRONIZE, FALSE, pid);
   need(process && system_process(process)); wchar_t actual[4096]; DWORD length = 4096; char dacl[65];
+  HANDLE helperToken; need(OpenProcessToken(process,TOKEN_QUERY,&helperToken)); DWORD helperSession=process_session(process);
   need(QueryFullProcessImageNameW(process, 0, actual, &length) && !wcscmp(actual, argv[2])); security(process, SE_KERNEL_OBJECT, FALSE, dacl);
   /* Pipe token inspection refers to the last read message. Keep the parked
    * reader's first frame private until both native peer checks have passed. */
@@ -259,10 +268,21 @@ int wmain(int argc, wchar_t **argv) {
   wchar_t *client = token_sid(token); DWORD *session = token_info(token, TokenSessionId); SECURITY_IMPERSONATION_LEVEL *level = token_info(token, TokenImpersonationLevel);
   need(!wcscmp(client, L"S-1-5-18") && *session == 0 && *level == SecurityIdentification && RevertToSelf()); free(level); free(session); LocalFree(client); CloseHandle(token);
   if (observe_only) observer_record(argv[7], runner, process, hash, FALSE);
-  printf("{\"phase\":\"entry\",\"helper\":"); identity(process); printf(",\"bridge\":"); identity(GetCurrentProcess()); printf(",\"processDaclSha256\":\"%s\"}\n", dacl); fflush(stdout);
+  BSTR instance; TASK_STATE state; DWORD engine;
+  need_hr(IRunningTask_Refresh, running); need_hr(IRunningTask_get_InstanceGuid, running, &instance);
+  GUID instanceId; wchar_t canonical[40]; need(SUCCEEDED(CLSIDFromString(instance, &instanceId)) && StringFromGUID2(&instanceId, canonical, 40)); SysFreeString(instance);
+  need_hr(IRunningTask_get_State, running, &state); need_hr(IRunningTask_get_EnginePID, running, &engine);
+  printf("{\"phase\":\"entry\",\"helper\":"); retained_identity(process,helperToken,helperSession); printf(",\"bridge\":"); identity(GetCurrentProcess()); printf(",\"processDaclSha256\":\"%s\",\"instance\":{\"guid\":\"%ls\",\"state\":%u,\"enginePid\":%lu}}\n", dacl, canonical, (unsigned)state, engine); fflush(stdout);
   DWORD written; need(WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), initial, initialSize, &written, NULL) && written == initialSize);
   /* Private duplex relay; overlapped operations retain events through completion. */
-  HANDLE input = CreateThread(NULL, 0, forward, NULL, 0, NULL); need(input);
+  char release[2]; DWORD released=0;
+  while(released<2){need(ReadFile(GetStdHandle(STD_INPUT_HANDLE),release+released,2-released,&used,NULL)&&used);released+=used;}
+  need((release[0]=='P'||release[0]=='X')&&release[1]=='\n'); BOOL aborting=release[0]=='X';
+  OVERLAPPED releaseWrite={0};releaseWrite.hEvent=CreateEventW(NULL,TRUE,FALSE,NULL);need(releaseWrite.hEvent);
+  BOOL sent=WriteFile(pipe,release,2,&written,&releaseWrite);
+  if(!sent)need(GetLastError()==ERROR_IO_PENDING&&WaitForSingleObject(releaseWrite.hEvent,30000)==WAIT_OBJECT_0&&GetOverlappedResult(pipe,&releaseWrite,&written,FALSE));
+  need(written==2&&CloseHandle(releaseWrite.hEvent));
+  HANDLE input = aborting?NULL:CreateThread(NULL, 0, forward, NULL, 0, NULL); need(aborting||input);
   for (ULONGLONG total = initialSize;;) {
     BYTE bytes[65536]; OVERLAPPED read = {0}; read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(read.hEvent);
     BOOL ok = ReadFile(pipe, bytes, sizeof(bytes), &used, &read); error = GetLastError();
@@ -271,10 +291,11 @@ int wmain(int argc, wchar_t **argv) {
     total += used; DWORD written; need(used && total <= 2147483648ULL && WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, used, &written, NULL) && written == used);
   }
   need(WaitForSingleObject(process, 30000) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(process, &exit) && exit == 0);
-  CancelSynchronousIo(input); need(WaitForSingleObject(input, 30000) == WAIT_OBJECT_0 && CloseHandle(input));
+  if(input){CancelSynchronousIo(input); need(WaitForSingleObject(input, 30000) == WAIT_OBJECT_0 && CloseHandle(input));}
+  if(aborting){printf("{\"phase\":\"helper-retired\",\"exitCode\":%lu,\"helper\":",exit);retained_identity(process,helperToken,helperSession);puts("}");fflush(stdout);ack('D');}
   ULONGLONG until = GetTickCount64()+30000;
   for (;;) { IRunningTaskCollection *instances; LONG n; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &n); IRunningTaskCollection_Release(instances);
-    if (!n) break; need(GetTickCount64() < until); Sleep(10); }
+    if (!n&&!task_active(service,taskName)) break; need(GetTickCount64() < until); Sleep(10); }
   IRegisteredTask *current; need_hr(ITaskFolder_GetTask, folder, taskName, &current); char final[65]; task_check(current, argv[2], args, directory, runner); task_hash(current, final); need(!strcmp(hash, final));
   need_hr(ITaskFolder_DeleteTask, folder, taskName, 0);
   need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &old);
@@ -283,12 +304,12 @@ int wmain(int argc, wchar_t **argv) {
     need(WaitForSingleObject(process, 0) == WAIT_OBJECT_0);
     need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &old);
     observer_record(argv[7], runner, process, hash, TRUE);
-    printf(",\"helper\":"); identity(process); printf(",\"observations\":2");
+    printf(",\"helper\":"); retained_identity(process,helperToken,helperSession); printf(",\"observations\":2");
   }
   printf("}\n"); fflush(stdout);
   IRegisteredTask_Release(current); IRunningTask_Release(running); IRegisteredTask_Release(task); ITaskFolder_Release(folder); ITaskService_Release(service);
   SysFreeString(root); SysFreeString(taskName); SysFreeString(definition); VariantClear(&user); VariantClear(&securityValue); CoUninitialize(); LocalFree(runner); LocalFree(sd);
-  need(CloseHandle(process) && CloseHandle(pipe)); close_file(&image); close_file(&plan);
+  need(CloseHandle(helperToken) && CloseHandle(process) && CloseHandle(pipe)); close_file(&image); close_file(&plan);
   if (observe_only) close_file(&receipt_root);
   for (unsigned i = 0; i < catalog_count; i++) close_file(&catalogs[i]); return 0;
 }

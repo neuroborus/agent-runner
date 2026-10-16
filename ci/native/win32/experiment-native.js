@@ -393,6 +393,7 @@ export async function openWindowsExperimentNative(
     status: "POSSIBLE",
   });
   const reader = createWindowsCustodyReader(bootstrap, {
+    preSetupVerifier: () => files.preSetupVerifier(),
     ...Object.fromEntries(
       verifierMethods.map((name) => [
         name,
@@ -439,12 +440,18 @@ export async function openWindowsExperimentNative(
     close() {
       return (closing ??= (async () => {
         const settlement = await reader.close();
-        requireObservation(
+        if (!(
           settlement.status === "RETIRED" &&
-            settlement.independent &&
-            !settlement.emergencyCleanup &&
-            settlement.taskRemoved,
-        );
+          settlement.independent &&
+          !settlement.emergencyCleanup &&
+          settlement.taskRemoved
+        ))
+          throw Object.assign(
+            new Error("Windows experiment bootstrap retirement unverified", {
+              cause: settlement.cause,
+            }),
+            { primaryCause: settlement.primaryCause ?? null },
+          );
         files.releaseReader(reader);
         const observer = {
           nonce: files.verification.input.nonce,

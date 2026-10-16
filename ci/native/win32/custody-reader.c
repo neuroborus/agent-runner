@@ -503,7 +503,24 @@ static BOOL object_type(HANDLE handle, const wchar_t *expected) {
     (uintptr_t)type->Buffer <= (uintptr_t)bytes + used && type->Length <= (uintptr_t)bytes + used - (uintptr_t)type->Buffer);
   return type->Length == wcslen(expected)*2 && !wcsncmp(type->Buffer, expected, type->Length/2);
 }
-static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject) {
+/* GetInstances has no include-hidden flag. Enumerate the scheduler's hidden
+ * running tasks explicitly and select the exact registered path. */
+static LONG task_instances(ITaskService *service, BSTR name, IRunningTask *owned[32]) {
+  IRunningTaskCollection *all; LONG count, found=0; wchar_t path[132]; need(swprintf_s(path,132,L"\\%ls",name)>0);
+  need_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&all);need_hr(IRunningTaskCollection_get_Count,all,&count);need(count>=0&&count<=4096);
+  for(LONG i=1;i<=count;i++){VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;IRunningTask *running;BSTR actual;
+    need_hr(IRunningTaskCollection_get_Item,all,index,&running);need_hr(IRunningTask_get_Path,running,&actual);
+    if(!_wcsicmp(path,actual)){need(found<32);owned[found++]=running;}else IRunningTask_Release(running);SysFreeString(actual);
+  }
+  IRunningTaskCollection_Release(all);return found;
+}
+static DWORD task_parent(HANDLE process) {
+  HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);PROCESSENTRY32W entry={sizeof(entry)};DWORD parent=0;unsigned found=0;
+  need(snapshot!=INVALID_HANDLE_VALUE&&Process32FirstW(snapshot,&entry));
+  do{if(entry.th32ProcessID==GetProcessId(process)){parent=entry.th32ParentProcessID;found++;}}while(Process32NextW(snapshot,&entry));
+  need(GetLastError()==ERROR_NO_MORE_FILES&&found==1&&CloseHandle(snapshot));return parent;
+}
+static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject, BOOL details) {
   need((!strcmp(kind, "custody") || !strcmp(kind, "prerequisite")) && wcslen(nonceText) == 32 && wcsspn(nonceText, L"0123456789abcdef") == 32);
   ITaskService *service; ITaskFolder *folder; IRegisteredTask *task; VARIANT empty; VariantInit(&empty);
   need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
@@ -519,7 +536,8 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
     DWORD a = SysStringByteLen(xml), b = SysStringByteLen(sd); need(a && a <= 262144 && b && b <= 65536);
     BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, sd, b);
     char hash[65]; sum(bytes, a+b+8, hash); free(bytes); SysFreeString(xml); SysFreeString(sd);
-    IRunningTaskCollection *instances; LONG active; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &active); need(active >= 0 && active <= 32); IRunningTaskCollection_Release(instances);
+    IRunningTaskCollection *instances; LONG registered; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &registered); need(registered >= 0 && registered <= 32); IRunningTaskCollection_Release(instances);
+    IRunningTask *running[32];LONG active=task_instances(service,taskName,running);
     if (expected) {
       need(!strcmp(kind, "prerequisite") || !strcmp(kind, "custody")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
       for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
@@ -530,7 +548,21 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
       need_hr(ITaskFolder_DeleteTask, folder, taskName, 0); IRegisteredTask *again;
       need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &again); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
+    } else if(details){
+      need(subject<process_count&&WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);DWORD parent=task_parent(processes[subject]);
+      printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld,\"registeredInstances\":%ld,\"running\":[",hash,active,registered);
+      for(LONG i=0;i<active;i++){BSTR guid;GUID parsed;wchar_t canonical[40];TASK_STATE state;DWORD enginePid;
+        need_hr(IRunningTask_Refresh,running[i]);need_hr(IRunningTask_get_InstanceGuid,running[i],&guid);need(SUCCEEDED(CLSIDFromString(guid,&parsed))&&StringFromGUID2(&parsed,canonical,40));SysFreeString(guid);
+        need_hr(IRunningTask_get_State,running[i],&state);need_hr(IRunningTask_get_EnginePID,running[i],&enginePid);
+        HANDLE engine=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,enginePid);need(engine&&system_process(engine)&&WaitForSingleObject(engine,0)==WAIT_TIMEOUT);
+        FILETIME a,b,c,d,e,f,g,h;need(GetProcessTimes(engine,&a,&b,&c,&d)&&GetProcessTimes(processes[subject],&e,&f,&g,&h));
+        ULONGLONG engineBirth=((ULONGLONG)a.dwHighDateTime<<32)|a.dwLowDateTime,helperBirth=((ULONGLONG)e.dwHighDateTime<<32)|e.dwLowDateTime;
+        if(i)putchar(',');printf("{\"guid\":\"%ls\",\"state\":%u,\"engine\":",canonical,(unsigned)state);identity(engine);
+        printf(",\"helperLinked\":%s}",(enginePid==GetProcessId(processes[subject])||parent==enginePid)&&engineBirth<=helperBirth?"true":"false");need(CloseHandle(engine));
+      }
+      need(WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);printf("]}");
     } else printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld}", hash, active);
+    for(LONG i=0;i<active;i++)IRunningTask_Release(running[i]);
     IRegisteredTask_Release(task);
   }
   SysFreeString(taskName); ITaskFolder_Release(folder); ITaskService_Release(service);
@@ -2050,7 +2082,9 @@ static void verification(char **values, unsigned n) {
       verification_path(name, values[3], values[4]);
       BOOL stock = stock_entry(name, values[3]), bridge = bridge_entry(name, values[3]); need(verification_file_count < 128); struct held_file file = hold(name, FALSE, !(stock || bridge), GENERIC_READ); pin(&file, values[3]); char sig[65], dacl[65]; if (stock) stock_security(file.handle, dacl); else if (bridge) bridge_security(file.handle, dacl); signature(&file, values[4], sig);
       printf("{\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"pathHex\":\"", values[3], sig); hex((BYTE *)name, wcslen(name)*2); printf("\"}"); verification_files[verification_file_count++] = file;
-    } else if (!strcmp(values[0]+7, "task")) { need(n == 4); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, NULL, 0);
+    } else if (!strcmp(values[0]+7, "task")) { need(n == 4); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, NULL, 0, FALSE);
+    } else if (!strcmp(values[0]+7, "task-instance")) { need(n == 4); wchar_t name[64]; decode_bounded(values[2],name,64);verifier_task("custody",name,NULL,bounded_number(values[3],process_count-1),TRUE);
+    } else if (!strcmp(values[0]+7, "process-exit")) {need(n==3);unsigned slot=bounded_number(values[2],process_count-1);DWORD code;need(WaitForSingleObject(processes[slot],0)==WAIT_OBJECT_0&&GetExitCodeProcess(processes[slot],&code));printf("{\"exitCode\":%lu}",code);
     } else if (!strcmp(values[0]+7, "transfer")) { need(n == 4); verifier_transfer(bounded_number(values[2], 127), bounded_number(values[3], 127));
     } else if (!strcmp(values[0]+7, "job")) { need(n == 3); unsigned index = bounded_number(values[2], 127); need(index < process_count);
       if (verified_jobs[index]) job_read(verified_jobs[index]); else printf("{\"absent\":true}");
@@ -2063,7 +2097,7 @@ static void verification(char **values, unsigned n) {
       need(GetFileInformationByHandleEx(file->handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(after)));
       printf("{\"hex\":\""); hex(bytes, size); printf("\"}");
     } else if (!strcmp(values[0]+7, "task-remove")) {
-      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 127));
+      need(n == 6); wchar_t name[64]; decode_bounded(values[3], name, 64); verifier_task(values[2], name, values[4], bounded_number(values[5], 127), FALSE);
     } else if (!strcmp(values[0]+7, "job-open")) {
       need(n == 3 && job_count < 32); wchar_t name[96]; decode_bounded(values[2], name, 96); need(!wcsncmp(name, L"Local\\NativeProof-", 18) && wcslen(name) == 50 && wcsspn(name+18, L"0123456789abcdef") == 32);
       HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); wcscpy_s(verification_job_names[job_count], 96, name); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); putchar('}');
@@ -3617,7 +3651,9 @@ int wmain(int argc, wchar_t **argv) {
   HANDLE out; need(DuplicateHandle(GetCurrentProcess(), control, GetCurrentProcess(), &out, 0, FALSE, DUPLICATE_SAME_ACCESS));
   int fd = _open_osfhandle((intptr_t)out, _O_BINARY); need(fd >= 0 && _dup2(fd, _fileno(stdout)) == 0 && _close(fd) == 0);
   printf("{\"helper\":"); identity(GetCurrentProcess()); printf(",\"peer\":"); identity(peer); puts("}"); fflush(stdout); CloseHandle(peer);
-  char input[262144]; line(control, input, sizeof(input)); need(!strcmp(input, "P"));
+  char input[262144]; line(control, input, sizeof(input));
+  if(!strcmp(input,"X")){need(fflush(stdout)==0&&CloseHandle(control));CoUninitialize();return 0;}
+  need(!strcmp(input, "P"));
   char hash[65]; need(wcslen(argv[3]) == 64); for (unsigned i = 0; i < 64; i++) hash[i] = (char)argv[3][i]; hash[64] = 0;
   plan(argv[2], hash);
   if (preparation_only) {

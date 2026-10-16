@@ -46,6 +46,7 @@ import {
   jobObservation,
   decodePlan,
   windowsVerificationArguments,
+  windowsTaskInstance,
 } from "./custody-protocol.js";
 
 function transport(input) {
@@ -110,6 +111,9 @@ export function createWindowsCustodyReader(value, options = {}) {
     auditRestoring = false,
     cleanup = false,
     admitted = false,
+    parked,
+    setupAuthorized = false,
+    abortStarted = false,
     packageBound = false,
     restoration;
   const held = new Map(),
@@ -202,7 +206,8 @@ export function createWindowsCustodyReader(value, options = {}) {
       nativeException("windows-custody-verification", error);
       failed = true;
       firstCause ??= error;
-      owner?.close();
+      if (name !== "verifyAdmission" || !parked || setupAuthorized)
+        owner?.close();
       throw error;
     }
   };
@@ -509,7 +514,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(
         started &&
           owner &&
-          !failed &&
+          (!failed || (parked && !setupAuthorized)) &&
           !closing &&
           !opening &&
           (!cleanup || signal === finish) &&
@@ -653,7 +658,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           () => {
             if (!admitted) {
               failed = true;
-              owner.close();
+              if (!parked || setupAuthorized) owner.close();
             }
           },
           { once: true },
@@ -684,7 +689,13 @@ export function createWindowsCustodyReader(value, options = {}) {
         requireWindows(!signal?.aborted && !options.admissionClosed?.());
         await owner.send("B");
         const entry = await owner.receive();
-        closed(entry, ["phase", "helper", "bridge", "processDaclSha256"]);
+        closed(entry, [
+          "phase",
+          "helper",
+          "bridge",
+          "processDaclSha256",
+          "instance",
+        ]);
         helper = systemIdentity(entry.helper);
         requireWindows(
           entry.phase === "entry" &&
@@ -697,6 +708,15 @@ export function createWindowsCustodyReader(value, options = {}) {
           sameWindowsIdentity(native.helper, helper) &&
             sameWindowsIdentity(native.peer, bridge),
         );
+        const original = {
+          helper,
+          bridge,
+          taskSha256,
+          processDaclSha256: entry.processDaclSha256,
+          instance: windowsTaskInstance(entry.instance),
+        };
+        await save("task-parked", original);
+        parked = structuredClone(original);
         const admission = await verify(
           "verifyAdmission",
           {
@@ -705,6 +725,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             bridge,
             taskSha256,
             processDaclSha256: entry.processDaclSha256,
+            instance: parked.instance,
           },
           { signal },
         );
@@ -727,6 +748,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           nativeEventSha256: admission.nativeEventSha256,
         });
         requireWindows(!signal?.aborted);
+        setupAuthorized = true;
         await owner.send("P\n");
         const setup = await owner.receive();
         closed(setup, ["candidateSha", "nonce", "entries"]);
@@ -745,17 +767,20 @@ export function createWindowsCustodyReader(value, options = {}) {
         };
       } catch (error) {
         failed = true;
-        owner?.close();
+        firstCause ??= error;
         try {
           await save("uncertain", {
             helper: helper ?? null,
             verifier: verifier ?? null,
             taskSha256: taskSha256 ?? null,
+            bridge: bridge ?? null,
+            parked: parked ?? null,
           });
         } catch (diagnosticError) {
           nativeException("win32/custody", diagnosticError);
           // The persisted intent remains possible; preserve the first failure.
         }
+        if (!parked || setupAuthorized) owner?.close();
         throw error;
       }
     },
@@ -2341,6 +2366,89 @@ export function createWindowsCustodyReader(value, options = {}) {
     async close() {
       try {
         await serial;
+        if (failed && parked && !setupAuthorized) {
+          requireWindows(
+            !abortStarted && typeof options.preSetupVerifier === "function",
+          );
+          abortStarted = true;
+          retiring = true;
+          const fresh = await options.preSetupVerifier();
+          await fresh.verifyBootstrap(input);
+          const bound = await fresh.verifyPreSetup({ input, ...parked });
+          requireWindows(
+            bound.independent === true &&
+              sameWindowsIdentity(bound.helper, helper) &&
+              systemIdentity(bound.verifier).pid !== helper.pid &&
+              hash(bound.nativeEventSha256),
+          );
+          await save("pre-setup-bound", {
+            ...parked,
+            verifier: systemIdentity(bound.verifier),
+            nativeEventSha256: bound.nativeEventSha256,
+          });
+          await save("pre-setup-abort-possible", parked);
+          await owner.send("X\n");
+          const stopped = await owner.receive();
+          closed(stopped, ["phase", "exitCode", "helper"]);
+          requireWindows(
+            stopped.phase === "helper-retired" &&
+              stopped.exitCode === 0 &&
+              sameWindowsIdentity(stopped.helper, helper),
+          );
+          const proof = await fresh.verifyPreSetupRetirement({ input, helper });
+          requireWindows(
+            retired(proof) &&
+              proof.noLiveMembers === true &&
+              sameWindowsIdentity(proof.helper, helper) &&
+              sameWindowsIdentity(
+                systemIdentity(proof.verifier),
+                bound.verifier,
+              ),
+          );
+          await save("pre-setup-helper-retired", {
+            ...parked,
+            nativeEventSha256: proof.nativeEventSha256,
+          });
+          await owner.send("D");
+          const task = await owner.receive();
+          closed(task, ["phase", "taskSha256", "taskRemoved", "helperRetired"]);
+          requireWindows(
+            task.phase === "retired" &&
+              task.taskSha256 === taskSha256 &&
+              task.taskRemoved === true &&
+              task.helperRetired === true,
+          );
+          const exit = await owner.completion;
+          requireWindows(exit.code === 0 && exit.signal === null);
+          const final = await fresh.verifyTaskRemoval({
+            input,
+            helper,
+            taskSha256,
+            task,
+          });
+          requireWindows(
+            retired(final) &&
+              final.taskRemoved === true &&
+              sameWindowsIdentity(final.helper, helper) &&
+              sameWindowsIdentity(
+                systemIdentity(final.verifier),
+                bound.verifier,
+              ),
+          );
+          await save("retired", {
+            ...parked,
+            nativeEventSha256: final.nativeEventSha256,
+            preSetup: true,
+          });
+          owner.settle?.();
+          closing = true;
+          return {
+            ...final,
+            bridge: structuredClone(bridge),
+            closed: true,
+            preSetup: true,
+          };
+        }
         guard();
         requireWindows(
           children.size === 0 && !opening && !auditOwned && !auditRestoring,
@@ -2408,17 +2516,22 @@ export function createWindowsCustodyReader(value, options = {}) {
       } catch (cause) {
         failed = true;
         owner?.close();
-        await save("retained", {
-          helper: helper ?? null,
-          verifier: verifier ?? null,
-          taskSha256: taskSha256 ?? null,
-        });
+        try {
+          await save("retained", {
+            helper: helper ?? null,
+            verifier: verifier ?? null,
+            taskSha256: taskSha256 ?? null,
+          });
+        } catch (diagnosticError) {
+          nativeException("win32/custody", diagnosticError);
+        }
         return {
           status: "RETAINED",
           independent: false,
           closed: false,
           emergencyCleanup: false,
           cause,
+          primaryCause: firstCause ?? null,
         };
       }
     },

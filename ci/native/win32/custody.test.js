@@ -33,6 +33,11 @@ const identity = (pid, userSid = "S-1-5-18") => ({
   creationTime: String(10000 + pid),
 });
 const id = (number) => `0000000000000001:${String(number).padStart(32, "0")}`;
+const instance = {
+  guid: "{11111111-2222-3333-4444-555555555555}",
+  state: 4,
+  enginePid: 20,
+};
 const hex = (text) => Buffer.from(text, "utf16le").toString("hex");
 function executable() {
   const bytes = Buffer.alloc(512),
@@ -297,7 +302,13 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
       }
       if (line === "B") {
         frames.push(
-          { phase: "entry", helper, bridge, processDaclSha256: hash },
+          {
+            phase: "entry",
+            helper,
+            bridge,
+            processDaclSha256: hash,
+            instance: { ...instance, enginePid: helper.pid },
+          },
           { helper, peer: bridge },
         );
         return;
@@ -491,6 +502,7 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
     owner,
     events,
     records,
+    frames,
     entries,
     bytes,
     file,
@@ -704,9 +716,9 @@ test("Windows admission failure survives an unsuccessful uncertainty receipt", a
   };
   const reader = f.reader();
   await assert.rejects(reader.start(), (error) => error === failure);
-  assert.equal(f.records.at(-1).phase, "task-run-possible");
+  assert.equal(f.records.at(-1).phase, "task-parked");
   assert.equal(f.records.at(-1).custody, "POSSIBLE");
-  assert.ok(f.events.includes("fault"));
+  assert.ok(!f.events.includes("fault"));
   assert.equal((await reader.close()).status, "RETAINED");
 });
 
@@ -1688,6 +1700,40 @@ function verificationFixture(f = fixture()) {
         state.absent || state.removedTasks.has(args[1])
           ? { absent: true }
           : { absent: false, sha256: hash, instances: state.instances };
+    else if (name === "task-instance")
+      value = {
+        absent: false,
+        sha256: hash,
+        instances: state.instances,
+        registeredInstances: 0,
+        running:
+          state.instances === 0
+            ? []
+            : Array.from({ length: state.instances }, () => ({
+                guid: instance.guid,
+                state: 4,
+                engine: f.helper,
+                helperLinked: true,
+              })),
+      };
+    else if (name === "process-exit") value = { exitCode: state.exitCode ?? 0 };
+    else if (name === "recovery-jobs")
+      value = {
+        nonce: args[1],
+        identity: subjects[Number(args[0])].identity,
+        jobs: Array.from({ length: 128 }, (_, i) =>
+          i === 0 && state.recoveryMembers
+            ? {
+                daclSha256: hash,
+                limitFlags: 0x2008,
+                processLimit: 32,
+                uiRestrictions: 255,
+                members: state.recoveryMembers,
+              }
+            : { absent: true },
+        ),
+        compilerJob: { absent: true },
+      };
     else if (name === "transfer") {
       transferred.add(Number(args[0]));
       value = {
@@ -1760,6 +1806,7 @@ function verificationFixture(f = fixture()) {
     bridge: identity(10, runnerSid),
     taskSha256: hash,
     processDaclSha256: hash,
+    instance: { ...instance, enginePid: f.helper.pid },
   };
   const transfer = {
     kind: "file",
@@ -1876,6 +1923,264 @@ test("Windows verifier rejects reused births, changed task identity and malforme
       (error) => error === first,
     );
     assert.equal(k.events.length, count);
+  }
+});
+
+test("Windows admission joins the original scheduler instance, including hidden tasks, and diagnoses each rejected predicate", async () => {
+  for (const fault of [
+    null,
+    "registered-one",
+    "zero",
+    "multiple",
+    "registered-multiple",
+    "guid",
+    "state",
+    "engine",
+    "helper",
+  ]) {
+    const k = verificationFixture();
+    if (fault === "zero") k.state.instances = 0;
+    if (fault === "multiple") k.state.instances = 2;
+    k.state.damage = (operation, frame) => {
+      if (operation === "verify-task-instance" && frame.value.running[0]) {
+        const row = frame.value.running[0];
+        if (fault === "registered-one") frame.value.registeredInstances = 1;
+        if (fault === "registered-multiple")
+          frame.value.registeredInstances = 2;
+        if (fault === "guid")
+          row.guid = "{22222222-2222-3333-4444-555555555555}";
+        if (fault === "state") row.state = 2;
+        if (fault === "engine") row.engine.pid = 2048;
+        if (fault === "helper") row.helperLinked = false;
+      }
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    await k.verifier.verifyBootstrap(k.f.input);
+    if (!fault || fault === "registered-one")
+      assert.equal(
+        (await k.verifier.verifyAdmission(k.admission)).taskSha256,
+        hash,
+      );
+    else
+      await assert.rejects(k.verifier.verifyAdmission(k.admission), (error) => {
+        assert.equal(error.admission.expectedDigest, hash);
+        assert.equal(error.admission.actualDigest, hash);
+        assert.equal(
+          error.admission.registeredInstances,
+          fault === "registered-multiple" ? 2 : 0,
+        );
+        const predicate = {
+          zero: "unique",
+          multiple: "unique",
+          "registered-multiple": "unique",
+          guid: "original",
+          state: "state",
+          engine: "engine",
+          helper: "helper",
+        }[fault];
+        assert.equal(error.admission.predicates[predicate], false);
+        return true;
+      });
+  }
+});
+
+test("Windows rejected admission aborts only the original parked helper before unchanged task removal", async () => {
+  for (const fault of [
+    null,
+    "exit124",
+    "job",
+    "lost-abort",
+    "removed-reply",
+    "retained-receipt",
+  ]) {
+    const f = fixture(),
+      k = verificationFixture(f),
+      primary = new Error("admission pending"),
+      cleanup = new Error("cleanup interrupted");
+    k.state.instances = 0;
+    f.options.verifyAdmission = async (value) => {
+      await k.verifier.verifyBootstrap(f.input);
+      try {
+        return await k.verifier.verifyAdmission(value);
+      } catch (error) {
+        primary.cause = error;
+        throw primary;
+      }
+    };
+    f.options.preSetupVerifier = async () => {
+      await assert.rejects(
+        k.verifier.verifyAdmission(k.admission),
+        (error) => error === primary.cause,
+      );
+      return createWindowsCustodyVerifier(k.observer, { exchange: k.exchange });
+    };
+    const send = f.owner.send;
+    f.owner.send = async (line) => {
+      if (line === "X\n") {
+        f.events.push("X");
+        assert.ok(
+          f.records.some((record) => record.phase === "pre-setup-bound"),
+        );
+        k.states.get(f.helper.pid).retired = true;
+        if (fault === "exit124") k.state.exitCode = 124;
+        if (fault === "job") k.state.recoveryMembers = [f.fileHelper];
+        if (["lost-abort", "retained-receipt"].includes(fault)) throw cleanup;
+        f.frames.push({
+          phase: "helper-retired",
+          helper: f.helper,
+          exitCode: 0,
+        });
+      } else if (line === "D") {
+        f.events.push("D");
+        assert.ok(
+          f.records.some(
+            (record) => record.phase === "pre-setup-helper-retired",
+          ),
+        );
+        k.states.get(10).retired = true;
+        k.state.absent = true;
+        if (fault === "removed-reply") throw cleanup;
+        f.frames.push({
+          phase: "retired",
+          taskSha256: hash,
+          taskRemoved: true,
+          helperRetired: true,
+        });
+      } else return send(line);
+    };
+    const reader = f.reader();
+    await assert.rejects(reader.start(), (error) => error === primary);
+    const parked = f.records.find((record) => record.phase === "task-parked");
+    assert.deepEqual(parked.helper, f.helper);
+    assert.equal(parked.taskSha256, hash);
+    assert.equal(f.events.includes("fault"), false);
+    if (fault === "retained-receipt") {
+      const persist = f.options.persist;
+      f.options.persist = async (record) => {
+        if (record.phase === "retained")
+          throw new Error("Receipt writer unavailable");
+        return persist(record);
+      };
+    }
+    const settled = await reader.close();
+    assert.equal(settled.status, fault ? "RETAINED" : "RETIRED");
+    assert.equal(f.events.includes("P"), false);
+    if (fault) {
+      assert.equal(settled.primaryCause, primary);
+      assert.notEqual(settled.cause, primary);
+      if (["lost-abort", "removed-reply", "retained-receipt"].includes(fault))
+        assert.equal(settled.cause, cleanup);
+      assert.equal(f.records.at(-1).custody, "POSSIBLE");
+      assert.equal(f.events.includes("D"), fault === "removed-reply");
+    } else {
+      assert.equal(settled.independent, true);
+      assert.equal(settled.emergencyCleanup, false);
+      assert.equal(settled.taskRemoved, true);
+      const exit = k.events.findIndex(
+        (event) => event.operation === "verify-process-exit",
+      );
+      assert.ok(exit >= 0);
+    }
+    await assert.rejects(reader.start());
+  }
+});
+
+test("Windows bridge abort acknowledgement uses the held identity after process retirement", async () => {
+  const source = await readFile(
+      new URL("./custody-bridge.c", import.meta.url),
+      "utf8",
+    ),
+    body = /if\(aborting\)\{([^\n]+)\}/u.exec(source)[1],
+    process = { retired: true },
+    helperToken = {},
+    calls = [];
+  new Script(body).runInNewContext({
+    process,
+    helperToken,
+    helperSession: 0,
+    exit: 0,
+    stdout: {},
+    printf() {},
+    puts() {},
+    fflush() {},
+    identity() {
+      assert.fail(
+        "Retired processes cannot supply a fresh token/session observation",
+      );
+    },
+    retained_identity(actual, token, session) {
+      assert.equal(actual, process);
+      assert.equal(token, helperToken);
+      assert.equal(session, 0);
+      calls.push("identity");
+    },
+    ack(value) {
+      assert.equal(value, "D");
+      calls.push("remove");
+    },
+  });
+  assert.deepEqual(calls, ["identity", "remove"]);
+});
+
+test("actual scheduler query explicitly includes hidden instances and selects the exact task path", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static LONG task_instances\([^\n]*\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "IRunningTaskCollection *all; LONG count, found=0; wchar_t path[132];",
+        "let all,count,found=0,path;",
+      )
+      .replace(
+        /swprintf_s\(path,132,L"[^\n]*?",name\)/u,
+        "format(value=>path=value,name)",
+      )
+      .replace(/\bLONG\b/gu, "let")
+      .replace(
+        "VARIANT index;VariantInit(&index);",
+        "let index={};VariantInit(index);",
+      )
+      .replace("IRunningTask *running;BSTR actual;", "let running,actual;")
+      .replace(/(?<!&)&(all|count|running|actual)\b/gu, "value=>$1=value");
+  for (const paths of [[], ["\\other"], ["\\owned"], ["\\owned", "\\owned"]]) {
+    const owned = [],
+      released = [],
+      api = {
+        service: {},
+        name: "owned",
+        owned,
+        TASK_ENUM_HIDDEN: 1,
+        VT_I4: 3,
+        format: (out, name) => {
+          out("\\" + name);
+          return 1;
+        },
+        need: assert.ok,
+        need_hr: (fn, ...args) => fn(...args),
+        VariantInit: () => {},
+        ITaskService_GetRunningTasks: (_service, flags, out) => {
+          assert.equal(flags, 1);
+          out(paths);
+        },
+        IRunningTaskCollection_get_Count: (all, out) => out(all.length),
+        IRunningTaskCollection_get_Item: (all, index, out) =>
+          out(all[index.lVal - 1]),
+        IRunningTask_get_Path: (task, out) => out(task),
+        _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+        IRunningTask_Release: (task) => released.push(task),
+        SysFreeString: () => {},
+        IRunningTaskCollection_Release: () => {},
+      };
+    assert.equal(
+      new Script(`(function(){${body}})()`).runInNewContext(api),
+      paths.filter((p) => p === "\\owned").length,
+    );
+    assert.deepEqual(
+      released,
+      paths.filter((p) => p !== "\\owned"),
+    );
   }
 });
 

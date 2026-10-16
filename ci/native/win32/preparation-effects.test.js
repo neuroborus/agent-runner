@@ -47,6 +47,7 @@ import {
   observeWindowsRelease,
   runWindowsFileCase,
   runWindowsGitCase,
+  createWindowsCustodyReader,
 } from "./index.js";
 import {
   runWindowsOwnershipCase,
@@ -65,6 +66,7 @@ import {
 import { createWindowsOperationReaders } from "./operation-readers.js";
 import { installPackageNativeFixture } from "./package-native.fixture.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
+import { windowsPreparationOptions } from "./preparation.js";
 import {
   bootstrapWindowsExperiment,
   WINDOWS_EXPERIMENT_SOURCES,
@@ -2472,6 +2474,29 @@ function rawPreparation() {
       return { slot, process: actual };
     }
     if (operation === "verify-process") return retained[Number(args[0])];
+    if (operation === "verify-process-exit") {
+      assert.ok(retained[Number(args[0])].retired);
+      return { exitCode: f.preSetupExitCode ?? 0 };
+    }
+    if (operation === "verify-task-instance") {
+      const helper = retained[Number(args[1])].identity;
+      return {
+        absent: false,
+        sha256: hash,
+        instances: f.preSetupRejected ? 0 : 1,
+        registeredInstances: 0,
+        running: f.preSetupRejected
+          ? []
+          : [
+              {
+                guid: "{11111111-2222-3333-4444-555555555555}",
+                state: 4,
+                engine: helper,
+                helperLinked: true,
+              },
+            ],
+      };
+    }
     if (operation === "verify-compiler-policy") {
       const worker = retained[Number(args[0])].identity;
       return {
@@ -2938,9 +2963,33 @@ function rawPreparation() {
               ),
             );
           queue.push(
-            { phase: "entry", helper, bridge, processDaclSha256: hash },
+            {
+              phase: "entry",
+              helper,
+              bridge,
+              processDaclSha256: hash,
+              instance: {
+                guid: "{11111111-2222-3333-4444-555555555555}",
+                state: 4,
+                enginePid: helper.pid,
+              },
+            },
             { helper, peer: bridge },
           );
+        } else if (frame === "X\n") {
+          assert.ok(!observer);
+          actors.get(helper.pid).retired = true;
+          queue.push({ phase: "helper-retired", helper, exitCode: 0 });
+        } else if (frame === "D") {
+          assert.ok(actors.get(helper.pid).retired);
+          actors.get(bridge.pid).retired = true;
+          tasks.delete(declaration.nonce);
+          queue.push({
+            phase: "retired",
+            taskSha256: hash,
+            taskRemoved: true,
+            helperRetired: true,
+          });
         } else if (frame === "P\n")
           queue.push({
             candidateSha,
@@ -3787,6 +3836,84 @@ test("Windows fixed access entry excludes missing proof and independently settle
       );
   }
 });
+test("Windows preparation preserves its observer through rejected admission and a fresh pre-setup verifier", async () => {
+  for (const fault of [null, "unbound", "birth", "exit124"]) {
+    const f = rawPreparation(),
+      files = createWindowsPreparationFiles(f, f.options),
+      records = [],
+      reader = createWindowsCustodyReader(
+        f.manifest.windowsPreparation.bootstrap,
+        {
+          ...f.options.readerOptions,
+          read: async (file) => f.files.get(file),
+          verifyBootstrap: (...args) =>
+            files.verify("verifyBootstrap", ...args),
+          verifyAdmission: (...args) =>
+            files.verify("verifyAdmission", ...args),
+          preSetupVerifier: () => files.preSetupVerifier(),
+          persist: async (record) => records.push(record),
+        },
+      );
+    f.preSetupRejected = true;
+    files.retainReader(reader);
+    await assert.rejects(
+      reader.start(),
+      (error) => error.admission.predicates.unique === false,
+    );
+    assert.ok(records.some((record) => record.phase === "task-parked"));
+    assert.equal((await reader.close()).status, "RETIRED");
+    assert.ok(f.rawEvents.indexOf("X") < f.rawEvents.indexOf("D"));
+    assert.equal(f.rawEvents.filter((event) => event === "P").length, 1); // Outer observer only.
+    assert.ok(records.some((record) => record.phase === "pre-setup-bound"));
+    files.releaseReader(reader);
+    assert.equal((await files.settleFiles()).status, "RETIRED");
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
+    const plan = f.manifest.windowsPreparation;
+    f.files.set(
+      path.join(directory, "windows-bootstrap-0-intent.json"),
+      Buffer.from(
+        JSON.stringify({
+          candidateSha,
+          context: plan.bootstrap.context,
+          preparationSha256: observationDigest(plan),
+          status: "POSSIBLE",
+        }),
+      ),
+    );
+    for (const record of records) {
+      if (record.phase === "pre-setup-bound") {
+        if (fault === "unbound") record.phase = "uncertain";
+        if (fault === "birth") record.helper.creationTime = "99999";
+      }
+      f.files.set(
+        path.join(
+          directory,
+          `windows-bootstrap-0-custody-${record.sequence}.json`,
+        ),
+        Buffer.from(JSON.stringify(record)),
+      );
+    }
+    if (fault === "exit124") f.preSetupExitCode = 124;
+    const native = windowsPreparationOptions(f, f.options, new Map());
+    await native.readdir(directory);
+    const retained = [...f.files]
+        .filter(([file]) =>
+          /^windows-(?:files-|bootstrap-)/u.test(path.basename(file)),
+        )
+        .map(([file, bytes]) => ({
+          name: path.basename(file),
+          record: JSON.parse(bytes),
+        })),
+      recovery = native.recover(
+        { request: {}, records: retained, plan },
+        { signal: new AbortController().signal },
+      );
+    if (fault) await assert.rejects(recovery);
+    else assert.equal((await recovery).status, "RETIRED");
+    assert.equal((await native.settleFiles()).status, "RETIRED");
+  }
+});
+
 test("Windows fixed entry supplies build/file/verifier defaults through raw IPC and rereads preparation without another compiler", async () => {
   const f = rawPreparation(),
     preparationWork = new AbortController(),

@@ -182,6 +182,15 @@ export function windowsVerificationArguments(name, values) {
     case "task":
       valid = args.length === 2 && task();
       break;
+    case "task-instance":
+      valid =
+        args.length === 2 &&
+        /^[a-f0-9]{32}$/u.test(decode(args[0])) &&
+        slot(args[1]);
+      break;
+    case "process-exit":
+      valid = args.length === 1 && slot(args[0]);
+      break;
     case "task-remove":
       valid = args.length === 4 && task() && hash(args[2]) && slot(args[3]);
       break;
@@ -364,6 +373,17 @@ export function fileObservation(value, { stockLinks = false } = {}) {
       value.reparse === false,
   );
   return structuredClone(value);
+}
+export function windowsTaskInstance(value) {
+  closed(value, ["guid", "state", "enginePid"]);
+  requireWindows(
+    typeof value.guid === "string" &&
+      /^\{[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\}$/iu.test(value.guid) &&
+      value.guid.replace(/[{}-]/gu, "") !== "0".repeat(32) &&
+      integer(value.state, 4) &&
+      integer(value.enginePid, 0xffffffff),
+  );
+  return { ...value, guid: value.guid.toLowerCase() };
 }
 export function processObservation(value) {
   closed(value, [

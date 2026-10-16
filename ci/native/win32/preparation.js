@@ -851,6 +851,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
     async recover({ request, records, plan }, { signal }) {
       requireObservation(!signal?.aborted);
       const subjects = [],
+        preSetup = [],
         taskOwners = [],
         byName = new Map(records.map(({ name, record }) => [name, record]));
       requireObservation(byName.size === records.length);
@@ -1020,15 +1021,38 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         const admitted = custody.find(
             ({ record }) => record.phase === "admitted",
           )?.record,
+          bound = custody.find(
+            ({ record }) => record.phase === "pre-setup-bound",
+          )?.record,
+          parked = custody.find(
+            ({ record }) => record.phase === "task-parked",
+          )?.record,
           registered = custody.find(
             ({ record }) => record.phase === "task-run-possible",
           )?.record;
         requireObservation(
-          admitted && registered && hash(registered.taskSha256),
+          (admitted || bound) && registered && hash(registered.taskSha256),
         );
+        if (bound) {
+          requireObservation(
+            parked &&
+              hash(bound.nativeEventSha256) &&
+              sameWindowsIdentity(bound.helper, parked.helper) &&
+              (!admitted ||
+                sameWindowsIdentity(bound.helper, admitted.helper)) &&
+              sameWindowsIdentity(bound.bridge, parked.bridge) &&
+              sameWindowsIdentity(bound.bridge, registered.bridge) &&
+              bound.taskSha256 === registered.taskSha256 &&
+              bound.taskSha256 === parked.taskSha256 &&
+              bound.processDaclSha256 === parked.processDaclSha256 &&
+              observationDigest(bound.instance) ===
+                observationDigest(parked.instance),
+          );
+          preSetup.push(bound.helper);
+        }
         subjects.push(registered.bridge);
         taskOwners.push({ ...registered, nonce: plan.bootstrap.nonce });
-        subjects.push(admitted.helper);
+        subjects.push((admitted ?? bound).helper);
         const helpers = custody.filter(
           ({ record }) => record.phase === "helper-admitted",
         );
@@ -1120,6 +1144,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
               nonce: birth.nonce,
             }));
           }),
+        preSetup,
       );
       const tasks = [];
       for (const owner of taskOwners)

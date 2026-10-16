@@ -173,7 +173,13 @@ export function createWindowsPreparationFiles(input, options = {}) {
     await owner.send("B");
     const entry = await owner.receive(),
       peer = await owner.receive();
-    closed(entry, ["phase", "helper", "bridge", "processDaclSha256"]);
+    closed(entry, [
+      "phase",
+      "helper",
+      "bridge",
+      "processDaclSha256",
+      "instance",
+    ]);
     closed(peer, ["helper", "peer"]);
     identity = systemIdentity(entry.helper);
     requireObservation(
@@ -656,6 +662,14 @@ export function createWindowsPreparationFiles(input, options = {}) {
     },
     async verify(name, ...args) {
       return (await observer())[name](...args);
+    },
+    async preSetupVerifier() {
+      guard();
+      await ensure();
+      return createWindowsCustodyVerifier(
+        { verification: native },
+        { clock, maximumSubjects: 128, deadline },
+      );
     },
     async settleFiles() {
       if (!starting) return null;

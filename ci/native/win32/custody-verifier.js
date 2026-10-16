@@ -29,6 +29,7 @@ import {
   jobObservation,
   windowsVerificationArguments,
   WINDOWS_CUSTODY_DEADLINE_MS,
+  windowsTaskInstance,
 } from "./custody-protocol.js";
 
 const same = (left, right) =>
@@ -1072,6 +1073,36 @@ export function createWindowsCustodyVerifier(
       const actual = await observe(systemIdentity(value.helper)),
         installed = await task("custody", input.nonce),
         executable = await image(value.helper, input.reader);
+      const original = windowsTaskInstance(value.instance),
+        held = await retain(value.helper),
+        lifecycle = await call("task-instance", [
+          encode(input.nonce),
+          held.slot,
+        ]);
+      if (!lifecycle.absent) {
+        closed(lifecycle, [
+          "absent",
+          "sha256",
+          "instances",
+          "registeredInstances",
+          "running",
+        ]);
+        requireWindows(
+          hash(lifecycle.sha256) &&
+            integer(lifecycle.instances, 32) &&
+            integer(lifecycle.registeredInstances, 32),
+        );
+        dense(lifecycle.running, 32).forEach((row) => {
+          closed(row, ["guid", "state", "engine", "helperLinked"]);
+          windowsTaskInstance({
+            guid: row.guid,
+            state: row.state,
+            enginePid: systemIdentity(row.engine).pid,
+          });
+          requireWindows(typeof row.helperLinked === "boolean");
+        });
+        requireWindows(lifecycle.instances === lifecycle.running.length);
+      } else closed(lifecycle, ["absent"]);
       bridge = normalizeWindowsIdentity(value.bridge);
       requireWindows(
         bridge.userSid === input.runnerSid &&
@@ -1079,13 +1110,45 @@ export function createWindowsCustodyVerifier(
           !(await observe(bridge)).retired,
       );
       await image(bridge, input.bridge);
-      requireWindows(
-        !actual.retired &&
-          actual.processDaclSha256 === value.processDaclSha256 &&
-          installed.absent === false &&
-          installed.instances === 1 &&
-          installed.sha256 === value.taskSha256,
-      );
+      const running = lifecycle.running?.[0],
+        predicates = {
+          live: !actual.retired,
+          dacl: actual.processDaclSha256 === value.processDaclSha256,
+          present: installed.absent === false && lifecycle.absent === false,
+          digest:
+            installed.sha256 === value.taskSha256 &&
+            lifecycle.sha256 === value.taskSha256,
+          unique:
+            installed.instances === 1 &&
+            lifecycle.instances === 1 &&
+            lifecycle.registeredInstances <= 1,
+          original: running?.guid.toLowerCase() === original.guid,
+          state: original.state === 4 && running?.state === 4,
+          engine:
+            original.enginePid > 0 &&
+            running?.engine.pid === original.enginePid,
+          helper: running?.helperLinked === true,
+        };
+      if (!Object.values(predicates).every(Boolean))
+        throw Object.assign(new Error("Unverified Windows launch authority"), {
+          admission: {
+            predicates,
+            helper: actual.identity,
+            retired: actual.retired,
+            expectedDaclSha256: value.processDaclSha256,
+            actualDaclSha256: actual.processDaclSha256,
+            taskPresent: !installed.absent,
+            lifecyclePresent: !lifecycle.absent,
+            instances: installed.instances ?? 0,
+            lifecycleInstances: lifecycle.instances ?? 0,
+            lifecycleDigest: lifecycle.sha256 ?? null,
+            registeredInstances: lifecycle.registeredInstances ?? 0,
+            expectedDigest: value.taskSha256,
+            actualDigest: installed.sha256 ?? null,
+            original,
+            running: lifecycle.running ?? [],
+          },
+        });
       taskSha256 = installed.sha256;
       target = structuredClone(actual.identity);
       return {
@@ -1097,7 +1160,60 @@ export function createWindowsCustodyVerifier(
         imageSha256: executable.sha256,
         signatureSha256: executable.signatureSha256,
         processDaclSha256: actual.processDaclSha256,
-        nativeEventSha256: observationDigest({ actual, installed, executable }),
+        nativeEventSha256: observationDigest({
+          actual,
+          installed,
+          lifecycle,
+          original,
+          executable,
+        }),
+      };
+    },
+    async verifyPreSetup(value) {
+      requireWindows(input && same(value.input, input));
+      const actual = await observe(systemIdentity(value.helper)),
+        installed = await task("custody", input.nonce);
+      bridge = normalizeWindowsIdentity(value.bridge);
+      requireWindows(
+        !actual.retired &&
+          bridge.userSid === input.runnerSid &&
+          bridge.pid !== actual.identity.pid &&
+          !(await observe(bridge)).retired &&
+          actual.processDaclSha256 === value.processDaclSha256 &&
+          !installed.absent &&
+          installed.sha256 === value.taskSha256,
+      );
+      await image(value.helper, input.reader);
+      await image(bridge, input.bridge);
+      target = actual.identity;
+      taskSha256 = value.taskSha256;
+      return {
+        independent: true,
+        helper: target,
+        verifier: verifier(),
+        nativeEventSha256: observationDigest({ actual, installed, bridge }),
+      };
+    },
+    async verifyPreSetupRetirement(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          target &&
+          sameWindowsIdentity(target, value.helper),
+      );
+      const observations = await recoveryJobs([
+        { identity: target, nonce: input.nonce },
+      ]);
+      observations.push(await empty(target), await empty(target));
+      const held = await retain(target),
+        exit = await call("process-exit", [held.slot]);
+      closed(exit, ["exitCode"]);
+      requireWindows(exit.exitCode === 0);
+      return {
+        ...retired([...observations, exit]),
+        helper: target,
+        verifier: verifier(),
+        noLiveMembers: true,
       };
     },
     async verifyTransfer(value) {
@@ -1320,6 +1436,7 @@ export function createWindowsCustodyVerifier(
       identities,
       nonces = [],
       observerOwners = [],
+      preSetup = [],
     ) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
@@ -1348,9 +1465,33 @@ export function createWindowsCustodyVerifier(
           })),
         ),
         proof = await api.verifyCompleted(declaration, identities, nonces);
+      const exits = [];
+      if (dense(preSetup, 128).length) {
+        requireWindows(
+          preSetup.every((helper) =>
+            identities.some((identity) =>
+              sameWindowsIdentity(identity, helper),
+            ),
+          ),
+        );
+        for (const identity of identities) {
+          const held = await retain(identity),
+            exit = await call("process-exit", [held.slot]);
+          closed(exit, ["exitCode"]);
+          requireWindows(
+            integer(exit.exitCode) &&
+              exit.exitCode !== 124 &&
+              (!preSetup.some((helper) =>
+                sameWindowsIdentity(helper, identity),
+              ) ||
+                exit.exitCode === 0),
+          );
+          exits.push(exit);
+        }
+      }
       return {
         ...proof,
-        nativeEventSha256: observationDigest({ jobs, proof }),
+        nativeEventSha256: observationDigest({ jobs, proof, exits }),
       };
     },
     async recoverOwnedTask(nonce, sha256, identity) {
