@@ -581,6 +581,15 @@ coverage. Controlled interruption and partial-setup failures preserve first caus
 and separate cleanup uncertainty; restoration follows independent closed custody.
 Capture and watcher delivery errors still fail after verified safe restoration;
 missing retirement proof refuses restoration.
+Actual-source coverage-control and driver regressions use controlled clocks and
+native calls to distinguish a bounded no-event receipt from rejected logon/time/
+object attribution. Refusal diagnostics retain bounded typed facts and predicate
+counts without raw XML or paths. The actual broker reader preserves admitted
+terminal capture after a primary failure. Rejected-coverage cleanup exercises
+original domain retirement, capture closure, watcher barriers, independent exact
+restoration and fixture removal; the original refusal survives both successful
+settlement and separate cleanup failures. These tests add no native support claim
+or slow-tier assignment.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.

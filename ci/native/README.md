@@ -2525,6 +2525,15 @@ stop before mutation. Audit ACLs use their exact occupied size, including the
 SID's embedded first DWORD, so unused allocation bytes do not become authority.
 Configured bits, RPC acknowledgements and injected booleans supply no delivery
 proof. Unavailable effective coverage remains BLOCKED with zero Codex launches.
+The fixed `P` receipt reports whether its bounded native loop saw delivery,
+record counts before/after and elapsed time, joined to the surrounding decoder
+barriers. The independent matching event must fall inside those control record
+counts as well as the strict barrier times. Refusal
+retains the original broker birth, token logon, held object identity/name digest,
+barrier times/counts and at most eight typed event candidates with failed
+predicates. Missing delivery and rejected attribution have distinct fixed causes;
+neither establishes an absent API. Raw XML and object paths stay out of this
+diagnosis, and all original SID/logon/access/time comparisons remain mandatory.
 Fixed operation labels distinguish startup, cleanup admission, baseline reads,
 installation, effective reads, delivery and the final join. They preserve the
 original native or transport cause and report local admission failures even when
@@ -2532,6 +2541,13 @@ stderr is absent. The saved absent-output report establishes no particular API
 or provider-authorization cause. Fresh post-preparation Windows evidence remains
 necessary to identify any remaining refusal and prove broker coverage and all
 original model-free cases; portable coverage does not establish that acceptance.
+Rejected coverage fences provider work but does not itself fail independently
+verified cleanup. Retirement retains a separate failure latch, drains admitted
+terminal capture even after a primary refusal, and preserves actual stop errors.
+Empty original custody and unchanged sentinels precede observer/capture closure,
+watcher retirement, exact baseline restoration, independent restoration readback
+and fixture removal. Any failed cleanup predicate still withholds settlement;
+the primary refusal remains separate from cleanup causes.
 A filtered medium-integrity server is suspended inside an unnamed, non-breakaway
 Job at creation with an explicit inherited-handle list. Independent native reads
 join its actual image, creation time, user/session, token and Job membership.

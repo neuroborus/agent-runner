@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { PassThrough, Writable } from "node:stream";
 import { EventEmitter, once } from "node:events";
 import { readFile } from "node:fs/promises";
+import { createInterface } from "node:readline";
 import { Script } from "node:vm";
 import { win32 as windowsPath } from "node:path";
 import {
@@ -171,6 +172,13 @@ async function brokerCapture(prepared) {
     captureComplete: true,
     start: { sequence: 1, time: epoch.toString(), records: 0 },
     end: { sequence: 2, time: (epoch + 200n).toString(), records: 1 },
+    control: {
+      event: "P",
+      delivered: true,
+      startRecords: 0,
+      endRecords: 1,
+      elapsedMs: 1,
+    },
     events: decoder
       .state()
       .events.map((event) => ({ ...event, logonId: decoded.logonId })),
@@ -605,7 +613,11 @@ test("unavailable policy or missing/mismatched delivery blocks every Codex probe
         effects.coverage = async () => {
           const o = await capture();
           alter(o, key, value);
-          if (key === "events") o.end.records = 0;
+          if (key === "events") {
+            o.end.records = 0;
+            o.control.endRecords = 0;
+            o.control.delivered = false;
+          }
           return o;
         };
       }),
@@ -646,6 +658,13 @@ test("coverage binds the original administrative token and held gate, not an inc
     ["baseline.token.modifiedId", "00000000:00000004"],
     ["captureComplete", false],
     ["end.sequence", 3],
+    ["control", { event: "P" }],
+    ["control.startRecords", -1],
+    ["control.endRecords", 2],
+    ["control.elapsedMs", 150001],
+    ["events.0.index", 1],
+    ["start.time", "1".repeat(21)],
+    ["end.sequence", 257],
   ]) {
     const o = structuredClone(complete);
     alter(o, key, value);
@@ -3363,7 +3382,7 @@ async function brokerCloseBoundary() {
     start >= 0 && end > start && failureStart >= 0 && failureEnd > failureStart,
   );
   const boundary = new Script(`(() => {
-    let closed, failed, brokerDiagnosticFirst, bytes = 0, reading = Promise.resolve();
+    let closed, failed, brokerDiagnosticFirst, retiring = false, retirementFailure, bytes = 0, reading = Promise.resolve();
     const pending = new Map();
     ${source.slice(failureStart, failureEnd)}
     ${source.slice(start, end)}
@@ -4493,6 +4512,8 @@ test("actual coverage rejects stale baselines before installation and joins all 
     if (fault === "delivery") {
       capture.events = [];
       capture.end.records = 0;
+      capture.control.delivered = false;
+      capture.control.endRecords = 0;
     }
     let coverageAdmitted = false,
       barriers = 0;
@@ -4530,7 +4551,13 @@ test("actual coverage rejects stale baselines before installation and joins all 
       },
       call: async (key) => {
         calls.push(key);
-        return key === "B" ? (barriers++ ? capture.end : capture.start) : {};
+        return key === "B"
+          ? barriers++
+            ? capture.end
+            : capture.start
+          : key === "P"
+            ? capture.control
+            : {};
       },
       decoder: { state: () => ({ ready: true, events: capture.events }) },
       logons: new Map(
@@ -4565,10 +4592,10 @@ test("actual coverage rejects stale baselines before installation and joins all 
         } else
           assert.ok(
             error.feasibilityCause.detail.includes(
-              fault === "baseline"
-                ? "baseline-read"
-                : fault === "delivery"
-                  ? "coverage-join"
+              fault === "delivery"
+                ? "delivery-missing"
+                : fault === "baseline"
+                  ? "baseline-read"
                   : "installed-audit-read",
             ),
           );
@@ -5060,6 +5087,7 @@ test("a failed restoration writer settles both early readers without replacing t
     const context = {
       signal: new AbortController().signal,
       failed: undefined,
+      retirementFailure: undefined,
       fixturesRetired: false,
       nativeException: () => {},
       need: assert.ok,
@@ -5105,5 +5133,382 @@ test("a failed restoration writer settles both early readers without replacing t
       "writer-retired",
     ]);
     assert.equal(context.fixturesRetired, false);
+  }
+});
+
+test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    body = /static void command_coverage_control\(void\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(/\b(?:unsigned|ULONGLONG)\b/gu, "let")
+      .replace(
+        /printf\([^\n]*?,command_coverage_seen/u,
+        "emit(command_coverage_seen",
+      ),
+    program = new Script(body);
+  for (const fault of [
+    null,
+    "missing",
+    "logon",
+    "afterStart",
+    "object",
+    "controlWindow",
+  ]) {
+    const delivered = fault !== "missing";
+    let clock = 0,
+      reads = 0,
+      captures = 0,
+      receipt;
+    const api = {
+      TRUE: true,
+      FALSE: false,
+      command_records: 0,
+      GetTickCount64: () => clock,
+      command_gate_read: () => {
+        reads++;
+      },
+      command_bound: () => assert.ok(clock < 10000),
+      command_capture: (timeout) => {
+        assert.equal(timeout, 1);
+        captures++;
+        clock += 5000;
+        if (delivered) {
+          api.command_records++;
+          api.command_coverage_seen = true;
+        }
+      },
+      emit: (seen, startRecords, endRecords, elapsedMs) => {
+        receipt = {
+          event: "P",
+          delivered: seen === "true",
+          startRecords,
+          endRecords,
+          elapsedMs,
+        };
+      },
+    };
+    program.runInNewContext(api);
+    assert.equal(reads, 1);
+    assert.equal(captures, delivered ? 1 : 2);
+    assert.equal(api.command_probing, false);
+    const value = {
+        nonce: "a".repeat(32),
+        observer: identity,
+        gateFile: "C:\\fixture\\gate",
+      },
+      observed = await brokerCapture(value);
+    observed.control = receipt;
+    observed.start.unexpected = "untrusted-barrier-field";
+    observed.end.unexpected = "untrusted-barrier-field";
+    if (!delivered) {
+      observed.events = [];
+      observed.end.records = 0;
+    } else if (fault === "logon")
+      observed.events[0].logonId = "0000000000000002";
+    else if (fault === "afterStart")
+      observed.events[0].time = observed.start.time;
+    else if (fault === "object")
+      observed.events[0].raw.target = "C:\\fixture\\other";
+    else if (fault === "controlWindow") observed.events[0].index = 1;
+    if (!fault) {
+      assert.match(
+        windowsCommandBrokerCoverage(value, observed),
+        /^[a-f0-9]{64}$/u,
+      );
+      continue;
+    }
+    assert.throws(
+      () => windowsCommandBrokerCoverage(value, observed),
+      (error) => {
+        const diagnosis = error.brokerCoverage;
+        assert.equal(error.code, 78);
+        assert.equal(
+          diagnosis.reason,
+          delivered ? "join-rejected" : "delivery-missing",
+        );
+        assert.equal(diagnosis.control.elapsedMs, delivered ? 5000 : 10000);
+        assert.equal(diagnosis.joined, 0);
+        assert.equal(diagnosis.broker.creationTime, identity.creationTime);
+        assert.equal(
+          diagnosis.object.identity,
+          value.original.files[3].identity,
+        );
+        if (delivered) {
+          assert.equal(diagnosis.rejected[fault], 1);
+          assert.equal(diagnosis.candidates[0].accessMask, 1);
+          assert.equal(diagnosis.candidates[0].time, observed.events[0].time);
+          assert.equal(diagnosis.candidates[0].subjectSid, identity.userSid);
+        }
+        assert.ok(
+          error.feasibilityCause.detail.includes(`delivered=${delivered}`),
+        );
+        assert.equal(JSON.stringify(diagnosis).includes(value.gateFile), false);
+        assert.equal(
+          JSON.stringify(diagnosis).includes("untrusted-barrier-field"),
+          false,
+        );
+        return true;
+      },
+    );
+  }
+  const value = {
+      nonce: "a".repeat(32),
+      observer: identity,
+      gateFile: "C:\\fixture\\gate",
+    },
+    observed = await brokerCapture(value);
+  observed.after.effective.available = false;
+  observed.control.unexpected = "untrusted-control-field";
+  assert.throws(
+    () => windowsCommandBrokerCoverage(value, observed),
+    (error) => {
+      assert.equal(error.brokerCoverage, undefined);
+      assert.equal(error.message.includes("untrusted-control-field"), false);
+      return true;
+    },
+  );
+});
+
+test("actual failed broker reader retains admitted terminal capture and records a separate cleanup error", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    start = source.indexOf("reading = (async"),
+    end = source.indexOf("reading.catch(fail);", start),
+    failureStart = source.indexOf("const fail = (error) =>"),
+    failureEnd = source.indexOf("const call =", failureStart),
+    program = new Script(`(async () => {
+      let failed = primary, retiring = true, retirementFailure, reading, bytes = 0;
+      ${source.slice(failureStart, failureEnd)}
+      ${source.slice(start, end)}
+      await reading;
+      return { failed, retirementFailure };
+    })()`);
+  for (const admitted of [false, true])
+    for (const malformed of [false, true]) {
+      const stdout = new PassThrough(),
+        pushed = [],
+        settled = [],
+        primary = new Error("coverage or command rejected"),
+        pending = new Map(
+          ["D", "S"].map((event) => [
+            event,
+            {
+              resolve: () => settled.push(event),
+              reject: assert.fail,
+            },
+          ]),
+        ),
+        running = program.runInNewContext({
+          primary,
+          Buffer,
+          createInterface,
+          broker: { stdout },
+          pending,
+          closing: false,
+          coverageAdmitted: admitted,
+          nativeException: () => {},
+          need: assert.ok,
+          digest: sha,
+          windowsCommandAuditRead: () => ({
+            native: {},
+            logonId: "0000000000000001",
+          }),
+          xml: new Map(),
+          logons: new Map(),
+          decoder: { push: async (bytes) => pushed.push(bytes.readUInt32LE()) },
+        });
+      stdout.end(
+        [
+          {
+            event: "audit",
+            hex: malformed ? "invalid" : "00000000",
+            decoded: {},
+          },
+          {
+            event: "capture-end",
+            hex: "00000000",
+            decoded: {},
+            bytes: 4,
+            records: 1,
+          },
+          { event: "D" },
+          { event: "S" },
+        ]
+          .map((frame) => JSON.stringify(frame) + "\n")
+          .join(""),
+      );
+      const outcome = await running;
+      assert.equal(outcome.failed, primary);
+      assert.deepEqual(settled, ["D", "S"]);
+      assert.deepEqual(
+        pushed,
+        admitted ? (malformed ? [0xffffffff] : [4, 0xffffffff]) : [],
+      );
+      assert.equal(!!outcome.retirementFailure, admitted && malformed);
+    }
+});
+
+test("actual rejected-coverage retirement restores originals without rethrowing the primary and still rejects cleanup failures", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    start = source.indexOf("async retire(value, signal) {"),
+    end = source.lastIndexOf("\n    },\n  };"),
+    failureStart = source.indexOf("const fail = (error) =>"),
+    failureEnd = source.indexOf("const call =", failureStart),
+    program = new Script(`(async () => {
+      let failed = primary, retiring = false, retirementFailure, cleanupDeadline, closing = false;
+      ${source.slice(failureStart, failureEnd)}
+      const effects = {${source.slice(start, end)} }};
+      return effects.retire(value, signal);
+    })()`);
+  for (const fault of [null, "capture", "watcher", "restoration"]) {
+    const primary = Object.assign(new Error("coverage delivery absent"), {
+        feasibilityCause: {
+          code: "prerequisite-unavailable",
+          detail: "coverage delivery absent",
+        },
+      }),
+      cleanup = Object.assign(new Error(`${fault} refused`), {
+        feasibilityCleanup: {
+          code: "cleanup-unobserved",
+          detail: `${fault} refused`,
+        },
+      }),
+      calls = [],
+      file = { identity: "held", sha256: PIN, daclSha256: PIN },
+      value = { original: { files: [file, file, file, file] } },
+      context = {
+        primary,
+        value,
+        signal: new AbortController().signal,
+        performance: { now: () => 1 },
+        broker: {},
+        watcher: {
+          finish: async () => {
+            calls.push("watcher");
+            return { completeDomain: true, exitCode: 0 };
+          },
+        },
+        cleanupReady: true,
+        pending: new Map(),
+        prepared: value,
+        coverageAdmitted: false,
+        need: assert.ok,
+        digest: sha,
+        nativeException: () => {},
+        settleWindowsCommandCustody,
+        windowsCommandCleanupSnapshot,
+        closed: Promise.resolve({ code: 0, signal: null }),
+        reading: Promise.resolve(),
+        decoder: { finish: assert.fail }, // Rejected coverage cannot claim admitted capture.
+        preparation: { settle: async () => calls.push("preparation") },
+        call: async (key) => {
+          calls.push(key);
+          if (fault === "capture" && key === "S") throw cleanup;
+          return { captureRetired: key === "S" };
+        },
+        cleanupReader: {
+          inspect: async () => {
+            calls.push("domain");
+            return {
+              empty: true,
+              admissionsClosed: true,
+              files: value.original.files,
+            };
+          },
+          finish: async (_signal, verify) => {
+            calls.push("restore");
+            await verify();
+            calls.push("remove");
+            return { restored: true, fixturesRemoved: true };
+          },
+          abandon: async () => calls.push("abandon"),
+        },
+        observerVerifier: {
+          finish: async () => {
+            calls.push("watcher-barrier");
+            if (fault === "watcher") throw cleanup;
+            return { retired: true };
+          },
+        },
+        restorationReader: {
+          finish: async () => {
+            calls.push("restoration-read");
+            if (fault === "restoration") throw cleanup;
+            return { independent: true, restored: true };
+          },
+          abandon: async () => calls.push("restoration-abandon"),
+        },
+        restorationVerifier: {
+          finish: async () => {
+            calls.push("restoration-barrier");
+            return { retired: true, exitCode: 0 };
+          },
+        },
+        readerVerifier: {
+          finish: async () => {
+            calls.push("writer-barrier");
+            return { retired: true };
+          },
+        },
+      };
+    const f = fixture(({ effects }) => {
+      const prepare = effects.prepare,
+        coverage = effects.coverage;
+      effects.prepare = async (...args) => ({
+        ...(await prepare(...args)),
+        sentinelSha256: sha(JSON.stringify(file)),
+      });
+      effects.coverage = async () => {
+        await coverage();
+        throw primary;
+      };
+      effects.retire = () => program.runInNewContext(context);
+    });
+    const result = await f.run();
+    assert.equal(result.status, "BLOCKED");
+    assert.deepEqual(result.cause, primary.feasibilityCause);
+    assert.equal(
+      result.cleanup.status,
+      fault ? "UNCERTAIN" : "PASS",
+      JSON.stringify(result.cleanup),
+    );
+    if (fault)
+      assert.deepEqual(result.cleanup.cause, cleanup.feasibilityCleanup);
+    else {
+      assert.equal(result.cleanup.independent, true);
+      assert.equal(result.cleanup.emergency, false);
+    }
+    assert.deepEqual(f.requests, []);
+    assert.equal(primary.feasibilityCause.detail, "coverage delivery absent");
+    assert.deepEqual(calls.slice(0, 5), [
+      "D",
+      "domain",
+      "S",
+      "watcher",
+      "watcher-barrier",
+    ]);
+    if (fault === "watcher") assert.equal(calls.includes("restore"), false);
+    else {
+      assert.ok(calls.indexOf("restore") > calls.indexOf("watcher-barrier"));
+      assert.ok(
+        calls.indexOf("restoration-barrier") >
+          calls.indexOf("restoration-read"),
+      );
+      assert.equal(calls.includes("remove"), fault !== "restoration");
+    }
   }
 });

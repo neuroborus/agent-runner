@@ -137,7 +137,7 @@ function commandCoverageFailure(operation, error) {
 /** Interface/configuration claims cannot admit a broker. Join independent held
  * token/object reads to the actual decoder's fresh native success delivery. */
 export function windowsCommandBrokerCoverage(value, observation) {
-  const { baseline, before, after, start, end, events } = observation,
+  const { baseline, before, after, start, end, control, events } = observation,
     broker = normalizeWindowsIdentity(value.observer),
     original = value.original.files[3];
   commandAuditSnapshot(value, baseline.audit, false);
@@ -165,14 +165,68 @@ export function windowsCommandBrokerCoverage(value, observation) {
         (gate) => JSON.stringify(gate) === JSON.stringify(original),
       ),
   );
-  const unavailable = () => {
+  const unavailable = (reason, delivery = {}) => {
+    const detail = `Broker audit ${reason}; delivered=${control?.delivered === true}; records=${start.records}..${end.records}; joined=${delivery.joined ?? 0}/${events.length}.`;
     throw Object.assign(
       new Error("Effective broker audit coverage unavailable"),
       {
         code: 78,
+        feasibilityCause: { code: "prerequisite-unavailable", detail },
+        brokerCoverage: {
+          reason,
+          broker,
+          authenticationId: before.token.details.authenticationId,
+          object: {
+            identity: original.identity,
+            nameSha256: digest(value.gateFile.toLowerCase()),
+          },
+          start: {
+            sequence: start.sequence,
+            time: start.time,
+            records: start.records,
+          },
+          end: { sequence: end.sequence, time: end.time, records: end.records },
+          control: { ...control },
+          ...delivery,
+        },
       },
     );
   };
+  need(
+    observation.captureComplete === true &&
+      Number.isSafeInteger(start.sequence) &&
+      start.sequence > 0 &&
+      end.sequence <= 256 &&
+      end.sequence === start.sequence + 1 &&
+      [start.time, end.time].every(
+        (time) =>
+          typeof time === "string" &&
+          /^[1-9][0-9]{0,19}$/u.test(time) &&
+          BigInt(time) <= 0xffffffffffffffffn,
+      ) &&
+      BigInt(end.time) > BigInt(start.time) &&
+      BigInt(broker.creationTime) < BigInt(start.time) &&
+      Number.isSafeInteger(start.records) &&
+      start.records >= 0 &&
+      Number.isSafeInteger(end.records) &&
+      end.records <= 4096 &&
+      end.records - start.records === events.length,
+  );
+  need(
+    control?.event === "P" &&
+      Object.keys(control).sort().join() ===
+        "delivered,elapsedMs,endRecords,event,startRecords" &&
+      typeof control.delivered === "boolean" &&
+      Number.isSafeInteger(control.elapsedMs) &&
+      control.elapsedMs >= 0 &&
+      control.elapsedMs <= 150000 &&
+      Number.isSafeInteger(control.startRecords) &&
+      control.startRecords >= start.records &&
+      Number.isSafeInteger(control.endRecords) &&
+      control.endRecords >= control.startRecords &&
+      control.endRecords <= end.records &&
+      (!control.delivered || control.endRecords > control.startRecords),
+  );
   if (
     ![before, after].every(
       (v) =>
@@ -182,33 +236,49 @@ export function windowsCommandBrokerCoverage(value, observation) {
         v.effective.error === 0,
     )
   )
-    unavailable();
-  need(
-    observation.captureComplete === true &&
-      end.sequence === start.sequence + 1 &&
-      BigInt(end.time) > BigInt(start.time) &&
-      BigInt(broker.creationTime) < BigInt(start.time) &&
-      Number.isSafeInteger(start.records) &&
-      start.records >= 0 &&
-      Number.isSafeInteger(end.records) &&
-      end.records <= 4096 &&
-      end.records - start.records === events.length,
-  );
-  if (
-    !events.some(
-      ({ raw, time, logonId }) =>
-        raw.pid === broker.pid &&
-        raw.subjectSid === broker.userSid &&
-        logonId === before.token.details.authenticationId.replace(":", "") &&
-        raw.opcode === "4663" &&
-        raw.auditFailure === false &&
-        (raw.accessMask & 1) !== 0 &&
-        raw.target.toLowerCase() === value.gateFile.toLowerCase() &&
-        BigInt(time) > BigInt(start.time) &&
-        BigInt(time) < BigInt(end.time),
-    )
-  )
-    unavailable();
+    unavailable("effective-policy");
+  const predicates = events.map(({ raw, time, logonId, index }) => ({
+      process: raw.pid === broker.pid,
+      sid: raw.subjectSid === broker.userSid,
+      logon: logonId === before.token.details.authenticationId.replace(":", ""),
+      opcode: raw.opcode === "4663",
+      success: raw.auditFailure === false,
+      access: (raw.accessMask & 1) !== 0,
+      object: raw.target.toLowerCase() === value.gateFile.toLowerCase(),
+      afterStart: BigInt(time) > BigInt(start.time),
+      beforeEnd: BigInt(time) < BigInt(end.time),
+      controlWindow:
+        index >= control.startRecords && index < control.endRecords,
+    })),
+    joined = predicates.filter((checks) =>
+      Object.values(checks).every(Boolean),
+    ).length;
+  if (!control.delivered || !joined)
+    unavailable(control.delivered ? "join-rejected" : "delivery-missing", {
+      joined,
+      rejected: Object.fromEntries(
+        Object.keys(predicates[0] ?? {}).map((key) => [
+          key,
+          predicates.filter((checks) => !checks[key]).length,
+        ]),
+      ),
+      // Retain bounded typed facts, never raw XML or file paths.
+      candidates: events
+        .slice(0, 8)
+        .map(({ raw, time, logonId, recordId, index }, i) => ({
+          index,
+          recordId,
+          time,
+          pid: raw.pid,
+          subjectSid: raw.subjectSid,
+          logonId,
+          opcode: raw.opcode,
+          auditFailure: raw.auditFailure,
+          accessMask: raw.accessMask,
+          objectSha256: digest(raw.target.toLowerCase()),
+          predicates: predicates[i],
+        })),
+    });
   return digest(JSON.stringify(observation));
 }
 export function windowsCommandEnvironment(home, directory, systemRoot) {
@@ -1052,6 +1122,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     decoder,
     observationSignal,
     closing = false,
+    retiring = false,
+    retirementFailure,
     start,
     watcher,
     cleanupReader,
@@ -1083,6 +1155,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
   });
   const fail = (error) => {
     nativeException("windows-command-broker", error);
+    if (retiring) retirementFailure ??= error;
     failed ??= error;
     for (const [key, entry] of pending)
       if (!["D", "S"].includes(key)) {
@@ -1397,7 +1470,15 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               bytes += Buffer.byteLength(line);
               need(bytes <= 33554432);
               const frame = JSON.parse(line);
-              if (failed && !["D", "S"].includes(frame.event)) continue;
+              if (
+                failed &&
+                !["D", "S"].includes(frame.event) &&
+                !(
+                  coverageAdmitted &&
+                  ["audit", "capture-end"].includes(frame.event)
+                )
+              )
+                continue;
               if (frame.event === "audit") {
                 need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
                 const raw = Buffer.from(frame.hex, "hex"),
@@ -1607,7 +1688,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           );
         operation = "gate-delivery";
         const start = await call("B");
-        await call("P");
+        const control = await call("P");
         const end = await call("B"),
           after = await inspect(),
           state = decoder.state();
@@ -1617,6 +1698,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           after,
           start,
           end,
+          control,
           captureComplete: state.ready && !failed,
           events: state.events
             .slice(start.records, end.records)
@@ -1702,6 +1784,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     },
     observe: (value, spec, signal) => observation(spec, signal),
     async retire(value, signal) {
+      retiring = true;
       cleanupDeadline = performance.now() + 30000;
       value ??= prepared;
       if (!broker)
@@ -1786,7 +1869,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           );
         },
         async closeObserver() {
-          let stopped;
+          let stopped, failure;
           try {
             stopped = await call("S");
           } catch (error) {
@@ -1795,9 +1878,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               error,
             );
             fail(error);
+            failure = error;
           }
           const completion = await closed;
           await reading;
+          if (failure) throw failure;
           need(completion.code === 0 && !completion.signal);
           capture = coverageAdmitted ? decoder.finish() : { admitted: false };
           need(stopped?.captureRetired === true);
@@ -1953,7 +2038,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             restored?.restored === true &&
             restored?.fixturesRemoved === true &&
             reader?.retired === true;
-          if (failure || failed) throw failure ?? failed;
+          if (failure || retirementFailure) throw failure ?? retirementFailure;
           need(fixturesRetired);
           return { restored, reader };
         },

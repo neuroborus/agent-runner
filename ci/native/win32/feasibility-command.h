@@ -469,9 +469,11 @@ static void command_gate_read(void) {
   invariant(length==33&&!memcmp(bytes,expected,32),"command-gate-nonce");
 }
 static void command_coverage_control(void) {
-  command_probing=TRUE;command_coverage_seen=FALSE;command_gate_read();ULONGLONG started=GetTickCount64();
+  unsigned records=command_records;ULONGLONG started=GetTickCount64();
+  command_probing=TRUE;command_coverage_seen=FALSE;command_gate_read();
   while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture(1);}
-  command_probing=FALSE;puts("{\"event\":\"P\"}");
+  command_probing=FALSE;
+  printf("{\"event\":\"P\",\"delivered\":%s,\"startRecords\":%u,\"endRecords\":%u,\"elapsedMs\":%llu}\n",command_coverage_seen?"true":"false",records,command_records,GetTickCount64()-started);
 }
 static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }
