@@ -33,6 +33,9 @@
 static void need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
     DWORD error = GetLastError();
+#ifdef NATIVE_CUSTODY_FAILURE
+    NATIVE_CUSTODY_FAILURE(file, line);
+#endif
     fprintf(stderr, "native-windows-guard: file=%s line=%u last-error=%lu\n", file, line, error);
     fflush(stderr); ExitProcess(126);
   }

@@ -11,6 +11,7 @@
 #pragma comment(lib, "oleaut32.lib")
 #pragma comment(lib, "uuid.lib")
 static HANDLE pipe;
+static volatile LONG forward_stopping;
 static BOOL observe_only;
 static wchar_t receipt_directory[4096];
 static struct held_file receipt_root;
@@ -182,15 +183,86 @@ static void task_hash(IRegisteredTask *task, char out[65]) {
   BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, security, b);
   sum(bytes, a+b+8, out); free(bytes); SysFreeString(xml); SysFreeString(security);
 }
+static void relay_report(const char *operation, DWORD value, DWORD error) {
+  fprintf(stderr, "native-windows-custody: operation=%s value=%lu error=%lu\n", operation, value, error); fflush(stderr);
+}
+static void relay_check(const char *operation, BOOL ok, DWORD value, DWORD error) {
+  if (!ok) { relay_report(operation, value, error); ExitProcess(126); }
+}
+/* Cancel requests do not settle I/O. Keep the event, OVERLAPPED and caller's
+ * buffer alive until terminal I/O; an expired settlement fails the process
+ * without returning through live stack storage or acknowledging retirement. */
+static DWORD relay_wait(OVERLAPPED *operation, DWORD timeout, DWORD *used) {
+  ULONGLONG until = GetTickCount64()+timeout;
+  DWORD waited = WaitForSingleObject(operation->hEvent, timeout), waitError = waited == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+  if (waited != WAIT_OBJECT_0) {
+    BOOL cancelled = CancelIoEx(pipe, operation); DWORD cancelError = cancelled ? ERROR_SUCCESS : GetLastError();
+    ULONGLONG now = GetTickCount64(); DWORD remaining = now < until ? (DWORD)(until-now) : 0;
+    DWORD settled = WaitForSingleObject(operation->hEvent, remaining), settlementError = settled == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    relay_report("pipe-wait", waited, waitError); relay_report("pipe-cancel", cancelled, cancelError);
+    relay_check("pipe-settlement-wait", settled == WAIT_OBJECT_0, settled, settlementError);
+    BOOL completed = GetOverlappedResult(pipe, operation, used, FALSE); DWORD error = completed ? ERROR_SUCCESS : GetLastError();
+    relay_report("pipe-completion", completed, error);
+    relay_check("pipe-settlement", HasOverlappedIoCompleted(operation) && (completed || (error != ERROR_IO_INCOMPLETE && error != ERROR_IO_PENDING && error != ERROR_SUCCESS)), completed, error);
+    return waited == WAIT_FAILED ? (waitError ? waitError : ERROR_GEN_FAILURE) : ERROR_TIMEOUT;
+  }
+  BOOL completed = GetOverlappedResult(pipe, operation, used, FALSE); DWORD error = completed ? ERROR_SUCCESS : GetLastError();
+  relay_check("pipe-settlement", HasOverlappedIoCompleted(operation) && (completed || (error != ERROR_IO_INCOMPLETE && error != ERROR_IO_PENDING && error != ERROR_SUCCESS)), completed, error); return error;
+}
+static DWORD relay_io(BOOL writing, BYTE *bytes, DWORD size, DWORD *used, DWORD timeout) {
+  OVERLAPPED operation = {0}; operation.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+  DWORD error = operation.hEvent ? ERROR_SUCCESS : GetLastError(); relay_check("pipe-event", operation.hEvent != NULL, 0, error);
+  *used = 0; BOOL ok = writing ? WriteFile(pipe, bytes, size, used, &operation) : ReadFile(pipe, bytes, size, used, &operation);
+  error = ok ? ERROR_SUCCESS : GetLastError();
+  relay_check("pipe-result", ok || error != ERROR_SUCCESS, ok, error);
+  if (!ok && error == ERROR_IO_PENDING) error = relay_wait(&operation, timeout, used);
+  BOOL closed = CloseHandle(operation.hEvent); DWORD closeError = closed ? ERROR_SUCCESS : GetLastError();
+  if (error) relay_report(writing ? "pipe-write" : "pipe-read", *used, error);
+  relay_check("pipe-event-close", closed, 0, closeError); return error;
+}
 static DWORD WINAPI forward(void *unused) {
   (void)unused; BYTE bytes[65536]; DWORD used, written; ULONGLONG total = 0;
-  while (ReadFile(GetStdHandle(STD_INPUT_HANDLE), bytes, sizeof(bytes), &used, NULL) && used) {
-    total += used; OVERLAPPED write = {0}; write.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(write.hEvent && total <= 2147483648ULL);
-    BOOL ok = WriteFile(pipe, bytes, used, &written, &write);
-    if (!ok) need(GetLastError() == ERROR_IO_PENDING && WaitForSingleObject(write.hEvent, 30000) == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &write, &written, FALSE));
-    need(written == used && CloseHandle(write.hEvent));
+  while (!forward_stopping) {
+    used = 0;
+    BOOL read = ReadFile(GetStdHandle(STD_INPUT_HANDLE), bytes, sizeof(bytes), &used, NULL); DWORD error = read ? ERROR_SUCCESS : GetLastError();
+    if (!read || !used) {
+      if (forward_stopping && error == ERROR_OPERATION_ABORTED) return 0;
+      relay_report("input-read", used, error); return 126;
+    }
+    total += used; need(total <= 2147483648ULL); error = relay_io(TRUE, bytes, used, &written, 30000);
+    if (forward_stopping && (error == ERROR_OPERATION_ABORTED || error == ERROR_BROKEN_PIPE)) return 0;
+    if (error || written != used) { relay_report("input-write", written, error); return 126; }
   }
   return 0;
+}
+static DWORD relay_retire(HANDLE process, HANDLE input) {
+  DWORD waited = WaitForSingleObject(process, 30000), waitError = waited == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+  DWORD exit = STILL_ACTIVE; BOOL queried = GetExitCodeProcess(process, &exit); DWORD queryError = queried ? ERROR_SUCCESS : GetLastError();
+  relay_report("reader-wait", waited, waitError); relay_report("reader-exit-query", queried, queryError);
+  if (queried) relay_report("reader-exit", exit, ERROR_SUCCESS);
+  BOOL inputOk = TRUE;
+  if (input) {
+    InterlockedExchange(&forward_stopping, 1); ULONGLONG until = GetTickCount64()+30000; DWORD stopped = WAIT_TIMEOUT, stoppedError = ERROR_SUCCESS;
+    while (stopped == WAIT_TIMEOUT && GetTickCount64() < until) {
+      BOOL cancelled = CancelSynchronousIo(input); DWORD error = cancelled ? ERROR_SUCCESS : GetLastError();
+      if (!cancelled && error != ERROR_NOT_FOUND) { relay_report("input-cancel", cancelled, error); inputOk = FALSE; }
+      cancelled = CancelIoEx(pipe, NULL); error = cancelled ? ERROR_SUCCESS : GetLastError();
+      if (!cancelled && error != ERROR_NOT_FOUND) { relay_report("input-pipe-cancel", cancelled, error); inputOk = FALSE; }
+      ULONGLONG now = GetTickCount64(); DWORD remaining = now < until ? (DWORD)(until-now) : 0;
+      stopped = WaitForSingleObject(input, remaining < 10 ? remaining : 10); stoppedError = stopped == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+    }
+    if (stopped != WAIT_OBJECT_0 || GetTickCount64() >= until) { relay_report("input-wait", stopped, stoppedError); inputOk = FALSE; }
+    else {
+      DWORD code = STILL_ACTIVE; BOOL read = GetExitCodeThread(input, &code); DWORD error = read ? ERROR_SUCCESS : GetLastError();
+      if (!read || code) { relay_report("input-exit", code, error); inputOk = FALSE; }
+      BOOL closed = CloseHandle(input); error = closed ? ERROR_SUCCESS : GetLastError();
+      if (!closed) { relay_report("input-close", 0, error); inputOk = FALSE; }
+    }
+  }
+  relay_check("reader-wait", waited == WAIT_OBJECT_0, waited, waitError);
+  relay_check("reader-exit-query", queried, queried, queryError);
+  relay_check("reader-exit", exit == 0, exit, ERROR_SUCCESS);
+  relay_check("input-settlement", inputOk, 0, ERROR_SUCCESS); return exit;
 }
 static LONG task_active(ITaskService *service, BSTR name) {
   IRunningTaskCollection *all;LONG count,found=0;wchar_t path[132];need(swprintf_s(path,132,L"\\%ls",name)>0);
@@ -247,9 +319,11 @@ int wmain(int argc, wchar_t **argv) {
   printf("{\"phase\":\"task-registered\",\"taskSha256\":\"%s\"}\n", hash); fflush(stdout); ack('B');
   need_hr(IRegisteredTask_Run, task, empty, &running);
   OVERLAPPED connect = {0}; connect.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(connect.hEvent);
-  BOOL connected = ConnectNamedPipe(pipe, &connect); DWORD error = GetLastError(), used;
-  if (!connected && error == ERROR_IO_PENDING) need(WaitForSingleObject(connect.hEvent, 30000) == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &connect, &used, FALSE));
-  else need(connected || error == ERROR_PIPE_CONNECTED); CloseHandle(connect.hEvent);
+  BOOL connected = ConnectNamedPipe(pipe, &connect); DWORD error = connected ? ERROR_SUCCESS : GetLastError(), used;
+  if (!connected && error == ERROR_IO_PENDING) error = relay_wait(&connect, 30000, &used);
+  else if (error == ERROR_PIPE_CONNECTED) error = ERROR_SUCCESS;
+  BOOL connectClosed = CloseHandle(connect.hEvent); DWORD closeError = connectClosed ? ERROR_SUCCESS : GetLastError();
+  relay_check("pipe-connect", error == ERROR_SUCCESS, connected, error); relay_check("pipe-connect-close", connectClosed, 0, closeError);
   DWORD pid; need(GetNamedPipeClientProcessId(pipe, &pid)); HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | READ_CONTROL | SYNCHRONIZE, FALSE, pid);
   need(process && system_process(process)); wchar_t actual[4096]; DWORD length = 4096; char dacl[65];
   HANDLE helperToken; need(OpenProcessToken(process,TOKEN_QUERY,&helperToken)); DWORD helperSession=process_session(process);
@@ -258,10 +332,8 @@ int wmain(int argc, wchar_t **argv) {
    * reader's first frame private until both native peer checks have passed. */
   BYTE initial[4096]; DWORD initialSize = 0;
   for (;;) {
-    OVERLAPPED read = {0}; read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(read.hEvent && initialSize < sizeof(initial));
-    BOOL ok = ReadFile(pipe, initial+initialSize, sizeof(initial)-initialSize, &used, &read);
-    if (!ok) need(GetLastError() == ERROR_IO_PENDING && WaitForSingleObject(read.hEvent, 30000) == WAIT_OBJECT_0 && GetOverlappedResult(pipe, &read, &used, FALSE));
-    need(used && CloseHandle(read.hEvent)); initialSize += used;
+    need(initialSize < sizeof(initial)); error = relay_io(FALSE, initial+initialSize, sizeof(initial)-initialSize, &used, 30000);
+    relay_check("pipe-initial", !error && used, used, error); initialSize += used;
     BYTE *end = memchr(initial, '\n', initialSize); if (end) { need(end == initial+initialSize-1); break; }
   }
   need(ImpersonateNamedPipeClient(pipe) && OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token));
@@ -278,21 +350,15 @@ int wmain(int argc, wchar_t **argv) {
   char release[2]; DWORD released=0;
   while(released<2){need(ReadFile(GetStdHandle(STD_INPUT_HANDLE),release+released,2-released,&used,NULL)&&used);released+=used;}
   need((release[0]=='P'||release[0]=='X')&&release[1]=='\n'); BOOL aborting=release[0]=='X';
-  OVERLAPPED releaseWrite={0};releaseWrite.hEvent=CreateEventW(NULL,TRUE,FALSE,NULL);need(releaseWrite.hEvent);
-  BOOL sent=WriteFile(pipe,release,2,&written,&releaseWrite);
-  if(!sent)need(GetLastError()==ERROR_IO_PENDING&&WaitForSingleObject(releaseWrite.hEvent,30000)==WAIT_OBJECT_0&&GetOverlappedResult(pipe,&releaseWrite,&written,FALSE));
-  need(written==2&&CloseHandle(releaseWrite.hEvent));
+  error = relay_io(TRUE, (BYTE *)release, 2, &written, 30000); relay_check("pipe-release", !error && written == 2, written, error);
   HANDLE input = aborting?NULL:CreateThread(NULL, 0, forward, NULL, 0, NULL); need(aborting||input);
   for (ULONGLONG total = initialSize;;) {
-    BYTE bytes[65536]; OVERLAPPED read = {0}; read.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL); need(read.hEvent);
-    BOOL ok = ReadFile(pipe, bytes, sizeof(bytes), &used, &read); error = GetLastError();
-    if (!ok && error == ERROR_IO_PENDING) { need(WaitForSingleObject(read.hEvent, observe_only ? PREPARATION_LIFETIME_MS : CUSTODY_LIFETIME_MS) == WAIT_OBJECT_0); ok = GetOverlappedResult(pipe, &read, &used, FALSE); error = GetLastError(); }
-    CloseHandle(read.hEvent); if (!ok) { need(error == ERROR_BROKEN_PIPE); break; }
+    BYTE bytes[65536]; error = relay_io(FALSE, bytes, sizeof(bytes), &used, observe_only ? PREPARATION_LIFETIME_MS : CUSTODY_LIFETIME_MS);
+    if (error) { relay_check("pipe-end", error == ERROR_BROKEN_PIPE, used, error); break; }
     total += used; DWORD written; need(used && total <= 2147483648ULL && WriteFile(GetStdHandle(STD_OUTPUT_HANDLE), bytes, used, &written, NULL) && written == used);
   }
-  need(WaitForSingleObject(process, 30000) == WAIT_OBJECT_0); DWORD exit; need(GetExitCodeProcess(process, &exit) && exit == 0);
-  if(input){CancelSynchronousIo(input); need(WaitForSingleObject(input, 30000) == WAIT_OBJECT_0 && CloseHandle(input));}
-  if(aborting){printf("{\"phase\":\"helper-retired\",\"exitCode\":%lu,\"helper\":",exit);retained_identity(process,helperToken,helperSession);puts("}");fflush(stdout);ack('D');}
+  DWORD exit = relay_retire(process, input);
+  printf("{\"phase\":\"helper-retired\",\"exitCode\":%lu,\"helper\":",exit);retained_identity(process,helperToken,helperSession);puts("}");fflush(stdout);ack('D');
   ULONGLONG until = GetTickCount64()+30000;
   for (;;) { IRunningTaskCollection *instances; LONG n; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &n); IRunningTaskCollection_Release(instances);
     if (!n&&!task_active(service,taskName)) break; need(GetTickCount64() < until); Sleep(10); }

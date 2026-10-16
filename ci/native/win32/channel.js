@@ -180,6 +180,7 @@ export function windowsCustodyChannel(
     pending,
     failure,
     finished = false,
+    outputEnded = false,
     writes = 0,
     timer,
     rejectFault;
@@ -192,7 +193,9 @@ export function windowsCustodyChannel(
   const fail = (cause) => {
     if (cause !== undefined) nativeException("windows-custody", cause);
     if (failure) return;
-    failure = new Error("Windows custody transport unavailable");
+    failure = new Error("Windows custody transport unavailable", { cause });
+    if (cause?.custodyReaderFailure)
+      failure.custodyReaderFailure = cause.custodyReaderFailure;
     cancel(timer);
     child.stdin.destroy();
     pending?.reject(failure);
@@ -219,6 +222,10 @@ export function windowsCustodyChannel(
   completion.catch(() => {});
   child.stdin.on("error", fail);
   child.stdout.on("error", fail);
+  child.stdout.once("end", () => {
+    outputEnded = true;
+    if (pending || writes || buffer.length) fail();
+  });
   child.stderr?.on("error", fail);
   child.stdout.on("data", (chunk) => {
     nativeDiagnostic("win32/channel.js", { stdout: chunk });
@@ -227,6 +234,38 @@ export function windowsCustodyChannel(
         !failure && !finished && buffer.length + chunk.length <= 262144,
       );
       buffer = Buffer.concat([buffer, chunk]);
+      // A native guard can interrupt a partially emitted response. This record
+      // separator is never valid JSON receipt data; diagnostics only fail work.
+      const diagnostic = buffer.indexOf(0x1e);
+      if (diagnostic >= 0) {
+        const end = buffer.indexOf(10, diagnostic);
+        if (end < 0) return;
+        const value = JSON.parse(
+          new TextDecoder("utf-8", { fatal: true }).decode(
+            buffer.subarray(diagnostic + 1, end),
+          ),
+        );
+        closed(value, ["phase", "sequence", "command", "source", "line"]);
+        requireWindows(
+          value.phase === "reader-failure" &&
+            Number.isSafeInteger(value.sequence) &&
+            value.sequence >= 0 &&
+            value.sequence <= 1048576 &&
+            typeof value.command === "string" &&
+            /^[a-z][a-z0-9-]{0,63}$/u.test(value.command) &&
+            typeof value.source === "string" &&
+            /^[a-z][a-z0-9-]{0,63}\.(?:c|h)$/u.test(value.source) &&
+            Number.isSafeInteger(value.line) &&
+            value.line > 0 &&
+            value.line <= 100000,
+        );
+        fail(
+          Object.assign(new Error("Native custody reader guard failed"), {
+            custodyReaderFailure: value,
+          }),
+        );
+        return;
+      }
       let end;
       while ((end = buffer.indexOf(10)) >= 0) {
         const value = JSON.parse(
@@ -259,6 +298,10 @@ export function windowsCustodyChannel(
     receive() {
       if (failure) return Promise.reject(failure);
       if (queue.length) return Promise.resolve(queue.shift());
+      if (outputEnded) {
+        fail();
+        return Promise.reject(failure);
+      }
       requireWindows(!pending && !finished);
       return new Promise((resolve, reject) => {
         pending = { resolve, reject };
@@ -268,6 +311,7 @@ export function windowsCustodyChannel(
       requireWindows(
         !failure &&
           !finished &&
+          !outputEnded &&
           typeof value === "string" &&
           Buffer.byteLength(value) <= 262144,
       );
@@ -277,7 +321,7 @@ export function windowsCustodyChannel(
           child.stdin.write(value, (error) => {
             writes--;
             if (error) {
-              fail();
+              fail(error);
               reject(failure);
             } else resolve();
           });

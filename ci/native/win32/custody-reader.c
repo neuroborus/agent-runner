@@ -8,6 +8,8 @@
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include <iphlpapi.h>
+static void reader_failure(const char *file, unsigned line);
+#define NATIVE_CUSTODY_FAILURE reader_failure
 #include "custody.h"
 #include "account.h"
 #pragma comment(lib, "ws2_32.lib")
@@ -107,6 +109,15 @@ static unsigned helper_lane;
 #define helper_out helpers[helper_lane].output
 #define helper_file helpers[helper_lane].file
 static HANDLE control; static char nonce[33], candidate[41];
+static BOOL reader_diagnostics_ready;
+static char reader_command[64] = "setup";
+static void reader_failure(const char *file, unsigned line) {
+  if (!reader_diagnostics_ready) return;
+  const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  char bytes[256]; DWORD written;
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u}\n", sequence, reader_command, source, line);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+}
 /* The fixed namespace makes possible helper/witness Jobs independently
  * discoverable after their creator and transfer handles have disappeared. */
 static unsigned recovery_job_count;
@@ -3651,6 +3662,7 @@ int wmain(int argc, wchar_t **argv) {
   HANDLE out; need(DuplicateHandle(GetCurrentProcess(), control, GetCurrentProcess(), &out, 0, FALSE, DUPLICATE_SAME_ACCESS));
   int fd = _open_osfhandle((intptr_t)out, _O_BINARY); need(fd >= 0 && _dup2(fd, _fileno(stdout)) == 0 && _close(fd) == 0);
   printf("{\"helper\":"); identity(GetCurrentProcess()); printf(",\"peer\":"); identity(peer); puts("}"); fflush(stdout); CloseHandle(peer);
+  reader_diagnostics_ready = TRUE;
   char input[262144]; line(control, input, sizeof(input));
   if(!strcmp(input,"X")){need(fflush(stdout)==0&&CloseHandle(control));CoUninitialize();return 0;}
   need(!strcmp(input, "P"));
@@ -3664,7 +3676,13 @@ int wmain(int argc, wchar_t **argv) {
   else for (unsigned i = 0; i < 32; i++) need(nonce[i] == argv[4][i]);
   printf("{\"candidateSha\":\"%s\",\"nonce\":\"%s\",\"entries\":%u}\n", candidate, nonce, count); fflush(stdout);
   for (unsigned operations = 0; operations < (package_mode ? 1048576U : 32768U); operations++) {
-    line(control, input, sizeof(input)); if (preparation_only) preparation_journal(input, sequence+1); char *values[520], *state; unsigned n = 0;
+    line(control, input, sizeof(input));
+    size_t commandLength = strcspn(input, " ");
+    strcpy_s(reader_command, sizeof(reader_command), "unparsed");
+    if (commandLength && commandLength < sizeof(reader_command) && strspn(input, "abcdefghijklmnopqrstuvwxyz0123456789-") == commandLength) {
+      memcpy(reader_command, input, commandLength); reader_command[commandLength] = 0;
+    }
+    if (preparation_only) preparation_journal(input, sequence+1); char *values[520], *state; unsigned n = 0;
     for (char *value = strtok_s(input, " ", &state); value; value = strtok_s(NULL, " ", &state)) { need(n < 520); values[n++] = value; }
     need(n >= 2 && number(values[1]) == ++sequence);
     need(!preparation_only || !strncmp(values[0], "verify-", 7) || !strncmp(values[0], "prepare-", 8) || !strcmp(values[0], "finish"));

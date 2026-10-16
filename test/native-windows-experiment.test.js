@@ -632,6 +632,79 @@ test("Windows cold loading preserves verification and cleanup failures separatel
   }
 });
 
+test("experiment startup retains the original owner across lost open completion and independent cleanup refusal", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/experiment-native.js", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf("  retain?.(native);"),
+    end = source.indexOf("\n  return {\n    ...native,", start),
+    program = new Script(`(async()=>{${source.slice(start, end)}})()`);
+  assert.ok(start > 0 && end > start);
+  for (const fault of [null, "open", "provision"]) {
+    const primary = new Error("original command completion lost"),
+      cleanup = new Error("independent cleanup unverified"),
+      calls = [];
+    const native = {
+        close: async () => {
+          calls.push("cleanup");
+          throw cleanup;
+        },
+      },
+      reader = {
+        start: async () => calls.push("start"),
+        open: async (index) => {
+          calls.push(index);
+          if (fault === "open" && index === 1) throw primary;
+        },
+      },
+      files = {
+        provisionBuild: async () => {
+          calls.push("provision");
+          if (fault === "provision") throw primary;
+        },
+      };
+    const result = program.runInNewContext({
+      native,
+      reader,
+      files,
+      retain: (owner) => {
+        assert.equal(owner, native);
+        calls.push("retain");
+      },
+      signal: undefined,
+      reopen: false,
+      output: "C:\\Fixture\\build",
+      entries: [
+        { kind: "helper", path: "helper" },
+        { kind: "image", path: "compiler" },
+        { kind: "data", path: "source" },
+      ],
+      helpers: [{ name: "build-helper", path: "helper" }],
+    });
+    if (!fault) {
+      await result;
+      assert.deepEqual(calls, ["retain", "start", 0, 1, 2, "provision"]);
+    } else {
+      await assert.rejects(
+        result,
+        (error) => error === primary && error.experimentNative === native,
+      );
+      await assert.rejects(
+        primary.experimentNative.close(),
+        (error) => error === cleanup,
+      );
+      assert.equal(primary.message, "original command completion lost");
+      assert.deepEqual(
+        calls,
+        fault === "open"
+          ? ["retain", "start", 0, 1, "cleanup"]
+          : ["retain", "start", 0, 1, 2, "provision", "cleanup"],
+      );
+    }
+  }
+});
+
 test("experiment close releases its outer observer only after independent pre-setup task settlement", async () => {
   const source = await readFile(
       new URL("../ci/native/win32/experiment-native.js", import.meta.url),

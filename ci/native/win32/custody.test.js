@@ -317,6 +317,15 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
         frames.push({ candidateSha, nonce, entries: entries.length });
         return;
       }
+      if (line === "D") {
+        frames.push({
+          phase: "retired",
+          taskSha256: hash,
+          taskRemoved: true,
+          helperRetired: true,
+        });
+        return;
+      }
       const parts = line.trim().split(" "),
         [op, sequence, a, b, c] = parts;
       let value;
@@ -400,12 +409,7 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
       };
       frames.push(options.damage ? options.damage(op, frame) : frame);
       if (op === "finish")
-        frames.push({
-          phase: "retired",
-          taskSha256: hash,
-          taskRemoved: true,
-          helperRetired: true,
-        });
+        frames.push({ phase: "helper-retired", helper, exitCode: 0 });
     },
     receive: async () => structuredClone(frames.shift()),
     completion: Promise.resolve({ code: 0, signal: null }),
@@ -1352,6 +1356,54 @@ test("Windows child exit never replaces independent domain retirement or owned t
   }
 });
 
+test("Windows task removal requires the original finish response, held exit and durable acknowledgement", async () => {
+  for (const fault of [null, "lost", "identity", "persist", "removal"]) {
+    const f = fixture(),
+      reader = f.reader(),
+      primary = new Error("lost original completion"),
+      cleanup = new Error("removal response lost");
+    await reader.start();
+    const receive = f.owner.receive,
+      send = f.owner.send,
+      persist = f.options.persist;
+    f.owner.receive = async () => {
+      const frame = await receive();
+      if (fault === "lost" && frame.value?.closed) throw primary;
+      if (fault === "identity" && frame.phase === "helper-retired")
+        frame.helper.pid++;
+      return frame;
+    };
+    f.options.persist = async (record) => {
+      if (fault === "persist" && record.phase === "finish-acknowledged")
+        throw cleanup;
+      return persist(record);
+    };
+    f.owner.send = async (line) => {
+      if (line === "D") {
+        assert.ok(
+          f.records.some((record) => record.phase === "finish-acknowledged"),
+        );
+        if (fault === "removal") throw cleanup;
+      }
+      return send(line);
+    };
+    const result = await reader.close();
+    assert.equal(result.status, fault ? "RETAINED" : "RETIRED");
+    if (fault) {
+      assert.equal(result.independent, false);
+      if (fault === "lost") assert.equal(result.primaryCause, primary);
+      assert.equal(f.events.includes("D"), false);
+      assert.equal(f.events.includes("verify-removal"), false);
+      assert.equal(f.records.at(-1).command.name, "finish");
+    } else {
+      assert.ok(
+        f.events.indexOf("persist-finish-acknowledged") < f.events.indexOf("D"),
+      );
+      assert.ok(f.events.indexOf("D") < f.events.indexOf("verify-removal"));
+    }
+  }
+});
+
 test("Windows helper retirement cannot discard unread private output", async () => {
   const f = fixture(),
     reader = f.reader();
@@ -1421,6 +1473,363 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
   } finally {
     writing.channel.close();
     await written;
+  }
+});
+test("Windows custody EOF refuses a lost response while reader diagnostics remain failures, never receipts", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static void reader_failure\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1],
+    value = {
+      phase: "reader-failure",
+      sequence: 2,
+      command: "open",
+      source: "custody.h",
+      line: 149,
+    },
+    diagnosticProgram = new Script(
+      `(file,line)=>{${body
+        .replace("const char *source", "let source")
+        .replace("source+1", "source.slice(1)")
+        .replace("char bytes[256]; DWORD written;", "let bytes={},written;")
+        .replace("int size", "let size")
+        .replace("sizeof(bytes)", "256")
+        .replace("\\036", "\\x1e")
+        .replace("(DWORD)size", "size")
+        .replace("&written", "value=>written=value")}}`,
+    );
+  for (const diagnostic of [false, true]) {
+    const f = transport(),
+      response = f.channel.receive();
+    if (diagnostic) {
+      f.child.stdout.write('{"sequence":2,"value":');
+      diagnosticProgram.runInNewContext({
+        reader_diagnostics_ready: true,
+        reader_command: "open",
+        sequence: 2,
+        control: "authenticated",
+        NULL: null,
+        strrchr: (file, separator) => {
+          const index = file.lastIndexOf(separator);
+          return index < 0 ? null : file.slice(index);
+        },
+        sprintf_s: (bytes, maximum, format, ...values) => {
+          let index = 0;
+          bytes.value = format.replace(/%[su]/gu, () => values[index++]);
+          assert.ok(Buffer.byteLength(bytes.value) < maximum);
+          return bytes.value.length;
+        },
+        WriteFile: (handle, bytes, size, out) => {
+          assert.equal(handle, "authenticated");
+          out(size);
+          f.child.stdout.write(bytes.value.slice(0, 25));
+          f.child.stdout.write(bytes.value.slice(25));
+          return true;
+        },
+      })("C:\\Fixture\\custody.h", 149);
+      await assert.rejects(response, (error) => {
+        assert.deepEqual(error.custodyReaderFailure, value);
+        return true;
+      });
+    } else {
+      f.child.stdout.emit("end");
+      await assert.rejects(response);
+    }
+    await assert.rejects(f.channel.completion);
+    assert.throws(() => f.channel.settle());
+    assert.equal(f.child.exitCode, undefined);
+    f.child.emit("close", 0, null);
+    await assert.rejects(f.channel.receive());
+  }
+  for (const field of ["command", "source"]) {
+    const f = transport(),
+      response = f.channel.receive();
+    f.child.stdout.write(
+      "\x1e" + JSON.stringify({ ...value, [field]: [value[field]] }) + "\n",
+    );
+    await assert.rejects(
+      response,
+      (error) => !Object.hasOwn(error, "custodyReaderFailure"),
+    );
+    await assert.rejects(f.channel.completion);
+    assert.throws(() => f.channel.settle());
+    f.child.emit("close", 0, null);
+  }
+  const f = transport();
+  f.child.stdout.emit("end");
+  assert.throws(() => f.channel.settle());
+  await assert.rejects(f.channel.receive());
+  await assert.rejects(f.channel.completion);
+});
+
+test("actual bridge relay settles original overlapped I/O and separates wait, exit-query and exit-code results", async () => {
+  const source = await readFile(
+      new URL("./custody-bridge.c", import.meta.url),
+      "utf8",
+    ),
+    body = (name) =>
+      new RegExp(
+        `static DWORD ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (text) =>
+      text
+        .replace("OVERLAPPED operation = {0};", "let operation={};")
+        .replaceAll("(DWORD)", "")
+        .replace(/\b(?:BOOL|DWORD|ULONGLONG)\b/gu, "let")
+        .replaceAll("operation->", "operation.")
+        .replaceAll("*used", "used.value")
+        .replaceAll("&operation", "operation")
+        .replace(/&(exit|code|forward_stopping)\b/gu, "value=>$1=value"),
+    program =
+      new Script(`function relay_wait(operation,timeout,used){${translate(body("relay_wait"))}}
+      function relay_io(writing,bytes,size,used,timeout){${translate(body("relay_io"))}}
+      function relay_retire(process,input){${translate(body("relay_retire"))}}`),
+    constants = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      ERROR_IO_PENDING: 997,
+      ERROR_IO_INCOMPLETE: 996,
+      ERROR_GEN_FAILURE: 31,
+      ERROR_TIMEOUT: 1460,
+      ERROR_NOT_FOUND: 1168,
+      WAIT_OBJECT_0: 0,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
+      STILL_ACTIVE: 259,
+    },
+    fixture = () => {
+      const calls = [],
+        reports = [];
+      let error = 109;
+      const api = {
+        ...constants,
+        pipe: "pipe",
+        forward_stopping: 0,
+        GetLastError: () => error,
+        relay_report: (...record) => reports.push(record),
+        relay_check: (operation, ok, value, error) => {
+          if (!ok) throw { operation, value, error };
+        },
+        CloseHandle: (handle) => {
+          calls.push(["close", handle]);
+          error = 109;
+          return true;
+        },
+      };
+      program.runInNewContext(api);
+      return { api, calls, reports, setError: (value) => (error = value) };
+    };
+  for (const fault of [
+    null,
+    "timeout",
+    "wait",
+    "completion",
+    "close",
+    "incomplete",
+    "cancel-stalled",
+    "cancel-wait",
+  ]) {
+    const f = fixture();
+    let settled = false,
+      tick = 1000,
+      waits = 0;
+    const cancelled = [
+        "timeout",
+        "wait",
+        "cancel-stalled",
+        "cancel-wait",
+      ].includes(fault),
+      unsettled = ["incomplete", "cancel-stalled", "cancel-wait"].includes(
+        fault,
+      );
+    Object.assign(f.api, {
+      GetTickCount64: () => tick,
+      CreateEventW: () => "event",
+      HasOverlappedIoCompleted: () => settled,
+      WriteFile: () => {
+        f.calls.push(["start"]);
+        f.setError(997);
+        return false;
+      },
+      WaitForSingleObject: (_event, timeout) => {
+        f.calls.push(["wait", timeout]);
+        f.setError(6);
+        if (waits++ === 0) {
+          assert.equal(timeout, 30000);
+          tick += fault === "wait" ? 5 : cancelled ? 30000 : 0;
+          return fault === "wait" ? 0xffffffff : cancelled ? 258 : 0;
+        }
+        assert.equal(timeout, fault === "wait" ? 29995 : 0);
+        return fault === "cancel-stalled"
+          ? 258
+          : fault === "cancel-wait"
+            ? 0xffffffff
+            : 0;
+      },
+      CancelIoEx: () => {
+        f.calls.push(["cancel"]);
+        f.setError(fault === "cancel-stalled" ? 109 : 1168);
+        return fault === "cancel-stalled";
+      },
+      GetOverlappedResult: (_pipe, _operation, used, wait) => {
+        assert.equal(wait, false, "Completion queries must never block");
+        f.calls.push(["complete", wait]);
+        used.value = 8;
+        const error =
+          fault === "completion"
+            ? 109
+            : fault === "incomplete"
+              ? 996
+              : fault === "wait"
+                ? 995
+                : 0;
+        settled = error !== 996;
+        f.setError(error);
+        return !error;
+      },
+      CloseHandle: () => {
+        assert.equal(settled, true);
+        f.calls.push(["close"]);
+        f.setError(6);
+        return fault !== "close";
+      },
+    });
+    if (fault === "close" || unsettled)
+      assert.throws(
+        () => f.api.relay_io(true, {}, 8, { value: 0 }, 30000),
+        (error) =>
+          error.operation ===
+          (fault === "close"
+            ? "pipe-event-close"
+            : fault === "incomplete"
+              ? "pipe-settlement"
+              : "pipe-settlement-wait"),
+      );
+    else
+      assert.equal(
+        f.api.relay_io(true, {}, 8, { value: 0 }, 30000),
+        fault === "timeout"
+          ? 1460
+          : fault === "wait"
+            ? 6
+            : fault === "completion"
+              ? 109
+              : 0,
+      );
+    assert.equal(
+      f.calls.some(([name]) => name === "cancel"),
+      cancelled,
+    );
+    assert.equal(
+      f.calls.some(([name]) => name === "complete"),
+      !["cancel-stalled", "cancel-wait"].includes(fault),
+    );
+    assert.equal(
+      f.calls.some(([name]) => name === "close"),
+      !unsettled,
+    );
+    if (fault === "cancel-stalled")
+      assert.ok(
+        f.reports.some(
+          ([name, value, error]) =>
+            name === "pipe-cancel" && value === true && error === 0,
+        ),
+      );
+    if (fault === "wait")
+      assert.ok(
+        f.reports.some(
+          ([name, value, error]) =>
+            name === "pipe-wait" && value === 0xffffffff && error === 6,
+        ),
+      );
+  }
+  for (const fault of [
+    null,
+    "wait-timeout",
+    "wait-failed",
+    "query",
+    "exit126",
+    "exit124",
+    "input",
+    "input-late",
+  ]) {
+    const f = fixture();
+    let tick = 0;
+    Object.assign(f.api, {
+      WaitForSingleObject: (handle, timeout) => {
+        f.setError(5);
+        if (handle === "input" && fault === "input-late") {
+          assert.equal(timeout, 5);
+          tick = 30000;
+          return 0;
+        }
+        return handle === "reader"
+          ? fault === "wait-timeout"
+            ? 258
+            : fault === "wait-failed"
+              ? 0xffffffff
+              : 0
+          : 0;
+      },
+      GetExitCodeProcess: (_process, out) => {
+        out(fault === "exit126" ? 126 : fault === "exit124" ? 124 : 0);
+        f.setError(6);
+        return fault !== "query";
+      },
+      InterlockedExchange: (out, value) => out(value),
+      GetTickCount64: () => tick++,
+      CancelSynchronousIo: () => {
+        if (fault === "input-late") tick = 29995;
+        f.setError(1168);
+        return false;
+      },
+      CancelIoEx: () => {
+        f.setError(1168);
+        return false;
+      },
+      GetExitCodeThread: (_thread, out) => {
+        out(fault === "input" ? 126 : 0);
+        return true;
+      },
+    });
+    if (fault)
+      assert.throws(
+        () => f.api.relay_retire("reader", "input"),
+        (error) => {
+          assert.equal(
+            error.operation,
+            fault.startsWith("wait")
+              ? "reader-wait"
+              : fault === "query"
+                ? "reader-exit-query"
+                : ["input", "input-late"].includes(fault)
+                  ? "input-settlement"
+                  : "reader-exit",
+          );
+          assert.equal(
+            error.error,
+            fault === "wait-failed" ? 5 : fault === "query" ? 6 : 0,
+          );
+          return true;
+        },
+      );
+    else assert.equal(f.api.relay_retire("reader", "input"), 0);
+    assert.deepEqual(
+      f.calls,
+      fault === "input-late" ? [] : [["close", "input"]],
+    );
+    assert.ok(
+      f.reports.some(
+        ([name, value]) =>
+          name === "reader-exit-query" && value === (fault !== "query"),
+      ),
+    );
   }
 });
 test("Windows custody and observer task XML delegates service-account logon to registration", async () => {
@@ -2085,41 +2494,59 @@ test("Windows rejected admission aborts only the original parked helper before u
   }
 });
 
-test("Windows bridge abort acknowledgement uses the held identity after process retirement", async () => {
+test("Windows bridge completion acknowledgement uses the held identity after process retirement", async () => {
   const source = await readFile(
       new URL("./custody-bridge.c", import.meta.url),
       "utf8",
     ),
-    body = /if\(aborting\)\{([^\n]+)\}/u.exec(source)[1],
-    process = { retired: true },
-    helperToken = {},
-    calls = [];
-  new Script(body).runInNewContext({
-    process,
-    helperToken,
-    helperSession: 0,
-    exit: 0,
-    stdout: {},
-    printf() {},
-    puts() {},
-    fflush() {},
-    identity() {
-      assert.fail(
-        "Retired processes cannot supply a fresh token/session observation",
-      );
-    },
-    retained_identity(actual, token, session) {
-      assert.equal(actual, process);
-      assert.equal(token, helperToken);
-      assert.equal(session, 0);
-      calls.push("identity");
-    },
-    ack(value) {
-      assert.equal(value, "D");
-      calls.push("remove");
-    },
-  });
-  assert.deepEqual(calls, ["identity", "remove"]);
+    body =
+      /  DWORD exit = relay_retire\(process, input\);[\s\S]*?ack\('D'\);/u.exec(
+        source,
+      )?.[0];
+  assert.ok(
+    body,
+    "Expected the shared bridge retirement and acknowledgement boundary",
+  );
+  const program = new Script(body.replace("DWORD exit", "const exit"));
+  for (const input of [null, {}]) {
+    const process = { retired: false },
+      helperToken = {},
+      calls = [];
+    program.runInNewContext({
+      process,
+      input,
+      helperToken,
+      helperSession: 0,
+      stdout: {},
+      relay_retire(actual, thread) {
+        assert.equal(actual, process);
+        assert.equal(thread, input);
+        process.retired = true;
+        calls.push("retire");
+        return 0;
+      },
+      printf() {},
+      puts() {},
+      fflush() {},
+      identity() {
+        assert.fail(
+          "Retired processes cannot supply a fresh token/session observation",
+        );
+      },
+      retained_identity(actual, token, session) {
+        assert.equal(actual, process);
+        assert.equal(process.retired, true);
+        assert.equal(token, helperToken);
+        assert.equal(session, 0);
+        calls.push("identity");
+      },
+      ack(value) {
+        assert.equal(value, "D");
+        calls.push("remove");
+      },
+    });
+    assert.deepEqual(calls, ["retire", "identity", "remove"]);
+  }
 });
 
 test("actual scheduler query explicitly includes hidden instances and selects the exact task path", async () => {
@@ -2452,6 +2879,8 @@ async function prerequisiteVerificationFixture({
       await send(line);
       if (line.startsWith("finish ")) {
         bootstrap.states.get(f.helper.pid).retired = true;
+      }
+      if (line === "D") {
         bootstrap.states.get(10).retired = true;
         bootstrap.state.absent = true;
       }

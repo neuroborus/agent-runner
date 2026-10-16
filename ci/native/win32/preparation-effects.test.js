@@ -2983,12 +2983,30 @@ function rawPreparation() {
         } else if (frame === "D") {
           assert.ok(actors.get(helper.pid).retired);
           actors.get(bridge.pid).retired = true;
-          tasks.delete(declaration.nonce);
+          const taskLost = !observer && f.coldDamage === "task";
+          if (!taskLost) tasks.delete(declaration.nonce);
+          if (observer)
+            f.files.set(
+              prefix + "result.json",
+              Buffer.from(
+                JSON.stringify({
+                  schemaVersion: 1,
+                  nonce: declaration.nonce,
+                  taskSha256: hash,
+                  helper,
+                  bridge,
+                  status: "RETIRED",
+                }),
+              ),
+            );
           queue.push({
             phase: "retired",
             taskSha256: hash,
-            taskRemoved: true,
+            taskRemoved: !taskLost,
             helperRetired: true,
+            ...(observer
+              ? { helper, observations: f.survivingObserver ? 1 : 2 }
+              : {}),
           });
         } else if (frame === "P\n")
           queue.push({
@@ -3204,35 +3222,10 @@ function rawPreparation() {
                   retained.every((subject) => subject.retired),
               );
             actors.get(helper.pid).retired = true;
-            actors.get(bridge.pid).retired = true;
-            const taskLost = !observer && f.coldDamage === "task";
-            if (!taskLost) tasks.delete(declaration.nonce);
-            if (observer)
-              f.files.set(
-                prefix + "result.json",
-                Buffer.from(
-                  JSON.stringify({
-                    schemaVersion: 1,
-                    nonce: declaration.nonce,
-                    taskSha256: hash,
-                    helper,
-                    bridge,
-                    status: "RETIRED",
-                  }),
-                ),
-              );
             value = { closed: true };
             queue.push(
               { sequence: Number(sequence), value },
-              {
-                phase: "retired",
-                taskSha256: hash,
-                taskRemoved: !taskLost,
-                helperRetired: true,
-                ...(observer
-                  ? { helper, observations: f.survivingObserver ? 1 : 2 }
-                  : {}),
-              },
+              { phase: "helper-retired", helper, exitCode: 0 },
             );
             return;
           } else throw new Error("Unexpected custody operation: " + operation);
@@ -3836,6 +3829,36 @@ test("Windows fixed access entry excludes missing proof and independently settle
       );
   }
 });
+test("Windows receipt batches drain aggregate deferral before reopening oversized records", async () => {
+  for (const oversized of [false, true]) {
+    const f = rawPreparation(),
+      files = createWindowsPreparationFiles(f, f.options),
+      names = Array.from(
+        { length: 16 },
+        (_, index) => `windows-receipt-${index}.json`,
+      ),
+      expected = names.map((name, index) => {
+        const bytes = Buffer.alloc(
+          oversized && index === 0 ? 60001 : 40000,
+          index + 1,
+        );
+        f.files.set(path.join(directory, name), bytes);
+        return bytes;
+      });
+    assert.deepEqual(await files.readReceipts(names), expected);
+    assert.equal(
+      f.rawEvents.filter((frame) => frame.startsWith("prepare-read ")).length,
+      oversized ? 1 : 0,
+    );
+    assert.equal(
+      f.rawEvents.filter((frame) => frame.startsWith("prepare-batch ")).length,
+      16,
+    );
+    assert.equal((await files.settleFiles()).status, "RETIRED");
+    assert.equal(f.rawTasks.size, 0);
+  }
+});
+
 test("Windows preparation preserves its observer through rejected admission and a fresh pre-setup verifier", async () => {
   for (const fault of [null, "unbound", "birth", "exit124"]) {
     const f = rawPreparation(),

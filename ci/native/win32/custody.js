@@ -103,6 +103,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     closing = false,
     failed = false,
     firstCause,
+    lastCommand,
     signal,
     sequence = 0,
     receiptSequence = 0,
@@ -164,10 +165,15 @@ export function createWindowsCustodyReader(value, options = {}) {
           (name === "package-file" &&
             ["write", "read", "observe"].includes(args[0])) ||
           name === "ownership-output");
+      lastCommand = {
+        name,
+        sequence: next,
+        ...(packageChunk ? {} : { argumentsSha256: observationDigest(args) }),
+      };
       if (!packageChunk)
         await save(name, {
           commandSequence: next,
-          argumentsSha256: observationDigest(args),
+          argumentsSha256: lastCommand.argumentsSha256,
           ...(name.startsWith("verify-") ||
           name.startsWith("case-") ||
           name.startsWith("ownership-") ||
@@ -188,7 +194,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       nativeException("windows-custody-command", error);
       firstCause ??= error;
       failed = true;
-      owner?.close();
+      owner?.close(error);
     });
     return action;
   };
@@ -2479,7 +2485,21 @@ export function createWindowsCustodyReader(value, options = {}) {
         const result = await observe("finish");
         closed(result, ["closed"]);
         requireWindows(result.closed === true);
+        const stopped = await owner.receive();
+        closed(stopped, ["phase", "helper", "exitCode"]);
+        requireWindows(
+          stopped.phase === "helper-retired" &&
+            stopped.exitCode === 0 &&
+            sameWindowsIdentity(systemIdentity(stopped.helper), helper),
+        );
+        await save("finish-acknowledged", {
+          helper,
+          commandSequence: sequence,
+          nativeEventSha256: proof.nativeEventSha256,
+        });
+        guard(true);
         closing = true;
+        await owner.send("D");
         const task = await owner.receive();
         closed(task, ["phase", "taskSha256", "taskRemoved", "helperRetired"]);
         requireWindows(
@@ -2518,6 +2538,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         owner?.close();
         try {
           await save("retained", {
+            command: lastCommand ?? null,
             helper: helper ?? null,
             verifier: verifier ?? null,
             taskSha256: taskSha256 ?? null,

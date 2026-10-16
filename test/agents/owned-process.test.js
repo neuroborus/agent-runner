@@ -183,11 +183,14 @@ async function productionTopologyEnvironment(t, bootId) {
 
 function detachedDescendantCommand() {
   return `const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-  detached: true,
-  stdio: "ignore",
-});
-child.unref();`;
+const child = spawn(process.execPath,
+  ["-e", 'setInterval(() => {}, 1000); process.send("ready");'],
+  { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+child.once("message", (message) => {
+  if (message !== "ready") throw new Error("Unexpected descendant readiness");
+  child.disconnect();
+  child.unref();
+});`;
 }
 
 function spawnUnrelatedProcessChurn(t) {
@@ -1581,13 +1584,7 @@ test(
     const environment = await inspectionSequenceEnvironment(t, ["complete"]);
     const detached = spawnOwnedProcess(
       process.execPath,
-      [
-        "-e",
-        `const { spawn } = require("node:child_process");
-       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
-         { detached: true, stdio: "ignore" });
-       child.unref();`,
-      ],
+      ["-e", detachedDescendantCommand()],
       {
         descendantGraceMs: 25,
         env: environment,

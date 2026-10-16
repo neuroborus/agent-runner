@@ -441,41 +441,59 @@ export function createWindowsPreparationFiles(input, options = {}) {
           names.every((name) => /^windows-[a-z0-9.-]+\.json$/u.test(name)),
       );
       return fileOperation(async () => {
-        const batch = await command("prepare-batch", names.map(encode));
-        closed(batch, ["records", "deferred"]);
-        requireObservation(
-          Array.isArray(batch.records) && Array.isArray(batch.deferred),
-        );
         const selected = new Map();
-        for (const record of batch.records) {
-          closed(record, [
-            "nameHex",
-            "identity",
-            "daclSha256",
-            "protectedParents",
-            "sha256",
-            "hex",
-          ]);
-          const name = decode(record.nameHex),
-            bytes = Buffer.from(record.hex, "hex");
+        let pending = [...names];
+        while (pending.length) {
+          const batch = await command("prepare-batch", pending.map(encode));
+          closed(batch, ["records", "deferred"]);
           requireObservation(
-            names.includes(name) &&
-              !selected.has(name) &&
-              /^(?:[a-f0-9]{2}){1,60000}$/u.test(record.hex) &&
-              digest(bytes) === record.sha256,
+            Array.isArray(batch.records) && Array.isArray(batch.deferred),
           );
-          proof(record);
-          selected.set(name, bytes);
-        }
-        for (const encoded of batch.deferred) {
-          const name = decode(encoded);
-          requireObservation(names.includes(name) && !selected.has(name));
-          const result = await readFile({
-            file: path.join(directory, name),
-            maximum: 1048576,
-            receipt: true,
+          const received = new Set();
+          for (const record of batch.records) {
+            closed(record, [
+              "nameHex",
+              "identity",
+              "daclSha256",
+              "protectedParents",
+              "sha256",
+              "hex",
+            ]);
+            const name = decode(record.nameHex);
+            requireObservation(
+              pending.includes(name) &&
+                !received.has(name) &&
+                typeof record.hex === "string" &&
+                /^(?:[a-f0-9]{2}){1,60000}$/u.test(record.hex),
+            );
+            const bytes = Buffer.from(record.hex, "hex");
+            requireObservation(digest(bytes) === record.sha256);
+            proof(record);
+            received.add(name);
+            selected.set(name, bytes);
+          }
+          const deferred = batch.deferred.map((encoded) => {
+            const name = decode(encoded);
+            requireObservation(pending.includes(name) && !received.has(name));
+            received.add(name);
+            return name;
           });
-          selected.set(name, result.bytes);
+          requireObservation(received.size === pending.length);
+          if (batch.records.length) {
+            // Deferral also means the aggregate response filled up. Drain the
+            // remaining records in batches before reopening oversized files.
+            pending = deferred;
+          } else {
+            for (const name of deferred) {
+              const result = await readFile({
+                file: path.join(directory, name),
+                maximum: 1048576,
+                receipt: true,
+              });
+              selected.set(name, result.bytes);
+            }
+            pending = [];
+          }
         }
         requireObservation(selected.size === names.length);
         return names.map((name) => selected.get(name));
@@ -679,6 +697,15 @@ export function createWindowsPreparationFiles(input, options = {}) {
       const value = await command("finish");
       closed(value, ["closed"]);
       requireObservation(value.closed === true);
+      const stopped = await owner.receive();
+      closed(stopped, ["phase", "helper", "exitCode"]);
+      requireObservation(
+        stopped.phase === "helper-retired" &&
+          stopped.exitCode === 0 &&
+          sameWindowsIdentity(stopped.helper, identity),
+      );
+      guard();
+      await owner.send("D");
       const final = await owner.receive();
       closed(final, [
         "phase",

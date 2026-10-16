@@ -7822,6 +7822,32 @@ retirement and exit zero precede `D` task removal, fresh absence reads and outer
 observer release. Interrupted recovery requires original bound births; exit 124
 never settles custody. Admission remains latched; hosted evidence remains required.
 
+Normal completion also requires the original sequenced `finish` response and a
+held-reader exit-zero observation before a durable controller acknowledgement
+releases `D` task removal. The preparation observer uses the same barrier; fresh
+task-absence verification remains mandatory. EOF, process exit and diagnostic
+publication alone never settle custody. A lost open/finish response retains its
+original command sequence and argument digest, fences replay and keeps the
+original experiment owner available for independent cleanup.
+The bridge separates pipe completion, process wait, exit-query and actual exit
+code facts. Failed pending I/O is cancelled and observed within the original
+operation deadline using nonblocking completion queries. Unsettled I/O fails
+the bridge process without unwinding its live event, buffer or OVERLAPPED;
+independent recovery still owns retirement and task removal. Stopping the relay
+settles both synchronous input and pending pipe writes within the existing
+retirement deadline; a late thread exit cannot acknowledge settlement. Reader
+guard failures carry only bounded command/source/line diagnostics on the authenticated pipe,
+using a non-JSON record separator so a truncated response cannot turn them into
+a receipt. Error 109 does not identify a reader wait/exit cause. Original native
+command acceptance remains unproved until matching hosted execution; preparation
+and workflow deadlines are unchanged.
+
+Protected receipt batches distinguish aggregate response exhaustion from an
+oversized record. Deferred records drain through further bounded batches; only
+a batch that cannot admit any remaining record falls back to held chunk reads.
+Every requested record and its independent identity/hash checks remain required,
+without increasing the ordinary observer's command allowance.
+
 Custody and observer task XML omit `LogonType`: the schema has no `ServiceAccount`
 value. `RegisterTask` separately retains `TASK_LOGON_SERVICE_ACCOUNT`, the
 LocalSystem SID `S-1-5-18` and an empty password. Installed principal/runlevel,

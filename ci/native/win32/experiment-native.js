@@ -485,20 +485,21 @@ export async function openWindowsExperimentNative(
   // The owner is retained before startup can release a process or lose its
   // acknowledgement. An opening exception cannot erase this cleanup obligation.
   retain?.(native);
+  let helper;
   try {
     await reader.start({ signal });
+    helper = entries.findIndex(
+      (entry) =>
+        entry.path ===
+        helpers.find((helper) => helper.name === "build-helper").path,
+    );
+    await reader.open(helper);
+    for (let i = 0; i < entries.length; i++)
+      if (["data", "image"].includes(entries[i].kind)) await reader.open(i);
+    if (!reopen) await files.provisionBuild({ output });
   } catch (error) {
     throw Object.assign(error, { experimentNative: native });
   }
-  const helper = entries.findIndex(
-    (entry) =>
-      entry.path ===
-      helpers.find((helper) => helper.name === "build-helper").path,
-  );
-  await reader.open(helper);
-  for (let i = 0; i < entries.length; i++)
-    if (["data", "image"].includes(entries[i].kind)) await reader.open(i);
-  if (!reopen) await files.provisionBuild({ output });
   return {
     ...native,
     async findLibrary(name, roots) {

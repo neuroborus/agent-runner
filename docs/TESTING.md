@@ -612,6 +612,21 @@ also checks the diagnostic query's original FILETIME interval, shared capture
 limits and independent query/event closure. A query candidate cannot satisfy the
 subscription control. These injections establish no Windows event generation,
 native XPath/SDK acceptance or hosted audit delivery.
+Custody/channel source execution covers original overlapped completion before
+event release, cancellation settlement within the original operation deadline,
+process failure without releasing unsettled I/O storage, distinct bridge
+wait/exit-query/exit-code refusals, and relay retirement with late input-thread
+completion refused under a controlled clock. Injected EOF with a live
+owner and fragmented reader diagnostics cannot supply a receipt or settle
+custody. Lost finish responses, changed held identity and failed durable
+acknowledgement withhold task removal; independent
+removal verification remains required. Experiment startup regressions preserve the
+original owner and failure after a later open response is lost, separately from
+cleanup refusal. These cases execute no Windows tools or native probes.
+Preparation receipt regressions drain aggregate batch deferrals without
+individual reopen amplification, retain oversized-record reads, and preserve
+the complete original access-profile/fault cold-recovery matrix and observer
+command bounds.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.
