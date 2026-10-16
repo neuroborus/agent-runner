@@ -100,6 +100,12 @@ approval callbacks, protected-provider promotion, substituted signatures,
 incomplete fresh installed-policy reads and surviving compiler descendants.
 Build admissions retain their purpose and pinned inputs despite caller mutation;
 image refusals retain segment and purpose diagnostics in build failures.
+Default-reader build-entry regressions inject raw filesystem and bootstrap
+effects without replacing the preparation reader. Protected installed Clang,
+SDK-query and signer hardlinks reach the command boundary; matching pins cannot
+admit unclassified tools, hardlinked sources/helpers, unsafe ancestry or changed
+held bytes. Reviewed and experiment reads retain their distinct purpose. The
+existing direct-reader suite owns the detailed installed-input refusal matrix.
 Synthetic signed Mach-O bytes protect the durable read-only purpose section and
 reviewed inspection refusal. These tests use no Darwin tool or compiler and add
 no slow-suite assignment; the explicit native harness registers them.

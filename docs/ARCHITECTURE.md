@@ -84,9 +84,13 @@ Darwin's private `experiment-build-inputs.js` acquires exact candidate sources a
 headers, installed Clang/delegated tools, SDK settings and data-only bootstrap
 seeds. `experiment-build.js` uses the existing preparation, fixed command and
 custody owners to rebuild/sign all ten helpers, read held outputs and SDK header
-dependencies, and bind native loader/cache and ABI observations. Original command
-and bootstrap retirement precede build evidence. Cold-loading rejoins original
-births/receipts and fresh held inputs without compilation; recovery fences further
+dependencies, and bind native loader/cache and ABI observations. Fixed build
+operations explicitly qualify compiler/SDK/signer reads through the shared
+installed-path/ancestry classifier before the default preparation reader admits
+installed hardlinks. Sealed sources, generated helpers and receipts remain
+single-linked; held-byte stability, native signatures and pins remain mandatory.
+Original command and bootstrap retirement precede build evidence. Cold-loading
+rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
 admission even before the private report directory exists. Original retirement and
 held outputs use separately retired reader sessions. ABI journal records and later
 cold-reader admissions remain recoverable after build retirement; uncertainty and

@@ -435,6 +435,12 @@ Tool verification, custody open/build-input/probe reads and the compiler owner
 share this distinction. Candidate and copied sources, seeds, generated helpers,
 dependencies, plans, receipts and publication inputs remain single-linked;
 root ownership, pins and custody kinds alone never authorize an exception.
+The default preparation reader opts into installed inputs only for a validated
+fixed compiler, SDK-query or signer operation. It requires the shared installed
+path/ancestry classifier before passing that eligibility to the held-byte reader;
+sealed sources, generated helpers and receipts retain single-link handling.
+This repairs the omitted eligibility on the build-effect caller. The retained
+initial `/usr/bin/clang` refusal alone does not identify its failed stat predicate.
 
 When the installed-input reader rejects its initial stat predicate, the existing
 ordinary CI diagnostic sink receives bounded requested/canonical path prefixes

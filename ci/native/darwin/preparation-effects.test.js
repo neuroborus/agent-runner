@@ -138,7 +138,7 @@ const custody = (id) => ({
   buildSha256: hash,
 });
 
-function wiring() {
+function wiring({ defaultRead = false } = {}) {
   const events = [],
     files = new Map(),
     env = {
@@ -301,10 +301,14 @@ function wiring() {
         events.push(path.basename(file));
       },
     },
-    read: async () => {
-      events.push("sealed-read");
-      return bytes;
-    },
+    ...(!defaultRead
+      ? {
+          read: async () => {
+            events.push("sealed-read");
+            return bytes;
+          },
+        }
+      : {}),
     inspectImage: (value) => assert.ok(Buffer.isBuffer(value)),
     readReceipt: async (file) => {
       assert.ok(files.has(file));
@@ -2836,6 +2840,172 @@ test("Darwin command admission rejects unreviewed vectors before effects and per
     ),
   );
   assert.ok(!substituted.events.includes("provision-build"));
+});
+
+test("Darwin build entry classifies fixed installed tools through the default preparation reader", async () => {
+  for (const [purpose, scenario, requestIndex = 0] of [
+    ["reviewed", "compiler"],
+    ["experiment", "compiler"],
+    ["reviewed", "sdk", 1],
+    ["reviewed", "signer", 3],
+    ["reviewed", "generated-source"],
+    ["reviewed", "generated-helper"],
+    ["reviewed", "unclassified-tool"],
+    ["reviewed", "unsafe-ancestry"],
+    ["reviewed", "unsafe-single-link"],
+    ["reviewed", "held-bytes"],
+  ]) {
+    const value = wiring({ defaultRead: true }),
+      { manifest, options, events } = value,
+      plan = manifest.darwinPreparation;
+    value.files.clear();
+    assert.equal(Object.hasOwn(options, "read"), false);
+    if (purpose === "experiment") {
+      manifest.purpose = purpose;
+      plan.purpose = purpose;
+      plan.cases = [];
+      plan.bootstrap.purpose = purpose;
+      plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
+      delete plan.bootstrap.reviewSha256;
+      for (const name of ["experiment.h", "pf-abi.h"]) {
+        plan.sources.push({ name, sha256: hash });
+        plan.bootstrap.sources.push({
+          path: path.join(path.dirname(plan.bootstrap.reader.path), name),
+          sha256: hash,
+        });
+      }
+    }
+    // Even an installed SDK ancestry cannot classify a sealed source by pin.
+    if (scenario === "generated-source")
+      plan.sourceDirectory = "/Library/Developer/Fixture";
+    const request = {
+      ...value.requests[requestIndex],
+      ...(purpose === "experiment" ? { purpose } : {}),
+    };
+    if (scenario === "unclassified-tool") {
+      request.file = "/fixture/tools/clang";
+      manifest.tools[0].path = request.file;
+    }
+    const sources = new Set(
+        plan.sources.map(({ name }) => path.join(plan.sourceDirectory, name)),
+      ),
+      tools = new Set(manifest.tools.map(({ path }) => path)),
+      helper = plan.command.helper.path,
+      inputs = new Map(
+        [...sources, helper, ...tools].map((file, index) => [file, index + 1]),
+      ),
+      readFiles = [];
+    let openFiles = 0,
+      changedTool = false;
+    const stat = (file, bigint = false) => {
+      const leaf = inputs.has(file),
+        privateDirectory =
+          file === directory || file.startsWith(directory + "/"),
+        unsafe =
+          file === "/usr" &&
+          ["unsafe-ancestry", "unsafe-single-link"].includes(scenario),
+        linked =
+          (tools.has(file) && scenario !== "unsafe-single-link") ||
+          (scenario === "generated-source" && sources.has(file)) ||
+          (scenario === "generated-helper" && file === helper),
+        convert = (number) => (bigint ? BigInt(number) : number);
+      return {
+        isFile: () => leaf,
+        isDirectory: () => !leaf,
+        isSymbolicLink: () => false,
+        dev: convert(1),
+        ino: convert(inputs.get(file) ?? 1),
+        uid: convert(!leaf && privateDirectory ? 1001 : 0),
+        gid: convert(0),
+        mode: convert(
+          leaf
+            ? 0o100000 |
+                (tools.has(file) ? 0o755 : file === helper ? 0o555 : 0o444)
+            : 0o040000 | (unsafe ? 0o777 : privateDirectory ? 0o700 : 0o755),
+        ),
+        nlink: convert(linked ? 78 : 1),
+        size: convert(leaf ? bytes.length : 0),
+        mtimeNs: convert(1),
+        ctimeNs: convert(changedTool && file === request.file ? 2 : 1),
+      };
+    };
+    options.fs = {
+      ...options.fs,
+      lstat: async (file, settings) => stat(file, settings?.bigint),
+      open: async (file, flags) => {
+        assert.ok(inputs.has(file));
+        assert.equal(
+          flags,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        openFiles++;
+        let closed = false;
+        return {
+          stat: async () => stat(file, true),
+          async read(buffer, offset, length, position) {
+            const changed = scenario === "held-bytes" && file === request.file;
+            if (changed) changedTool = true;
+            const content = changed ? Buffer.alloc(bytes.length) : bytes,
+              chunk = content.subarray(position, position + length);
+            if (chunk.length) readFiles.push(file);
+            chunk.copy(buffer, offset);
+            return { bytesRead: chunk.length };
+          },
+          async close() {
+            assert.equal(closed, false);
+            closed = true;
+            openFiles--;
+          },
+        };
+      },
+    };
+    options.digestIntermediate = async () => hash;
+    options.runCommand = async (current, operation, entry) => {
+      assert.equal(current.file, request.file);
+      assert.equal(operation.tool.path, request.file);
+      assert.equal(operation.tool.sha256, hash);
+      assert.equal(entry.toolCdhash, cdhash);
+      assert.ok(readFiles.includes(request.file));
+      assert.ok(events.includes("provision-build"));
+      events.push("command");
+      return {
+        ...(purpose === "experiment" ? { purpose } : {}),
+        requestSha256: observationDigest(current),
+        toolSha256: hash,
+        independent: true,
+        nativeEventSha256: hash,
+        settlement: retired,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+      };
+    };
+    const effects = createDarwinBuildEffects(value.input, options),
+      accepted = ["compiler", "sdk", "signer"].includes(scenario);
+    try {
+      if (accepted) {
+        const result = await effects.run(request);
+        assert.equal(result.bootstrapSettlement.closed, true);
+        assert.equal(result.purpose ?? "reviewed", purpose);
+        assert.ok(events.includes("command"));
+      } else {
+        await assert.rejects(effects.run(request), /Unverified/u, scenario);
+        assert.equal(events.includes("command"), false);
+        assert.equal(events.includes("provision-build"), false);
+        assert.equal(
+          [...value.files.keys()].some((file) =>
+            path.basename(file).startsWith("darwin-command-"),
+          ),
+          false,
+        );
+      }
+    } finally {
+      const settlement = await effects.settle();
+      if (events.includes("start:build"))
+        assert.equal(settlement.status, "RETIRED");
+      assert.equal(openFiles, 0);
+    }
+  }
 });
 
 test("Darwin native compiler entry verifies parked images, bounded output and retirement before publication", async () => {

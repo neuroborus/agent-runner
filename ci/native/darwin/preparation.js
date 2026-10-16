@@ -9,7 +9,7 @@ import {
 } from "../index.js";
 import { digest } from "./protocol.js";
 import { purposeData, bindingKey } from "./experiment-policy.js";
-import { protectedBytes } from "./private-files.js";
+import { protectedBytes, protectedInstalledInput } from "./private-files.js";
 import {
   createDarwinCustodyReader,
   normalizeDarwinCustodyInput,
@@ -255,17 +255,21 @@ export function darwinPreparationContext(input, options) {
     );
   const read =
     options.read ??
-    (async (file, pin, maximum = 134217728) => {
+    (async (file, pin, maximum = 134217728, installedTool = false) => {
       const stat = await fs.lstat(file);
       requireObservation(
         stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o6022),
       );
+      const installed =
+        installedTool && (await protectedInstalledInput(file, stat, fs));
+      requireObservation(!installedTool || installed);
       return protectedBytes(
         { path: file, sha256: pin },
         0,
         stat.mode & 0o7777,
         maximum,
         fs,
+        installed,
       );
     });
   let activeReader;
@@ -534,9 +538,16 @@ export function createDarwinBuildEffects(input, options = {}) {
       try {
         const { reader } = await state.bootstrap(signal),
           id = observationDigest(request);
+        // Only the validated fixed tool operation opts into installed inputs.
         requireObservation(
-          digest(await state.read(request.file, request.toolSha256)) ===
-            request.toolSha256,
+          digest(
+            await state.read(
+              operation.tool.path,
+              operation.tool.sha256,
+              134217728,
+              true,
+            ),
+          ) === request.toolSha256,
         );
         let targetSha256;
         if (operation.mode === "sign") {
