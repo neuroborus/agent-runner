@@ -46,7 +46,7 @@ const identity = {
 };
 // Bounded native-shaped bytes/fields exercise the real finite decoder. These
 // portable transcripts supply no Windows compilation, query or delivery proof.
-async function brokerCapture(prepared) {
+async function brokerCapture(prepared, overrides = {}) {
   const fields = {
     Provider: "Microsoft-Windows-Security-Auditing",
     Channel: "Security",
@@ -61,6 +61,7 @@ async function brokerCapture(prepared) {
     SubjectUserSid: identity.userSid,
     AccessMask: "0x1",
     SubjectLogonId: "0x1",
+    ...overrides,
   };
   const native = {
       kind: "event",
@@ -178,6 +179,7 @@ async function brokerCapture(prepared) {
       startRecords: 0,
       endRecords: 1,
       elapsedMs: 1,
+      query: null,
     },
     events: decoder
       .state()
@@ -3854,6 +3856,7 @@ test("actual gate-read source captures the first API cause before independent ha
       FILE_SHARE_DELETE: 4,
       command_preflight_owned: owned,
       command_broker_token: 7,
+      command_gate_bytes: 0,
       command_files: [0, 0, 0, 8],
       command_ids: [0, 0, 0, "original"],
       nonce: "n".repeat(32),
@@ -3956,14 +3959,12 @@ async function commandCaptureProgram() {
     assert.ok(match, name);
     return match[1];
   };
-  let capture = body(source, "command_capture");
+  const capture = body(source, "command_capture").replace(
+    "command_audit_project(bytes,length)",
+    "project(bytes,length)",
+  );
   // Control only XML projection; execute the owned wait, batch, rendering,
   // bookmark and closure flow from source, without a native tool or compiler.
-  const start = capture.indexOf('printf("{\\"event\\":\\"audit\\"'),
-    end = capture.indexOf("free(bytes);BOOL updated=", start);
-  assert.ok(start > 0 && end > start);
-  capture =
-    capture.slice(0, start) + "project(bytes,length);" + capture.slice(end);
   const translate = (text) =>
     text
       .replace(/EVT_HANDLE \*events/gu, "let events")
@@ -3999,7 +4000,7 @@ async function commandCaptureProgram() {
     /command_(?:preflight_owned\.event|event)=CreateEventW\([^;]+\);/gu,
   );
   assert.equal(creations.length, 2);
-  return { dispatch, createEvents: new Script(creations.join("\n")) };
+  return { dispatch, createEvents: new Script(creations.join("\n")), source };
 }
 
 function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
@@ -4037,6 +4038,8 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     command_event: "notification",
     command_records: 0,
     command_bytes: 0,
+    command_scanned: 0,
+    command_scanned_bytes: 0,
     ref,
     GetLastError: () => lastError,
     remember: (...cause) => {
@@ -4131,8 +4134,9 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     },
     project: (bytes) => {
       calls.push(["project", bytes.event]);
-      projected.push(bytes.event);
-      api.onProject?.(bytes.event);
+      const selected = api.onProject?.(bytes.event) ?? true;
+      if (selected) projected.push(bytes.event);
+      return selected;
     },
     EvtUpdateBookmark: (bookmark, event) => {
       assert.equal(bookmark, "bookmark");
@@ -5136,6 +5140,437 @@ test("a failed restoration writer settles both early readers without replacing t
   }
 });
 
+test("broker subscription retains Windows name variants through native capture, decoding and independent restoration", async () => {
+  const program = await commandCaptureProgram(),
+    queryBody =
+      /static void command_audit_query\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        program.source,
+      )[1],
+    queryProgram = new Script(
+      `(query, interval) => {${queryBody.replace(/\bL(?=")/gu, "")}}`,
+    ),
+    selectionBody = /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(
+      program.source,
+    )[1],
+    selection = new Script(
+      `(() => {${selectionBody.replace(/\bL(?=")/gu, "").replace(/\b(?:BOOL|unsigned)\b/gu, "let")} return selected;})()`,
+    ),
+    probeBody = program.source
+      .split("\n")
+      .find((line) => line.trim().startsWith("if(command_probing&&process")),
+    probe = new Script(
+      probeBody
+        .replace(/\bL(?=")/gu, "")
+        .replace("WCHAR *end;", "let end;")
+        .replace(/ULONGLONG (pid|rights)/gu, "let $1")
+        .replaceAll("&end", "value=>end=value")
+        .replaceAll("!*end", "!end"),
+    );
+  let selected;
+  const buildQuery = queryProgram.runInNewContext({
+    userText: identity.userSid,
+    invariant: assert.ok,
+    swprintf_s: (target, capacity, format, ...values) => {
+      let index = 0;
+      target.value = format.replace(/%ls/gu, () => values[index++]);
+      assert.ok(target.value.length < capacity);
+      selected = target.value;
+      return target.value.length;
+    },
+  });
+  buildQuery({}, "");
+  assert.ok(
+    selected.includes(`Data[@Name="SubjectUserSid"]="${identity.userSid}"`),
+  );
+  assert.ok(selected.includes('Data[@Name="ObjectType"]="File"'));
+  assert.equal(selected.includes("ObjectName"), false);
+  assert.ok(selected.includes("EventID=1101 or EventID=1102"));
+  assert.ok(selected.includes("EventID=4663"));
+  assert.match(
+    program.source,
+    /command_audit_query\(query,L""\);\s*command_subscription=EvtSubscribe\(NULL,command_event,L"Security",query/u,
+  );
+  for (const fault of [
+    null,
+    "missing",
+    "logon",
+    "object",
+    "restoration",
+    "missing-restoration",
+  ]) {
+    const missing = fault?.startsWith("missing");
+    let observed, capture;
+    const f = fixture(({ effects, prepared }) => {
+      const original = effects.coverage,
+        retire = effects.retire;
+      effects.coverage = async () => {
+        await original();
+        observed = await brokerCapture(prepared, {
+          ObjectName:
+            fault === "object"
+              ? "C:\\fixture\\other"
+              : prepared.gateFile.toUpperCase(),
+          SubjectLogonId: fault === "logon" ? "0x2" : "0x1",
+        });
+        capture = commandCaptureFixture(program);
+        Object.assign(capture.api, {
+          command_probing: true,
+          command_coverage_seen: false,
+          command_paths: [
+            prepared.files.inspect,
+            prepared.files.edit,
+            prepared.files.outside,
+            prepared.gateFile,
+          ],
+          GetCurrentProcessId: () => prepared.observer.pid,
+          _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+          wcscmp: (a, b) => (a === b ? 0 : 1),
+          _wcstoui64: (text, end) => {
+            end("");
+            return Number(text);
+          },
+        });
+        capture.api.onProject = () => {
+          const raw = observed.events[0].raw;
+          Object.assign(capture.api, {
+            process: String(raw.pid),
+            object: raw.target,
+            eventId: raw.opcode,
+            mask: String(raw.accessMask),
+          });
+          const selected = selection.runInNewContext(capture.api);
+          if (selected) probe.runInNewContext(capture.api);
+          return selected;
+        };
+        if (!missing) capture.notify(["original-read"]);
+        capture.capture();
+        observed.control.delivered = capture.api.command_coverage_seen;
+        observed.control.endRecords = observed.end.records =
+          capture.api.command_records;
+        if (fault === "object") observed.events = [];
+        if (missing) {
+          observed.events = [];
+          observed.control.query = {
+            from: observed.start.time,
+            to: observed.end.time,
+            records: 1,
+            bytes: 8,
+            candidates: 1,
+            complete: true,
+            error: 0,
+            gateIdentity: prepared.original.files[3].identity,
+            requestedAccess: 0x80000080,
+            performedAccess: 1,
+            readBytes: 32,
+            scannedRecords: 0,
+            scannedBytes: 0,
+          };
+        }
+        return observed;
+      };
+      effects.retire = async (...args) => {
+        const cleanup = await retire(...args);
+        if (fault?.endsWith("restoration")) cleanup.auditRestored = false;
+        return cleanup;
+      };
+    });
+    const result = await f.run();
+    assert.equal(
+      result.status,
+      !fault ? "PASS" : fault === "restoration" ? "FAIL" : "BLOCKED",
+    );
+    assert.equal(f.calls.includes("retire"), true);
+    assert.equal(
+      result.cleanup.status,
+      fault?.endsWith("restoration") ? "UNCERTAIN" : "PASS",
+    );
+    if (missing || ["logon", "object"].includes(fault)) {
+      assert.equal(f.calls.includes("schema"), false);
+      assert.deepEqual(f.requests, []);
+    }
+    if (missing) {
+      assert.equal(capture.projected.length, 0);
+      assert.equal(observed.control.query.candidates, 1);
+      assert.equal(result.cause.detail.includes("delivery-missing"), true);
+    } else
+      assert.deepEqual(
+        capture.projected,
+        fault === "object" ? [] : ["original-read"],
+      );
+    if (fault === "object") {
+      assert.equal(capture.api.command_scanned, 1);
+      assert.equal(capture.api.command_records, 0);
+      assert.equal(
+        capture.calls.some(([name]) => name === "bookmark"),
+        false,
+      );
+    }
+  }
+});
+
+test("failed delivery queries only its original interval within capture bounds and closes independent handles", async () => {
+  const program = await commandCaptureProgram(),
+    body = (name) =>
+      new RegExp(
+        `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(program.source)[1];
+  let query = body("command_delivery_query");
+  // The existing native XML projection is opaque here; query construction,
+  // bounded enumeration, native results and resource closure execute from source.
+  const start = query.indexOf("for(DWORD i=0;i<length;i++)snprintf"),
+    end =
+      query.indexOf("free(parsed.fields);", start) +
+      "free(parsed.fields);".length;
+  assert.ok(start > 0 && end > start);
+  query =
+    query.slice(0, start) +
+    "candidates+=candidate(raw,length);" +
+    query.slice(end);
+  const queryCode = query
+      .replace(
+        "WCHAR from[40],to[40],interval[256],query[2048];",
+        "let from={},to={},interval={},query={};",
+      )
+      .replace(
+        /ULARGE_INTEGER start,end;[^\n]+/u,
+        "const start={QuadPart:first.time},end={QuadPart:last.time};",
+      )
+      .replaceAll("(DWORD)", "")
+      .replaceAll("(size_t)", "")
+      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+      .replace("BYTE *raw", "let raw")
+      .replace("char *encoded", "let encoded")
+      .replace(/\bL(?=")/gu, "")
+      .replace(
+        /&command_preflight_owned\.(queryItem|query)\b/gu,
+        'ref(command_preflight_owned,"$1")',
+      )
+      .replace(/,&(count|length|properties)\b/gu, ",value=>$1=value")
+      .replace(/printf\([^\n]*?,start\.QuadPart/u, "emit(start.QuadPart"),
+    timeCode = body("command_query_time")
+      .replace("SYSTEMTIME value;", "let value={};")
+      .replace(
+        "ULARGE_INTEGER ticks;",
+        "const ticks={get QuadPart(){return BigInt(this.LowPart)+(BigInt(this.HighPart)<<32n);}};",
+      )
+      .replace("&time,&value", "time,value")
+      .replace("ticks.QuadPart%10000000", "ticks.QuadPart%10000000n")
+      .replace(/\bL(?=")/gu, ""),
+    script = new Script(`
+      function command_query_time(time,text) {${timeCode}}
+      function command_audit_query(query,interval) {${body("command_audit_query").replace(/\bL(?=")/gu, "")}}
+      (first,last) => {${queryCode}}
+    `),
+    epoch =
+      (BigInt(Date.parse("2026-10-09T00:00:00Z")) + 11644473600000n) * 10000n,
+    stamp = (time) => ({
+      time,
+      dwLowDateTime: Number(time & 0xffffffffn),
+      dwHighDateTime: Number(time >> 32n),
+    });
+  for (const fault of [
+    null,
+    "open",
+    "next",
+    "render",
+    "records",
+    "bytes",
+    "close",
+  ]) {
+    const f = commandCaptureFixture(program, {
+      fault: ["next", "render"].includes(fault) ? fault : null,
+      closeFailures: fault === "close" ? ["query-event", "query"] : [],
+    });
+    const next = f.api.EvtNext;
+    let receipt, selected;
+    Object.assign(f.api, {
+      userText: identity.userSid,
+      GENERIC_READ: 0x80000000,
+      FILE_READ_ATTRIBUTES: 128,
+      FILE_READ_DATA: 1,
+      EvtQueryChannelPath: 1,
+      EvtQueryForwardDirection: 256,
+      ERROR_INVALID_DATA: 13,
+      ERROR_OUTOFMEMORY: 14,
+      command_gate_bytes: 32,
+      command_ids: [null, null, null, "held"],
+      command_records: fault === "records" ? 4096 : 0,
+      command_bytes: fault === "bytes" ? 8388608 : 0,
+      command_scanned: fault === "records" ? 4096 : 0,
+      command_scanned_bytes: fault === "bytes" ? 8388608 : 0,
+      command_coverage_seen: false,
+      command_bound: () => {},
+      FileTimeToSystemTime: (_time, result) => {
+        Object.assign(result, {
+          wYear: 2026,
+          wMonth: 10,
+          wDay: 9,
+          wHour: 0,
+          wMinute: 0,
+          wSecond: 0,
+        });
+        return true;
+      },
+      swprintf_s: (target, capacity, format, ...values) => {
+        let index = 0;
+        target.value = format.replace(
+          /%(?:0([0-9]+))?(ls|llu|u)/gu,
+          (_match, width) => {
+            const value = values[index++];
+            return String(value?.value ?? value).padStart(
+              Number(width ?? 0),
+              "0",
+            );
+          },
+        );
+        assert.ok(target.value.length < capacity);
+        return target.value.length;
+      },
+      EvtQuery: (session, channel, value, flags) => {
+        assert.deepEqual([session, channel, flags], [null, "Security", 257]);
+        selected = value.value;
+        if (fault === "open") {
+          f.api.GetLastError = () => 5;
+          return null;
+        }
+        f.notify(["query-event"]);
+        return "query";
+      },
+      EvtNext: (handle, size, slot, timeout, flags, count) => {
+        assert.deepEqual([handle, size, timeout, flags], ["query", 1, 0, 0]);
+        const events = [];
+        const result = next("subscription", 16, events, timeout, flags, count);
+        slot.value = events[0] ?? null;
+        return result;
+      },
+      malloc: () => ({}),
+      candidate: () => 1,
+      emit: (
+        from,
+        to,
+        records,
+        bytes,
+        candidates,
+        error,
+        complete,
+        gateIdentity,
+        requestedAccess,
+        performedAccess,
+        readBytes,
+        scannedRecords,
+        scannedBytes,
+      ) => {
+        receipt = {
+          from: from.toString(),
+          to: to.toString(),
+          records,
+          bytes,
+          candidates,
+          error,
+          complete: complete === "true",
+          gateIdentity,
+          // Match native %lu serialization of the DWORD access mask.
+          requestedAccess: requestedAccess >>> 0,
+          performedAccess,
+          readBytes,
+          scannedRecords,
+          scannedBytes,
+        };
+      },
+    });
+    script.runInNewContext(f.api)(stamp(epoch), stamp(epoch + 100n));
+    assert.ok(
+      selected.includes(
+        'TimeCreated[@SystemTime>="2026-10-09T00:00:00.0000000Z" and @SystemTime<="2026-10-09T00:00:00.0000100Z"]',
+      ),
+    );
+    assert.equal(selected.includes("ObjectName"), false);
+    assert.equal(receipt.from, epoch.toString());
+    assert.equal(receipt.to, (epoch + 100n).toString());
+    assert.equal(receipt.complete, !fault);
+    assert.equal(
+      receipt.error,
+      !fault
+        ? 0
+        : fault === "next"
+          ? 4317
+          : ["open", "render"].includes(fault)
+            ? 5
+            : 13,
+    );
+    assert.equal(f.api.command_coverage_seen, false);
+    assert.equal(f.api.command_records, fault === "records" ? 4096 : 0);
+    assert.deepEqual(
+      f.closed,
+      fault === "open" ? [] : ["query-event", "query"],
+    );
+    if (fault === "close") assert.equal(f.cleanup.length, 2);
+    if (!fault)
+      assert.deepEqual(
+        [
+          receipt.records,
+          receipt.bytes,
+          receipt.candidates,
+          receipt.requestedAccess,
+          receipt.performedAccess,
+          receipt.readBytes,
+        ],
+        [1, 8, 1, 0x80000080, 1, 32],
+      );
+  }
+  const value = {
+      nonce: "a".repeat(32),
+      observer: identity,
+      gateFile: "C:\\fixture\\gate",
+    },
+    observed = await brokerCapture(value);
+  observed.events = [];
+  observed.end.records = 0;
+  observed.control.delivered = false;
+  observed.control.endRecords = 0;
+  observed.control.query = {
+    from: observed.start.time,
+    to: observed.end.time,
+    records: 1,
+    bytes: 8,
+    candidates: 1,
+    error: 0,
+    complete: true,
+    gateIdentity: value.original.files[3].identity,
+    requestedAccess: 0x80000080,
+    performedAccess: 1,
+    readBytes: 32,
+    scannedRecords: 0,
+    scannedBytes: 0,
+  };
+  for (const [field, replacement] of [
+    ["from", (BigInt(observed.start.time) - 1n).toString()],
+    ["to", (BigInt(observed.end.time) + 1n).toString()],
+    ["records", 4097],
+    ["bytes", 8388609],
+    ["candidates", 2],
+    ["error", 5],
+    ["scannedRecords", 4096],
+    ["scannedBytes", 8388608],
+    ["readBytes", 31],
+    ["gateIdentity", "foreign"],
+    ["requestedAccess", 2],
+    ["unexpected", "untrusted-query-field"],
+  ]) {
+    const rejected = structuredClone(observed);
+    rejected.control.query[field] = replacement;
+    assert.throws(
+      () => windowsCommandBrokerCoverage(value, rejected),
+      (error) => {
+        assert.equal(error.brokerCoverage, undefined);
+        assert.equal(error.message.includes("untrusted-query-field"), false);
+        return true;
+      },
+    );
+  }
+});
+
 test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
   const source = await readFile(
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
@@ -5144,6 +5579,8 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
     body = /static void command_coverage_control\(void\) \{([\s\S]*?)\n\}/u
       .exec(source)[1]
       .replace(/\b(?:unsigned|ULONGLONG)\b/gu, "let")
+      .replace("FILETIME first,last;", "let first={}, last={};")
+      .replace(/&(first|last)\b/gu, "$1")
       .replace(
         /printf\([^\n]*?,command_coverage_seen/u,
         "emit(command_coverage_seen",
@@ -5167,6 +5604,11 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
       FALSE: false,
       command_records: 0,
       GetTickCount64: () => clock,
+      GetSystemTimePreciseAsFileTime: () => {},
+      command_delivery_query: () => assert.equal(delivered, false),
+      fputs: () => {},
+      puts: () => {},
+      stdout: {},
       command_gate_read: () => {
         reads++;
       },
@@ -5187,6 +5629,7 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
           startRecords,
           endRecords,
           elapsedMs,
+          query: null,
         };
       },
     };

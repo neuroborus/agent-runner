@@ -604,6 +604,14 @@ original domain retirement, capture closure, watcher barriers, independent exact
 restoration and fixture removal; the original refusal survives both successful
 settlement and separate cleanup failures. These tests add no native support claim
 or slow-tier assignment.
+The same controlled capture fixture drives case-variant original names through
+the source subscription contract, native control predicate and real decoder/join.
+Missing delivery and mismatched attribution still refuse all probes and attempt
+independent restoration; restoration failure remains separate. Source execution
+also checks the diagnostic query's original FILETIME interval, shared capture
+limits and independent query/event closure. A query candidate cannot satisfy the
+subscription control. These injections establish no Windows event generation,
+native XPath/SDK acceptance or hosted audit delivery.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.

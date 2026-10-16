@@ -166,7 +166,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
       ),
   );
   const unavailable = (reason, delivery = {}) => {
-    const detail = `Broker audit ${reason}; delivered=${control?.delivered === true}; records=${start.records}..${end.records}; joined=${delivery.joined ?? 0}/${events.length}.`;
+    const detail = `Broker audit ${reason}; delivered=${control?.delivered === true}; records=${start.records}..${end.records}; joined=${delivery.joined ?? 0}/${events.length}; query=${control?.query?.complete === true ? "complete" : "unobserved"}:${control?.query?.records ?? 0}; gateCandidates=${control?.query?.candidates ?? 0}.`;
     throw Object.assign(
       new Error("Effective broker audit coverage unavailable"),
       {
@@ -215,7 +215,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
   need(
     control?.event === "P" &&
       Object.keys(control).sort().join() ===
-        "delivered,elapsedMs,endRecords,event,startRecords" &&
+        "delivered,elapsedMs,endRecords,event,query,startRecords" &&
       typeof control.delivered === "boolean" &&
       Number.isSafeInteger(control.elapsedMs) &&
       control.elapsedMs >= 0 &&
@@ -226,6 +226,46 @@ export function windowsCommandBrokerCoverage(value, observation) {
       control.endRecords >= control.startRecords &&
       control.endRecords <= end.records &&
       (!control.delivered || control.endRecords > control.startRecords),
+  );
+  const query = control.query;
+  need(
+    query === null ||
+      (!control.delivered &&
+        query &&
+        Object.keys(query).sort().join() ===
+          "bytes,candidates,complete,error,from,gateIdentity,performedAccess,readBytes,records,requestedAccess,scannedBytes,scannedRecords,to" &&
+        typeof query.complete === "boolean" &&
+        Number.isInteger(query.error) &&
+        query.error >= 0 &&
+        query.error <= 0xffffffff &&
+        (!query.complete || query.error === 0) &&
+        [query.from, query.to].every(
+          (time) =>
+            typeof time === "string" && /^[1-9][0-9]{0,19}$/u.test(time),
+        ) &&
+        BigInt(query.from) >= BigInt(start.time) &&
+        BigInt(query.to) >= BigInt(query.from) &&
+        BigInt(query.to) <= BigInt(end.time) &&
+        Number.isSafeInteger(query.scannedRecords) &&
+        query.scannedRecords >= control.endRecords &&
+        query.scannedRecords <= 4096 &&
+        Number.isSafeInteger(query.scannedBytes) &&
+        query.scannedBytes >= query.scannedRecords * 4 &&
+        query.scannedBytes <= Math.min(query.scannedRecords * 65536, 8388608) &&
+        Number.isSafeInteger(query.records) &&
+        query.records >= 0 &&
+        query.records + query.scannedRecords <= 4096 &&
+        Number.isSafeInteger(query.bytes) &&
+        query.bytes >= query.records * 4 &&
+        query.bytes <= query.records * 65536 &&
+        query.bytes + query.scannedBytes <= 8388608 &&
+        Number.isSafeInteger(query.candidates) &&
+        query.candidates >= 0 &&
+        query.candidates <= query.records &&
+        query.gateIdentity === original.identity &&
+        query.requestedAccess === 0x80000080 &&
+        query.performedAccess === 1 &&
+        query.readBytes === 32),
   );
   if (
     ![before, after].every(

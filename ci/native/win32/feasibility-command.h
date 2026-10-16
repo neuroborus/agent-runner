@@ -20,6 +20,8 @@ static HANDLE command_files[4], command_parents[2], command_client, command_gate
 static HANDLE command_processes[16], command_threads[16], command_input, command_output, command_error;
 static DWORD command_lifetime = 150000;
 static unsigned command_count, command_action, command_barriers, command_records, command_bytes;
+static unsigned command_scanned, command_scanned_bytes;
+static DWORD command_gate_bytes;
 static char command_ids[4][50], command_helper_hash[65], command_image_hash[65];
 static WCHAR command_paths[4][4096], command_helper[4096], command_image[4096], command_pipe[128];
 static PSECURITY_DESCRIPTOR command_baseline[4], command_parent_baseline[2];
@@ -43,7 +45,7 @@ static PSECURITY_DESCRIPTOR command_protection[3];
 static struct command_preflight_resources {
   BOOL active, impersonating, comReady;
   HANDLE token, medium, launch, mutableNull, event, gateRead;
-  EVT_HANDLE metadata, enumerator, subscription, item;
+  EVT_HANDLE metadata, enumerator, subscription, item, query, queryItem;
   EVT_HANDLE capture[16];
   BCRYPT_ALG_HANDLE algorithm;
   BCRYPT_HASH_HANDLE hash;
@@ -62,6 +64,8 @@ static BOOL command_event_close(EVT_HANDLE *slot) {
 static BOOL command_capture_close(void) {
   BOOL ok = TRUE;
   for (unsigned i = 0; i < 16; i++) if (!command_event_close(&command_preflight_owned.capture[i])) ok = FALSE;
+  if (!command_event_close(&command_preflight_owned.queryItem)) ok = FALSE;
+  if (!command_event_close(&command_preflight_owned.query)) ok = FALSE;
   if (!command_event_close(&command_subscription)) ok = FALSE;
   if (!command_event_close(&command_bookmark)) ok = FALSE;
   if (!release_handle(&command_event, "command-event-close")) ok = FALSE;
@@ -419,6 +423,25 @@ static DWORD command_members(HANDLE job) {
   for(DWORD i=0;i<list->NumberOfProcessIdsInList;i++){invariant(list->ProcessIdList[i]<=MAXDWORD,"command-member-pid");HANDLE h=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,(DWORD)list->ProcessIdList[i]);BOOL member;
     win32_check(h!=NULL,"command-member-open");win32_check(IsProcessInJob(h,job,&member),"command-member-job");invariant(member,"command-member-job");if(!close_handle(h,"process-close"))failure(126);} return list->NumberOfProcessIdsInList;
 }
+/* XPath string equality is case sensitive; Windows object-name joins are not.
+ * Keep the principal/type filter here and the original held-name joins below. */
+static void command_audit_query(WCHAR query[2048], const WCHAR *interval) {
+  invariant(swprintf_s(query,2048,L"*[System[(EventID=1101 or EventID=1102)%ls]] or *[System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]",interval,interval,userText)>0,"command-subscription-query");
+}
+static BOOL command_audit_project(BYTE *bytes, DWORD length) {
+  char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
+  for(unsigned j=0;j<parsed.count;j++){struct xml_field *f=&parsed.fields[j];if(!wcscmp(f->name,L"ProcessId"))process=f->value;else if(!wcscmp(f->name,L"ObjectName"))object=f->value;else if(!wcscmp(f->name,L"EventID"))eventId=f->value;else if(!wcscmp(f->name,L"AccessMask"))mask=f->value;}
+  BOOL selected=eventId&&(!wcscmp(eventId,L"1101")||!wcscmp(eventId,L"1102"));
+  if(object)for(unsigned i=0;i<4;i++)if(!_wcsicmp(object,command_paths[i]))selected=TRUE;
+  if(selected){
+    printf("{\"event\":\"audit\",\"hex\":\"");hex(bytes,length);printf("\",\"decoded\":");
+    if(command_closing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_retirement_seen=TRUE;}}
+    if(command_probing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_coverage_seen=TRUE;}}
+    if(command_case_pid&&process&&object&&eventId&&mask){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==command_case_pid){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end){if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2)))command_target_seen=TRUE;if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")&&(rights&1))command_marker_seen=TRUE;}}}
+    xml_decode(encoded);puts("}");
+  }
+  free(parsed.fields);free(encoded);return selected;
+}
 static void command_capture(DWORD timeout) {
   DWORD waited=WaitForSingleObject(command_event,timeout);
   if(waited==WAIT_FAILED)win32_check(FALSE,"command-capture-wait");
@@ -440,15 +463,10 @@ static void command_capture(DWORD timeout) {
     for(DWORD i=0;i<count;i++){DWORD length=0,counted;
       BOOL measured=EvtRender(NULL,events[i],EvtRenderEventXml,0,NULL,&length,&counted);error=measured?ERROR_SUCCESS:GetLastError();
       if(!measured&&error!=ERROR_INSUFFICIENT_BUFFER){remember("command-capture-query","win32",error);failure(126);}invariant(!measured,"command-capture-query");
-      invariant(length>=4 && length<=65536 && !(length%2) && ++command_records<=4096 && command_bytes+length<=8388608,"command-capture-bound");
+      invariant(length>=4 && length<=65536 && !(length%2) && ++command_scanned<=4096 && command_scanned_bytes+length<=8388608,"command-capture-bound");
       BYTE *bytes=calloc(1,length);invariant(bytes!=NULL,"command-capture-allocation");BOOL rendered=EvtRender(NULL,events[i],EvtRenderEventXml,length,bytes,&length,&counted);error=rendered?ERROR_SUCCESS:GetLastError();
-      if(!rendered){remember("command-capture-render","win32",error);free(bytes);failure(126);}command_bytes+=length;
-      printf("{\"event\":\"audit\",\"hex\":\"");hex(bytes,length);printf("\",\"decoded\":");char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
-      for(unsigned j=0;j<parsed.count;j++){struct xml_field *f=&parsed.fields[j];if(!wcscmp(f->name,L"ProcessId"))process=f->value;else if(!wcscmp(f->name,L"ObjectName"))object=f->value;else if(!wcscmp(f->name,L"EventID"))eventId=f->value;else if(!wcscmp(f->name,L"AccessMask"))mask=f->value;}
-      if(command_closing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_retirement_seen=TRUE;}}
-      if(command_probing&&process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_coverage_seen=TRUE;}}
-      if(command_case_pid&&process&&object&&eventId&&mask){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==command_case_pid){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end){if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2)))command_target_seen=TRUE;if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")&&(rights&1))command_marker_seen=TRUE;}}}free(parsed.fields);
-      xml_decode(encoded);puts("}");free(encoded);free(bytes);BOOL updated=EvtUpdateBookmark(command_bookmark,events[i]);error=updated?ERROR_SUCCESS:GetLastError();
+      if(!rendered){remember("command-capture-render","win32",error);free(bytes);failure(126);}command_scanned_bytes+=length;
+      BOOL selected=command_audit_project(bytes,length);if(selected){command_records++;command_bytes+=length;}free(bytes);BOOL updated=!selected||EvtUpdateBookmark(command_bookmark,events[i]);error=updated?ERROR_SUCCESS:GetLastError();
       if(!updated)remember("command-capture-bookmark","win32",error);BOOL closed=command_event_close(&events[i]);if(!updated||!closed)failure(126); }
   }
 }
@@ -467,13 +485,52 @@ static void command_gate_read(void) {
   if(!matched||!read||count!=32||!closed||!reverted)failure(126);
   int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL);win32_check(length!=0,"command-gate-nonce-encode");
   invariant(length==33&&!memcmp(bytes,expected,32),"command-gate-nonce");
+  command_gate_bytes=count;
+}
+static void command_query_time(FILETIME time, WCHAR text[40]) {
+  SYSTEMTIME value;win32_check(FileTimeToSystemTime(&time,&value),"command-capture-query");
+  ULARGE_INTEGER ticks;ticks.LowPart=time.dwLowDateTime;ticks.HighPart=time.dwHighDateTime;
+  invariant(swprintf_s(text,40,L"%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ",value.wYear,value.wMonth,value.wDay,value.wHour,value.wMinute,value.wSecond,ticks.QuadPart%10000000)>0,"command-subscription-query");
+}
+/* This bounded query diagnoses generation versus subscription delivery. It
+ * never enters the decoder, advances a bookmark or satisfies the control. */
+static void command_delivery_query(FILETIME first, FILETIME last) {
+  WCHAR from[40],to[40],interval[256],query[2048];command_query_time(first,from);command_query_time(last,to);
+  invariant(swprintf_s(interval,256,L" and TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]",from,to)>0,"command-subscription-query");command_audit_query(query,interval);
+  DWORD records=0,bytes=0,candidates=0,error=ERROR_SUCCESS;BOOL complete=FALSE;
+  command_preflight_owned.query=EvtQuery(NULL,L"Security",query,EvtQueryChannelPath|EvtQueryForwardDirection);
+  if(!command_preflight_owned.query)error=GetLastError();
+  while(command_preflight_owned.query&&!error){command_bound();DWORD count=0,length=0,properties=0;
+    BOOL next=EvtNext(command_preflight_owned.query,1,&command_preflight_owned.queryItem,0,0,&count);
+    if(!next){error=GetLastError();if(error==ERROR_NO_MORE_ITEMS){error=ERROR_SUCCESS;complete=TRUE;}break;}
+    if(count!=1){error=ERROR_INVALID_DATA;break;}
+    BOOL measured=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,0,NULL,&length,&properties);DWORD measuredError=measured?ERROR_SUCCESS:GetLastError();
+    if(measured||measuredError!=ERROR_INSUFFICIENT_BUFFER){error=measured?ERROR_INVALID_DATA:measuredError;break;}
+    if(length<4||length>65536||(length%2)||command_scanned+records>=4096||command_scanned_bytes+bytes+length>8388608){error=ERROR_INVALID_DATA;break;}
+    BYTE *raw=calloc(1,length);char *encoded=malloc((size_t)length*2+1);
+    if(!raw||!encoded){free(raw);free(encoded);error=ERROR_OUTOFMEMORY;break;}
+    BOOL rendered=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,length,raw,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
+    if(!rendered&&!error)error=ERROR_INVALID_DATA;
+    if(rendered){records++;bytes+=length;for(DWORD i=0;i<length;i++)snprintf(encoded+2*i,3,"%02x",raw[i]);struct xml_result parsed=xml_parse(encoded);
+      const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
+      for(unsigned i=0;i<parsed.count;i++){struct xml_field *field=&parsed.fields[i];if(!wcscmp(field->name,L"ProcessId"))process=field->value;else if(!wcscmp(field->name,L"ObjectName"))object=field->value;else if(!wcscmp(field->name,L"EventID"))eventId=field->value;else if(!wcscmp(field->name,L"AccessMask"))mask=field->value;}
+      if(process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&FILE_READ_DATA))candidates++;}}
+      free(parsed.fields);
+    }
+    free(encoded);free(raw);BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!closed&&!error)error=ERROR_INVALID_DATA;
+  }
+  BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!command_event_close(&command_preflight_owned.query))closed=FALSE;if(!closed){complete=FALSE;if(!error)error=ERROR_INVALID_DATA;}
+  ULARGE_INTEGER start,end;start.LowPart=first.dwLowDateTime;start.HighPart=first.dwHighDateTime;end.LowPart=last.dwLowDateTime;end.HighPart=last.dwHighDateTime;
+  printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"records\":%lu,\"bytes\":%lu,\"candidates\":%lu,\"error\":%lu,\"complete\":%s,\"gateIdentity\":\"%s\",\"requestedAccess\":%lu,\"performedAccess\":%lu,\"readBytes\":%lu,\"scannedRecords\":%u,\"scannedBytes\":%u}",start.QuadPart,end.QuadPart,records,bytes,candidates,error,complete?"true":"false",command_ids[3],(DWORD)(GENERIC_READ|FILE_READ_ATTRIBUTES),(DWORD)FILE_READ_DATA,command_gate_bytes,command_scanned,command_scanned_bytes);
 }
 static void command_coverage_control(void) {
   unsigned records=command_records;ULONGLONG started=GetTickCount64();
+  FILETIME first,last;GetSystemTimePreciseAsFileTime(&first);
   command_probing=TRUE;command_coverage_seen=FALSE;command_gate_read();
   while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture(1);}
-  command_probing=FALSE;
-  printf("{\"event\":\"P\",\"delivered\":%s,\"startRecords\":%u,\"endRecords\":%u,\"elapsedMs\":%llu}\n",command_coverage_seen?"true":"false",records,command_records,GetTickCount64()-started);
+  command_probing=FALSE;GetSystemTimePreciseAsFileTime(&last);ULONGLONG elapsed=GetTickCount64()-started;
+  printf("{\"event\":\"P\",\"delivered\":%s,\"startRecords\":%u,\"endRecords\":%u,\"elapsedMs\":%llu,\"query\":",command_coverage_seen?"true":"false",records,command_records,elapsed);
+  if(command_coverage_seen)fputs("null",stdout);else command_delivery_query(first,last);puts("}");
 }
 static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }
@@ -721,7 +778,7 @@ static int command_main(int argc,WCHAR **argv) {
   WCHAR admissionLine[8192];invariant(swprintf_s(admissionLine,8192,L"\"%ls\" command-case",command_helper)>0,"command-admission-line");PROCESS_INFORMATION admission=command_spawn(admissionLine,root);command_image_read(admission.hProcess,command_helper_hash,FALSE);win32_check(TerminateProcess(admission.hProcess,0),"command-admission-terminate");
   DWORD waited=WaitForSingleObject(admission.hProcess,10000);if(waited==WAIT_FAILED)win32_check(FALSE,"command-admission-wait");invariant(waited==WAIT_OBJECT_0,"command-admission-wait");
   BOOL pipesClosed=TRUE;if(!release_handle(&command_input,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_output,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_error,"pipe-close"))pipesClosed=FALSE;if(!pipesClosed)failure(126);invariant(!command_members(ownedJob),"command-admission-members");
-  command_files_prepare();WCHAR query[18000];invariant(swprintf_s(query,18000,L"*[System[(EventID=1101 or EventID=1102)]] or *[System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and (Data[@Name=\"ObjectName\"]=\"%ls\" or Data[@Name=\"ObjectName\"]=\"%ls\" or Data[@Name=\"ObjectName\"]=\"%ls\" or Data[@Name=\"ObjectName\"]=\"%ls\")]]",userText,command_paths[0],command_paths[1],command_paths[2],command_paths[3])>0,"command-subscription-query");
+  command_files_prepare();WCHAR query[2048];command_audit_query(query,L"");
   command_subscription=EvtSubscribe(NULL,command_event,L"Security",query,NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);win32_check(command_subscription!=NULL,"command-subscription-create");invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
   PSECURITY_DESCRIPTOR gateSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GRGW;;;WD)",SDDL_REVISION_1,&gateSd,NULL),"command-gate-descriptor");SECURITY_ATTRIBUTES gateSa={sizeof(gateSa),gateSd,FALSE};
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);

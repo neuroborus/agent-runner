@@ -2079,6 +2079,21 @@ available privileges and effective File System success coverage for the held
 broker token and gate. The workflow never enables system auditing, invents
 admission or restores unrelated descriptors to obtain a pass; unavailable native
 coverage remains BLOCKED.
+The command subscription filters the original principal, file type and event
+classes, retaining loss/clear events. A native case-insensitive filter forwards
+only the original four held names, and unrelated rows consume the same limits.
+The existing held-object joins remain mandatory: XPath's case-sensitive string
+equality must not discard a native spelling those joins accept. Record, byte,
+token/logon, process-birth, successful-4663, access and acknowledged-time bounds
+remain mandatory. The original gate read still reopens the held file once under
+the queried token; no account or exclusion policy changes establish coverage.
+When its ten-second delivery control fails, a separate Security query uses only
+that original read interval and the remaining 4096-record/8-MiB capture bounds.
+It reports bounded enumeration/candidate counts, exact errors, completion state
+and the verified held read's identity/access/byte facts. Query rows never enter
+the subscription decoder, advance its bookmark or satisfy admission. Zero counts
+describe this scoped observation, not global event absence. Independent custody,
+retirement, restoration and verification remain required after either outcome.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
