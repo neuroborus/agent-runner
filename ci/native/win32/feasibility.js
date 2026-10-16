@@ -436,7 +436,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     file-protect command-protect-label command-protect-process command-protect-job
     command-protect-intent-event command-protect-closed-event command-protect-free command-fixture-descriptor command-fixture-label
     command-parent-open command-file-open command-file-protect command-file-sacl
-    command-audit-allocation command-audit-init command-audit-ace-read command-audit-ace-copy command-audit-ace
+    command-audit-allocation command-audit-size-read command-audit-init command-audit-ace-read command-audit-ace-copy command-audit-ace
     command-image-query command-job-query command-members-query command-member-open
     command-stdin-pipe command-stdout-pipe command-stderr-pipe command-stdin-inherit command-stdout-inherit command-stderr-inherit
     command-attribute-init command-attribute-job command-attribute-handles command-launch-environment command-process-create
@@ -444,6 +444,9 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-job-create command-job-config command-broker-token command-intent-event command-closed-event
     command-capture-event command-bookmark command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create
     command-gate-impersonate command-gate-open command-gate-read command-gate-nonce-encode
+    command-policy-query command-policy-principal-query command-policy-install command-sacl-install
+    command-intent-set command-intent-wait command-broker-open command-broker-token-duplicate command-broker-token-query
+    command-broker-file-duplicate command-broker-job-duplicate command-broker-job-query
     command-capture-next command-capture-reset command-capture-render command-capture-bookmark command-bookmark-render
     command-owner-read command-cleanup-begin command-retirement-event command-retirement-terminate`
       .split(/\s+/u)
@@ -460,6 +463,13 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation
     command-ready-output command-owner-bound command-coverage-state command-deadline command-retirement-delivery command-retirement-state command-retirement-records`
+      .split(/\s+/u)
+      .map((operation) => [operation, ["invariant"]]),
+  ),
+  ...Object.fromEntries(
+    `command-policy-match command-policy-principal-match command-intent-state command-effective-policy
+    command-broker-check-arguments command-broker-birth command-broker-token-match command-broker-job-empty command-broker-job-outside
+    command-cleanup-baseline`
       .split(/\s+/u)
       .map((operation) => [operation, ["invariant"]]),
   ),

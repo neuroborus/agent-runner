@@ -2486,8 +2486,22 @@ A bounded positive control reopens the original held gate under that exact token
 The finite decoder additionally requires a delivered Security 4663 success with
 matching PID, principal/logon, read access and fresh acknowledged window, while
 independent before/after reads preserve the original file/DACL/bytes and token.
+The reader additionally checks the broker is outside its empty payload Job,
+the unchanged system policy, exact owned per-user inclusion across every
+subcategory, and the installed SACL on each of the four original held objects.
+Both effective success and failure auditing are required. A separate baseline
+read precedes the installation intent; stale object identities, ACLs or policy
+stop before mutation. Audit ACLs use their exact occupied size, including the
+SID's embedded first DWORD, so unused allocation bytes do not become authority.
 Configured bits, RPC acknowledgements and injected booleans supply no delivery
 proof. Unavailable effective coverage remains BLOCKED with zero Codex launches.
+Fixed operation labels distinguish startup, cleanup admission, baseline reads,
+installation, effective reads, delivery and the final join. They preserve the
+original native or transport cause and report local admission failures even when
+stderr is absent. The saved absent-output report establishes no particular API
+or provider-authorization cause. Fresh post-preparation Windows evidence remains
+necessary to identify any remaining refusal and prove broker coverage and all
+original model-free cases; portable coverage does not establish that acceptance.
 A filtered medium-integrity server is suspended inside an unnamed, non-breakaway
 Job at creation with an explicit inherited-handle list. Independent native reads
 join its actual image, creation time, user/session, token and Job membership.
@@ -2509,7 +2523,11 @@ without asserting success. Native finish owners expire with the cleanup budget.
 Before audit setters, an independent finish owner duplicates the original Job,
 file/parent, NUL and intent handles and saves their baselines; native watchers
 hold the broker and both reader identities. Complete empty custody and observer
-retirement precede restoration. Refused pre-admission runs retire without a
+retirement precede restoration. Before custody readiness, the finish owner
+independently checks the supplied file/parent descriptors, absent inclusion,
+unset intent, system policy and original NUL descriptor against live reads.
+The original capture and separately meaningful command result remain mandatory.
+Refused pre-admission runs retire without a
 missing success witness or a manufactured bookmark; admitted runs retain the
 terminal gate witness and complete native capture counts. Partial installation
 may leave baseline or exact owned SACLs and absent or exact owned inclusion;

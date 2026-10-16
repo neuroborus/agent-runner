@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-16 — Bind model-free Windows commands to complete audit coverage
+
+Independent baseline and installed reads now cover all four held object SACLs,
+the complete per-user inclusion and unchanged system policy. Both effective
+audit outcomes and the original nonce gate-read delivery precede every provider
+probe. Cleanup readers validate live baselines before installation intent, and
+occupied ACL sizing avoids binding unused bytes. Fixed operation labels retain
+local admission failures without replacing an original native or transport cause.
+The original buffered cases, controls, deadlines and restoration remain required;
+fresh Windows acceptance and diagnosis of any remaining refusal are pending.
+
 ## 2026-10-16 — Bind Windows feasibility TCP denial to the original socket
 
 The original read/edit socket is independently held before its single connect.

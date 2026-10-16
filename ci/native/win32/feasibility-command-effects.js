@@ -100,18 +100,57 @@ export function windowsCommandAuditRead(native) {
   // Loss events intentionally reach the strict decoder even without a subject.
   return { native: { kind: "event", fields }, logonId };
 }
+function commandAuditSnapshot(value, read, installed) {
+  const original = value.original.cleanup;
+  need(
+    /^[a-f0-9]{64}$/u.test(original.systemSha256) &&
+      read.systemSha256 === original.systemSha256 &&
+      read.included === installed &&
+      Array.isArray(read.files) &&
+      read.files.length === 4 &&
+      new Set(read.files.map((file) => file.identity)).size === 4,
+  );
+  for (let i = 0; i < 4; i++) {
+    const file = original.files[i];
+    need(
+      /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
+        file.identity === value.original.files[i].identity &&
+        read.files[i].identity === file.identity &&
+        /^[a-f0-9]{64}$/u.test(file.baselineSaclSha256) &&
+        /^(?:[a-f0-9]{2}){8,16384}$/u.test(file.saclHex) &&
+        read.files[i].saclSha256 ===
+          (installed
+            ? digest(Buffer.from(file.saclHex, "hex"))
+            : file.baselineSaclSha256),
+    );
+  }
+}
+/** Fixed operation labels explain local admission failures even when no native
+ * stderr exists. A native/transport first cause remains authoritative. */
+function commandCoverageFailure(operation, error) {
+  error.feasibilityCause ??= windowsFeasibilityCause(
+    `broker-${operation}`,
+    error,
+  );
+  return error;
+}
 /** Interface/configuration claims cannot admit a broker. Join independent held
  * token/object reads to the actual decoder's fresh native success delivery. */
 export function windowsCommandBrokerCoverage(value, observation) {
-  const { before, after, start, end, events } = observation,
+  const { baseline, before, after, start, end, events } = observation,
     broker = normalizeWindowsIdentity(value.observer),
     original = value.original.files[3];
+  commandAuditSnapshot(value, baseline.audit, false);
+  commandAuditSnapshot(value, before.audit, true);
+  commandAuditSnapshot(value, after.audit, true);
   need(
-    sameWindowsIdentity(broker, before.identity) &&
+    sameWindowsIdentity(broker, baseline.identity) &&
+      sameWindowsIdentity(broker, before.identity) &&
       sameWindowsIdentity(broker, after.identity) &&
       /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.tokenId) &&
       /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.modifiedId) &&
       JSON.stringify(before.token) === JSON.stringify(after.token) &&
+      JSON.stringify(baseline.token) === JSON.stringify(before.token) &&
       before.token.details.appContainer === false &&
       before.token.details.restricted === false &&
       before.token.details.restrictingSids === 0 &&
@@ -122,7 +161,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
       /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(original.identity) &&
       /^[a-f0-9]{64}$/u.test(original.daclSha256) &&
       original.sha256 === digest(value.nonce) &&
-      [before.gate, after.gate].every(
+      [baseline.gate, before.gate, after.gate].every(
         (gate) => JSON.stringify(gate) === JSON.stringify(original),
       ),
   );
@@ -136,7 +175,11 @@ export function windowsCommandBrokerCoverage(value, observation) {
   };
   if (
     ![before, after].every(
-      (v) => v.effective.available === true && v.effective.success === true,
+      (v) =>
+        v.effective.available === true &&
+        v.effective.success === true &&
+        v.effective.failure === true &&
+        v.effective.error === 0,
     )
   )
     unavailable();
@@ -145,6 +188,10 @@ export function windowsCommandBrokerCoverage(value, observation) {
       end.sequence === start.sequence + 1 &&
       BigInt(end.time) > BigInt(start.time) &&
       BigInt(broker.creationTime) < BigInt(start.time) &&
+      Number.isSafeInteger(start.records) &&
+      start.records >= 0 &&
+      Number.isSafeInteger(end.records) &&
+      end.records <= 4096 &&
       end.records - start.records === events.length,
   );
   if (
@@ -1206,300 +1253,329 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       });
     },
     async coverage(value, signal) {
-      observationSignal = signal;
-      broker = spawn(
-        value.helper,
-        [
-          "command-broker",
-          value.root,
-          value.nonce,
-          inputs.packages.codex.file,
-          inputs.packages.codex.component.sha256,
+      let operation = "startup";
+      try {
+        observationSignal = signal;
+        broker = spawn(
           value.helper,
-          value.helperSha256,
-        ],
-        {
-          env: nativeEnvironment(),
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        },
-      );
-      const ready = new Promise((resolve, reject) =>
-        pending.set("ready", { resolve, reject }),
-      );
-      let brokerStderr = Buffer.alloc(0),
-        brokerStderrInvalid = false;
-      closed = new Promise((resolve) => {
-        broker.once("error", fail);
-        broker.once("close", (code, killed) => {
-          resolve({ code, signal: killed });
-          rpc.end();
-          errorOutput.end();
-          const incomplete =
-            brokerStderrInvalid || !broker.stderr.readableEnded;
-          const diagnosis = incomplete
-            ? null
-            : windowsFeasibilityDiagnostics(brokerStderr);
-          const first = failed;
-          const error = Object.assign(
-            new Error("Native broker closed", { cause: first }),
-            {
-              code,
-              signal: killed,
-              stderr: brokerStderr,
-              nativeDiagnosticInvalid:
-                incomplete || (brokerStderr.length > 0 && !diagnosis),
-            },
-          );
-          error.feasibilityCause = windowsFeasibilityCause(
-            "broker-coverage",
-            diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
-          );
-          if (diagnosis?.cleanup) {
-            const { operation, domain, value } = diagnosis.cleanup;
-            error.feasibilityCleanup = {
-              code: "cleanup-unobserved",
-              detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
-            };
-            if (first) first.feasibilityCleanup ??= error.feasibilityCleanup;
-          }
-          if (first)
-            first.brokerCompletion = {
-              code,
-              signal: killed,
-              stderr: brokerStderr,
-              nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
-            };
-          // Arrival order is only a candidate. The complete bounded carrier and
-          // real close facts must validate before it can outrank a later failure.
-          if (diagnosis && brokerDiagnosticFirst) failed = error;
-          if (
-            code !== 0 ||
-            killed ||
-            error.nativeDiagnosticInvalid ||
-            brokerStderr.length
-          )
-            fail(error);
-          for (const entry of pending.values()) entry.reject(failed ?? error);
-          pending.clear();
-        });
-      });
-      broker.stdin.on("error", (error) => {
-        fail(error);
-        for (const key of ["D", "S"]) {
-          pending.get(key)?.reject(error);
-          pending.delete(key);
-        }
-      });
-      observeNativeProcess("win32/feasibility-command-effects.js", broker);
-      broker.stderr.on("data", (v) => {
-        if (v.length && brokerDiagnosticFirst === undefined)
-          brokerDiagnosticFirst = !failed;
-        if (!brokerStderrInvalid) {
-          if (brokerStderr.length + v.length <= 4096)
-            brokerStderr = Buffer.concat([brokerStderr, v]);
-          else {
-            brokerStderrInvalid = true;
-            brokerStderr = Buffer.alloc(0);
-          }
-        }
-        bytes += v.length;
-        if (bytes > 33554432) fail(new Error("Native capture exceeded bound"));
-      });
-      broker.stderr.on("error", (error) => {
-        brokerStderrInvalid = true;
-        fail(error);
-      });
-      reading = (async () => {
-        for await (const line of createInterface({
-          input: broker.stdout,
-          crlfDelay: Infinity,
-        })) {
-          try {
-            need(line.length <= 600000);
-            bytes += Buffer.byteLength(line);
-            need(bytes <= 33554432);
-            const frame = JSON.parse(line);
-            if (failed && !["D", "S"].includes(frame.event)) continue;
-            if (frame.event === "audit") {
-              need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
-              const raw = Buffer.from(frame.hex, "hex"),
-                header = Buffer.alloc(4);
-              const decoded = windowsCommandAuditRead(frame.decoded);
-              xml.set(digest(raw), decoded.native);
-              logons.set(digest(raw), decoded.logonId);
-              header.writeUInt32LE(raw.length);
-              await decoder.push(Buffer.concat([header, raw]));
-            } else if (
-              frame.event === "rpc" ||
-              frame.event === "stderr" ||
-              frame.event === "probe-output" ||
-              frame.event === "probe-stderr"
-            ) {
-              need(/^(?:[a-f0-9]{2}){1,4096}$/u.test(frame.hex));
-              const raw = Buffer.from(frame.hex, "hex");
-              nativeDiagnostic(`windows-command:${frame.event}`, {
-                [frame.event.endsWith("stderr") ? "stderr" : "stdout"]: raw,
-              });
-              if (frame.event === "probe-output") {
-                probeOutput += raw.toString("utf8");
-                need(probeOutput.length <= 4096);
-              } else if (frame.event !== "probe-stderr")
-                (frame.event === "rpc" ? rpc : errorOutput).write(raw);
-            } else if (["rpc-end", "stderr-end"].includes(frame.event))
-              (frame.event === "rpc-end" ? rpc : errorOutput).end();
-            else if (frame.event === "capture-end") {
-              need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
-              const raw = Buffer.from(frame.hex, "hex"),
-                header = Buffer.alloc(16);
-              xml.set(digest(raw), frame.decoded);
-              header.writeUInt32LE(0xffffffff);
-              header.writeUInt32LE(frame.bytes, 4);
-              header.writeUInt32LE(frame.records, 8);
-              header.writeUInt32LE(raw.length, 12);
-              await decoder.push(Buffer.concat([header, raw]));
-            } else {
-              if (frame.event === "ready") await decoder.push(Buffer.alloc(4));
-              if (frame.event === "B") {
-                const raw = Buffer.alloc(20);
-                raw.writeUInt32LE(0xfffffffe);
-                raw.writeUInt32LE(frame.sequence, 4);
-                raw.writeBigUInt64LE(BigInt(frame.time), 8);
-                raw.writeUInt32LE(frame.records, 16);
-                await decoder.push(raw);
-              }
-              const entry = pending.get(frame.event);
-              need(entry);
-              pending.delete(frame.event);
-              entry.resolve(frame);
-            }
-          } catch (error) {
-            nativeException(
-              "win32/feasibility-command-effects.js:exception",
-              error,
-            );
-            fail(error);
-          }
-        }
-      })();
-      reading.catch(fail);
-      const admitted = await ready;
-      value.observer = normalizeWindowsIdentity(admitted.identity);
-      value.jobHandle = admitted.jobHandle;
-      need(
-        /^[1-9][0-9]{0,19}$/u.test(value.jobHandle) &&
-          admitted.files.length === 4,
-      );
-      value.sentinelSha256 = digest(JSON.stringify(admitted.files[2]));
-      value.original = admitted;
-      watcher = await watch(
-        [
-          "command-watch",
-          String(value.observer.pid),
-          value.observer.creationTime,
-          value.helperSha256,
-          value.nonce,
-          value.jobHandle,
-        ],
-        signal,
-      );
-      cleanupReader = await watch(
-        [
-          "command-finish",
-          String(value.observer.pid),
-          value.observer.creationTime,
-          value.helperSha256,
-          value.nonce,
-          value.jobHandle,
-        ],
-        signal,
-      );
-      const original = value.original.cleanup;
-      need(
-        [original.intentHandle, original.closedHandle].every((v) =>
-          /^[1-9][0-9]{0,19}$/u.test(v),
-        ),
-      );
-      need(original.files.length === 6);
-      need(
-        /^[a-f0-9]{64}$/u.test(original.systemSha256) &&
-          /^[a-f0-9]{64}$/u.test(original.nullSha256) &&
-          /^[1-9][0-9]{0,19}$/u.test(original.nullHandle),
-      );
-      await cleanupReader.initialize(
-        `${original.systemSha256} ${original.nullSha256} ${original.nullHandle} ${original.intentHandle} ${original.closedHandle}\n` +
-          original.files
-            .map((file) => {
-              need(
-                /^[1-9][0-9]{0,19}$/u.test(file.handle) &&
-                  /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
-                  /^(?:[a-f0-9]{2})+$/u.test(file.baselineHex) &&
-                  /^(?:[a-f0-9]{2})*$/u.test(file.saclHex),
-              );
-              return `${file.handle} ${file.identity} ${file.baselineHex} ${file.saclHex || "-"}\n`;
-            })
-            .join(""),
-      );
-      cleanupReady = true;
-      readerVerifier = await watch(
-        [
-          "command-watch",
-          String(cleanupReader.identity.pid),
-          cleanupReader.identity.creationTime,
-          value.helperSha256,
-          value.nonce,
-        ],
-        signal,
-      );
-      observerVerifier = await watch(
-        [
-          "command-watch",
-          String(watcher.identity.pid),
-          watcher.identity.creationTime,
-          value.helperSha256,
-          value.nonce,
-        ],
-        signal,
-      );
-      await call("I");
-      const inspect = () =>
-        native(
           [
-            "command-broker-check",
+            "command-broker",
+            value.root,
+            value.nonce,
+            inputs.packages.codex.file,
+            inputs.packages.codex.component.sha256,
+            value.helper,
+            value.helperSha256,
+          ],
+          {
+            env: nativeEnvironment(),
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+          },
+        );
+        const ready = new Promise((resolve, reject) =>
+          pending.set("ready", { resolve, reject }),
+        );
+        let brokerStderr = Buffer.alloc(0),
+          brokerStderrInvalid = false;
+        closed = new Promise((resolve) => {
+          broker.once("error", fail);
+          broker.once("close", (code, killed) => {
+            resolve({ code, signal: killed });
+            rpc.end();
+            errorOutput.end();
+            const incomplete =
+              brokerStderrInvalid || !broker.stderr.readableEnded;
+            const diagnosis = incomplete
+              ? null
+              : windowsFeasibilityDiagnostics(brokerStderr);
+            const first = failed;
+            const error = Object.assign(
+              new Error("Native broker closed", { cause: first }),
+              {
+                code,
+                signal: killed,
+                stderr: brokerStderr,
+                nativeDiagnosticInvalid:
+                  incomplete || (brokerStderr.length > 0 && !diagnosis),
+              },
+            );
+            error.feasibilityCause = windowsFeasibilityCause(
+              "broker-coverage",
+              diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
+            );
+            if (diagnosis?.cleanup) {
+              const { operation, domain, value } = diagnosis.cleanup;
+              error.feasibilityCleanup = {
+                code: "cleanup-unobserved",
+                detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+              };
+              if (first) first.feasibilityCleanup ??= error.feasibilityCleanup;
+            }
+            if (first)
+              first.brokerCompletion = {
+                code,
+                signal: killed,
+                stderr: brokerStderr,
+                nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+              };
+            // Arrival order is only a candidate. The complete bounded carrier and
+            // real close facts must validate before it can outrank a later failure.
+            if (diagnosis && brokerDiagnosticFirst) failed = error;
+            if (
+              code !== 0 ||
+              killed ||
+              error.nativeDiagnosticInvalid ||
+              brokerStderr.length
+            )
+              fail(error);
+            for (const entry of pending.values()) entry.reject(failed ?? error);
+            pending.clear();
+          });
+        });
+        broker.stdin.on("error", (error) => {
+          fail(error);
+          for (const key of ["D", "S"]) {
+            pending.get(key)?.reject(error);
+            pending.delete(key);
+          }
+        });
+        broker.stdout.on("error", fail);
+        observeNativeProcess("win32/feasibility-command-effects.js", broker);
+        broker.stderr.on("data", (v) => {
+          if (v.length && brokerDiagnosticFirst === undefined)
+            brokerDiagnosticFirst = !failed;
+          if (!brokerStderrInvalid) {
+            if (brokerStderr.length + v.length <= 4096)
+              brokerStderr = Buffer.concat([brokerStderr, v]);
+            else {
+              brokerStderrInvalid = true;
+              brokerStderr = Buffer.alloc(0);
+            }
+          }
+          bytes += v.length;
+          if (bytes > 33554432)
+            fail(new Error("Native capture exceeded bound"));
+        });
+        broker.stderr.on("error", (error) => {
+          brokerStderrInvalid = true;
+          fail(error);
+        });
+        reading = (async () => {
+          for await (const line of createInterface({
+            input: broker.stdout,
+            crlfDelay: Infinity,
+          })) {
+            try {
+              need(line.length <= 600000);
+              bytes += Buffer.byteLength(line);
+              need(bytes <= 33554432);
+              const frame = JSON.parse(line);
+              if (failed && !["D", "S"].includes(frame.event)) continue;
+              if (frame.event === "audit") {
+                need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex"),
+                  header = Buffer.alloc(4);
+                const decoded = windowsCommandAuditRead(frame.decoded);
+                xml.set(digest(raw), decoded.native);
+                logons.set(digest(raw), decoded.logonId);
+                header.writeUInt32LE(raw.length);
+                await decoder.push(Buffer.concat([header, raw]));
+              } else if (
+                frame.event === "rpc" ||
+                frame.event === "stderr" ||
+                frame.event === "probe-output" ||
+                frame.event === "probe-stderr"
+              ) {
+                need(/^(?:[a-f0-9]{2}){1,4096}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex");
+                nativeDiagnostic(`windows-command:${frame.event}`, {
+                  [frame.event.endsWith("stderr") ? "stderr" : "stdout"]: raw,
+                });
+                if (frame.event === "probe-output") {
+                  probeOutput += raw.toString("utf8");
+                  need(probeOutput.length <= 4096);
+                } else if (frame.event !== "probe-stderr")
+                  (frame.event === "rpc" ? rpc : errorOutput).write(raw);
+              } else if (["rpc-end", "stderr-end"].includes(frame.event))
+                (frame.event === "rpc-end" ? rpc : errorOutput).end();
+              else if (frame.event === "capture-end") {
+                need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex"),
+                  header = Buffer.alloc(16);
+                xml.set(digest(raw), frame.decoded);
+                header.writeUInt32LE(0xffffffff);
+                header.writeUInt32LE(frame.bytes, 4);
+                header.writeUInt32LE(frame.records, 8);
+                header.writeUInt32LE(raw.length, 12);
+                await decoder.push(Buffer.concat([header, raw]));
+              } else {
+                if (frame.event === "ready")
+                  await decoder.push(Buffer.alloc(4));
+                if (frame.event === "B") {
+                  const raw = Buffer.alloc(20);
+                  raw.writeUInt32LE(0xfffffffe);
+                  raw.writeUInt32LE(frame.sequence, 4);
+                  raw.writeBigUInt64LE(BigInt(frame.time), 8);
+                  raw.writeUInt32LE(frame.records, 16);
+                  await decoder.push(raw);
+                }
+                const entry = pending.get(frame.event);
+                need(entry);
+                pending.delete(frame.event);
+                entry.resolve(frame);
+              }
+            } catch (error) {
+              nativeException(
+                "win32/feasibility-command-effects.js:exception",
+                error,
+              );
+              fail(error);
+            }
+          }
+        })();
+        reading.catch(fail);
+        const admitted = await ready;
+        operation = "ready-admission";
+        value.observer = normalizeWindowsIdentity(admitted.identity);
+        value.jobHandle = admitted.jobHandle;
+        need(
+          /^[1-9][0-9]{0,19}$/u.test(value.jobHandle) &&
+            admitted.files.length === 4,
+        );
+        value.sentinelSha256 = digest(JSON.stringify(admitted.files[2]));
+        value.original = admitted;
+        operation = "cleanup-reader-admission";
+        watcher = await watch(
+          [
+            "command-watch",
             String(value.observer.pid),
             value.observer.creationTime,
             value.helperSha256,
-            admitted.tokenHandle,
-            admitted.gateHandle,
+            value.nonce,
             value.jobHandle,
           ],
           signal,
         );
-      const before = await inspect();
-      if (!before.effective.available || !before.effective.success)
-        throw Object.assign(
-          new Error("Effective broker auditing unavailable"),
-          { code: 78 },
+        cleanupReader = await watch(
+          [
+            "command-finish",
+            String(value.observer.pid),
+            value.observer.creationTime,
+            value.helperSha256,
+            value.nonce,
+            value.jobHandle,
+          ],
+          signal,
         );
-      const start = await call("B");
-      await call("P");
-      const end = await call("B"),
-        after = await inspect(),
-        state = decoder.state();
-      const observation = {
-        before,
-        after,
-        start,
-        end,
-        captureComplete: state.ready && !failed,
-        events: state.events
-          .slice(start.records, end.records)
-          .map((event) => ({ ...event, logonId: logons.get(event.raw.id) })),
-      };
-      windowsCommandBrokerCoverage(value, observation);
-      await call("M");
-      coverageAdmitted = true;
-      return observation;
+        const original = value.original.cleanup;
+        need(
+          [original.intentHandle, original.closedHandle].every((v) =>
+            /^[1-9][0-9]{0,19}$/u.test(v),
+          ),
+        );
+        need(original.files.length === 6);
+        need(
+          /^[a-f0-9]{64}$/u.test(original.systemSha256) &&
+            /^[a-f0-9]{64}$/u.test(original.nullSha256) &&
+            /^[1-9][0-9]{0,19}$/u.test(original.nullHandle),
+        );
+        await cleanupReader.initialize(
+          `${original.systemSha256} ${original.nullSha256} ${original.nullHandle} ${original.intentHandle} ${original.closedHandle}\n` +
+            original.files
+              .map((file) => {
+                need(
+                  /^[1-9][0-9]{0,19}$/u.test(file.handle) &&
+                    /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
+                    /^(?:[a-f0-9]{2})+$/u.test(file.baselineHex) &&
+                    /^(?:[a-f0-9]{2})*$/u.test(file.saclHex),
+                );
+                return `${file.handle} ${file.identity} ${file.baselineHex} ${file.saclHex || "-"}\n`;
+              })
+              .join(""),
+        );
+        cleanupReady = true;
+        readerVerifier = await watch(
+          [
+            "command-watch",
+            String(cleanupReader.identity.pid),
+            cleanupReader.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
+        );
+        observerVerifier = await watch(
+          [
+            "command-watch",
+            String(watcher.identity.pid),
+            watcher.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
+        );
+        const inspect = () =>
+          native(
+            [
+              "command-broker-check",
+              String(value.observer.pid),
+              value.observer.creationTime,
+              value.helperSha256,
+              admitted.tokenHandle,
+              admitted.gateHandle,
+              value.jobHandle,
+              ...original.files.slice(0, 3).map((file) => file.handle),
+            ],
+            signal,
+          );
+        operation = "baseline-read";
+        const baseline = await inspect();
+        need(
+          sameWindowsIdentity(baseline.identity, value.observer) &&
+            JSON.stringify(baseline.gate) === JSON.stringify(admitted.files[3]),
+        );
+        commandAuditSnapshot(value, baseline.audit, false);
+        operation = "audit-installation";
+        await call("I");
+        operation = "installed-audit-read";
+        const before = await inspect();
+        commandAuditSnapshot(value, before.audit, true);
+        if (
+          !before.effective.available ||
+          !before.effective.success ||
+          !before.effective.failure ||
+          before.effective.error !== 0
+        )
+          throw Object.assign(
+            new Error("Effective broker auditing unavailable"),
+            { code: 78 },
+          );
+        operation = "gate-delivery";
+        const start = await call("B");
+        await call("P");
+        const end = await call("B"),
+          after = await inspect(),
+          state = decoder.state();
+        const observation = {
+          baseline,
+          before,
+          after,
+          start,
+          end,
+          captureComplete: state.ready && !failed,
+          events: state.events
+            .slice(start.records, end.records)
+            .map((event) => ({ ...event, logonId: logons.get(event.raw.id) })),
+        };
+        operation = "coverage-join";
+        windowsCommandBrokerCoverage(value, observation);
+        await call("M");
+        coverageAdmitted = true;
+        return observation;
+      } catch (error) {
+        throw commandCoverageFailure(operation, error);
+      }
     },
     async schema(value) {
       need(coverageAdmitted);

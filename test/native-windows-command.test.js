@@ -30,7 +30,10 @@ import {
   openFeasibilityCommand,
 } from "../ci/native/providers/index.js";
 import { observationDigest } from "../ci/native/index.js";
-import { feasibilityFailureCause } from "../ci/native/feasibility/index.js";
+import {
+  feasibilityFailureCause,
+  unavailableFeasibilityResults,
+} from "../ci/native/feasibility/index.js";
 
 const sha = (v) => createHash("sha256").update(v).digest("hex"),
   PIN = sha("fixture");
@@ -133,11 +136,36 @@ async function brokerCapture(prepared) {
           authenticationId: "00000000:00000001",
         },
       },
-      effective: { available: true, success: true },
+      effective: { available: true, success: true, failure: true, error: 0 },
       gate,
     };
-  prepared.original = { files: [gate, gate, gate, gate] };
+  const files = Array.from({ length: 4 }, (_, i) => ({
+    ...gate,
+    identity:
+      i === 3 ? gate.identity : `${"1".repeat(16)}:${String(i + 3).repeat(32)}`,
+  }));
+  prepared.original = {
+    files,
+    cleanup: {
+      systemSha256: PIN,
+      files: files.map((file) => ({
+        identity: file.identity,
+        baselineSaclSha256: sha("baseline"),
+        saclHex: Buffer.from("owned-acl").toString("hex"),
+      })),
+    },
+  };
+  const audit = (installed) => ({
+    systemSha256: PIN,
+    included: installed,
+    files: files.map((file) => ({
+      identity: file.identity,
+      saclSha256: sha(installed ? "owned-acl" : "baseline"),
+    })),
+  });
+  inspected.audit = audit(true);
   return {
+    baseline: { ...structuredClone(inspected), audit: audit(false) },
     before: inspected,
     after: structuredClone(inspected),
     captureComplete: true,
@@ -562,6 +590,8 @@ test("unavailable policy or missing/mismatched delivery blocks every Codex probe
   for (const [key, value] of [
     ["before.effective.available", false],
     ["after.effective.success", false],
+    ["before.effective.failure", false],
+    ["after.effective.error", 5],
     ["events", []],
     ["events.0.raw.pid", 999],
     ["events.0.raw.subjectSid", "S-1-5-21-10-20-30-1002"],
@@ -607,6 +637,13 @@ test("coverage binds the original administrative token and held gate, not an inc
     ["before.token.details.integrity", 8192],
     ["before.token.details.restricted", true],
     ["after.gate.daclSha256", sha("changed")],
+    ["baseline.audit.included", true],
+    ["baseline.audit.files.1.saclSha256", sha("foreign")],
+    ["before.audit.included", false],
+    ["after.audit.systemSha256", sha("foreign")],
+    ["before.audit.files.0.identity", "1".repeat(16) + ":" + "8".repeat(32)],
+    ["after.audit.files.2.saclSha256", sha("foreign")],
+    ["baseline.token.modifiedId", "00000000:00000004"],
     ["captureComplete", false],
     ["end.sequence", 3],
   ]) {
@@ -898,7 +935,21 @@ test("native custody retains live handles, original NUL and saved ACL protection
     /DuplicateHandle\(owner,\(HANDLE\)\(ULONG_PTR\)nullValue,GetCurrentProcess\(\),&null,READ_CONTROL/u,
   );
   assert.doesNotMatch(finish, /CreateFileW/u);
-  assert.equal(finish.match(/command_sd\(null,SE_KERNEL_OBJECT/gu)?.length, 2);
+  const custody = finish.indexOf('puts("{\\"custodyReady\\":true}")');
+  assert.ok(custody > 0);
+  assert.equal(
+    finish.slice(0, custody).match(/command_sd\(null,SE_KERNEL_OBJECT/gu)
+      ?.length,
+    1,
+  );
+  assert.equal(
+    finish.slice(custody).match(/command_sd\(null,SE_KERNEL_OBJECT/gu)?.length,
+    2,
+  );
+  assert.match(
+    finish.slice(custody),
+    /AuditEnumerateSubCategories\(NULL,TRUE,&command_categories,&command_category_count\)[\s\S]*AuditQuerySystemPolicy[\s\S]*command_sum[\s\S]*!strcmp\(actual,systemHash\)/u,
+  );
   assert.match(
     source,
     /i==3\?PROTECTED_DACL_SECURITY_INFORMATION:UNPROTECTED_DACL_SECURITY_INFORMATION/u,
@@ -3319,6 +3370,7 @@ async function brokerCloseBoundary() {
       rpc = new PassThrough(),
       errorOutput = new PassThrough();
     broker.stdin = new EventEmitter();
+    broker.stdout = new PassThrough();
     broker.stderr = new PassThrough();
     const result = boundary.runInNewContext({
       Buffer,
@@ -4370,4 +4422,539 @@ test("coverage admission and retirement preserve immediate errors and independen
     final.indexOf("close_job(FALSE)") <
       final.indexOf("if(!closed)failure(126)"),
   );
+});
+
+test("actual coverage rejects stale baselines before installation and joins all held SACLs before probes", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    guards = source.slice(
+      source.indexOf("function commandAuditSnapshot("),
+      source.indexOf("/** Interface/configuration"),
+    ),
+    start = source.indexOf(
+      "const inspect = () =>",
+      source.indexOf("async coverage("),
+    ),
+    end =
+      source.indexOf("return observation;", start) +
+      "return observation;".length;
+  assert.ok(start > 0 && end > start);
+  const program = new Script(`(async () => {
+    ${guards}
+    let operation;
+    try { ${source.slice(start, end)} }
+    catch (error) { throw commandCoverageFailure(operation, error); }
+  })()`);
+  for (const fault of [
+    null,
+    "baseline",
+    "sacl",
+    "failure-policy",
+    "delivery",
+    "reader-error",
+  ]) {
+    const value = {
+        nonce: "a".repeat(32),
+        observer: identity,
+        gateFile: "C:\\fixture\\gate",
+        helperSha256: PIN,
+        jobHandle: "7",
+      },
+      capture = await brokerCapture(value),
+      reads = [capture.baseline, capture.before, capture.after],
+      calls = [],
+      originalCause = {
+        code: "setup-failed",
+        detail: "Native command-policy-query failed (win32=5).",
+      },
+      originalError = Object.assign(new Error("native reader refused"), {
+        feasibilityCause: originalCause,
+      });
+    value.original.cleanup.files.forEach((file, i) => {
+      file.handle = String(i + 10);
+    });
+    if (fault === "baseline")
+      capture.baseline.audit.files[2].saclSha256 = sha("foreign");
+    if (fault === "sacl")
+      capture.before.audit.files[0].saclSha256 = sha("foreign");
+    if (fault === "failure-policy") capture.before.effective.failure = false;
+    if (fault === "delivery") {
+      capture.events = [];
+      capture.end.records = 0;
+    }
+    let coverageAdmitted = false,
+      barriers = 0;
+    const context = {
+      value,
+      original: value.original.cleanup,
+      admitted: {
+        files: value.original.files,
+        tokenHandle: "8",
+        gateHandle: "13",
+      },
+      signal: new AbortController().signal,
+      Buffer,
+      need: assert.ok,
+      digest: sha,
+      sameWindowsIdentity: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      windowsFeasibilityCause,
+      windowsCommandBrokerCoverage,
+      native: async (args) => {
+        calls.push("read");
+        assert.deepEqual(Array.from(args), [
+          "command-broker-check",
+          "123",
+          "101",
+          PIN,
+          "8",
+          "13",
+          "7",
+          "10",
+          "11",
+          "12",
+        ]);
+        if (fault === "reader-error") throw originalError;
+        return reads.shift();
+      },
+      call: async (key) => {
+        calls.push(key);
+        return key === "B" ? (barriers++ ? capture.end : capture.start) : {};
+      },
+      decoder: { state: () => ({ ready: true, events: capture.events }) },
+      logons: new Map(
+        capture.events.map((event) => [event.raw.id, event.logonId]),
+      ),
+      failed: null,
+      set coverageAdmitted(value) {
+        coverageAdmitted = value;
+      },
+      get coverageAdmitted() {
+        return coverageAdmitted;
+      },
+    };
+    if (!fault) {
+      await program.runInNewContext(context);
+      assert.deepEqual(calls, [
+        "read",
+        "I",
+        "read",
+        "B",
+        "P",
+        "B",
+        "read",
+        "M",
+      ]);
+      assert.equal(coverageAdmitted, true);
+    } else {
+      await assert.rejects(program.runInNewContext(context), (error) => {
+        if (fault === "reader-error") {
+          assert.equal(error, originalError);
+          assert.equal(error.feasibilityCause, originalCause);
+        } else
+          assert.ok(
+            error.feasibilityCause.detail.includes(
+              fault === "baseline"
+                ? "baseline-read"
+                : fault === "delivery"
+                  ? "coverage-join"
+                  : "installed-audit-read",
+            ),
+          );
+        return true;
+      });
+      assert.equal(coverageAdmitted, false);
+      assert.equal(calls.includes("M"), false);
+      if (["baseline", "reader-error"].includes(fault))
+        assert.equal(calls.includes("I"), false);
+      if (["sacl", "failure-policy"].includes(fault))
+        assert.equal(calls.includes("P"), false);
+    }
+  }
+});
+
+test("coverage operation labels preserve native failure classes and bounded report causes", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    start = source.indexOf("function commandCoverageFailure("),
+    end = source.indexOf("/** Interface/configuration", start);
+  assert.ok(start >= 0 && end > start);
+  const annotate = new Script(`(${source.slice(start, end)})`).runInNewContext({
+    windowsFeasibilityCause,
+  });
+  for (const properties of [
+    { code: 124, signal: null },
+    { code: null, signal: "SIGTERM" },
+    { code: 78, signal: null },
+    { code: 78, signal: null, nativeDiagnosticInvalid: true },
+    { code: "ERR_FEASIBILITY_DEADLINE" },
+    {
+      code: 126,
+      signal: null,
+      operation: "git-status",
+      stderr:
+        "native-windows: operation=command-policy-query domain=win32 value=5\n",
+    },
+  ]) {
+    const error = Object.assign(
+        new Error("private diagnostics are not a cause"),
+        properties,
+      ),
+      expected = windowsFeasibilityCause(
+        "broker-cleanup-reader-admission",
+        error,
+      );
+    assert.equal(annotate("cleanup-reader-admission", error), error);
+    assert.deepEqual(error.feasibilityCause, expected);
+    assert.ok(error.feasibilityCause.detail.length <= 256);
+    assert.equal(
+      unavailableFeasibilityResults("win32", error.feasibilityCause)[0].cause
+        .code,
+      expected.code,
+    );
+    const first = error.feasibilityCause;
+    assert.equal(annotate("coverage-join", error).feasibilityCause, first);
+  }
+});
+
+test("native audit installation records intent first and preserves exact setter and wait errors", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    body = source.slice(
+      source.indexOf("static void command_audit_install(void) {"),
+      source.indexOf("static void command_token_read("),
+    ),
+    script = new Script(
+      body
+        .replace(
+          "static void command_audit_install(void)",
+          "function install()",
+        )
+        .replace(/AUDIT_POLICY_INFORMATION policy=\{0\}/u, "let policy={}")
+        .replace(/\b(?:DWORD|unsigned)\b/gu, "let")
+        .replace("&policy", "policy") + "install();",
+    );
+  for (const fault of [null, "wait", "intent", "policy", 0, 1, 2, 3]) {
+    const calls = [];
+    let first;
+    const remember = (...cause) => {
+        first ??= cause;
+      },
+      api = {
+        command_policy_equal: () => calls.push("baseline"),
+        command_principal_exists: () => false,
+        command_audit_intent: 1,
+        command_category: 2,
+        userSid: 3,
+        command_files: [0, 1, 2, 3],
+        command_sacls: [4, 5, 6, 7],
+        WAIT_FAILED: -1,
+        WAIT_TIMEOUT: 258,
+        FALSE: false,
+        NULL: null,
+        PER_USER_AUDIT_SUCCESS_INCLUDE: 1,
+        PER_USER_AUDIT_FAILURE_INCLUDE: 4,
+        SE_FILE_OBJECT: 1,
+        SACL_SECURITY_INFORMATION: 8,
+        WaitForSingleObject: () => (fault === "wait" ? -1 : 258),
+        GetLastError: () => 5,
+        SetEvent: () => {
+          calls.push("intent");
+          return fault !== "intent";
+        },
+        AuditSetPerUserPolicy: () => {
+          calls.push("policy");
+          return fault !== "policy";
+        },
+        SetSecurityInfo: (file) => {
+          calls.push(file);
+          return fault === file ? 1314 : 0;
+        },
+        invariant: (ok, operation) => {
+          if (!ok) {
+            remember(operation, "invariant", 0);
+            throw 126;
+          }
+        },
+        win32_check: (ok, operation) => {
+          if (!ok) {
+            remember(operation, "win32", 5);
+            throw 126;
+          }
+        },
+        status_check: (status, operation) => {
+          if (status) {
+            remember(operation, "win32", status);
+            throw 126;
+          }
+        },
+      };
+    if (fault === null) {
+      script.runInNewContext(api);
+      assert.deepEqual(calls, ["baseline", "intent", "policy", 0, 1, 2, 3]);
+    } else {
+      assert.throws(
+        () => script.runInNewContext(api),
+        (code) => code === 126,
+      );
+      const operation =
+        typeof fault === "number"
+          ? "command-sacl-install"
+          : `command-${fault === "policy" ? "policy-install" : fault === "wait" ? "intent-wait" : "intent-set"}`;
+      assert.deepEqual(first, [
+        operation,
+        "win32",
+        typeof fault === "number" ? 1314 : 5,
+      ]);
+      assert.ok(
+        windowsFeasibilityDiagnostics(
+          `native-windows: operation=${first[0]} domain=win32 value=${first[2]}\n`,
+        ),
+      );
+      if (["wait", "intent"].includes(fault))
+        assert.equal(calls.includes("policy"), false);
+      if (typeof fault === "number") assert.equal(calls.at(-1), fault);
+    }
+  }
+});
+
+test("effective audit reads retain both outcomes and the immediate native query status", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    body = source.slice(
+      source.indexOf("static void command_effective(HANDLE token) {"),
+      source.indexOf("static void command_image_read("),
+    ),
+    script = new Script(
+      body
+        .replace(
+          "static void command_effective(HANDLE token)",
+          "function effective(token)",
+        )
+        .replace("AUDIT_POLICY_INFORMATION *policy", "let policy")
+        .replace(/\b(?:BOOL|DWORD)\b/gu, "let")
+        .replace("&policy->AuditSubCategoryGuid", "policy.AuditSubCategoryGuid")
+        .replace(/policy->/gu, "policy.")
+        .replace(/&command_category/gu, "command_category")
+        .replace("&policy", "value=>policy=value") + "effective(7);",
+    );
+  for (const [available, flags] of [
+    [true, 3],
+    [true, 1],
+    [false, 0],
+  ]) {
+    let output,
+      closed = 0,
+      lastError = 5;
+    script.runInNewContext({
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      command_category: "file-system",
+      POLICY_AUDIT_EVENT_SUCCESS: 1,
+      POLICY_AUDIT_EVENT_FAILURE: 2,
+      AuditComputeEffectivePolicyByToken: (token, category, count, result) => {
+        assert.deepEqual([token, category, count], [7, "file-system", 1]);
+        if (available)
+          result({
+            AuditSubCategoryGuid: category,
+            AuditingInformation: flags,
+          });
+        return available;
+      },
+      GetLastError: () => lastError,
+      AuditFree: () => {
+        closed++;
+        lastError = 6;
+      },
+      IsEqualGUID: (a, b) => a === b,
+      invariant: assert.ok,
+      printf: (_format, ...args) => {
+        output = args;
+      },
+    });
+    assert.deepEqual(output, [
+      available ? "true" : "false",
+      flags & 1 ? "true" : "false",
+      flags & 2 ? "true" : "false",
+      available ? 0 : 5,
+    ]);
+    assert.equal(closed, available ? 1 : 0);
+  }
+});
+
+test("native audit ACE sizing counts SidStart once and excludes unused baseline ACL storage", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      "PACL old; BOOL present;",
+      source.indexOf("static void command_files_prepare("),
+    ),
+    end = source.indexOf("invariant(length<=16384", start);
+  assert.ok(start > 0 && end > start);
+  const program = new Script(`(() => {
+    ${source
+      .slice(start, end)
+      .replace("ACL_SIZE_INFORMATION used={0}", "let used={}")
+      .replaceAll("sizeof(DWORD)", "4")
+      .replace(/\b(?:PACL|BOOL|DWORD)\b/gu, "let")
+      .replace("&present", "value=>present=value")
+      .replace("&old", "value=>old=value")
+      .replace("&def", "null")
+      .replace("&used", "used")
+      .replaceAll("sizeof(ACL)", "8")
+      .replaceAll("sizeof(SYSTEM_AUDIT_ACE)", "12")
+      .replaceAll("sizeof(used)", "12")}
+    return length;
+  })()`);
+  for (const old of [null, { AclSize: 64, AclBytesInUse: 28 }]) {
+    for (const sidBytes of [12, 28]) {
+      let queried = false;
+      const length = program.runInNewContext({
+        command_baseline: [1],
+        i: 0,
+        userSid: 2,
+        AclSizeInformation: 2,
+        GetSecurityDescriptorSacl: (_sd, present, acl) => {
+          present(Boolean(old));
+          acl(old);
+          return true;
+        },
+        GetAclInformation: (acl, used, size, kind) => {
+          assert.deepEqual([acl, size, kind], [old, 12, 2]);
+          used.AclBytesInUse = old.AclBytesInUse;
+          queried = true;
+          return true;
+        },
+        GetLengthSid: () => sidBytes,
+        win32_check: assert.ok,
+      });
+      // The new ACE is an 8-byte type/flags/size/mask header followed by the
+      // complete SID. Existing occupied bytes already include their ACL header.
+      assert.equal(length, (old ? 28 : 8) + 8 + sidBytes);
+      assert.equal(queried, old !== null);
+    }
+  }
+});
+
+test("the actual finish reader admits only live original baselines before any installation intent", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      "command_privilege(SE_SECURITY_NAME);win32_check(AuditEnumerateSubCategories",
+      source.indexOf("static void command_finish("),
+    ),
+    end = source.indexOf('puts("{\\"custodyReady\\":true}")', start);
+  assert.ok(start > 0 && end > start);
+  const program = new Script(
+    `${source
+      .slice(start, end)
+      .replaceAll("command_sd(null,", "command_sd(nullHandle,")
+      .replace(/\(BYTE \*\)/gu, "")
+      .replace("sizeof(*command_system)", "1")
+      .replace("char initialHash[65]", "let initialHash")
+      .replace(/\b(?:DWORD|BOOL|PSECURITY_DESCRIPTOR|unsigned)\b/gu, "let")
+      .replace(
+        /,&(command_categories|command_category_count|command_system)\b/gu,
+        ",value=>$1=value",
+      )
+      .replaceAll(",initialHash)", ",value=>initialHash=value)")} admitted();`,
+  );
+  for (const fault of [
+    null,
+    "system",
+    "principal",
+    "intent",
+    "null",
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+  ]) {
+    const baselines = Array.from({ length: 6 }, (_, i) => ({
+      serial: `original-${i}`,
+    }));
+    let admitted = false;
+    const api = {
+      command_categories: null,
+      command_category_count: 0,
+      command_system: null,
+      SE_SECURITY_NAME: "security",
+      SE_KERNEL_OBJECT: 1,
+      SE_FILE_OBJECT: 2,
+      OWNER_SECURITY_INFORMATION: 1,
+      DACL_SECURITY_INFORMATION: 4,
+      SACL_SECURITY_INFORMATION: 8,
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      WAIT_FAILED: -1,
+      WAIT_TIMEOUT: 258,
+      systemHash: "system",
+      nullHash: "null",
+      nullHandle: "null-handle",
+      intent: "intent-handle",
+      files: [0, 1, 2, 3, 4, 5],
+      baselines,
+      command_privilege: () => {},
+      AuditEnumerateSubCategories: (_category, _all, categories, count) => {
+        categories(["file-system"]);
+        count(1);
+        return true;
+      },
+      AuditQuerySystemPolicy: (_categories, _count, policy) => {
+        policy(fault === "system" ? "foreign" : "system");
+        return true;
+      },
+      command_sum: (data, _length, result) =>
+        result(typeof data === "string" ? data : data.serial),
+      command_principal_exists: () => fault === "principal",
+      WaitForSingleObject: () => (fault === "intent" ? 0 : 258),
+      command_sd: (file) =>
+        file === "null-handle"
+          ? { serial: fault === "null" ? "foreign" : "null" }
+          : { serial: fault === file ? "foreign" : baselines[file].serial },
+      GetSecurityDescriptorLength: (sd) => sd.serial.length,
+      LocalFree: () => {},
+      strcmp: (a, b) => (a === b ? 0 : 1),
+      memcmp: (a, b) => (a.serial === b.serial ? 0 : 1),
+      invariant: (ok, operation) => {
+        if (!ok) throw new Error(operation);
+      },
+      win32_check: assert.ok,
+      admitted: () => {
+        admitted = true;
+      },
+    };
+    if (fault === null) {
+      program.runInNewContext(api);
+      assert.equal(admitted, true);
+    } else {
+      assert.throws(
+        () => program.runInNewContext(api),
+        /command-(?:cleanup-baseline|intent-state)/u,
+      );
+      assert.equal(admitted, false);
+    }
+  }
 });

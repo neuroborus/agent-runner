@@ -695,8 +695,19 @@ denial of that mutation and an unchanged held descriptor. Missing privileges,
 coverage or custody block before Codex effects. Observation and independent
 settlement retain separate 120-second and 30-second bounds. Held Job/process
 watchers and an independent finish owner acquire original custody before audit
-setters. They prove complete empty custody and observer retirement before restoring
-verified unchanged owned changes, including partial installation. Refused admission
+setters. The finish owner independently validates the supplied file/parent and
+NUL descriptors, system policy, absent inclusion and unset intent before reporting
+custody readiness. A separate broker baseline read precedes installation; later
+reads bind every original held object to its exact owned SACL and require full
+per-user inclusion, unchanged system policy and effective success/failure auditing.
+The broker must remain outside its empty payload Job. Only the actual nonce
+gate-read event joined to its original token, birth, SID/logon and acknowledged
+barriers admits the unchanged buffered command cases. Exact occupied ACL sizing
+excludes unused allocation bytes from the expected readback. Fixed operation
+labels preserve local startup/admission failures without inferring a native API
+or authorization cause from absent output. Matching Windows acceptance is pending.
+The custody owners prove complete empty custody and observer retirement before
+restoring verified unchanged owned changes, including partial installation. Refused admission
 needs no missing success witness; admitted capture/terminal requirements remain.
 Safe restoration is attempted even after capture failure, with first cause and
 settlement uncertainty retained separately. Preparation acquisition precedes
