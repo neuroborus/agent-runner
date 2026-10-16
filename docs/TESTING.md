@@ -323,10 +323,13 @@ destination predicate with injected calls, including duplication error 10022,
 PID-only/malformed input, changed or reused destination birth/token, interrupted
 carriers, acknowledgment loss and separate socket cleanup failure. The driver
 loop requires persisted target/provider evidence before duplication and persisted
-socket intent before its original connect. Creation flags remain zero; strict
-10013 denial, outside nonce/closed-port controls and independent retirement stay
-mandatory. Portable coverage establishes neither native transfer support nor a
-cause for 10022 and adds no slow-tier assignment.
+socket intent before its original connect. The actual loop also uses the guarded
+helper session through injected child streams for both rooted read/edit bundles.
+Failed persistence withholds the next `D/T/U` acknowledgment without replay;
+unrelated helper roles and unknown commands remain rejected. Creation flags
+remain zero; strict 10013 denial, outside nonce/closed-port controls and
+independent retirement stay mandatory. Portable coverage establishes neither
+native transfer support nor a cause for 10022 and adds no slow-tier assignment.
 Darwin portable coverage protects narrow policy grants and literal quoting,
 matching-worker dispatch, missing native records, audit-token argument binding
 and the distinction between recorded process retirement and full domain recovery.

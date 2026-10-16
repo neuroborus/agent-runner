@@ -2040,7 +2040,7 @@ export function windowsFeasibilityHelperSession(
         /^[RAGFWQNS]$/u.test(value) ||
           (rootedLaunch &&
             ["read", "edit"].includes(args[0]) &&
-            /^[OTU]$/u.test(value)),
+            /^[ODTU]$/u.test(value)),
       );
       child.stdin.write(value);
     },

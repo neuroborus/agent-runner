@@ -821,6 +821,8 @@ the original launcher PID, birth and primary-token identifiers. Before duplicati
 the launcher rejoins that record against its live self and the original child,
 records the source's `SO_PROTOCOL_INFOW` contract, and emits `tcp-transfer-ready`.
 The driver persists this observation before its one-shot `D` acknowledgment.
+The helper transport admits `O/D/T/U` only for the original rooted read/edit
+roles; unrelated roles and unknown commands remain rejected.
 The imported socket must rejoin the same provider, catalog, protocol chain and
 destination; both original creation and import retain flags zero. Birth/token
 drift, PID-only input and incomplete carriers fail without another attempt.

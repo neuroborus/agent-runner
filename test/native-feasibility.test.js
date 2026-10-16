@@ -5572,13 +5572,16 @@ function windowsSessionFixture(
   diagnostics,
   probeCase,
   rootedLaunch = false,
+  { launchCase = "null-probe", onSend } = {},
 ) {
   const sent = [];
   const child = Object.assign(new EventEmitter(), {
     pid: 42,
     stdin: new Writable({
       write: (bytes, _, done) => {
-        sent.push(bytes.toString());
+        const value = bytes.toString();
+        sent.push(value);
+        onSend?.(value, child);
         done();
       },
     }),
@@ -5590,14 +5593,14 @@ function windowsSessionFixture(
     ? [probeCase]
     : rootedLaunch
       ? [
-          "null-probe",
+          launchCase,
           "image",
-          "null-probe",
+          launchCase === "null-probe" ? "null-probe" : "bundle",
           "root",
           "nonce",
           "0",
           "unused",
-          "workspace-rooted",
+          launchCase === "null-probe" ? "workspace-rooted" : launchCase,
           "identity",
           "native-path",
         ]
@@ -6772,59 +6775,160 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
   }
 });
 
-test("TCP intent persistence failure cannot acknowledge the original connect", async () => {
+test("original TCP operation loop uses the guarded session and withholds unpersisted acknowledgments", async () => {
   const driver = await readFile(
     new URL("../ci/native/win32/feasibility.js", import.meta.url),
     "utf8",
   );
   const start = driver.indexOf("for (const operation of OPERATIONS)");
   const loop = driver.slice(start, driver.indexOf("complete = true;", start));
-  for (const failAt of ["read-tcp-transfer", "read-tcp-intent"]) {
-    const f = tcpDenialFixture(),
-      sent = [],
-      persisted = [];
-    const rows = [
-      { event: "attempt", operation: "tcp" },
-      f.transfer,
-      f.prepared,
-      f.attribution,
-      { event: "completed", operation: "tcp", error: 10013 },
-    ];
-    const original = new Error("Intent write failed");
-    const run = {
-      receipt: f.receipt,
-      session: { send: (value) => sent.push(value) },
-    };
-    await assert.rejects(
-      new Script(`(async () => {${loop}})()`).runInNewContext({
+  const commands = ["O", "D", "T", "U"];
+  const stages = ["tcp-transfer", "tcp-intent", "tcp-observed", "tcp-denial"];
+  for (const mode of ["read", "edit"]) {
+    for (const failAt of [null, ...stages.slice(0, -1)]) {
+      const f = tcpDenialFixture(),
+        order = [],
+        persisted = new Map();
+      const completed = { event: "completed", operation: "tcp", error: 10013 };
+      const replies = {
+        O: f.transfer,
+        D: f.prepared,
+        T: f.attribution,
+        U: completed,
+      };
+      const authorizations = {
+        D: ["tcp-transfer", "transfer", f.transfer],
+        T: ["tcp-intent", "prepared", f.prepared],
+        U: ["tcp-observed", "attribution", f.attribution],
+      };
+      let released = 0;
+      const transport = windowsSessionFixture(
+        windowsCallerEnvironment,
+        () => {},
+        undefined,
+        true,
+        {
+          launchCase: mode,
+          onSend: (value, child) => {
+            assert.equal(value, commands[released++]);
+            order.push(`send:${value}`);
+            if (authorizations[value]) {
+              const [stage, property, expected] = authorizations[value];
+              const intent = persisted.get(`${mode}-${stage}`);
+              assert.ok(intent);
+              assert.equal(intent.pending, true);
+              assert.equal(intent.requestedEndpoint, f.endpoint);
+              assert.deepEqual(intent[property], expected);
+            }
+            child.stdout.write(JSON.stringify(replies[value]) + "\n");
+          },
+        },
+      );
+      const run = { receipt: f.receipt, session: transport.session };
+      const original = new Error("Intent write failed");
+      let received = 0;
+      const context = {
         OPERATIONS: ["tcp"],
-        mode: "read",
+        mode,
         run,
         tcpEndpoint: f.endpoint,
-        nextRun: async () => rows.shift(),
+        nextRun: async () => {
+          const row = await transport.session.next();
+          received++;
+          return row;
+        },
         need: (value) => assert.ok(value),
         nativeException: () => {},
         assertWindowsFeasibilityTcpObserver,
         assertWindowsFeasibilityTcpTransfer,
         assertWindowsFeasibilityTcpDenial,
-        observeWindowsFeasibilityWfp: async () => {},
+        observeWindowsFeasibilityWfp: async () => order.push("wfp-observed"),
         operations: [],
-        persist: async (name) => {
-          persisted.push(name);
-          if (name === failAt) throw original;
+        persist: async (name, value) => {
+          order.push(name);
+          if (name === `${mode}-${failAt}`) throw original;
+          persisted.set(name, structuredClone(value));
         },
-      }),
-      (error) => error === original && error.operation === "tcp",
+      };
+      try {
+        for (const command of ["X", "DD", "d", "O\n"])
+          assert.throws(() => transport.session.send(command));
+        assert.deepEqual(transport.sent, []);
+        transport.child.stdout.write(
+          JSON.stringify({ event: "attempt", operation: "tcp" }) + "\n",
+        );
+        const execution = new Script(
+          `(async () => {${loop}})()`,
+        ).runInNewContext(context);
+        if (failAt)
+          await assert.rejects(
+            execution,
+            (error) => error === original && error.operation === "tcp",
+          );
+        else await execution;
+
+        const acknowledged = failAt ? stages.indexOf(failAt) + 1 : 4;
+        assert.deepEqual(transport.sent, commands.slice(0, acknowledged));
+        const expectedOrder = [
+          "send:O",
+          `${mode}-tcp-transfer`,
+          "send:D",
+          `${mode}-tcp-intent`,
+          "send:T",
+          `${mode}-tcp-observed`,
+          "send:U",
+          "wfp-observed",
+          `${mode}-tcp-denial`,
+        ];
+        assert.deepEqual(
+          order,
+          failAt
+            ? [...expectedOrder.slice(0, acknowledged * 2), "wfp-observed"]
+            : expectedOrder,
+        );
+        assert.deepEqual(
+          [...persisted.keys()],
+          stages
+            .slice(0, failAt ? acknowledged - 1 : 4)
+            .map((stage) => `${mode}-${stage}`),
+        );
+        assert.equal(received, acknowledged + 1);
+        assert.equal(context.operations.length, failAt ? 0 : 1);
+        assert.equal(run.tcpAttribution.pending, failAt !== null);
+        if (!failAt) {
+          assert.deepEqual(context.operations[0].completed, completed);
+          assert.equal(persisted.get(`${mode}-tcp-denial`).pending, false);
+        }
+      } finally {
+        transport.session.stop();
+        transport.close(0);
+        await transport.session.finish(received);
+      }
+    }
+  }
+});
+
+test("TCP transport acknowledgments remain unavailable to unrelated helper roles", async () => {
+  for (const [probeCase, rootedLaunch] of [
+    [undefined, false],
+    [undefined, true],
+    ["workspace-rooted", false],
+  ]) {
+    const transport = windowsSessionFixture(
+      windowsCallerEnvironment,
+      () => {},
+      probeCase,
+      rootedLaunch,
     );
-    assert.deepEqual(sent, failAt === "read-tcp-transfer" ? ["O"] : ["O", "D"]);
-    assert.deepEqual(
-      persisted,
-      failAt === "read-tcp-transfer"
-        ? ["read-tcp-transfer"]
-        : ["read-tcp-transfer", "read-tcp-intent"],
-    );
-    assert.equal(rows.length, failAt === "read-tcp-transfer" ? 3 : 2);
-    assert.equal(run.tcpAttribution.pending, true);
+    try {
+      for (const command of ["O", "D", "T", "U"])
+        assert.throws(() => transport.session.send(command));
+      assert.deepEqual(transport.sent, []);
+    } finally {
+      transport.session.stop();
+      transport.close(0);
+      await transport.session.finish(0);
+    }
   }
 });
 
