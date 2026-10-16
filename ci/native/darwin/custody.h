@@ -197,6 +197,9 @@ static void emit(struct identity value) {
 #ifndef AUDIT_DOMAIN_INSPECT
 #define AUDIT_DOMAIN_INSPECT(pid) inspect(pid)
 #endif
+#ifndef AUDIT_DOMAIN_DIAG
+#define AUDIT_DOMAIN_DIAG(ok, operation, kind, value) do { (void)(operation); (void)(kind); (void)(value); need(ok); } while (0)
+#endif
 static bool audit_identity_same(struct identity a, struct identity b) {
   return !memcmp(&a.token, &b.token, sizeof(a.token)) &&
     a.bsd.pbi_start_tvsec == b.bsd.pbi_start_tvsec && a.bsd.pbi_start_tvusec == b.bsd.pbi_start_tvusec &&
@@ -204,41 +207,56 @@ static bool audit_identity_same(struct identity a, struct identity b) {
 }
 static au_asid_t audit_fresh(uid_t uid) {
   auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
-  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
-    audit.ai_asid > 0 && audit.ai_asid != AU_ASSIGN_ASID); return audit.ai_asid;
+  int result = setaudit_addr(&audit, sizeof(audit)), error = errno;
+  AUDIT_DOMAIN_DIAG(!result, "audit-session-create", "errno", error);
+  result = getaudit_addr(&audit, sizeof(audit)); error = errno;
+  AUDIT_DOMAIN_DIAG(!result, "audit-session-read", "errno", error);
+  AUDIT_DOMAIN_DIAG(audit.ai_auid == uid && audit.ai_asid > 0 && audit.ai_asid != AU_ASSIGN_ASID, "audit-session-binding", "invariant", 0);
+  return audit.ai_asid;
 }
 static mach_port_t audit_hold(au_asid_t asid) {
   mach_port_t port = MACH_PORT_NULL;
-  need(asid > 0 && asid != AU_ASSIGN_ASID && !audit_session_port(asid, &port) && port != MACH_PORT_NULL); return port;
+  AUDIT_DOMAIN_DIAG(asid > 0 && asid != AU_ASSIGN_ASID, "audit-session-binding", "invariant", 0);
+  int result = audit_session_port(asid, &port), error = errno;
+  AUDIT_DOMAIN_DIAG(!result, "audit-session-hold", "errno", error);
+  AUDIT_DOMAIN_DIAG(port != MACH_PORT_NULL, "audit-session-port", "invariant", 0); return port;
 }
 struct audit_domain_view { struct identity live[32]; struct proc_bsdinfo dead[32]; unsigned nl, nd; };
 static struct audit_domain_view audit_census(uid_t uid, au_asid_t asid) {
   struct audit_domain_view view = {0}; pid_t pids[4096]; errno = 0;
   int size = proc_listpids(PROC_ALL_PIDS, 0, pids, sizeof(pids));
-  need(!errno && size > 0 && size < sizeof(pids) && size % sizeof(pid_t) == 0);
+  int error = errno;
+  AUDIT_DOMAIN_DIAG(!error && size > 0, "audit-census-list", error ? "errno" : "status", error ? error : size);
+  AUDIT_DOMAIN_DIAG(size < sizeof(pids) && size % sizeof(pid_t) == 0, "audit-census-capacity", "status", size);
   for (unsigned i = 0; i < (unsigned)size / sizeof(pid_t); i++) {
     if (!pids[i]) continue;
-    need(pids[i] > 0); for (unsigned j = 0; j < i; j++) need(pids[i] != pids[j]);
+    AUDIT_DOMAIN_DIAG(pids[i] > 0, "audit-census-pid", "status", pids[i]);
+    for (unsigned j = 0; j < i; j++) AUDIT_DOMAIN_DIAG(pids[i] != pids[j], "audit-census-duplicate", "status", pids[i]);
     struct proc_bsdinfo before, after; auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};
-    need(proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)) == sizeof(before) &&
-      !auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)) &&
-      proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)) == sizeof(after) &&
-      !auditon(A_GETPINFO_ADDR, &again, sizeof(again)) &&
-      before.pbi_pid == after.pbi_pid && (before.pbi_status == SZOMB) == (after.pbi_status == SZOMB) &&
+    errno = 0; int result = proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &before, sizeof(before)); error = errno;
+    AUDIT_DOMAIN_DIAG(result == sizeof(before), "audit-census-bsd", !result && error ? "errno" : "status", !result && error ? error : result);
+    result = auditon(A_GETPINFO_ADDR, &audit, sizeof(audit)); error = errno;
+    AUDIT_DOMAIN_DIAG(!result, "audit-census-audit", "errno", error);
+    errno = 0; result = proc_pidinfo(pids[i], PROC_PIDTBSDINFO, 1, &after, sizeof(after)); error = errno;
+    AUDIT_DOMAIN_DIAG(result == sizeof(after), "audit-census-bsd-again", !result && error ? "errno" : "status", !result && error ? error : result);
+    result = auditon(A_GETPINFO_ADDR, &again, sizeof(again)); error = errno;
+    AUDIT_DOMAIN_DIAG(!result, "audit-census-audit-again", "errno", error);
+    AUDIT_DOMAIN_DIAG(before.pbi_pid == after.pbi_pid && (before.pbi_status == SZOMB) == (after.pbi_status == SZOMB) &&
       before.pbi_start_tvsec == after.pbi_start_tvsec && before.pbi_start_tvusec == after.pbi_start_tvusec &&
       before.pbi_uid == after.pbi_uid && before.pbi_gid == after.pbi_gid &&
       before.pbi_ruid == after.pbi_ruid && before.pbi_rgid == after.pbi_rgid &&
       before.pbi_svuid == after.pbi_svuid && before.pbi_svgid == after.pbi_svgid &&
-      audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid);
+      audit.ap_asid == again.ap_asid && audit.ap_auid == again.ap_auid, "audit-census-binding", "invariant", 0);
     if ((!asid || audit.ap_asid != asid) && before.pbi_uid != uid) continue;
     /* A reserved UID outside its admitted session is an escape, never absence.
      * Members inside it remain visible even if their credentials have changed. */
-    need((!asid || audit.ap_asid == asid) && view.nl + view.nd < 32);
+    AUDIT_DOMAIN_DIAG(!asid || audit.ap_asid == asid, "audit-census-session", "invariant", 0);
+    AUDIT_DOMAIN_DIAG(view.nl + view.nd < 32, "audit-census-capacity", "invariant", 0);
     if (before.pbi_status == SZOMB) view.dead[view.nd++] = after;
     else {
-      struct identity value = AUDIT_DOMAIN_INSPECT(pids[i]); need(value.token.val[6] == (unsigned)audit.ap_asid &&
+      struct identity value = AUDIT_DOMAIN_INSPECT(pids[i]); AUDIT_DOMAIN_DIAG(value.token.val[6] == (unsigned)audit.ap_asid &&
         value.token.val[0] == (unsigned)audit.ap_auid && value.bsd.pbi_start_tvsec == before.pbi_start_tvsec &&
-        value.bsd.pbi_start_tvusec == before.pbi_start_tvusec); view.live[view.nl++] = value;
+        value.bsd.pbi_start_tvusec == before.pbi_start_tvusec, "audit-census-binding", "invariant", 0); view.live[view.nl++] = value;
     }
   }
   return view;

@@ -1527,6 +1527,195 @@ test("Darwin feasibility fault custody keeps privileged effects behind sealed re
   assert.match(fixture, /command == 'C' \|\| command == 'L'/u);
 });
 
+test("Darwin fault reexec retains possible effects and transfers only the original writable journal", async () => {
+  const [source, helper] = await Promise.all(
+    ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const body = /static void domain_transfer\(void\) \{([\s\S]*?)\n\}/u.exec(
+    source,
+  )?.[1];
+  assert.ok(body);
+  const script = new Script(
+    `() => {${body
+      .replace(
+        "struct stat inherited, held;",
+        "const inherited = {}, held = {};",
+      )
+      .replaceAll("&inherited", "inherited")
+      .replaceAll("&held", "held")
+      .replace("int flags", "const flags")}}`,
+  );
+  for (const fault of [
+    null,
+    "stat",
+    "different-file",
+    "flags",
+    "readonly",
+    "close",
+    "cloexec",
+  ]) {
+    const calls = [],
+      context = {
+        domain_root: 4,
+        domain_journal: 5,
+        errno: 0,
+        F_GETFL: 1,
+        F_SETFD: 2,
+        FD_CLOEXEC: 1,
+        O_ACCMODE: 3,
+        O_RDWR: 2,
+        fstat(fd, result) {
+          calls.push(["stat", fd]);
+          if (fault === "stat") {
+            context.errno = 9;
+            return -1;
+          }
+          result.inode = fd === 3 && fault === "different-file" ? 2 : 1;
+          return 0;
+        },
+        same_file_stat: (a, b) => a.inode === b.inode,
+        fcntl(fd, command, flags) {
+          calls.push(["flags", fd, command, flags]);
+          if (
+            (fault === "flags" && command === 1) ||
+            (fault === "cloexec" && command === 2)
+          ) {
+            context.errno = 5;
+            return -1;
+          }
+          return command === 1 ? (fault === "readonly" ? 0 : 2) : 0;
+        },
+        close(fd) {
+          calls.push(["close", fd]);
+          if (fault === "close") {
+            context.errno = 5;
+            return -1;
+          }
+          return 0;
+        },
+        posix_check(result, operation) {
+          if (result < 0)
+            throw Object.assign(new Error(operation), { value: context.errno });
+        },
+        invariant(ok, operation) {
+          if (!ok) throw new Error(operation);
+        },
+      };
+    const transfer = script.runInNewContext(context);
+    if (!fault) {
+      transfer();
+      assert.equal(context.domain_journal, 3);
+      assert.deepEqual(calls.at(-1), ["flags", 3, 2, 1]);
+      assert.deepEqual(
+        calls.filter(([op]) => op === "close"),
+        [["close", 5]],
+      );
+    } else {
+      const operation = {
+        stat: "fault-inherited-stat",
+        "different-file": "fault-journal-transfer",
+        flags: "fault-journal-flags",
+        readonly: "fault-journal-access",
+        close: "fault-journal-close",
+        cloexec: "fault-journal-flags",
+      }[fault];
+      assert.throws(transfer, (error) => {
+        assert.equal(error.message, operation);
+        if (["stat", "flags", "close", "cloexec"].includes(fault))
+          assert.equal(error.value, fault === "stat" ? 9 : 5);
+        return true;
+      });
+      assert.ok(!calls.some(([op, fd]) => op === "close" && fd === 3));
+    }
+  }
+  const expression =
+    /admitted_effects = (\(argc >= 2 && !strcmp\(argv\[1\], "fault-custody"\)\) \|\| getenv\("NATIVE_FAULT_PARENT_ASID"\) != NULL);/u.exec(
+      helper,
+    )?.[1];
+  assert.ok(expression);
+  const possible = new Script(
+    `(argv, parent = null) => {const argc = argv.length, getenv = () => parent; return ${expression.replace("NULL", "null")};}`,
+  ).runInNewContext({ strcmp: (a, b) => (a === b ? 0 : 1) });
+  assert.equal(possible(["helper", "fault-custody"]), true);
+  assert.equal(possible(["helper", "fault-domain"]), false);
+  assert.equal(possible(["helper", "exec"], "77"), true);
+  assert.equal(possible(["helper", "fault"], "77"), true);
+  assert.ok(
+    helper.indexOf(expression) <
+      helper.indexOf(
+        '"startup-observer-identity"',
+        helper.indexOf("int main("),
+      ),
+  );
+});
+
+test("Darwin fault audit sessions retain exact create/read failures before validating their bindings", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
+    body = /static au_asid_t audit_fresh\(uid_t uid\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const script = new Script(
+    `uid => {${body.replace("auditinfo_addr_t audit = {0};", "const audit = {ai_termid: {}};").replace("int result", "let result").replaceAll("&audit", "audit").replaceAll("sizeof(audit)", "1")}}`,
+  );
+  for (const fault of [null, "create", "read", "uid", "asid"]) {
+    const calls = [],
+      context = {
+        errno: 0,
+        AU_ASSIGN_ASID: -1,
+        AU_IPv4: 4,
+        setaudit_addr() {
+          calls.push("create");
+          if (fault === "create") {
+            context.errno = 1;
+            return -1;
+          }
+          return 0;
+        },
+        getaudit_addr(audit) {
+          calls.push("read");
+          if (fault === "read") {
+            context.errno = 5;
+            return -1;
+          }
+          audit.ai_asid = fault === "asid" ? -1 : 44;
+          if (fault === "uid") audit.ai_auid++;
+          return 0;
+        },
+        AUDIT_DOMAIN_DIAG(ok, operation, kind, value) {
+          if (!ok) throw Object.assign(new Error(operation), { kind, value });
+        },
+      };
+    const fresh = script.runInNewContext(context);
+    if (!fault) assert.equal(fresh(90001), 44);
+    else
+      assert.throws(
+        () => fresh(90001),
+        (error) => {
+          assert.equal(
+            error.message,
+            fault === "create"
+              ? "audit-session-create"
+              : fault === "read"
+                ? "audit-session-read"
+                : "audit-session-binding",
+          );
+          assert.equal(
+            error.value,
+            fault === "create" ? 1 : fault === "read" ? 5 : 0,
+          );
+          return true;
+        },
+      );
+    assert.deepEqual(
+      calls,
+      fault === "create" ? ["create"] : ["create", "read"],
+    );
+  }
+});
+
 test("Darwin fault retirement rejects credential drift in known zombies and unstable sealed reads", async () => {
   const source = await readFile(
     new URL("feasibility-domain.h", SOURCE),

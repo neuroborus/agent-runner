@@ -81,7 +81,9 @@ export async function openDarwinFaultDomain(
   });
   const fail = (error) => {
     failed ??= error;
-    failed.stderr ??= stderr;
+    failed.stderr = stderr;
+    if (error.exitCode !== undefined) failed.exitCode ??= error.exitCode;
+    if (error.signal !== undefined) failed.signal ??= error.signal;
     pending?.reject(failed);
     pending = null;
     ready?.reject(failed);
@@ -153,6 +155,7 @@ export async function openDarwinFaultDomain(
     total += chunk.length;
     const length = stderr.length + chunk.length;
     stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
+    if (failed) failed.stderr = stderr;
     if (length > 65536 || total > 262144)
       fail(new Error("Fault custody output bound"));
   });

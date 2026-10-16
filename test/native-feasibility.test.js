@@ -3788,7 +3788,7 @@ test("Darwin original faults pass only with protected complete independent domai
 });
 
 test("Darwin fault custody channel retains native failure diagnostics and handles output errors", async (t) => {
-  for (const fault of ["native-exit", "stream-error"]) {
+  for (const fault of ["native-exit", "stream-error", "late-native-exit"]) {
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(),
       stdout: new PassThrough(),
@@ -3816,9 +3816,9 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
       "native-darwin: operation=bsd-identity domain=errno value=5 effects=possible settlement=unsettled\n";
     const streamError = new Error("Custody output unavailable");
     child.stdin.on("data", () => {
-      if (fault === "native-exit") child.stderr.write(diagnostic);
-      else child.stdout.emit("error", streamError);
-      child.emit("close", fault === "native-exit" ? 78 : 0, null);
+      if (fault !== "native-exit") child.stdout.emit("error", streamError);
+      if (fault !== "stream-error") child.stderr.write(diagnostic);
+      child.emit("close", fault !== "stream-error" ? 78 : 0, null);
     });
     const domain = await openDarwinFaultDomain(
       "/fixture",
@@ -3863,7 +3863,8 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
       domain.inspect("/fixture", "identity", "42", "9000"),
       (error) => {
         assert.equal(domain.running.failure(), error);
-        if (fault === "native-exit") {
+        if (fault === "late-native-exit") assert.equal(error, streamError);
+        if (fault !== "stream-error") {
           assert.equal(error.exitCode, 78);
           assert.equal(error.stderr.toString(), diagnostic);
           assert.match(
@@ -3885,6 +3886,11 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     ["cancel", "malformed"],
     ["cancel", "partial"],
     ["cancel", "unclosed"],
+    ["owner-loss", "malformed"],
+    ["owner-loss", "partial"],
+    ["owner-loss", "unclosed"],
+    ["cancel", "startup"],
+    ["owner-loss", "startup"],
   ]) {
     const owner = {
       pid: 42,
@@ -4004,7 +4010,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         closeReply();
       }
     });
-    const domain = await openDarwinFaultDomain(
+    const opening = openDarwinFaultDomain(
       "/fixture",
       SHA,
       caseId,
@@ -4020,6 +4026,13 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
           assert.equal(file, "/usr/bin/sudo");
           assert.ok(args.includes("fault-domain") && args.includes("-i"));
           queueMicrotask(() => {
+            if (trailing === "startup") {
+              child.stderr.write(
+                "native-darwin: operation=fault-journal-write domain=errno value=9 effects=possible settlement=unsettled\n",
+              );
+              child.emit("close", 126, null);
+              return;
+            }
             send({ ready: record });
             send({
               stream: "stderr",
@@ -4052,6 +4065,24 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         },
       },
     );
+    if (trailing === "startup") {
+      await assert.rejects(opening, (error) => {
+        assert.equal(error.exitCode, 126);
+        assert.match(
+          darwinFeasibilityCause(caseId, error).detail,
+          /fault-journal-write failed.*errno=9/u,
+        );
+        assert.match(
+          error.stderr.toString(),
+          /effects=possible settlement=unsettled/u,
+        );
+        return true;
+      });
+      assert.deepEqual(frames, []);
+      assert.deepEqual(actions, []);
+      continue;
+    }
+    const domain = await opening;
     const saved = new Map();
     const work = runDarwinFeasibilityFault(
       "/fixture",
@@ -9114,6 +9145,25 @@ test("Darwin preparation preserves the first native cause while attempting indep
 });
 
 test("Darwin native diagnostics retain bounded operation and error domains without arbitrary output", () => {
+  for (const [operation, domain, value] of [
+    ["fault-journal-access", "invariant", 0],
+    ["fault-journal-write", "errno", 9],
+    ["fault-birth-read", "status", 0],
+    ["fault-child-status", "status", 256],
+    ["fault-host-port", "mach", 5],
+    ["audit-session-create", "errno", 1],
+    ["audit-census-bsd", "status", 12],
+    ["audit-census-audit-again", "errno", 3],
+  ]) {
+    const cause = darwinFeasibilityCause("cancel", {
+      code: 126,
+      stderr: `native-darwin: operation=${operation} domain=${domain} value=${value} effects=possible settlement=unsettled\n`,
+    });
+    assert.ok(
+      cause.detail.includes(`Native ${operation} failed (${domain}=${value})`),
+      cause.detail,
+    );
+  }
   for (const stream of ["stdout", "stderr"]) {
     const operation = stream === "stdout" ? "acl-empty" : "helper-output";
     const cause = darwinFeasibilityCause(

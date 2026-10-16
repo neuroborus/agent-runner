@@ -192,6 +192,14 @@ Retirement rejects changed admission bindings, trailing custody output and a clo
 reply without bounded custodian exit.
 These deterministic fast regressions run no macOS helper; the existing native
 harness and all future check assignments remain unchanged.
+Fault transition regressions execute the original writable-journal handoff and
+audit-session creation bodies with injected native calls, covering descriptor
+substitution, read-only access, exact errors and preserved reexec effects. Both
+original fault channels reject pre-ready native failures, incomplete output and
+unclosed custody; late stderr/status cannot erase the first channel cause.
+Fixed diagnostic parsing retains bounded errno, Mach and operation-specific
+status facts. These cases add no native execution or slow-tier requirement and
+do not prove that the hosted cancel failure is repaired.
 Token regressions reject timestamp/process-name substitution alongside value/PID
 changes. Restored authority must match the original root positions even when
 generation tickets have advanced.

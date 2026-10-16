@@ -59,6 +59,16 @@ Protected helper guard failures emit the calling source file and line with an im
 errno or last-error snapshot on existing stderr channels before exit or Job
 termination. These snapshots are diagnostic only; feasibility helpers retain
 their existing named API checks, first-failure records and cleanup classification.
+Darwin fault custody retains possible effects across both sealed root reexec and
+the original payload execs. It verifies descriptor 3 against the protected journal
+and requires its original read/write access before retaining that description;
+no writable receipt is reopened by name. Startup, transfer, journal, credential,
+Mach sanitation, audit-session and complete census failures retain fixed operation
+names and immediate native errors/status. The existing shared audit owner supplies
+these observations without changing census scope or retirement requirements.
+Late custody stderr and exit status survive earlier channel errors. Missing facts
+remain failures with possible/unsettled effects; diagnostics alone identify no
+new native first cause and grant no native PASS.
 The Windows custody bridge and reader check Task Scheduler HRESULTs one call at a
 time. A rejected result emits the literal operation, exact hexadecimal HRESULT and
 source location on stderr before the existing guard failure. Expected task absence

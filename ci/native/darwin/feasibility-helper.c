@@ -562,6 +562,9 @@ int main(int argc, char **argv) {
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
   bool domain = argc >= 2 && (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
+  /* These execs continue an acquired fault domain; reset globals cannot prove
+   * that its original effects never started, even when startup now fails. */
+  admitted_effects = (argc >= 2 && !strcmp(argv[1], "fault-custody")) || getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
   bool observer = startup_observer_request(argc, argv) || domain;
   if (observer) invariant(getuid() == 0 && geteuid() == 0, "startup-observer-identity");
   else invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");
@@ -576,7 +579,8 @@ int main(int argc, char **argv) {
   audit_signal = (audit_signal_fn)dlsym(RTLD_DEFAULT, "proc_signal_with_audittoken");
   sandbox_binding = feasibility_sandbox_load();
   if (domain) {
-    need(audit_signal && feasibility_sandbox_available(sandbox_binding));
+    invariant(audit_signal != NULL, "audit-binding");
+    invariant(feasibility_sandbox_available(sandbox_binding), "sandbox-binding");
     if (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody")) domain_start(argc, argv);
     else { need(argc == 4); domain_verify(!strcmp(argv[1], "fault-closed"), argv[2], argv[3]); }
     return 0;
