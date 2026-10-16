@@ -294,11 +294,33 @@ static void domain_start(int argc, char **argv) {
   int exec_error = errno; remember("fault-reexec", "errno", exec_error); failure(126);
   }
   au_asid_t parent_asid = audit_fresh(0); domain_record.custodian = fault_inspect(getpid()); domain_store(0);
-  int lease = open("/private/var/run/native-feasibility-fault.lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600); struct stat lease_stat;
-  posix_check(lease, "fault-lease-open"); posix_check(fstat(lease,&lease_stat), "fault-lease-stat");
-  invariant(S_ISREG(lease_stat.st_mode) && !lease_stat.st_uid && !lease_stat.st_gid &&
-    lease_stat.st_nlink == 1 && (lease_stat.st_mode & 07777) == 0600, "fault-lease-shape");
-  posix_check(flock(lease,LOCK_EX|LOCK_NB), "fault-lease-lock"); no_acl(lease,&lease_stat);
+  const char *lease_path = "/private/var/run/native-feasibility-fault.lock";
+  int lease = open(lease_path, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0600);
+  bool lease_created = lease >= 0;
+  if (lease < 0 && errno == EEXIST)
+    lease = open(lease_path, O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+  posix_check(lease, "fault-lease-open");
+  struct stat lease_before, lease_stat, lease_named;
+  posix_check(fstat(lease, &lease_before), "fault-lease-stat");
+  domain_shape(S_ISREG(lease_before.st_mode) && lease_before.st_nlink == 1 &&
+    (lease_created || (!lease_before.st_uid && !lease_before.st_gid &&
+      (lease_before.st_mode & 07777) == 0600)), &lease_before, "fault-lease-shape");
+  posix_check(flock(lease,LOCK_EX|LOCK_NB), "fault-lease-lock");
+  struct stat lease_expected = lease_before;
+  if (lease_created) {
+    /* Exclusive creation and the held lock authorize initialization, never reuse. */
+    domain_metadata("created-lease", &lease_before);
+    posix_check(fchown(lease, 0, 0), "fault-lease-owner");
+    posix_check(fchmod(lease, 0600), "fault-lease-mode");
+    lease_expected.st_uid = 0; lease_expected.st_gid = 0;
+    lease_expected.st_mode = (lease_before.st_mode & S_IFMT) | 0600;
+  }
+  posix_check(fstat(lease, &lease_stat), "fault-lease-stat");
+  domain_shape(same_file_stat(&lease_expected, &lease_stat), &lease_stat, "fault-lease-shape");
+  no_acl(lease, &lease_stat);
+  posix_check(lstat(lease_path, &lease_named), "fault-lease-stat");
+  domain_shape(domain_file_same(&lease_stat, &lease_named), &lease_named, "fault-lease-shape");
+  /* Keep this description locked through custody; never unlink or replace it. */
   struct audit_domain_view absent = audit_census(domain_record.uid, 0); invariant(!absent.nl && !absent.nd, "fault-uid-empty");
   int in[2], out[2], err[2], ready[2], release[2];
   posix_check(pipe(in), "fault-pipe"); posix_check(pipe(out), "fault-pipe"); posix_check(pipe(err), "fault-pipe");

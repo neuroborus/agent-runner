@@ -9656,6 +9656,8 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     ["fault-journal-owner", "errno", 1],
     ["fault-journal-mode", "errno", 5],
     ["fault-journal-write", "errno", 9],
+    ["fault-lease-owner", "errno", 1],
+    ["fault-lease-mode", "errno", 5],
     ["fault-root-owner", "errno", 1],
     ["fault-birth-read", "status", 0],
     ["fault-child-status", "status", 256],
@@ -9718,6 +9720,11 @@ test("Darwin provider gating retains bounded native origins separately from deri
       "identity-prerequisites",
       darwinPrerequisiteFailure({ code: 126 }),
     ),
+    darwinFeasibilityCause("cancel", {
+      code: 126,
+      stderr:
+        "native-darwin: operation=fault-lease-shape domain=invariant value=0 effects=possible settlement=unsettled\n",
+    }),
     {
       code: "setup-failed",
       detail: "darwin identity-prerequisites: " + "é".repeat(100),
@@ -9751,6 +9758,8 @@ test("Darwin provider gating retains bounded native origins separately from deri
     );
     assert.deepEqual(assessment.report.results[0].cause, cause);
     assert.deepEqual(assessment.report.results[0].cleanup.cause, cleanupCause);
+    assert.equal(assessment.report.results[0].cleanup.status, "UNCERTAIN");
+    assert.equal(assessment.report.results[0].cleanup.independent, false);
     for (const entry of assessment.report.results.filter(({ capability }) =>
       feasibilityCapabilities("darwin").some(
         ({ id, tier }) => id === capability && tier !== "native",
@@ -9758,14 +9767,20 @@ test("Darwin provider gating retains bounded native origins separately from deri
     )) {
       assert.equal(entry.status, "BLOCKED");
       assert.equal(entry.cause.code, "prerequisite-unavailable");
-      assert.match(
-        entry.cause.detail,
-        /origin=setup-failed; darwin identity-prerequisites/u,
+      assert.ok(
+        entry.cause.detail.includes(
+          `origin=setup-failed; ${cause.detail.split(":")[0]}:`,
+        ),
       );
       if (cause.detail.includes("task-audit"))
         assert.match(
           entry.cause.detail,
           /Native task-audit failed \(mach=5\)/u,
+        );
+      if (cause.detail.includes("fault-lease-shape"))
+        assert.match(
+          entry.cause.detail,
+          /Native fault-lease-shape failed \(invariant=0\)/u,
         );
       assert.ok(Buffer.byteLength(entry.cause.detail) <= 256);
       assert.equal(entry.cause.detail.isWellFormed(), true);

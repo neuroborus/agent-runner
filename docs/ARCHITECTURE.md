@@ -344,10 +344,15 @@ identity-matched allocation cleanup preserves acknowledged substitutions. Fresh
 audit-token observations and safe signalling precede detached fault release.
 The two original detached fault recipes now run under separately held fresh audit
 sessions with a fixed reserved UID and protected helper/policy copies. The root
-custodian and runner remain outside the payload domain. A fixed private receipt
-binds candidate, case, original births/images, policy and fault intent before
-release or signalling. The shared custody-header census spans every UID, retains
-new members before effects and rejects stale or incomplete views. Fresh independent
+custodian and runner remain outside the payload domain. The persistent fault lease
+uses no-follow acquisition and a nonblocking exclusive lock. Only exclusive
+creation authorizes held-descriptor uid/gid 0 and mode-0600 initialization under
+that lock. Existing leases receive strict read-back validation without
+metadata repair or truncation; held/name identity and ACL checks precede payload
+creation. The lock remains held through custody without unlink or replacement.
+A fixed private receipt binds candidate, case, original births/images, policy
+and fault intent before release or signalling. The shared custody-header census
+spans every UID, retains new members before effects and rejects stale or incomplete views. Fresh independent
 verification holds the original session through empty-domain proof; independent
 holder/session retirement and unchanged sentinels precede another fault case.
 Lost custody and emergency per-birth intervention retain exclusion. The original

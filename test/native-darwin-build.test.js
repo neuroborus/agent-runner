@@ -2043,6 +2043,264 @@ test("Darwin fault creation initializes only held new objects and refuses failed
   assert.doesNotMatch(recovery, /domain_initialize|fchown|fchmod/u);
 });
 
+test("Darwin fault start initializes only its exclusive new lease and refuses unsafe reuse or contention", async () => {
+  const [source, helper] = await Promise.all(
+    ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const start = source.indexOf(
+    "  const char *lease_path",
+    source.indexOf("static void domain_start("),
+  );
+  assert.ok(start > 0);
+  const body = source.slice(start, source.indexOf("  int in[2]", start));
+  const same = /static bool same_file_stat\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    helper,
+  )?.[1];
+  const bound = /static bool domain_file_same\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    source,
+  )?.[1];
+  const shape = /static void domain_shape\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    source,
+  )?.[1];
+  assert.ok(same && bound && shape);
+  const script = new Script(`
+    function same_file_stat(a, b) {${same.replaceAll("->", ".")}}
+    function domain_file_same(a, b) {${bound.replaceAll("->", ".")}}
+    function domain_shape(ok, st, operation) {${shape}}
+    () => {${body
+      .replace("const char *lease_path", "const lease_path")
+      .replace("int lease =", "let lease =")
+      .replace("bool lease_created", "const lease_created")
+      .replace(
+        "struct stat lease_before, lease_stat, lease_named;",
+        "const lease_before = {}, lease_stat = {}, lease_named = {};",
+      )
+      .replace(
+        "struct stat lease_expected = lease_before;",
+        "const lease_expected = {...lease_before};",
+      )
+      .replace("struct audit_domain_view absent", "const absent")
+      .replace(
+        /&(lease_before|lease_stat|lease_named|lease_expected)\b/gu,
+        "$1",
+      )
+      .replace(/\b0([0-7]{3,})\b/gu, "0o$1")}
+      return lease;
+    }
+  `);
+  for (const [existing, fault, operation, errorValue] of [
+    [false, null],
+    [true, null],
+    [false, "create", "fault-lease-open", 13],
+    [true, "symlink", "fault-lease-open", 40],
+    [true, "disappeared", "fault-lease-open", 2],
+    [true, "uid", "fault-lease-shape"],
+    [true, "gid", "fault-lease-shape"],
+    [true, "permissions", "fault-lease-shape"],
+    [false, "kind", "fault-lease-shape"],
+    [true, "kind", "fault-lease-shape"],
+    [false, "links", "fault-lease-shape"],
+    [true, "links", "fault-lease-shape"],
+    [false, "lock", "fault-lease-lock", 35],
+    [true, "lock", "fault-lease-lock", 35],
+    [false, "owner", "fault-lease-owner", 1],
+    [false, "mode", "fault-lease-mode", 5],
+    [true, "stat-before", "fault-lease-stat", 9],
+    [false, "stat-after", "fault-lease-stat", 9],
+    [false, "owner-readback", "fault-lease-shape"],
+    [false, "mode-readback", "fault-lease-shape"],
+    [true, "held-identity", "fault-lease-shape"],
+    [true, "held-mode", "fault-lease-shape"],
+    [true, "acl", "acl-empty"],
+    [true, "name-stat", "fault-lease-stat", 2],
+    [false, "name-identity", "fault-lease-shape"],
+    [true, "name-identity", "fault-lease-shape"],
+    [true, "name-time", "fault-lease-shape"],
+    [true, "name-symlink", "fault-lease-shape"],
+  ]) {
+    const calls = [],
+      metadata = [];
+    const file = {
+      st_dev: 1,
+      st_ino: 42,
+      st_birthtimespec: { tv_sec: 100, tv_nsec: 9 },
+      st_mtimespec: { tv_sec: 100, tv_nsec: 10 },
+      st_ctimespec: { tv_sec: 100, tv_nsec: 11 },
+      st_uid: fault === "uid" ? 501 : 0,
+      st_gid: !existing || fault === "gid" ? 20 : 0,
+      st_mode:
+        (fault === "kind" ? 0o040000 : 0o100000) |
+        (!existing ? 0o200 : fault === "permissions" ? 0o640 : 0o600),
+      st_nlink: fault === "links" ? 2 : 1,
+      st_size: existing ? 32 : 0,
+    };
+    const initial = structuredClone(file);
+    let opens = 0,
+      stats = 0,
+      locked = false;
+    const context = {
+      errno: 0,
+      O_RDWR: 2,
+      O_CREAT: 4,
+      O_EXCL: 8,
+      O_NOFOLLOW: 16,
+      O_CLOEXEC: 32,
+      O_NONBLOCK: 64,
+      EEXIST: 17,
+      LOCK_EX: 2,
+      LOCK_NB: 4,
+      S_IFMT: 0o170000,
+      S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+      domain_record: { uid: 90001 },
+      open(path, flags, mode) {
+        calls.push("open");
+        opens++;
+        assert.equal(path, "/private/var/run/native-feasibility-fault.lock");
+        const common =
+          context.O_RDWR |
+          context.O_NOFOLLOW |
+          context.O_CLOEXEC |
+          context.O_NONBLOCK;
+        assert.equal(
+          flags,
+          opens === 1 ? common | context.O_CREAT | context.O_EXCL : common,
+        );
+        assert.equal(mode, opens === 1 ? 0o600 : undefined);
+        assert.ok(opens <= (existing ? 2 : 1));
+        if (fault === "create" || (existing && opens === 1)) {
+          context.errno = fault === "create" ? 13 : context.EEXIST;
+          return -1;
+        }
+        if (["symlink", "disappeared"].includes(fault)) {
+          context.errno = fault === "symlink" ? 40 : 2;
+          return -1;
+        }
+        return 7;
+      },
+      fstat(fd, value) {
+        assert.equal(fd, 7);
+        calls.push("stat");
+        stats++;
+        if (
+          (fault === "stat-before" && stats === 1) ||
+          (fault === "stat-after" && stats === 2)
+        ) {
+          context.errno = 9;
+          return -1;
+        }
+        Object.assign(value, structuredClone(file));
+        if (stats === 2 && fault === "held-identity") value.st_ino++;
+        if (stats === 2 && fault === "held-mode") value.st_mode ^= 0o100;
+        return 0;
+      },
+      flock(fd, flags) {
+        assert.deepEqual([fd, flags], [7, 6]);
+        calls.push("lock");
+        if (fault === "lock") {
+          context.errno = 35;
+          return -1;
+        }
+        locked = true;
+        return 0;
+      },
+      fchown(fd, uid, gid) {
+        assert.deepEqual([fd, uid, gid], [7, 0, 0]);
+        assert.ok(!existing && locked);
+        calls.push("owner");
+        if (fault === "owner") {
+          context.errno = 1;
+          return -1;
+        }
+        if (fault !== "owner-readback") file.st_gid = gid;
+        file.st_uid = uid;
+        return 0;
+      },
+      fchmod(fd, mode) {
+        assert.deepEqual([fd, mode], [7, 0o600]);
+        assert.ok(!existing && locked);
+        calls.push("mode");
+        if (fault === "mode") {
+          context.errno = 5;
+          return -1;
+        }
+        if (fault !== "mode-readback") file.st_mode = 0o100000 | mode;
+        return 0;
+      },
+      no_acl(fd, inspected) {
+        assert.equal(fd, 7);
+        assert.ok(locked);
+        assert.deepEqual(structuredClone(inspected), file);
+        calls.push("acl");
+        if (fault === "acl") throw new Error("acl-empty");
+      },
+      lstat(path, value) {
+        assert.equal(path, "/private/var/run/native-feasibility-fault.lock");
+        calls.push("name");
+        if (fault === "name-stat") {
+          context.errno = 2;
+          return -1;
+        }
+        Object.assign(value, structuredClone(file));
+        if (fault === "name-identity") value.st_ino++;
+        if (fault === "name-time") value.st_ctimespec.tv_nsec++;
+        if (fault === "name-symlink") value.st_mode = 0o120600;
+        return 0;
+      },
+      domain_metadata(object, inspected) {
+        metadata.push({ object, stat: structuredClone(inspected) });
+      },
+      audit_census(uid, asid) {
+        assert.deepEqual([uid, asid], [90001, 0]);
+        assert.ok(locked);
+        assert.equal(calls.at(-1), "name");
+        calls.push("census");
+        return { nl: 0, nd: 0 };
+      },
+      posix_check(result, name) {
+        if (result < 0)
+          throw Object.assign(new Error(name), { value: context.errno });
+      },
+      invariant(ok, name) {
+        if (!ok) throw new Error(name);
+      },
+    };
+    const acquire = script.runInNewContext(context);
+    if (fault) {
+      assert.throws(acquire, (error) => {
+        assert.equal(error.message, operation, `${existing}/${fault}`);
+        if (errorValue !== undefined) assert.equal(error.value, errorValue);
+        return true;
+      });
+      assert.equal(calls.includes("census"), false);
+      if (operation === "fault-lease-shape")
+        assert.equal(metadata.at(-1).object, operation);
+    } else {
+      assert.equal(acquire(), 7);
+      assert.deepEqual(calls, [
+        "open",
+        ...(existing ? ["open"] : []),
+        "stat",
+        "lock",
+        ...(!existing ? ["owner", "mode"] : []),
+        "stat",
+        "acl",
+        "name",
+        "census",
+      ]);
+      assert.equal(file.st_gid, 0);
+      assert.equal(file.st_mode, 0o100600);
+      if (!existing) assert.deepEqual(metadata[0].stat, initial);
+    }
+    if (existing || !calls.includes("owner")) {
+      assert.deepEqual(file, initial);
+      assert.equal(calls.includes("mode"), false);
+    }
+    assert.equal(opens, existing ? 2 : 1);
+  }
+});
+
 test("Darwin fault reexec retains possible effects and transfers only the original writable journal", async () => {
   const [source, helper] = await Promise.all(
     ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>

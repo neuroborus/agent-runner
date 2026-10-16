@@ -2872,9 +2872,19 @@ SIGTERM cancellation, SIGKILL owner loss and 25-second descendant safety alarm.
 A separate fixed root custody channel acquires a fresh audit session before
 releasing the original helper. Its reserved UID/GID are 90001/90002; the runner
 and root custodian remain outside that session. A protected exclusive lease and
-complete UID absence precede creation. The fixed nonce-derived directory under
-`/private/var/run` contains sealed helper/policy bytes and a mode-0400 original
-operation receipt. Sealing intent precedes copying; custody re-execs only the
+complete UID absence precede payload creation. The persistent lease under
+`/private/var/run` uses exclusive no-follow creation. Only a newly created
+descriptor receives root uid/gid and mode-0600 initialization, after acquiring its
+nonblocking exclusive lock. EEXIST reopens without creation, truncation or
+metadata repair. Both paths require a regular single-link file,
+strict metadata and ACL inspection, then rejoin the held file to its name before
+payload creation. Custody retains the lock; failed acquisition never unlinks or
+replaces the lease. Bounded metadata diagnostics do not establish which predicate
+failed on a hosted worker; original failure and uncertain
+cleanup remain until independent retirement witnesses succeed.
+The fixed nonce-derived directory under `/private/var/run` contains sealed
+helper/policy bytes and a mode-0400 original operation receipt. Sealing intent
+precedes copying; custody re-execs only the
 sealed image using its inherited journal descriptor before creating a payload.
 The original unprivileged self-exec/fork recipe runs with sanitized descriptors
 and Mach rights, bounded process count and native credential/session/delegation

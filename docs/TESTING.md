@@ -199,6 +199,13 @@ Held-initialization regressions execute the actual creation helper with syntheti
 inherited metadata, failed setters and substituted identities. They retain the
 strict root/journal modes, ACL refusal and creation-only normalization boundary;
 portable injections establish no native ownership or filesystem acceptance.
+Fault-start regressions also execute the actual lease acquisition branch with
+injected filesystem and lock effects: exclusive creation with inherited metadata,
+strict existing-file reuse, refused objects, contention, setter failures and
+held/name substitution. Reuse and contention permit no metadata repair or lease
+replacement; failed acquisition cannot reach payload creation. These cases retain
+the original cancel/owner-loss controls and independent recovery requirements,
+without running macOS tools or adding slow-tier checks.
 The same source-execution suite drives the shared custody ACL inspector through
 one case table: inspected absence, present empty or nonempty ACLs, malformed or
 failed reads, held metadata changes and independent resource-release failures.
