@@ -170,13 +170,20 @@ without reselection, replay, version-label substitution or global selection chan
 This correction supplies no unique explanation of earlier native query failure
 and does not close the separate PF or matching-host proof obligations.
 
-Darwin signature admission retains its original URL/Security calls, flags and
-short circuits. Failure-only diagnostics carry exact signed statuses or uncalled
+Darwin signature admission retains public flags, order and short circuits. Its
+single original validity call uses `SecStaticCodeCheckValidityWithErrors` with
+strict validation and a NULL requirement. The old API delegates with NULL errors;
+requesting errors additionally enables internal full-report work.
+Failure-only diagnostics carry exact signed statuses or uncalled
 states, URL outcome and at most `PATH_MAX - 1` requested bytes as hex with
-requested/emitted lengths and truncation. Diagnostics restore original errno
-before refusal; success, reviewed-image, pins, entitlements and cleanup stay fixed.
-The composite source line and errno identify no failed API. Portable injections
-prove observation behavior, not native validity, a unique remedy or acceptance.
+requested/emitted lengths and truncation. Original validity failure additionally
+reports its CFError code and up to 128 UTF-8 bytes each of domain and description
+as hex, with explicit unavailable/truncated states. Owned error/description
+releases preserve errno across diagnostic failures. No nested traversal, probe or
+additional validity call occurs; success stays silent and later guards stay fixed.
+The composite source line and errno identify no failed API; `-67061` establishes
+no unique corruption, profile, memory or SDK cause or authorized bypass.
+Portable injections prove diagnostics, not native validity, retirement or acceptance.
 
 Experiment acquisition, installed-input ancestry and build snapshots use BigInt
 filesystem statistics, including nanosecond modification/change timestamps.

@@ -466,15 +466,27 @@ Portable fixtures prove these observation boundaries, not the failed native
 filename/predicate, a remedy, successful selected-SDK queries or native readiness.
 
 Signature admission separately samples its original URL/create/strict-validity/
-signing-information composite, retaining each call, flag and short circuit.
+signing-information composite, retaining public flags, order and short circuits.
+Its single original validity call uses `SecStaticCodeCheckValidityWithErrors`
+with strict validation and a NULL requirement. The
+[old API delegates with a NULL error pointer](https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_codesigning/lib/SecStaticCode.cpp);
+requesting errors additionally enables internal full-report work.
 Only composite failure emits the URL outcome, exact signed `OSStatus` values
 and explicit `uncalled` states. Requested path hex uses at most `PATH_MAX - 1`
 bytes, with requested/emitted lengths and truncation; the original length sample
 is reused without adding path admission. Encoding, writes and flushing restore
-original errno before refusal/exit 126, including diagnostic failures. Success,
-reviewed-image, pin/entitlement and cleanup behavior remain unchanged. A composite
-source line and errno identify no particular API failure; portable injections
-prove observation behavior, not native validity or a unique functional remedy.
+original errno before refusal/exit 126, including diagnostic failures.
+Original validity failure also reports that call's CFError availability and
+signed code, with at most 128 UTF-8 bytes each of domain and copied description
+as hex. Unavailable or malformed types and failed conversions are explicit;
+partial text is marked truncated. No nested graph, dictionary dump, probe or
+additional validity call is used. The owned description and original error are
+released, including unexpected non-NULL success errors, with errno restored
+across diagnostics and release. Success remains silent; reviewed-image,
+pin/entitlement, stability and existing cleanup guards remain unchanged.
+A composite source line and errno identify no particular API failure; `-67061`
+alone establishes no unique corruption, profile, memory or SDK cause and permits
+no bypass. Portable injections prove diagnostics, not native validity or retirement.
 
 The sealed build entry separately samples the original SDK guard in its existing
 short-circuit order: native realpath result and errno, exact path equality,

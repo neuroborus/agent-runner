@@ -217,6 +217,34 @@ static void reviewed_image(const char *name) {
     before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec && !close(fd));
 }
 #endif
+/* Fixed UTF-8 byte prefixes are hex encoded; no diagnostic text becomes syntax. */
+static void signature_text(const char *field, CFStringRef value) {
+  UInt8 bytes[128] = {0}; char encoded[257] = {0};
+  CFIndex length = 0, used = 0, converted = 0;
+  bool available = value != NULL && CFGetTypeID(value) == CFStringGetTypeID();
+  if (available) {
+    length = CFStringGetLength(value);
+    if (length >= 0) converted = CFStringGetBytes(value, CFRangeMake(0, length), kCFStringEncodingUTF8,
+      0, false, bytes, sizeof(bytes), &used);
+    available = length >= 0 && converted >= 0 && converted <= length && used >= 0 && used <= sizeof(bytes) &&
+      (!length || converted > 0) && (converted ? used > 0 : used == 0);
+  }
+  if (available) for (CFIndex i = 0; i < used; i++) {
+    encoded[2*i] = "0123456789abcdef"[bytes[i] >> 4];
+    encoded[2*i + 1] = "0123456789abcdef"[bytes[i] & 15];
+  }
+  fprintf(stderr, "native-darwin-signature-error-%s: available=%d truncated=%d utf8-hex=%s\n",
+    field, available, available && converted < length, encoded);
+}
+static void signature_error_details(CFErrorRef error) {
+  bool available = error != NULL && CFGetTypeID(error) == CFErrorGetTypeID();
+  if (available) fprintf(stderr, "native-darwin-signature-error: available=1 code=%jd\n", (intmax_t)CFErrorGetCode(error));
+  else fprintf(stderr, "native-darwin-signature-error: available=0\n");
+  signature_text("domain", available ? CFErrorGetDomain(error) : NULL);
+  CFStringRef description = available ? CFErrorCopyDescription(error) : NULL;
+  signature_text("description", description);
+  if (description) CFRelease(description);
+}
 static void signature(const char *name, const char *pin) {
 #ifndef NATIVE_CI_EXPERIMENT
   reviewed_image(name);
@@ -225,14 +253,17 @@ static void signature(const char *name, const char *pin) {
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)name,
                                                         (CFIndex)path_length, false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
+  CFErrorRef error = NULL;
   bool create_called = false, validity_called = false, info_called = false;
   OSStatus create_status = 0, validity_status = 0, info_status = 0;
+  /* The old API delegates with NULL errors; requesting errors additionally
+   * enables internal full-report work. */
   bool signature_ok = url &&
        (create_called = true, create_status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code), create_status == errSecSuccess) &&
-       (validity_called = true, validity_status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL), validity_status == errSecSuccess) &&
+       (validity_called = true, validity_status = SecStaticCodeCheckValidityWithErrors(code, kSecCSStrictValidate, NULL, &error), validity_status == errSecSuccess) &&
        (info_called = true, info_status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info), info_status == errSecSuccess);
+  int signature_errno = errno;
   if (!signature_ok) {
-    int signature_error = errno;
     size_t emitted = path_length < PATH_MAX ? path_length : PATH_MAX - 1;
     char path_hex[2*PATH_MAX] = {0};
     hex((const unsigned char *)name, emitted, path_hex);
@@ -244,8 +275,11 @@ static void signature(const char *name, const char *pin) {
     else fprintf(stderr, "native-darwin-signature-validity: uncalled\n");
     if (info_called) fprintf(stderr, "native-darwin-signature-info: status=%jd\n", (intmax_t)info_status);
     else fprintf(stderr, "native-darwin-signature-info: uncalled\n");
-    fflush(stderr); errno = signature_error;
+    if (validity_called && validity_status != errSecSuccess) signature_error_details(error);
+    fflush(stderr);
   }
+  if (error) CFRelease(error);
+  errno = signature_errno;
   need(signature_ok);
   CFDataRef hash = CFDictionaryGetValue(info, kSecCodeInfoUnique);
   need(hash && CFGetTypeID(hash) == CFDataGetTypeID() && CFDataGetLength(hash) == 20);

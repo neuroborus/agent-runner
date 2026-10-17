@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Capture the original Darwin strict signature error
+
+The single strict validity call now requests its original CFError. The old API
+delegates with NULL errors; requesting an error additionally enables internal
+full-report work. Failure-only domain/code/description diagnostics use bounded
+UTF-8 hex and explicit unavailable/truncated states without another validity call or
+nested traversal. Owned error/description releases preserve errno and original
+refusal; success stays silent and later guards remain strict. Portable coverage
+proves diagnostics only. `-67061` identifies no unique corruption, profile,
+memory or SDK cause and authorizes no bypass. Live TASK_ACCESS_PORT, Windows
+socket 10022, missing audit delivery and VERIFY 8/whole-effect retirement remain open.
+
 ## 2026-10-17 — Reacquire complete Darwin census after vanished processes
 
 The shared census now allows three immediate complete attempts, restarting only

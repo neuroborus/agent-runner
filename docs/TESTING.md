@@ -152,13 +152,18 @@ The same fast build-source suite executes the original SDK admission predicate
 with injected realpath/lstat and sampled metadata. It covers each short-circuit
 stop, unknown later terms, single native-call evaluation, successful unchanged
 admission and failed diagnostic writes without changing the guard errno.
-One compact signature fixture translates the complete original admission, hex
-encoder, refusal and downstream guard/cleanup bodies. Neutral injections cover
-URL and each API failure, exact call order/flags/counts and later-call suppression,
+One compact signature fixture translates the complete original admission, bounded
+CFError helpers, hex encoder, refusal and downstream guard/cleanup bodies.
+Neutral injections cover URL and each API failure, exact call order/flags/counts
+and later-call suppression,
 signed-status boundaries distinct from uncalled states, control/non-UTF-8 path
-bytes, truncation bounds and long-path success without new admission. Success
-remains silent; encoding/write/flush failures preserve refusal and original errno,
-including zero. The composite source line and errno identify no failed API.
+bytes, truncation bounds and long-path success without new admission. The single
+WithErrors call covers NULL/malformed error, domain and description objects,
+empty/oversized UTF-8 details, signed code limits, conversion/write/flush failures
+and independent owned-description/error release, including non-NULL success
+errors. Success remains silent; diagnostic and release work preserves original
+refusal and errno, including zero. The full-report tradeoff supplies no native
+work equivalence. The composite source line and errno identify no failed API.
 These portable observations establish neither native validity nor a unique remedy;
 they add no native invocation, harness, dependency or tier assignment.
 The same suite executes the complete protected-file reader body, including its
