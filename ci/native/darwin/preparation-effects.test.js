@@ -5728,6 +5728,148 @@ test("Darwin directory refusal settles original custody through a fresh reader w
   }
 });
 
+test("Darwin SDK refusal retains original command custody until independent domain retirement", async () => {
+  for (const purpose of ["reviewed", "experiment"])
+    for (const fault of [
+      null,
+      "descendant",
+      "missing-birth",
+      "replaced",
+      "census",
+      "cancelled",
+    ]) {
+      const f = buildTranscripts(purpose === "experiment"),
+        original = Object.assign(
+          new Error("Original SDK root-ownership refusal"),
+          {
+            stderr:
+              "native-darwin-sdk: realpath=1 equal=1 lstat=0 kind=1 owner=0 writable=-1\n",
+          },
+        ),
+        cleanup = new AbortController(),
+        open = f.options.commandTransport.open,
+        order = [];
+      f.options.signal = cleanup.signal;
+      let helper;
+      f.options.commandTransport.open = async (...args) => {
+        const { channel } = await open(...args);
+        let admitted = false;
+        return {
+          channel: {
+            ...channel,
+            receive: async () => {
+              if (admitted) throw original;
+              const frame = await channel.receive();
+              helper = frame.helper;
+              return frame;
+            },
+            send: async (frame) => {
+              assert.equal(frame, "P");
+              admitted = true;
+              order.push("sdk-admission");
+            },
+          },
+        };
+      };
+      const build = await createBuildEffects(f.input, f.options),
+        request = {
+          ...f.requests[2],
+          ...(purpose === "experiment"
+            ? {
+                purpose,
+                args: darwinCompilerArguments(
+                  path.join(sourceDirectory, DARWIN_HELPER_NAMES[0] + ".c"),
+                  path.join(output, DARWIN_HELPER_NAMES[0]),
+                  f.manifest.environment,
+                  purpose,
+                ),
+              }
+            : {}),
+        };
+      await assert.rejects(build.run(request), (cause) => cause === original);
+      assert.ok(helper);
+      if (fault === "descendant")
+        f.processes.set(9900, {
+          identity: { ...helper, pid: 9900, startMicroseconds: 9900 },
+        });
+      if (fault === "missing-birth")
+        for (const [file, entry] of f.files)
+          if (
+            /darwin-command-.*-[0-9]+\.json$/u.test(file) &&
+            JSON.parse(entry.bytes).phase === "helper"
+          )
+            f.files.delete(file);
+      if (fault === "cancelled") cleanup.abort();
+      f.operationFrames((name, args) => {
+        if (name === "finish") order.push("observer-finish");
+        if (name === "root-retired" && Number(args[0]) === helper.pid) {
+          order.push("original-domain");
+          if (fault === "census")
+            return { helper, complete: false, members: [] };
+          if (fault === "replaced")
+            return {
+              helper: { ...helper, startSeconds: 101 },
+              complete: true,
+              members: [],
+            };
+        }
+      });
+      const result = await build.settle();
+      assert.equal(
+        result.status,
+        fault ? "RETAINED" : "RETIRED",
+        `${purpose}:${fault}`,
+      );
+      assert.equal(result.emergencyCleanup, false);
+      assert.equal(
+        f.events.filter((event) => event.startsWith("tool:")).length,
+        1,
+      );
+      assert.ok(
+        !f.events.includes("command:R") && !f.events.includes("command:S"),
+      );
+      const commandRecords = [...f.files.entries()]
+        .filter(([file]) => /darwin-command-.*-[0-9]+\.json$/u.test(file))
+        .map(([, entry]) => JSON.parse(entry.bytes));
+      assert.ok(
+        commandRecords.some(
+          (record) => record.phase === "uncertain" && record.worker === null,
+        ),
+      );
+      assert.ok(
+        !commandRecords.some((record) =>
+          ["worker", "publication-possible"].includes(record.phase),
+        ),
+      );
+      assert.ok(
+        !f.files.has(
+          path.join(
+            directory,
+            `darwin-command-${observationDigest(request)}-result.json`,
+          ),
+        ),
+      );
+      if (!fault) {
+        assert.equal(result.independent, true);
+        assert.equal(f.processes.size, 0);
+        assert.ok(
+          order.indexOf("original-domain") < order.indexOf("observer-finish"),
+        );
+        assert.equal(
+          order.filter((event) => event === "original-domain").length,
+          2,
+        );
+      }
+      await assert.rejects(
+        build.run({
+          ...f.requests[3],
+          ...(purpose === "experiment" ? { purpose } : {}),
+        }),
+        (cause) => cause === original,
+      );
+    }
+});
+
 test("Darwin lost finish acknowledgment is not replayed during independent recovery", async () => {
   const f = buildTranscripts(),
     build = await createBuildEffects(f.input, f.options),

@@ -121,8 +121,15 @@ operations explicitly qualify compiler/SDK/signer reads through the shared
 installed-path/ancestry classifier before the default preparation reader admits
 installed hardlinks. Sealed sources, generated helpers and receipts remain
 single-linked; held-byte stability, native signatures and pins remain mandatory.
-Original command and bootstrap retirement precede build evidence. Cold-loading
-rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
+Original command and bootstrap retirement precede build evidence.
+Before installed-input admission, the sealed compiler entry announces its original
+birth and parks until the independent reader holds its fresh audit domain. A
+rejected SDK therefore retains command ownership without authorizing a tool.
+Failure settlement checks original commands/domains before observer closure,
+then independently revalidates original commands and observers without replay.
+The unsafe installed SDK remains a blocker; canonicalization already exists and
+no supported safe alternative or native build success is established.
+Cold-loading rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
 admission even before the private report directory exists. Original retirement and
 held outputs use separately retired reader sessions. ABI journal records and later
 cold-reader admissions remain recoverable after build retirement; uncertainty and

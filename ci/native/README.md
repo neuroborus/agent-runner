@@ -458,6 +458,12 @@ retained as observed, not interpreted as its failure cause. Diagnostic writes
 restore the guard's sampled errno before the original refusal. No input is
 reselected, compilation retried or protection relaxed. The already observed fresh
 output custody at UID0/GID0/mode0700 and JS realpath discovery remain unchanged.
+The original SDK passed realpath/equality/lstat/directory-kind and failed root
+ownership at UID501/GID20/mode040755; writability was unsampled. Discovery already
+canonicalizes `xcrun --show-sdk-path`, so canonicalization is not a supported
+remedy for that refusal. No independently safe alternative SDK is established.
+The missing safe installed SDK remains a technical blocker: no selector fallback,
+copy, adoption, ownership/permission change or relaxed guard is authorized.
 These observations and portable regressions establish no installed-tool native
 acceptance. Darwin descendant-survival and Windows TCP/audit failures remain
 unresolved. Matching-host execution and both fresh same-SHA native workflows
@@ -5940,6 +5946,14 @@ unsettled commands do not publish outputs.
 
 Each command uses a fresh root audit session. The separately admitted reader pins
 that session and enumerates its actual kernel membership across all UIDs.
+The sealed entry announces its original helper birth after joining the protected
+output directory, before source/tool/SDK admission. Its first `P` barrier permits
+those checks only after the outside reader verifies the helper and holds its
+original session. Every installed-input predicate still precedes tool creation;
+the parked tool retains its separate `R` release. Previously SDK refusal could
+exit before announcing this birth, leaving recovery without original ownership.
+This is a source-supported preparation-order correction, not evidence that the
+unsafe SDK is admissible or that a native build or retirement now succeeds.
 Reaping the compiler alone is insufficient: only the acknowledged helper may
 remain before its final barrier, and the complete domain must be empty before
 custody release. Unreadable,
@@ -5952,6 +5966,15 @@ A directory-provision refusal leaves a separate request-bound caller receipt
 before any compiler entry can launch. Recovery admits that partial state only
 with the refusal receipt and no directory receipt, compiler transcript or result;
 missing birth evidence after possible compiler admission still retains custody.
+On failed work, the original live reader independently checks recorded command
+births and complete original root domains before its own close is attempted.
+This first pass cannot prove observer settlement or overall retirement. A fresh
+reader then revalidates those commands, original reader/verifier births and all
+recorded domains before closing independently. Missing or replaced births,
+incomplete census, changed output identity or expired cleanup authority retain
+exclusion. Failure of the first pass cannot become success from closing observers.
+Recovery reads protected receipts and the original directory identity; it neither
+reopens rejected SDK inputs nor recompiles or repeats consumed finish.
 Reader close is attempted once, including when `finish` may have consumed its
 request before losing the acknowledgment. Failed normal close instead uses a
 fresh custody reader to check original reader/verifier retirement and empty

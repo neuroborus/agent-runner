@@ -464,13 +464,40 @@ export function darwinPreparationContext(input, options) {
   };
   const settleBootstrap = ({ recover = false, signal = options.signal } = {}) =>
     (settlement ??= (async () => {
-      let closeFailure;
+      let closeFailure, commandFailure;
       try {
-        if (bootstrapPromise) await releaseBootstrap();
+        if (bootstrapPromise) {
+          const current = await bootstrapPromise;
+          if ((recover || firstFailure) && !current.close) {
+            try {
+              const inventory = darwinBuildRecoveryInventory(
+                state,
+                await darwinBuildRecords({
+                  ...state,
+                  receipt: options.readReceipt ?? state.stockReceipt,
+                }),
+              );
+              // Keep original audit references until the original commands and
+              // their complete domains are independently absent. This partial
+              // pass supplies no observer or overall settlement proof.
+              await inspectDarwinBuildRetirement(
+                state,
+                inventory.commands,
+                current.reader,
+                signal,
+              );
+            } catch (cause) {
+              commandFailure = cause;
+              nativeException("darwin-build-recovery", cause);
+            }
+          }
+          await releaseBootstrap();
+        }
       } catch (cause) {
         closeFailure = cause;
         nativeException("darwin-build-close", cause);
       }
+      if (commandFailure) return retained();
       if (!recover && !firstFailure && !closeFailure)
         return {
           status: "RETIRED",
@@ -494,7 +521,7 @@ export function darwinPreparationContext(input, options) {
         return retained();
       }
     })());
-  return {
+  const state = {
     ...value,
     plan,
     output,
@@ -515,6 +542,7 @@ export function darwinPreparationContext(input, options) {
     createReader,
     fail,
   };
+  return state;
 }
 
 export async function darwinBuildRecords(state) {
@@ -697,15 +725,7 @@ export function createDarwinBuildEffects(input, options = {}) {
   };
 }
 
-/** Reconstruct build custody only. Case effects remain with their later owner;
- * an unannounced native launch cannot be retired from a missing receipt. */
-export async function recoverDarwinBuild(
-  state,
-  records,
-  signal,
-  existingReader,
-  bootstrapOptions,
-) {
+function darwinBuildRecoveryInventory(state, records) {
   const byName = new Map(records.map(({ name, record }) => [name, record]));
   requireObservation(
     byName.size === records.length &&
@@ -843,6 +863,8 @@ export async function recoverDarwinBuild(
       subjects.push(born.request.verifier);
     }
   }
+  const observerSubjectCount = subjects.length,
+    observerDomainCount = domains.length;
   for (const { name, record } of intents) {
     observationObject(record, [
       ...Object.keys(purposeData(state.manifest)),
@@ -957,34 +979,67 @@ export async function recoverDarwinBuild(
         );
     }
   }
-  const reader =
+  return {
+    subjects,
+    domains,
+    directoryIdentity,
+    commands: {
+      subjects: subjects.slice(observerSubjectCount),
+      domains: domains.slice(observerDomainCount),
+      directoryIdentity,
+    },
+  };
+}
+
+async function inspectDarwinBuildRetirement(state, inventory, reader, signal) {
+  state.guard(signal);
+  const reads = [];
+  if (inventory.directoryIdentity) {
+    const actual = await reader.readBuildDirectory(state.output);
+    requireObservation(
+      actual.independent === true &&
+        actual.identity === inventory.directoryIdentity,
+    );
+    reads.push(actual);
+  }
+  for (const subject of inventory.subjects) {
+    state.guard(signal);
+    const observed = await reader.retired(subject);
+    requireObservation(retired(observed) && hash(observed.nativeEventSha256));
+    reads.push(observed);
+  }
+  for (const subject of inventory.domains) {
+    state.guard(signal);
+    const observed = await reader.retiredRootDomain(subject);
+    requireObservation(
+      observed.independent === true &&
+        observed.complete === true &&
+        observed.members.length === 0,
+    );
+    reads.push(observed);
+  }
+  return reads;
+}
+
+/** Reconstruct build custody only. Case effects remain with their later owner;
+ * an unannounced native launch cannot be retired from a missing receipt. */
+export async function recoverDarwinBuild(
+  state,
+  records,
+  signal,
+  existingReader,
+  bootstrapOptions,
+) {
+  const inventory = darwinBuildRecoveryInventory(state, records),
+    reader =
       existingReader ??
       (await state.bootstrap(signal, bootstrapOptions)).reader,
     reads = [];
   let firstFailure;
   try {
-    if (directoryIdentity) {
-      const actual = await reader.readBuildDirectory(state.output);
-      requireObservation(
-        actual.independent === true && actual.identity === directoryIdentity,
-      );
-      reads.push(actual);
-    }
-    for (const subject of subjects) {
-      state.guard(signal);
-      const observed = await reader.retired(subject);
-      requireObservation(retired(observed) && hash(observed.nativeEventSha256));
-      reads.push(observed);
-    }
-    for (const subject of domains) {
-      const observed = await reader.retiredRootDomain(subject);
-      requireObservation(
-        observed.independent === true &&
-          observed.complete === true &&
-          observed.members.length === 0,
-      );
-      reads.push(observed);
-    }
+    reads.push(
+      ...(await inspectDarwinBuildRetirement(state, inventory, reader, signal)),
+    );
   } catch (cause) {
     firstFailure = cause;
     throw state.fail(cause);

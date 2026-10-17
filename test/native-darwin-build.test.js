@@ -16,6 +16,19 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
     start = source.indexOf("    char canonical[PATH_MAX]; struct stat stat;"),
     end = source.indexOf("    ancestors(sdk);", start);
   assert.ok(start > 0 && end > start);
+  const admissionStart = source.indexOf("  int work = directory(cwd"),
+    admissionEnd = source.indexOf("  const char *publication", admissionStart);
+  assert.ok(
+    admissionStart > 0 && admissionEnd > admissionStart && admissionEnd < start,
+  );
+  const admission = new Script(
+    `() => {${source
+      .slice(admissionStart, admissionEnd)
+      .replace("int work", "let work")
+      .replace("auditinfo_addr_t audit = {0};", "const audit = {ai_termid:{}};")
+      .replaceAll("&audit", "audit")
+      .replaceAll("sizeof(audit)", "1")}}`,
+  );
   const script = new Script(
     `() => {${source
       .slice(start, end)
@@ -103,6 +116,60 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
             : fault === "lstat"
               ? 13
               : 44;
+    const handoff = [],
+      admissionContext = {
+        cwd: "/fixture/build",
+        tool: "/usr/bin/clang",
+        argv: [null, null, null, "pin", "signature"],
+        stdout: {},
+        AU_ASSIGN_ASID: -1,
+        AU_DEFAUDITSID: 0,
+        AU_IPv4: 2,
+        directory: (name, uid, gid, mode) => {
+          assert.deepEqual(
+            [name, uid, gid, mode],
+            ["/fixture/build", 0, 0, 0o700],
+          );
+          handoff.push("directory");
+          return 3;
+        },
+        fchdir: () => 0,
+        no_acl: () => handoff.push("acl"),
+        need: (ok) => assert.ok(ok),
+        setaudit_addr: () => {
+          handoff.push("audit-create");
+          return 0;
+        },
+        getaudit_addr: (audit) => {
+          audit.ai_asid = 55;
+          return 0;
+        },
+        getpid: () => 42,
+        inspect: (pid) => ({ pid, asid: 55 }),
+        emit: (birth) => {
+          assert.deepEqual(birth, { pid: 42, asid: 55 });
+          handoff.push("birth");
+        },
+        printf() {},
+        puts() {},
+        fflush() {},
+        control: (command) => {
+          assert.equal(command, "P");
+          handoff.push("outside-custody");
+        },
+        protected_input: () => handoff.push("tool-input"),
+        signature: () => handoff.push("tool-signature"),
+      };
+    admission.runInNewContext(admissionContext)();
+    assert.deepEqual(handoff, [
+      "directory",
+      "acl",
+      "audit-create",
+      "birth",
+      "outside-custody",
+      "tool-input",
+      "tool-signature",
+    ]);
     if (fault) assert.throws(run, { errno: expectedError });
     else run();
     assert.equal(context.errno, expectedError, fault);

@@ -139,7 +139,16 @@ The same fast build-source suite executes the original SDK admission predicate
 with injected realpath/lstat and sampled metadata. It covers each short-circuit
 stop, unknown later terms, single native-call evaluation, successful unchanged
 admission and failed diagnostic writes without changing the guard errno. The
-existing custody-channel fixture carries those numeric diagnostics, malformed
+same actual-body fixture executes helper admission before those predicates,
+joining fresh audit-session creation, birth announcement and the original `P`
+barrier before protected tool checks. The raw build transport injects the
+original SDK refusal for reviewed and experiment purposes, preserving the exact
+first cause without a worker or publication. It requires original command-domain
+proof before observer finish and full independent revalidation afterward.
+Missing/replaced births, surviving descendants, incomplete census and cancelled
+cleanup retain exclusion; existing lost-finish coverage prohibits replay.
+No fixture supplies a safe replacement SDK, native build or retirement proof.
+The existing custody-channel fixture carries those numeric diagnostics, malformed
 metadata and the original guard through failed completion; output supplies no
 receipt, new compiler attempt or retirement evidence.
 The fixture retains native ABI journal entries and the read-only root lifetime;

@@ -109,9 +109,15 @@ int main(int argc, char **argv) {
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
   unsigned seconds = number(argv[10]); need(seconds > 0 && seconds <= 30);
   need(signal(SIGALRM, expire) != SIG_ERR); alarm(seconds);
-  protected_input(tool, argv[3], 1); signature(tool, argv[4]);
   int work = directory(cwd, 0, 0, 0700); need(!fchdir(work));
   no_acl(work);
+  /* Retain the original birth and audit domain before installed-input refusal.
+   * P authorizes admission checks only; no tool exists until they all pass. */
+  auditinfo_addr_t audit = {0}; audit.ai_auid = 0; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
+  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
+    audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
+  printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout); control('P');
+  protected_input(tool, argv[3], 1); signature(tool, argv[4]);
   const char *publication = NULL;
   char *vector[32] = {(char *)tool, NULL};
 #ifdef NATIVE_CI_EXPERIMENT
@@ -174,10 +180,6 @@ int main(int argc, char **argv) {
     char *args[] = {(char *)tool, "--force", "--sign", "-", "--timestamp=none", (char *)leaf, NULL};
     memcpy(vector, args, sizeof(args));
   }
-  auditinfo_addr_t audit = {0}; audit.ai_auid = 0; audit.ai_asid = AU_ASSIGN_ASID; audit.ai_termid.at_type = AU_IPv4;
-  need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
-    audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
-  printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout); control('P');
   int output[2], errors[2]; need(!pipe(output) && !pipe(errors));
   posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
   need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
