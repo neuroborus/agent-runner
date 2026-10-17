@@ -15,7 +15,12 @@ import {
   observationObject,
   requireObservation,
 } from "../index.js";
-import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
+import {
+  DARWIN_HELPER_NAMES,
+  darwinCompilerArguments,
+  darwinDeveloperDirectory,
+  darwinBuildToolchain,
+} from "./build.js";
 import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 import { protectedInstalledInput } from "./private-files.js";
@@ -137,21 +142,28 @@ export async function acquireDarwinExperimentBuild(
       args,
     });
     await admit();
+    const { env: commandEnvironment = {}, ...settings } = extra;
     return (options.command ?? execute)(file, args, {
       env: {
         CI: "true",
         GITHUB_ACTIONS: "true",
         LANG: "C",
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        ...commandEnvironment,
       },
       signal: options.signal,
       encoding: "utf8",
       timeout: 60000,
       maxBuffer: 1048576,
-      ...extra,
+      ...settings,
     });
   };
-  const read = async (file, maximum = 134217728, installed = false) => {
+  const read = async (
+    file,
+    maximum = 134217728,
+    installed = false,
+    identity,
+  ) => {
     let canonical;
     requireObservation(
       absolute(file) && (canonical = await fs.realpath(file)) === file,
@@ -229,6 +241,7 @@ export async function acquireDarwinExperimentBuild(
         (before.nlink === 1 ||
           (installed && (await protectedInstalledInput(file, after, fs)))),
     );
+    if (identity) Object.assign(identity, { dev: after.dev, ino: after.ino });
     return bytes;
   };
   requireObservation(
@@ -241,8 +254,10 @@ export async function acquireDarwinExperimentBuild(
     (await run("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim() ===
       job.candidateSha,
   );
-  const discover = async (args) => {
-    const value = (await run("/usr/bin/xcrun", args)).stdout.trim();
+  const discover = async (args, environment) => {
+    const value = (
+      await run("/usr/bin/xcrun", args, { env: environment })
+    ).stdout.trim();
     requireObservation(absolute(value));
     return fs.realpath(value);
   };
@@ -324,11 +339,32 @@ export async function acquireDarwinExperimentBuild(
     ));
   requireObservation(sdk);
   const SDKROOT = sdk.path,
-    compiler = await discover(["--sdk", SDKROOT, "--find", "clang"]),
-    sourceDirectory = "/Library/native-poc-" + observationDigest(binding),
+    DEVELOPER_DIR = darwinDeveloperDirectory(SDKROOT),
+    environment = { SDKROOT, DEVELOPER_DIR },
+    developerBefore = await fs.lstat(DEVELOPER_DIR);
+  requireObservation(
+    (await fs.realpath(DEVELOPER_DIR)) === DEVELOPER_DIR &&
+      developerBefore.isDirectory() &&
+      !developerBefore.isSymbolicLink() &&
+      developerBefore.uid === 0 &&
+      !(developerBefore.mode & 0o22) &&
+      [developerBefore.dev, developerBefore.ino].every(
+        (value) => Number.isSafeInteger(value) && value >= 0,
+      ),
+  );
+  const compiler = await discover(
+      ["--sdk", SDKROOT, "--find", "clang"],
+      environment,
+    ),
+    bin =
+      DEVELOPER_DIR +
+      (DEVELOPER_DIR === "/Library/Developer/CommandLineTools"
+        ? "/usr/bin"
+        : "/Toolchains/XcodeDefault.xctoolchain/usr/bin");
+  requireObservation(compiler === (await fs.realpath(path.join(bin, "clang"))));
+  const sourceDirectory = "/Library/native-poc-" + observationDigest(binding),
     staging = directory + "-seed",
-    output = path.join(directory, "platform-build"),
-    environment = { SDKROOT };
+    output = path.join(directory, "platform-build");
   await persist({
     purpose: "experiment",
     phase: "seed-possible",
@@ -374,12 +410,25 @@ export async function acquireDarwinExperimentBuild(
       sha256: digest(await read(file, 134217728, true)),
       cdhash: await signature(file),
     });
-  const inputs = new Map();
+  const inputs = new Map(),
+    inputIdentities = new Map();
   const input = async (file) => {
     file = await fs.realpath(file);
-    const sha256 = digest(await read(file, 536870912, true));
+    const identity = {},
+      sha256 = digest(await read(file, 536870912, true, identity));
+    requireObservation(
+      [identity.dev, identity.ino].every(
+        (value) => Number.isSafeInteger(value) && value >= 0,
+      ),
+    );
     if (inputs.has(file)) requireObservation(inputs.get(file) === sha256);
+    const previous = inputIdentities.get(file);
+    if (previous)
+      requireObservation(
+        previous.dev === identity.dev && previous.ino === identity.ino,
+      );
     inputs.set(file, sha256);
+    inputIdentities.set(file, identity);
     return file;
   };
   await input(compiler);
@@ -405,9 +454,15 @@ export async function acquireDarwinExperimentBuild(
     },
     read: (file) => read(file, 134217728, true),
     executable: (file) => observeDarwinPfExecutable(file, fs),
-    run,
+    run: (file, args, settings) =>
+      run(
+        file,
+        args,
+        file === compiler ? { ...settings, env: environment } : settings,
+      ),
     signal: options.signal,
   });
+  const delegated = new Set();
   for (const name of DARWIN_HELPER_NAMES) {
     const args = darwinCompilerArguments(
       path.join(staging, name + ".c"),
@@ -415,18 +470,47 @@ export async function acquireDarwinExperimentBuild(
       environment,
       "experiment",
     );
-    const query = await run(compiler, ["-###", ...args], { cwd: staging });
+    const query = await run(compiler, ["-###", ...args], {
+      cwd: staging,
+      env: environment,
+    });
     let programs = 0;
     for (const line of query.stderr.split(/\r?\n/u)) {
       const program = /^\s*"((?:[^"\\]|\\.)+)"\s/u.exec(line)?.[1];
       if (!program) continue;
       const file = JSON.parse('"' + program + '"');
       requireObservation(absolute(file));
-      await input(file);
+      const canonical = await input(file);
+      requireObservation(path.dirname(canonical) === bin);
+      if (canonical !== compiler) delegated.add(canonical);
+      requireObservation(delegated.size < 16);
       programs++;
     }
     requireObservation(programs >= 2);
   }
+  const tool = async (file) => ({
+    path: file,
+    sha256: inputs.get(file),
+    cdhash: await signature(file),
+    dev: String(inputIdentities.get(file).dev),
+    ino: String(inputIdentities.get(file).ino),
+  });
+  const delegatedTools = [];
+  for (const file of [...delegated].sort())
+    delegatedTools.push(await tool(file));
+  const toolchain = darwinBuildToolchain(
+    {
+      developer: {
+        path: DEVELOPER_DIR,
+        dev: String(developerBefore.dev),
+        ino: String(developerBefore.ino),
+      },
+      compiler: await tool(compiler),
+      delegated: delegatedTools,
+    },
+    SDKROOT,
+    DEVELOPER_DIR,
+  );
   const build = (name) =>
     run(
       compiler,
@@ -436,7 +520,7 @@ export async function acquireDarwinExperimentBuild(
         environment,
         "experiment",
       ),
-      { cwd: staging },
+      { cwd: staging, env: environment },
     );
   await attemptNativeBuilds(
     "darwin-bootstrap-builds",
@@ -454,8 +538,22 @@ export async function acquireDarwinExperimentBuild(
           requireObservation(
             digest(await read(tool.path, 134217728, true)) === tool.sha256,
           );
-        for (const [file, pin] of inputs)
-          requireObservation(digest(await read(file, 536870912, true)) === pin);
+        for (const [file, pin] of inputs) {
+          const actual = {};
+          requireObservation(
+            digest(await read(file, 536870912, true, actual)) === pin &&
+              actual.dev === inputIdentities.get(file).dev &&
+              actual.ino === inputIdentities.get(file).ino,
+          );
+        }
+        const after = await fs.lstat(DEVELOPER_DIR);
+        requireObservation(
+          (await fs.realpath(DEVELOPER_DIR)) === DEVELOPER_DIR &&
+            ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+              (key) => developerBefore[key] === after[key],
+            ) &&
+            (await fs.realpath(path.join(bin, "clang"))) === compiler,
+        );
       },
     },
   );
@@ -492,6 +590,7 @@ export async function acquireDarwinExperimentBuild(
       tools,
       inputs: [...inputs],
       sdk,
+      toolchain,
     }),
     selectedSystemSha256: null,
   };
@@ -576,12 +675,19 @@ export async function acquireDarwinExperimentBuild(
       tools: null,
       reportDirectory: directory,
       bindingSha256: observationDigest({ binding, sources, tools }),
-      sdkSha256: observationDigest([...inputs]),
-      buildSha256: observationDigest({ sources, tools, environment, sdk }),
+      sdkSha256: observationDigest({ inputs: [...inputs], sdk, toolchain }),
+      buildSha256: observationDigest({
+        sources,
+        tools,
+        environment,
+        sdk,
+        toolchain,
+      }),
     },
     command: {
       helper: { ...seeds[1] },
       sdk,
+      toolchain,
       toolCdhashes: Object.fromEntries(
         tools.map((tool) => [tool.name, tool.cdhash]),
       ),

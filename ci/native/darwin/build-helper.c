@@ -94,6 +94,59 @@ static int selected_sdk(const char *sdk, const char *dev, const char *ino, const
   need(!close(sdk_fd)); return -1;
 #endif
 }
+#ifdef NATIVE_CI_EXPERIMENT
+struct selected_toolchain {
+  int developer; struct stat directory;
+  int files[16]; struct stat identities[16]; unsigned count;
+};
+static void toolchain_stable(struct selected_toolchain *held, char **argv) {
+  struct stat current, named; char developer[PATH_MAX], compiler[PATH_MAX];
+  developer_paths(argv[6], developer, compiler);
+  need(!strcmp(developer, argv[15]) && !strcmp(compiler, argv[19]) &&
+    !fstat(held->developer, &current) && file_stat_same(&held->directory, &current) &&
+    !lstat(developer, &named) && file_stat_same(&current, &named));
+  no_acl(held->developer); ancestors(argv[6]);
+  for (unsigned i = 0; i < held->count; i++) {
+    const char *name = argv[19 + i*4];
+    need(!fstat(held->files[i], &current) && file_stat_same(&held->identities[i], &current) &&
+      !lstat(name, &named) && file_stat_same(&current, &named));
+    no_acl(held->files[i]); protected_input(name, argv[20 + i*4], 1); signature(name, argv[21 + i*4]);
+    need(!fstat(held->files[i], &current) && file_stat_same(&held->identities[i], &current) &&
+      !lstat(name, &named) && file_stat_same(&current, &named)); no_acl(held->files[i]);
+  }
+  need(!fstat(held->developer, &current) && file_stat_same(&held->directory, &current) &&
+    !lstat(developer, &named) && file_stat_same(&current, &named)); no_acl(held->developer);
+}
+static struct selected_toolchain selected_toolchain(int argc, char **argv) {
+  struct selected_toolchain held = {0}; char developer[PATH_MAX], compiler[PATH_MAX]; struct stat named;
+  developer_paths(argv[6], developer, compiler);
+  need(!strcmp(developer, argv[15]) && !strcmp(compiler, argv[19]) &&
+    !lstat(developer, &named) && S_ISDIR(named.st_mode) && named.st_uid == 0 && !(named.st_mode & 022));
+  ancestors(developer);
+  held.developer = directory(developer, 0, named.st_gid, named.st_mode & 07777);
+  need(!fstat(held.developer, &held.directory) && file_stat_same(&held.directory, &named)); no_acl(held.developer);
+  const char *ids[] = {argv[16], argv[17]}; uintmax_t actual[] = {(uintmax_t)named.st_dev, (uintmax_t)named.st_ino};
+  for (unsigned i = 0; i < 2; i++) {
+    char *end; errno = 0;
+    need(*ids[i] && strlen(ids[i]) <= 20 && strspn(ids[i], "0123456789") == strlen(ids[i]));
+    unsigned long long value = strtoull(ids[i], &end, 10); need(!errno && !*end && value == actual[i]);
+  }
+  held.count = number(argv[18]); need(held.count >= 2 && held.count <= 16 && argc == 19 + held.count*4);
+  char *slash = strrchr(compiler, '/'); need(slash); size_t prefix = (size_t)(slash - compiler) + 1;
+  for (unsigned i = 0; i < held.count; i++) {
+    const char *name = argv[19 + i*4];
+    need(!strncmp(name, compiler, prefix) && name[prefix] && !strchr(name + prefix, '/'));
+    for (unsigned j = 0; j < i; j++) need(strcmp(name, argv[19 + j*4]));
+    protected_input(name, argv[20 + i*4], 1); signature(name, argv[21 + i*4]);
+    held.files[i] = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
+    need(held.files[i] >= 0 && !fstat(held.files[i], &held.identities[i]));
+    char expected[42];
+    need(snprintf(expected, sizeof(expected), "%ju:%ju", (uintmax_t)held.identities[i].st_dev, (uintmax_t)held.identities[i].st_ino) < sizeof(expected) &&
+      !strcmp(expected, argv[22 + i*4]));
+  }
+  toolchain_stable(&held, argv); return held;
+}
+#endif
 /* sudo preserves only standard descriptors. Create the tool pipes inside this
  * sealed entry and return bounded bytes as data on the private control pipe. */
 static void capture(int out, int err, unsigned char *output, size_t *out_size,
@@ -144,14 +197,15 @@ static void publish(int work, const char *cwd, const char *leaf) {
 static void expire(int signal) { (void)signal; _exit(124); }
 int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
-  const int expected_argc = 15;
+  need(argc >= 27 && argc <= 83);
+  unsigned tool_count = number(argv[18]); need(tool_count >= 2 && tool_count <= 16);
+  const int expected_argc = 19 + tool_count*4;
 #else
   const int expected_argc = 11;
 #endif
   need(argc == expected_argc && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
     getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
-  /* mode, tool, SHA, cdhash, private output, SDK, source, SHA, target, seconds;
-   * experiment adds header SHA, selected SDK device/inode and settings SHA. */
+  /* Experiment additionally binds SDK, developer identity and 2..16 tool pins. */
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
   unsigned seconds = number(argv[10]); need(seconds > 0 && seconds <= 30);
   need(signal(SIGALRM, expire) != SIG_ERR); alarm(seconds);
@@ -170,6 +224,7 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "sdk-version") || !strcmp(mode, "compile"))
     sdk_fd = selected_sdk(sdk, argv[12], argv[13], argv[14]);
   if (sdk_fd >= 0) need(!fstat(sdk_fd, &sdk_identity));
+  struct selected_toolchain toolchain = selected_toolchain(argc, argv);
 #endif
   char *vector[32] = {(char *)tool, NULL};
 #ifdef NATIVE_CI_EXPERIMENT
@@ -234,7 +289,15 @@ int main(int argc, char **argv) {
     !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_START_SUSPENDED | POSIX_SPAWN_CLOEXEC_DEFAULT));
   char sdk_environment[PATH_MAX + 9]; need(strlen(sdk) < PATH_MAX);
   snprintf(sdk_environment, sizeof(sdk_environment), "SDKROOT=%s", sdk);
-  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "LANG=C", "PATH=/nonexistent", sdk_environment, NULL};
+#ifdef NATIVE_CI_EXPERIMENT
+  char developer_environment[PATH_MAX + 15];
+  need(snprintf(developer_environment, sizeof(developer_environment), "DEVELOPER_DIR=%s", argv[15]) < sizeof(developer_environment));
+#endif
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "LANG=C", "PATH=/nonexistent", sdk_environment,
+#ifdef NATIVE_CI_EXPERIMENT
+    developer_environment,
+#endif
+    NULL};
   pid_t worker; need(!posix_spawn(&worker, tool, &files, &attributes, vector, environment));
   need(!posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes));
   need(!close(output[1]) && !close(errors[1]));
@@ -249,6 +312,9 @@ int main(int argc, char **argv) {
   emit_bytes(output_bytes, out_size); printf("\",\"stderrHex\":\"");
   emit_bytes(error_bytes, err_size); puts("\"}"); fflush(stdout);
   control('S');
+#ifdef NATIVE_CI_EXPERIMENT
+  toolchain_stable(&toolchain, argv);
+#endif
   if (WEXITSTATUS(status) == 0) {
 #ifdef NATIVE_CI_EXPERIMENT
     if (!strcmp(mode, "compile")) {
@@ -260,6 +326,8 @@ int main(int argc, char **argv) {
     publish(work, cwd, publication);
   }
 #ifdef NATIVE_CI_EXPERIMENT
+  for (unsigned i = 0; i < toolchain.count; i++) need(!close(toolchain.files[i]));
+  need(!close(toolchain.developer));
   if (sdk_fd >= 0) {
     struct stat held, named;
     need(!fstat(sdk_fd, &held) && file_stat_same(&sdk_identity, &held) &&

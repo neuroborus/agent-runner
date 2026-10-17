@@ -19,6 +19,7 @@ import {
   DARWIN_HELPER_NAMES,
   darwinBuildOperation,
   darwinBuildSdk,
+  darwinBuildToolchain,
   runDarwinBuildCommand,
 } from "./build.js";
 
@@ -120,10 +121,16 @@ export function normalizeDarwinPreparation(
   observationObject(value.command, [
     "helper",
     "toolCdhashes",
-    ...(purpose === "experiment" ? ["sdk"] : []),
+    ...(purpose === "experiment" ? ["sdk", "toolchain"] : []),
   ]);
-  if (purpose === "experiment")
+  if (purpose === "experiment") {
     darwinBuildSdk(value.command.sdk, value.command.sdk?.path);
+    darwinBuildToolchain(
+      value.command.toolchain,
+      value.command.sdk.path,
+      value.command.toolchain?.developer?.path,
+    );
+  }
   observationObject(value.command.helper, ["path", "sha256", "cdhash"]);
   requireObservation(
     absolute(value.command.helper.path) &&

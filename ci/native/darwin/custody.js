@@ -993,18 +993,27 @@ export function createDarwinCustodyReader(value, options = {}) {
         return actual.subject;
       });
     },
-    async readBuildInput(file, pin) {
+    async readBuildInput(file, pin, cdhash) {
       requireDarwin(
         input.purpose === "experiment" &&
           input.context.executionId === "build" &&
           location(file) &&
-          hash(pin),
+          hash(pin) &&
+          (cdhash === undefined || /^[a-f0-9]{40}$/u.test(cdhash)),
       );
-      const actual = await command("build-input", hex(file), pin);
+      const actual = await command(
+        "build-input",
+        hex(file),
+        pin,
+        ...(cdhash ? [cdhash] : []),
+      );
       observationObject(actual, [
         "object",
         "sha256",
-        ...(path.basename(file) === "SDKSettings.json" ? ["sdk"] : []),
+        ...(path.basename(file) === "SDKSettings.json"
+          ? ["sdk", "developer", "compilerPathHex"]
+          : []),
+        ...(cdhash ? ["cdhash"] : []),
         ...(Object.hasOwn(actual, "macho") ? ["macho"] : []),
       ]);
       if (actual.macho) actual.macho = macho(actual.macho);
@@ -1014,12 +1023,22 @@ export function createDarwinCustodyReader(value, options = {}) {
       });
       if (path.basename(file) === "SDKSettings.json") {
         actual.sdk = snapshot(actual.sdk, { uid: 0, gid: actual.sdk.gid });
+        actual.developer = snapshot(actual.developer, {
+          uid: 0,
+          gid: actual.developer.gid,
+        });
         requireDarwin(
           actual.sdk.directory &&
             actual.sdk.uid === 0 &&
-            !(actual.sdk.mode & 0o22),
+            !(actual.sdk.mode & 0o22) &&
+            actual.developer.directory &&
+            actual.developer.uid === 0 &&
+            !(actual.developer.mode & 0o22) &&
+            typeof actual.compilerPathHex === "string" &&
+            /^(?:[a-f0-9]{2}){1,4095}$/u.test(actual.compilerPathHex),
         );
       }
+      if (cdhash) requireDarwin(actual.cdhash === cdhash);
       requireDarwin(
         !object.directory &&
           object.uid === 0 &&

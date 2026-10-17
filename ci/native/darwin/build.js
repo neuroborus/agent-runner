@@ -89,6 +89,63 @@ export function darwinBuildSdk(sdk, root) {
   return structuredClone(sdk);
 }
 
+/** Only the documented CLT and Xcode macOS SDK layouts identify an owner. */
+export function darwinDeveloperDirectory(sdk) {
+  if (/^\/Library\/Developer\/CommandLineTools\/SDKs\/[^/]+$/u.test(sdk))
+    return "/Library/Developer/CommandLineTools";
+  const match =
+    /^(\/Applications\/[^/]+\.app\/Contents\/Developer)\/Platforms\/MacOSX\.platform\/Developer\/SDKs\/[^/]+$/u.exec(
+      sdk,
+    );
+  requireDarwin(match);
+  return match[1];
+}
+
+export function darwinBuildToolchain(value, sdk, developer) {
+  observationObject(value, ["developer", "compiler", "delegated"]);
+  observationObject(value.developer, ["path", "dev", "ino"]);
+  requireDarwin(
+    developer === darwinDeveloperDirectory(sdk) &&
+      value.developer.path === developer &&
+      [value.developer.dev, value.developer.ino].every(
+        (id) =>
+          typeof id === "string" &&
+          /^(?:0|[1-9][0-9]{0,19})$/u.test(id) &&
+          BigInt(id) <= 18446744073709551615n,
+      ) &&
+      Array.isArray(value.delegated) &&
+      value.delegated.length > 0 &&
+      value.delegated.length < 16,
+  );
+  const bin =
+      developer +
+      (developer === "/Library/Developer/CommandLineTools"
+        ? "/usr/bin/"
+        : "/Toolchains/XcodeDefault.xctoolchain/usr/bin/"),
+    tools = [value.compiler, ...value.delegated];
+  for (const tool of tools) {
+    observationObject(tool, ["path", "sha256", "cdhash", "dev", "ino"]);
+    requireDarwin(
+      typeof tool.path === "string" &&
+        tool.path.startsWith(bin) &&
+        path.dirname(tool.path) + "/" === bin &&
+        path.normalize(tool.path) === tool.path &&
+        tool.path.length < 4096 &&
+        !/[\u0000-\u001f\u007f]/u.test(tool.path) &&
+        /^[a-f0-9]{64}$/u.test(tool.sha256) &&
+        /^[a-f0-9]{40}$/u.test(tool.cdhash) &&
+        [tool.dev, tool.ino].every(
+          (id) =>
+            typeof id === "string" &&
+            /^(?:0|[1-9][0-9]{0,19})$/u.test(id) &&
+            BigInt(id) <= 18446744073709551615n,
+        ),
+    );
+  }
+  requireDarwin(new Set(tools.map((tool) => tool.path)).size === tools.length);
+  return structuredClone(value);
+}
+
 /** Only these vectors can cross the compiler entry. Source/output approval is
  * read before exec; a hash of a generated command is not that approval. */
 export function darwinBuildOperation(request, manifest, output) {
@@ -104,10 +161,17 @@ export function darwinBuildOperation(request, manifest, output) {
           manifest.environment.SDKROOT,
         )
       : null;
+  const toolchain = sdk
+    ? darwinBuildToolchain(
+        manifest.darwinPreparation.command.toolchain,
+        sdk.path,
+        manifest.environment.DEVELOPER_DIR,
+      )
+    : null;
   const operation = (value) => ({
     ...purposeData(manifest),
     ...value,
-    ...(sdk ? { sdk } : {}),
+    ...(sdk ? { sdk, toolchain } : {}),
   });
   observationObject(request, [
     ...(purpose === "experiment" ? ["purpose"] : []),
@@ -139,6 +203,7 @@ export function darwinBuildOperation(request, manifest, output) {
           GITHUB_ACTIONS: "true",
           LANG: "C",
           SDKROOT: manifest.environment.SDKROOT,
+          ...(toolchain ? { DEVELOPER_DIR: toolchain.developer.path } : {}),
         }) &&
       Number.isSafeInteger(request.deadlineMs) &&
       request.deadlineMs > 0 &&
@@ -289,8 +354,14 @@ export async function runDarwinBuildCommand(
       (request.purpose !== "experiment" ||
         typeof reader.compilerPolicy === "function"),
   );
-  if (request.purpose === "experiment")
+  if (request.purpose === "experiment") {
     darwinBuildSdk(operation.sdk, request.env.SDKROOT);
+    darwinBuildToolchain(
+      operation.toolchain,
+      operation.sdk.path,
+      request.env.DEVELOPER_DIR,
+    );
+  }
   const targetSha256 =
     operation.mode === "sign"
       ? entry.targetSha256
@@ -312,6 +383,19 @@ export async function runDarwinBuildCommand(
           operation.sdk.dev,
           operation.sdk.ino,
           operation.sdk.settingsSha256,
+          operation.toolchain.developer.path,
+          operation.toolchain.developer.dev,
+          operation.toolchain.developer.ino,
+          String(1 + operation.toolchain.delegated.length),
+          ...[
+            operation.toolchain.compiler,
+            ...operation.toolchain.delegated,
+          ].flatMap((tool) => [
+            tool.path,
+            tool.sha256,
+            tool.cdhash,
+            tool.dev + ":" + tool.ino,
+          ]),
         ]
       : []),
   ];

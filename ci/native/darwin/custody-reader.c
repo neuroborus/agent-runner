@@ -1302,7 +1302,7 @@ static void build_receipt(const char *encoded, const char *pin) {
 #ifdef NATIVE_CI_EXPERIMENT
 /* Read installed build inputs without adding hundreds of SDK headers to the
  * finite custody slots. Observed pins confer no reviewed authority. */
-static void build_input(const char *encoded, const char *pin, const char *runtime) {
+static void build_input(const char *encoded, const char *pin, const char *runtime, const char *cdhash) {
   char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode || (case_mode && runtime != NULL));
   bool declared = false;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
@@ -1319,7 +1319,7 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
     need(fd >= 0 && !fstat(fd, &held) && held.st_uid == 0 && !(held.st_mode & 022)); no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }
-  struct entry sdk = {.fd = -1};
+  struct entry sdk = {.fd = -1}, developer = {.fd = -1}; char compiler[PATH_MAX];
   const char *leaf = strrchr(name, '/');
   if (!cache && leaf && !strcmp(leaf, "/SDKSettings.json")) {
     size_t length = (size_t)(leaf - name); need(length < sizeof(sdk.path));
@@ -1327,6 +1327,10 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
     sdk.fd = open(sdk.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     need(sdk.fd >= 0 && !fstat(sdk.fd, &sdk.stat) && S_ISDIR(sdk.stat.st_mode) &&
       sdk.stat.st_uid == 0 && !(sdk.stat.st_mode & 022)); no_acl(sdk.fd); stable(&sdk);
+    developer_paths(sdk.path, developer.path, compiler);
+    developer.fd = open(developer.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(developer.fd >= 0 && !fstat(developer.fd, &developer.stat) && S_ISDIR(developer.stat.st_mode) &&
+      developer.stat.st_uid == 0 && !(developer.stat.st_mode & 022)); no_acl(developer.fd); stable(&developer);
   }
   struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
   strcpy(value.kind, cache ? "cache" : "data"); strcpy(value.path, name);
@@ -1336,8 +1340,18 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
   if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
   else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); } }
   stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat));
+  if (cdhash) {
+    need(!cache && strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40);
+    signature(name, cdhash); stable(&value); printf(",\"cdhash\":\"%s\"", cdhash);
+  }
   if (sdk.fd >= 0) {
     stable(&sdk); no_acl(sdk.fd); fputs(",\"sdk\":", stdout); identity(&sdk); need(!close(sdk.fd));
+    char current_developer[PATH_MAX], current_compiler[PATH_MAX], encoded_compiler[PATH_MAX*2+1];
+    developer_paths(sdk.path, current_developer, current_compiler);
+    need(!strcmp(developer.path, current_developer) && !strcmp(compiler, current_compiler));
+    stable(&developer); no_acl(developer.fd); fputs(",\"developer\":", stdout); identity(&developer);
+    hex((const unsigned char *)compiler, strlen(compiler), encoded_compiler);
+    printf(",\"compilerPathHex\":\"%s\"", encoded_compiler); need(!close(developer.fd));
   }
   need(!close(value.fd)); putchar('}');
 }
@@ -2446,9 +2460,9 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
 #ifdef NATIVE_CI_EXPERIMENT
-    } else if (!strcmp(tokens[0], "build-input")) { need(building && n == 4); build_input(tokens[2], tokens[3], NULL);
+    } else if (!strcmp(tokens[0], "build-input")) { need(building && (n == 4 || n == 5)); build_input(tokens[2], tokens[3], NULL, n == 5 ? tokens[4] : NULL);
     } else if (!strcmp(tokens[0], "build-runtime")) { need((building || case_mode) && n == 4); char image[PATH_MAX]; decode(tokens[3], image, sizeof(image));
-      need(!strncmp(image, "/usr/lib/", 9) || !strncmp(image, "/System/Library/", 16)); build_input(tokens[2], "-", image);
+      need(!strncmp(image, "/usr/lib/", 9) || !strncmp(image, "/System/Library/", 16)); build_input(tokens[2], "-", image, NULL);
 #endif
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "root-retired")) {

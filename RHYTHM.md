@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Bind the selected SDK to its developer installation
+
+Darwin experiment discovery and sealed commands explicitly pair the selected SDK
+with its documented developer directory. Real compiler/delegated-tool pins remain
+separate from stock shims; native held admission and independent cold reads bind
+the installation, paths, signatures and identities through completion. Ambiguous
+pairings and missing actual SDK build metadata refuse without reselection or
+replay. This makes tool selection coherent without claiming a unique explanation
+of ProductBuildVersion failure or closing the separate native SDK/PF, authority
+and independent-retirement obligations. Reviewed admission and native bounds stay
+unchanged.
+
 ## 2026-10-17 — Select one installed SDK before native build admission
 
 Darwin experiment acquisition filters the discovered SDK and one documented CLT

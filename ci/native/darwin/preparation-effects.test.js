@@ -93,10 +93,33 @@ const retired = {
   nativeEventSha256: hash,
 };
 const sdkSelection = {
-  path: "/fixture/sdk",
+  path: "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
   dev: "1",
   ino: "99",
   settingsSha256: hash,
+};
+const toolchainSelection = {
+  developer: {
+    path: "/Library/Developer/CommandLineTools",
+    dev: "1",
+    ino: "99",
+  },
+  compiler: {
+    path: "/Library/Developer/CommandLineTools/usr/bin/clang",
+    sha256: hash,
+    dev: "1",
+    ino: "99",
+    cdhash,
+  },
+  delegated: [
+    {
+      path: "/Library/Developer/CommandLineTools/usr/bin/ld",
+      sha256: hash,
+      dev: "1",
+      ino: "99",
+      cdhash,
+    },
+  ],
 };
 const identity = (pid) => ({
   pid,
@@ -158,7 +181,9 @@ function wiring({ defaultRead = false } = {}) {
     schemaVersion: 1,
     candidateSha,
     platform: "darwin",
-    environment: { SDKROOT: "/fixture/sdk" },
+    environment: {
+      SDKROOT: "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+    },
     tools: [
       ["compiler", "/usr/bin/clang"],
       ["sdk", "/usr/bin/xcrun"],
@@ -508,12 +533,15 @@ function experimentBuildFixture(failure = null) {
       cdhash,
     })),
     inputs: [
-      "/fixture/sdk/SDKSettings.json",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/SDKSettings.json",
       "/usr/lib/dyld",
       "/Library/Developer/CommandLineTools/usr/bin/clang",
       "/Library/Developer/CommandLineTools/usr/bin/ld",
     ].map((path) => ({ path, sha256: hash })),
-    environment: f.manifest.environment,
+    environment: {
+      ...f.manifest.environment,
+      DEVELOPER_DIR: toolchainSelection.developer.path,
+    },
     helpers: f.manifest.helpers.map((helper) => ({
       ...helper,
       sha256: ["custody-reader", "build-helper"].includes(helper.name)
@@ -524,6 +552,7 @@ function experimentBuildFixture(failure = null) {
     command: {
       ...f.manifest.darwinPreparation.command,
       sdk: { ...sdkSelection },
+      toolchain: structuredClone(toolchainSelection),
     },
     cachePath: "/System/Library/dyld/dyld_shared_cache_x86_64h",
   };
@@ -593,11 +622,18 @@ function experimentBuildFixture(failure = null) {
         joined = true;
         return { independent: true, identity: id, uid: 0, gid: 0, mode: 0o555 };
       },
-      readBuildInput: async (file, pin) => ({
+      readBuildInput: async (file, pin, toolCdhash) => ({
         sha256: pin,
+        ...(toolCdhash ? { cdhash: toolCdhash } : {}),
         object: { identity: file === "/usr/lib/dyld" ? "held-loader" : id },
         ...(file.endsWith("/SDKSettings.json")
-          ? { sdk: { identity: id, directory: true } }
+          ? {
+              sdk: { identity: id, directory: true },
+              developer: { identity: id, directory: true },
+              compilerPathHex: Buffer.from(
+                toolchainSelection.compiler.path,
+              ).toString("hex"),
+            }
           : {}),
         ...(file === "/usr/lib/dyld" ? { macho: { dependencies: [] } } : {}),
         independent: true,
@@ -630,7 +666,7 @@ function experimentBuildFixture(failure = null) {
           name = path.basename(file).replace(/\.deps$/u, ""),
           data = dependencies
             ? Buffer.from(
-                `${name}: /fixture/sealed/${name}.c /fixture/sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h /fixture/sdk/usr/include/mach/task_info.h /fixture/sdk/usr/include/mach-o/dyld_images.h" : ""}\n`,
+                `${name}: /fixture/sealed/${name}.c /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach/task_info.h /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach-o/dyld_images.h" : ""}\n`,
               )
             : image;
         return {
@@ -1246,8 +1282,8 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
         const reader = originalReader(...args),
           readInput = reader.readBuildInput,
           readImage = reader.readBuildImage;
-        reader.readBuildInput = async (file, pin) => {
-          const value = await readInput(file, pin);
+        reader.readBuildInput = async (file, pin, ...rest) => {
+          const value = await readInput(file, pin, ...rest);
           if (fault === "held" && file.endsWith("/" + header)) {
             observed = true;
             value.sha256 = "e".repeat(64);
@@ -1268,7 +1304,7 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
                   "/fixture/sealed/" + header,
                   fault === "dependency-missing"
                     ? ""
-                    : `/fixture/sealed/${header} /fixture/sdk/${header}`,
+                    : `/fixture/sealed/${header} /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/${header}`,
                 ),
             );
           }
@@ -1326,17 +1362,17 @@ test("Darwin experiment builds bind actual outputs and cold-load original native
   );
   const createReader = f.options.createReader;
   for (const input of [
-    "/fixture/sdk/SDKSettings.json",
-    "/fixture/sdk/usr/include/mach/task_info.h",
-    "/fixture/sdk/usr/include/mach-o/dyld_images.h",
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/SDKSettings.json",
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach/task_info.h",
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach-o/dyld_images.h",
   ]) {
     assert.ok(result.build.sdk.inputs.some((value) => value.path === input));
     let substituted = false;
     f.options.createReader = (...args) => {
       const reader = createReader(...args),
         read = reader.readBuildInput;
-      reader.readBuildInput = async (file, pin) => {
-        const value = await read(file, pin);
+      reader.readBuildInput = async (file, pin, ...rest) => {
+        const value = await read(file, pin, ...rest);
         if (file === input) {
           substituted = true;
           value.sha256 = "e".repeat(64);
@@ -1388,6 +1424,10 @@ test("Darwin selected SDK commands reject query, settings and argument drift bef
     request = {
       ...f.requests[1],
       purpose: "experiment",
+      env: {
+        ...f.requests[1].env,
+        DEVELOPER_DIR: toolchainSelection.developer.path,
+      },
       args: ["--sdk", sdkSelection.path, "--show-sdk-build-version"],
     };
   assert.deepEqual(
@@ -1406,12 +1446,31 @@ test("Darwin selected SDK commands reject query, settings and argument drift bef
       false,
     );
   }
-  for (const fault of ["root", "settings", "identity"]) {
+  for (const fault of [
+    "root",
+    "settings",
+    "identity",
+    "developer",
+    "compiler",
+    "delegated",
+    "missing-pin",
+  ]) {
     const prepared = structuredClone(f.prepared);
     if (fault === "root") prepared.environment.SDKROOT = "/fixture/other-sdk";
     if (fault === "settings")
       prepared.command.sdk.settingsSha256 = "e".repeat(64);
     if (fault === "identity") prepared.command.sdk.ino = "-1";
+    if (fault === "developer")
+      prepared.environment.DEVELOPER_DIR =
+        "/Applications/Other.app/Contents/Developer";
+    if (fault === "compiler")
+      prepared.command.toolchain.compiler.path = "/usr/bin/clang";
+    if (fault === "delegated")
+      prepared.command.toolchain.delegated[0].path = "/fixture/ld";
+    if (fault === "missing-pin")
+      prepared.inputs = prepared.inputs.filter(
+        ({ path }) => path !== prepared.command.toolchain.compiler.path,
+      );
     assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
   }
 });
@@ -1430,15 +1489,25 @@ test("Darwin cold build reads rejoin selected SDK and settings identities withou
     f.options.command =
     f.options.runCommand =
       () => assert.fail("Cold loading cannot discover or compile");
-  for (const fault of ["directory", "settings", "missing", "pin"]) {
+  for (const fault of [
+    "directory",
+    "settings",
+    "missing",
+    "pin",
+    "developer",
+    "compiler-path",
+    "compiler-identity",
+    "compiler-cdhash",
+    "delegated-identity",
+  ]) {
     let inspected = false;
     const options = {
       ...f.options,
       createReader: (...args) => {
         const reader = createReader(...args),
           read = reader.readBuildInput;
-        reader.readBuildInput = async (file, pin) => {
-          const value = await read(file, pin);
+        reader.readBuildInput = async (file, pin, ...rest) => {
+          const value = await read(file, pin, ...rest);
           if (file.endsWith("/SDKSettings.json")) {
             inspected = true;
             if (fault === "directory")
@@ -1450,6 +1519,37 @@ test("Darwin cold build reads rejoin selected SDK and settings identities withou
               );
             if (fault === "missing") delete value.sdk;
             if (fault === "pin") value.sha256 = "e".repeat(64);
+            if (fault === "developer")
+              value.developer.identity = value.developer.identity.replace(
+                ":99:",
+                ":98:",
+              );
+            if (fault === "compiler-path")
+              value.compilerPathHex = Buffer.from(
+                "/fixture/substituted/clang",
+              ).toString("hex");
+          }
+          if (
+            file === toolchainSelection.compiler.path &&
+            fault.startsWith("compiler-")
+          ) {
+            inspected = true;
+            if (fault === "compiler-identity")
+              value.object.identity = value.object.identity.replace(
+                ":99:",
+                ":98:",
+              );
+            if (fault === "compiler-cdhash") value.cdhash = "e".repeat(40);
+          }
+          if (
+            file === toolchainSelection.delegated[0].path &&
+            fault === "delegated-identity"
+          ) {
+            inspected = true;
+            value.object.identity = value.object.identity.replace(
+              ":99:",
+              ":98:",
+            );
           }
           return value;
         };
@@ -1465,6 +1565,35 @@ test("Darwin cold build reads rejoin selected SDK and settings identities withou
     (await loadDarwinExperimentBuild(result.job, directory, f.options)).build,
     result.build,
   );
+});
+
+test("Darwin selected toolchain still requires the original successful SDK build query", async () => {
+  for (const result of [
+    { exitCode: 1, stdout: "" },
+    { exitCode: 0, stdout: "" },
+    { exitCode: 0, stdout: "15.5 SDK version\n" },
+    { exitCode: 0, stdout: 42 },
+    { exitCode: 0, stdout: null },
+    { exitCode: 0, stdout: undefined },
+  ]) {
+    const f = experimentBuildFixture(),
+      run = f.options.runCommand;
+    f.options.runCommand = async (...args) => {
+      const observed = await run(...args);
+      return args[1].mode === "sdk-version"
+        ? { ...observed, ...result }
+        : observed;
+    };
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+    );
+    assert.equal(f.events.includes("compile-owner:compile"), false);
+    assert.equal(
+      f.files.has(path.join(directory, "darwin-experiment-build.json")),
+      false,
+    );
+    assert.ok(f.events.includes("original-retirement"));
+  }
 });
 
 test("Darwin protected builds continue only after settled failures and never publish partial preparation", async () => {
@@ -1608,16 +1737,19 @@ test("Darwin experiment acquisition refuses foreign workers and substituted cand
   assert.deepEqual(
     darwinExperimentDependencies(
       Buffer.from(
-        "fixture: /fixture/source.c /fixture/sdk/a\\ b.h \\\n /fixture/sdk/next.h\n",
+        "fixture: /fixture/source.c /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/a\\ b.h \\\n /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/next.h\n",
       ),
       "/fixture/source.c",
       "/fixture",
-      "/fixture/sdk",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
     ),
-    ["/fixture/sdk/a b.h", "/fixture/sdk/next.h", "/fixture/source.c"],
+    [
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/a b.h",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/next.h",
+      "/fixture/source.c",
+    ],
   );
   const resources = [
-    "/Applications/Fixture.app/Contents/Developer/Toolchains/Fixture.xctoolchain/usr/lib/clang/1/include/stddef.h",
     "/Library/Developer/CommandLineTools/usr/lib/clang/1/include/stddef.h",
   ];
   assert.deepEqual(
@@ -1625,11 +1757,12 @@ test("Darwin experiment acquisition refuses foreign workers and substituted cand
       Buffer.from(`fixture: /fixture/source.c ${resources.join(" ")}\n`),
       "/fixture/source.c",
       "/fixture",
-      "/fixture/sdk",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
     ),
     [...resources, "/fixture/source.c"],
   );
   for (const text of [
+    "fixture: /fixture/source.c /Applications/Fixture.app/Contents/Developer/Toolchains/Fixture.xctoolchain/usr/lib/clang/1/include/stddef.h",
     "fixture: /outside/source.c",
     "fixture: /fixture/source.c /outside/input.h",
     "fixture: /fixture/source.c ../../input.h",
@@ -1641,7 +1774,7 @@ test("Darwin experiment acquisition refuses foreign workers and substituted cand
         Buffer.from(text),
         "/fixture/source.c",
         "/fixture",
-        "/fixture/sdk",
+        "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
       ),
     );
   await assert.rejects(
@@ -1661,7 +1794,9 @@ test("Darwin experiment dependencies cannot canonicalize into another installed 
     installedReads = [];
   let substituted = false;
   f.options.fs.realpath = async (file) => {
-    if (file === "/fixture/sdk/input.h") {
+    if (
+      file === "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/input.h"
+    ) {
       substituted = true;
       return "/Library/Developer/CommandLineTools/SDKs/Other.sdk/usr/include/input.h";
     }
@@ -1904,6 +2039,11 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "sdk-settings-rejected",
     "sdk-settings-drift",
     "sdk-ancestry-changed",
+    "developer-unpaired",
+    "developer-drift",
+    "compiler-pairing",
+    "compiler-inode",
+    "delegated-other",
     "seed-links",
     "compiler-failures",
     "elevation-denied",
@@ -1913,6 +2053,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     "pf-timeout",
     "pf-cancelled",
     "pf-capture",
+    "pf-selected-dependencies",
     "preexisting",
     "substitution",
     "adapter-missing",
@@ -1973,20 +2114,32 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         failure === "seed-links"
           ? "/Library/Developer/native-fixture/native"
           : path.join(directory, "native"),
+      developer =
+        failure === "sdk-default-safe"
+          ? "/Applications/Fixture.app/Contents/Developer"
+          : "/Library/Developer/CommandLineTools",
+      bin =
+        developer +
+        (failure === "sdk-default-safe"
+          ? "/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          : "/usr/bin"),
       compiler =
         failure === "stat-path"
           ? rejectedPath
-          : "/Library/Developer/CommandLineTools/usr/bin/clang",
+          : bin + (failure === "compiler-pairing" ? "/other-clang" : "/clang"),
       clt = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
       sdk =
         failure === "sdk-canonical-clt"
           ? "/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk"
           : clt,
-      defaultSdk = failure?.startsWith("sdk-")
-        ? "/Applications/Fixture.app/Contents/Developer/SDKs/MacOSX.sdk"
-        : sdk,
+      defaultSdk =
+        failure === "developer-unpaired"
+          ? "/Library/Developer/Unpaired/SDKs/MacOSX.sdk"
+          : failure?.startsWith("sdk-")
+            ? "/Applications/Fixture.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+            : sdk,
       selectedSdk = failure === "sdk-default-safe" ? defaultSdk : sdk,
-      linker = "/Library/Developer/CommandLineTools/usr/bin/ld",
+      linker = bin + "/ld",
       cache = "/System/Library/dyld/dyld_shared_cache_x86_64h",
       permissions = new Map(),
       files = new Map(
@@ -2034,6 +2187,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         parent = path.dirname(parent)
       )
         directories.add(parent);
+    if (failure === "pf-selected-dependencies")
+      files.set(sdk + "/usr/include/net/pfvar.h", bytes);
     if (failure === "sdk-no-alternative") {
       directories.delete(clt);
       files.delete(clt + "/SDKSettings.json");
@@ -2057,6 +2212,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       Object.assign(new Error("Missing fixture input"), { code: "ENOENT" });
     const fs = {
       realpath: async (file) => {
+        if (file === bin + "/clang")
+          return failure === "compiler-pairing" ? file : compiler;
         sdkLookups.push(file);
         if (file === clt && failure === "sdk-canonical-clt") return sdk;
         if (file === clt && failure === "sdk-alternative-escape")
@@ -2106,6 +2263,20 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           failure === "sdk-settings-rejected"
         )
           sampled.mode = 0o100666;
+        if (
+          file === developer &&
+          failure === "developer-drift" &&
+          intents.some(({ phase }) => phase === "seed-possible")
+        )
+          sampled.ino++;
+        if (
+          file === compiler &&
+          failure === "compiler-inode" &&
+          commands.some(
+            (entry) => entry.file === compiler && entry.args[0] === "-###",
+          )
+        )
+          sampled.ino++;
         if (file === path.dirname(sdk) && failure === "sdk-ancestry-changed")
           sampled.ino += sdkParentStats++;
         if (["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"].includes(file))
@@ -2271,12 +2442,21 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           file,
           args,
         });
+        const bound =
+          (file === "/usr/bin/xcrun" && args[0] === "--sdk") ||
+          file === compiler;
         assert.deepEqual(Object.keys(settings.env).sort(), [
           "CI",
+          ...(bound ? ["DEVELOPER_DIR"] : []),
           "GITHUB_ACTIONS",
           "LANG",
           "PATH",
+          ...(bound ? ["SDKROOT"] : []),
         ]);
+        if (bound) {
+          assert.equal(settings.env.DEVELOPER_DIR, developer);
+          assert.equal(settings.env.SDKROOT, selectedSdk);
+        }
         commands.push({ file, args });
         if (file === "git") return { stdout: candidateSha + "\n", stderr: "" };
         if (file === "/usr/bin/xcrun")
@@ -2302,7 +2482,14 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           assert.ok(
             !intents.some((record) => record.phase === "seal-possible"),
           );
-          assert.ok(!commands.some((record) => record.file === compiler));
+          assert.ok(
+            !commands.some(
+              (record) =>
+                record.file === compiler &&
+                (failure !== "pf-selected-dependencies" ||
+                  record.args[0] !== "-M"),
+            ),
+          );
           if (failure === "elevation-denied")
             throw Object.assign(new Error("Noninteractive sudo denied"), {
               code: 1,
@@ -2330,10 +2517,24 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           };
         }
         if (file === compiler) {
+          if (args[0] === "-M") {
+            assert.equal(failure, "pf-selected-dependencies");
+            assert.equal(settings.timeout, 3000);
+            assert.equal(settings.maxBuffer, 65536);
+            assert.deepEqual(args, [
+              "-M",
+              "-x",
+              "c",
+              "-isysroot",
+              selectedSdk,
+              selectedSdk + "/usr/include/net/pfvar.h",
+            ]);
+            return { stdout: "fixture: " + args.at(-1), stderr: "" };
+          }
           if (args[0] === "-###")
             return {
               stdout: "",
-              stderr: ` "${compiler}" "-cc1"\n "${linker}" "-dynamic"\n`,
+              stderr: ` "${compiler}" "-cc1"\n "${failure === "delegated-other" ? "/fixture/other-toolchain/ld" : linker}" "-dynamic"\n`,
             };
           const source = args[args.indexOf("-o") - 1];
           assert.ok(
@@ -2372,6 +2573,12 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       },
       acquisitionOptions = {
         ...f.options,
+        env: {
+          ...f.options.env,
+          DEVELOPER_DIR: "/fixture/ambient",
+          SDKROOT: "/fixture/ambient-sdk",
+          TOOLCHAINS: "ambient",
+        },
         fs,
         command,
         bootstrapNonce: () => String(++verifierNonce).padStart(32, "0"),
@@ -2505,6 +2712,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         "sdk-default-unavailable",
         "sdk-default-safe",
         "sdk-canonical-clt",
+        "pf-selected-dependencies",
       ].includes(failure)
     ) {
       let rejected;
@@ -2746,7 +2954,15 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         ino: "1",
         settingsSha256: hash,
       });
-      assert.equal(prepared.environment.SDKROOT, selected);
+      assert.deepEqual(prepared.environment, {
+        SDKROOT: selected,
+        DEVELOPER_DIR: developer,
+      });
+      assert.deepEqual(prepared.command.toolchain, {
+        developer: { path: developer, dev: "1", ino: "1" },
+        compiler: { path: compiler, sha256: hash, cdhash, dev: "1", ino: "1" },
+        delegated: [{ path: linker, sha256: hash, cdhash, dev: "1", ino: "1" }],
+      });
       if (failure === "sdk-default-safe")
         assert.equal(sdkLookups.includes(clt), false);
       assert.deepEqual(
@@ -2775,10 +2991,18 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       );
       assert.equal(
         commands.filter(
-          ({ file, args }) => file === compiler && args[0] !== "-###",
+          ({ file, args }) =>
+            file === compiler && args[0] !== "-###" && args[0] !== "-M",
         ).length,
         DARWIN_HELPER_NAMES.length,
       );
+      if (failure === "pf-selected-dependencies")
+        assert.equal(
+          commands.filter(
+            ({ file, args }) => file === compiler && args[0] === "-M",
+          ).length,
+          1,
+        );
       assert.equal(intents.at(-1).phase, "sealed");
       assert.ok(
         intents.findIndex((record) => record.phase === "seed-sealed") <
@@ -3054,6 +3278,11 @@ test("Darwin experimental declarations and fixed compilation cannot borrow revie
   manifest.purpose = "experiment";
   manifest.darwinPreparation.purpose = "experiment";
   manifest.darwinPreparation.command.sdk = { ...sdkSelection };
+  manifest.darwinPreparation.command.toolchain =
+    structuredClone(toolchainSelection);
+  manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+  for (const request of requests)
+    request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
   manifest.darwinPreparation.sources.push({
     name: "experiment.h",
     sha256: hash,
@@ -3168,6 +3397,10 @@ test("Darwin build entry classifies fixed installed tools through the default pr
       manifest.purpose = purpose;
       plan.purpose = purpose;
       plan.command.sdk = { ...sdkSelection };
+      plan.command.toolchain = structuredClone(toolchainSelection);
+      manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+      for (const request of value.requests)
+        request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
       plan.cases = [];
       plan.bootstrap.purpose = purpose;
       plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
@@ -3338,6 +3571,12 @@ test("Darwin native compiler entry verifies parked images, bounded output and re
       value.manifest.purpose = purpose;
       value.manifest.darwinPreparation.purpose = purpose;
       value.manifest.darwinPreparation.command.sdk = { ...sdkSelection };
+      value.manifest.darwinPreparation.command.toolchain =
+        structuredClone(toolchainSelection);
+      value.manifest.environment.DEVELOPER_DIR =
+        toolchainSelection.developer.path;
+      for (const request of value.requests)
+        request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
     }
     const request = {
         ...value.requests[0],
@@ -3418,7 +3657,7 @@ test("Darwin native compiler entry verifies parked images, bounded output and re
       },
       {
         open: async (_, args) => {
-          assert.equal(args.length, purpose === "experiment" ? 14 : 10);
+          assert.equal(args.length, purpose === "experiment" ? 26 : 10);
           if (scenario === "mutation") {
             delete request.purpose;
             request.toolSha256 = "e".repeat(64);
@@ -4107,6 +4346,10 @@ function buildTranscripts(experiment = false, complete = false) {
   if (experiment) {
     f.manifest.purpose = plan.purpose = "experiment";
     plan.command.sdk = { ...sdkSelection };
+    plan.command.toolchain = structuredClone(toolchainSelection);
+    f.manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+    for (const request of f.requests)
+      request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
     for (const name of ["experiment.h", "pf-abi.h"])
       plan.sources.push({ name, sha256: hash });
     if (!complete)
@@ -10250,12 +10493,12 @@ test("indexed Darwin experiment preparation seals the complete inventory and col
       read = reader.readBuildInput,
       close = reader.close;
     let interrupted = false;
-    reader.readBuildInput = async (file, pin) => {
+    reader.readBuildInput = async (file, pin, ...rest) => {
       if (file.includes("experiment-asset-")) {
         interrupted = true;
         throw new Error("Original cold input read failure");
       }
-      return read(file, pin);
+      return read(file, pin, ...rest);
     };
     reader.close = async () => {
       if (interrupted)

@@ -142,6 +142,19 @@ settings; build evidence and cold loading rejoin both native identities and pins
 without discovery or recompilation. Native refusal is terminal. Reviewed version-6
 vectors, fixed command count and native bounds remain unchanged. Safe installed
 CLT metadata, actual building and independent retirement remain unestablished.
+Experiment selection additionally binds the SDK's documented canonical developer
+installation and its named real Clang plus separately pinned delegated tools.
+Explicit per-command `DEVELOPER_DIR` and `SDKROOT` govern discovery and seed work;
+sealed declarations carry the same binding without changing stock shim pins.
+Native admission derives the installation relationship and holds/rechecks the
+developer and actual tool identities, ACLs, signatures and content through tool
+completion. Independent settings/tool reads and cold reconstruction freshly
+rejoin those bindings, including developer identity and actual compiler path.
+Other developer installations cannot supply compiler resource dependencies.
+Unverifiable pairings and missing actual SDK build-query results remain terminal,
+without reselection, replay, version-label substitution or global selection changes.
+This correction supplies no unique explanation of earlier native query failure
+and does not close the separate PF or matching-host proof obligations.
 Cold-loading rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
 admission even before the private report directory exists. Original retirement and
 held outputs use separately retired reader sessions. ABI journal records and later

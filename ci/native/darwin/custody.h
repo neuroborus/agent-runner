@@ -218,6 +218,31 @@ static void signature(const char *name, const char *pin) {
   }
   CFRelease(info); CFRelease(code); CFRelease(url);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Derive one documented installation, never search for another toolchain.
+ * Resolve the installation's named clang separately from the stock shim. */
+static inline void developer_paths(const char *sdk, char developer[PATH_MAX], char compiler[PATH_MAX]) {
+  const char *clt = "/Library/Developer/CommandLineTools", *sdk_prefix = "/Library/Developer/CommandLineTools/SDKs/", *leaf;
+  char named[PATH_MAX], canonical[PATH_MAX];
+  if (!strncmp(sdk, sdk_prefix, strlen(sdk_prefix))) {
+    strcpy(developer, clt); leaf = sdk + strlen(sdk_prefix);
+    need(snprintf(named, sizeof(named), "%s/usr/bin/clang", developer) < sizeof(named));
+  } else {
+    const char *layout = ".app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/";
+    const char *marker = strstr(sdk, layout);
+    need(!strncmp(sdk, "/Applications/", 14) && marker && marker > sdk + 14 &&
+      (size_t)(marker - sdk) < PATH_MAX && !memchr(sdk + 14, '/', (size_t)(marker - sdk - 14)));
+    size_t size = (size_t)(marker - sdk) + strlen(".app/Contents/Developer");
+    need(size < PATH_MAX); memcpy(developer, sdk, size); developer[size] = 0;
+    leaf = marker + strlen(layout);
+    need(snprintf(named, sizeof(named), "%s/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang", developer) < sizeof(named));
+  }
+  need(*leaf && !strchr(leaf, '/') && strcmp(leaf, ".") && strcmp(leaf, "..") &&
+    realpath(developer, canonical) && !strcmp(developer, canonical) && realpath(named, compiler));
+  char *slash = strrchr(named, '/'); need(slash); slash[1] = 0;
+  need(!strncmp(compiler, named, strlen(named)) && compiler[strlen(named)] && !strchr(compiler + strlen(named), '/'));
+}
+#endif
 struct identity { audit_token_t token; struct proc_bsdinfo bsd; };
 static struct identity inspect(pid_t pid) {
   struct identity value = {0}; struct proc_bsdinfo after; audit_token_t again;

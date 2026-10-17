@@ -163,6 +163,23 @@ identities or pins without rediscovery or compilation. Original SDK-refusal
 retirement and lost-finish cases remain required. These cases use the existing
 fast gate and explicit native harness, adding no slow-tier assignment. Actual CLT
 metadata, SDK compilation and independent retirement require fresh matching macOS.
+The same acquisition fixture now covers coherent CLT/Xcode developer pairing,
+explicit closed `DEVELOPER_DIR`/`SDKROOT` propagation despite ambient overrides,
+unpaired installations, substituted compilers and foreign delegated tools.
+An available PF header also exercises the original preliminary dependency query
+under that same explicit binding, retaining its separate diagnostic status and bounds.
+Declaration and cold-load cases reject developer, compiler-path, held-identity
+and signature drift while retaining the original SDK-refusal and lost-finish
+settlement coverage. Successful selected-SDK build metadata remains required;
+failed queries and absent or malformed results cannot publish preparation.
+Actual-body regressions execute the native developer-layout, held-toolchain and
+closed-environment bodies with injected filesystem/signature operations, including
+unsafe metadata, ACLs, pin refusal and substitutions during pin/signature reads
+or after command execution. The existing custody
+reader cases validate fresh developer metadata and real-tool signature responses.
+These portable cases execute no platform compiler or probe and do not establish
+the unique cause of ProductBuildVersion failure, a native SDK/PF remedy or original
+independent retirement.
 The existing custody-channel fixture carries those numeric diagnostics, malformed
 metadata and the original guard through failed completion; output supplies no
 receipt, new compiler attempt or retirement evidence.

@@ -213,7 +213,10 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
     start = source.indexOf("  ancestors(sdk);"),
     end = source.indexOf("\n#else\n  (void)dev", start),
     gateStart = source.indexOf("  int sdk_fd = -1; struct stat sdk_identity;"),
-    gateEnd = source.indexOf("\n#endif", gateStart);
+    gateEnd = source.indexOf(
+      "  struct selected_toolchain toolchain",
+      gateStart,
+    );
   assert.ok(start > 0 && end > start && gateStart > end && gateEnd > gateStart);
   const body = source
     .slice(start, end)
@@ -364,6 +367,374 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
         }
       }
     }
+});
+
+test("Darwin native developer pairing derives only the selected documented installation", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
+    start = source.indexOf("  const char *clt ="),
+    end = source.indexOf("\n}\n#endif", start);
+  assert.ok(start > 0 && end > start);
+  const body = source
+    .slice(start, end)
+    .replace(
+      'const char *clt = "/Library/Developer/CommandLineTools", *sdk_prefix = "/Library/Developer/CommandLineTools/SDKs/", *leaf;',
+      'const clt = "/Library/Developer/CommandLineTools", sdk_prefix = "/Library/Developer/CommandLineTools/SDKs/"; let leaf;',
+    )
+    .replace(
+      "char named[PATH_MAX], canonical[PATH_MAX];",
+      "const named = {}, canonical = {};",
+    )
+    .replaceAll("const char *", "const ")
+    .replace("strstr(sdk, layout)", "sdk.indexOf(layout)")
+    .replace("marker && marker > sdk + 14", "marker > 14")
+    .replaceAll("(size_t)(marker - sdk)", "marker")
+    .replace(
+      "!memchr(sdk + 14, '/', (size_t)(marker - sdk - 14))",
+      '!sdk.slice(14, marker).includes("/")',
+    )
+    .replace("size_t size", "const size")
+    .replace(
+      "developer[size] = 0",
+      "developer.value = developer.value.slice(0, size)",
+    )
+    .replace(
+      "leaf = sdk + strlen(sdk_prefix)",
+      "leaf = sdk.slice(strlen(sdk_prefix))",
+    )
+    .replace(
+      "leaf = marker + strlen(layout)",
+      "leaf = sdk.slice(marker + strlen(layout))",
+    )
+    .replaceAll("sizeof(named)", "PATH_MAX")
+    .replace("*leaf", "leaf.length")
+    .replace(
+      "char *slash = strrchr(named, '/'); need(slash); slash[1] = 0;",
+      'const slash = text(named).lastIndexOf("/"); need(slash >= 0); named.value = text(named).slice(0, slash + 1);',
+    )
+    .replace("compiler[strlen(named)]", "text(compiler)[strlen(named)]")
+    .replace("compiler + strlen(named)", "text(compiler).slice(strlen(named))");
+  const script = new Script(`() => {${body}}`),
+    text = (value) => value?.value ?? value;
+  for (const [sdk, fault] of [
+    ["/Library/Developer/CommandLineTools/SDKs/Fixture.sdk", null],
+    [
+      "/Applications/Fixture.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/Fixture.sdk",
+      null,
+    ],
+    ["/Library/Developer/CommandLineTools/SDKs/Fixture.sdk", "developer-alias"],
+    ["/Library/Developer/CommandLineTools/SDKs/Fixture.sdk", "compiler-escape"],
+    [
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+      "compiler-unavailable",
+    ],
+    ["/Library/Developer/CommandLineTools/SDKs/../Fixture.sdk", null],
+    ["/Applications/Fixture.app/Contents/Developer/SDKs/Fixture.sdk", null],
+    [
+      "/Applications/Nested/Fixture.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/Fixture.sdk",
+      null,
+    ],
+  ]) {
+    const developer = {},
+      compiler = {},
+      calls = [],
+      valid =
+        !fault &&
+        !sdk.includes("..") &&
+        (sdk.startsWith("/Library/Developer/CommandLineTools/SDKs/") ||
+          sdk.startsWith(
+            "/Applications/Fixture.app/Contents/Developer/Platforms/",
+          ));
+    const run = script.runInNewContext({
+      sdk,
+      developer,
+      compiler,
+      text,
+      PATH_MAX: 4096,
+      need: (ok) => assert.ok(ok),
+      strlen: (value) => text(value).length,
+      strncmp: (a, b, n) =>
+        text(a).slice(0, n) === text(b).slice(0, n) ? 0 : 1,
+      strcmp: (a, b) => (text(a) === text(b) ? 0 : 1),
+      strchr: (value, char) => text(value).includes(char),
+      strcpy: (out, value) => {
+        out.value = text(value);
+      },
+      memcpy: (out, value, n) => {
+        out.value = text(value).slice(0, n);
+      },
+      snprintf(out, maximum, format, value) {
+        out.value = format.replace("%s", text(value));
+        return out.value.length;
+      },
+      realpath(name, out) {
+        calls.push(text(name));
+        if (fault === "compiler-unavailable" && text(name).endsWith("/clang"))
+          return 0;
+        out.value =
+          text(name) +
+          (fault === "developer-alias" && !text(name).endsWith("/clang")
+            ? "-alias"
+            : "");
+        if (fault === "compiler-escape" && text(name).endsWith("/clang"))
+          out.value = "/fixture/foreign/clang";
+        return 1;
+      },
+    });
+    if (valid) {
+      run();
+      assert.equal(calls.length, 2);
+      assert.ok(compiler.value.startsWith(developer.value + "/"));
+    } else assert.throws(run, undefined, `${sdk}:${fault}`);
+  }
+});
+
+test("Darwin sealed toolchain holds developer and real tool pins through completion", async () => {
+  const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
+    stableStart = source.indexOf(
+      "  struct stat current, named; char developer[PATH_MAX], compiler[PATH_MAX];",
+    ),
+    stableEnd = source.indexOf("\n}", stableStart),
+    start = source.indexOf("  struct selected_toolchain held ="),
+    end = source.indexOf("\n}", start);
+  assert.ok(
+    stableStart > 0 &&
+      stableEnd > stableStart &&
+      start > stableEnd &&
+      end > start,
+  );
+  const translate = (body) =>
+    body
+      .replace(
+        "struct selected_toolchain held = {0}; char developer[PATH_MAX], compiler[PATH_MAX]; struct stat named;",
+        "const held = {files:[],identities:Array.from({length:16},()=>({})),directory:{}}, developer={},compiler={},named={};",
+      )
+      .replace(
+        "struct stat current, named; char developer[PATH_MAX], compiler[PATH_MAX];",
+        "const current={},named={},developer={},compiler={};",
+      )
+      .replace("const char *ids[]", "const ids")
+      .replace("uintmax_t actual[]", "const actual")
+      .replace("char *end;", "const end = {};")
+      .replace("char expected[42];", "const expected = {};")
+      .replaceAll("sizeof(expected)", "42")
+      .replace(
+        "char *slash = strrchr(compiler, '/'); need(slash); size_t prefix = (size_t)(slash - compiler) + 1;",
+        'const prefix = text(compiler).lastIndexOf("/") + 1; need(prefix > 0);',
+      )
+      .replace(
+        /\b(?:const char \*|unsigned long long |unsigned |char \*|int )/gu,
+        "let ",
+      )
+      .replace(/\(uintmax_t\)/gu, "")
+      .replace(
+        "const ids = {argv[16], argv[17]};",
+        "const ids = [argv[16], argv[17]];",
+      )
+      .replace(
+        "const actual = {named.st_dev, named.st_ino};",
+        "const actual = [named.st_dev, named.st_ino];",
+      )
+      .replace(/&(held(?:\.[a-z]+(?:\[i\])?)?|current|named|end)\b/gu, "$1")
+      .replaceAll("->", ".")
+      .replaceAll("*ids[i]", "ids[i].length")
+      .replaceAll("!*end", "!end.value")
+      .replaceAll("name + prefix", "name.slice(prefix)")
+      .replace(/\b022\b/gu, "0o22");
+  const stable = new Script(
+      `() => {${translate(source.slice(stableStart, stableEnd))}}`,
+    ),
+    select = new Script(`() => {${translate(source.slice(start, end))}}`),
+    text = (value) => value?.value ?? value;
+  for (const fault of [
+    null,
+    "developer-owner",
+    "developer-write",
+    "developer-identity",
+    "compiler-pair",
+    "compiler-identity",
+    "delegated-escape",
+    "acl",
+    "pin",
+    "signature",
+    "pin-replaced",
+    "signature-replaced",
+    "developer-pin-drift",
+    "held-drift",
+    "named-drift",
+    "late-pin",
+  ]) {
+    const developer = "/Library/Developer/CommandLineTools",
+      compiler = developer + "/usr/bin/clang",
+      argv = Array(27).fill("-");
+    Object.assign(argv, {
+      6: developer + "/SDKs/Fixture.sdk",
+      15: developer,
+      16: "1",
+      17: fault === "developer-identity" ? "8" : "7",
+      18: "2",
+      19: fault === "compiler-pair" ? compiler + "-other" : compiler,
+      20: "a".repeat(64),
+      21: "b".repeat(40),
+      23:
+        fault === "delegated-escape"
+          ? "/fixture/ld"
+          : developer + "/usr/bin/ld",
+      24: "c".repeat(64),
+      25: "d".repeat(40),
+      22: fault === "compiler-identity" ? "1:8" : "1:7",
+      26: "1:7",
+    });
+    const metadata = {
+        st_dev: 1,
+        st_ino: 7,
+        st_gid: 0,
+        st_uid: fault === "developer-owner" ? 501 : 0,
+        st_mode: fault === "developer-write" ? 0o40775 : 0o40755,
+      },
+      calls = [];
+    let late = false,
+      replaced = false,
+      developerChanged = false;
+    const signatures = [];
+    const context = {
+      argv,
+      argc: 27,
+      errno: 0,
+      PATH_MAX: 4096,
+      text,
+      O_RDONLY: 0,
+      O_NOFOLLOW: 0,
+      O_NONBLOCK: 0,
+      O_CLOEXEC: 0,
+      need: (ok) => assert.ok(ok),
+      number: Number,
+      snprintf(out, maximum, format, dev, ino) {
+        out.value = dev + ":" + ino;
+        return out.value.length;
+      },
+      developer_paths(sdk, dev, tool) {
+        dev.value = developer;
+        tool.value = compiler;
+      },
+      lstat(name, out) {
+        Object.assign(out, metadata);
+        if (late && fault === "named-drift") out.st_ino++;
+        if (
+          (replaced && name === compiler) ||
+          (developerChanged && text(name) === developer)
+        )
+          out.st_ino++;
+        return 0;
+      },
+      fstat(fd, out) {
+        Object.assign(out, metadata);
+        if (late && fault === "held-drift") out.st_ino++;
+        return 0;
+      },
+      S_ISDIR: () => true,
+      ancestors: () => {},
+      directory: () => 7,
+      open: () => 8,
+      file_stat_same: (a, b) =>
+        Object.keys(metadata).every((key) => a[key] === b[key]),
+      no_acl: () => assert.notEqual(fault, "acl"),
+      protected_input(name, pin) {
+        calls.push([name, pin]);
+        if (
+          fault === "pin-replaced" &&
+          name === compiler &&
+          calls.filter(([file]) => file === compiler).length === 2
+        )
+          replaced = true;
+        assert.notEqual(fault, "pin");
+        if (late) assert.notEqual(fault, "late-pin");
+      },
+      signature(name) {
+        assert.notEqual(fault, "signature");
+        signatures.push(name);
+        if (
+          fault === "signature-replaced" &&
+          name === compiler &&
+          signatures.filter((file) => file === compiler).length === 2
+        )
+          replaced = true;
+        if (
+          fault === "developer-pin-drift" &&
+          name === argv[23] &&
+          signatures.filter((file) => file === name).length === 2
+        )
+          developerChanged = true;
+      },
+      strlen: (value) => text(value).length,
+      strspn: (value) => (/^\d+$/u.test(value) ? value.length : 0),
+      strtoull(value, end) {
+        end.value = "";
+        return Number(value);
+      },
+      strncmp: (a, b, n) =>
+        text(a).slice(0, n) === text(b).slice(0, n) ? 0 : 1,
+      strcmp: (a, b) => (text(a) === text(b) ? 0 : 1),
+      strchr: (value, char) => text(value).includes(char),
+    };
+    context.toolchain_stable = (held) =>
+      stable.runInNewContext({ ...context, held })();
+    const run = select.runInNewContext(context);
+    if (!fault || ["late-pin", "held-drift", "named-drift"].includes(fault)) {
+      const held = run();
+      late = true;
+      if (fault) assert.throws(() => context.toolchain_stable(held));
+      else {
+        context.toolchain_stable(held);
+        assert.ok(calls.some(([name]) => name === argv[23]));
+      }
+    } else assert.throws(run, undefined, fault);
+  }
+});
+
+test("Darwin sealed command environments bind the developer only in experiment mode", async () => {
+  const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
+    start = source.indexOf("  char sdk_environment["),
+    end = source.indexOf("  pid_t worker;", start);
+  assert.ok(start > 0 && end > start);
+  for (const experiment of [false, true]) {
+    const body = source
+      .slice(start, end)
+      .replace(/#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu, (_, body) =>
+        experiment ? body : "",
+      )
+      .replace(
+        /char (sdk_environment|developer_environment)\[[^;]+;/gu,
+        "const $1 = {};",
+      )
+      .replace("char *environment[] = {", "const environment = [")
+      .replace("NULL};", "null]; return environment;")
+      .replace(/sizeof\((?:sdk_environment|developer_environment)\)/gu, "8192");
+    const sdk = "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+      developer = "/Library/Developer/CommandLineTools",
+      environment = new Script(`()=>{${body}}`).runInNewContext({
+        sdk,
+        argv: { 15: developer },
+        PATH_MAX: 4096,
+        need: (ok) => assert.ok(ok),
+        strlen: (value) => value.length,
+        snprintf(out, maximum, format, value) {
+          out.value = format.replace("%s", value);
+          return out.value.length;
+        },
+      })();
+    assert.deepEqual(
+      Array.from(environment, (value) => value?.value ?? value),
+      [
+        "CI=true",
+        "GITHUB_ACTIONS=true",
+        "LANG=C",
+        "PATH=/nonexistent",
+        `SDKROOT=${sdk}`,
+        ...(experiment ? [`DEVELOPER_DIR=${developer}`] : []),
+        null,
+      ],
+    );
+  }
 });
 
 test("Darwin build custody normalizes only its joined exclusive creation", async () => {

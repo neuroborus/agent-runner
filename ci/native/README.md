@@ -492,6 +492,32 @@ protected commands, deadlines, output limits and original command/helper/custody
 retirement remain unchanged; first failure and settlement failures stay separate.
 Reviewed version-6 vectors and compile-only SDK admission remain unchanged.
 
+The experiment additionally binds that SDK to its documented canonical developer
+installation: standalone CLT SDKs belong to `/Library/Developer/CommandLineTools`,
+while Xcode SDKs must use the installation's macOS platform layout. An ambiguous
+or unverifiable pairing is terminal after selection; it adds no candidate or
+search. Compiler discovery, dependency discovery and seed compilation explicitly
+construct both `DEVELOPER_DIR` and `SDKROOT` in the closed per-command environment.
+Ambient toolchain overrides and global `xcode-select` changes are never used.
+The discovered canonical compiler must rejoin that installation's named Clang;
+its digest/signature and the bounded delegated-tool pins remain separate from
+the stock Clang/xcrun/codesign shim pins.
+
+Sealed experiment declarations carry the developer directory identity and those
+tool pins through request validation and native execution. Native admission
+independently derives the installation/compiler relationship, checks protected
+ancestry and ACL absence, and holds/rechecks the developer and actual tool
+identities and pins through command completion. Independent build-input reads
+observe the same developer directory with SDK settings and freshly verify the
+actual tool signatures. Selectors, closure hashes and build evidence retain
+these joins; cold loading rechecks them without discovery, compilation or replay.
+Compiler resource dependencies must remain within the selected installation.
+Reviewed version-6 behavior, the 22 protected commands and all native bounds remain
+unchanged. The actual successful selected-SDK `--show-sdk-build-version` output
+remains mandatory; a missing build result cannot be replaced with an SDK version
+label. This binding does not uniquely explain the earlier ProductBuildVersion
+failure and supplies no native success or resolution of preliminary PF facts.
+
 These observations and portable regressions establish no installed-tool native
 acceptance. Actual selected CLT ownership, ancestry, ACLs, pins, successful native
 building and independent non-emergency retirement remain unresolved until fresh

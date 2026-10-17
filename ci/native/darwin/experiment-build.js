@@ -19,6 +19,8 @@ import {
   DARWIN_HELPER_NAMES,
   darwinCompilerArguments,
   darwinBuildSdk,
+  darwinBuildToolchain,
+  darwinDeveloperDirectory,
 } from "./build.js";
 import {
   createDarwinBuildEffects,
@@ -58,9 +60,7 @@ function isDarwinExperimentDependency(file, directory, sdk) {
       // Developer roots also contain compiler resources, but another SDK
       // cannot supply dependencies for the selected SDK.
       (!file.includes("/SDKs/") &&
-        ((file.startsWith("/Applications/") &&
-          file.includes("/Contents/Developer/")) ||
-          file.startsWith("/Library/Developer/CommandLineTools/"))) ||
+        file.startsWith(darwinDeveloperDirectory(sdk) + "/")) ||
       file.startsWith("/usr/include/"))
   );
 }
@@ -99,6 +99,11 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
   const sdk = darwinBuildSdk(
     prepared?.command?.sdk,
     prepared?.environment?.SDKROOT,
+  );
+  const toolchain = darwinBuildToolchain(
+    prepared.command.toolchain,
+    sdk.path,
+    prepared.environment.DEVELOPER_DIR,
   );
   observationObject(prepared, [
     "purpose",
@@ -154,6 +159,13 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
         input.sha256 === sdk.settingsSha256,
     ),
   );
+  requireObservation(
+    [toolchain.compiler, ...toolchain.delegated].every((tool) =>
+      prepared.inputs.some(
+        (input) => input.path === tool.path && input.sha256 === tool.sha256,
+      ),
+    ),
+  );
   normalizeExperimentJob(prepared.job);
   observationObject(prepared.bootstrapSeed, ["path", "sha256", "acquisition"]);
   requireObservation(
@@ -164,7 +176,7 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
       observationDigest(prepared.bootstrap.tools) ===
         observationDigest(prepared.bootstrapSeed.acquisition.tools),
   );
-  observationObject(prepared.environment, ["SDKROOT"]);
+  observationObject(prepared.environment, ["SDKROOT", "DEVELOPER_DIR"]);
   for (const helper of prepared.helpers)
     observationObject(helper, ["name", "sourceSha256", "sha256"]);
   for (const tool of prepared.tools)
@@ -237,15 +249,28 @@ async function candidateSources(prepared, options) {
     );
 }
 async function observe(prepared, commands, reader, options, previous) {
-  const selectedSdk = prepared.command.sdk;
+  requireObservation(
+    commands.length === 2 + DARWIN_HELPER_NAMES.length * 2 &&
+      commands.every(
+        (command) =>
+          command.exitCode === 0 &&
+          command.signal === null &&
+          command.timedOut === false &&
+          retired(command.settlement),
+      ) &&
+      typeof commands[1].stdout === "string" &&
+      /^[A-Za-z0-9.]+\n?$/u.test(commands[1].stdout),
+  );
+  const selectedSdk = prepared.command.sdk,
+    toolchain = prepared.command.toolchain;
   const reads = [],
     inputs = new Map(
       prepared.inputs.map((input) => [input.path, input.sha256]),
     ),
     helpers = [],
     runtime = new Map();
-  const held = async (file, pin) => {
-    const value = await reader.readBuildInput(file, pin);
+  const held = async (file, pin, cdhash) => {
+    const value = await reader.readBuildInput(file, pin, cdhash);
     requireObservation(
       value.independent === true &&
         value.held === true &&
@@ -253,6 +278,7 @@ async function observe(prepared, commands, reader, options, previous) {
         value.sha256 === pin &&
         hash(value.nativeEventSha256),
     );
+    if (cdhash) requireObservation(value.cdhash === cdhash);
     reads.push(value.nativeEventSha256);
     return value;
   };
@@ -264,8 +290,23 @@ async function observe(prepared, commands, reader, options, previous) {
     typeof settings.object?.identity === "string" &&
       typeof settings.sdk?.identity === "string" &&
       settings.sdk.identity.split(":")[0] === selectedSdk.dev &&
-      settings.sdk.identity.split(":")[3] === selectedSdk.ino,
+      settings.sdk.identity.split(":")[3] === selectedSdk.ino &&
+      typeof settings.developer?.identity === "string" &&
+      settings.developer.identity.split(":")[0] === toolchain.developer.dev &&
+      settings.developer.identity.split(":")[3] === toolchain.developer.ino &&
+      Buffer.from(settings.compilerPathHex ?? "", "hex").toString("utf8") ===
+        toolchain.compiler.path,
   );
+  const selectedTools = [];
+  for (const tool of [toolchain.compiler, ...toolchain.delegated]) {
+    const value = await held(tool.path, tool.sha256, tool.cdhash);
+    requireObservation(
+      typeof value.object?.identity === "string" &&
+        value.object.identity.split(":")[0] === tool.dev &&
+        value.object.identity.split(":")[3] === tool.ino,
+    );
+    selectedTools.push({ ...tool, identity: value.object.identity });
+  }
   for (const source of prepared.sources)
     await held(path.join(prepared.sourceDirectory, source.name), source.sha256);
   for (const tool of prepared.tools) await held(tool.path, tool.sha256);
@@ -425,7 +466,10 @@ async function observe(prepared, commands, reader, options, previous) {
       runtime.set(dependency, actual);
     }
   for (const [file, pin] of inputs)
-    if (file !== path.join(selectedSdk.path, "SDKSettings.json"))
+    if (
+      file !== path.join(selectedSdk.path, "SDKSettings.json") &&
+      !selectedTools.some((tool) => tool.path === file)
+    )
       await held(file, pin);
   const installed = await reader.build();
   requireObservation(
@@ -437,6 +481,14 @@ async function observe(prepared, commands, reader, options, previous) {
     identity: settings.sdk.identity,
     settingsIdentity: settings.object.identity,
     build: commands[1].stdout.trim(),
+    toolchain: {
+      developer: {
+        path: toolchain.developer.path,
+        identity: settings.developer.identity,
+      },
+      compiler: selectedTools[0],
+      delegated: selectedTools.slice(1),
+    },
     inputs: [...inputs]
       .map(([path, sha256]) => ({ path, sha256 }))
       .sort((a, b) => a.path.localeCompare(b.path)),
@@ -578,6 +630,7 @@ export async function prepareDarwinExperimentBuild(
     ]);
     requireObservation(
       /^(?:Apple )?clang version /u.test(commands[0].stdout) &&
+        typeof commands[1].stdout === "string" &&
         /^[A-Za-z0-9.]+\n?$/u.test(commands[1].stdout),
     );
     const build = async (name) => {

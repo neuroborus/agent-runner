@@ -300,6 +300,9 @@ function fixture({
           value = {
             object: { ...object(4), mode: 0o444, gid: 80 },
             sha256: failure === "build-input" ? "e".repeat(64) : b,
+            ...(c
+              ? { cdhash: failure === "build-signature" ? "e".repeat(40) : c }
+              : {}),
             ...(Buffer.from(a, "hex")
               .toString()
               .endsWith("/SDKSettings.json") && failure !== "sdk-missing"
@@ -310,6 +313,23 @@ function fixture({
                     mode: failure === "sdk-writable" ? 0o775 : 0o755,
                     directory: failure !== "sdk-file",
                   },
+                  ...(failure === "developer-missing"
+                    ? {}
+                    : {
+                        developer: {
+                          ...object(2),
+                          gid: 20,
+                          mode:
+                            failure === "developer-writable" ? 0o775 : 0o755,
+                          directory: failure !== "developer-file",
+                        },
+                      }),
+                  compilerPathHex:
+                    failure === "compiler-path"
+                      ? "xx"
+                      : Buffer.from(
+                          "/Library/Developer/CommandLineTools/usr/bin/clang",
+                        ).toString("hex"),
                 }
               : {}),
           };
@@ -437,6 +457,17 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
   );
   assert.equal(settings.sdk.directory, true);
   assert.equal(settings.sdk.identity, fileId(3));
+  assert.equal(settings.developer.directory, true);
+  assert.equal(
+    (
+      await value.reader.readBuildInput(
+        "/Library/Developer/CommandLineTools/usr/bin/clang",
+        hash,
+        cdhash,
+      )
+    ).cdhash,
+    cdhash,
+  );
   const runtime = await value.reader.readBuildRuntime(
     "/System/Library/dyld/dyld_shared_cache_x86_64h",
     "/usr/lib/libfixture.dylib",
@@ -457,7 +488,15 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     substituted.reader.readBuildInput("/Library/Developer/input.h", hash),
   );
   await substituted.reader.close();
-  for (const failure of ["sdk-missing", "sdk-writable", "sdk-file"]) {
+  for (const failure of [
+    "sdk-missing",
+    "sdk-writable",
+    "sdk-file",
+    "developer-missing",
+    "developer-writable",
+    "developer-file",
+    "compiler-path",
+  ]) {
     const refused = fixture({ purpose: "experiment", build: true, failure });
     await refused.reader.start();
     await assert.rejects(
@@ -468,6 +507,20 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     );
     await refused.reader.close();
   }
+  const badSignature = fixture({
+    purpose: "experiment",
+    build: true,
+    failure: "build-signature",
+  });
+  await badSignature.reader.start();
+  await assert.rejects(
+    badSignature.reader.readBuildInput(
+      "/Library/Developer/CommandLineTools/usr/bin/clang",
+      hash,
+      cdhash,
+    ),
+  );
+  await badSignature.reader.close();
   for (const failure of [
     "runtime-uuid",
     "runtime-cache-uuid",
