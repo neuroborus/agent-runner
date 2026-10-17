@@ -168,6 +168,8 @@ function fixture({
   onPersist,
   purpose = "reviewed",
   build = false,
+  inputBytes = 4,
+  buildBytes = 4,
 } = {}) {
   const selectedInput = structuredClone(input);
   if (build) selectedInput.context.executionId = "build";
@@ -292,13 +294,13 @@ function fixture({
         if (op === "build-open")
           value = {
             index: 4,
-            object: object(4),
+            object: { ...object(4), bytes: buildBytes },
             root: { ...object(1), mode: 0o555 },
             sha256: digest(Buffer.from("data")),
           };
         if (op === "build-input")
           value = {
-            object: { ...object(4), mode: 0o444, gid: 80 },
+            object: { ...object(4), mode: 0o444, gid: 80, bytes: inputBytes },
             sha256: failure === "build-input" ? "e".repeat(64) : b,
             ...(c
               ? { cdhash: failure === "build-signature" ? "e".repeat(40) : c }
@@ -546,6 +548,52 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
   );
   assert.deepEqual(reviewed.events, []);
 });
+test("Darwin selected toolchain response sizes retain the installed-data bound and generated-image limit", async () => {
+  for (const bytes of [134217729, 536870912, 536870913]) {
+    const value = fixture({
+      purpose: "experiment",
+      build: true,
+      inputBytes: bytes,
+    });
+    await value.reader.start();
+    try {
+      for (const tool of ["clang", "ld"])
+        for (let read = 0; read < 2; read++) {
+          const result = value.reader.readBuildInput(
+            "/Library/Developer/CommandLineTools/usr/bin/" + tool,
+            hash,
+            cdhash,
+          );
+          if (bytes > 536870912) await assert.rejects(result);
+          else {
+            const actual = await result;
+            assert.equal(actual.object.bytes, bytes);
+            assert.equal(actual.sha256, hash);
+            assert.equal(actual.cdhash, cdhash);
+            assert.equal(actual.unchanged, true);
+          }
+        }
+    } finally {
+      assert.equal((await value.reader.close()).status, "RETIRED");
+    }
+  }
+  for (const purpose of ["reviewed", "experiment"]) {
+    const value = fixture({ purpose, build: true, buildBytes: 134217729 });
+    await value.reader.start();
+    try {
+      await assert.rejects(
+        value.reader.readBuildImage("/fixture/report/platform-build/launcher"),
+      );
+      assert.equal(
+        value.events.some((event) => event.startsWith("read ")),
+        false,
+      );
+    } finally {
+      assert.equal((await value.reader.close()).status, "RETIRED");
+    }
+  }
+});
+
 test("Darwin cache custody rejects absent cache UUIDs and substituted image UUIDs in both purposes", async () => {
   for (const purpose of ["reviewed", "experiment"])
     for (const failure of ["runtime-cache-uuid", "runtime-uuid"]) {

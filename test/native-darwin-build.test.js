@@ -155,7 +155,10 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
           assert.equal(command, "P");
           handoff.push("outside-custody");
         },
-        protected_input: () => handoff.push("tool-input"),
+        protected_input(name, pin, installed, limit) {
+          assert.equal(limit, 134217728);
+          handoff.push("tool-input");
+        },
         signature: () => handoff.push("tool-signature"),
       };
     admission.runInNewContext(admissionContext)();
@@ -282,7 +285,7 @@ test("Darwin protected-file admission observes original short circuits without c
     "full-width": 3,
     "full-width-positive": 10,
   };
-  for (const fault of [
+  const cases = [
     ...Object.keys(stops),
     null,
     "single-installed",
@@ -290,7 +293,20 @@ test("Darwin protected-file admission observes original short circuits without c
     "at-limit",
     "pin-mismatch",
     "close",
-  ]) {
+  ].map((fault) => [fault]);
+  for (const [size, maximum] of [
+    [134217728, 134217728],
+    [134217729, 134217728],
+    [134217729, 536870912],
+    [536870912, 536870912],
+    [536870913, 536870912],
+  ])
+    cases.push([
+      size > maximum ? "ceiling" : "single-installed",
+      BigInt(size),
+      BigInt(maximum),
+    ]);
+  for (const [fault, virtualSize, maximum] of cases) {
     const calls = [],
       samples = [],
       records = [];
@@ -346,7 +362,8 @@ test("Darwin protected-file admission observes original short circuits without c
     };
     let gid = 20n,
       mode = 0o400n,
-      limit = fault === "at-limit" ? 3n : 16n;
+      limit = maximum ?? (fault === "at-limit" ? 3n : 16n);
+    if (virtualSize !== undefined) metadata.st_size = virtualSize;
     if (fault === "full-width") {
       Object.assign(metadata, {
         st_dev: -2147483648n,
@@ -488,8 +505,9 @@ test("Darwin protected-file admission observes original short circuits without c
       },
       calloc(size, count) {
         observe("allocate");
-        assert.equal(size, 4n);
+        assert.equal(size, metadata.st_size + 1n);
         assert.equal(count, 1);
+        // Native size/read/hash counts are synthetic; storage stays four bytes.
         return Buffer.alloc(4);
       },
       read(fd, output, count) {
@@ -497,9 +515,9 @@ test("Darwin protected-file admission observes original short circuits without c
         assert.equal(fd, 7);
         if (output.bytes) {
           assert.equal(output.offset, 0n);
-          assert.equal(count, 3n);
+          assert.equal(count, metadata.st_size);
           payload.copy(output.bytes);
-          return 3n;
+          return count;
         }
         assert.equal(count, 1);
         return 0n;
@@ -516,7 +534,7 @@ test("Darwin protected-file admission observes original short circuits without c
       },
       CC_SHA256(bytes, size, sum) {
         observe("hash");
-        assert.equal(size, 3n);
+        assert.equal(size, metadata.st_size);
         assert.deepEqual(bytes.subarray(0, 3), payload);
         createHash("sha256").update(payload).digest().copy(sum);
         return sum;
@@ -795,11 +813,12 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
             assert.ok(out.value.length < size);
             return out.value.length;
           },
-          protected_input(file, pin, installed) {
+          protected_input(file, pin, installed, limit) {
             events.push("settings");
             assert.equal(file.value, context.sdk + "/SDKSettings.json");
             assert.equal(pin, context.settings_pin);
             assert.equal(installed, 1);
+            assert.equal(limit, 134217728);
             assert.notEqual(fault, "settings");
           },
         };
@@ -963,6 +982,9 @@ test("Darwin native developer pairing derives only the selected documented insta
 
 test("Darwin sealed toolchain holds developer and real tool pins through completion", async () => {
   const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
+    inputBody = /static void protected_input\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1],
     stableStart = source.indexOf(
       "  struct stat current, named; char developer[PATH_MAX], compiler[PATH_MAX];",
     ),
@@ -970,7 +992,8 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
     start = source.indexOf("  struct selected_toolchain held ="),
     end = source.indexOf("\n}", start);
   assert.ok(
-    stableStart > 0 &&
+    inputBody &&
+      stableStart > 0 &&
       stableEnd > stableStart &&
       start > stableEnd &&
       end > start,
@@ -1017,6 +1040,13 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       `() => {${translate(source.slice(stableStart, stableEnd))}}`,
     ),
     select = new Script(`() => {${translate(source.slice(start, end))}}`),
+    protect = new Script(
+      `(path, pin, installed, limit) => {${inputBody
+        .replaceAll(/struct stat (stat|actual);/gu, "const $1 = {};")
+        .replace("int held", "const held")
+        .replaceAll(/&(stat|actual)\b/gu, "$1")
+        .replaceAll(/\b0([0-7]+)\b/gu, "0o$1")}}`,
+    ),
     text = (value) => value?.value ?? value;
   const cases = [
     null,
@@ -1046,7 +1076,9 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       "developer-pin-drift",
     ])
       cases.push([fault, inode]);
-  for (const [fault, inode] of cases) {
+  for (const size of [134217729, 536870912, 536870913])
+    for (const tool of ["clang", "ld"]) cases.push([null, 7n, size, tool]);
+  for (const [fault, inode, size = 4, largeTool = "clang"] of cases) {
     const adjacent = inode === 18446744073709551615n ? inode - 1n : inode + 1n;
     if (inode > 2n ** 53n) assert.equal(Number(inode), Number(adjacent));
     const developer = "/Library/Developer/CommandLineTools",
@@ -1070,12 +1102,17 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       22: "1:" + (fault === "compiler-identity" ? adjacent : inode),
       26: "1:" + inode,
     });
+    const sizeFor = (name) => (text(name).endsWith("/" + largeTool) ? size : 4);
     const metadata = {
         st_dev: 1n,
         st_ino: inode,
         st_gid: 0,
         st_uid: fault === "developer-owner" ? 501 : 0,
         st_mode: fault === "developer-write" ? 0o40775 : 0o40755,
+        st_nlink: 1,
+        st_size: 4,
+        st_mtimespec: { tv_sec: 1, tv_nsec: 0 },
+        st_ctimespec: { tv_sec: 1, tv_nsec: 0 },
       },
       calls = [];
     let late = false,
@@ -1103,7 +1140,7 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
         tool.value = compiler;
       },
       lstat(name, out) {
-        Object.assign(out, metadata);
+        Object.assign(out, metadata, { st_size: sizeFor(name) });
         if (late && fault === "named-drift") out.st_ino = adjacent;
         if (
           (replaced && name === compiler) ||
@@ -1113,19 +1150,28 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
         return 0;
       },
       fstat(fd, out) {
-        Object.assign(out, metadata);
+        Object.assign(out, metadata, {
+          st_size: sizeFor(
+            fd === 7 ? developer : fd === 8 ? compiler : argv[23],
+          ),
+        });
         if (late && fault === "held-drift") out.st_ino = adjacent;
         return 0;
       },
       S_ISDIR: () => true,
       ancestors: () => {},
       directory: () => 7,
-      open: () => 8,
+      open: (name) => (name === compiler ? 8 : 9),
+      close: () => 0,
+      free() {},
+      file: () => assert.fail("selected tools require installed reads"),
       file_stat_same: (a, b) =>
         Object.keys(metadata).every((key) => a[key] === b[key]),
       no_acl: () => assert.notEqual(fault, "acl"),
-      protected_input(name, pin) {
-        calls.push([name, pin]);
+      installed_file(name, gid, mode, limit, pin, stat) {
+        calls.push([name, pin, limit, late]);
+        assert.equal(limit, 536870912);
+        assert.ok(stat.st_size <= limit);
         if (
           fault === "pin-replaced" &&
           name === compiler &&
@@ -1162,18 +1208,83 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       strcmp: (a, b) => (text(a) === text(b) ? 0 : 1),
       strchr: (value, char) => text(value).includes(char),
     };
+    context.protected_input = protect.runInNewContext(context);
     context.toolchain_stable = (held) =>
       stable.runInNewContext({ ...context, held })();
     const run = select.runInNewContext(context);
-    if (!fault || ["late-pin", "held-drift", "named-drift"].includes(fault)) {
+    if (size > 536870912) {
+      assert.throws(run);
+      assert.equal(calls.at(-1)[0], developer + "/usr/bin/" + largeTool);
+    } else if (
+      !fault ||
+      ["late-pin", "held-drift", "named-drift"].includes(fault)
+    ) {
       const held = run();
       late = true;
       if (fault) assert.throws(() => context.toolchain_stable(held));
       else {
         context.toolchain_stable(held);
-        assert.ok(calls.some(([name]) => name === argv[23]));
+        for (const tool of [compiler, argv[23]])
+          assert.deepEqual(
+            calls
+              .filter(([name]) => name === tool)
+              .map(([, , limit, late]) => [limit, late]),
+            [
+              [536870912, false],
+              [536870912, false],
+              [536870912, true],
+            ],
+          );
       }
     } else assert.throws(run, undefined, fault);
+  }
+});
+
+test("Darwin non-toolchain callers and bootstrap/output guards retain their original ceilings", async () => {
+  const [helper, reader] = await Promise.all(
+    ["build-helper.c", "custody-reader.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const calls = [
+    ...helper.matchAll(
+      /protected_input\((settings|tool|source|purpose_header),[^;\n]+\);/gu,
+    ),
+  ];
+  assert.equal(calls.length, 4);
+  for (const [call, name] of calls)
+    new Script(`() => {${call}}`).runInNewContext({
+      settings: "sdk-settings",
+      settings_pin: "pin",
+      tool: "stock-shim",
+      source: "sealed-source",
+      purpose_header: "sealed-header",
+      argv: { 3: "pin", 8: "pin", 11: "pin" },
+      protected_input(file, pin, installed, limit) {
+        assert.equal(pin, "pin");
+        assert.equal(installed, ["settings", "tool"].includes(name) ? 1 : 0);
+        assert.equal(limit, 134217728);
+      },
+    })();
+  for (const [source, owner] of [
+    [helper, "publish"],
+    [reader, "build_open"],
+    [reader, "bootstrap_tool"],
+  ]) {
+    const start = source.indexOf(`static void ${owner}(`),
+      body = source.slice(start, source.indexOf("\n}", start)),
+      guard =
+        /(?:actual|value->stat|st)\.st_size > 0 && (?:\(uint64_t\))?(?:actual|value->stat|st)\.st_size <= \d+/u.exec(
+          body,
+        )?.[0];
+    assert.ok(start >= 0 && guard, owner);
+    const accepts = new Script(
+      `size => ${guard
+        .replace("(uint64_t)", "")
+        .replaceAll(/(?:actual|value->stat|st)\.st_size/gu, "size")}`,
+    ).runInNewContext();
+    assert.equal(accepts(134217728), true, owner);
+    assert.equal(accepts(134217729), false, owner);
   }
 });
 

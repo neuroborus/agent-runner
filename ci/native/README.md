@@ -528,11 +528,24 @@ observe the same developer directory with SDK settings and freshly verify the
 actual tool signatures. Selectors, closure hashes and build evidence retain
 these joins; cold loading rechecks them without discovery, compilation or replay.
 Compiler resource dependencies must remain within the selected installation.
-Reviewed version-6 behavior, the 22 protected commands and all native bounds remain
-unchanged. The actual successful selected-SDK `--show-sdk-build-version` output
+Reviewed version-6 behavior and the 22 protected commands remain unchanged.
+The actual successful selected-SDK `--show-sdk-build-version` output
 remains mandatory; a missing build result cannot be replaced with an SDK version
 label. This binding does not uniquely explain the earlier ProductBuildVersion
 failure and supplies no native success or resolution of preliminary PF facts.
+
+Only the experiment selected compiler/delegated-tool input class uses an explicit
+512 MiB limit in the sealed entry, during initial admission and every toolchain
+stability reread. This matches the existing acquisition/revalidation, independent
+installed build reads, custody response bounds and cold verification. The larger
+limit changes no membership, canonical installation relationship, hash/signature
+or exact device/inode pin, ownership, ancestry, ACL or held/named stability guard.
+Stock shims, SDK settings and sealed sources/headers retain the entry's 128 MiB
+limit. Bootstrap/compiler-entry images, generated images, signing and publication
+retain their existing limits; installed selected-toolchain data is a separate
+class. Deadlines, capture bounds, first-cause preservation and independent original
+retirement remain unchanged. Portable boundary coverage supplies no actual compiler
+admission, successful selected-SDK query or native readiness.
 
 Acquisition now requests BigInt filesystem statistics for input, SDK/developer
 and stability snapshots; installed ancestry and build snapshots retain exact

@@ -191,6 +191,17 @@ closed-environment bodies with injected filesystem/signature operations, includi
 unsafe metadata, ACLs, pin refusal and substitutions during pin/signature reads
 or after command execution. The existing custody
 reader cases validate fresh developer metadata and real-tool signature responses.
+The same actual-body fixtures execute the protected-input wrapper and selected
+toolchain admission/rereads with synthetic sizes. Compiler and delegated inputs
+accept 128 MiB + 1 byte through exactly 512 MiB and reject 512 MiB + 1 byte;
+every initial and repeated read must receive the selected-class ceiling. The
+complete protected-file body checks those boundaries with synthetic allocation,
+read and hash counts while keeping its payload storage at four bytes. Existing
+pin/signature/identity/stability cases remain shared. Non-toolchain caller limits,
+bootstrap and generated-image native guards retain their 128 MiB boundary.
+Injected custody responses separately enforce 512 MiB installed-tool metadata
+and reject oversized generated images in reviewed and experiment modes before
+reading bytes. These regressions add no harness or slow-tier assignment.
 These portable cases execute no platform compiler or probe and do not establish
 the unique cause of ProductBuildVersion failure, a native SDK/PF remedy or original
 independent retirement.

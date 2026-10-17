@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Align selected Darwin toolchain input limits
+
+The sealed experiment compiler entry applies an explicit 512 MiB per-call ceiling
+to its already selected and pinned compiler/delegated tools, including stability
+rereads. Acquisition, independent custody and cold verification already use that
+installed-data bound. Other entry inputs retain 128 MiB, as do bootstrap/entry
+images, generated images, signing and publication. Membership, installation joins,
+pins, native safety guards, commands, deadlines and independent original-owner
+retirement remain unchanged. Synthetic portable boundaries allocate no large
+payload and establish no native admission, selected-SDK success or readiness.
+
 ## 2026-10-17 — Observe failed native protected-file admission
 
 Darwin's protected-file reader samples its original admission expression without

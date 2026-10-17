@@ -146,7 +146,7 @@ and compilation and holds/rechecks the same directory through completion. The
 existing build-input reader additionally returns its held SDK directory with
 settings; build evidence and cold loading rejoin both native identities and pins
 without discovery or recompilation. Native refusal is terminal. Reviewed version-6
-vectors, fixed command count and native bounds remain unchanged. Safe installed
+vectors and the fixed command count remain unchanged. Safe installed
 CLT metadata, actual building and independent retirement remain unestablished.
 Experiment selection additionally binds the SDK's documented canonical developer
 installation and its named real Clang plus separately pinned delegated tools.
@@ -156,6 +156,14 @@ Native admission derives the installation relationship and holds/rechecks the
 developer and actual tool identities, ACLs, signatures and content through tool
 completion. Independent settings/tool reads and cold reconstruction freshly
 rejoin those bindings, including developer identity and actual compiler path.
+The sealed entry admits only that experiment selected compiler/delegated-tool
+class with an explicit 512 MiB per-call limit, including every toolchain stability
+reread. Acquisition/revalidation, independent installed-input custody, response
+validation and cold verification retain their existing matching 512 MiB bounds.
+Stock shims, SDK settings and sealed sources/headers retain the entry's 128 MiB
+limit; bootstrap/compiler-entry images, generated images, signing and publication
+also retain their existing limits. Closed membership, exact pins, native metadata,
+ACLs and held/named stability remain mandatory across these distinct input classes.
 Other developer installations cannot supply compiler resource dependencies.
 Unverifiable pairings and missing actual SDK build-query results remain terminal,
 without reselection, replay, version-label substitution or global selection changes.

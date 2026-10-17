@@ -38,11 +38,11 @@ static void ancestors(const char *path) {
     slash = strrchr(name, '/'); need(slash); *slash = 0;
   }
 }
-static void protected_input(const char *path, const char *pin, int installed) {
+static void protected_input(const char *path, const char *pin, int installed, size_t limit) {
   struct stat stat; need(!lstat(path, &stat) && !(stat.st_mode & 06022));
   int held = open(path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); need(held >= 0); no_acl(held);
   ancestors(path);
-  free((installed ? installed_file : file)(path, stat.st_gid, stat.st_mode & 07777, 134217728, pin, &stat));
+  free((installed ? installed_file : file)(path, stat.st_gid, stat.st_mode & 07777, limit, pin, &stat));
   struct stat actual; need(!fstat(held, &actual) && actual.st_dev == stat.st_dev && actual.st_ino == stat.st_ino &&
     actual.st_mode == stat.st_mode && actual.st_uid == 0 && actual.st_gid == stat.st_gid && actual.st_nlink == stat.st_nlink &&
     actual.st_size == stat.st_size && actual.st_mtimespec.tv_sec == stat.st_mtimespec.tv_sec && actual.st_mtimespec.tv_nsec == stat.st_mtimespec.tv_nsec &&
@@ -85,7 +85,7 @@ static int selected_sdk(const char *sdk, const char *dev, const char *ino, const
   need((uintmax_t)held.st_dev == expected_dev && (uintmax_t)held.st_ino == expected_ino);
   char settings[PATH_MAX];
   need(snprintf(settings, sizeof(settings), "%s/SDKSettings.json", sdk) < sizeof(settings));
-  protected_input(settings, settings_pin, 1);
+  protected_input(settings, settings_pin, 1, 134217728);
   need(!fstat(sdk_fd, &named) && file_stat_same(&held, &named) &&
     !lstat(sdk, &named) && file_stat_same(&held, &named));
   no_acl(sdk_fd); return sdk_fd;
@@ -110,7 +110,7 @@ static void toolchain_stable(struct selected_toolchain *held, char **argv) {
     const char *name = argv[19 + i*4];
     need(!fstat(held->files[i], &current) && file_stat_same(&held->identities[i], &current) &&
       !lstat(name, &named) && file_stat_same(&current, &named));
-    no_acl(held->files[i]); protected_input(name, argv[20 + i*4], 1); signature(name, argv[21 + i*4]);
+    no_acl(held->files[i]); protected_input(name, argv[20 + i*4], 1, 536870912); signature(name, argv[21 + i*4]);
     need(!fstat(held->files[i], &current) && file_stat_same(&held->identities[i], &current) &&
       !lstat(name, &named) && file_stat_same(&current, &named)); no_acl(held->files[i]);
   }
@@ -137,7 +137,7 @@ static struct selected_toolchain selected_toolchain(int argc, char **argv) {
     const char *name = argv[19 + i*4];
     need(!strncmp(name, compiler, prefix) && name[prefix] && !strchr(name + prefix, '/'));
     for (unsigned j = 0; j < i; j++) need(strcmp(name, argv[19 + j*4]));
-    protected_input(name, argv[20 + i*4], 1); signature(name, argv[21 + i*4]);
+    protected_input(name, argv[20 + i*4], 1, 536870912); signature(name, argv[21 + i*4]);
     held.files[i] = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
     need(held.files[i] >= 0 && !fstat(held.files[i], &held.identities[i]));
     char expected[42];
@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
   need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
     audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout); control('P');
-  protected_input(tool, argv[3], 1); signature(tool, argv[4]);
+  protected_input(tool, argv[3], 1, 134217728); signature(tool, argv[4]);
   const char *publication = NULL;
 #ifdef NATIVE_CI_EXPERIMENT
   int sdk_fd = -1; struct stat sdk_identity;
@@ -240,7 +240,7 @@ int main(int argc, char **argv) {
     vector[1] = "--show-sdk-build-version";
 #endif
   } else if (!strcmp(mode, "compile")) {
-    need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8], 0);
+    need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8], 0, 134217728);
 #ifndef NATIVE_CI_EXPERIMENT
     selected_sdk(sdk, NULL, NULL, NULL);
 #endif
@@ -253,7 +253,7 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
     const char *slash = strrchr(source, '/'); need(slash && slash - source < PATH_MAX);
     need(snprintf(purpose_header, sizeof(purpose_header), "%.*s/experiment.h", (int)(slash - source), source) < sizeof(purpose_header));
-    protected_input(purpose_header, argv[11], 0);
+    protected_input(purpose_header, argv[11], 0, 134217728);
     need(snprintf(dependencies, sizeof(dependencies), "%s.deps", publication) < sizeof(dependencies));
     errno = 0; need(fstatat(work, dependencies, &stat, AT_SYMLINK_NOFOLLOW) < 0 && errno == ENOENT);
 #endif
