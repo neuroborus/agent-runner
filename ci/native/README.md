@@ -448,6 +448,16 @@ and lengths, sampled file/symlink predicates, stat identity, ownership, link
 count, size, timestamps and the applicable size maximum. Predicates without a
 sampled boolean remain null. Rejected contents remain unread;
 diagnostic construction or sink failure preserves the original rejection.
+The sealed build entry separately samples the original SDK guard in its existing
+short-circuit order: native realpath result and errno, exact path equality,
+lstat result and errno, directory kind, root owner and group/other write bits.
+Each term executes once. Unsampled predicates and errno use `-1`; unsampled
+lstat uses `-2`, distinct from its native failure result `-1`. Metadata is printed
+only after successful lstat, from that same sample. A successful call's errno is
+retained as observed, not interpreted as its failure cause. Diagnostic writes
+restore the guard's sampled errno before the original refusal. No input is
+reselected, compilation retried or protection relaxed. The already observed fresh
+output custody at UID0/GID0/mode0700 and JS realpath discovery remain unchanged.
 These observations and portable regressions establish no installed-tool native
 acceptance. Darwin descendant-survival and Windows TCP/audit failures remain
 unresolved. Matching-host execution and both fresh same-SHA native workflows
@@ -2991,13 +3001,28 @@ exception and foreign-name sanitation still precedes the original payload exec.
 The slot is never blindly overwritten: XNU refuses replacement of an already
 valid task-access port, and live or unknown authority cannot reach payload exec
 without a separately source-supported confined launch correction.
-One bounded numeric observation of the original task-access read preserves its
-returned name, queried type and query status. The prior CI record did not
-observe these values; fresh matching macOS CI must establish that the failing
-launch reaches a demonstrated harmless state and that both original faults
-retire independently while all eight earlier capabilities remain passing.
-Portable classification and caller coverage supply neither that observation
-nor native acceptance.
+The original observed `type=0x10000/query=0` is a live send right and retains the
+pre-exec `fault-access-authority` refusal. Bounded lifecycle observations now
+separate `custodian-entry` before sealed reexec, `custodian-fork` after reexec and
+audit-session setup, and the existing unprivileged `payload` sanitation read.
+They retain PID/parent, real/effective credentials, getter/type status, local name
+and reference-release status; `-1` denotes an unattempted query or release.
+Failed getter/type reads do not establish absence or a usable queried type.
+The two custodian observations query only their own public task-access slot.
+Each successful getter's valid copied send reference is released once, even if
+its optional type query is unavailable; a failed release blocks and retains its
+independent cleanup cause. Failed getters allocate no reference. Original child
+sanitation keeps its stricter inspected-name release and refusal behavior.
+Local names cannot establish endpoint identity across observations or prove
+confinement. No endpoint is contacted and no setter or extra launch is tried.
+The existing JS custody caller forwards custodian stderr through the ordinary CI
+diagnostic sink, separately from relayed original payload stderr; neither stream's
+lifecycle metadata supplies a receipt, admission or retirement proof. A failed
+diagnostic sink cannot interrupt original custody capture or replace its failure
+and cleanup evidence. Fresh matching macOS CI must establish a supported confined
+launch and independent retirement of both original faults while all eight earlier
+capabilities remain passing.
+Portable classification and caller coverage supply no native acceptance.
 
 After each acknowledged fault, the root holder fences admissions and recovers
 the complete held session through the shared `custody.h` all-UID census. Every

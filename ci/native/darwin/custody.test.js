@@ -832,7 +832,10 @@ test("Darwin custody completion rejects an unconsumed trailing frame", async () 
 test("Darwin guard locations and errno remain diagnostics through failed custody", async () => {
   const chunks = [],
     guard = Buffer.from(
-      "native-darwin-guard: file=fixture.c line=19 errno=13\n",
+      "native-darwin-sdk: realpath=1 realpath-errno=0 equal=1 lstat=0 lstat-errno=0 kind=1 owner=1 writable=1\n" +
+        "native-darwin-sdk-metadata: uid=0 gid=0 mode=040775 dev=1 inode=42\n" +
+        "native-darwin-sdk: malformed untrusted=value\n" +
+        "native-darwin-guard: file=fixture.c line=19 errno=13\n",
     );
   await withNativeDiagnostics(
     async () => {
@@ -864,4 +867,6 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
   const output = Buffer.concat(chunks).toString();
   assert.ok(output.includes("native-darwin-guard"));
   assert.ok(output.includes("file=fixture.c line=19 errno=13"));
+  assert.ok(output.includes("kind=1 owner=1 writable=1"));
+  assert.ok(output.includes("uid=0 gid=0 mode=040775 dev=1 inode=42"));
 });

@@ -124,8 +124,22 @@ int main(int argc, char **argv) {
   } else if (!strcmp(mode, "compile")) {
     need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8], 0);
     char canonical[PATH_MAX]; struct stat stat;
-    need(realpath(sdk, canonical) && !strcmp(sdk, canonical) && !lstat(sdk, &stat) &&
-      S_ISDIR(stat.st_mode) && stat.st_uid == 0 && !(stat.st_mode & 022));
+    int sdk_resolved = realpath(sdk, canonical) != NULL, sdk_resolve_error = errno;
+    int sdk_equal = -1, sdk_stat = -2, sdk_stat_error = -1, sdk_kind = -1, sdk_owner = -1, sdk_writable = -1;
+    bool sdk_ok = sdk_resolved && (sdk_equal = !strcmp(sdk, canonical)) &&
+      (sdk_stat = lstat(sdk, &stat), sdk_stat_error = errno, !sdk_stat) &&
+      (sdk_kind = S_ISDIR(stat.st_mode)) && (sdk_owner = stat.st_uid == 0) &&
+      (sdk_writable = !!(stat.st_mode & 022), !sdk_writable);
+    if (!sdk_ok) {
+      int sdk_error = errno;
+      fprintf(stderr, "native-darwin-sdk: realpath=%d realpath-errno=%d equal=%d lstat=%d lstat-errno=%d kind=%d owner=%d writable=%d\n",
+        sdk_resolved, sdk_resolve_error, sdk_equal, sdk_stat, sdk_stat_error, sdk_kind, sdk_owner, sdk_writable);
+      if (sdk_stat == 0)
+        fprintf(stderr, "native-darwin-sdk-metadata: uid=%ju gid=%ju mode=%#o dev=%ju inode=%ju\n",
+          (uintmax_t)stat.st_uid, (uintmax_t)stat.st_gid, (unsigned)stat.st_mode, (uintmax_t)stat.st_dev, (uintmax_t)stat.st_ino);
+      fflush(stderr); errno = sdk_error;
+    }
+    need(sdk_ok);
     ancestors(sdk);
     int sdk_fd = directory(sdk, 0, stat.st_gid, stat.st_mode & 07777);
     no_acl(sdk_fd); need(!close(sdk_fd));

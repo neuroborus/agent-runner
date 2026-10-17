@@ -133,6 +133,13 @@ cleanup signal after work cancellation. A lost `finish` reply is never replayed.
 The experiment build caller retains the original error separately from close
 failure and records cleanup success only after fresh original-owner and domain
 proof; successful cleanup never publishes preparation.
+The same fast build-source suite executes the original SDK admission predicate
+with injected realpath/lstat and sampled metadata. It covers each short-circuit
+stop, unknown later terms, single native-call evaluation, successful unchanged
+admission and failed diagnostic writes without changing the guard errno. The
+existing custody-channel fixture carries those numeric diagnostics, malformed
+metadata and the original guard through failed completion; output supplies no
+receipt, new compiler attempt or retirement evidence.
 The fixture retains native ABI journal entries and the read-only root lifetime;
 cold output reads require recovery's observer to retire first. Interrupted cold
 readers and admission before report-directory creation remain fenced and uncertain
@@ -226,9 +233,18 @@ the primary refusal and independent cleanup error. The same execution retains
 ordinary-host checks, descriptor closure, bootstrap/registered/exception clearing
 and foreign-name destruction. Existing cancel/owner-loss caller and independent
 domain-retirement cases remain required; bounded task-access metadata alone
-supplies no success or retirement evidence. These portable fixtures run no native
-compiler or macOS tool and add no slow-tier assignment. Matching macOS CI must
-resolve the original unobserved port name/type and verify functional recovery.
+supplies no success or retirement evidence. Custodian lifecycle fixtures execute
+the actual observation body with failed getters, absent/dead values, live send
+references, unavailable type queries and refused releases. They verify one checked
+release per valid getter copy, no endpoint contact and unchanged errno. The
+original child fixture checks its separate payload observation and unchanged live
+authority refusal. The custody caller fixture forwards fragmented raw lifecycle
+and malformed metadata while preserving the original authority failure and separate
+release cause, including when the raw diagnostic sink throws. These portable
+fixtures run no native compiler or macOS tool and add no slow-tier assignment.
+Matching macOS CI must resolve the observed live send right (`type=0x10000/query=0`)
+without weakening admission and verify functional
+recovery and complete independent retirement.
 
 Held-initialization regressions execute the actual creation helper with synthetic
 inherited metadata, failed setters and substituted identities. They retain the

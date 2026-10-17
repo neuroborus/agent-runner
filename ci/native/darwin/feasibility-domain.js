@@ -1,7 +1,9 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
+import { nativeDiagnostic } from "../diagnostics.js";
 import {
   normalizeDarwinIdentity,
   sameDarwinIdentity,
@@ -151,14 +153,27 @@ export async function openDarwinFaultDomain(
   };
   owner.on("error", fail);
   owner.stdin.on("error", fail);
-  owner.stderr.on("data", (chunk) => {
-    total += chunk.length;
-    const length = stderr.length + chunk.length;
-    stderr = Buffer.concat([stderr, chunk.subarray(0, 65536 - stderr.length)]);
-    if (failed) failed.stderr = stderr;
-    if (length > 65536 || total > 262144)
-      fail(new Error("Fault custody output bound"));
-  });
+  owner.stderr.on(
+    "data",
+    AsyncLocalStorage.bind((chunk) => {
+      total += chunk.length;
+      const length = stderr.length + chunk.length;
+      stderr = Buffer.concat([
+        stderr,
+        chunk.subarray(0, 65536 - stderr.length),
+      ]);
+      if (failed) failed.stderr = stderr;
+      if (length > 65536 || total > 262144)
+        fail(new Error("Fault custody output bound"));
+      // Custodian diagnostics stay separate from relayed payload stdio and cannot
+      // interrupt the original bounded capture, refusal or independent cleanup.
+      try {
+        nativeDiagnostic("darwin-fault-custody", { stderr: chunk });
+      } catch {
+        // The output sink supplies no custody or retirement evidence.
+      }
+    }),
+  );
   owner.stdout.on("error", fail);
   owner.stderr.on("error", fail);
   owner.stdout.on("data", (chunk) => {

@@ -3789,7 +3789,13 @@ test("Darwin original faults pass only with protected complete independent domai
 });
 
 test("Darwin fault custody channel retains native failure diagnostics and handles output errors", async (t) => {
-  for (const fault of ["native-exit", "stream-error", "late-native-exit"]) {
+  for (const fault of [
+    "native-exit",
+    "stream-error",
+    "late-native-exit",
+    "access-refusal",
+    "diagnostic-sink",
+  ]) {
     const child = Object.assign(new EventEmitter(), {
       stdin: new PassThrough(),
       stdout: new PassThrough(),
@@ -3813,51 +3819,76 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
       startSeconds: 100,
       startMicroseconds: 1,
     };
-    const diagnostic =
-      "native-darwin: operation=bsd-identity domain=errno value=5 effects=possible settlement=unsettled\n";
+    const raw = [],
+      diagnostic = ["access-refusal", "diagnostic-sink"].includes(fault)
+        ? "native-darwin-fault-access-lifecycle: phase=custodian-fork pid=9000 parent=1 uid=0 euid=0 gid=0 egid=0 get=0 name=200 type=0x10000 query=0 release=0\n" +
+          "native-darwin-fault-access-lifecycle: phase=untrusted malformed private=value\n" +
+          "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n" +
+          "native-darwin-cleanup: operation=fault-access-release domain=mach value=15 effects=possible settlement=unsettled\n"
+        : "native-darwin: operation=bsd-identity domain=errno value=5 effects=possible settlement=unsettled\n";
     const streamError = new Error("Custody output unavailable");
     child.stdin.on("data", () => {
-      if (fault !== "native-exit") child.stdout.emit("error", streamError);
-      if (fault !== "stream-error") child.stderr.write(diagnostic);
-      child.emit("close", fault !== "stream-error" ? 78 : 0, null);
+      try {
+        if (
+          !["native-exit", "access-refusal", "diagnostic-sink"].includes(fault)
+        )
+          child.stdout.emit("error", streamError);
+        if (fault !== "stream-error") {
+          child.stderr.write(diagnostic.slice(0, 40));
+          child.stderr.write(diagnostic.slice(40));
+        }
+      } finally {
+        child.emit("close", fault !== "stream-error" ? 78 : 0, null);
+      }
     });
-    const domain = await openDarwinFaultDomain(
-      "/fixture",
-      SHA,
-      "cancel",
-      "c".repeat(32),
-      DIGEST,
-      DIGEST,
-      {},
-      (_root, _operation, _args, { launch }) => {
-        const virtual = launch();
-        virtual.on("error", (error) => {
-          error.stderr = Buffer.from("payload diagnostics");
-        });
-        return { failure: () => null };
-      },
-      {
-        uid: 501,
-        gid: 20,
-        launch: () => {
-          queueMicrotask(() =>
-            child.stdout.write(
-              JSON.stringify({
-                ready: {
-                  candidateSha: SHA,
-                  caseId: "cancel",
-                  stage: 1,
-                  helperSha256: DIGEST,
-                  policySha256: DIGEST,
-                  asid: 55,
-                  custodian,
-                  owner: { pid: 42 },
-                },
-              }) + "\n",
-            ),
-          );
-          return child;
-        },
+    const domain = await withNativeDiagnostics(
+      () =>
+        openDarwinFaultDomain(
+          "/fixture",
+          SHA,
+          "cancel",
+          "c".repeat(32),
+          DIGEST,
+          DIGEST,
+          {},
+          (_root, _operation, _args, { launch }) => {
+            const virtual = launch();
+            virtual.on("error", (error) => {
+              error.stderr = Buffer.from("payload diagnostics");
+            });
+            return { failure: () => null };
+          },
+          {
+            uid: 501,
+            gid: 20,
+            launch: () => {
+              queueMicrotask(() =>
+                child.stdout.write(
+                  JSON.stringify({
+                    ready: {
+                      candidateSha: SHA,
+                      caseId: "cancel",
+                      stage: 1,
+                      helperSha256: DIGEST,
+                      policySha256: DIGEST,
+                      asid: 55,
+                      custodian,
+                      owner: { pid: 42 },
+                    },
+                  }) + "\n",
+                ),
+              );
+              return child;
+            },
+          },
+        ),
+      (owner, value) => {
+        assert.equal(owner, "darwin-fault-custody");
+        if (value.stderr) {
+          raw.push(value.stderr);
+          if (fault === "diagnostic-sink")
+            throw new Error("Diagnostic sink failure");
+        }
       },
     );
     await assert.rejects(
@@ -3870,11 +3901,17 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
           assert.equal(error.stderr.toString(), diagnostic);
           assert.match(
             darwinFeasibilityCause("cancel", error).detail,
-            /bsd-identity failed.*errno=5/u,
+            ["access-refusal", "diagnostic-sink"].includes(fault)
+              ? /fault-access-authority failed.*invariant=0/u
+              : /bsd-identity failed.*errno=5/u,
           );
         } else assert.equal(error, streamError);
         return true;
       },
+    );
+    assert.equal(
+      Buffer.concat(raw).toString(),
+      fault === "stream-error" ? "" : diagnostic,
     );
   }
 });
@@ -10997,7 +11034,9 @@ test("Darwin preparation preserves the first native cause while attempting indep
 test("Darwin native diagnostics retain bounded operation and error domains without arbitrary output", () => {
   const metadata =
     "native-darwin-fault-metadata: object=created-root uid=0 gid=20 mode=040700 links=2 size=64 dev=1 inode=42\n" +
-    "native-darwin-fault-access: name=200 type=0x10000 query=0\n";
+    "native-darwin-fault-access: name=200 type=0x10000 query=0\n" +
+    "native-darwin-fault-access-lifecycle: phase=payload pid=42 parent=9000 uid=90001 euid=90001 gid=90002 egid=90002 get=0 name=200 type=0x10000 query=0 release=0\n" +
+    "native-darwin-fault-access-lifecycle: phase=unknown get=0 malformed\n";
   for (const [operation, domain, value] of [
     ["fault-journal-access", "invariant", 0],
     ["fault-journal-owner", "errno", 1],

@@ -11,6 +11,138 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+test("Darwin SDK guard samples each original predicate once and preserves refusal errno", async () => {
+  const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
+    start = source.indexOf("    char canonical[PATH_MAX]; struct stat stat;"),
+    end = source.indexOf("    ancestors(sdk);", start);
+  assert.ok(start > 0 && end > start);
+  const script = new Script(
+    `() => {${source
+      .slice(start, end)
+      .replace(
+        "char canonical[PATH_MAX]; struct stat stat;",
+        "const canonical = {}, stat = {};",
+      )
+      .replace(/\b(?:int|bool) /gu, "let ")
+      .replaceAll("&stat", "stat")
+      .replace(/\((?:uintmax_t|unsigned)\)/gu, "")
+      .replace(/\b022\b/gu, "0o22")}}`,
+  );
+  for (const fault of [
+    null,
+    "realpath",
+    "equal",
+    "lstat",
+    "kind",
+    "owner",
+    "writable",
+    "diagnostic-write",
+  ]) {
+    const calls = [],
+      diagnostics = [],
+      metadata = {
+        st_uid: fault === "owner" ? 501 : 0,
+        st_gid: 20,
+        st_mode:
+          (fault === "kind" ? 0o100000 : 0o40000) |
+          (["writable", "diagnostic-write"].includes(fault) ? 0o775 : 0o755),
+        st_dev: 1,
+        st_ino: 42,
+      };
+    const context = {
+      errno: 7,
+      sdk: "/fixture/sdk",
+      NULL: null,
+      stderr: {},
+      realpath(name, canonical) {
+        calls.push("realpath");
+        assert.equal(name, "/fixture/sdk");
+        context.errno = fault === "realpath" ? 2 : 31;
+        if (fault === "realpath") return null;
+        canonical.value = fault === "equal" ? "/fixture/other-sdk" : name;
+        return canonical;
+      },
+      strcmp(name, canonical) {
+        calls.push("equal");
+        return name === canonical.value ? 0 : 1;
+      },
+      lstat(name, output) {
+        calls.push("lstat");
+        assert.equal(name, "/fixture/sdk");
+        context.errno = fault === "lstat" ? 13 : 44;
+        if (fault === "lstat") return -1;
+        Object.assign(output, metadata);
+        return 0;
+      },
+      S_ISDIR(mode) {
+        calls.push("kind");
+        return Number((mode & 0o170000) === 0o40000);
+      },
+      fprintf(_stream, format, ...values) {
+        diagnostics.push([format, values.map(Number)]);
+        context.errno = 99;
+        return fault === "diagnostic-write" ? -1 : 1;
+      },
+      fflush() {
+        context.errno = 98;
+      },
+      need(ok) {
+        calls.push("guard");
+        if (!ok)
+          throw Object.assign(new Error("SDK refusal"), {
+            errno: context.errno,
+          });
+      },
+    };
+    const run = script.runInNewContext(context),
+      expectedError =
+        fault === "realpath"
+          ? 2
+          : fault === "equal"
+            ? 31
+            : fault === "lstat"
+              ? 13
+              : 44;
+    if (fault) assert.throws(run, { errno: expectedError });
+    else run();
+    assert.equal(context.errno, expectedError, fault);
+    assert.deepEqual(
+      calls,
+      [
+        "realpath",
+        ...(fault !== "realpath" ? ["equal"] : []),
+        ...(!["realpath", "equal"].includes(fault) ? ["lstat"] : []),
+        ...(!["realpath", "equal", "lstat"].includes(fault) ? ["kind"] : []),
+        "guard",
+      ],
+      fault,
+    );
+    if (!fault) assert.deepEqual(diagnostics, []);
+    else {
+      const expected = {
+        realpath: [0, 2, -1, -2, -1, -1, -1, -1],
+        equal: [1, 31, 0, -2, -1, -1, -1, -1],
+        lstat: [1, 31, 1, -1, 13, -1, -1, -1],
+        kind: [1, 31, 1, 0, 44, 0, -1, -1],
+        owner: [1, 31, 1, 0, 44, 1, 0, -1],
+        writable: [1, 31, 1, 0, 44, 1, 1, 1],
+        "diagnostic-write": [1, 31, 1, 0, 44, 1, 1, 1],
+      }[fault];
+      assert.deepEqual(diagnostics[0][1], expected, fault);
+      const sampled = !["realpath", "equal", "lstat"].includes(fault);
+      assert.equal(diagnostics.length, sampled ? 2 : 1);
+      if (sampled)
+        assert.deepEqual(diagnostics[1][1], [
+          metadata.st_uid,
+          20,
+          metadata.st_mode,
+          1,
+          42,
+        ]);
+    }
+  }
+});
+
 test("Darwin build custody normalizes only its joined exclusive creation", async () => {
   const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
     body =
@@ -2120,6 +2252,120 @@ test("Darwin feasibility fault custody keeps privileged effects behind sealed re
   assert.match(fixture, /command == 'C' \|\| command == 'L'/u);
 });
 
+test("Darwin custodian lifecycle observations balance their own public getter references", async () => {
+  const source = await readFile(
+      new URL("feasibility-domain.h", SOURCE),
+      "utf8",
+    ),
+    body =
+      /static void domain_access_observe\(const char \*phase\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1];
+  assert.ok(body);
+  const script = new Script(
+    `(phase) => {${body
+      .replace(
+        /\b(?:int|task_t|mach_port_t|kern_return_t|mach_port_type_t) /gu,
+        "let ",
+      )
+      .replace(
+        /&(access|type)\b/gu,
+        (_, name) => `{set value(v) {${name} = v;}}`,
+      )}}`,
+  );
+  for (const options of [
+    {},
+    { access: 0xffffffff },
+    { access: 200 },
+    { get: 5 },
+    { access: 200, query: 15 },
+    { access: 200, release: 15 },
+  ]) {
+    const calls = [],
+      observations = [],
+      cleanup = [];
+    const context = {
+      errno: 9,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      MACH_PORT_DEAD: 0xffffffff,
+      MACH_PORT_TYPE_NONE: 0,
+      MACH_PORT_TYPE_DEAD_NAME: 0x100000,
+      TASK_ACCESS_PORT: 2,
+      MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
+      mach_task_self: () => 101,
+      task_get_special_port(self, which, output) {
+        assert.deepEqual([self, which], [101, 2]);
+        calls.push("get");
+        if (!options.get) output.value = options.access ?? 0;
+        return options.get ?? 0;
+      },
+      mach_port_type(self, name, output) {
+        assert.deepEqual([self, name], [101, 200]);
+        calls.push("query");
+        if (!options.query) output.value = 0x10000;
+        return options.query ?? 0;
+      },
+      mach_port_deallocate(self, name) {
+        assert.deepEqual([self, name], [101, 200]);
+        calls.push("release");
+        return options.release ?? 0;
+      },
+      domain_access_diagnostic(...facts) {
+        observations.push(facts);
+        context.errno = 22;
+      },
+      remember_cleanup: (...facts) => cleanup.push(facts),
+      domain_mach(value, operation) {
+        throw Object.assign(new Error(operation), { value });
+      },
+    };
+    const observe = script.runInNewContext(context);
+    for (const phase of ["custodian-entry", "custodian-fork"]) {
+      if (options.release) assert.throws(() => observe(phase), { value: 15 });
+      else observe(phase);
+      assert.equal(context.errno, 9);
+    }
+    const valid = options.access === 200 && !options.get;
+    assert.deepEqual(
+      calls,
+      Array(2)
+        .fill(valid ? ["get", "query", "release"] : ["get"])
+        .flat(),
+    );
+    assert.deepEqual(
+      observations,
+      ["custodian-entry", "custodian-fork"].map((phase) => [
+        phase,
+        options.get ?? 0,
+        options.access ?? 0,
+        options.access === 0xffffffff
+          ? 0x100000
+          : valid && !options.query
+            ? 0x10000
+            : 0,
+        valid ? (options.query ?? 0) : -1,
+        valid ? (options.release ?? 0) : -1,
+      ]),
+    );
+    assert.deepEqual(
+      cleanup,
+      options.release
+        ? Array(2).fill(["fault-access-release", "mach", 15])
+        : [],
+    );
+  }
+  const entry = source.indexOf('domain_access_observe("custodian-entry")'),
+    reexec = source.indexOf("execv(domain_helper, argv)"),
+    beforeFork = source.indexOf('domain_access_observe("custodian-fork")');
+  assert.ok(
+    entry > 0 &&
+      entry < reexec &&
+      reexec < beforeFork &&
+      beforeFork < source.indexOf("pid_t child = fork()"),
+  );
+});
+
 test("Darwin fault sanitation admits only absent or dead access rights before the original payload exec", async () => {
   const source = await readFile(
       new URL("feasibility-domain.h", SOURCE),
@@ -2246,6 +2492,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
   ]) {
     const calls = [],
       diagnostics = [],
+      lifecycle = [],
       cleanup = [],
       executed = {},
       originalBirth = { pid: 42 },
@@ -2418,6 +2665,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       fprintf(_stream, _format, ...values) {
         diagnostics.push(values);
       },
+      domain_access_diagnostic: (...facts) => lifecycle.push(facts),
       fflush() {},
     };
     const launch = script.runInNewContext(context);
@@ -2456,6 +2704,29 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     );
     const queried = calls.some(([op]) => op === "type"),
       released = calls.some(([op, name]) => op === "release" && name === 200);
+    const got =
+      calls.some(([op, which]) => op === "get" && which === 2) && !options.get;
+    assert.deepEqual(
+      lifecycle,
+      got
+        ? [
+            [
+              "payload",
+              0,
+              options.access ?? 0,
+              options.access === DEAD
+                ? DEAD_NAME
+                : options.query
+                  ? 0
+                  : (options.rights ??
+                    (options.access === 200 ? DEAD_NAME : 0)),
+              queried ? (options.query ?? 0) : -1,
+              released ? (options.release ?? 0) : -1,
+            ],
+          ]
+        : [],
+      label,
+    );
     assert.equal(queried, options.access === 200 && !options.get, label);
     assert.equal(
       released,

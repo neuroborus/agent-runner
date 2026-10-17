@@ -131,6 +131,32 @@ static void domain_policy_check(void) {
   need(!strcmp(hash,domain_record.policy_hash) && !fstat(fd,&after) && !fstatat(domain_root,"policy",&named,AT_SYMLINK_NOFOLLOW) &&
     domain_file_same(&before,&after) && domain_file_same(&before,&named) && !close(fd));
 }
+static void domain_access_diagnostic(const char *phase, kern_return_t got, mach_port_t access,
+                                     mach_port_type_t type, int query, int released) {
+  int saved = errno;
+  fprintf(stderr, "native-darwin-fault-access-lifecycle: phase=%s pid=%d parent=%d uid=%ju euid=%ju gid=%ju egid=%ju get=%d name=%u type=%#x query=%d release=%d\n",
+    phase, getpid(), getppid(), (uintmax_t)getuid(), (uintmax_t)geteuid(),
+    (uintmax_t)getgid(), (uintmax_t)getegid(), got, access, type, query, released);
+  fflush(stderr); errno = saved;
+}
+/* Observe our own public getter only. Its copied send reference belongs to this
+ * call even if the optional type query fails; no message is sent to the port.
+ * Neither a local name nor releasing this copy identifies or clears the slot. */
+static void domain_access_observe(const char *phase) {
+  int saved = errno; task_t self = mach_task_self(); mach_port_t access = MACH_PORT_NULL;
+  kern_return_t got = task_get_special_port(self, TASK_ACCESS_PORT, &access);
+  mach_port_type_t type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
+  int query = -1, released = -1;
+  if (got == KERN_SUCCESS && MACH_PORT_VALID(access)) {
+    query = mach_port_type(self, access, &type);
+    released = mach_port_deallocate(self, access);
+  }
+  domain_access_diagnostic(phase, got, access, type, query, released); errno = saved;
+  if (released != -1 && released != KERN_SUCCESS) {
+    remember_cleanup("fault-access-release", "mach", released);
+    domain_mach(released, "fault-access-release");
+  }
+}
 static void domain_sanitize(void) {
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host, access; natural_t type; mach_vm_address_t address;
@@ -149,6 +175,8 @@ static void domain_sanitize(void) {
     fflush(stderr);
   }
   /* A failed query cannot authorize another operation on an uninspected name. */
+  if (access_query != KERN_SUCCESS)
+    domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query, -1);
   domain_mach(access_query, "fault-access-kind");
   if (MACH_PORT_VALID(access)) {
     bool harmless = access_type == MACH_PORT_TYPE_DEAD_NAME;
@@ -157,12 +185,14 @@ static void domain_sanitize(void) {
     /* Release only the getter's inspected reference, never an unrelated right. */
     if (access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME))
       released = mach_port_deallocate(self, access);
+    domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query,
+      access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME) ? released : -1);
     if (released != KERN_SUCCESS) {
       remember("fault-access-release", "mach", released);
       remember_cleanup("fault-access-release", "mach", released);
     }
     if (!harmless || released != KERN_SUCCESS) failure(126);
-  }
+  } else domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, -1, -1);
   domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
   domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
   domain_mach(task_set_special_port(self,TASK_RESOURCE_NOTIFY_PORT,MACH_PORT_NULL), "fault-notify-port");
@@ -294,6 +324,7 @@ static void domain_start(int argc, char **argv) {
       !strcmp(domain_record.helper_hash, argv[6]) && !strcmp(domain_record.policy_hash, argv[7]) && domain_record.uid == 90001 && domain_record.gid == 90002, "fault-reexec-binding");
     domain_transfer();
   } else {
+  domain_access_observe("custodian-entry");
   posix_check(mkdir(domain_path, 0700), "fault-root-create");
   domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); posix_check(domain_root, "fault-root-open");
   domain_initialize(domain_root, true);
@@ -350,6 +381,7 @@ static void domain_start(int argc, char **argv) {
   int in[2], out[2], err[2], ready[2], release[2];
   posix_check(pipe(in), "fault-pipe"); posix_check(pipe(out), "fault-pipe"); posix_check(pipe(err), "fault-pipe");
   posix_check(pipe(ready), "fault-pipe"); posix_check(pipe(release), "fault-pipe");
+  domain_access_observe("custodian-fork");
   pid_t child = fork(); posix_check(child, "fault-fork");
   if (!child) {
     alarm(20); posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
