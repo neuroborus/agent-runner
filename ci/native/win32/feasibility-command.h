@@ -45,7 +45,7 @@ static PSECURITY_DESCRIPTOR command_protection[3];
 static struct command_preflight_resources {
   BOOL active, impersonating, comReady;
   HANDLE token, medium, launch, mutableNull, event, gateRead;
-  EVT_HANDLE metadata, enumerator, subscription, item, query, queryItem;
+  EVT_HANDLE metadata, enumerator, subscription, item, query, queryItem, queryContext;
   EVT_HANDLE capture[16];
   BCRYPT_ALG_HANDLE algorithm;
   BCRYPT_HASH_HANDLE hash;
@@ -87,6 +87,7 @@ static BOOL command_capture_close(void) {
   for (unsigned i = 0; i < 16; i++) if (!command_event_close(&command_preflight_owned.capture[i])) ok = FALSE;
   if (!command_event_close(&command_preflight_owned.queryItem)) ok = FALSE;
   if (!command_event_close(&command_preflight_owned.query)) ok = FALSE;
+  if (!command_event_close(&command_preflight_owned.queryContext)) ok = FALSE;
   if (!command_event_close(&command_subscription)) ok = FALSE;
   if (!command_event_close(&command_bookmark)) ok = FALSE;
   if (!release_handle(&command_event, "command-event-close")) ok = FALSE;
@@ -525,36 +526,122 @@ static void command_query_time(FILETIME time, WCHAR text[40]) {
   ULARGE_INTEGER ticks;ticks.LowPart=time.dwLowDateTime;ticks.HighPart=time.dwHighDateTime;
   invariant(swprintf_s(text,40,L"%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ",value.wYear,value.wMonth,value.wDay,value.wHour,value.wMinute,value.wSecond,ticks.QuadPart%10000000)>0,"command-subscription-query");
 }
-/* This bounded query diagnoses generation versus subscription delivery. It
- * never enters the decoder, advances a bookmark or satisfies the control. */
+/* Optional diagnostic fields never enter the strict admission XML decoder. */
+struct command_query_counts {
+  DWORD pid, gate, successRead, sid, type, pidGate, candidates;
+  DWORD pidGateReadSid, pidGateReadType, pidGateReadSidType, loss, unavailable;
+};
+static const WCHAR *command_query_string(const EVT_VARIANT *value, const BYTE *buffer, DWORD length) {
+  if(value->Type!=EvtVarTypeString)return NULL;
+  ULONG_PTR first=(ULONG_PTR)value->StringVal,base=(ULONG_PTR)buffer;
+  if(first<base||first-base>=length||(first-base)%sizeof(WCHAR))return NULL;
+  size_t available=(length-(first-base))/sizeof(WCHAR),used=wcsnlen_s(value->StringVal,available);
+  return used&&used<available&&used<4096?value->StringVal:NULL;
+}
+static BOOL command_query_number(const EVT_VARIANT *value, const BYTE *buffer, DWORD length, ULONGLONG *number) {
+  switch(value->Type){
+    case EvtVarTypeUInt16:*number=value->UInt16Val;return TRUE;
+    case EvtVarTypeUInt32:case EvtVarTypeHexInt32:*number=value->UInt32Val;return TRUE;
+    case EvtVarTypeUInt64:case EvtVarTypeHexInt64:*number=value->UInt64Val;return TRUE;
+  }
+  const WCHAR *text=command_query_string(value,buffer,length);if(!text)return FALSE;
+  unsigned base=10,index=0;if(text[0]==L'0'&&(text[1]==L'x'||text[1]==L'X')){base=16;index=2;}
+  if(!text[index])return FALSE;ULONGLONG result=0;
+  for(;text[index];index++){WCHAR c=text[index];unsigned digit;
+    if(c>=L'0'&&c<=L'9')digit=c-L'0';else if(c>=L'a'&&c<=L'f')digit=c-L'a'+10;else if(c>=L'A'&&c<=L'F')digit=c-L'A'+10;else return FALSE;
+    if(digit>=base||result>((~(ULONGLONG)0)-digit)/base)return FALSE;result=result*base+digit;
+  }
+  *number=result;return TRUE;
+}
+static int command_query_sid(const EVT_VARIANT *value, const BYTE *buffer, DWORD length) {
+  if(value->Type==EvtVarTypeSid){
+    ULONG_PTR first=(ULONG_PTR)value->SidVal,base=(ULONG_PTR)buffer;
+    if(first<base||first-base>length||length-(first-base)<8)return -1;
+    SID *sid=value->SidVal;
+    if(sid->SubAuthorityCount>SID_MAX_SUB_AUTHORITIES||GetSidLengthRequired(sid->SubAuthorityCount)>length-(first-base)||!IsValidSid(sid))return -1;
+    return EqualSid(sid,userSid)?1:0;
+  }
+  const WCHAR *text=command_query_string(value,buffer,length);if(!text||wcsncmp(text,L"S-1-",4))return -1;
+  ULONGLONG number=0;unsigned components=0,digits=0;
+  for(unsigned i=4;;i++){WCHAR c=text[i];
+    if(c>=L'0'&&c<=L'9'){
+      unsigned digit=c-L'0';ULONGLONG limit=components?MAXDWORD:0xffffffffffffULL;
+      if(number>(limit-digit)/10)return -1;number=number*10+digit;digits++;
+    }else if(!c||c==L'-'){
+      if(!digits||++components>16)return -1;if(!c)break;number=0;digits=0;
+    }else return -1;
+  }
+  return components>=2?(!wcscmp(text,userText)?1:0):-1;
+}
+static DWORD command_query_fields(const EVT_VARIANT *values, const BYTE *buffer, DWORD length, struct command_query_counts *counts) {
+  ULONGLONG event=0,pid=0,mask=0,keywords=0;
+  BOOL eventKnown=command_query_number(&values[0],buffer,length,&event)&&(event==4656||event==4663||event==1101||event==1102);
+  if(eventKnown&&(event==1101||event==1102)){counts->loss++;return ERROR_SUCCESS;}
+  BOOL pidKnown=command_query_number(&values[1],buffer,length,&pid)&&pid>0&&pid<=MAXDWORD;
+  const WCHAR *object=command_query_string(&values[2],buffer,length),*type=command_query_string(&values[6],buffer,length);
+  BOOL maskKnown=command_query_number(&values[3],buffer,length,&mask)&&mask<=MAXDWORD;
+  BOOL keywordsKnown=command_query_number(&values[4],buffer,length,&keywords)&&((keywords&0x0030000000000000ULL)==0x0010000000000000ULL||(keywords&0x0030000000000000ULL)==0x0020000000000000ULL);
+  int sid=command_query_sid(&values[5],buffer,length);
+  BOOL actor=pidKnown&&pid==GetCurrentProcessId();BOOL gate=object&&!_wcsicmp(object,command_paths[3]);
+  BOOL read=eventKnown&&event==4663&&maskKnown&&(mask&FILE_READ_DATA)&&keywordsKnown&&(keywords&0x0030000000000000ULL)==0x0020000000000000ULL;
+  BOOL subject=sid==1;BOOL file=type&&!wcscmp(type,L"File");
+  counts->pid+=actor;counts->gate+=gate;counts->successRead+=read;counts->sid+=subject;counts->type+=file;
+  counts->pidGate+=actor&&gate;counts->candidates+=actor&&gate&&read;
+  counts->pidGateReadSid+=actor&&gate&&read&&subject;counts->pidGateReadType+=actor&&gate&&read&&file;
+  counts->pidGateReadSidType+=actor&&gate&&read&&subject&&file;
+  return eventKnown&&pidKnown&&object&&maskKnown&&keywordsKnown&&sid>=0&&type?ERROR_SUCCESS:ERROR_INVALID_DATA;
+}
+static DWORD command_query_observe(EVT_HANDLE event, DWORD xmlLength, struct command_query_counts *counts) {
+  if(!command_preflight_owned.queryContext){
+    const WCHAR *paths[]={L"Event/System/EventID",L"Event/EventData/Data[@Name='ProcessId']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='AccessMask']",L"Event/System/Keywords",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='ObjectType']"};
+    command_preflight_owned.queryContext=EvtCreateRenderContext(7,paths,EvtRenderContextValues);
+    if(!command_preflight_owned.queryContext){DWORD error=GetLastError();return error?error:ERROR_INVALID_DATA;}
+  }
+  DWORD length=0,properties=0;BOOL measured=EvtRender(command_preflight_owned.queryContext,event,EvtRenderEventValues,0,NULL,&length,&properties);
+  DWORD error=measured?ERROR_SUCCESS:GetLastError();
+  if(measured||error!=ERROR_INSUFFICIENT_BUFFER)return measured||!error?ERROR_INVALID_DATA:error;
+  if(length<7*sizeof(EVT_VARIANT)||length>65536-xmlLength||command_scanned_bytes+length>8388608)return ERROR_INVALID_DATA;
+  BYTE *buffer=calloc(1,length);if(!buffer)return ERROR_OUTOFMEMORY;
+  DWORD capacity=length;command_scanned_bytes+=capacity;
+  BOOL rendered=EvtRender(command_preflight_owned.queryContext,event,EvtRenderEventValues,capacity,buffer,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
+  if(rendered)error=properties==7&&length>=7*sizeof(EVT_VARIANT)&&length<=capacity?command_query_fields((EVT_VARIANT *)buffer,buffer,length,counts):ERROR_INVALID_DATA;
+  else if(!error)error=ERROR_INVALID_DATA;
+  free(buffer);return error;
+}
+/* Coarser original-event/time diagnostics never deliver, bookmark or admit.
+ * Charge rejected records and both renders to the shared lifetime budgets. */
 static void command_delivery_query(FILETIME first, FILETIME last) {
   WCHAR from[40],to[40],interval[256],query[2048];command_query_time(first,from);command_query_time(last,to);
-  invariant(swprintf_s(interval,256,L" and TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]",from,to)>0,"command-subscription-query");command_audit_query(query,interval);
-  DWORD records=0,bytes=0,candidates=0,error=ERROR_SUCCESS;BOOL complete=FALSE;
+  invariant(swprintf_s(interval,256,L" and TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]",from,to)>0,"command-subscription-query");
+  invariant(swprintf_s(query,2048,L"*[System[(EventID=1101 or EventID=1102)%ls]] or *[System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)%ls]]",interval,interval)>0,"command-subscription-query");
+  DWORD records=0,error=ERROR_SUCCESS,observationError=ERROR_SUCCESS,scannedRecords=command_scanned,scannedBytes=command_scanned_bytes;BOOL complete=FALSE;
+  struct command_query_counts counts={0};
   command_preflight_owned.query=EvtQuery(NULL,L"Security",query,EvtQueryChannelPath|EvtQueryForwardDirection);
-  if(!command_preflight_owned.query)error=GetLastError();
+  if(!command_preflight_owned.query){error=GetLastError();if(!error)error=ERROR_INVALID_DATA;}
   while(command_preflight_owned.query&&!error){command_bound();DWORD count=0,length=0,properties=0;
+    if(command_scanned>=4096){error=ERROR_INVALID_DATA;break;}
     BOOL next=EvtNext(command_preflight_owned.query,1,&command_preflight_owned.queryItem,0,0,&count);
-    if(!next){error=GetLastError();if(error==ERROR_NO_MORE_ITEMS){error=ERROR_SUCCESS;complete=TRUE;}break;}
-    if(count!=1){error=ERROR_INVALID_DATA;break;}
+    if(!next){error=GetLastError();if(error==ERROR_NO_MORE_ITEMS){error=ERROR_SUCCESS;complete=TRUE;}else if(!error)error=ERROR_INVALID_DATA;break;}
+    if(count!=1){error=ERROR_INVALID_DATA;break;}records++;command_scanned++;
     BOOL measured=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,0,NULL,&length,&properties);DWORD measuredError=measured?ERROR_SUCCESS:GetLastError();
-    if(measured||measuredError!=ERROR_INSUFFICIENT_BUFFER){error=measured?ERROR_INVALID_DATA:measuredError;break;}
-    if(length<4||length>65536||(length%2)||command_scanned+records>=4096||command_scanned_bytes+bytes+length>8388608){error=ERROR_INVALID_DATA;break;}
-    BYTE *raw=calloc(1,length);char *encoded=malloc((size_t)length*2+1);
-    if(!raw||!encoded){free(raw);free(encoded);error=ERROR_OUTOFMEMORY;break;}
-    BOOL rendered=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,length,raw,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
-    if(!rendered&&!error)error=ERROR_INVALID_DATA;
-    if(rendered){records++;bytes+=length;for(DWORD i=0;i<length;i++)snprintf(encoded+2*i,3,"%02x",raw[i]);struct xml_result parsed=xml_parse(encoded);
-      const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL;
-      for(unsigned i=0;i<parsed.count;i++){struct xml_field *field=&parsed.fields[i];if(!wcscmp(field->name,L"ProcessId"))process=field->value;else if(!wcscmp(field->name,L"ObjectName"))object=field->value;else if(!wcscmp(field->name,L"EventID"))eventId=field->value;else if(!wcscmp(field->name,L"AccessMask"))mask=field->value;}
-      if(process&&object&&eventId&&mask&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&FILE_READ_DATA))candidates++;}}
-      free(parsed.fields);
-    }
-    free(encoded);free(raw);BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!closed&&!error)error=ERROR_INVALID_DATA;
+    if(measured||measuredError!=ERROR_INSUFFICIENT_BUFFER){error=measured||!measuredError?ERROR_INVALID_DATA:measuredError;break;}
+    if(length<4||length>65536||(length%2)||command_scanned_bytes+length>8388608){error=ERROR_INVALID_DATA;break;}
+    BYTE *raw=calloc(1,length);if(!raw){error=ERROR_OUTOFMEMORY;break;}
+    DWORD capacity=length;command_scanned_bytes+=capacity;
+    BOOL rendered=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,capacity,raw,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
+    if(rendered&&(length<4||length>capacity||(length%2)))error=ERROR_INVALID_DATA;else if(!rendered&&!error)error=ERROR_INVALID_DATA;
+    free(raw);
+    if(!error){DWORD observed=command_query_observe(command_preflight_owned.queryItem,capacity,&counts);if(observed){counts.unavailable++;if(!observationError)observationError=observed;}}
+    BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!closed&&!error)error=ERROR_INVALID_DATA;
+    /* A failed context acquisition is not retried for another record. */
+    if(observationError&&!command_preflight_owned.queryContext)break;
   }
-  BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!command_event_close(&command_preflight_owned.query))closed=FALSE;if(!closed){complete=FALSE;if(!error)error=ERROR_INVALID_DATA;}
+  BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!command_event_close(&command_preflight_owned.query))closed=FALSE;
+  if(!command_event_close(&command_preflight_owned.queryContext))closed=FALSE;if(!closed){complete=FALSE;if(!error)error=ERROR_INVALID_DATA;}
+  complete=complete&&!observationError;
   ULARGE_INTEGER start,end;start.LowPart=first.dwLowDateTime;start.HighPart=first.dwHighDateTime;end.LowPart=last.dwLowDateTime;end.HighPart=last.dwHighDateTime;
-  printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"records\":%lu,\"bytes\":%lu,\"candidates\":%lu,\"error\":%lu,\"complete\":%s,\"gateIdentity\":\"%s\",\"requestedAccess\":%lu,\"performedAccess\":%lu,\"readBytes\":%lu,\"scannedRecords\":%u,\"scannedBytes\":%u,\"audit\":[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld]}",start.QuadPart,end.QuadPart,records,bytes,candidates,error,complete?"true":"false",command_ids[3],(DWORD)(GENERIC_READ|FILE_READ_ATTRIBUTES),(DWORD)FILE_READ_DATA,command_gate_bytes,command_scanned,command_scanned_bytes,
+  printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"records\":%lu,\"bytes\":%lu,\"candidates\":%lu,\"error\":%lu,\"complete\":%s,\"gateIdentity\":\"%s\",\"requestedAccess\":%lu,\"performedAccess\":%lu,\"readBytes\":%lu,\"scannedRecords\":%lu,\"scannedBytes\":%lu,\"brokerPid\":%lu,\"observationError\":%lu,\"lossRecords\":%lu,\"unavailableRecords\":%lu,\"predicates\":{\"pid\":%lu,\"gate\":%lu,\"successRead\":%lu,\"sid\":%lu,\"type\":%lu,\"pidGate\":%lu,\"pidGateReadSid\":%lu,\"pidGateReadType\":%lu,\"pidGateReadSidType\":%lu},\"audit\":[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld]}",start.QuadPart,end.QuadPart,records,(DWORD)(command_scanned_bytes-scannedBytes),counts.candidates,error,complete?"true":"false",command_ids[3],(DWORD)(GENERIC_READ|FILE_READ_ATTRIBUTES),(DWORD)FILE_READ_DATA,command_gate_bytes,scannedRecords,scannedBytes,GetCurrentProcessId(),observationError,counts.loss,counts.unavailable,
+    counts.pid,counts.gate,counts.successRead,counts.sid,counts.type,counts.pidGate,counts.pidGateReadSid,counts.pidGateReadType,counts.pidGateReadSidType,
     command_observed.audit[0],command_observed.audit[1],command_observed.audit[2],command_observed.audit[3],command_observed.audit[4],command_observed.audit[5],command_observed.audit[6],command_observed.audit[7],command_observed.audit[8]);
 }
 static void command_coverage_control(void) {

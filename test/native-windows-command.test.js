@@ -5201,7 +5201,7 @@ test("coverage operation labels preserve native failure classes and bounded repo
       "utf8",
     ),
     start = source.indexOf("function commandCoverageFailure("),
-    end = source.indexOf("/** Interface/configuration", start);
+    end = source.indexOf("\n}", start) + 2;
   assert.ok(start >= 0 && end > start);
   const annotate = new Script(`(${source.slice(start, end)})`).runInNewContext({
     windowsFeasibilityCause,
@@ -5764,6 +5764,8 @@ test("broker subscription retains Windows name variants through native capture, 
     "object",
     "restoration",
     "missing-restoration",
+    "missing-observations",
+    "missing-observations-restoration",
   ]) {
     const missing = fault?.startsWith("missing");
     let observed, capture;
@@ -5831,7 +5833,16 @@ test("broker subscription retains Windows name variants through native capture, 
             readBytes: 32,
             scannedRecords: 0,
             scannedBytes: 0,
+            ...queryObservations(prepared.observer.pid, 1),
           };
+          if (fault.includes("observations"))
+            Object.assign(observed.control.query, {
+              records: 2,
+              bytes: 16,
+              complete: false,
+              observationError: 5,
+              unavailableRecords: 1,
+            });
         }
         return observed;
       };
@@ -5875,25 +5886,265 @@ test("broker subscription retains Windows name variants through native capture, 
   }
 });
 
+const queryPredicateNames = [
+  "pid",
+  "gate",
+  "successRead",
+  "sid",
+  "type",
+  "pidGate",
+  "pidGateReadSid",
+  "pidGateReadType",
+  "pidGateReadSidType",
+];
+const emptyQueryCounts = (count = 0) => ({
+  ...Object.fromEntries(queryPredicateNames.map((name) => [name, count])),
+  candidates: 0,
+  loss: 0,
+  unavailable: 0,
+});
+const queryObservations = (brokerPid, count = 0) => ({
+  brokerPid,
+  observationError: 0,
+  lossRecords: 0,
+  unavailableRecords: 0,
+  predicates: Object.fromEntries(
+    queryPredicateNames.map((name) => [name, count]),
+  ),
+});
+
+test("original diagnostic fields count filter intersections, loss and unavailable data without admission", async () => {
+  const { source } = await commandCaptureProgram();
+  const body = (name) =>
+    new RegExp(
+      `static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const number = body("command_query_number")
+    .replaceAll("value->", "value.")
+    .replace(/\bL(?=["'])/gu, "")
+    .replaceAll("*number=", "set(")
+    .replace(/set\(([^;]+);/gu, "set($1);")
+    .replace("const WCHAR *text", "const text")
+    .replace(/\b(?:unsigned|WCHAR|ULONGLONG)\b/gu, "let")
+    .replace("result=0;", "result=0n;")
+    .replace(
+      "((~(let)0)-digit)/base",
+      "(0xffffffffffffffffn-BigInt(digit))/BigInt(base)",
+    )
+    .replace("result*base+digit", "result*BigInt(base)+BigInt(digit)")
+    .replace("c-'a'+10", "c.charCodeAt(0)-87")
+    .replace("c-'A'+10", "c.charCodeAt(0)-55");
+  const sid = body("command_query_sid")
+    .replaceAll("value->", "value.")
+    .replaceAll("sid->", "sid.")
+    .replace(
+      /ULONG_PTR first=[^;]+;/u,
+      "const first=value.SidVal?.address,base=0;",
+    )
+    .replace("SID *sid", "const sid")
+    .replace("const WCHAR *text", "const text")
+    .replace(/\bL(?=["'])/gu, "")
+    .replace(/\b(?:ULONGLONG|unsigned|WCHAR)\b/gu, "let")
+    .replace("0xffffffffffffULL", "0xffffffffffff");
+  const fields = body("command_query_fields")
+    .replaceAll("counts->", "counts.")
+    .replace(/&values\[(\d)\]/gu, "values[$1]")
+    .replace(/,&(event|pid|mask|keywords)\b/gu, ",value=>$1=value")
+    .replace(/\bL(?=")/gu, "")
+    .replace(/0x([0-9a-f]+)ULL/gu, "0x$1n")
+    .replace("mask&FILE_READ_DATA", "mask&BigInt(FILE_READ_DATA)")
+    .replace("const WCHAR *object", "const object")
+    .replace(",*type=", ",type=")
+    .replace(/BOOL (\w+)=([^;]+);/gu, "let $1=Boolean($2);")
+    .replace(/\b(?:ULONGLONG|int)\b/gu, "let");
+  const api = {
+    TRUE: true,
+    FALSE: false,
+    NULL: null,
+    MAXDWORD: 0xffffffff,
+    ERROR_SUCCESS: 0,
+    ERROR_INVALID_DATA: 13,
+    FILE_READ_DATA: 1,
+    EvtVarTypeUInt16: 6,
+    EvtVarTypeUInt32: 8,
+    EvtVarTypeUInt64: 10,
+    EvtVarTypeHexInt32: 20,
+    EvtVarTypeHexInt64: 21,
+    EvtVarTypeSid: 19,
+    SID_MAX_SUB_AUTHORITIES: 15,
+    userText: identity.userSid,
+    userSid: identity.userSid,
+    command_paths: [null, null, null, "C:\\fixture\\gate"],
+    command_query_string: (value) =>
+      value.Type === 1 &&
+      typeof value.StringVal === "string" &&
+      value.StringVal.length > 0 &&
+      value.StringVal.length < 4096
+        ? value.StringVal
+        : null,
+    GetSidLengthRequired: (count) => 8 + 4 * count,
+    IsValidSid: (value) => value.valid,
+    EqualSid: (value, expected) => value.text === expected,
+    GetCurrentProcessId: () => identity.pid,
+    wcscmp: (a, b) => (a === b ? 0 : 1),
+    wcsncmp: (a, b, size) => (a.slice(0, size) === b.slice(0, size) ? 0 : 1),
+    _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+  };
+  const project = new Script(`
+    function command_query_number(value,buffer,length,set) {${number}}
+    function command_query_sid(value,buffer,length) {${sid}}
+    (values,counts) => {${fields.replaceAll("buffer,length", "null,1024")}}
+  `).runInNewContext(api);
+  const original = [
+    { Type: 6, UInt16Val: 4663n },
+    { Type: 21, UInt64Val: BigInt(identity.pid) },
+    { Type: 1, StringVal: "C:\\FIXTURE\\GATE" },
+    { Type: 20, UInt32Val: 1n },
+    { Type: 21, UInt64Val: 0x8020000000000000n },
+    {
+      Type: 19,
+      SidVal: {
+        address: 128,
+        SubAuthorityCount: 5,
+        valid: true,
+        text: identity.userSid,
+      },
+    },
+    { Type: 1, StringVal: "File" },
+  ];
+  for (const fault of [
+    null,
+    "sid",
+    "type",
+    "both",
+    "pid",
+    "gate",
+    "failure",
+    "access",
+    "loss",
+    "missing",
+    "malformed",
+    "overflow",
+    "sid-bounds",
+    "string-number",
+    "string-sid",
+    "malformed-sid",
+    "malformed-keywords",
+  ]) {
+    const values = structuredClone(original),
+      counts = emptyQueryCounts();
+    if (["sid", "both"].includes(fault))
+      values[5].SidVal.text = "S-1-5-21-10-20-30-1002";
+    if (["type", "both"].includes(fault)) values[6].StringVal = "Pipe";
+    if (fault === "pid") values[1].UInt64Val++;
+    if (fault === "gate") values[2].StringVal = "C:\\fixture\\other";
+    if (fault === "failure") values[4].UInt64Val = 0x8010000000000000n;
+    if (fault === "access") values[3].UInt32Val = 0n;
+    if (fault === "loss") {
+      values.fill({ Type: 0 });
+      values[0] = { Type: 6, UInt16Val: 1101n };
+    }
+    if (fault === "missing") values[5] = { Type: 0 };
+    if (fault === "malformed") values[3] = { Type: 1, StringVal: "0x1tail" };
+    if (fault === "overflow")
+      values[1] = { Type: 1, StringVal: "18446744073709551616" };
+    if (fault === "sid-bounds") values[5].SidVal.address = 1020;
+    if (fault === "string-number")
+      values[4] = { Type: 1, StringVal: "0x8020000000000000" };
+    if (fault === "string-sid")
+      values[5] = { Type: 1, StringVal: identity.userSid };
+    if (fault === "malformed-sid")
+      values[5] = { Type: 1, StringVal: "S-1-5-invalid" };
+    if (fault === "malformed-keywords")
+      values[4].UInt64Val = 0x8030000000000000n;
+    const unavailable = [
+      "missing",
+      "malformed",
+      "overflow",
+      "sid-bounds",
+      "malformed-sid",
+      "malformed-keywords",
+    ].includes(fault);
+    assert.equal(project(values, counts), unavailable ? 13 : 0, fault);
+    const expectedPredicates = {
+      pid: Number(!["loss", "pid", "overflow"].includes(fault)),
+      gate: Number(!["loss", "gate"].includes(fault)),
+      successRead: Number(
+        ![
+          "loss",
+          "failure",
+          "access",
+          "malformed",
+          "malformed-keywords",
+        ].includes(fault),
+      ),
+      sid: Number(
+        ![
+          "loss",
+          "sid",
+          "both",
+          "missing",
+          "sid-bounds",
+          "malformed-sid",
+        ].includes(fault),
+      ),
+      type: Number(!["loss", "type", "both"].includes(fault)),
+      pidGate: Number(!["loss", "pid", "gate", "overflow"].includes(fault)),
+    };
+    for (const [name, expected] of Object.entries(expectedPredicates))
+      assert.equal(counts[name], expected, `${fault}: ${name}`);
+    assert.equal(counts.loss, fault === "loss" ? 1 : 0, fault);
+    assert.equal(
+      counts.candidates,
+      [
+        null,
+        "sid",
+        "type",
+        "both",
+        "missing",
+        "sid-bounds",
+        "string-number",
+        "string-sid",
+        "malformed-sid",
+      ].includes(fault)
+        ? 1
+        : 0,
+      fault,
+    );
+    assert.equal(
+      counts.pidGateReadSid,
+      counts.candidates &&
+        !["sid", "both", "missing", "sid-bounds", "malformed-sid"].includes(
+          fault,
+        )
+        ? 1
+        : 0,
+      fault,
+    );
+    assert.equal(
+      counts.pidGateReadType,
+      counts.candidates && !["type", "both"].includes(fault) ? 1 : 0,
+      fault,
+    );
+    assert.equal(
+      counts.pidGateReadSidType,
+      Math.min(counts.pidGateReadSid, counts.pidGateReadType),
+      fault,
+    );
+    if (fault === "loss")
+      assert.deepEqual(counts, { ...emptyQueryCounts(), loss: 1 });
+  }
+});
+
 test("failed delivery queries only its original interval within capture bounds and closes independent handles", async () => {
   const program = await commandCaptureProgram(),
     body = (name) =>
       new RegExp(
-        `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
         "u",
       ).exec(program.source)[1];
-  let query = body("command_delivery_query");
-  // The existing native XML projection is opaque here; query construction,
-  // bounded enumeration, native results and resource closure execute from source.
-  const start = query.indexOf("for(DWORD i=0;i<length;i++)snprintf"),
-    end =
-      query.indexOf("free(parsed.fields);", start) +
-      "free(parsed.fields);".length;
-  assert.ok(start > 0 && end > start);
-  query =
-    query.slice(0, start) +
-    "candidates+=candidate(raw,length);" +
-    query.slice(end);
+  const query = body("command_delivery_query");
   const queryCode = query
       .replace(
         "WCHAR from[40],to[40],interval[256],query[2048];",
@@ -5907,14 +6158,26 @@ test("failed delivery queries only its original interval within capture bounds a
       .replaceAll("(size_t)", "")
       .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
       .replace("BYTE *raw", "let raw")
-      .replace("char *encoded", "let encoded")
+      .replace(
+        "struct command_query_counts counts={0};",
+        "let counts=emptyQueryCounts();",
+      )
       .replace(/\bL(?=")/gu, "")
       .replace(
-        /&command_preflight_owned\.(queryItem|query)\b/gu,
+        /&command_preflight_owned\.(queryItem|query|queryContext)\b/gu,
         'ref(command_preflight_owned,"$1")',
       )
       .replace(/,&(count|length|properties)\b/gu, ",value=>$1=value")
+      .replaceAll("&counts", "counts")
       .replace(/printf\([^\n]*?,start\.QuadPart/u, "emit(start.QuadPart"),
+    observeCode = body("command_query_observe")
+      .replace(/const WCHAR \*paths\[\]=\{([^;]+)\};/u, "const paths=[$1];")
+      .replaceAll("sizeof(EVT_VARIANT)", "16")
+      .replaceAll("(EVT_VARIANT *)buffer", "buffer")
+      .replace("BYTE *buffer", "let buffer")
+      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+      .replace(/,&(length|properties)\b/gu, ",value=>$1=value")
+      .replace(/\bL(?=")/gu, ""),
     timeCode = body("command_query_time")
       .replace("SYSTEMTIME value;", "let value={};")
       .replace(
@@ -5925,6 +6188,7 @@ test("failed delivery queries only its original interval within capture bounds a
       .replace("ticks.QuadPart%10000000", "ticks.QuadPart%10000000n")
       .replace(/\bL(?=")/gu, ""),
     script = new Script(`
+      function command_query_observe(event,xmlLength,counts) {${observeCode}}
       function command_query_time(time,text) {${timeCode}}
       function command_audit_query(query,interval) {${body("command_audit_query").replace(/\bL(?=")/gu, "")}}
       (first,last) => {${queryCode}}
@@ -5944,13 +6208,37 @@ test("failed delivery queries only its original interval within capture bounds a
     "records",
     "bytes",
     "close",
+    "empty",
+    "context",
+    "values-query",
+    "values-render",
+    "values-properties",
+    "values-missing",
+    "values-bytes",
+    "record-size",
+    "later-records",
+    "later-bytes",
   ]) {
     const f = commandCaptureFixture(program, {
       fault: ["next", "render"].includes(fault) ? fault : null,
-      closeFailures: fault === "close" ? ["query-event", "query"] : [],
+      closeFailures:
+        fault === "close" ? ["query-event", "query", "query-context"] : [],
     });
-    const next = f.api.EvtNext;
-    let receipt, selected;
+    const next = f.api.EvtNext,
+      render = f.api.EvtRender,
+      nativeError = f.api.GetLastError;
+    let receipt,
+      selected,
+      optionalError = null;
+    const unavailable = [
+      "context",
+      "values-query",
+      "values-render",
+      "values-properties",
+      "values-missing",
+      "values-bytes",
+      "record-size",
+    ].includes(fault);
     Object.assign(f.api, {
       userText: identity.userSid,
       GENERIC_READ: 0x80000000,
@@ -5962,10 +6250,68 @@ test("failed delivery queries only its original interval within capture bounds a
       ERROR_OUTOFMEMORY: 14,
       command_gate_bytes: 32,
       command_ids: [null, null, null, "held"],
-      command_records: fault === "records" ? 4096 : 0,
-      command_bytes: fault === "bytes" ? 8388608 : 0,
-      command_scanned: fault === "records" ? 4096 : 0,
-      command_scanned_bytes: fault === "bytes" ? 8388608 : 0,
+      command_records: 0,
+      command_bytes: 0,
+      command_scanned:
+        fault === "records"
+          ? 4096
+          : fault === "later-records"
+            ? 4095
+            : ["bytes", "values-bytes", "later-bytes"].includes(fault)
+              ? 128
+              : 0,
+      command_scanned_bytes:
+        fault === "bytes"
+          ? 8388608
+          : fault === "values-bytes"
+            ? 8388600
+            : fault === "later-bytes"
+              ? 8388488
+              : fault === "later-records"
+                ? 16380
+                : 0,
+      EvtRenderContextValues: 0,
+      EvtRenderEventValues: 0,
+      GetLastError: () => {
+        const value = optionalError;
+        optionalError = null;
+        return value ?? nativeError();
+      },
+      EvtCreateRenderContext: (count, paths, flags) => {
+        assert.equal(count, 7);
+        assert.equal(flags, 0);
+        assert.equal(paths[0], "Event/System/EventID");
+        assert.equal(paths[5], "Event/EventData/Data[@Name='SubjectUserSid']");
+        if (fault === "context") {
+          optionalError = 5;
+          return null;
+        }
+        return "query-context";
+      },
+      EvtRender: (context, event, flags, size, buffer, length, properties) => {
+        if (flags === 1)
+          return render(
+            context,
+            event,
+            flags,
+            size,
+            buffer,
+            length,
+            properties,
+          );
+        assert.equal(context, "query-context");
+        length(fault === "record-size" ? 65536 : 112);
+        properties(fault === "values-properties" ? 6 : 7);
+        if (fault === (size ? "values-render" : "values-query")) {
+          optionalError = 5;
+          return false;
+        }
+        if (!size) {
+          optionalError = 122;
+          return false;
+        }
+        return true;
+      },
       command_coverage_seen: false,
       command_bound: () => {},
       FileTimeToSystemTime: (_time, result) => {
@@ -6001,7 +6347,7 @@ test("failed delivery queries only its original interval within capture bounds a
           f.api.GetLastError = () => 5;
           return null;
         }
-        f.notify(["query-event"]);
+        if (fault !== "empty") f.notify(["query-event"]);
         return "query";
       },
       EvtNext: (handle, size, slot, timeout, flags, count) => {
@@ -6011,8 +6357,14 @@ test("failed delivery queries only its original interval within capture bounds a
         slot.value = events[0] ?? null;
         return result;
       },
-      malloc: () => ({}),
-      candidate: () => 1,
+      emptyQueryCounts,
+      GetCurrentProcessId: () => identity.pid,
+      command_query_fields: (_values, _buffer, length, counts) => {
+        assert.equal(length, 112);
+        if (fault === "values-missing") return 13;
+        Object.assign(counts, { ...emptyQueryCounts(1), candidates: 1 });
+        return 0;
+      },
       emit: (
         from,
         to,
@@ -6027,8 +6379,15 @@ test("failed delivery queries only its original interval within capture bounds a
         readBytes,
         scannedRecords,
         scannedBytes,
-        ...audit
+        brokerPid,
+        observationError,
+        lossRecords,
+        unavailableRecords,
+        ...values
       ) => {
+        const predicates = Object.fromEntries(
+          queryPredicateNames.map((name, i) => [name, values[i]]),
+        );
         receipt = {
           from: from.toString(),
           to: to.toString(),
@@ -6044,7 +6403,12 @@ test("failed delivery queries only its original interval within capture bounds a
           readBytes,
           scannedRecords,
           scannedBytes,
-          audit,
+          brokerPid,
+          observationError,
+          lossRecords,
+          unavailableRecords,
+          predicates,
+          audit: values.slice(queryPredicateNames.length),
         };
       },
     });
@@ -6055,13 +6419,40 @@ test("failed delivery queries only its original interval within capture bounds a
       ),
     );
     assert.equal(selected.includes("ObjectName"), false);
+    assert.equal(selected.includes("SubjectUserSid"), false);
+    assert.equal(selected.includes("ObjectType"), false);
+    assert.ok(
+      selected.includes("EventID=4656 and band(Keywords,4503599627370496)"),
+    );
+    assert.ok(selected.includes("EventID=4663"));
+    assert.ok(selected.includes("EventID=1101 or EventID=1102"));
     assert.equal(receipt.from, epoch.toString());
     assert.equal(receipt.to, (epoch + 100n).toString());
     assert.deepEqual(receipt.audit, f.api.command_observed.audit);
-    assert.equal(receipt.complete, !fault);
+    assert.equal(
+      receipt.complete,
+      !fault || ["empty", "later-bytes"].includes(fault),
+      fault,
+    );
+    assert.equal(
+      receipt.observationError,
+      unavailable
+        ? ["context", "values-query", "values-render"].includes(fault)
+          ? 5
+          : 13
+        : 0,
+      fault,
+    );
+    assert.equal(receipt.unavailableRecords, unavailable ? 1 : 0, fault);
+    if (unavailable) assert.equal(f.api.first, undefined, fault);
+    assert.equal(
+      receipt.records,
+      ["open", "next", "records", "empty"].includes(fault) ? 0 : 1,
+      fault,
+    );
     assert.equal(
       receipt.error,
-      !fault
+      !fault || unavailable || ["empty", "later-bytes"].includes(fault)
         ? 0
         : fault === "next"
           ? 4317
@@ -6070,12 +6461,42 @@ test("failed delivery queries only its original interval within capture bounds a
             : 13,
     );
     assert.equal(f.api.command_coverage_seen, false);
-    assert.equal(f.api.command_records, fault === "records" ? 4096 : 0);
+    assert.equal(f.api.command_records, 0);
+    assert.equal(
+      f.api.command_scanned,
+      receipt.scannedRecords + receipt.records,
+    );
+    assert.equal(
+      f.api.command_scanned_bytes,
+      receipt.scannedBytes + receipt.bytes,
+    );
     assert.deepEqual(
       f.closed,
-      fault === "open" ? [] : ["query-event", "query"],
+      fault === "open"
+        ? []
+        : ["records", "empty"].includes(fault)
+          ? ["query"]
+          : [
+              "query-event",
+              "query",
+              ...(!["next", "render", "bytes", "context"].includes(fault)
+                ? ["query-context"]
+                : []),
+            ],
     );
-    if (fault === "close") assert.equal(f.cleanup.length, 2);
+    if (fault === "close") assert.equal(f.cleanup.length, 3);
+    if (["later-records", "later-bytes"].includes(fault)) {
+      f.api.EvtNext = next;
+      f.notify(["later-capture"]);
+      assert.throws(
+        () => f.capture(),
+        (code) => code === 126,
+      );
+      assert.equal(
+        f.calls.some(([name]) => name === "bookmark"),
+        false,
+      );
+    }
     if (!fault)
       assert.deepEqual(
         [
@@ -6086,7 +6507,7 @@ test("failed delivery queries only its original interval within capture bounds a
           receipt.performedAccess,
           receipt.readBytes,
         ],
-        [1, 8, 1, 0x80000080, 1, 32],
+        [1, 120, 1, 0x80000080, 1, 32],
       );
   }
   const value = {
@@ -6113,6 +6534,7 @@ test("failed delivery queries only its original interval within capture bounds a
     readBytes: 32,
     scannedRecords: 0,
     scannedBytes: 0,
+    ...queryObservations(identity.pid, 1),
     audit: [5, 0, 1, 2, 0, 1, 0, 32, 0],
   };
   for (const [field, replacement] of [
@@ -6127,6 +6549,25 @@ test("failed delivery queries only its original interval within capture bounds a
     ["readBytes", 31],
     ["gateIdentity", "foreign"],
     ["requestedAccess", 2],
+    ["brokerPid", identity.pid + 1],
+    ["observationError", -1],
+    ["observationError", 0x100000000],
+    ["observationError", 5],
+    ["unavailableRecords", 2],
+    ["lossRecords", 1],
+    ["predicates", null],
+    ["predicates", { ...observed.control.query.predicates, pid: 0 }],
+    [
+      "predicates",
+      { ...observed.control.query.predicates, pidGateReadSidType: 2 },
+    ],
+    [
+      "predicates",
+      {
+        ...observed.control.query.predicates,
+        privateField: "untrusted-query-field",
+      },
+    ],
     ["audit", []],
     ["audit", Array(9).fill("untrusted-query-field")],
     ["audit", Array(9).fill(7)],
@@ -6154,6 +6595,35 @@ test("failed delivery queries only its original interval within capture bounds a
       return true;
     },
   );
+  for (const complete of [true, false]) {
+    const diagnostic = structuredClone(observed);
+    if (complete)
+      Object.assign(diagnostic.control.query, {
+        records: 0,
+        bytes: 0,
+        candidates: 0,
+        ...queryObservations(identity.pid),
+      });
+    else
+      Object.assign(diagnostic.control.query, {
+        records: 2,
+        bytes: 16,
+        complete: false,
+        observationError: 5,
+        unavailableRecords: 1,
+      });
+    assert.throws(
+      () => windowsCommandBrokerCoverage(value, diagnostic),
+      (error) => {
+        assert.equal(error.brokerCoverage?.reason, "delivery-missing");
+        assert.deepEqual(
+          error.brokerCoverage.control.query,
+          diagnostic.control.query,
+        );
+        return true;
+      },
+    );
+  }
 });
 
 async function commandCoverageControlProgram() {
@@ -6523,6 +6993,7 @@ test("production coverage joins a fresh audited open to native capture and rejec
               readBytes: api.command_gate_bytes,
               scannedRecords: api.command_scanned,
               scannedBytes: api.command_scanned_bytes,
+              ...queryObservations(prepared.observer.pid),
             };
           },
           failure: (code) => {

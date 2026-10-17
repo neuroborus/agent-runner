@@ -135,6 +135,65 @@ function commandCoverageFailure(operation, error) {
   );
   return error;
 }
+function commandQueryPredicates(query, broker) {
+  const counts = query.predicates;
+  need(
+    query.brokerPid === broker.pid &&
+      Number.isInteger(query.observationError) &&
+      query.observationError >= 0 &&
+      query.observationError <= 0xffffffff &&
+      [query.lossRecords, query.unavailableRecords].every(
+        (count) =>
+          Number.isSafeInteger(count) && count >= 0 && count <= query.records,
+      ) &&
+      Boolean(query.unavailableRecords) === Boolean(query.observationError) &&
+      (!query.complete || query.observationError === 0) &&
+      counts &&
+      Object.keys(counts).sort().join() ===
+        "gate,pid,pidGate,pidGateReadSid,pidGateReadSidType,pidGateReadType,sid,successRead,type" &&
+      Object.values(counts).every(
+        (count) =>
+          Number.isSafeInteger(count) &&
+          count >= 0 &&
+          count <= query.records - query.lossRecords,
+      ),
+  );
+  need(
+    counts.pidGate <= Math.min(counts.pid, counts.gate) &&
+      counts.pidGate >=
+        Math.max(
+          0,
+          counts.pid + counts.gate - (query.records - query.lossRecords),
+        ) &&
+      query.candidates <= Math.min(counts.pidGate, counts.successRead) &&
+      query.candidates >=
+        Math.max(
+          0,
+          counts.pidGate +
+            counts.successRead -
+            (query.records - query.lossRecords),
+        ) &&
+      counts.pidGateReadSid <= Math.min(query.candidates, counts.sid) &&
+      counts.pidGateReadType <= Math.min(query.candidates, counts.type) &&
+      counts.pidGateReadSid >=
+        Math.max(
+          0,
+          query.candidates + counts.sid - (query.records - query.lossRecords),
+        ) &&
+      counts.pidGateReadType >=
+        Math.max(
+          0,
+          query.candidates + counts.type - (query.records - query.lossRecords),
+        ) &&
+      counts.pidGateReadSidType <=
+        Math.min(counts.pidGateReadSid, counts.pidGateReadType) &&
+      counts.pidGateReadSidType >=
+        Math.max(
+          0,
+          counts.pidGateReadSid + counts.pidGateReadType - query.candidates,
+        ),
+  );
+}
 /** Interface/configuration claims cannot admit a broker. Join independent held
  * token/object reads to the actual decoder's fresh native success delivery. */
 export function windowsCommandBrokerCoverage(value, observation) {
@@ -237,7 +296,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
           .filter((key) => key !== "audit")
           .sort()
           .join() ===
-          "bytes,candidates,complete,error,from,gateIdentity,performedAccess,readBytes,records,requestedAccess,scannedBytes,scannedRecords,to" &&
+          "brokerPid,bytes,candidates,complete,error,from,gateIdentity,lossRecords,observationError,performedAccess,predicates,readBytes,records,requestedAccess,scannedBytes,scannedRecords,to,unavailableRecords" &&
         (!Object.hasOwn(query, "audit") ||
           (Array.isArray(query.audit) &&
             query.audit.length === 9 &&
@@ -270,7 +329,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
         query.records >= 0 &&
         query.records + query.scannedRecords <= 4096 &&
         Number.isSafeInteger(query.bytes) &&
-        query.bytes >= query.records * 4 &&
+        query.bytes >= (query.complete ? query.records * 4 : 0) &&
         query.bytes <= query.records * 65536 &&
         query.bytes + query.scannedBytes <= 8388608 &&
         Number.isSafeInteger(query.candidates) &&
@@ -281,6 +340,7 @@ export function windowsCommandBrokerCoverage(value, observation) {
         query.performedAccess === 1 &&
         query.readBytes === 32),
   );
+  if (query !== null) commandQueryPredicates(query, broker);
   if (
     ![before, after].every(
       (v) =>

@@ -2710,6 +2710,31 @@ barrier times/counts and at most eight typed event candidates with failed
 predicates. Missing delivery and rejected attribution have distinct fixed causes;
 neither establishes an absent API. Raw XML and object paths stay out of this
 diagnosis, and all original SID/logon/access/time comparisons remain mandatory.
+On missing delivery, the retrospective query retains only the original event IDs
+and FILETIME interval, without the subscription's SID/ObjectType restriction.
+The subscription itself remains unchanged. Scalar predicate counts distinguish
+the original broker PID, case-insensitive held gate name, successful 4663
+FILE_READ_DATA use, SID and exact File type, with their actor/object/read and
+SID/type intersections. Loss events remain a separate count. The receipt binds
+the broker PID, original held identity, interval and original read/access facts;
+it exposes no unrelated event contents or names and never advances a bookmark.
+
+Optional typed field rendering uses a separately owned
+[EvtCreateRenderContext](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtcreaterendercontext)
+and bounded [EvtRender](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtrender) values;
+missing, malformed or unavailable fields make the observation incomplete.
+Its first native read failure (or local invalid-data status) and unavailable-record
+count remain separate from query/enumeration and cleanup failures. Known partial
+predicate counts cannot establish absence or delivery. Every examined diagnostic
+record consumes the same lifetime 4096-record budget as subscription capture,
+including rejected or unrenderable records. XML and typed-value render
+reservations share the same
+8-MiB budget and combined 64-KiB per-record ceiling; later capture retains those
+charges. No budget, original query interval or deadline resets, extra gate I/O,
+control, subscription retry or policy setter are introduced. Complete zero
+results and historical matches both preserve the original missing-delivery
+refusal. These observations supply diagnostics, not an audit repair or native
+acceptance; matching Windows CI must establish the next supported correction.
 Fixed operation labels distinguish startup, cleanup admission, baseline reads,
 installation, effective reads, delivery and the final join. They preserve the
 original native or transport cause and report local admission failures even when

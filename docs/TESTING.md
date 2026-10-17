@@ -698,9 +698,18 @@ the source subscription contract, native control predicate and real decoder/join
 Missing delivery and mismatched attribution still refuse all probes and attempt
 independent restoration; restoration failure remains separate. Source execution
 also checks the diagnostic query's original FILETIME interval, shared capture
-limits and independent query/event closure. A query candidate cannot satisfy the
-subscription control. These injections establish no Windows event generation,
-native XPath/SDK acceptance or hosted audit delivery.
+limits and independent query/event/render-context closure. Only that failure-only
+query drops the subscription's SID/type filter. Actual predicate bodies count
+original actor, held-name and successful read matches and SID/type intersections,
+with loss and unavailable observations separate. Fixtures cover zero results,
+filter exclusion, malformed or missing fields, original native render failures,
+strict scalar/identity/interval/access carriers, and separate closure failures.
+All examined records and XML/value render reservations consume the shared
+4096-record/8-MiB budget and combined 64-KiB record ceiling; subsequent capture
+cannot reuse that budget. Historical matches and incomplete diagnostics still
+refuse probes and preserve independent restoration and separate cleanup failure.
+These focused portable fixtures add no slow-tier requirement and establish no
+Windows event generation, native XPath/SDK acceptance or hosted audit delivery.
 The production coverage sequence also drives the actual policy/SACL installer,
 gate open/read, bounded delivery loop and capture/bookmark bodies together.
 Injected APIs verify the fresh `CreateFileW` pathname open under the held broker
