@@ -3537,24 +3537,73 @@ test("Windows experiment receipt rejection still settles the real file observer"
   assert.equal(f.rawTasks.size, 0);
 });
 
-test("Windows explicit recovery can retire an observer after its cached finish failure", async () => {
+test("Windows lost original observer finish waits for bridge exit without replaying finish", async () => {
   const f = rawPreparation({ experiment: true }),
-    native = await openWindowsExperimentNative(f.prepared, {
-      ...f.options,
-      reopen: true,
-    });
-  let finishes = 0;
-  f.beforeRawCommand = (operation) => {
-    if (operation === "finish" && ++finishes === 2)
-      throw new Error("observer finish acknowledgement lost");
+    open = f.options.openPreparation,
+    exited = Promise.withResolvers(),
+    waiting = Promise.withResolvers(),
+    primary = new Error("observer finish acknowledgement lost");
+  let original;
+  f.options.openPreparation = async (...args) => {
+    const channel = await open(...args);
+    if (original) return channel;
+    original = channel;
+    return {
+      ...channel,
+      async send(frame) {
+        await channel.send(frame);
+        if (frame.startsWith("finish ")) throw primary;
+      },
+      get exited() {
+        waiting.resolve();
+        return exited.promise;
+      },
+    };
   };
-  await assert.rejects(
-    native.close(),
-    (error) => error.settlement.status === "RETAINED",
+  const native = await openWindowsExperimentNative(f.prepared, {
+    ...f.options,
+    reopen: true,
+  });
+  const observer = native.files.verification.identity,
+    bridge = native.files.verification.bridge,
+    beforeClose = f.rawEvents.length,
+    closing = native.close(),
+    rejected = assert.rejects(
+      closing,
+      (error) =>
+        error.settlement.status === "RETIRED" && error.errors.includes(primary),
+    );
+  await waiting.promise;
+  assert.equal(native.close(), closing);
+  assert.equal(f.actors.get(bridge.pid).retired, false);
+  assert.ok(
+    f.rawEvents
+      .slice(beforeClose)
+      .some((frame) =>
+        new RegExp(`^verify-retain [0-9]+ ${observer.pid} `, "u").test(frame),
+      ),
+    "fresh recovery must hold the original observer before waiting for exit",
   );
-  // Independent raw process observations now show all old owners retired;
-  // cached channel failure cannot stand in for, or prevent, fresh proof.
-  for (const actor of f.actors.values()) actor.retired = true;
+  for (const actor of [observer, bridge]) {
+    f.actors.get(actor.pid).retired = true;
+    f.rawExitCodes.set(actor.pid, 126);
+  }
+  exited.resolve({ code: 126, signal: null });
+  await rejected;
+  // Neither the lost finish nor bridge exit establishes retirement. Recovery
+  // has now independently rejoined the old births, whole Jobs and owned tasks.
+  const originalFinishes = [...f.files.entries()]
+    .filter(
+      ([file]) =>
+        file.includes(
+          `windows-files-${native.files.verification.input.nonce}-`,
+        ) && /-[0-9]+\.json$/u.test(file),
+    )
+    .map(([, bytes]) => JSON.parse(bytes))
+    .filter((record) =>
+      Buffer.from(record.commandHex, "hex").toString().startsWith("finish "),
+    );
+  assert.equal(originalFinishes.length, 1);
   const before = f.rawEvents.length;
   assert.equal((await native.recover()).status, "RETIRED");
   assert.ok(
@@ -3680,6 +3729,116 @@ test("Windows post-startup open rejection retains original owners until fresh co
     [1, 2],
     "recovery must not repeat verification",
   );
+});
+
+test("Windows original compiler refusal waits for bridge exit before independent recovery", async () => {
+  for (const fault of [null, "job", "exit"]) {
+    const f = rawPreparation({ experiment: true }),
+      source = await compilerTrustFixture({
+        entries: f.prepared.entries,
+        files: f.files,
+        identity: f.rawFileId,
+        inspect: f.objectRead,
+        result: 8,
+        closed: 0,
+      }),
+      exited = Promise.withResolvers(),
+      waiting = Promise.withResolvers(),
+      cleanup = new AbortController(),
+      open = f.options.readerOptions.open,
+      openObserver = f.options.openPreparation;
+    let native,
+      primary,
+      opens = 0;
+    f.options.openPreparation = async (...args) => {
+      const channel = await openObserver(...args),
+        nonce = args[1][6];
+      let closed = false;
+      return {
+        ...channel,
+        close() {
+          if (closed) return;
+          closed = true;
+          // A failed observer's native EOF exit is only a later
+          // process observation; its original task still needs recovery.
+          for (const pid of [channel.pid, f.rawTasks.get(nonce)?.pid])
+            if (pid) {
+              f.actors.get(pid).retired = true;
+              f.rawExitCodes.set(pid, 126);
+            }
+          channel.close();
+        },
+      };
+    };
+    f.options.readerOptions.open = async (...args) => ({
+      ...(await open(...args)),
+      get exited() {
+        waiting.resolve();
+        return exited.promise;
+      },
+    });
+    f.accessNative = async (operation, args, _, __, sequence) => {
+      if (operation !== "open") return;
+      opens++;
+      try {
+        return await source.open(Number(args[0]), sequence);
+      } catch (cause) {
+        primary = cause;
+        throw cause;
+      }
+    };
+    await assert.rejects(
+      openWindowsExperimentNative(f.prepared, {
+        ...f.options,
+        reopen: true,
+        retain: (owner) => {
+          native = owner;
+        },
+      }),
+      (cause) => cause === primary,
+    );
+    const original = native.reader.retirementBinding,
+      observer = native.files.verification.identity,
+      before = f.rawEvents.length,
+      closing = native.close({ signal: cleanup.signal }),
+      rejected = assert.rejects(
+        closing,
+        (cause) => cause.settlement.status === (fault ? "RETAINED" : "RETIRED"),
+      );
+    await waiting.promise;
+    assert.deepEqual(native.reader.retirementBinding, original);
+    assert.equal(f.actors.get(observer.pid).retired, false);
+    assert.ok(
+      !f.rawEvents
+        .slice(before)
+        .some((frame) => frame.startsWith("verify-recovery-jobs ")),
+    );
+    if (fault === "exit") {
+      cleanup.abort(new Error("original bridge exit remains pending"));
+      await rejected;
+      assert.deepEqual(native.reader.retirementBinding, original);
+      assert.equal(f.actors.get(observer.pid).retired, false);
+    }
+    for (const actor of [original.helper, original.bridge]) {
+      f.actors.get(actor.pid).retired = true;
+      f.rawExitCodes.set(actor.pid, 126);
+    }
+    if (fault === "job") f.coldDamage = "surviving-compiler-job";
+    exited.resolve({ code: 126, signal: null });
+    await rejected;
+    if (fault) {
+      assert.equal(f.actors.get(observer.pid).retired, false);
+      await assert.rejects(native.files.settleFiles());
+      f.coldDamage = null;
+      assert.equal((await native.recover()).status, "RETIRED");
+    }
+    assert.equal(primary.custodyReaderFailure.trust.result, "0x00000008");
+    assert.equal(primary.custodyReaderFailure.trust.closeResult, "0x00000000");
+    assert.deepEqual(source.calls, [1, 2]);
+    assert.equal(opens, 2);
+    assert.equal(f.rawTasks.size, 0);
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
+  }
 });
 
 test("actual experiment compiler open requires zero trust and unchanged content/signature pins", async () => {

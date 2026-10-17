@@ -32,7 +32,7 @@ import {
   windowsGitPolicyArguments,
 } from "./git.js";
 
-import { windowsCustodyChannel } from "./channel.js";
+import { windowsCustodyChannel, waitForWindowsCustodyExit } from "./channel.js";
 import { createWindowsCustodyVerifier } from "./custody-verifier.js";
 import {
   integer,
@@ -154,7 +154,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     );
   };
   const observe = async (name, ...args) => {
-    const action = serial.then(async () => {
+    const work = serial.then(async () => {
       guard(name === "finish");
       const next = ++sequence;
       requireWindows(next <= (packageBound ? 1048576 : 32768));
@@ -192,6 +192,9 @@ export function createWindowsCustodyReader(value, options = {}) {
       guard(name === "finish");
       return message.value;
     });
+    // A terminal reader fault also ends work waiting on its dependent
+    // observer's journal, without closing that observer or replaying the work.
+    const action = owner?.wait ? owner.wait(work) : work;
     serial = action.catch((error) => {
       nativeException("windows-custody-command", error);
       firstCause ??= error;
@@ -2566,6 +2569,12 @@ export function createWindowsCustodyReader(value, options = {}) {
       } catch (cause) {
         failed = true;
         owner?.close();
+        let cleanupCause;
+        try {
+          await waitForWindowsCustodyExit(owner, cleanupSignal);
+        } catch (error) {
+          cleanupCause = error;
+        }
         try {
           await save("retained", {
             command: lastCommand ?? null,
@@ -2581,7 +2590,13 @@ export function createWindowsCustodyReader(value, options = {}) {
           independent: false,
           closed: false,
           emergencyCleanup: false,
-          cause,
+          cause: cleanupCause
+            ? new AggregateError(
+                [cause, cleanupCause],
+                "Windows reader exit unsettled",
+                { cause },
+              )
+            : cause,
           primaryCause: firstCause ?? null,
         };
       }

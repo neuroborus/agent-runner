@@ -166,6 +166,23 @@ export function windowsAdmissionChannel(
   };
 }
 
+/** Bridge exit only orders the next independent observation, never retirement. */
+export async function waitForWindowsCustodyExit(channel, signal) {
+  const exited = channel?.exited;
+  if (!exited) return;
+  const finish = signal ?? AbortSignal.timeout(30000);
+  finish.throwIfAborted();
+  const stopped = Promise.withResolvers(),
+    abort = () => stopped.reject(finish.reason);
+  finish.addEventListener("abort", abort, { once: true });
+  if (finish.aborted) abort();
+  try {
+    await Promise.race([exited, stopped.promise]);
+  } finally {
+    finish.removeEventListener("abort", abort);
+  }
+}
+
 /** Dedicated private control transport; payload/helper output remains data. */
 export function windowsCustodyChannel(
   child,
@@ -208,17 +225,18 @@ export function windowsCustodyChannel(
       deadlineMs <= WINDOWS_CUSTODY_DEADLINE_MS,
   );
   timer = schedule(fail, deadlineMs);
-  const completion = wait(
-    new Promise((resolve) => {
-      child.once("error", fail);
-      child.once("close", (code, signal) => {
-        finished = true;
-        if (pending || writes || buffer.length || code !== 0 || signal !== null)
-          fail();
-        resolve({ code, signal });
-      });
-    }),
-  );
+  // Fault rejection settles callers immediately; it does not mean the bridge
+  // has exited. Recovery waits for that separate event before observing births.
+  const exited = new Promise((resolve) => {
+    child.once("error", fail);
+    child.once("close", (code, signal) => {
+      finished = true;
+      if (pending || writes || buffer.length || code !== 0 || signal !== null)
+        fail();
+      resolve({ code, signal });
+    });
+  });
+  const completion = wait(exited);
   completion.catch(() => {});
   child.stdin.on("error", fail);
   child.stdout.on("error", fail);
@@ -341,6 +359,7 @@ export function windowsCustodyChannel(
   return {
     pid: child.pid,
     wait,
+    exited,
     get completion() {
       return completion.then((value) => {
         requireWindows(!failure && !writes && !queue.length && !buffer.length);

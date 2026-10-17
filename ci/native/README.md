@@ -6528,6 +6528,17 @@ every old observer as well. Dependency release matches the original reader and
 bridge births and task digest. Recovery holds old observer births before their
 closure; that custody is not retirement proof. Its own successful finish cannot
 settle an old owner.
+Terminal reader failure rejects outstanding commands, including commands waiting
+for a dependent observer's journal. The channel separately exposes the bridge's
+actual close event: fault-rejected completion can precede that event. Failed
+reader closure waits for bridge exit within the existing cleanup signal before
+fresh original-owner observation. A failed observer finish likewise remains
+cached and is never sent again. Fresh recovery first retains the old observer
+births and proves its registered readers retired, then waits for the original
+bridge exit before the independent observer-retirement pass. These waits provide
+ordering only. Reader registration, child/whole-Job retirement and
+owned-task removal still require matching independent proof before the dependent
+observer can close, followed by independent proof for that original observer.
 Explicit recovery after a cached failure never replays startup, native opens or
 compilation. A separate 30-second cleanup signal interrupts pending IPC and does
 not renew the original observer deadline. Cancellation covers queued reader work,

@@ -1437,6 +1437,17 @@ A wrong original birth cannot release registration, and recovery holds the old
 observer births before closing them without treating that custody as retirement.
 A later observer's success, missing task or watchdog exit cannot retire an old
 owner. Original preparation and cleanup/persistence causes remain separate.
+Raw transport regressions distinguish terminal failure from bridge exit while
+rejecting outstanding sends, receives and dependent waits. Actual reader commands
+also reject when their journal is still pending, without sending late work.
+The compiler-trust and preparation callers retain the original nonzero trust
+refusal and separate CLOSE result while delaying bridge exit. Recovery must wait
+for that exit, then independently prove the original births, whole Jobs and tasks;
+a surviving compiler Job or an expired cleanup signal retains registration and
+the dependent observer. A consumed observer finish with a lost acknowledgement
+is cached once; fresh recovery must retain the old observer before waiting for
+its bridge exit and independently proving original observer retirement. These
+portable fixtures exercise ordering, not native trust success or retirement.
 Distinct regressions reject unsigned/source/output substitution, publication changes
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers

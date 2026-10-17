@@ -467,6 +467,10 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
             }
           }
         }
+        // The fresh observer already holds the old births and has proved each
+        // original reader retired. Keep those references through bridge exit
+        // before its second pass independently retires the original observers.
+        await files.waitForExit(signal);
       },
     });
   const native = {

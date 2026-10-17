@@ -1475,6 +1475,74 @@ test("Windows private transport rejects truncation, malformed bytes, unread fram
     await written;
   }
 });
+test("Windows terminal reader faults settle outstanding work before bridge exit without retiring it", async () => {
+  for (const diagnostic of [false, true]) {
+    const f = transport({ holdWrites: true }),
+      work = [
+        f.channel.send("open 2 14\n"),
+        f.channel.receive(),
+        f.channel.wait(new Promise(() => {})),
+        f.channel.completion,
+      ],
+      rejected = Promise.all(
+        work.map((value) => value.catch((cause) => cause)),
+      );
+    let exited = false;
+    f.channel.exited.then(() => {
+      exited = true;
+    });
+    if (diagnostic)
+      f.child.stdout.write(
+        '\x1e{"phase":"reader-failure","sequence":2,"command":"open","source":"custody.h","line":1}\n',
+      );
+    else f.child.stdout.emit("end");
+    const causes = await rejected;
+    assert.ok(causes[0] instanceof Error);
+    assert.ok(causes.every((cause) => cause === causes[0]));
+    assert.equal(!!causes[0].custodyReaderFailure, diagnostic);
+    assert.equal(exited, false);
+    f.child.emit("close", 126, null);
+    assert.deepEqual(await f.channel.exited, { code: 126, signal: null });
+    assert.throws(() => f.channel.settle());
+  }
+});
+
+test("Windows reader failure rejects queued commands while the dependent journal remains pending", async () => {
+  const f = fixture(),
+    reader = f.reader(),
+    fault = Promise.withResolvers(),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers(),
+    primary = new Error("original reader EOF");
+  fault.promise.catch(() => {});
+  f.owner.wait = (value) => Promise.race([value, fault.promise]);
+  await reader.start();
+  const persist = f.options.persist;
+  f.options.persist = async (record) => {
+    await persist(record);
+    if (record.phase === "open") {
+      entered.resolve();
+      await release.promise;
+    }
+  };
+  const first = reader.open(3),
+    queued = reader.open(2),
+    rejected = Promise.all(
+      [first, queued].map((value) =>
+        assert.rejects(value, (cause) => cause === primary),
+      ),
+    );
+  await entered.promise;
+  fault.reject(primary);
+  await rejected;
+  assert.ok(!f.events.some((event) => /^open [0-9]/u.test(event)));
+  release.resolve();
+  const result = await reader.close();
+  assert.equal(result.status, "RETAINED");
+  assert.equal(result.primaryCause, primary);
+  assert.ok(!f.events.some((event) => /^open [0-9]/u.test(event)));
+});
+
 test("Windows custody EOF refuses a lost response while reader diagnostics remain failures, never receipts", async () => {
   const source = await readFile(
       new URL("./custody-reader.c", import.meta.url),

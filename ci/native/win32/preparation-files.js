@@ -17,7 +17,7 @@ import {
   location,
   windowsVerificationArguments,
 } from "./custody-protocol.js";
-import { windowsCustodyChannel } from "./channel.js";
+import { windowsCustodyChannel, waitForWindowsCustodyExit } from "./channel.js";
 import { createWindowsCustodyVerifier } from "./custody-verifier.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
 import {
@@ -782,6 +782,11 @@ export function createWindowsPreparationFiles(input, options = {}) {
         { clock, maximumSubjects: 128, deadline },
       );
     },
+    waitForExit(signal = cleanupSignal) {
+      // Recovery retains these original births before waiting for their exit.
+      // This synchronization neither closes admission nor proves retirement.
+      return waitForWindowsCustodyExit(owner, signal);
+    },
     async settleFiles() {
       // Ordinary verification also disposes its observer here; only explicit
       // cleanup/recovery closes the wider admission gate.
@@ -834,7 +839,13 @@ export function createWindowsPreparationFiles(input, options = {}) {
           emergencyCleanup: false,
           nativeEventSha256: observationDigest({ final, bridge }),
         };
-      })());
+      })().catch((cause) => {
+        failed ??= cause;
+        closeIndependentOwner();
+        // Cache a possibly consumed finish. Recovery must retain this owner's
+        // births before waiting for exit and independently proving retirement.
+        throw cause;
+      }));
     },
   };
   return api;
