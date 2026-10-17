@@ -18,6 +18,7 @@ import { darwinSystemRecipes } from "./system.js";
 import {
   DARWIN_HELPER_NAMES,
   darwinBuildOperation,
+  darwinBuildSdk,
   runDarwinBuildCommand,
 } from "./build.js";
 
@@ -116,7 +117,13 @@ export function normalizeDarwinPreparation(
       bootstrap.context.executionId === "build" &&
       bootstrap.context.tier === "system",
   );
-  observationObject(value.command, ["helper", "toolCdhashes"]);
+  observationObject(value.command, [
+    "helper",
+    "toolCdhashes",
+    ...(purpose === "experiment" ? ["sdk"] : []),
+  ]);
+  if (purpose === "experiment")
+    darwinBuildSdk(value.command.sdk, value.command.sdk?.path);
   observationObject(value.command.helper, ["path", "sha256", "cdhash"]);
   requireObservation(
     absolute(value.command.helper.path) &&

@@ -1004,6 +1004,7 @@ export function createDarwinCustodyReader(value, options = {}) {
       observationObject(actual, [
         "object",
         "sha256",
+        ...(path.basename(file) === "SDKSettings.json" ? ["sdk"] : []),
         ...(Object.hasOwn(actual, "macho") ? ["macho"] : []),
       ]);
       if (actual.macho) actual.macho = macho(actual.macho);
@@ -1011,6 +1012,14 @@ export function createDarwinCustodyReader(value, options = {}) {
         uid: 0,
         gid: actual.object.gid,
       });
+      if (path.basename(file) === "SDKSettings.json") {
+        actual.sdk = snapshot(actual.sdk, { uid: 0, gid: actual.sdk.gid });
+        requireDarwin(
+          actual.sdk.directory &&
+            actual.sdk.uid === 0 &&
+            !(actual.sdk.mode & 0o22),
+        );
+      }
       requireDarwin(
         !object.directory &&
           object.uid === 0 &&

@@ -66,6 +66,29 @@ export const darwinCompilerArguments = (
   "-lsandbox",
 ];
 
+/** A persisted experimental SDK observation is never native admission. */
+export function darwinBuildSdk(sdk, root) {
+  observationObject(sdk, ["path", "dev", "ino", "settingsSha256"]);
+  requireDarwin(
+    sdk.path === root &&
+      typeof root === "string" &&
+      path.isAbsolute(root) &&
+      path.normalize(root) === root &&
+      !root.endsWith("/") &&
+      root.length < 4096 &&
+      !/[\u0000-\u001f\u007f]/u.test(root) &&
+      [sdk.dev, sdk.ino].every(
+        (value) =>
+          typeof value === "string" &&
+          /^(?:0|[1-9][0-9]{0,19})$/u.test(value) &&
+          BigInt(value) <= 18446744073709551615n,
+      ) &&
+      typeof sdk.settingsSha256 === "string" &&
+      /^[a-f0-9]{64}$/u.test(sdk.settingsSha256),
+  );
+  return structuredClone(sdk);
+}
+
 /** Only these vectors can cross the compiler entry. Source/output approval is
  * read before exec; a hash of a generated command is not that approval. */
 export function darwinBuildOperation(request, manifest, output) {
@@ -74,7 +97,18 @@ export function darwinBuildOperation(request, manifest, output) {
     ["reviewed", "experiment"].includes(purpose) &&
       purpose === (manifest.darwinPreparation?.purpose ?? "reviewed"),
   );
-  const operation = (value) => ({ ...purposeData(manifest), ...value });
+  const sdk =
+    purpose === "experiment"
+      ? darwinBuildSdk(
+          manifest.darwinPreparation.command.sdk,
+          manifest.environment.SDKROOT,
+        )
+      : null;
+  const operation = (value) => ({
+    ...purposeData(manifest),
+    ...value,
+    ...(sdk ? { sdk } : {}),
+  });
   observationObject(request, [
     ...(purpose === "experiment" ? ["purpose"] : []),
     "candidateSha",
@@ -114,7 +148,10 @@ export function darwinBuildOperation(request, manifest, output) {
     observationDigest(args) === observationDigest(request.args);
   if (tool.name === "compiler" && equal(["--version"]))
     return operation({ mode: "compiler-version", tool });
-  if (tool.name === "sdk" && equal(["--show-sdk-build-version"]))
+  if (
+    tool.name === "sdk" &&
+    equal([...(sdk ? ["--sdk", sdk.path] : []), "--show-sdk-build-version"])
+  )
     return operation({ mode: "sdk-version", tool });
   for (const helper of manifest.helpers) {
     requireDarwin(DARWIN_HELPER_NAMES.includes(helper.name));
@@ -252,6 +289,8 @@ export async function runDarwinBuildCommand(
       (request.purpose !== "experiment" ||
         typeof reader.compilerPolicy === "function"),
   );
+  if (request.purpose === "experiment")
+    darwinBuildSdk(operation.sdk, request.env.SDKROOT);
   const targetSha256 =
     operation.mode === "sign"
       ? entry.targetSha256
@@ -268,7 +307,12 @@ export async function runDarwinBuildCommand(
     operation.target ?? "-",
     String(Math.max(1, Math.floor(request.deadlineMs / 1000))),
     ...(request.purpose === "experiment"
-      ? [operation.header?.sha256 ?? "-"]
+      ? [
+          operation.header?.sha256 ?? "-",
+          operation.sdk.dev,
+          operation.sdk.ino,
+          operation.sdk.settingsSha256,
+        ]
       : []),
   ];
   const save = (record) =>

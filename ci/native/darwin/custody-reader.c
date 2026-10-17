@@ -1319,6 +1319,15 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
     need(fd >= 0 && !fstat(fd, &held) && held.st_uid == 0 && !(held.st_mode & 022)); no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }
+  struct entry sdk = {.fd = -1};
+  const char *leaf = strrchr(name, '/');
+  if (!cache && leaf && !strcmp(leaf, "/SDKSettings.json")) {
+    size_t length = (size_t)(leaf - name); need(length < sizeof(sdk.path));
+    memcpy(sdk.path, name, length); sdk.path[length] = 0;
+    sdk.fd = open(sdk.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(sdk.fd >= 0 && !fstat(sdk.fd, &sdk.stat) && S_ISDIR(sdk.stat.st_mode) &&
+      sdk.stat.st_uid == 0 && !(sdk.stat.st_mode & 022)); no_acl(sdk.fd); stable(&sdk);
+  }
   struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
   strcpy(value.kind, cache ? "cache" : "data"); strcpy(value.path, name);
   need(value.fd >= 0 && !fstat(value.fd, &value.stat) && S_ISREG(value.stat.st_mode) && value.stat.st_uid == 0 &&
@@ -1326,7 +1335,11 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
   printf("{\"object\":"); identity(&value);
   if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
   else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); } }
-  stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat)); need(!close(value.fd)); putchar('}');
+  stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat));
+  if (sdk.fd >= 0) {
+    stable(&sdk); no_acl(sdk.fd); fputs(",\"sdk\":", stdout); identity(&sdk); need(!close(sdk.fd));
+  }
+  need(!close(value.fd)); putchar('}');
 }
 #endif
 /* Read-only provider preparation lane. The approved plan admits each source,

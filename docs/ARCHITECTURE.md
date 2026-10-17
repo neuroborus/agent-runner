@@ -127,8 +127,21 @@ birth and parks until the independent reader holds its fresh audit domain. A
 rejected SDK therefore retains command ownership without authorizing a tool.
 Failure settlement checks original commands/domains before observer closure,
 then independently revalidates original commands and observers without replay.
-The unsafe installed SDK remains a blocker; canonicalization already exists and
-no supported safe alternative or native build success is established.
+Experiment acquisition filters the canonical default SDK and then only the
+documented standalone CLT SDK, canonicalizing and deduplicating candidates before
+seed staging or compilation. Journaled discovery remains intact. JavaScript
+ancestry/settings filtering supplies no native admission. The command declaration
+binds the selected directory device/inode and settings digest; explicit SDK
+arguments bind compiler discovery, version queries and compiler roots. The build
+owner rejects other SDK dependencies before reading their bytes, including
+canonical aliases, while retaining compiler resource headers. The sealed entry
+applies the existing native SDK guards before the experiment version query
+and compilation and holds/rechecks the same directory through completion. The
+existing build-input reader additionally returns its held SDK directory with
+settings; build evidence and cold loading rejoin both native identities and pins
+without discovery or recompilation. Native refusal is terminal. Reviewed version-6
+vectors, fixed command count and native bounds remain unchanged. Safe installed
+CLT metadata, actual building and independent retirement remain unestablished.
 Cold-loading rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
 admission even before the private report directory exists. Original retirement and
 held outputs use separately retired reader sessions. ABI journal records and later

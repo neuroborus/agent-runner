@@ -246,8 +246,85 @@ export async function acquireDarwinExperimentBuild(
     requireObservation(absolute(value));
     return fs.realpath(value);
   };
-  const compiler = await discover(["--find", "clang"]),
-    SDKROOT = await discover(["--show-sdk-path"]),
+  // These observations only reject unsafe candidates. Native held reads and
+  // the sealed compiler entry independently establish admission later.
+  const seen = new Set();
+  const inspectSdk = async (candidate, alternative = false) => {
+    try {
+      const canonical = await fs.realpath(candidate);
+      requireObservation(
+        absolute(canonical) &&
+          canonical.length < 4096 &&
+          !/[\u0000-\u001f\u007f]/u.test(canonical),
+      );
+      if (seen.has(canonical)) return null;
+      seen.add(canonical);
+      if (alternative)
+        requireObservation(
+          canonical.startsWith("/Library/Developer/CommandLineTools/SDKs/") &&
+            (await fs.realpath("/Library/Developer/CommandLineTools")) ===
+              "/Library/Developer/CommandLineTools",
+        );
+      let root;
+      for (let parent = canonical, depth = 0; depth < 32; depth++) {
+        const before = await fs.lstat(parent);
+        requireObservation(
+          before.isDirectory() &&
+            !before.isSymbolicLink() &&
+            before.uid === 0 &&
+            !(before.mode & 0o22) &&
+            (await fs.realpath(parent)) === parent,
+        );
+        const after = await fs.lstat(parent);
+        requireObservation(
+          ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+            (key) => before[key] === after[key],
+          ),
+        );
+        if (parent === canonical) root = before;
+        if (parent === "/") {
+          const settings = path.join(canonical, "SDKSettings.json"),
+            stat = await fs.lstat(settings);
+          requireObservation(await protectedInstalledInput(settings, stat, fs));
+          const settingsSha256 = digest(await read(settings, 536870912, true));
+          const current = await fs.lstat(canonical);
+          requireObservation(
+            [root.dev, root.ino].every(
+              (value) => Number.isSafeInteger(value) && value >= 0,
+            ) &&
+              ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+                (key) => root[key] === current[key],
+              ),
+          );
+          return {
+            path: canonical,
+            dev: String(root.dev),
+            ino: String(root.ino),
+            settingsSha256,
+          };
+        }
+        parent = path.dirname(parent);
+      }
+    } catch (cause) {
+      if (options.signal?.aborted) throw cause;
+      // An unverifiable candidate cannot be adopted. There is only one
+      // documented alternative, and no reselection after seed admission.
+    }
+    return null;
+  };
+  const defaultSdk = (
+    await run("/usr/bin/xcrun", ["--show-sdk-path"])
+  ).stdout.trim();
+  requireObservation(absolute(defaultSdk));
+  const sdk =
+    (await inspectSdk(defaultSdk)) ??
+    (await inspectSdk(
+      "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      true,
+    ));
+  requireObservation(sdk);
+  const SDKROOT = sdk.path,
+    compiler = await discover(["--sdk", SDKROOT, "--find", "clang"]),
     sourceDirectory = "/Library/native-poc-" + observationDigest(binding),
     staging = directory + "-seed",
     output = path.join(directory, "platform-build"),
@@ -307,6 +384,9 @@ export async function acquireDarwinExperimentBuild(
   };
   await input(compiler);
   await input(path.join(SDKROOT, "SDKSettings.json"));
+  requireObservation(
+    inputs.get(path.join(SDKROOT, "SDKSettings.json")) === sdk.settingsSha256,
+  );
   await input("/usr/lib/dyld");
   await observeDarwinPfCapabilities(SDKROOT, compiler, {
     context: {
@@ -407,7 +487,12 @@ export async function acquireDarwinExperimentBuild(
     runAttempt: job.runAttempt,
     jobBindingSha256: observationDigest(binding),
     executionId: "build",
-    closureSha256: observationDigest({ sources, tools, inputs: [...inputs] }),
+    closureSha256: observationDigest({
+      sources,
+      tools,
+      inputs: [...inputs],
+      sdk,
+    }),
     selectedSystemSha256: null,
   };
   const entries = [
@@ -492,10 +577,11 @@ export async function acquireDarwinExperimentBuild(
       reportDirectory: directory,
       bindingSha256: observationDigest({ binding, sources, tools }),
       sdkSha256: observationDigest([...inputs]),
-      buildSha256: observationDigest({ sources, tools, environment }),
+      buildSha256: observationDigest({ sources, tools, environment, sdk }),
     },
     command: {
       helper: { ...seeds[1] },
+      sdk,
       toolCdhashes: Object.fromEntries(
         tools.map((tool) => [tool.name, tool.cdhash]),
       ),

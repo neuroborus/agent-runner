@@ -148,6 +148,21 @@ proof before observer finish and full independent revalidation afterward.
 Missing/replaced births, surviving descendants, incomplete census and cancelled
 cleanup retain exclusion; existing lost-finish coverage prohibits replay.
 No fixture supplies a safe replacement SDK, native build or retirement proof.
+The same acquisition fixture covers rejected or unavailable defaults followed by
+the one documented CLT candidate, a safe default without alternative discovery,
+canonical CLT aliases, duplicate candidates, unavailable/escaping/unsafe
+alternatives, unstable ancestry and refused settings. Closed-command regressions
+reject unqualified or substituted SDK queries and changed arguments/declarations
+before effects. Dependency parsing and acquisition reject other installed SDKs
+and aliases into them before installed-byte reads, while accepting compiler
+resource headers. The actual native SDK-admission body runs with injected
+directory, ACL, identity and settings reads; its original mode gate precedes both
+experiment SDK queries and compilation. The custody adapter requires the native SDK directory
+snapshot for settings, and cold-read fixtures reject changed directory/settings
+identities or pins without rediscovery or compilation. Original SDK-refusal
+retirement and lost-finish cases remain required. These cases use the existing
+fast gate and explicit native harness, adding no slow-tier assignment. Actual CLT
+metadata, SDK compilation and independent retirement require fresh matching macOS.
 The existing custody-channel fixture carries those numeric diagnostics, malformed
 metadata and the original guard through failed completion; output supplies no
 receipt, new compiler attempt or retirement evidence.

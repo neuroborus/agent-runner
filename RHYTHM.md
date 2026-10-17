@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Select one installed SDK before native build admission
+
+Darwin experiment acquisition filters the discovered SDK and one documented CLT
+candidate before seed staging. The selected canonical directory identity and
+settings pin bind compiler discovery, version reporting, compilation and cold
+reconstruction. Native guards and independent held reads remain authoritative;
+refusal causes no reselection or replay. This keeps an unsafe default from hiding
+a separately installed candidate without changing installed inputs, reviewed
+version-6 admission or native bounds. Actual safe CLT metadata, successful building
+and independent retirement remain matching-host obligations.
+
 ## 2026-10-17 — Separate socket-transfer controls from original admission
 
 An original Windows read/edit duplication refusal can observe separate fresh

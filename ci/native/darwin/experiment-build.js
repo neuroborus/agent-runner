@@ -15,7 +15,11 @@ import {
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
 } from "./experiment-build-inputs.js";
-import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
+import {
+  DARWIN_HELPER_NAMES,
+  darwinCompilerArguments,
+  darwinBuildSdk,
+} from "./build.js";
 import {
   createDarwinBuildEffects,
   darwinBuildRecords as recordsFor,
@@ -44,6 +48,23 @@ const jobContext = (job) =>
     ),
   );
 
+function isDarwinExperimentDependency(file, directory, sdk) {
+  return (
+    typeof file === "string" &&
+    path.isAbsolute(file) &&
+    path.normalize(file) === file &&
+    (path.dirname(file) === directory ||
+      file.startsWith(sdk + "/") ||
+      // Developer roots also contain compiler resources, but another SDK
+      // cannot supply dependencies for the selected SDK.
+      (!file.includes("/SDKs/") &&
+        ((file.startsWith("/Applications/") &&
+          file.includes("/Contents/Developer/")) ||
+          file.startsWith("/Library/Developer/CommandLineTools/"))) ||
+      file.startsWith("/usr/include/"))
+  );
+}
+
 /** Parse Clang's bounded Make dependency data, including escaped spaces and
  * continuation lines. These paths are observed build inputs, never approvals. */
 export function darwinExperimentDependencies(bytes, source, directory, sdk) {
@@ -69,22 +90,16 @@ export function darwinExperimentDependencies(bytes, source, directory, sdk) {
   requireObservation(
     words.includes(source) &&
       words.length <= 2048 &&
-      words.every(
-        (file) =>
-          path.isAbsolute(file) &&
-          path.normalize(file) === file &&
-          (path.dirname(file) === directory ||
-            file.startsWith(sdk + "/") ||
-            (/^\/Applications\//u.test(file) &&
-              file.includes("/Contents/Developer/")) ||
-            file.startsWith("/Library/Developer/CommandLineTools/") ||
-            file.startsWith("/usr/include/")),
-      ),
+      words.every((file) => isDarwinExperimentDependency(file, directory, sdk)),
   );
   return [...new Set(words)].sort();
 }
 
 export function darwinExperimentBuildInput(prepared, job, directory) {
+  const sdk = darwinBuildSdk(
+    prepared?.command?.sdk,
+    prepared?.environment?.SDKROOT,
+  );
   observationObject(prepared, [
     "purpose",
     "job",
@@ -131,6 +146,13 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
         path.join(prepared.environment.SDKROOT, "SDKSettings.json"),
         "/usr/lib/dyld",
       ].every((file) => prepared.inputs.some((input) => input.path === file)),
+  );
+  requireObservation(
+    prepared.inputs.some(
+      (input) =>
+        input.path === path.join(sdk.path, "SDKSettings.json") &&
+        input.sha256 === sdk.settingsSha256,
+    ),
   );
   normalizeExperimentJob(prepared.job);
   observationObject(prepared.bootstrapSeed, ["path", "sha256", "acquisition"]);
@@ -215,6 +237,7 @@ async function candidateSources(prepared, options) {
     );
 }
 async function observe(prepared, commands, reader, options, previous) {
+  const selectedSdk = prepared.command.sdk;
   const reads = [],
     inputs = new Map(
       prepared.inputs.map((input) => [input.path, input.sha256]),
@@ -231,7 +254,18 @@ async function observe(prepared, commands, reader, options, previous) {
         hash(value.nativeEventSha256),
     );
     reads.push(value.nativeEventSha256);
+    return value;
   };
+  const settings = await held(
+    path.join(selectedSdk.path, "SDKSettings.json"),
+    selectedSdk.settingsSha256,
+  );
+  requireObservation(
+    typeof settings.object?.identity === "string" &&
+      typeof settings.sdk?.identity === "string" &&
+      settings.sdk.identity.split(":")[0] === selectedSdk.dev &&
+      settings.sdk.identity.split(":")[3] === selectedSdk.ino,
+  );
   for (const source of prepared.sources)
     await held(path.join(prepared.sourceDirectory, source.name), source.sha256);
   for (const tool of prepared.tools) await held(tool.path, tool.sha256);
@@ -329,8 +363,15 @@ async function observe(prepared, commands, reader, options, previous) {
         (source) => path.join(prepared.sourceDirectory, source.name) === input,
       );
       if (source) continue;
-      const file = await (options.fs ?? filesystem).realpath(input),
-        pin = prior ? prior.get(file) : digest(await readInput(file));
+      const file = await (options.fs ?? filesystem).realpath(input);
+      requireObservation(
+        isDarwinExperimentDependency(
+          file,
+          prepared.sourceDirectory,
+          selectedSdk.path,
+        ),
+      );
+      const pin = prior ? prior.get(file) : digest(await readInput(file));
       requireObservation(
         hash(pin) && (!inputs.has(file) || inputs.get(file) === pin),
       );
@@ -383,13 +424,18 @@ async function observe(prepared, commands, reader, options, previous) {
       reads.push(actual.nativeEventSha256);
       runtime.set(dependency, actual);
     }
-  for (const [file, pin] of inputs) await held(file, pin);
+  for (const [file, pin] of inputs)
+    if (file !== path.join(selectedSdk.path, "SDKSettings.json"))
+      await held(file, pin);
   const installed = await reader.build();
   requireObservation(
     installed.purpose === "experiment" &&
       installed.osBuild === prepared.binding.osBuild,
   );
   const sdk = {
+    path: selectedSdk.path,
+    identity: settings.sdk.identity,
+    settingsIdentity: settings.object.identity,
     build: commands[1].stdout.trim(),
     inputs: [...inputs]
       .map(([path, sha256]) => ({ path, sha256 }))
@@ -525,7 +571,11 @@ export async function prepareDarwinExperimentBuild(
       }
     };
     await run(prepared.tools[0], ["--version"]);
-    await run(prepared.tools[1], ["--show-sdk-build-version"]);
+    await run(prepared.tools[1], [
+      "--sdk",
+      prepared.environment.SDKROOT,
+      "--show-sdk-build-version",
+    ]);
     requireObservation(
       /^(?:Apple )?clang version /u.test(commands[0].stdout) &&
         /^[A-Za-z0-9.]+\n?$/u.test(commands[1].stdout),

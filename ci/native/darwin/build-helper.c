@@ -49,6 +49,51 @@ static void protected_input(const char *path, const char *pin, int installed) {
     actual.st_ctimespec.tv_sec == stat.st_ctimespec.tv_sec && actual.st_ctimespec.tv_nsec == stat.st_ctimespec.tv_nsec);
   no_acl(held); need(!close(held));
 }
+/* Hold the selected SDK across its query or compilation. Preliminary selector
+ * metadata is only an expected identity; these native predicates admit it. */
+static int selected_sdk(const char *sdk, const char *dev, const char *ino, const char *settings_pin) {
+  char canonical[PATH_MAX]; struct stat stat;
+  int sdk_resolved = realpath(sdk, canonical) != NULL, sdk_resolve_error = errno;
+  int sdk_equal = -1, sdk_stat = -2, sdk_stat_error = -1, sdk_kind = -1, sdk_owner = -1, sdk_writable = -1;
+  bool sdk_ok = sdk_resolved && (sdk_equal = !strcmp(sdk, canonical)) &&
+    (sdk_stat = lstat(sdk, &stat), sdk_stat_error = errno, !sdk_stat) &&
+    (sdk_kind = S_ISDIR(stat.st_mode)) && (sdk_owner = stat.st_uid == 0) &&
+    (sdk_writable = !!(stat.st_mode & 022), !sdk_writable);
+  if (!sdk_ok) {
+    int sdk_error = errno;
+    fprintf(stderr, "native-darwin-sdk: realpath=%d realpath-errno=%d equal=%d lstat=%d lstat-errno=%d kind=%d owner=%d writable=%d\n",
+      sdk_resolved, sdk_resolve_error, sdk_equal, sdk_stat, sdk_stat_error, sdk_kind, sdk_owner, sdk_writable);
+    if (sdk_stat == 0)
+      fprintf(stderr, "native-darwin-sdk-metadata: uid=%ju gid=%ju mode=%#o dev=%ju inode=%ju\n",
+        (uintmax_t)stat.st_uid, (uintmax_t)stat.st_gid, (unsigned)stat.st_mode, (uintmax_t)stat.st_dev, (uintmax_t)stat.st_ino);
+    fflush(stderr); errno = sdk_error;
+  }
+  need(sdk_ok);
+  ancestors(sdk);
+  int sdk_fd = directory(sdk, 0, stat.st_gid, stat.st_mode & 07777);
+  no_acl(sdk_fd);
+#ifdef NATIVE_CI_EXPERIMENT
+  struct stat held, named;
+  need(!fstat(sdk_fd, &held) && file_stat_same(&stat, &held) &&
+    !lstat(sdk, &named) && file_stat_same(&held, &named));
+  char *end; errno = 0;
+  need(*dev && strlen(dev) <= 20 && strspn(dev, "0123456789") == strlen(dev));
+  unsigned long long expected_dev = strtoull(dev, &end, 10); need(!errno && !*end);
+  errno = 0;
+  need(*ino && strlen(ino) <= 20 && strspn(ino, "0123456789") == strlen(ino));
+  unsigned long long expected_ino = strtoull(ino, &end, 10); need(!errno && !*end);
+  need((uintmax_t)held.st_dev == expected_dev && (uintmax_t)held.st_ino == expected_ino);
+  char settings[PATH_MAX];
+  need(snprintf(settings, sizeof(settings), "%s/SDKSettings.json", sdk) < sizeof(settings));
+  protected_input(settings, settings_pin, 1);
+  need(!fstat(sdk_fd, &named) && file_stat_same(&held, &named) &&
+    !lstat(sdk, &named) && file_stat_same(&held, &named));
+  no_acl(sdk_fd); return sdk_fd;
+#else
+  (void)dev; (void)ino; (void)settings_pin;
+  need(!close(sdk_fd)); return -1;
+#endif
+}
 /* sudo preserves only standard descriptors. Create the tool pipes inside this
  * sealed entry and return bounded bytes as data on the private control pipe. */
 static void capture(int out, int err, unsigned char *output, size_t *out_size,
@@ -99,13 +144,14 @@ static void publish(int work, const char *cwd, const char *leaf) {
 static void expire(int signal) { (void)signal; _exit(124); }
 int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
-  const int expected_argc = 12;
+  const int expected_argc = 15;
 #else
   const int expected_argc = 11;
 #endif
   need(argc == expected_argc && getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 &&
     getenv("CI") && !strcmp(getenv("CI"), "true") && getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
-  /* mode, tool, SHA, cdhash, private output, SDK, source, SHA, target, seconds */
+  /* mode, tool, SHA, cdhash, private output, SDK, source, SHA, target, seconds;
+   * experiment adds header SHA, selected SDK device/inode and settings SHA. */
   const char *mode = argv[1], *tool = argv[2], *cwd = argv[5], *sdk = argv[6], *source = argv[7], *target = argv[9];
   unsigned seconds = number(argv[10]); need(seconds > 0 && seconds <= 30);
   need(signal(SIGALRM, expire) != SIG_ERR); alarm(seconds);
@@ -119,6 +165,12 @@ int main(int argc, char **argv) {
   printf("{\"helper\":"); emit(inspect(getpid())); puts("}"); fflush(stdout); control('P');
   protected_input(tool, argv[3], 1); signature(tool, argv[4]);
   const char *publication = NULL;
+#ifdef NATIVE_CI_EXPERIMENT
+  int sdk_fd = -1; struct stat sdk_identity;
+  if (!strcmp(mode, "sdk-version") || !strcmp(mode, "compile"))
+    sdk_fd = selected_sdk(sdk, argv[12], argv[13], argv[14]);
+  if (sdk_fd >= 0) need(!fstat(sdk_fd, &sdk_identity));
+#endif
   char *vector[32] = {(char *)tool, NULL};
 #ifdef NATIVE_CI_EXPERIMENT
   char purpose_header[PATH_MAX], dependencies[PATH_MAX];
@@ -126,29 +178,18 @@ int main(int argc, char **argv) {
   if (!strcmp(mode, "compiler-version")) {
     need(!strcmp(tool, "/usr/bin/clang")); vector[1] = "--version";
   } else if (!strcmp(mode, "sdk-version")) {
-    need(!strcmp(tool, "/usr/bin/xcrun")); vector[1] = "--show-sdk-build-version";
+    need(!strcmp(tool, "/usr/bin/xcrun"));
+#ifdef NATIVE_CI_EXPERIMENT
+    vector[1] = "--sdk"; vector[2] = (char *)sdk; vector[3] = "--show-sdk-build-version";
+#else
+    vector[1] = "--show-sdk-build-version";
+#endif
   } else if (!strcmp(mode, "compile")) {
     need(!strcmp(tool, "/usr/bin/clang")); protected_input(source, argv[8], 0);
-    char canonical[PATH_MAX]; struct stat stat;
-    int sdk_resolved = realpath(sdk, canonical) != NULL, sdk_resolve_error = errno;
-    int sdk_equal = -1, sdk_stat = -2, sdk_stat_error = -1, sdk_kind = -1, sdk_owner = -1, sdk_writable = -1;
-    bool sdk_ok = sdk_resolved && (sdk_equal = !strcmp(sdk, canonical)) &&
-      (sdk_stat = lstat(sdk, &stat), sdk_stat_error = errno, !sdk_stat) &&
-      (sdk_kind = S_ISDIR(stat.st_mode)) && (sdk_owner = stat.st_uid == 0) &&
-      (sdk_writable = !!(stat.st_mode & 022), !sdk_writable);
-    if (!sdk_ok) {
-      int sdk_error = errno;
-      fprintf(stderr, "native-darwin-sdk: realpath=%d realpath-errno=%d equal=%d lstat=%d lstat-errno=%d kind=%d owner=%d writable=%d\n",
-        sdk_resolved, sdk_resolve_error, sdk_equal, sdk_stat, sdk_stat_error, sdk_kind, sdk_owner, sdk_writable);
-      if (sdk_stat == 0)
-        fprintf(stderr, "native-darwin-sdk-metadata: uid=%ju gid=%ju mode=%#o dev=%ju inode=%ju\n",
-          (uintmax_t)stat.st_uid, (uintmax_t)stat.st_gid, (unsigned)stat.st_mode, (uintmax_t)stat.st_dev, (uintmax_t)stat.st_ino);
-      fflush(stderr); errno = sdk_error;
-    }
-    need(sdk_ok);
-    ancestors(sdk);
-    int sdk_fd = directory(sdk, 0, stat.st_gid, stat.st_mode & 07777);
-    no_acl(sdk_fd); need(!close(sdk_fd));
+#ifndef NATIVE_CI_EXPERIMENT
+    selected_sdk(sdk, NULL, NULL, NULL);
+#endif
+    struct stat stat;
     need(strlen(target) > strlen(cwd) + 1 && !strncmp(target, cwd, strlen(cwd)) &&
       target[strlen(cwd)] == '/' && !strchr(target + strlen(cwd) + 1, '/') &&
       strcmp(target + strlen(cwd) + 1, ".") && strcmp(target + strlen(cwd) + 1, ".."));
@@ -218,5 +259,13 @@ int main(int argc, char **argv) {
 #endif
     publish(work, cwd, publication);
   }
+#ifdef NATIVE_CI_EXPERIMENT
+  if (sdk_fd >= 0) {
+    struct stat held, named;
+    need(!fstat(sdk_fd, &held) && file_stat_same(&sdk_identity, &held) &&
+      !lstat(sdk, &named) && file_stat_same(&held, &named));
+    no_acl(sdk_fd); need(!close(sdk_fd));
+  }
+#endif
   need(!close(work)); return 0;
 }

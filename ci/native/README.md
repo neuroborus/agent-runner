@@ -462,11 +462,43 @@ The original SDK passed realpath/equality/lstat/directory-kind and failed root
 ownership at UID501/GID20/mode040755; writability was unsampled. Discovery already
 canonicalizes `xcrun --show-sdk-path`, so canonicalization is not a supported
 remedy for that refusal. No independently safe alternative SDK is established.
-The missing safe installed SDK remains a technical blocker: no selector fallback,
-copy, adoption, ownership/permission change or relaxed guard is authorized.
+
+Experiment acquisition now filters that canonical default, then only the
+documented standalone CLT candidate
+`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk` if the default is unavailable,
+unsafe or unverifiable. Canonical candidates are deduplicated; the alternative
+must remain inside the canonical CLT SDK installation. Bounded ancestry and
+settings checks precede seed staging/compilation, while read-only discovery
+retains its existing command-intent journal. There is no search, version guessing,
+changed `xcode-select`, installation, copying or installed-input ownership or
+permission change. Missing or unsafe candidates remain blocked. The matching
+image inventory documents a candidate package, not its safe installed metadata.
+
+The persisted command owner binds the selected canonical SDK directory's device
+and inode and the `SDKSettings.json` digest. Explicit `--sdk` arguments bind
+compiler discovery and the experiment SDK build-version query; seed dependency
+queries and both compiler paths retain the same `-isysroot`. The build owner
+rejects dependencies from other installed SDKs, including canonical aliases,
+before reading their bytes; existing compiler resource-header locations remain
+eligible. Before the native experiment version query or compilation, the sealed
+entry applies the original SDK predicates, held/named identity joins, inspected
+ACL absence, settings pin and protected ancestors. It holds and rechecks that
+SDK through completion.
+The existing independent build-input reader returns the checked SDK directory
+alongside held settings. Build evidence retains both native identities, and cold
+loading rejoins them and all existing pins without rediscovery or compilation.
+Native refusal never causes reselection or consumed-effect replay. The 22 fixed
+protected commands, deadlines, output limits and original command/helper/custody
+retirement remain unchanged; first failure and settlement failures stay separate.
+Reviewed version-6 vectors and compile-only SDK admission remain unchanged.
+
 These observations and portable regressions establish no installed-tool native
-acceptance. Darwin descendant-survival and Windows TCP/audit failures remain
-unresolved. Matching-host execution and both fresh same-SHA native workflows
+acceptance. Actual selected CLT ownership, ancestry, ACLs, pins, successful native
+building and independent non-emergency retirement remain unresolved until fresh
+matching CI. Darwin live task-access authority and Windows 10022 transfer,
+LONG8/CLOSE0 trust, failed-reader retirement and missing audit4663 remain
+unresolved. Previously accepted original-failure settlement repairs are preserved.
+Matching-host execution and both fresh same-SHA native workflows
 remain necessary; diagnostics, injected regressions and setup success establish
 no native acceptance or production GO.
 

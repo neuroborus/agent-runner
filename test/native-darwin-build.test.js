@@ -13,14 +13,12 @@ const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 test("Darwin SDK guard samples each original predicate once and preserves refusal errno", async () => {
   const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
-    start = source.indexOf("    char canonical[PATH_MAX]; struct stat stat;"),
-    end = source.indexOf("    ancestors(sdk);", start);
+    start = source.indexOf("  char canonical[PATH_MAX]; struct stat stat;"),
+    end = source.indexOf("  ancestors(sdk);", start);
   assert.ok(start > 0 && end > start);
   const admissionStart = source.indexOf("  int work = directory(cwd"),
     admissionEnd = source.indexOf("  const char *publication", admissionStart);
-  assert.ok(
-    admissionStart > 0 && admissionEnd > admissionStart && admissionEnd < start,
-  );
+  assert.ok(admissionStart > end && admissionEnd > admissionStart);
   const admission = new Script(
     `() => {${source
       .slice(admissionStart, admissionEnd)
@@ -208,6 +206,164 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
         ]);
     }
   }
+});
+
+test("Darwin selected SDK native admission rejects ACL, identity and settings drift before query or compilation", async () => {
+  const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
+    start = source.indexOf("  ancestors(sdk);"),
+    end = source.indexOf("\n#else\n  (void)dev", start),
+    gateStart = source.indexOf("  int sdk_fd = -1; struct stat sdk_identity;"),
+    gateEnd = source.indexOf("\n#endif", gateStart);
+  assert.ok(start > 0 && end > start && gateStart > end && gateEnd > gateStart);
+  const body = source
+    .slice(start, end)
+    .replace("#ifdef NATIVE_CI_EXPERIMENT", "")
+    .replace("struct stat held, named;", "const held = {}, named = {};")
+    .replace("char *end;", "const end = {};")
+    .replace("char settings[PATH_MAX];", "const settings = {};")
+    .replace(/\b(?:unsigned long long|int) /gu, "let ")
+    .replace(/\((?:uintmax_t)\)/gu, "")
+    .replace(/&(held|named|end|stat)/gu, "$1")
+    .replace(/\*dev/gu, "dev.length")
+    .replace(/\*ino/gu, "ino.length")
+    .replace(/!\*end/gu, "!end.value")
+    .replace(/sizeof\(settings\)/gu, "PATH_MAX");
+  const guard = new Script(`() => {${body}}`),
+    gate = new Script(
+      `() => {${source
+        .slice(gateStart, gateEnd)
+        .replace("int sdk_fd", "let sdk_fd")
+        .replace("struct stat sdk_identity;", "const sdk_identity = {};")
+        .replace("&sdk_identity", "sdk_identity")} return sdk_fd;}`,
+    );
+  assert.ok(
+    gateEnd < source.indexOf('  if (!strcmp(mode, "compiler-version"))'),
+  );
+  const queryStart = source.indexOf(
+      '    need(!strcmp(tool, "/usr/bin/xcrun"));',
+    ),
+    queryEnd = source.indexOf("\n#else", queryStart),
+    query = new Script(
+      `() => {${source
+        .slice(queryStart, queryEnd)
+        .replace("#ifdef NATIVE_CI_EXPERIMENT", "")
+        .replace("(char *)sdk", "sdk")}}`,
+    );
+  const faults = [
+    null,
+    "acl",
+    "ancestor-acl",
+    "held",
+    "named",
+    "declared-identity",
+    "settings",
+    "late-identity",
+  ];
+  for (const mode of ["sdk-version", "compile", "compiler-version", "sign"])
+    for (const fault of ["sdk-version", "compile"].includes(mode)
+      ? faults
+      : [null]) {
+      const events = [],
+        expected = {
+          st_dev: 1,
+          st_ino: 42,
+          st_uid: 0,
+          st_gid: 20,
+          st_mode: 0o40755,
+        },
+        context = {
+          sdk: "/fixture/selected-sdk",
+          dev: "1",
+          ino: fault === "declared-identity" ? "43" : "42",
+          settings_pin: "a".repeat(64),
+          stat: expected,
+          PATH_MAX: 4096,
+          errno: 0,
+          need: (ok) => assert.ok(ok),
+          ancestors() {
+            events.push("ancestors");
+            assert.notEqual(fault, "ancestor-acl");
+          },
+          directory: () => 7,
+          no_acl(fd) {
+            assert.equal(fd, 7);
+            events.push("acl");
+            assert.notEqual(fault, "acl");
+          },
+          fstat(fd, actual) {
+            assert.equal(fd, 7);
+            Object.assign(actual, expected);
+            if (
+              fault === "held" ||
+              (fault === "late-identity" && events.includes("settings"))
+            )
+              actual.st_ino++;
+            return 0;
+          },
+          lstat(name, actual) {
+            assert.equal(name, context.sdk);
+            Object.assign(actual, expected);
+            if (fault === "named") actual.st_ino++;
+            return 0;
+          },
+          file_stat_same: (a, b) =>
+            Object.keys(expected).every((key) => a[key] === b[key]),
+          strlen: (text) => text.length,
+          strspn: (text) => (/^\d*$/u.test(text) ? text.length : 0),
+          strtoull(text, end) {
+            end.value = "";
+            return Number(text);
+          },
+          snprintf(out, size, format, sdk) {
+            out.value = sdk + "/SDKSettings.json";
+            assert.ok(out.value.length < size);
+            return out.value.length;
+          },
+          protected_input(file, pin, installed) {
+            events.push("settings");
+            assert.equal(file.value, context.sdk + "/SDKSettings.json");
+            assert.equal(pin, context.settings_pin);
+            assert.equal(installed, 1);
+            assert.notEqual(fault, "settings");
+          },
+        };
+      const native = guard.runInNewContext(context),
+        gateContext = {
+          mode,
+          sdk: context.sdk,
+          argv: { 12: context.dev, 13: context.ino, 14: context.settings_pin },
+          strcmp: (a, b) => (a === b ? 0 : 1),
+          need: context.need,
+          fstat: context.fstat,
+          selected_sdk(sdk, dev, ino, pin) {
+            assert.deepEqual(
+              [sdk, dev, ino, pin],
+              [context.sdk, context.dev, context.ino, context.settings_pin],
+            );
+            return native();
+          },
+        },
+        admit = gate.runInNewContext(gateContext),
+        usesSdk = ["sdk-version", "compile"].includes(mode);
+      if (usesSdk && fault) {
+        assert.throws(admit, undefined, `${mode}:${fault}`);
+        if (["acl", "ancestor-acl", "held", "named"].includes(fault))
+          assert.equal(events.includes("settings"), false);
+      } else {
+        assert.equal(admit(), usesSdk ? 7 : -1);
+        assert.equal(events.includes("settings"), usesSdk);
+        if (mode === "sdk-version") {
+          const vector = ["/usr/bin/xcrun"];
+          query.runInNewContext({ ...gateContext, tool: vector[0], vector })();
+          assert.deepEqual(vector, [
+            "/usr/bin/xcrun",
+            "--sdk",
+            context.sdk,
+            "--show-sdk-build-version",
+          ]);
+        }
+      }
+    }
 });
 
 test("Darwin build custody normalizes only its joined exclusive creation", async () => {
