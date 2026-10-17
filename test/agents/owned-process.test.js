@@ -45,7 +45,7 @@ function hostSessionLauncher(cwd, { ownershipMode }) {
 async function inspectionSequenceFixture(
   t,
   sequence,
-  { record = false, unrelatedPid = null } = {},
+  { record = false, unrelatedPid = null, inspectionTimes = null } = {},
 ) {
   // Synthetic classification is independent of host scheduling; elapsed-budget
   // regressions below supply their own clocks. Retry windows still use Date.now.
@@ -64,6 +64,10 @@ async function inspectionSequenceFixture(
   const originalRead = fs.readFileSync;
   const sequence = ${JSON.stringify(sequence)};
   let index = 0;
+  const inspectionTimes = ${JSON.stringify(inspectionTimes)};
+  if (inspectionTimes !== null) {
+    Date.now = () => inspectionTimes[Math.min(index, inspectionTimes.length - 1)];
+  }
   const bootId = originalRead("/proc/sys/kernel/random/boot_id", "utf8").trim();
   const ownStat = originalRead("/proc/" + process.pid + "/stat", "utf8");
   const ownFields = ownStat.slice(ownStat.lastIndexOf(")") + 2).trim().split(/\\s+/);
@@ -1132,6 +1136,9 @@ test(
     const releaseDeregistration = Promise.withResolvers();
     const inspection = await inspectionSequenceFixture(t, ["incomplete"], {
       record: true,
+      // A scheduler pause must not expire the deadline before the retry. Other
+      // live fixtures keep real time; this one proves the inspection sequence.
+      inspectionTimes: [0, 0, 50],
     });
     let parentInspections = 0;
     let registeredIdentity;

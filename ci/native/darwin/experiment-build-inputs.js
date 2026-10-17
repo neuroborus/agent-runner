@@ -50,6 +50,13 @@ const execute = diagnosticCommand(
   "darwin-experiment-bootstrap",
   promisify(execFile),
 );
+const exactIdentity = (stat) =>
+  [stat.dev, stat.ino].every(
+    (value) =>
+      typeof value === "bigint" &&
+      value >= 0n &&
+      value <= 18446744073709551615n,
+  );
 const absolute = (value) =>
   typeof value === "string" &&
   path.isAbsolute(value) &&
@@ -168,17 +175,18 @@ export async function acquireDarwinExperimentBuild(
     requireObservation(
       absolute(file) && (canonical = await fs.realpath(file)) === file,
     );
-    const before = await fs.lstat(file);
+    const before = await fs.lstat(file, { bigint: true });
     let isFile = null,
       isSymbolicLink = null;
     try {
       requireObservation(
         (isFile = before.isFile()) &&
           !(isSymbolicLink = before.isSymbolicLink()) &&
-          (before.nlink === 1 ||
+          (before.nlink === 1n ||
             (installed && (await protectedInstalledInput(file, before, fs)))) &&
-          before.size > 0 &&
-          before.size <= maximum,
+          before.size > 0n &&
+          before.size <= BigInt(maximum) &&
+          exactIdentity(before),
       );
     } catch (error) {
       try {
@@ -206,13 +214,17 @@ export async function acquireDarwinExperimentBuild(
                 "mtimeMs",
                 "ctimeMs",
                 "birthtimeMs",
+                "mtimeNs",
+                "ctimeNs",
               ].map((key) => {
                 const value = before[key];
                 return [
                   key,
-                  typeof value === "number" && Number.isFinite(value)
-                    ? value
-                    : null,
+                  typeof value === "bigint"
+                    ? value.toString()
+                    : typeof value === "number" && Number.isFinite(value)
+                      ? value
+                      : null,
                 ];
               }),
             ),
@@ -224,9 +236,10 @@ export async function acquireDarwinExperimentBuild(
       throw error;
     }
     const bytes = await fs.readFile(file),
-      after = await fs.lstat(file);
+      after = await fs.lstat(file, { bigint: true });
     requireObservation(
-      bytes.length === before.size &&
+      BigInt(bytes.length) === before.size &&
+        exactIdentity(after) &&
         [
           "dev",
           "ino",
@@ -235,10 +248,10 @@ export async function acquireDarwinExperimentBuild(
           "gid",
           "nlink",
           "size",
-          "mtimeMs",
-          "ctimeMs",
+          "mtimeNs",
+          "ctimeNs",
         ].every((key) => before[key] === after[key]) &&
-        (before.nlink === 1 ||
+        (before.nlink === 1n ||
           (installed && (await protectedInstalledInput(file, after, fs)))),
     );
     if (identity) Object.assign(identity, { dev: after.dev, ino: after.ino });
@@ -282,32 +295,32 @@ export async function acquireDarwinExperimentBuild(
         );
       let root;
       for (let parent = canonical, depth = 0; depth < 32; depth++) {
-        const before = await fs.lstat(parent);
+        const before = await fs.lstat(parent, { bigint: true });
         requireObservation(
-          before.isDirectory() &&
+          exactIdentity(before) &&
+            before.isDirectory() &&
             !before.isSymbolicLink() &&
-            before.uid === 0 &&
-            !(before.mode & 0o22) &&
+            before.uid === 0n &&
+            !(before.mode & 0o22n) &&
             (await fs.realpath(parent)) === parent,
         );
-        const after = await fs.lstat(parent);
+        const after = await fs.lstat(parent, { bigint: true });
         requireObservation(
-          ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+          ["dev", "ino", "mode", "uid", "gid", "mtimeNs", "ctimeNs"].every(
             (key) => before[key] === after[key],
           ),
         );
         if (parent === canonical) root = before;
         if (parent === "/") {
           const settings = path.join(canonical, "SDKSettings.json"),
-            stat = await fs.lstat(settings);
+            stat = await fs.lstat(settings, { bigint: true });
           requireObservation(await protectedInstalledInput(settings, stat, fs));
           const settingsSha256 = digest(await read(settings, 536870912, true));
-          const current = await fs.lstat(canonical);
+          const current = await fs.lstat(canonical, { bigint: true });
           requireObservation(
-            [root.dev, root.ino].every(
-              (value) => Number.isSafeInteger(value) && value >= 0,
-            ) &&
-              ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+            exactIdentity(root) &&
+              exactIdentity(current) &&
+              ["dev", "ino", "mode", "uid", "gid", "mtimeNs", "ctimeNs"].every(
                 (key) => root[key] === current[key],
               ),
           );
@@ -341,16 +354,14 @@ export async function acquireDarwinExperimentBuild(
   const SDKROOT = sdk.path,
     DEVELOPER_DIR = darwinDeveloperDirectory(SDKROOT),
     environment = { SDKROOT, DEVELOPER_DIR },
-    developerBefore = await fs.lstat(DEVELOPER_DIR);
+    developerBefore = await fs.lstat(DEVELOPER_DIR, { bigint: true });
   requireObservation(
     (await fs.realpath(DEVELOPER_DIR)) === DEVELOPER_DIR &&
       developerBefore.isDirectory() &&
       !developerBefore.isSymbolicLink() &&
-      developerBefore.uid === 0 &&
-      !(developerBefore.mode & 0o22) &&
-      [developerBefore.dev, developerBefore.ino].every(
-        (value) => Number.isSafeInteger(value) && value >= 0,
-      ),
+      developerBefore.uid === 0n &&
+      !(developerBefore.mode & 0o22n) &&
+      exactIdentity(developerBefore),
   );
   const compiler = await discover(
       ["--sdk", SDKROOT, "--find", "clang"],
@@ -416,11 +427,7 @@ export async function acquireDarwinExperimentBuild(
     file = await fs.realpath(file);
     const identity = {},
       sha256 = digest(await read(file, 536870912, true, identity));
-    requireObservation(
-      [identity.dev, identity.ino].every(
-        (value) => Number.isSafeInteger(value) && value >= 0,
-      ),
-    );
+    requireObservation(exactIdentity(identity));
     if (inputs.has(file)) requireObservation(inputs.get(file) === sha256);
     const previous = inputIdentities.get(file);
     if (previous)
@@ -546,10 +553,11 @@ export async function acquireDarwinExperimentBuild(
               actual.ino === inputIdentities.get(file).ino,
           );
         }
-        const after = await fs.lstat(DEVELOPER_DIR);
+        const after = await fs.lstat(DEVELOPER_DIR, { bigint: true });
         requireObservation(
           (await fs.realpath(DEVELOPER_DIR)) === DEVELOPER_DIR &&
-            ["dev", "ino", "mode", "uid", "gid", "mtimeMs", "ctimeMs"].every(
+            exactIdentity(after) &&
+            ["dev", "ino", "mode", "uid", "gid", "mtimeNs", "ctimeNs"].every(
               (key) => developerBefore[key] === after[key],
             ) &&
             (await fs.realpath(path.join(bin, "clang"))) === compiler,
@@ -705,7 +713,7 @@ export async function acquireDarwinExperimentBuild(
     ]) {
       try {
         const file = await fs.realpath(path.join(base, name));
-        if ((await fs.lstat(file)).isFile()) {
+        if ((await fs.lstat(file, { bigint: true })).isFile()) {
           prepared.cachePath = file;
           break;
         }

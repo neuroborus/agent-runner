@@ -518,6 +518,32 @@ remains mandatory; a missing build result cannot be replaced with an SDK version
 label. This binding does not uniquely explain the earlier ProductBuildVersion
 failure and supplies no native success or resolution of preliminary PF facts.
 
+Acquisition now requests BigInt filesystem statistics for input, SDK/developer
+and stability snapshots; installed ancestry and build snapshots retain exact
+identities and nanosecond modification/change times. Device/inode values must
+remain within the unsigned-64-bit contract and never pass through Number for
+acquisition or authoritative comparisons. Existing Number-stat eligibility samples
+remain compatible; independent held reads and ancestry acquire exact identities.
+Selected SDK, developer, real compiler and delegated tools retain their existing
+canonical decimal fields; other acquisition identities stay transient. Bounded
+stat diagnostics encode BigInt values as decimal strings while preserving the
+original refusal if diagnostic construction or publication fails.
+
+The observed new identity predicate failed at `/usr/lib/dyld` before the protected
+SDK query; actual device/inode values were not emitted and no unique precision
+cause was observed. Seed staging and command intents can precede that failure.
+After fencing, recovery recognizes validated contiguous pre-seal journals as
+incomplete acquisition, without inventing a sealed declaration or opening another
+proof reader. Possible effects stay RETAINED, independently unproved, with no
+retirement receipt; cleanup remains unsuccessful and original failure/emergency
+history survives. Missing, torn, gapped or contradictory journals remain uncertain.
+Normal loading requires complete preparation; sealed recovery still rejoins
+original births and independent receipts without replay or uncertain release.
+The successful `--sdk <selected-sdk> --show-sdk-build-version` query, all 22
+protected commands, reviewed version-6 behavior and native limits remain mandatory.
+Windows VERIFY8/CLOSE0 trust and failed-owner retirement, socket10022 and missing4663,
+and Darwin task-access/PF obligations remain explicitly unresolved.
+
 These observations and portable regressions establish no installed-tool native
 acceptance. Actual selected CLT ownership, ancestry, ACLs, pins, successful native
 building and independent non-emergency retirement remain unresolved until fresh

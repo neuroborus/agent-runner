@@ -27,6 +27,13 @@ const STABILITY = [
   "mtimeNs",
   "ctimeNs",
 ];
+const validIdentity = (stat) =>
+  [stat.dev, stat.ino].every(
+    (value) =>
+      typeof value === "bigint" &&
+      value >= 0n &&
+      value <= 18446744073709551615n,
+  );
 const same = (before, after) =>
   STABILITY.every((key) => before[key] === after[key]);
 
@@ -44,16 +51,17 @@ export async function verifyDarwinBootstrapSeed(prepared, fs) {
       /^[a-f0-9]{64}$/u.test(prepared.bootstrapSeed.sha256),
   );
   for (let parent = root; ; parent = path.dirname(parent)) {
-    const before = await fs.lstat(parent);
+    const before = await fs.lstat(parent, { bigint: true });
     requireDarwin(
-      before.isDirectory() &&
+      validIdentity(before) &&
+        before.isDirectory() &&
         !before.isSymbolicLink() &&
-        before.uid === 0 &&
-        before.gid === 0 &&
-        !(before.mode & 0o22) &&
-        (parent !== root || (before.mode & 0o7777) === 0o555) &&
+        before.uid === 0n &&
+        before.gid === 0n &&
+        !(before.mode & 0o22n) &&
+        (parent !== root || (before.mode & 0o7777n) === 0o555n) &&
         (await fs.realpath(parent)) === parent &&
-        same(before, await fs.lstat(parent)),
+        same(before, await fs.lstat(parent, { bigint: true })),
     );
     if (parent === "/") break;
   }
@@ -73,6 +81,19 @@ export async function verifyDarwinBootstrapSeed(prepared, fs) {
  * Neither root ownership nor a caller's pin classifies a generated input. */
 export async function protectedInstalledInput(file, stat, fs) {
   try {
+    // Existing Number-stat callers classify scalar eligibility only. The held
+    // reader and ancestry snapshots independently acquire exact identities.
+    const bounded = (value, maximum) =>
+      typeof value === "bigint"
+        ? value >= 0n && value <= BigInt(maximum)
+        : Number.isSafeInteger(value) && value >= 0 && value <= maximum;
+    if (
+      ((typeof stat.dev === "bigint" || typeof stat.ino === "bigint") &&
+        !validIdentity(stat)) ||
+      !bounded(stat.mode, 0xffffffff) ||
+      !bounded(stat.nlink, Number.MAX_SAFE_INTEGER)
+    )
+      return false;
     const mode = Number(stat.mode) & 0o7777,
       stock = STOCK_TOOLS.has(file),
       installed =
@@ -96,10 +117,9 @@ export async function protectedInstalledInput(file, stat, fs) {
           file === "/usr/bin/sudo" ? [0o4555, 0o4755] : [0o555, 0o755]
         ).includes(mode)) ||
       (!stock && mode & 0o6022) ||
-      Number(stat.uid) !== 0 ||
-      (stock && Number(stat.gid) !== 0) ||
-      !Number.isSafeInteger(Number(stat.nlink)) ||
-      Number(stat.nlink) <= 0 ||
+      (stat.uid !== 0 && stat.uid !== 0n) ||
+      (stock && stat.gid !== 0 && stat.gid !== 0n) ||
+      stat.nlink <= 0 ||
       !stat.isFile() ||
       stat.isSymbolicLink() ||
       (await fs.realpath(file)) !== file
@@ -107,14 +127,15 @@ export async function protectedInstalledInput(file, stat, fs) {
       return false;
     let parent = path.dirname(file);
     for (let depth = 0; depth < 32; depth++) {
-      const before = await fs.lstat(parent);
+      const before = await fs.lstat(parent, { bigint: true });
       if (
+        !validIdentity(before) ||
         !before.isDirectory() ||
         before.isSymbolicLink() ||
-        Number(before.uid) !== 0 ||
-        Number(before.mode) & 0o22 ||
+        before.uid !== 0n ||
+        before.mode & 0o22n ||
         (await fs.realpath(parent)) !== parent ||
-        !same(before, await fs.lstat(parent))
+        !same(before, await fs.lstat(parent, { bigint: true }))
       )
         return false;
       if (parent === "/")
@@ -146,7 +167,8 @@ export async function protectedBytes(
   try {
     const before = await handle.stat({ bigint: true });
     requireDarwin(
-      before.isFile() &&
+      validIdentity(before) &&
+        before.isFile() &&
         before.uid === 0n &&
         before.gid === BigInt(gid) &&
         (before.nlink === 1n ||
@@ -172,6 +194,8 @@ export async function protectedBytes(
       named = await fs.lstat(entry.path, { bigint: true });
     requireDarwin(
       BigInt(size) === before.size &&
+        validIdentity(after) &&
+        validIdentity(named) &&
         [
           "dev",
           "ino",

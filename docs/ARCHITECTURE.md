@@ -161,6 +161,29 @@ Unverifiable pairings and missing actual SDK build-query results remain terminal
 without reselection, replay, version-label substitution or global selection changes.
 This correction supplies no unique explanation of earlier native query failure
 and does not close the separate PF or matching-host proof obligations.
+
+Experiment acquisition, installed-input ancestry and build snapshots use BigInt
+filesystem statistics, including nanosecond modification/change timestamps.
+Device/inode identities remain exact unsigned-64-bit values through comparisons
+and the existing selected SDK/developer/compiler/delegated-tool decimal fields;
+other acquisition identities remain transient. Existing Number-stat eligibility
+samples supply no identity proof; held-byte reads and ancestry use exact values.
+Only bounded scalar sizes/modes undergo Number conversion. Bounded installed-input diagnostics encode BigInt
+metadata as decimal strings; diagnostic failure preserves the original refusal.
+The observed acquisition failure was the new identity predicate at
+`/usr/lib/dyld`; its actual device/inode values and a unique precision cause were
+not observed. This representation repair supplies no native acceptance.
+
+After the recovery fence, a bounded contiguous bootstrap journal containing only
+validated pre-seal command/staging records can identify incomplete acquisition
+without a prepared declaration. Recovery retains possible effects, independently
+unproved and without a retirement receipt; cleanup remains unsuccessful. Missing,
+torn, gapped or contradictory journals remain uncertain. Normal loading still
+requires complete preparation; sealed recovery retains its original birth and
+independent-receipt joins. Incomplete recovery neither replays acquisition nor
+opens a replacement proof reader, releases uncertain resources or clears original
+failure/emergency-cleanup history.
+
 Cold-loading rejoins original births/receipts and fresh held inputs without compilation; recovery fences further
 admission even before the private report directory exists. Original retirement and
 held outputs use separately retired reader sessions. ABI journal records and later

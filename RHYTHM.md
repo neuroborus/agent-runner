@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Preserve exact Darwin acquisition identities and pre-seal uncertainty
+
+Darwin experiment acquisition and affected snapshots preserve BigInt filesystem
+identities and nanosecond timestamps through comparisons and existing decimal
+selectors. Adjacent full-width identities cannot hide behind Number rounding;
+bounded diagnostics retain exact metadata without changing refusal. Recovery
+fences and recognizes validated pre-seal journals without inventing preparation,
+replaying work or replacing original proof. Possible effects remain RETAINED and
+cleanup unsuccessful until independently proved; first failure and emergency
+history survive. The observed `/usr/lib/dyld` identity predicate emitted no actual
+values or unique precision diagnosis. Native guards, successful selected-SDK
+query, original-owner retirement requirements and unresolved Darwin task-access/PF
+and Windows VERIFY8/CLOSE0 trust, retirement, socket10022 and missing4663 remain.
+
 ## 2026-10-17 — Observe the original failed Windows trust provider phase
 
 Failed experiment trust verification observes optional provider state before its

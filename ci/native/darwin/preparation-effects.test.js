@@ -1567,6 +1567,130 @@ test("Darwin cold build reads rejoin selected SDK and settings identities withou
   );
 });
 
+test("Darwin full-width build identities persist and cold reads reject adjacent native and snapshot substitutions", async () => {
+  for (const inode of [9007199254740995n, 18446744073709551615n])
+    for (const snapshot of [
+      null,
+      "snapshot-inode",
+      "snapshot-device",
+      "snapshot-ns",
+    ]) {
+      const f = experimentBuildFixture(),
+        device = 18446744073709551615n,
+        adjacent = inode === device ? inode - 1n : inode + 1n,
+        sdk = f.prepared.command.sdk,
+        toolchain = f.prepared.command.toolchain,
+        createReader = f.options.createReader,
+        originalStat = f.options.fs.lstat,
+        samples = new Map();
+      assert.equal(Number(inode), Number(adjacent));
+      for (const entry of [
+        sdk,
+        toolchain.developer,
+        toolchain.compiler,
+        ...toolchain.delegated,
+      ])
+        Object.assign(entry, { dev: String(device), ino: String(inode) });
+      let fault = snapshot,
+        inspected = false;
+      const header = sdk.path + "/input.h";
+      delete f.options.readInstalled;
+      f.options.fs.readFile = async () => bytes;
+      f.options.fs.lstat = async (file, settings) => {
+        if (!settings?.bigint) return originalStat(file);
+        const count = (samples.get(file) ?? 0) + 1;
+        samples.set(file, count);
+        const stat = {
+          isFile: () => true,
+          isSymbolicLink: () => false,
+          dev: device,
+          ino: inode,
+          uid: 0n,
+          gid: 0n,
+          mode: 0o100444n,
+          nlink: 1n,
+          size: BigInt(bytes.length),
+          mtimeNs: 1000000n,
+          ctimeNs: 1000000n,
+        };
+        if (file === header && count === 2 && fault?.startsWith("snapshot-")) {
+          inspected = true;
+          if (fault === "snapshot-inode") stat.ino = adjacent;
+          if (fault === "snapshot-device") stat.dev--;
+          if (fault === "snapshot-ns") stat.ctimeNs++;
+        }
+        return stat;
+      };
+      f.options.createReader = (...args) => {
+        const reader = createReader(...args),
+          read = reader.readBuildInput;
+        reader.readBuildInput = async (file, ...rest) => {
+          const value = await read(file, ...rest);
+          for (const key of ["object", "sdk", "developer"]) {
+            if (!value[key] || value[key].identity === "held-loader") continue;
+            const id = value[key].identity.split(":");
+            id[0] = String(device);
+            id[3] = String(inode);
+            if (
+              (fault === key && file.endsWith("SDKSettings.json")) ||
+              (key === "object" &&
+                file === toolchain.compiler.path &&
+                fault === "compiler") ||
+              (key === "object" &&
+                file === toolchain.delegated[0].path &&
+                fault === "delegated")
+            ) {
+              id[3] = String(adjacent);
+              inspected = true;
+            }
+            value[key].identity = id.join(":");
+          }
+          return value;
+        };
+        return reader;
+      };
+      if (snapshot) {
+        await assert.rejects(
+          prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+          undefined,
+          snapshot,
+        );
+        assert.equal(inspected, true, snapshot);
+        continue;
+      }
+      const built = await prepareDarwinExperimentBuild(
+        f.job,
+        directory,
+        f.persist,
+        f.options,
+      );
+      const selector = f.files.get(
+        path.join(directory, "darwin-experiment-build-selector.json"),
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(selector)).command,
+        f.prepared.command,
+      );
+      f.options.acquire = f.options.runCommand = () =>
+        assert.fail("Cold reads cannot discover or compile");
+      assert.deepEqual(
+        (await loadDarwinExperimentBuild(built.job, directory, f.options))
+          .build,
+        built.build,
+      );
+      for (fault of ["object", "sdk", "developer", "compiler", "delegated"]) {
+        inspected = false;
+        samples.clear();
+        await assert.rejects(
+          loadDarwinExperimentBuild(built.job, directory, f.options),
+          undefined,
+          fault,
+        );
+        assert.equal(inspected, true, fault);
+      }
+    }
+});
+
 test("Darwin selected toolchain still requires the original successful SDK build query", async () => {
   for (const result of [
     { exitCode: 1, stdout: "" },
@@ -1873,6 +1997,191 @@ test("Darwin experiment recovery fences admission before the report directory or
   assert.equal(commands, 0);
 });
 
+test("Darwin pre-seal recovery fences incomplete acquisition and retains effects without replacement proof", async () => {
+  for (const fault of [
+    "before-directory",
+    "staged",
+    "missing",
+    "torn",
+    "gap",
+    "duplicate-seed",
+    "binding",
+    "unsealed-tool",
+    "sealed-without-seed",
+    "command-shape",
+  ]) {
+    const f = experimentBuildFixture(),
+      journal = "/fixture/public/native",
+      command = {
+        purpose: "experiment",
+        phase: "seed-command-possible",
+        file: "git",
+        args: ["rev-parse", "HEAD"],
+      },
+      seed = {
+        purpose: "experiment",
+        phase: "seed-possible",
+        directory,
+        staging: directory + "-seed",
+        output,
+        bindingSha256: observationDigest(f.options.binding),
+        sourceDirectory:
+          "/Library/native-poc-" + observationDigest(f.options.binding),
+      },
+      records =
+        fault === "before-directory"
+          ? [command]
+          : [
+              command,
+              seed,
+              {
+                ...command,
+                file: "/usr/bin/codesign",
+                args: ["-d", "--verbose=4", "/usr/bin/clang"],
+              },
+            ],
+      diagnostics = [],
+      originalStat = f.options.fs.lstat;
+    if (fault === "missing") records.length = 0;
+    if (fault === "duplicate-seed") records.push(seed);
+    if (fault === "binding") seed.bindingSha256 = "e".repeat(64);
+    if (fault === "unsealed-tool")
+      records.push({
+        purpose: "experiment",
+        phase: "tool-acquisition-retired",
+      });
+    if (fault === "sealed-without-seed")
+      records.push({ purpose: "experiment", phase: "sealed", prepared: {} });
+    if (fault === "command-shape") command.extra = true;
+    for (const [index, record] of records.entries())
+      f.files.set(
+        journal +
+          "-bootstrap-" +
+          (fault === "gap" && index === 1 ? 3 : index) +
+          ".json",
+        fault === "torn" && index === 1 ? Buffer.from("{") : record,
+      );
+    let exists = fault !== "before-directory",
+      replayed = 0;
+    f.options.bootstrapJournal = journal;
+    f.options.fs.lstat = async (file) => {
+      if (file === directory && !exists)
+        throw Object.assign(new Error("No report directory"), {
+          code: "ENOENT",
+        });
+      return originalStat(file);
+    };
+    f.options.fs.mkdir = async (file, settings) => {
+      assert.equal(file, directory);
+      assert.deepEqual(settings, { mode: 0o700 });
+      assert.equal(f.jobs.at(-1).preparationEffects.admission, "possible");
+      exists = true;
+    };
+    f.options.fs.readdir = async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file));
+    f.options.fs.readFile = async (file) => {
+      assert.ok(
+        [...f.files.keys()].some((name) => name.includes("darwin-recovery-")),
+      );
+      const value = f.files.get(file);
+      return Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(JSON.stringify(value));
+    };
+    for (const name of [
+      "acquire",
+      "command",
+      "runCommand",
+      "readBootstrapTools",
+      "readCandidate",
+      "readSelector",
+      "createReader",
+    ])
+      f.options[name] = () => {
+        replayed++;
+        assert.fail(
+          "Pre-seal recovery cannot replay or replace original proof",
+        );
+      };
+    const job = {
+      ...recordExperimentPreparationEffect(f.job, {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: true,
+        },
+        receiptSha256: null,
+      }),
+      failure: "preparation-failed",
+    };
+    const recovered = await withNativeDiagnostics(
+      () => recoverDarwinExperimentBuild(job, directory, f.persist, f.options),
+      (owner) => diagnostics.push(owner),
+    );
+    assert.equal(recovered.failure, job.failure, fault);
+    assert.equal(recovered.preparation, null, fault);
+    assert.deepEqual(
+      recovered.preparationEffects,
+      {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: true,
+        },
+        receiptSha256: null,
+      },
+      fault,
+    );
+    assert.ok(
+      [...f.files.keys()].some((name) => name.includes("darwin-recovery-")),
+    );
+    assert.equal(
+      f.files.has(
+        path.join(directory, "darwin-experiment-build-selector.json"),
+      ),
+      false,
+    );
+    assert.equal(
+      diagnostics.includes("darwin-experiment-build-recovery"),
+      !["before-directory", "staged"].includes(fault),
+      fault,
+    );
+    await assert.rejects(
+      loadDarwinExperimentBuild(
+        {
+          ...recovered,
+          preparationEffects: {
+            admission: "possible",
+            settlement: {
+              status: "RETIRED",
+              independent: true,
+              emergencyCleanup: false,
+            },
+            receiptSha256: hash,
+          },
+        },
+        directory,
+        { ...f.options, recovery: true },
+      ),
+    );
+    assert.equal(replayed, 0, fault);
+    await assert.rejects(
+      acquireDarwinExperimentBuild(
+        recovered,
+        directory,
+        f.options.binding,
+        async () => {},
+        f.options,
+      ),
+    );
+    assert.equal(replayed, 0, fault);
+  }
+});
+
 test("Darwin bootstrap recovery rejoins the original acquisition without a build selector or replay", async () => {
   for (const fault of [null, "no-digests", "birth", "build-intent"]) {
     const f = experimentBuildFixture(),
@@ -2028,6 +2337,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
   for (const failure of [
     null,
     "installed-links",
+    "full-width",
+    "uint64-max",
+    "identity-read",
+    "identity-late",
+    "identity-nanoseconds",
+    "identity-ancestry",
+    "identity-installed-parent",
+    "identity-missing",
+    "identity-negative",
+    "identity-range",
+    "stat-bigint",
     "sdk-default-rejected",
     "sdk-default-unavailable",
     "sdk-default-safe",
@@ -2086,6 +2406,19 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
     const header = failure?.startsWith("spi-")
         ? "feasibility-sandbox.h"
         : "pf-abi.h",
+      wide =
+        failure === "full-width" ||
+        failure === "uint64-max" ||
+        failure?.startsWith("identity-") ||
+        failure === "stat-bigint",
+      inode =
+        failure === "uint64-max"
+          ? 18446744073709551615n
+          : wide
+            ? 9007199254740995n
+            : 1n,
+      device = wide ? 18446744073709551615n : 1n,
+      adjacent = inode === 18446744073709551615n ? inode - 1n : inode + 1n,
       statFailure = failure?.startsWith("stat-"),
       toolFailure =
         failure?.startsWith("tool-") && failure !== "tool-execute-only",
@@ -2179,6 +2512,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       chunks = [],
       sdkLookups = [],
       sdkStats = new Map(),
+      exactSamples = new Map(),
       writer = createNativeDiagnosticWriter((chunk) => chunks.push(chunk));
     for (const file of [...files.keys(), defaultSdk + "/SDKSettings.json"])
       for (
@@ -2288,7 +2622,10 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
           sampled.mode = 0o104111;
         if (failure === "diagnostic-unsafe" && file === "/usr/bin/sudo")
           sampled.mode = 0o104110;
-        if (failure === "installed-links" && file === "/usr/bin/clang") {
+        if (
+          ["installed-links", "identity-installed-parent"].includes(failure) &&
+          file === "/usr/bin/clang"
+        ) {
           sampled.mode = 0o100755;
           sampled.nlink = 78;
         }
@@ -2330,7 +2667,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               },
             });
         }
-        if (options.bigint)
+        if (options.bigint) {
           for (const key of [
             "dev",
             "ino",
@@ -2339,11 +2676,70 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
             "gid",
             "nlink",
             "size",
+            "atimeMs",
             "mtimeMs",
             "ctimeMs",
+            "birthtimeMs",
           ])
-            if (typeof sampled[key] === "number")
+            if (
+              !(
+                failure === "stat-facts" &&
+                file === rejectedPath &&
+                key === "uid"
+              ) &&
+              typeof sampled[key] === "number"
+            )
               sampled[key] = BigInt(sampled[key]);
+          sampled.mtimeNs = 1000000n;
+          sampled.ctimeNs = 1000000n;
+          if (
+            wide &&
+            [
+              compiler,
+              linker,
+              sdk,
+              developer,
+              path.dirname(sdk),
+              sdk + "/SDKSettings.json",
+              "/usr/lib/dyld",
+              rejectedPath,
+              "/usr/bin",
+            ].includes(file)
+          ) {
+            sampled.dev = device;
+            sampled.ino = inode;
+            const count = (exactSamples.get(file) ?? 0) + 1;
+            exactSamples.set(file, count);
+            if (
+              (failure === "identity-read" && file === compiler && count > 1) ||
+              (failure === "identity-late" &&
+                file === compiler &&
+                commands.some(
+                  ({ file, args }) =>
+                    file === "/usr/bin/codesign" && args.at(-1) === compiler,
+                )) ||
+              (failure === "identity-ancestry" &&
+                file === path.dirname(sdk) &&
+                count > 1) ||
+              (failure === "identity-installed-parent" &&
+                file === "/usr/bin" &&
+                count > 1)
+            )
+              sampled.ino = adjacent;
+            if (
+              failure === "identity-nanoseconds" &&
+              file === compiler &&
+              count > 1
+            )
+              sampled.ctimeNs++;
+            if (file === "/usr/lib/dyld") {
+              if (failure === "identity-missing") delete sampled.ino;
+              if (failure === "identity-negative") sampled.ino = -1n;
+              if (failure === "identity-range")
+                sampled.ino = 18446744073709551616n;
+            }
+          }
+        }
         return sampled;
       },
       open: async (file) => {
@@ -2707,6 +3103,8 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
       failure &&
       ![
         "installed-links",
+        "full-width",
+        "uint64-max",
         "tool-execute-only",
         "sdk-default-rejected",
         "sdk-default-unavailable",
@@ -2734,7 +3132,7 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         else
           assert.equal(rejected.message, "Unverified native tool observation");
         assert.notEqual(rejected, diagnosticError);
-        assert.equal(rejectedStats, 1);
+        assert.equal(rejectedStats, 1, failure);
         assert.equal(fileSamples, 1);
         assert.equal(
           linkSamples,
@@ -2777,24 +3175,31 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
               ? null
               : failure === "stat-symlink",
           );
-          assert.deepEqual(facts.stat, {
-            dev: 1,
-            ino: 1,
-            mode: 0o100444,
-            uid: 0,
-            gid: 0,
-            nlink: ["stat-empty", "stat-size"].includes(failure) ? 1 : 2,
-            size:
-              failure === "stat-empty"
-                ? 0
-                : failure === "stat-size"
-                  ? 134217729
-                  : bytes.length,
-            atimeMs: 2,
-            mtimeMs: 1,
-            ctimeMs: 1,
-            birthtimeMs: 0,
-          });
+          assert.deepEqual(
+            facts.stat,
+            Object.fromEntries(
+              Object.entries({
+                dev: device,
+                ino: inode,
+                mode: 0o100444,
+                uid: 0,
+                gid: 0,
+                nlink: ["stat-empty", "stat-size"].includes(failure) ? 1 : 2,
+                size:
+                  failure === "stat-empty"
+                    ? 0
+                    : failure === "stat-size"
+                      ? 134217729
+                      : bytes.length,
+                atimeMs: 2,
+                mtimeMs: 1,
+                ctimeMs: 1,
+                birthtimeMs: 0,
+                mtimeNs: 1000000n,
+                ctimeNs: 1000000n,
+              }).map(([key, value]) => [key, String(value)]),
+            ),
+          );
           const output = Buffer.concat(chunks).toString();
           assert.ok(Buffer.byteLength(output) < 16384);
           assert.ok(!output.includes(bytes.toString()));
@@ -2947,11 +3352,17 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         writer(owner, value);
       });
       assert.equal(prepared.directory, storage);
+      if (wide) {
+        assert.ok(exactSamples.get(compiler) > 2);
+        assert.equal(Number(inode), Number(adjacent));
+        const persisted = JSON.parse(JSON.stringify(intents.at(-1).prepared));
+        assert.deepEqual(persisted.command, prepared.command);
+      }
       const selected = failure === "sdk-default-safe" ? defaultSdk : sdk;
       assert.deepEqual(prepared.command.sdk, {
         path: selected,
-        dev: "1",
-        ino: "1",
+        dev: String(device),
+        ino: String(inode),
         settingsSha256: hash,
       });
       assert.deepEqual(prepared.environment, {
@@ -2959,9 +3370,23 @@ test("Darwin experiment acquisition seals exact candidate seeds after observing 
         DEVELOPER_DIR: developer,
       });
       assert.deepEqual(prepared.command.toolchain, {
-        developer: { path: developer, dev: "1", ino: "1" },
-        compiler: { path: compiler, sha256: hash, cdhash, dev: "1", ino: "1" },
-        delegated: [{ path: linker, sha256: hash, cdhash, dev: "1", ino: "1" }],
+        developer: { path: developer, dev: String(device), ino: String(inode) },
+        compiler: {
+          path: compiler,
+          sha256: hash,
+          cdhash,
+          dev: String(device),
+          ino: String(inode),
+        },
+        delegated: [
+          {
+            path: linker,
+            sha256: hash,
+            cdhash,
+            dev: String(device),
+            ino: String(inode),
+          },
+        ],
       });
       if (failure === "sdk-default-safe")
         assert.equal(sdkLookups.includes(clt), false);
@@ -3379,6 +3804,10 @@ test("Darwin build entry classifies fixed installed tools through the default pr
   for (const [purpose, scenario, requestIndex = 0] of [
     ["reviewed", "compiler"],
     ["experiment", "compiler"],
+    ["reviewed", "full-width"],
+    ["experiment", "full-width"],
+    ["reviewed", "uint64-max"],
+    ["experiment", "uint64-max"],
     ["reviewed", "sdk", 1],
     ["reviewed", "signer", 3],
     ["reviewed", "generated-source"],
@@ -3432,7 +3861,13 @@ test("Darwin build entry classifies fixed installed tools through the default pr
       inputs = new Map(
         [...sources, helper, ...tools].map((file, index) => [file, index + 1]),
       ),
-      readFiles = [];
+      readFiles = [],
+      fullWidthInode =
+        scenario === "full-width"
+          ? 9007199254740995n
+          : scenario === "uint64-max"
+            ? 18446744073709551615n
+            : null;
     let openFiles = 0,
       changedTool = false;
     const stat = (file, bigint = false) => {
@@ -3452,7 +3887,13 @@ test("Darwin build entry classifies fixed installed tools through the default pr
         isDirectory: () => !leaf,
         isSymbolicLink: () => false,
         dev: convert(1),
-        ino: convert(inputs.get(file) ?? 1),
+        // Only the compatibility sample rounds; held reads use the exact literal.
+        ino:
+          fullWidthInode === null
+            ? convert(inputs.get(file) ?? 1)
+            : bigint
+              ? fullWidthInode
+              : Number(fullWidthInode),
         uid: convert(!leaf && privateDirectory ? 1001 : 0),
         gid: convert(0),
         mode: convert(
@@ -3519,7 +3960,13 @@ test("Darwin build entry classifies fixed installed tools through the default pr
       };
     };
     const effects = createDarwinBuildEffects(value.input, options),
-      accepted = ["compiler", "sdk", "signer"].includes(scenario);
+      accepted = [
+        "compiler",
+        "sdk",
+        "signer",
+        "full-width",
+        "uint64-max",
+      ].includes(scenario);
     try {
       if (accepted) {
         const result = await effects.run(request);

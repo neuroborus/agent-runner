@@ -314,21 +314,27 @@ async function observe(prepared, commands, reader, options, previous) {
     options.readInstalled ??
     (async (file) => {
       const fs = options.fs ?? filesystem,
-        stat = await fs.lstat(file);
+        stat = await fs.lstat(file, { bigint: true });
       requireObservation(
-        stat.isFile() &&
+        [stat.dev, stat.ino].every(
+          (value) =>
+            typeof value === "bigint" &&
+            value >= 0n &&
+            value <= 18446744073709551615n,
+        ) &&
+          stat.isFile() &&
           !stat.isSymbolicLink() &&
-          stat.uid === 0 &&
-          !(stat.mode & 0o6022) &&
-          (stat.nlink === 1 ||
+          stat.uid === 0n &&
+          !(stat.mode & 0o6022n) &&
+          (stat.nlink === 1n ||
             (await protectedInstalledInput(file, stat, fs))) &&
-          stat.size > 0 &&
-          stat.size <= 536870912,
+          stat.size > 0n &&
+          stat.size <= 536870912n,
       );
       const bytes = await fs.readFile(file),
-        after = await fs.lstat(file);
+        after = await fs.lstat(file, { bigint: true });
       requireObservation(
-        bytes.length === stat.size &&
+        BigInt(bytes.length) === stat.size &&
           [
             "dev",
             "ino",
@@ -337,10 +343,10 @@ async function observe(prepared, commands, reader, options, previous) {
             "gid",
             "nlink",
             "size",
-            "mtimeMs",
-            "ctimeMs",
+            "mtimeNs",
+            "ctimeNs",
           ].every((key) => stat[key] === after[key]) &&
-          (stat.nlink === 1 ||
+          (stat.nlink === 1n ||
             (await protectedInstalledInput(file, after, fs))),
       );
       return bytes;
@@ -737,7 +743,8 @@ async function selected(input, directory, options) {
   const job = normalizeExperimentJob(input),
     fs = options.fs ?? filesystem;
   // Selectors are not native evidence. Source and protected custody joins follow.
-  let prepared;
+  let prepared,
+    seed = false;
   if (options.bootstrapJournal) {
     const parent = path.dirname(options.bootstrapJournal),
       prefix = path.basename(options.bootstrapJournal) + "-bootstrap-",
@@ -759,11 +766,49 @@ async function selected(input, directory, options) {
       requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
       const record = JSON.parse(bytes);
       requireObservation(record.purpose === "experiment");
-      if (record.phase === "seal-possible") {
+      if (record.phase === "seed-command-possible") {
+        observationObject(record, ["purpose", "phase", "file", "args"]);
+        requireObservation(
+          typeof record.file === "string" &&
+            (record.file === "git" ||
+              (path.isAbsolute(record.file) &&
+                path.normalize(record.file) === record.file)) &&
+            !/[\0\r\n]/u.test(record.file) &&
+            Array.isArray(record.args) &&
+            record.args.length > 0 &&
+            record.args.length <= 128 &&
+            record.args.every(
+              (arg) =>
+                typeof arg === "string" &&
+                arg.length <= 8192 &&
+                !arg.includes("\0"),
+            ),
+        );
+      } else if (record.phase === "seed-possible") {
+        observationObject(record, [
+          "purpose",
+          "phase",
+          "directory",
+          "staging",
+          "sourceDirectory",
+          "output",
+          "bindingSha256",
+        ]);
+        requireObservation(
+          !seed &&
+            !prepared &&
+            record.directory === directory &&
+            record.staging === directory + "-seed" &&
+            record.output === path.join(directory, "platform-build") &&
+            record.bindingSha256 === observationDigest(options.binding) &&
+            record.sourceDirectory ===
+              "/Library/native-poc-" + record.bindingSha256,
+        );
+        seed = true;
+      } else if (record.phase === "seal-possible") {
         requireObservation(!prepared && record.prepared);
         prepared = record.prepared;
-      }
-      if (record.phase === "sealed") {
+      } else if (record.phase === "sealed") {
         requireObservation(
           prepared &&
             record.prepared &&
@@ -771,9 +816,14 @@ async function selected(input, directory, options) {
               prepared.bootstrapSeed.sha256,
         );
         prepared = record.prepared;
-      }
+      } else requireObservation(prepared);
     }
-    requireObservation(prepared);
+    if (!prepared) {
+      // Discovery and staging may already have effects. This recovery-only
+      // selector supplies no sealed declaration, reader or retirement proof.
+      requireObservation(options.recovery === true);
+      return { job, incomplete: true };
+    }
   } else {
     const bytes = await (options.readSelector ?? fs.readFile)(
       path.join(directory, "darwin-experiment-build-selector.json"),
@@ -859,7 +909,10 @@ export async function loadDarwinExperimentBuild(
     retired(job.preparationEffects.settlement) &&
       hash(job.preparationEffects.receiptSha256),
   );
-  const { prepared, state } = await selected(job, directory, options);
+  const { prepared, state } = await selected(job, directory, {
+    ...options,
+    recovery: false,
+  });
   let primary;
   try {
     const observed = JSON.parse(
@@ -975,22 +1028,24 @@ export async function recoverDarwinExperimentBuild(
       ...options,
       recovery: true,
     });
-    ({ state } = selection);
-    state?.fence();
-    if (state) await state.receipt(fence);
-    const records = state ? await recordsFor(state) : [];
-    const result = selection.acquisitionOnly
-      ? selection.acquisition.settlement
-      : await recoverDarwinBuild(state, records, options.signal, undefined, {
-          recovery: true,
-        });
-    requireObservation(retired(result));
-    settlement = {
-      status: "RETIRED",
-      independent: true,
-      emergencyCleanup: false,
-    };
-    receiptSha256 = observationDigest(result);
+    if (!selection.incomplete) {
+      ({ state } = selection);
+      state?.fence();
+      if (state) await state.receipt(fence);
+      const records = state ? await recordsFor(state) : [];
+      const result = selection.acquisitionOnly
+        ? selection.acquisition.settlement
+        : await recoverDarwinBuild(state, records, options.signal, undefined, {
+            recovery: true,
+          });
+      requireObservation(retired(result));
+      settlement = {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+      };
+      receiptSha256 = observationDigest(result);
+    }
   } catch (cause) {
     primary = cause;
     nativeException("darwin-experiment-build-recovery", cause);

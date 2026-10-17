@@ -59,12 +59,16 @@ timing code through an owner-settled public pause/resume with a fresh process
 before first finalization if necessary; preserve frozen inputs and state.
 
 Owned-process fixture repairs use `test/agents/owned-process.test.js`. Keep the
-supervisor's real bounded incomplete-inspection retries separate from controlled
+supervisor's bounded incomplete-inspection retries separate from controlled
 parent observations: an uncertain parent must retain registration, so a fixture
 expecting durable deregistration supplies an empty parent view and races callback
 entry against premature completion. Keep the distinct persistent and transient
 parent-uncertainty regressions. The transient case forces a failed termination
 message callback, making its additional fallback inspection deterministic.
+The persistent retry assertion advances its injected supervisor clock only
+after another inspection, so scheduler stalls and termination-message delivery
+cannot bypass its retry proof. Other live supervisor retry windows retain real
+time.
 Owner-loss fixtures acknowledge entry into the pending registration callback
 through IPC, before or after its simulated durable side effect, and compare
 recorded process identity before retirement. Await owned process closure and
@@ -180,6 +184,26 @@ reader cases validate fresh developer metadata and real-tool signature responses
 These portable cases execute no platform compiler or probe and do not establish
 the unique cause of ProductBuildVersion failure, a native SDK/PF remedy or original
 independent retirement.
+
+The same acquisition and build fixtures use exact BigInt/decimal identities
+above `2^53` and at the unsigned-64-bit boundary. Stable snapshots, persisted
+selectors, native joins and cold loading preserve those values. Adjacent identities
+that collapse to one Number are rejected during acquisition, installed ancestry,
+later revalidation, build snapshots and native/persisted joins despite unchanged
+bytes; nanosecond-only changes and missing/negative/out-of-range identities also
+refuse. Actual native SDK/toolchain bodies use exact injected integer parsers,
+without repeating the existing ownership, ACL, signature or selection matrices.
+Default preparation-reader cases retain full-width installed-input eligibility
+from existing Number-stat callers in reviewed and experiment modes, while held
+reads and ancestry retain exact BigInt identities.
+Focused pre-seal cases cover recovery before directory creation and after seed
+staging/command intents, plus missing, torn, gapped and contradictory journals.
+They require fencing, unchanged first cause and emergency history, RETAINED
+unproved effects, absent receipts, strict normal loading and no acquisition,
+compilation or replacement reader. Original-owner and lost-reply cases remain.
+These portable regressions add no harness or slow-tier assignment and prove no
+native success or unique precision diagnosis for the `/usr/lib/dyld` refusal.
+
 The existing custody-channel fixture carries those numeric diagnostics, malformed
 metadata and the original guard through failed completion; output supplies no
 receipt, new compiler attempt or retirement evidence.

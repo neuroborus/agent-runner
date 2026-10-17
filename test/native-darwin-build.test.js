@@ -263,13 +263,25 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
     "late-identity",
   ];
   for (const mode of ["sdk-version", "compile", "compiler-version", "sign"])
-    for (const fault of ["sdk-version", "compile"].includes(mode)
-      ? faults
-      : [null]) {
+    for (const [fault, inode] of [
+      ...(["sdk-version", "compile"].includes(mode) ? faults : [null]).map(
+        (fault) => [fault, 42n],
+      ),
+      ...(mode === "compile"
+        ? [9007199254740995n, 18446744073709551615n].flatMap((inode) =>
+            [null, "held", "named", "declared-identity", "late-identity"].map(
+              (fault) => [fault, inode],
+            ),
+          )
+        : []),
+    ]) {
+      const adjacent =
+        inode === 18446744073709551615n ? inode - 1n : inode + 1n;
+      if (inode > 2n ** 53n) assert.equal(Number(inode), Number(adjacent));
       const events = [],
         expected = {
-          st_dev: 1,
-          st_ino: 42,
+          st_dev: 1n,
+          st_ino: inode,
           st_uid: 0,
           st_gid: 20,
           st_mode: 0o40755,
@@ -277,7 +289,7 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
         context = {
           sdk: "/fixture/selected-sdk",
           dev: "1",
-          ino: fault === "declared-identity" ? "43" : "42",
+          ino: String(fault === "declared-identity" ? adjacent : inode),
           settings_pin: "a".repeat(64),
           stat: expected,
           PATH_MAX: 4096,
@@ -300,13 +312,13 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
               fault === "held" ||
               (fault === "late-identity" && events.includes("settings"))
             )
-              actual.st_ino++;
+              actual.st_ino = adjacent;
             return 0;
           },
           lstat(name, actual) {
             assert.equal(name, context.sdk);
             Object.assign(actual, expected);
-            if (fault === "named") actual.st_ino++;
+            if (fault === "named") actual.st_ino = adjacent;
             return 0;
           },
           file_stat_same: (a, b) =>
@@ -315,7 +327,7 @@ test("Darwin selected SDK native admission rejects ACL, identity and settings dr
           strspn: (text) => (/^\d*$/u.test(text) ? text.length : 0),
           strtoull(text, end) {
             end.value = "";
-            return Number(text);
+            return BigInt(text);
           },
           snprintf(out, size, format, sdk) {
             out.value = sdk + "/SDKSettings.json";
@@ -545,7 +557,7 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
     ),
     select = new Script(`() => {${translate(source.slice(start, end))}}`),
     text = (value) => value?.value ?? value;
-  for (const fault of [
+  const cases = [
     null,
     "developer-owner",
     "developer-write",
@@ -562,7 +574,20 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
     "held-drift",
     "named-drift",
     "late-pin",
-  ]) {
+  ].map((fault) => [fault, 7n]);
+  for (const inode of [9007199254740995n, 18446744073709551615n])
+    for (const fault of [
+      null,
+      "developer-identity",
+      "compiler-identity",
+      "held-drift",
+      "named-drift",
+      "developer-pin-drift",
+    ])
+      cases.push([fault, inode]);
+  for (const [fault, inode] of cases) {
+    const adjacent = inode === 18446744073709551615n ? inode - 1n : inode + 1n;
+    if (inode > 2n ** 53n) assert.equal(Number(inode), Number(adjacent));
     const developer = "/Library/Developer/CommandLineTools",
       compiler = developer + "/usr/bin/clang",
       argv = Array(27).fill("-");
@@ -570,7 +595,7 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       6: developer + "/SDKs/Fixture.sdk",
       15: developer,
       16: "1",
-      17: fault === "developer-identity" ? "8" : "7",
+      17: String(fault === "developer-identity" ? adjacent : inode),
       18: "2",
       19: fault === "compiler-pair" ? compiler + "-other" : compiler,
       20: "a".repeat(64),
@@ -581,12 +606,12 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
           : developer + "/usr/bin/ld",
       24: "c".repeat(64),
       25: "d".repeat(40),
-      22: fault === "compiler-identity" ? "1:8" : "1:7",
-      26: "1:7",
+      22: "1:" + (fault === "compiler-identity" ? adjacent : inode),
+      26: "1:" + inode,
     });
     const metadata = {
-        st_dev: 1,
-        st_ino: 7,
+        st_dev: 1n,
+        st_ino: inode,
         st_gid: 0,
         st_uid: fault === "developer-owner" ? 501 : 0,
         st_mode: fault === "developer-write" ? 0o40775 : 0o40755,
@@ -618,17 +643,17 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       },
       lstat(name, out) {
         Object.assign(out, metadata);
-        if (late && fault === "named-drift") out.st_ino++;
+        if (late && fault === "named-drift") out.st_ino = adjacent;
         if (
           (replaced && name === compiler) ||
           (developerChanged && text(name) === developer)
         )
-          out.st_ino++;
+          out.st_ino = adjacent;
         return 0;
       },
       fstat(fd, out) {
         Object.assign(out, metadata);
-        if (late && fault === "held-drift") out.st_ino++;
+        if (late && fault === "held-drift") out.st_ino = adjacent;
         return 0;
       },
       S_ISDIR: () => true,
@@ -669,7 +694,7 @@ test("Darwin sealed toolchain holds developer and real tool pins through complet
       strspn: (value) => (/^\d+$/u.test(value) ? value.length : 0),
       strtoull(value, end) {
         end.value = "";
-        return Number(value);
+        return BigInt(value);
       },
       strncmp: (a, b, n) =>
         text(a).slice(0, n) === text(b).slice(0, n) ? 0 : 1,
