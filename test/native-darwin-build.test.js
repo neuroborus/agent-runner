@@ -11,6 +11,267 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+test("Darwin build custody normalizes only its joined exclusive creation", async () => {
+  const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    body =
+      /static void build_directory\(const char \*encoded\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1],
+    same =
+      /static void same_stat\(struct stat a, struct stat b\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1];
+  assert.ok(body && same);
+  // Execute the admission body; only C storage/pointer syntax is projected.
+  const translated = body
+    .replace("unsigned approved", "let approved")
+    .replace("unsigned i", "let i")
+    .replace("char *leaf", "const leaf")
+    .replace("leaf + 1", "leaf.next")
+    .replace("*leaf = 0", "leaf.truncate()")
+    .replace("char canonical[PATH_MAX];", "const canonical = {};")
+    .replace(
+      /struct stat ([a-z_, ]+);/gu,
+      (_, names) =>
+        `const ${names
+          .split(", ")
+          .map((name) => `${name} = {}`)
+          .join(", ")};`,
+    )
+    .replace("bool created", "let created")
+    .replace(
+      "struct entry value = {.fd = build_root};",
+      "const value = {fd: build_root, kind: {}, path: {}};",
+    )
+    .replace(
+      /&(report_identity|build_identity|named|parent_named|parent|current|value)\b/gu,
+      "$1",
+    )
+    .replace(/sizeof\([^)]+\)/gu, "4096")
+    .replace(/\b0([0-7]{3,5})\b/gu, "0o$1");
+  const script = new Script(
+    `function same_stat(a, b) {${same}}; () => {${translated}}`,
+  );
+  const cases = [
+    ["inherited group", { gid: 20 }, true],
+    ["root group", { gid: 0, parentGid: 0 }, true],
+    ["restrictive umask", { gid: 20, mode: 0o400 }, true],
+    ["existing private", { existing: true, mode: 0o700 }, true],
+    ["existing sealed", { existing: true, mode: 0o555 }, true],
+    ["existing inherited group", { existing: true, gid: 20 }],
+    ["existing user", { existing: true, uid: 1001 }],
+    ["existing writable", { existing: true, mode: 0o777 }],
+    ["existing symlink", { existing: true, type: 0o120000 }],
+    ["exclusive creation race", { fault: "mkdir" }],
+    ["initial query", { fault: "query" }],
+    ["created owner", { uid: 1001 }],
+    ["created group", { gid: 21 }],
+    ["created mode", { mode: 0o750 }],
+    ["created ACL", { fault: "acl" }],
+    ["held substitution", { fault: "open" }],
+    ["held inode reuse", { fault: "birth" }],
+    ["parent substitution", { fault: "parent" }],
+    ["parent group drift", { fault: "parent-gid" }],
+    ["parent ACL", { fault: "parent-acl" }],
+    ["name substitution before normalization", { fault: "name" }],
+    ["named inode reuse", { fault: "name-birth" }],
+    ["ownership failure", { fault: "chown" }],
+    ["ownership not applied", { fault: "chown-noop" }],
+    ["mode failure", { fault: "chmod" }],
+    ["mode not applied", { fault: "chmod-noop", mode: 0o400 }],
+    ["post-normalization identity", { fault: "identity" }],
+    ["post-normalization name", { fault: "final-name" }],
+    ["post-normalization ACL", { fault: "final-acl" }],
+  ];
+  for (const [label, options, succeeds = false] of cases) {
+    const events = [],
+      output = "/fixture/report/platform-build",
+      text = (value) => (typeof value === "string" ? value : value.value),
+      directory = (ino, uid, gid, mode) => ({
+        st_dev: 1,
+        st_ino: ino,
+        st_uid: uid,
+        st_gid: gid,
+        st_mode: 0o40000 | mode,
+        st_nlink: 2,
+        st_size: 64,
+        st_birthtimespec: { tv_sec: ino, tv_nsec: 0 },
+        st_mtimespec: { tv_sec: 1, tv_nsec: 0 },
+        st_ctimespec: { tv_sec: 1, tv_nsec: 0 },
+      }),
+      parent = directory(10, 1001, options.parentGid ?? 20, 0o700);
+    let root = options.existing
+        ? directory(
+            11,
+            options.uid ?? 0,
+            options.gid ?? 0,
+            options.mode ?? 0o700,
+          )
+        : undefined,
+      named = root,
+      queries = 0,
+      normalized = false;
+    if (root && options.type) root.st_mode = options.type | 0o700;
+    const env = {
+      build_root: -1,
+      build_parent: -1,
+      build_path: {},
+      report_path: {},
+      build_identity: {},
+      report_identity: {},
+      errno: 0,
+      ENOENT: 2,
+      O_RDONLY: 0,
+      O_DIRECTORY: 1,
+      O_NOFOLLOW: 2,
+      O_CLOEXEC: 4,
+      AT_SYMLINK_NOFOLLOW: 8,
+      entries: [{ kind: "directory", path: output }],
+      count: 1,
+      encoded: output,
+      need: (ok) => assert.ok(ok, label),
+      S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
+      decode: (value, out) => {
+        out.value = value;
+      },
+      strcpy: (out, value) => {
+        out.value = text(value);
+      },
+      strcmp: (a, b) => (text(a) === text(b) ? 0 : 1),
+      strrchr: (value) => ({
+        next: value.value.slice(value.value.lastIndexOf("/") + 1),
+        truncate() {
+          value.value = value.value.slice(0, value.value.lastIndexOf("/"));
+        },
+      }),
+      realpath: (value, out) => {
+        out.value = text(value);
+        return true;
+      },
+      open: () => 1,
+      openat: (fd) => {
+        assert.equal(fd, 1);
+        if (options.fault === "open") root = { ...root, st_ino: 12 };
+        if (options.fault === "birth")
+          root = { ...root, st_birthtimespec: { tv_sec: 12, tv_nsec: 0 } };
+        return 2;
+      },
+      fstat(fd, out) {
+        Object.assign(out, structuredClone(fd === 1 ? parent : root));
+        return 0;
+      },
+      fstatat(fd, name, out, flags) {
+        assert.equal(fd, 1);
+        assert.equal(name, "platform-build");
+        assert.equal(flags, 8);
+        queries++;
+        if (!named) {
+          env.errno = options.fault === "query" ? 13 : 2;
+          return -1;
+        }
+        if (options.fault === "name" && queries > 2)
+          named = { ...named, st_ino: 12 };
+        if (options.fault === "name-birth" && queries > 2)
+          named = { ...named, st_birthtimespec: { tv_sec: 12, tv_nsec: 0 } };
+        Object.assign(out, structuredClone(named));
+        return 0;
+      },
+      lstat(file, out) {
+        const isParent = text(file) === "/fixture/report";
+        const value = structuredClone(isParent ? parent : named);
+        if (isParent && options.fault === "parent") value.st_ino++;
+        if (isParent && options.fault === "parent-gid") value.st_gid++;
+        if (!isParent && options.fault === "final-name") value.st_ino++;
+        Object.assign(out, value);
+        return 0;
+      },
+      mkdirat(fd, name, mode) {
+        events.push("mkdir");
+        assert.equal(fd, 1);
+        assert.equal(mode, 0o700);
+        if (options.fault === "mkdir") return -1;
+        root = directory(
+          11,
+          options.uid ?? 0,
+          options.gid ?? 20,
+          options.mode ?? 0o700,
+        );
+        named = root;
+        return 0;
+      },
+      no_acl(fd) {
+        assert.ok(
+          !(
+            fd === 2 &&
+            (options.fault === "acl" ||
+              (normalized && options.fault === "final-acl"))
+          ),
+          label,
+        );
+        assert.ok(!(fd === 1 && options.fault === "parent-acl"), label);
+      },
+      fchown(fd, uid, gid) {
+        events.push("chown");
+        assert.equal(fd, 2);
+        assert.equal(uid, 0);
+        assert.equal(gid, 0);
+        assert.equal(options.existing, undefined);
+        if (options.fault === "chown") return -1;
+        if (options.fault !== "chown-noop") {
+          root.st_uid = uid;
+          root.st_gid = gid;
+        }
+        return 0;
+      },
+      fchmod(fd, mode) {
+        events.push("chmod");
+        assert.equal(fd, 2);
+        assert.equal(mode, 0o700);
+        if (options.fault === "chmod") return -1;
+        if (options.fault !== "chmod-noop") root.st_mode = 0o40000 | mode;
+        if (options.fault === "identity") root.st_ino++;
+        normalized = true;
+        return 0;
+      },
+      stable(value) {
+        assert.equal(value.fd, 2);
+        const current = {};
+        env.lstat(env.build_path, current);
+        assert.deepEqual(current, root, label);
+        assert.equal(root.st_uid, 0);
+        assert.equal(root.st_gid, 0);
+        env.no_acl(1);
+        env.no_acl(2);
+      },
+      identity: () => events.push("admitted"),
+    };
+    const run = script.runInNewContext(env);
+    if (succeeds) {
+      run();
+      assert.equal(events.at(-1), "admitted", label);
+      assert.equal(events.includes("chown"), !options.existing, label);
+    } else {
+      assert.throws(run, undefined, label);
+      assert.ok(!events.includes("admitted"), label);
+      if (
+        ![
+          "chown",
+          "chown-noop",
+          "chmod",
+          "chmod-noop",
+          "identity",
+          "final-name",
+          "final-acl",
+        ].includes(options.fault)
+      )
+        assert.ok(
+          !events.includes("chown") && !events.includes("chmod"),
+          label,
+        );
+    }
+  }
+});
+
 function image(size = 108) {
   const bytes = Buffer.alloc(size);
   for (const [offset, value] of [

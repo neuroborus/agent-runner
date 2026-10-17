@@ -122,6 +122,17 @@ Cold recovery rejoins the original acquisition without replay or a build selecto
 retaining uncertainty for missing births or possible build admission. Source-driven
 coverage in `test/native-darwin-build.test.js` protects the fixed privileged tool
 set, mode bounds and birth-before-release ordering. These supply no native proof.
+It also executes the actual build-directory admission body with inherited parent
+GID, exclusive-creation races, unsafe existing ownership, held/name/parent
+substitutions, ACL refusal and failed or ineffective descriptor normalization.
+The raw preparation transport covers the original directory refusal before any
+compiler entry, work cancellation, missing refusal/birth evidence, surviving
+original domains, expired recovery authority, unavailable independent proof and
+failed recovery close. The actual build settlement caller forwards its separate
+cleanup signal after work cancellation. A lost `finish` reply is never replayed.
+The experiment build caller retains the original error separately from close
+failure and records cleanup success only after fresh original-owner and domain
+proof; successful cleanup never publishes preparation.
 The fixture retains native ABI journal entries and the read-only root lifetime;
 cold output reads require recovery's observer to retire first. Interrupted cold
 readers and admission before report-directory creation remain fenced and uncertain

@@ -139,6 +139,7 @@ const custody = (id) => ({
 });
 
 function wiring({ defaultRead = false } = {}) {
+  let nextReaderPid = 20;
   const events = [],
     files = new Map(),
     env = {
@@ -314,36 +315,72 @@ function wiring({ defaultRead = false } = {}) {
       assert.ok(files.has(file));
       return Buffer.from(JSON.stringify(files.get(file)));
     },
-    createReader: (value, readerOptions) => ({
-      async start() {
-        events.push(`start:${value.context.executionId}`);
-        await readerOptions.persist({
-          context: value.context,
-          sequence: 0,
-          phase: "entry",
-          custody: "POSSIBLE",
-        });
-        return { helper: identity(20), independent: true, planSha256: hash };
-      },
-      async beginCleanup({ signal }) {
-        assert.ok(signal instanceof AbortSignal && !signal.aborted);
-        events.push("cleanup");
-      },
-      async retired(value) {
-        assert.ok(value.pid);
-        events.push("fresh-retirement");
-        return retired;
-      },
-      async close() {
-        events.push(`close:${value.context.executionId}`);
-        return {
-          status: "RETIRED",
-          independent: true,
-          closed: true,
-          nativeEventSha256: hash,
-        };
-      },
-    }),
+    createReader: (value, readerOptions) => {
+      const building = value.context.executionId === "build",
+        pid = nextReaderPid++,
+        helper = building
+          ? { ...identity(pid), asid: 100 + pid }
+          : identity(20),
+        verifier = identity(nextReaderPid++);
+      return {
+        async start() {
+          events.push(`start:${value.context.executionId}`);
+          assert.notEqual(helper.pid, verifier.pid);
+          const request = { helper, verifier };
+          for (const [sequence, phase] of (building
+            ? ["entry", "admitted"]
+            : ["entry"]
+          ).entries())
+            await readerOptions.persist({
+              ...(value.purpose === "experiment"
+                ? { purpose: "experiment" }
+                : {}),
+              schemaVersion: 1,
+              context: value.context,
+              sequence,
+              phase,
+              request,
+              requestSha256: digest(JSON.stringify(request)),
+              [value.purpose === "experiment"
+                ? "bindingSha256"
+                : "reviewSha256"]: value.bindingSha256 ?? value.reviewSha256,
+              custody: "POSSIBLE",
+              ...(phase === "admitted" ? { subjects: request } : {}),
+            });
+          return { helper, independent: true, planSha256: hash };
+        },
+        async beginCleanup({ signal }) {
+          assert.ok(signal instanceof AbortSignal && !signal.aborted);
+          events.push("cleanup");
+        },
+        async retired(value) {
+          assert.ok(value.pid);
+          if (building) assert.notEqual(value.pid, helper.pid);
+          events.push("fresh-retirement");
+          return retired;
+        },
+        ...(building
+          ? {
+              async retiredRootDomain(value) {
+                assert.ok(value.asid > 0);
+                assert.notEqual(value.asid, helper.asid);
+                events.push("fresh-root-retirement");
+                return { independent: true, complete: true, members: [] };
+              },
+            }
+          : {}),
+        async close() {
+          events.push(`close:${value.context.executionId}`);
+          return {
+            status: "RETIRED",
+            independent: true,
+            emergencyCleanup: false,
+            closed: true,
+            nativeEventSha256: hash,
+          };
+        },
+      };
+    },
     createReaders: () => ({
       gitSnapshot: async () => {
         events.push("git-snapshot");
@@ -3001,8 +3038,12 @@ test("Darwin build entry classifies fixed installed tools through the default pr
       }
     } finally {
       const settlement = await effects.settle();
-      if (events.includes("start:build"))
-        assert.equal(settlement.status, "RETIRED");
+      if (events.includes("start:build")) {
+        assert.equal(settlement.status, "RETIRED", scenario);
+        assert.equal(settlement.independent, true, scenario);
+        if (!accepted)
+          assert.ok(events.includes("fresh-root-retirement"), scenario);
+      }
       assert.equal(openFiles, 0);
     }
   }
@@ -5396,6 +5437,11 @@ test("fixed Darwin entry supplies protected build defaults and fresh prepared ve
     ).length,
     81,
   );
+  for (let i = 0; i < 2; i++) {
+    await build.bootstrap();
+    assert.equal((await build.settle()).status, "RETIRED");
+    assert.equal(f.processes.size, 0);
+  }
   const before = f.events.filter((name) => name.startsWith("tool:")).length;
   const effects = await createSystemEffects(f.input, f.options);
   assert.equal((await effects.verifyBuild(f.prepared())).status, "OBSERVED");
@@ -5568,6 +5614,254 @@ test("Darwin partial-build recovery observes recorded custody without compilatio
     assert.equal(
       f.events.filter((name) => name.startsWith("tool:")).length,
       before,
+    );
+  }
+});
+
+test("Darwin directory refusal settles original custody through a fresh reader without launching a compiler", async () => {
+  for (const fault of [
+    null,
+    "cancelled",
+    "expired-authority",
+    "descendant",
+    "missing-proof",
+    "recovery-close",
+    "missing-birth",
+    "missing-refusal",
+    "unexpected-launch",
+  ]) {
+    const f = buildTranscripts(),
+      original = new Error("Original build-directory guard refusal"),
+      diagnostics = [],
+      controller = new AbortController();
+    if (fault === "expired-authority") f.options.signal = controller.signal;
+    const build = await createBuildEffects(f.input, f.options);
+    let helper,
+      refused = false;
+    f.operationFrames((name, args, owner) => {
+      if (name === "build-directory") {
+        helper = owner.helper;
+        refused = true;
+        if (fault === "cancelled" || fault === "expired-authority")
+          controller.abort();
+        if (fault === "descendant")
+          owner.live(
+            owner.subject(helper.asid),
+            f.manifest.darwinPreparation.bootstrap.reader.path,
+          );
+        throw original;
+      }
+      if (
+        refused &&
+        ((fault === "missing-proof" && name === "root-retired") ||
+          (fault === "recovery-close" && name === "finish"))
+      )
+        throw new Error("Independent cleanup observation unavailable");
+    });
+    await assert.rejects(
+      build.run(f.requests[0], { signal: controller.signal }),
+      (cause) => cause === original,
+    );
+    assert.equal(f.events.includes("finish"), false);
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+    if (fault === "missing-birth")
+      for (const [file, entry] of f.files)
+        if (
+          /darwin-bootstrap-0-custody-/u.test(file) &&
+          JSON.parse(entry.bytes).phase === "admitted"
+        )
+          f.files.delete(file);
+    if (fault === "missing-refusal")
+      f.files.delete(
+        path.join(
+          directory,
+          `darwin-command-${observationDigest(f.requests[0])}-provision-failed.json`,
+        ),
+      );
+    if (fault === "unexpected-launch")
+      f.put(
+        path.join(
+          directory,
+          `darwin-command-${observationDigest(f.requests[0])}-0.json`,
+        ),
+        Buffer.from(
+          JSON.stringify({
+            phase: "helper",
+            helper,
+            requestSha256: observationDigest(f.requests[0]),
+          }),
+        ),
+        0o400,
+        1001,
+      );
+    const result = await withNativeDiagnostics(
+      () => build.settle(),
+      (owner, value) => diagnostics.push({ owner, value }),
+    );
+    const success = !fault || fault === "cancelled";
+    assert.equal(result.status, success ? "RETIRED" : "RETAINED", fault);
+    assert.equal(result.emergencyCleanup, false);
+    if (fault === "expired-authority")
+      assert.equal(f.events.includes("darwin-bootstrap-1-intent.json"), false);
+    if (success) {
+      assert.equal(result.independent, true);
+      assert.equal(result.noLiveMembers, true);
+      assert.equal(f.processes.size, 0);
+      assert.ok(f.events.includes("probe:" + helper.pid));
+      assert.ok(f.events.includes("root-retired"));
+    } else
+      assert.ok(
+        diagnostics.some(({ owner }) => owner === "darwin-build-recovery"),
+      );
+    assert.strictEqual(await build.settle(), result);
+    await assert.rejects(
+      build.run(f.requests[1]),
+      (cause) => cause === original,
+    );
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+  }
+});
+
+test("Darwin lost finish acknowledgment is not replayed during independent recovery", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options),
+    finishes = new Map();
+  let first;
+  f.operationFrames((name, args, { helper }) => {
+    if (name !== "finish") return;
+    finishes.set(helper.pid, (finishes.get(helper.pid) ?? 0) + 1);
+    if (!first) {
+      first = helper.pid;
+      // Native finish consumed the request and exited; only its reply is lost.
+      f.processes.delete(helper.pid);
+      throw new Error("Original finish acknowledgment lost");
+    }
+  });
+  await assert.rejects(build.run(f.requests[0]));
+  const result = await build.settle();
+  assert.equal(result.status, "RETIRED");
+  assert.equal(finishes.get(first), 1);
+  assert.equal(f.processes.size, 0);
+  assert.equal(f.events.filter((event) => event.startsWith("tool:")).length, 1);
+});
+
+test("Darwin build settlement forwards the separate cleanup signal to original-reader recovery", async () => {
+  const f = buildTranscripts(),
+    work = new AbortController(),
+    cleanup = new AbortController();
+  f.options.signal = work.signal;
+  const effects = await createSystemEffects(f.input, f.options);
+  await effects.bootstrap(work.signal);
+  let lost = false;
+  f.operationFrames((name, args, { helper }) => {
+    if (name === "finish" && !lost) {
+      lost = true;
+      f.processes.delete(helper.pid);
+      throw new Error("Original reader finish acknowledgment lost");
+    }
+  });
+  work.abort();
+  const result = await effects.settle(darwinSystemRecipes()[0], undefined, {
+    signal: cleanup.signal,
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [
+          key,
+          {
+            admission: key === "builds" ? "possible" : "not-started",
+          },
+        ]),
+      ),
+    },
+  });
+  assert.equal(lost, true);
+  assert.equal(result.builds.settlement.status, "RETIRED");
+  assert.equal(result.builds.settlement.independent, true);
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin experiment build preserves directory refusal separately from failed close and independent settlement", async () => {
+  for (const unavailable of [false, true]) {
+    const f = experimentBuildFixture(),
+      original = new Error("Original directory guard failure"),
+      cleanup = new Error("Original reader transport closed"),
+      create = f.options.createReader,
+      diagnostics = [];
+    let readers = 0,
+      closes = 0,
+      retirements = 0,
+      domains = 0;
+    f.options.runCommand = () =>
+      assert.fail("Directory refusal must block compiler launch");
+    f.options.createReader = (...args) => {
+      const reader = create(...args);
+      if (++readers === 1)
+        return {
+          ...reader,
+          provisionBuild: async () => {
+            throw original;
+          },
+          close: async () => {
+            closes++;
+            throw cleanup;
+          },
+        };
+      return {
+        ...reader,
+        retired: async (...args) => {
+          retirements++;
+          if (unavailable)
+            throw new Error("Original reader retirement unavailable");
+          return reader.retired(...args);
+        },
+        retiredRootDomain: async (...args) => {
+          domains++;
+          return reader.retiredRootDomain(...args);
+        },
+      };
+    };
+    await withNativeDiagnostics(
+      () =>
+        assert.rejects(
+          prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+          (cause) => cause === original,
+        ),
+      (owner, value) => diagnostics.push({ owner, value }),
+    );
+    assert.equal(closes, 1);
+    assert.ok(retirements > 0);
+    assert.equal(domains > 0, !unavailable);
+    assert.ok(
+      diagnostics.some(
+        ({ owner, value }) =>
+          owner === "darwin-build-close" && value.exception === cleanup,
+      ),
+    );
+    assert.equal(
+      diagnostics.some(
+        ({ owner }) => owner === "darwin-experiment-build-cleanup",
+      ),
+      unavailable,
+    );
+    const job = f.jobs.at(-1);
+    assert.equal(job.failure, "preparation-failed");
+    assert.equal(job.preparation, null);
+    assert.equal(
+      job.preparationEffects.settlement.status,
+      unavailable ? "RETAINED" : "RETIRED",
+    );
+    assert.equal(
+      f.files.has(
+        path.join(directory, "darwin-experiment-build-failure-settlement.json"),
+      ),
+      !unavailable,
     );
   }
 });

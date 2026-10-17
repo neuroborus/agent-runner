@@ -5709,8 +5709,16 @@ sealed source copies, whose hashes also match the checked-in reviewed sources.
 The repository default `provisionBuild` asks the admitted reader to provision
 only the `platform-build` directory declared in the separately pinned bootstrap
 plan, after command intent is persisted. A missing directory is created
-exclusively under its canonical private report parent; an existing root-owned
-published directory is resealed without replacing its identity. Native extended
+exclusively under its canonical private report parent. XNU 11417.140.69's
+`vn_attribute_prepare` defaults the new object's group to the parent's group;
+root execution alone does not imply GID 0. The reader joins the fresh held/named
+directory, its birth identity and private mode, the original parent and empty
+ACLs before using `fchown` and `fchmod` on that held descriptor. It then requires
+unchanged identity, UID/GID 0 and mode `0700`, and repeats the existing stable
+name/parent/ACL checks. A raced exclusive creation, substituted object or unsafe
+existing path is rejected. Existing directories must already have UID/GID 0 and
+mode `0700` or `0555`; they are never adopted or chowned. An admitted published
+directory is resealed without replacing its identity. Native extended
 ACL reads reject inherited or foreign access on the held report/build directories
 and helper outputs. Held/named root ownership and identity are checked before
 resealing. Its protected directory receipt precedes compiler-entry launch, and
@@ -5749,6 +5757,22 @@ changing, over-capacity or ambiguous membership withholds success. Command inten
 native helper/worker identities and uncertainty survive a missing final result.
 Fresh recovery must retain exclusion when original session custody or complete
 retirement cannot be independently rejoined.
+
+A directory-provision refusal leaves a separate request-bound caller receipt
+before any compiler entry can launch. Recovery admits that partial state only
+with the refusal receipt and no directory receipt, compiler transcript or result;
+missing birth evidence after possible compiler admission still retains custody.
+Reader close is attempted once, including when `finish` may have consumed its
+request before losing the acknowledgment. Failed normal close instead uses a
+fresh custody reader to check original reader/verifier retirement and empty
+original root domains, then independently retires that recovery reader. Neither
+EOF nor a close result without independent proof establishes retirement. Fresh
+recovery uses the caller's signal, including the separately supplied cleanup
+signal after work cancellation; an expired bound cannot authorize a new observer
+or establish retirement. The experiment build keeps its first error and reports
+close/recovery errors separately; successful failure settlement persists its own
+receipt and updates only cleanup status, without completing preparation or
+retrying a build.
 
 System `verifyBuild` rereads all pinned signed image bytes/ABI and every original
 command intent and receipt, as well as the pinned source and tool bytes. It

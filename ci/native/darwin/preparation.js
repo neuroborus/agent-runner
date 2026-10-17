@@ -319,6 +319,7 @@ export function darwinPreparationContext(input, options) {
       });
   let bootstrapPromise,
     bootstrapSequence,
+    settlement,
     firstFailure,
     fenced = false;
   const fail = (cause) => {
@@ -347,6 +348,7 @@ export function darwinPreparationContext(input, options) {
       if (firstFailure) throw firstFailure;
     }
     if (bootstrapPromise) return bootstrapPromise;
+    settlement = undefined;
     bootstrapPromise = (async () => {
       if (!recovery)
         requireObservation(
@@ -451,26 +453,47 @@ export function darwinPreparationContext(input, options) {
   };
   const releaseBootstrap = async () => {
     const current = await bootstrapPromise;
+    // A close may have consumed finish even when its acknowledgment is lost.
+    // Keep that attempt; only independent recovery may replace missing proof.
+    const result = await (current.close ??= current.reader.close());
+    requireObservation(retired(result) && result.closed === true);
     activeReader = undefined;
-    const result = await current.reader.close();
-    requireObservation(
-      result.status === "RETIRED" &&
-        result.independent === true &&
-        result.closed === true,
-    );
     await write(`darwin-bootstrap-${current.sequence}-result.json`, result);
     bootstrapPromise = undefined;
     return result;
   };
-  const settleBootstrap = async () => {
-    try {
-      if (bootstrapPromise) await releaseBootstrap();
-      return { status: "RETIRED", independent: true, emergencyCleanup: false };
-    } catch (diagnosticError) {
-      nativeException("darwin/preparation", diagnosticError);
-      return retained();
-    }
-  };
+  const settleBootstrap = ({ recover = false, signal = options.signal } = {}) =>
+    (settlement ??= (async () => {
+      let closeFailure;
+      try {
+        if (bootstrapPromise) await releaseBootstrap();
+      } catch (cause) {
+        closeFailure = cause;
+        nativeException("darwin-build-close", cause);
+      }
+      if (!recover && !firstFailure && !closeFailure)
+        return {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: false,
+        };
+      try {
+        const recovery = darwinPreparationContext(value, options);
+        const result = await recoverDarwinBuild(
+          recovery,
+          await darwinBuildRecords(recovery),
+          signal,
+          undefined,
+          { recovery: true },
+        );
+        activeReader = undefined;
+        bootstrapPromise = undefined;
+        return result;
+      } catch (diagnosticError) {
+        nativeException("darwin-build-recovery", diagnosticError);
+        return retained();
+      }
+    })());
   return {
     ...value,
     plan,
@@ -492,6 +515,20 @@ export function darwinPreparationContext(input, options) {
     createReader,
     fail,
   };
+}
+
+export async function darwinBuildRecords(state) {
+  const names = await state.fs.readdir(state.directory);
+  requireObservation(names.length <= 65536);
+  const records = [];
+  for (const name of names.filter((name) =>
+    /^darwin-(?:bootstrap-[0-9]+-|command-[a-f0-9]{64}-)/u.test(name),
+  ))
+    records.push({
+      name,
+      record: JSON.parse(await state.receipt(path.join(state.directory, name))),
+    });
+  return records;
 }
 
 export function createDarwinBuildEffects(input, options = {}) {
@@ -574,18 +611,39 @@ export function createDarwinBuildEffects(input, options = {}) {
         const persist = (record) =>
           state.write(`darwin-command-${id}-${sequence++}.json`, record);
         await state.admit(signal);
-        const provisioned = await (
-          options.provisionBuild ??
-          ((value) => value.reader.provisionBuild(value.output))
-        )(
-          {
-            output: state.output,
-            candidateSha: state.job.candidateSha,
-            context: state.plan.bootstrap.context,
-            reader,
-          },
-          { signal },
-        );
+        let provisioned;
+        try {
+          provisioned = await (
+            options.provisionBuild ??
+            ((value) => value.reader.provisionBuild(value.output))
+          )(
+            {
+              output: state.output,
+              candidateSha: state.job.candidateSha,
+              context: state.plan.bootstrap.context,
+              reader,
+            },
+            { signal },
+          );
+        } catch (cause) {
+          // A positive caller record distinguishes this pre-launch refusal from
+          // an unannounced compiler launch with missing durable birth evidence.
+          try {
+            await state.write(
+              `darwin-command-${id}-provision-failed.json`,
+              {
+                candidateSha: state.job.candidateSha,
+                requestSha256: id,
+                stage: "build-directory",
+                status: "FAILED",
+              },
+              false,
+            );
+          } catch (failure) {
+            nativeException("darwin-build-provision-failure-record", failure);
+          }
+          throw cause;
+        }
         if (!options.provisionBuild) {
           requireObservation(
             provisioned.independent === true &&
@@ -657,12 +715,12 @@ export async function recoverDarwinBuild(
           (record.purpose ?? "reviewed") ===
             (state.manifest.purpose ?? "reviewed") &&
           Object.getPrototypeOf(record) === Object.prototype &&
-          /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-result|-[0-9]+))\.json$/u.test(
+          /^darwin-(?:bootstrap-[0-9]+-(?:intent|result|custody-[0-9]+)|command-[a-f0-9]{64}(?:-intent|-directory|-provision-failed|-result|-[0-9]+))\.json$/u.test(
             name,
           ) &&
           byName.has(
             name.replace(
-              /-(?:intent|result|directory|custody-[0-9]+|[0-9]+)\.json$/u,
+              /-(?:intent|result|directory|provision-failed|custody-[0-9]+|[0-9]+)\.json$/u,
               "-intent.json",
             ),
           ),
@@ -819,6 +877,42 @@ export async function recoverDarwinBuild(
     const directory = byName.get(
       `darwin-command-${record.requestSha256}-directory.json`,
     );
+    const transcript = records
+      .filter(({ name }) =>
+        new RegExp(
+          `^darwin-command-${record.requestSha256}-[0-9]+\\.json$`,
+          "u",
+        ).test(name),
+      )
+      .map(({ record }) => record);
+    if (Object.hasOwn(record, "targetSha256"))
+      requireObservation(
+        operation.mode === "sign"
+          ? hash(record.targetSha256)
+          : record.targetSha256 === null,
+      );
+    const refused = byName.get(
+      `darwin-command-${record.requestSha256}-provision-failed.json`,
+    );
+    if (refused) {
+      observationObject(refused, [
+        ...Object.keys(purposeData(state.manifest)),
+        "candidateSha",
+        "requestSha256",
+        "stage",
+        "status",
+      ]);
+      requireObservation(
+        refused.candidateSha === state.job.candidateSha &&
+          refused.requestSha256 === record.requestSha256 &&
+          refused.stage === "build-directory" &&
+          refused.status === "FAILED" &&
+          !directory &&
+          !result &&
+          transcript.length === 0,
+      );
+      continue;
+    }
     observationObject(directory, [
       ...Object.keys(purposeData(state.manifest)),
       "candidateSha",
@@ -833,21 +927,7 @@ export async function recoverDarwinBuild(
           directoryIdentity === directory.directoryIdentity),
     );
     directoryIdentity = directory.directoryIdentity;
-    if (Object.hasOwn(record, "targetSha256"))
-      requireObservation(
-        operation.mode === "sign"
-          ? hash(record.targetSha256)
-          : record.targetSha256 === null,
-      );
-    const transcript = records
-        .filter(({ name }) =>
-          new RegExp(
-            `^darwin-command-${record.requestSha256}-[0-9]+\\.json$`,
-            "u",
-          ).test(name),
-        )
-        .map(({ record }) => record),
-      announced = transcript.find((entry) => entry.phase === "helper");
+    const announced = transcript.find((entry) => entry.phase === "helper");
     requireObservation(
       announced &&
         transcript.every(

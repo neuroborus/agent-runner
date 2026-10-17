@@ -18,6 +18,7 @@ import {
 import { DARWIN_HELPER_NAMES, darwinCompilerArguments } from "./build.js";
 import {
   createDarwinBuildEffects,
+  darwinBuildRecords as recordsFor,
   darwinPreparationContext,
   recoverDarwinBuild,
 } from "./preparation.js";
@@ -212,19 +213,6 @@ async function candidateSources(prepared, options) {
       digest(await read("ci/native/darwin/" + source.name, 1048576)) ===
         source.sha256,
     );
-}
-async function recordsFor(state) {
-  const names = await state.fs.readdir(state.directory);
-  requireObservation(names.length <= 65536);
-  const records = [];
-  for (const name of names.filter((name) =>
-    /^darwin-(?:bootstrap-[0-9]+-|command-[a-f0-9]{64}-)/u.test(name),
-  ))
-    records.push({
-      name,
-      record: JSON.parse(await state.receipt(path.join(state.directory, name))),
-    });
-  return records;
 }
 async function observe(prepared, commands, reader, options, previous) {
   const reads = [],
@@ -614,7 +602,27 @@ export async function prepareDarwinExperimentBuild(
   } finally {
     if (effects)
       try {
-        requireObservation(retired(await effects.settle()));
+        const settlement = await effects.settle({ recover: !!primary });
+        requireObservation(retired(settlement));
+        if (primary) {
+          requireObservation(hash(settlement.nativeEventSha256));
+          const pin = await state.write(
+            "darwin-experiment-build-failure-settlement.json",
+            settlement,
+            false,
+          );
+          await save(
+            recordExperimentPreparationEffect(job, {
+              admission: "possible",
+              settlement: {
+                status: "RETIRED",
+                independent: true,
+                emergencyCleanup: false,
+              },
+              receiptSha256: pin.sha256,
+            }),
+          );
+        }
       } catch (cause) {
         nativeException("darwin-experiment-build-cleanup", cause);
         if (!primary) throw cause;

@@ -1052,7 +1052,8 @@ export function createDarwinSystemEffects(input, options = {}) {
     async settle(recipe, prepared, { signal, execution } = {}) {
       requireObservation(execution?.id === recipe.id);
       let result;
-      if (recipe.id === "build") result = await state.settleBootstrap();
+      if (recipe.id === "build")
+        result = await state.settleBootstrap({ signal });
       else {
         const current = active.get(recipe.id);
         requireObservation(

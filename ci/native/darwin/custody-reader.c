@@ -1195,18 +1195,35 @@ static void build_directory(const char *encoded) {
   build_parent = open(report_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   need(build_parent >= 0 && !fstat(build_parent, &report_identity) && S_ISDIR(report_identity.st_mode) &&
     report_identity.st_uid > 500 && (report_identity.st_mode & 07777) == 0700); no_acl(build_parent);
-  struct stat named;
+  struct stat named; bool created = false;
   if (fstatat(build_parent, "platform-build", &named, AT_SYMLINK_NOFOLLOW) < 0) {
     need(errno == ENOENT && !mkdirat(build_parent, "platform-build", 0700));
+    created = true;
     need(!fstatat(build_parent, "platform-build", &named, AT_SYMLINK_NOFOLLOW));
-  } else need(S_ISDIR(named.st_mode) && named.st_uid == 0 && named.st_gid == 0 &&
-    ((named.st_mode & 07777) == 0700 || (named.st_mode & 07777) == 0555));
+  }
+  need(S_ISDIR(named.st_mode) && named.st_uid == 0);
+  if (created) need(named.st_gid == report_identity.st_gid && !(named.st_mode & 07077));
+  else need(named.st_gid == 0 && ((named.st_mode & 07777) == 0700 || (named.st_mode & 07777) == 0555));
   build_root = openat(build_parent, "platform-build", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  need(build_root >= 0 && !fstat(build_root, &build_identity) && S_ISDIR(build_identity.st_mode) &&
-    build_identity.st_uid == 0 && build_identity.st_gid == 0 &&
-    ((build_identity.st_mode & 07777) == 0700 || (build_identity.st_mode & 07777) == 0555));
+  need(build_root >= 0 && !fstat(build_root, &build_identity));
   same_stat(named, build_identity); no_acl(build_root);
+  need(build_identity.st_birthtimespec.tv_sec == named.st_birthtimespec.tv_sec && build_identity.st_birthtimespec.tv_nsec == named.st_birthtimespec.tv_nsec);
+  struct stat parent, parent_named, current;
+  need(!fstat(build_parent, &parent) && !lstat(report_path, &parent_named));
+  need(parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
+    parent.st_mode == report_identity.st_mode && parent.st_uid == report_identity.st_uid && parent.st_gid == report_identity.st_gid &&
+    parent.st_birthtimespec.tv_sec == report_identity.st_birthtimespec.tv_sec && parent.st_birthtimespec.tv_nsec == report_identity.st_birthtimespec.tv_nsec);
+  same_stat(parent, parent_named); no_acl(build_parent);
+  need(!fstatat(build_parent, "platform-build", &current, AT_SYMLINK_NOFOLLOW)); same_stat(named, current);
+  need(current.st_birthtimespec.tv_sec == named.st_birthtimespec.tv_sec && current.st_birthtimespec.tv_nsec == named.st_birthtimespec.tv_nsec);
+  /* XNU vn_attribute_prepare inherits the parent GID. Only our successful
+   * exclusive mkdir permits normalization, through the joined held descriptor. */
+  if (created) need(!fchown(build_root, 0, 0));
   need(!fchmod(build_root, 0700) && !fstat(build_root, &build_identity));
+  need(build_identity.st_dev == named.st_dev && build_identity.st_ino == named.st_ino &&
+    build_identity.st_birthtimespec.tv_sec == named.st_birthtimespec.tv_sec && build_identity.st_birthtimespec.tv_nsec == named.st_birthtimespec.tv_nsec &&
+    build_identity.st_nlink == named.st_nlink && S_ISDIR(build_identity.st_mode) &&
+    build_identity.st_uid == 0 && build_identity.st_gid == 0 && (build_identity.st_mode & 07777) == 0700);
   struct entry value = {.fd = build_root}; strcpy(value.kind, "build"); strcpy(value.path, build_path); value.stat = build_identity;
   stable(&value); identity(&value);
 }
