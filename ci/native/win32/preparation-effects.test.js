@@ -4045,11 +4045,13 @@ test("Windows original compiler refusal waits for bridge exit before independent
   }
 });
 
-test("actual experiment compiler open requires zero trust and unchanged content/signature pins", async () => {
+test("actual experiment compiler open requires noninteractive paired trust, zero results and unchanged pins", async () => {
   for (const fault of [
     "none",
     "positive",
+    "negative",
     "close",
+    "negative-close",
     "unavailable",
     "content",
     "signature",
@@ -4060,7 +4062,13 @@ test("actual experiment compiler open requires zero trust and unchanged content/
         (entry) => entry.path === compiler.path,
       ),
       entries = structuredClone(f.prepared.entries),
-      files = new Map(f.files);
+      files = new Map(f.files),
+      verificationResult = ["negative", "negative-close"].includes(fault)
+        ? -2146762496 // Signed LONG for TRUST_E_NOSIGNATURE (0x800b0100).
+        : ["positive", "unavailable"].includes(fault)
+          ? 8
+          : 0,
+      closureResult = ["close", "negative-close"].includes(fault) ? 5 : 0;
     if (fault === "signature") entries[index].signatureSha256 = "e".repeat(64);
     if (fault === "content") {
       const changed = Buffer.from(files.get(compiler.path));
@@ -4072,8 +4080,8 @@ test("actual experiment compiler open requires zero trust and unchanged content/
       files,
       identity: f.rawFileId,
       inspect: f.objectRead,
-      result: ["positive", "unavailable"].includes(fault) ? 8 : 0,
-      closed: fault === "close" ? 5 : 0,
+      result: verificationResult,
+      closed: closureResult,
       unavailable: fault === "unavailable",
     });
     f.accessNative = (operation, args, _, __, sequence) =>
@@ -4094,14 +4102,22 @@ test("actual experiment compiler open requires zero trust and unchanged content/
         const failure = error.custodyReaderFailure;
         assert.equal(error.experimentNative, native);
         assert.equal(failure.sequence, 2);
-        if (["positive", "close", "unavailable"].includes(fault)) {
+        if (
+          [
+            "positive",
+            "negative",
+            "close",
+            "negative-close",
+            "unavailable",
+          ].includes(fault)
+        ) {
           assert.equal(
             failure.trust.result,
-            fault === "close" ? "0x00000000" : "0x00000008",
+            "0x" + (verificationResult >>> 0).toString(16).padStart(8, "0"),
           );
           assert.equal(
             failure.trust.closeResult,
-            fault === "close" ? "0x00000005" : "0x00000000",
+            "0x" + closureResult.toString(16).padStart(8, "0"),
           );
           assert.equal(failure.trust.entry, index);
           assert.deepEqual(failure.trust.inputs, source.inputs);

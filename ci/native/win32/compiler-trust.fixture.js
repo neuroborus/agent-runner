@@ -143,7 +143,8 @@ export async function compilerTrustFixture({
   const open = reader
     .split('} else if (!strcmp(values[0], "open")) {')[1]
     .split('} else if (!strcmp(values[0], "inspect"))')[0];
-  let program;
+  let program, activeTrust;
+  const verifiedHandles = new Set();
   const api = {
     entries: held,
     count: held.length,
@@ -153,6 +154,7 @@ export async function compilerTrustFixture({
     signature_trust,
     control: "authenticated",
     NULL: null,
+    INVALID_HANDLE_VALUE: -1,
     TRUE: true,
     FALSE: false,
     ERROR_SUCCESS: 0,
@@ -201,15 +203,34 @@ export async function compilerTrustFixture({
       return !unavailable;
     },
     wcslen: (path) => path.length,
-    WinVerifyTrust: (_, __, trust) => {
-      calls.push(trust.dwStateAction);
+    WinVerifyTrust: (window, _, trust) => {
+      assert.equal(window, api.INVALID_HANDLE_VALUE);
+      const entry = held[api.openIndex],
+        file = entry.file;
       assert.equal(trust.dwUnionChoice, 1);
+      assert.equal(trust.dwUIChoice, 2);
+      assert.equal(trust.fdwRevocationChecks, 0);
       assert.equal(trust.dwProvFlags, 0x1010);
+      assert.equal(trust.pFile.pcwszFilePath, entry.path);
+      assert.equal(trust.pFile.pcwszFilePath, file.path);
+      assert.equal(trust.pFile.hFile, file.handle);
+      assert.ok(file.handle.access & api.GENERIC_READ);
+      calls.push(trust.dwStateAction);
       if (trust.dwStateAction === 2) {
+        assert.equal(
+          trust,
+          activeTrust,
+          "close the original verification state",
+        );
+        activeTrust = undefined;
         assert.equal(signature_trust.result, result, "save before closure");
         return closed;
       }
       assert.equal(trust.dwStateAction, 1);
+      assert.equal(activeTrust, undefined);
+      assert.ok(!verifiedHandles.has(file.handle), "never retry verification");
+      verifiedHandles.add(file.handle);
+      activeTrust = trust;
       return result;
     },
     headers: (bytes, at) => {
@@ -261,10 +282,10 @@ export async function compilerTrustFixture({
     bridge_entry: () => false,
     stock_security: () => {},
     bridge_security: () => {},
-    hold_shared: (path) => {
+    hold_shared: (path, _directory, _private, access) => {
       const [volume, id] = identity(path).split(":");
       return {
-        handle: true,
+        handle: Object.freeze({ access }),
         path,
         bytes: files.get(path),
         id: {
@@ -322,6 +343,7 @@ export async function compilerTrustFixture({
     },
     async open(index, sequence) {
       api.sequence = sequence;
+      api.openIndex = index;
       try {
         program.open_entry(["open", String(sequence), String(index)]);
         return api.observation;

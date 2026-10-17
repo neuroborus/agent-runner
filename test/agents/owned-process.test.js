@@ -1270,7 +1270,7 @@ test(
 );
 
 test(
-  "rechecks descendant absence after a transient parent inspection failure",
+  "rechecks descendant absence after parent inspection and termination-message failures",
   { timeout: 5_000 },
   async (t) => {
     // Keep the watchdog from adding inspections before the close notification.
@@ -1298,6 +1298,21 @@ test(
       },
     );
     const closed = new Promise((resolve) => child.once("close", resolve));
+    const send = child.send.bind(child);
+    t.mock.method(child, "send", (message, callback) => {
+      if (message.type !== "terminate") return send(message, callback);
+      // A lost IPC acknowledgment adds a fallback scan before the close scan.
+      // Make that outcome explicit instead of depending on the kill/write race.
+      const sent = send(message, () => {});
+      process.nextTick(() =>
+        callback(
+          Object.assign(new Error("Termination channel closed."), {
+            code: "ERR_IPC_CHANNEL_CLOSED",
+          }),
+        ),
+      );
+      return sent;
+    });
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
@@ -1317,7 +1332,7 @@ test(
     await assert.rejects(child.ownedCompletion, {
       code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     });
-    assert.equal(inspections, 2);
+    assert.equal(inspections, 3);
     assert.deepEqual(registrations, [child.ownedPid, null]);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   },

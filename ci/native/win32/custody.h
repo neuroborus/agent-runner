@@ -215,12 +215,13 @@ static void signature_observe(struct held_file *file, WINTRUST_DATA *trust) {
 static void signature_verify(struct held_file *file, const char *expected, WINTRUST_DATA *trust) {
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
   signature_observe(file, trust);
-  LONG result = WinVerifyTrust(NULL, &action, trust);
+  /* INVALID_HANDLE_VALUE declares that no interactive user is available. */
+  LONG result = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, trust);
   /* Save the original LONG before CLOSE can replace native error state. */
   signature_trust.file = file; signature_trust.expected = expected; signature_trust.choice = trust->dwUnionChoice;
   signature_trust.result = result; signature_trust.closed = ERROR_SUCCESS; signature_trust.active = TRUE;
   trust->dwStateAction = WTD_STATEACTION_CLOSE;
-  LONG closed = WinVerifyTrust(NULL, &action, trust); signature_trust.closed = closed;
+  LONG closed = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, trust); signature_trust.closed = closed;
   DWORD saved = GetLastError();
   if (result != ERROR_SUCCESS || closed != ERROR_SUCCESS)
     fprintf(stderr, "native-windows-trust: choice=%lu result=0x%08lx close-result=0x%08lx\n", signature_trust.choice, (unsigned long)(DWORD)result, (unsigned long)(DWORD)closed);

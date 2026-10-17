@@ -63,10 +63,12 @@ supervisor's real bounded incomplete-inspection retries separate from controlled
 parent observations: an uncertain parent must retain registration, so a fixture
 expecting durable deregistration supplies an empty parent view and races callback
 entry against premature completion. Keep the distinct persistent and transient
-parent-uncertainty regressions. Owner-loss fixtures acknowledge entry into the
-pending registration callback through IPC, before or after its simulated durable
-side effect, and compare recorded process identity before retirement. Await owned
-process closure and identity-checked supervisor retirement during teardown.
+parent-uncertainty regressions. The transient case forces a failed termination
+message callback, making its additional fallback inspection deterministic.
+Owner-loss fixtures acknowledge entry into the pending registration callback
+through IPC, before or after its simulated durable side effect, and compare
+recorded process identity before retirement. Await owned process closure and
+identity-checked supervisor retirement during teardown.
 Synthetic procfs classification fixtures control both parent and embedded
 inspection clocks so scheduler pauses cannot exhaust an unrelated test's budget;
 explicit elapsed-budget regressions and real supervisor retry windows retain
@@ -749,9 +751,16 @@ Compiler-open regressions execute the production open, pin, PE/experiment,
 verification and failure-emission bodies with injected SDK/kernel reads, then
 use the actual fragmented failure parser and experiment preparation owner.
 They retain the original nonzero LONG separately from closure failures, reject
-positive nonzero results and substituted content/signature pins, and exercise
-original owner settlement without repeating verification. Malformed status,
-identity, slot and pin carriers remain failures without diagnostic authority.
+positive and signed-negative nonzero results and substituted content/signature
+pins, and exercise original owner settlement without repeating verification.
+Malformed status, identity, slot and pin carriers remain failures without
+diagnostic authority.
+The injected WinVerifyTrust boundary requires `INVALID_HANDLE_VALUE` for both
+VERIFY and CLOSE, the original full path and readable held handle, unchanged
+UI/revocation/cache policy, a single VERIFY per held file and closure of that
+same verification state. A simultaneous negative VERIFY and failed CLOSE keeps
+both original statuses. These checks extend the existing caller matrix and
+preserve the original LONG 8/CLOSE 0 settlement regressions.
 The actual trust-input snapshot and authenticated failure carrier retain the
 original result 8/CLOSE 0 alongside unchanged call inputs, held handle flags,
 size and current position, including failed optional queries. The fixture checks

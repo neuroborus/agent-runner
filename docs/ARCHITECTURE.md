@@ -72,11 +72,14 @@ publication, PE and custody owners reject promotion. Original creation identitie
 whole Jobs, owned task removal and independent settlement govern load and partial
 recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
 recompilation or resource release. Ordinary CI consumes this experiment preparer.
-Windows custody retains each original WinVerifyTrust LONG before closing its
-state. Failure-only authenticated diagnostics carry exact 32-bit verification
-and closure results, embedded/catalog mode, held file identity and the retained
-entry/pins when present. Only zero succeeds; diagnostics never retry verification,
-relax pins or promote experiment observations. The compiler opens after the build
+Windows custody passes the documented noninteractive `INVALID_HANDLE_VALUE`
+to the original WinVerifyTrust VERIFY and separate CLOSE, retaining the original
+held file/path, strict pins and cache-only policy. It retains each original LONG
+before closing its state. Failure-only authenticated diagnostics carry exact
+32-bit verification and closure results, embedded/catalog mode, held file
+identity and the retained entry/pins when present. Only zero succeeds;
+diagnostics never retry verification, relax pins or promote experiment
+observations. The compiler opens after the build
 helper at sequence 2. Its original trust cause and functional compatibility remain
 pending matching Windows evidence; pipe error 109 supplies no trust diagnosis.
 Windows experiment closure fences admission and coalesces original reader and

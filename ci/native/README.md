@@ -8157,6 +8157,14 @@ file identity and retained entry/content/signature pins when available. Both
 statuses use exact eight-digit hexadecimal 32-bit representations; only zero
 succeeds. The carrier remains strict, bounded and failure-only. Verification is
 never retried for diagnostics, and failed trust cannot fall back to a digest.
+The shared embedded/catalog helper passes `INVALID_HANDLE_VALUE` to both the
+original VERIFY and its separate CLOSE call, explicitly declaring that no
+interactive user is available under the public
+[WinVerifyTrust contract](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-winverifytrust).
+The original full non-null path and readable held file handle remain unchanged,
+as do identity/content/signature pins, cache-only policy and zero-only LONG
+acceptance. The same original verification state is closed once even when
+VERIFY fails; its separate CLOSE result cannot replace the original result.
 Its optional twenty-element `inputs` array retains the original trust/file-info
 structure sizes; full-path, held-path, held-handle and known-subject flags; UI,
 revocation, state-action, provider and UI-context values; policy/SIP/state-handle
@@ -8170,7 +8178,13 @@ the compiler's signature pin identifies the PE signature representation, not an 
 signer certificate. The observed original embedded verification returned LONG 8
 with CLOSE 0 at sequence 2/open, entry 14. That status alone establishes neither
 an EOF, UI nor resource cause; later pipe error 109 cannot replace it. The
-functional compiler-trust repair remains pending original-call Windows evidence.
+noninteractive argument corrects the call contract conservatively; it is not a
+proved explanation for LONG 8. The original position equal to size (893288)
+establishes no cursor requirement, UI cause or resource-exhaustion cause. There
+is no rewind, replacement handle/path or verification retry. Functional trust
+success and original failed-owner retirement remain separate matching Windows
+CI requirements; the original LONG 8/CLOSE 0 failure-settlement coverage remains
+mandatory even if a later trust call succeeds.
 Error 109 does not identify a reader wait/exit cause. Original native
 command acceptance remains unproved until matching hosted execution; preparation
 and workflow deadlines are unchanged.
