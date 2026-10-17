@@ -72,6 +72,13 @@ publication, PE and custody owners reject promotion. Original creation identitie
 whole Jobs, owned task removal and independent settlement govern load and partial
 recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
 recompilation or resource release. Ordinary CI consumes this experiment preparer.
+Windows custody retains each original WinVerifyTrust LONG before closing its
+state. Failure-only authenticated diagnostics carry exact 32-bit verification
+and closure results, embedded/catalog mode, held file identity and the retained
+entry/pins when present. Only zero succeeds; diagnostics never retry verification,
+relax pins or promote experiment observations. The compiler opens after the build
+helper at sequence 2. Its original trust cause and functional compatibility remain
+pending matching Windows evidence; pipe error 109 supplies no trust diagnosis.
 Windows experiment closure fences admission and coalesces original reader and
 file-observer settlement. Its separate 30-second cleanup signal interrupts IPC
 through queued reader work, task acknowledgement and bridge completion without

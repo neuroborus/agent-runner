@@ -245,7 +245,42 @@ export function windowsCustodyChannel(
             buffer.subarray(diagnostic + 1, end),
           ),
         );
-        closed(value, ["phase", "sequence", "command", "source", "line"]);
+        const fields = ["phase", "sequence", "command", "source", "line"];
+        if (Object.hasOwn(value, "trust")) {
+          fields.push("trust");
+          const trust = value.trust;
+          closed(trust, [
+            "mode",
+            "result",
+            "closeResult",
+            "entry",
+            "identity",
+            "sha256",
+            "signatureSha256",
+          ]);
+          const hash = (pin) =>
+            typeof pin === "string" && /^[a-f0-9]{64}$/u.test(pin);
+          requireWindows(
+            ["embedded", "catalog"].includes(trust.mode) &&
+              typeof trust.result === "string" &&
+              /^0x[a-f0-9]{8}$/u.test(trust.result) &&
+              typeof trust.closeResult === "string" &&
+              /^0x[a-f0-9]{8}$/u.test(trust.closeResult) &&
+              (trust.result !== "0x00000000" ||
+                trust.closeResult !== "0x00000000") &&
+              (trust.entry === null ||
+                (Number.isInteger(trust.entry) &&
+                  trust.entry >= 0 &&
+                  trust.entry < 128)) &&
+              typeof trust.identity === "string" &&
+              /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(trust.identity) &&
+              (trust.entry === null
+                ? trust.sha256 === null
+                : hash(trust.sha256)) &&
+              (trust.signatureSha256 === null || hash(trust.signatureSha256)),
+          );
+        }
+        closed(value, fields);
         requireWindows(
           value.phase === "reader-failure" &&
             Number.isSafeInteger(value.sequence) &&

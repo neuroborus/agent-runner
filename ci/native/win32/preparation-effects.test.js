@@ -68,6 +68,7 @@ import {
 import { createWindowsOperationReaders } from "./operation-readers.js";
 import { installPackageNativeFixture } from "./package-native.fixture.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
+import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import { windowsPreparationOptions } from "./preparation.js";
 import {
   bootstrapWindowsExperiment,
@@ -3088,7 +3089,13 @@ function rawPreparation({ experiment = false } = {}) {
             throw new Error("Interrupted native case operation");
           const accessValue =
             !observer && f.accessNative
-              ? await f.accessNative(operation, values, scope, declaration)
+              ? await f.accessNative(
+                  operation,
+                  values,
+                  scope,
+                  declaration,
+                  Number(sequence),
+                )
               : undefined;
           if (accessValue !== undefined) value = accessValue;
           else if (observer && operation !== "finish")
@@ -3560,11 +3567,30 @@ test("Windows explicit recovery can retire an observer after its cached finish f
 
 test("Windows post-startup open rejection retains original owners until fresh complete recovery", async () => {
   const f = rawPreparation({ experiment: true }),
-    primary = new Error("original image open rejected");
+    compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
+    index = f.prepared.entries.findIndex(
+      (entry) => entry.path === compiler.path,
+    ),
+    source = await compilerTrustFixture({
+      entries: f.prepared.entries,
+      files: f.files,
+      identity: f.rawFileId,
+      inspect: f.objectRead,
+      result: -2146762496,
+      closed: 5,
+    });
   let opens = 0,
-    native;
-  f.beforeRawCommand = (operation) => {
-    if (operation === "open" && ++opens === 2) throw primary;
+    native,
+    primary;
+  f.accessNative = async (operation, args, _, __, sequence) => {
+    if (operation !== "open") return;
+    opens++;
+    try {
+      return await source.open(Number(args[0]), sequence);
+    } catch (error) {
+      primary = error;
+      throw error;
+    }
   };
   await assert.rejects(
     openWindowsExperimentNative(f.prepared, {
@@ -3576,6 +3602,22 @@ test("Windows post-startup open rejection retains original owners until fresh co
     }),
     (error) => error === primary && error.experimentNative === native,
   );
+  assert.deepEqual(primary.custodyReaderFailure, {
+    phase: "reader-failure",
+    sequence: 2,
+    command: "open",
+    source: "custody.h",
+    line: 1,
+    trust: {
+      mode: "embedded",
+      result: "0x800b0100",
+      closeResult: "0x00000005",
+      entry: index,
+      identity: f.rawFileId(compiler.path),
+      sha256: compiler.sha256,
+      signatureSha256: compiler.signatureSha256,
+    },
+  });
   const original = [...f.files.entries()]
     .filter(([file]) => /custody-[0-9]+\.json$/u.test(file))
     .map(([, bytes]) => JSON.parse(bytes))
@@ -3610,6 +3652,11 @@ test("Windows post-startup open rejection retains original owners until fresh co
       )
     )
       actor.retired = true;
+  for (const actor of [
+    native.reader.retirementBinding.helper,
+    native.reader.retirementBinding.bridge,
+  ])
+    f.rawExitCodes.set(actor.pid, 126);
   const recoveryStart = f.rawEvents.length;
   const first = native.recover(),
     second = native.recover();
@@ -3626,7 +3673,91 @@ test("Windows post-startup open rejection retains original owners until fresh co
   assert.equal(opens, 2, "recovery must not repeat native open or compilation");
   assert.equal(f.rawTasks.size, 0);
   assert.ok([...f.actors.values()].every((actor) => actor.retired));
-  assert.equal(primary.message, "original image open rejected");
+  assert.equal(primary.custodyReaderFailure.trust.result, "0x800b0100");
+  assert.deepEqual(
+    source.calls,
+    [1, 2],
+    "recovery must not repeat verification",
+  );
+});
+
+test("actual experiment compiler open requires zero trust and unchanged content/signature pins", async () => {
+  for (const fault of ["none", "positive", "close", "content", "signature"]) {
+    const f = rawPreparation({ experiment: true }),
+      compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
+      index = f.prepared.entries.findIndex(
+        (entry) => entry.path === compiler.path,
+      ),
+      entries = structuredClone(f.prepared.entries),
+      files = new Map(f.files);
+    if (fault === "signature") entries[index].signatureSha256 = "e".repeat(64);
+    if (fault === "content") {
+      const changed = Buffer.from(files.get(compiler.path));
+      changed[changed.length - 1] ^= 1;
+      files.set(compiler.path, changed);
+    }
+    const source = await compilerTrustFixture({
+      entries,
+      files,
+      identity: f.rawFileId,
+      inspect: f.objectRead,
+      result: fault === "positive" ? 1 : 0,
+      closed: fault === "close" ? 5 : 0,
+    });
+    f.accessNative = (operation, args, _, __, sequence) =>
+      operation === "open" ? source.open(Number(args[0]), sequence) : undefined;
+    let native;
+    const opening = openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+      retain: (owner) => {
+        native = owner;
+      },
+    });
+    if (fault === "none") {
+      native = await opening;
+      assert.deepEqual(source.calls, [1, 2, 1, 2]);
+    } else {
+      await assert.rejects(opening, (error) => {
+        const failure = error.custodyReaderFailure;
+        assert.equal(error.experimentNative, native);
+        assert.equal(failure.sequence, 2);
+        if (["positive", "close"].includes(fault)) {
+          assert.equal(
+            failure.trust.result,
+            fault === "positive" ? "0x00000001" : "0x00000000",
+          );
+          assert.equal(
+            failure.trust.closeResult,
+            fault === "close" ? "0x00000005" : "0x00000000",
+          );
+          assert.equal(failure.trust.entry, index);
+        } else assert.equal(Object.hasOwn(failure, "trust"), false);
+        return true;
+      });
+      assert.deepEqual(source.calls, fault === "content" ? [] : [1, 2]);
+      // Independent raw observations retire the failed original reader; its
+      // dependent file observer remains live until production recovery joins it.
+      const observer = native.files.verification;
+      for (const actor of f.actors.values())
+        if (
+          ![observer.identity.pid, observer.bridge.pid].includes(
+            actor.identity.pid,
+          )
+        )
+          actor.retired = true;
+      for (const actor of [
+        native.reader.retirementBinding.helper,
+        native.reader.retirementBinding.bridge,
+      ])
+        f.rawExitCodes.set(actor.pid, 126);
+    }
+    const settlement =
+      fault === "none" ? await native.close() : await native.recover();
+    assert.equal(settlement.status, "RETIRED");
+    assert.equal(f.rawTasks.size, 0);
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
+  }
 });
 
 test("Windows registry attempts retained and thrown readers without bypassing dependencies", async () => {

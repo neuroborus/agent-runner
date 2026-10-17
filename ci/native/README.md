@@ -7911,9 +7911,20 @@ the bridge process without unwinding its live event, buffer or OVERLAPPED;
 independent recovery still owns retirement and task removal. Stopping the relay
 settles both synchronous input and pending pipe writes within the existing
 retirement deadline; a late thread exit cannot acknowledge settlement. Reader
-guard failures carry only bounded command/source/line diagnostics on the authenticated pipe,
+guard failures carry bounded command/source/line diagnostics on the authenticated pipe,
 using a non-JSON record separator so a truncated response cannot turn them into
-a receipt. Error 109 does not identify a reader wait/exit cause. Original native
+a receipt. Trust refusals additionally retain the original WinVerifyTrust LONG
+before state closure, with separate closure status, embedded/catalog mode, held
+file identity and retained entry/content/signature pins when available. Both
+statuses use exact eight-digit hexadecimal 32-bit representations; only zero
+succeeds. The carrier remains strict, bounded and failure-only. Verification is
+never retried for diagnostics, and failed trust cannot fall back to a digest.
+The experiment opens its build helper before the MSVC compiler at sequence 2;
+the compiler's signature pin identifies the PE signature representation, not an inferred
+signer certificate. The historical artifact lacks the original LONG, so neither
+its trust predicate nor pipe error 109 establishes the native cause. The
+functional compiler-trust repair remains pending original-call Windows evidence.
+Error 109 does not identify a reader wait/exit cause. Original native
 command acceptance remains unproved until matching hosted execution; preparation
 and workflow deadlines are unchanged.
 

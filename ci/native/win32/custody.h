@@ -193,6 +193,20 @@ static void pin(struct held_file *file, const char *expected) {
   DWORD size; BYTE *bytes = read_file(file, 536870912, &size); char actual[65]; sum(bytes, size, actual); need(!strcmp(actual, expected)); free(bytes);
 }
 static struct held_file catalogs[256]; static unsigned catalog_count;
+static struct { struct held_file *file; const char *expected; DWORD choice; LONG result, closed; BOOL active; } signature_trust;
+static void signature_verify(struct held_file *file, const char *expected, WINTRUST_DATA *trust) {
+  GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+  LONG result = WinVerifyTrust(NULL, &action, trust);
+  /* Save the original LONG before CLOSE can replace native error state. */
+  signature_trust.file = file; signature_trust.expected = expected; signature_trust.choice = trust->dwUnionChoice;
+  signature_trust.result = result; signature_trust.closed = ERROR_SUCCESS; signature_trust.active = TRUE;
+  trust->dwStateAction = WTD_STATEACTION_CLOSE;
+  LONG closed = WinVerifyTrust(NULL, &action, trust); signature_trust.closed = closed;
+  if (result != ERROR_SUCCESS || closed != ERROR_SUCCESS)
+    fprintf(stderr, "native-windows-trust: choice=%lu result=0x%08lx close-result=0x%08lx\n", signature_trust.choice, (unsigned long)(DWORD)result, (unsigned long)(DWORD)closed);
+  need(result == ERROR_SUCCESS); need(closed == ERROR_SUCCESS);
+  signature_trust.active = FALSE;
+}
 static void catalog_signature(struct held_file *file, const char *expected, char actual[65]) {
   HCATADMIN admin; DWORD size = 32; BYTE hash[32]; HCATINFO catalog; CATALOG_INFO info = {sizeof(info)};
   need(CryptCATAdminAcquireContext2(&admin, NULL, L"SHA256", NULL, 0) &&
@@ -208,8 +222,7 @@ static void catalog_signature(struct held_file *file, const char *expected, char
   WINTRUST_DATA trust = {0}; trust.cbStruct = sizeof(trust); trust.dwUIChoice = WTD_UI_NONE;
   trust.fdwRevocationChecks = WTD_REVOKE_NONE; trust.dwUnionChoice = WTD_CHOICE_CATALOG; trust.pCatalog = &member;
   trust.dwStateAction = WTD_STATEACTION_VERIFY; trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
-  GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2; LONG result = WinVerifyTrust(NULL, &action, &trust);
-  trust.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(NULL, &action, &trust); need(result == ERROR_SUCCESS);
+  signature_verify(file, expected, &trust);
   DWORD bytes; BYTE *data = read_file(&catalogs[slot], 536870912, &bytes); sum(data, bytes, actual); free(data); if (expected) need(!strcmp(expected, actual));
   need(CryptCATAdminReleaseCatalogContext(admin, catalog, 0) && CryptCATAdminReleaseContext(admin, 0));
 }
@@ -249,13 +262,11 @@ static void signature(struct held_file *file, const char *expected, char actual[
     free(bytes); catalog_signature(file, expected, actual); return;
 #endif
   }
-  GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
   WINTRUST_FILE_INFO info = {sizeof(info), file->path, file->handle, NULL};
   WINTRUST_DATA trust = {0}; trust.cbStruct = sizeof(trust); trust.dwUIChoice = WTD_UI_NONE;
   trust.fdwRevocationChecks = WTD_REVOKE_NONE; trust.dwUnionChoice = WTD_CHOICE_FILE; trust.pFile = &info;
   trust.dwStateAction = WTD_STATEACTION_VERIFY; trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
-  LONG result = WinVerifyTrust(NULL, &action, &trust); trust.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(NULL, &action, &trust);
-  need(result == ERROR_SUCCESS);
+  signature_verify(file, expected, &trust);
   need(cert.VirtualAddress && cert.Size >= 8 && cert.VirtualAddress <= size && cert.Size <= size - cert.VirtualAddress);
   sum(bytes + cert.VirtualAddress, cert.Size, actual); if (expected) need(!strcmp(actual, expected)); free(bytes);
 }

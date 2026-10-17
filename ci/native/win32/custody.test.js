@@ -1508,6 +1508,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       f.child.stdout.write('{"sequence":2,"value":');
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
+        signature_trust: { active: false },
         reader_command: "open",
         sequence: 2,
         control: "authenticated",
@@ -1563,6 +1564,81 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
   assert.throws(() => f.channel.settle());
   await assert.rejects(f.channel.receive());
   await assert.rejects(f.channel.completion);
+});
+
+test("Windows trust diagnostics reject malformed status, entry and held-pin context", async () => {
+  const trust = {
+    mode: "embedded",
+    result: "0x800b0100",
+    closeResult: "0x00000000",
+    entry: 11,
+    identity: id(11),
+    sha256: hash,
+    signatureSha256: hash,
+  };
+  for (const damage of [
+    { result: 2148204800 },
+    { result: "0x1" },
+    { result: "0x00000000" },
+    { closeResult: "0x100000000" },
+    { mode: "fallback" },
+    { entry: 128 },
+    { entry: null },
+    { identity: [id(11)] },
+    { sha256: null },
+    { signatureSha256: "substituted" },
+    { extra: true },
+  ]) {
+    const f = transport(),
+      response = f.channel.receive();
+    f.child.stdout.write(
+      "\x1e" +
+        JSON.stringify({
+          phase: "reader-failure",
+          sequence: 2,
+          command: "open",
+          source: "custody.h",
+          line: 1,
+          trust: { ...trust, ...damage },
+        }) +
+        "\n",
+    );
+    await assert.rejects(
+      response,
+      (error) => !Object.hasOwn(error, "custodyReaderFailure"),
+    );
+    await assert.rejects(f.channel.completion);
+    assert.throws(() => f.channel.settle());
+    f.child.emit("close", 126, null);
+  }
+  const f = transport(),
+    response = f.channel.receive(),
+    unbound = {
+      ...trust,
+      mode: "catalog",
+      entry: null,
+      sha256: null,
+      signatureSha256: null,
+    };
+  f.child.stdout.write(
+    "\x1e" +
+      JSON.stringify({
+        phase: "reader-failure",
+        sequence: 2,
+        command: "signature",
+        source: "custody.h",
+        line: 1,
+        trust: unbound,
+      }) +
+      "\n",
+  );
+  await assert.rejects(response, (error) => {
+    assert.deepEqual(error.custodyReaderFailure.trust, unbound);
+    return true;
+  });
+  await assert.rejects(f.channel.completion);
+  assert.throws(() => f.channel.settle());
+  f.child.emit("close", 126, null);
 });
 
 test("actual bridge relay settles original overlapped I/O and separates wait, exit-query and exit-code results", async () => {

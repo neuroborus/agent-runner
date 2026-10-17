@@ -658,6 +658,15 @@ acknowledgement withhold task removal; independent
 removal verification remains required. Experiment startup regressions preserve the
 original owner and failure after a later open response is lost, separately from
 cleanup refusal. These cases execute no Windows tools or native probes.
+Compiler-open regressions execute the production open, pin, PE/experiment,
+verification and failure-emission bodies with injected SDK/kernel reads, then
+use the actual fragmented failure parser and experiment preparation owner.
+They retain the original nonzero LONG separately from closure failures, reject
+positive nonzero results and substituted content/signature pins, and exercise
+original owner settlement without repeating verification. Malformed status,
+identity, slot and pin carriers remain failures without diagnostic authority.
+These cases run in the existing selected native harness, add no slow-tier
+requirement and establish no Windows trust cause or native acceptance.
 Preparation receipt regressions drain aggregate batch deferrals without
 individual reopen amplification, retain oversized-record reads, and preserve
 the complete original access-profile/fault cold-recovery matrix and observer

@@ -111,9 +111,24 @@ static unsigned helper_lane;
 static HANDLE control; static char nonce[33], candidate[41];
 static BOOL reader_diagnostics_ready;
 static char reader_command[64] = "setup";
+static void reader_trust_failure(const char *source, unsigned line) {
+  char bytes[1024], index[8] = "null", pin[68] = "null", expected[68] = "null", identity[50]; DWORD written;
+  struct held_file *file = signature_trust.file;
+  sprintf_s(identity, sizeof(identity), "%016llx:", file->id.VolumeSerialNumber);
+  for (unsigned i = 0; i < 16; i++) sprintf_s(identity+17+i*2, sizeof(identity)-17-i*2, "%02x", file->id.FileId.Identifier[i]);
+  for (unsigned i = 0; i < count; i++) if (&entries[i].file == file) {
+    sprintf_s(index, sizeof(index), "%u", i); sprintf_s(pin, sizeof(pin), "\"%s\"", entries[i].pin); break;
+  }
+  if (signature_trust.expected) sprintf_s(expected, sizeof(expected), "\"%s\"", signature_trust.expected);
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"trust\":{\"mode\":\"%s\",\"result\":\"0x%08lx\",\"closeResult\":\"0x%08lx\",\"entry\":%s,\"identity\":\"%s\",\"sha256\":%s,\"signatureSha256\":%s}}\n",
+    sequence, reader_command, source, line, signature_trust.choice == WTD_CHOICE_FILE ? "embedded" : "catalog",
+    (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+}
 static void reader_failure(const char *file, unsigned line) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  if (signature_trust.active) { reader_trust_failure(source, line); return; }
   char bytes[256]; DWORD written;
   int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u}\n", sequence, reader_command, source, line);
   if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
