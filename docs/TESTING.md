@@ -744,10 +744,16 @@ command bounds.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.
-Actual admission/census bodies preserve original termination, signaling, retained
-process/thread slots, returned assignment/list counts and matching/unexpected
-members. Partial lists, query/closure failures and surviving members still refuse;
-one process signal never establishes whole-Job retirement. Fragmented observation
+Actual spawn/admission/census bodies retain ownership before launch cleanup and
+require birth, termination, signaling and zero exit status before releasing the
+original process/thread slots and querying the Job. The caller retains the child
+identity and rejects absent or inconsistent ready metadata. Source-executed
+retirement checks release only exited children, clear server aliases and prevent
+duplicate closure during later settlement. Live originals and unregistered Job
+members (including nested descendants) remain blocking within the original bound.
+Returned assignment/list completeness, query/closure failures and surviving
+members still refuse; one process signal or released handle never establishes
+whole-Job retirement. Fragmented observation
 metadata preserves the original broker refusal and separate cleanup cause;
 repeated or malformed records provide no proof. Existing capture/coverage fixtures
 also check the cached notification, drain, reset, bookmark and control counters

@@ -444,7 +444,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-attribute-init command-attribute-job command-attribute-handles command-launch-environment command-process-create
     command-build-open command-build-descriptor command-build-label command-helper-open command-helper-label command-image-open
     command-job-create command-job-config command-broker-token command-intent-event command-closed-event
-    command-capture-event command-bookmark command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create
+    command-capture-event command-bookmark command-admission-birth command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create
     command-gate-impersonate command-gate-open command-gate-read command-gate-nonce-encode
     command-policy-query command-policy-principal-query command-policy-install command-sacl-install
     command-intent-set command-intent-wait command-broker-open command-broker-token-duplicate command-broker-token-query
@@ -464,7 +464,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-launch-state command-attribute-allocation command-launch-bound command-broker-arguments command-broker-nonce
     command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation
-    command-ready-output command-owner-bound command-coverage-state command-deadline command-retirement-delivery command-retirement-state command-retirement-records`
+    command-ready-output command-owner-bound command-coverage-state command-deadline command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records`
       .split(/\s+/u)
       .map((operation) => [operation, ["invariant"]]),
   ),
@@ -479,7 +479,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     `command-host-actions command-host-os command-null-control command-timer-wait
     command-protect-descriptor command-protect-owner command-protect-control command-protect-dacl command-protect-sacl command-fixture-sacl command-parent-tag command-file-tag command-file-dacl command-file-owner
     command-member-job command-child-job command-image-digest command-helper-digest command-build-sacl command-job-membership command-admission-wait
-    command-capture-query command-capture-wait command-bookmark-query command-coverage-wait command-retirement-wait command-retirement-status`
+    command-capture-query command-capture-wait command-bookmark-query command-coverage-wait command-admission-status command-retirement-wait command-retirement-status`
       .split(/\s+/u)
       .map((operation) => [operation, ["win32", "invariant"]]),
   ),

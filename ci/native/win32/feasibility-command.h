@@ -584,6 +584,7 @@ static PROCESS_INFORMATION command_spawn(const WCHAR *arguments,const WCHAR *cwd
   WCHAR line[16384]; invariant(wcslen(arguments)<16380,"command-launch-bound");wcscpy_s(line,16384,arguments); LPWCH environment=GetEnvironmentStringsW(); win32_check(environment!=NULL,"command-launch-environment");
   PROCESS_INFORMATION p={0};BOOL created=CreateProcessAsUserW(medium,NULL,line,NULL,NULL,TRUE,CREATE_SUSPENDED|CREATE_UNICODE_ENVIRONMENT|EXTENDED_STARTUPINFO_PRESENT,environment,cwd,&si.StartupInfo,&p);
   DWORD error=created?ERROR_SUCCESS:GetLastError();if(!created)remember("command-process-create","win32",error);
+  if(created){command_processes[command_count]=p.hProcess;command_threads[command_count++]=p.hThread;}
   BOOL cleaned=FreeEnvironmentStringsW(environment);if(!cleaned){DWORD cleanup=GetLastError();remember("command-environment-close","win32",cleanup);cleanup_error("command-environment-close","win32",cleanup);}
   DeleteProcThreadAttributeList(attrs);free(attrs);
   if(!release_handle(&command_preflight_owned.launch,"command-token-close"))cleaned=FALSE;
@@ -592,7 +593,24 @@ static PROCESS_INFORMATION command_spawn(const WCHAR *arguments,const WCHAR *cwd
   if(!close_handle(writeErr,"pipe-close"))cleaned=FALSE;
   if(!cleaned)failure(126);
   if(!created)failure(error==ERROR_NOT_SUPPORTED||error==ERROR_CALL_NOT_IMPLEMENTED||error==ERROR_PRIVILEGE_NOT_HELD?78:126);
-  BOOL member;win32_check(IsProcessInJob(p.hProcess,ownedJob,&member),"command-child-job");invariant(member,"command-child-job");command_processes[command_count]=p.hProcess;command_threads[command_count++]=p.hThread;return p;
+  BOOL member;win32_check(IsProcessInJob(p.hProcess,ownedJob,&member),"command-child-job");invariant(member,"command-child-job");return p;
+}
+static BOOL command_child_close(unsigned index) {
+  BOOL closed=release_handle(&command_threads[index],"thread-close");
+  if(command_processes[index]==command_server)command_server=NULL;
+  if(!release_handle(&command_processes[index],"process-close"))closed=FALSE;
+  return closed;
+}
+static void command_release_exited(void) {
+  BOOL closed=TRUE;
+  for(unsigned i=0;i<command_count;i++){
+    if(!command_processes[i]){invariant(!command_threads[i],"command-retirement-slot");continue;}
+    DWORD code,waited=WaitForSingleObject(command_processes[i],0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-retirement-wait");
+    invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-retirement-wait");if(waited==WAIT_TIMEOUT)continue;
+    win32_check(GetExitCodeProcess(command_processes[i],&code),"command-retirement-status");invariant(code!=STILL_ACTIVE,"command-retirement-status");
+    if(!command_child_close(i))closed=FALSE;
+  }
+  if(!closed)failure(126);
 }
 static void command_probe_output(PROCESS_INFORMATION p,const char *event) {
   need(ResumeThread(p.hThread)==1 && CloseHandle(command_input));command_input=NULL;
@@ -642,9 +660,8 @@ static void command_retire_domain(void) {
   BOOL stopped=TRUE;if(command_server&&!command_server_released){stopped=TerminateProcess(command_server,0);error=stopped?ERROR_SUCCESS:GetLastError();if(!stopped)remember("command-retirement-terminate","win32",error);}
   if(!release_handle(&command_input,"pipe-close"))closed=FALSE;if(command_control&&!release_handle(&command_saved_input,"pipe-close"))closed=FALSE;
   if(!notified||!closed||!stopped)failure(126);
-  while(command_members(ownedJob)){command_bound();command_capture(0);command_pump(&command_output,command_control?"probe-output":"rpc");command_pump(&command_error,command_control?"probe-stderr":"stderr");Sleep(1);}
-  for(unsigned i=0;i<command_count;i++){DWORD code,waited=WaitForSingleObject(command_processes[i],0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-retirement-wait");invariant(waited==WAIT_OBJECT_0,"command-retirement-wait");
-    win32_check(GetExitCodeProcess(command_processes[i],&code),"command-retirement-status");invariant(code!=STILL_ACTIVE,"command-retirement-status");}
+  for(;;){command_bound();command_release_exited();if(!command_members(ownedJob))break;command_capture(0);command_pump(&command_output,command_control?"probe-output":"rpc");command_pump(&command_error,command_control?"probe-stderr":"stderr");Sleep(1);}
+  for(unsigned i=0;i<command_count;i++)invariant(!command_processes[i]&&!command_threads[i],"command-retirement-state");
   /* Admitted runs retain the delivered terminal witness. A refused preflight
    * has no provider domain and cannot depend on its unavailable audit coverage. */
   if(command_coverage_admitted){command_gate_read();ULONGLONG flush=GetTickCount64();while(!command_retirement_seen){command_bound();invariant(GetTickCount64()-flush<10000,"command-retirement-delivery");command_capture(1);}}
@@ -815,18 +832,23 @@ static int command_main(int argc,WCHAR **argv) {
   command_observed.pid=admission.dwProcessId;command_observed.thread=admission.dwThreadId;
   DWORD saved=GetLastError();FILETIME born,exited,kernel,user;BOOL timed=GetProcessTimes(admission.hProcess,&born,&exited,&kernel,&user);command_observed.status[0]=timed?0:GetLastError();
   if(timed)command_observed.birth=((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime;
-  for(unsigned i=0;i<command_count;i++){if(command_processes[i]==admission.hProcess)command_observed.held[0]++;if(command_threads[i]==admission.hThread)command_observed.held[1]++;}SetLastError(saved);
+  for(unsigned i=0;i<command_count;i++){if(command_processes[i]==admission.hProcess)command_observed.held[0]++;if(command_threads[i]==admission.hThread)command_observed.held[1]++;}
+  SetLastError((DWORD)command_observed.status[0]);win32_check(timed,"command-admission-birth");SetLastError(saved);
   BOOL terminated=TerminateProcess(admission.hProcess,0);DWORD terminateError=terminated?ERROR_SUCCESS:GetLastError();command_observed.status[1]=terminateError;SetLastError(terminateError);win32_check(terminated,"command-admission-terminate");
   DWORD waited=WaitForSingleObject(admission.hProcess,10000);DWORD waitError=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;command_observed.status[2]=waited;
   SetLastError(waitError);if(waited==WAIT_FAILED)win32_check(FALSE,"command-admission-wait");invariant(waited==WAIT_OBJECT_0,"command-admission-wait");
-  saved=GetLastError();DWORD exitCode=0;BOOL exitRead=GetExitCodeProcess(admission.hProcess,&exitCode);command_observed.status[3]=exitRead?0:GetLastError();if(exitRead)command_observed.status[4]=exitCode;SetLastError(saved);
+  DWORD exitCode=0;BOOL exitRead=GetExitCodeProcess(admission.hProcess,&exitCode);DWORD exitError=exitRead?ERROR_SUCCESS:GetLastError();command_observed.status[3]=exitError;if(exitRead)command_observed.status[4]=exitCode;
+  SetLastError(exitError);win32_check(exitRead,"command-admission-status");invariant(exitCode==0,"command-admission-status");
+  invariant(command_count==1&&command_processes[0]==admission.hProcess&&command_threads[0]==admission.hThread,"command-admission-slot");
+  /* Keep this cleared slot in the original lifetime launch bound. */
+  BOOL childClosed=command_child_close(0);admission.hProcess=admission.hThread=NULL;if(!childClosed)failure(126);
   BOOL pipesClosed=TRUE;if(!release_handle(&command_input,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_output,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_error,"pipe-close"))pipesClosed=FALSE;if(!pipesClosed)failure(126);
   command_observed.census=TRUE;DWORD admissionMembers=command_members(ownedJob);command_observed.census=FALSE;invariant(!admissionMembers,"command-admission-members");command_observed.audit[0]=1;
   command_files_prepare();command_observed.audit[0]=2;WCHAR query[2048];command_audit_query(query,L"");
   command_subscription=EvtSubscribe(NULL,command_event,L"Security",query,NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
   PSECURITY_DESCRIPTOR gateSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GRGW;;;WD)",SDDL_REVISION_1,&gateSd,NULL),"command-gate-descriptor");SECURITY_ATTRIBUTES gateSa={sizeof(gateSa),gateSd,FALSE};
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
-  printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);printf("\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
+  printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);printf("\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
   for(unsigned i=0;i<6;i++){HANDLE h=i<4?command_files[i]:command_parents[i-4];PSECURITY_DESCRIPTOR baseline=i<4?command_baseline[i]:command_parent_baseline[i-4];char id[50];fileid(h,id);if(i)putchar(',');printf("{\"handle\":\"%llu\",\"identity\":\"%s\",\"baselineHex\":\"",(ULONGLONG)(ULONG_PTR)h,id);hex(baseline,GetSecurityDescriptorLength(baseline));printf("\",\"saclHex\":\"");if(i<4)hex(command_sacls[i],command_sacls[i]->AclSize);char saclHash[65];command_sacl_read(h,saclHash);printf("\",\"baselineSaclSha256\":\"%s\"}",saclHash);}puts("]}}");
   invariant(!ferror(stdout),"command-ready-output");
   PROCESS_INFORMATION server={0}; char line[131100];HANDLE input=GetStdHandle(STD_INPUT_HANDLE);unsigned size=0;
@@ -839,7 +861,7 @@ static int command_main(int argc,WCHAR **argv) {
     else if(!strcmp(line,"M")){invariant(command_coverage_seen&&!command_coverage_admitted,"command-coverage-state");command_coverage_admitted=TRUE;command_observed.audit[0]=6;command_observed.audit[8]=1;puts("{\"event\":\"M\"}");}
     else if(!strcmp(line,"V")||!strcmp(line,"G")){need(command_coverage_admitted);name(cwd,L"schema-home");need(SetEnvironmentVariableW(L"CODEX_HOME",cwd)&&SetEnvironmentVariableW(L"HOME",cwd)&&SetEnvironmentVariableW(L"USERPROFILE",cwd)&&SetEnvironmentVariableW(L"TEMP",cwd)&&SetEnvironmentVariableW(L"TMP",cwd));name(cwd,L"schema");if(line[0]=='V')need(swprintf_s(arguments,16384,L"\"%ls\" --version",command_image)>0);else need(swprintf_s(arguments,16384,L"\"%ls\" app-server generate-json-schema --out \"%ls\"",command_image,cwd)>0);command_probe_output(command_spawn(arguments,root),line);}
     else if(!strcmp(line,"A")){need(command_coverage_admitted);name(cwd,L"home");need(SetEnvironmentVariableW(L"CODEX_HOME",cwd)&&SetEnvironmentVariableW(L"HOME",cwd)&&SetEnvironmentVariableW(L"USERPROFILE",cwd)&&SetEnvironmentVariableW(L"TEMP",cwd)&&SetEnvironmentVariableW(L"TMP",cwd));name(cwd,L"workspace");need(swprintf_s(arguments,16384,L"\"%ls\" -c windows.sandbox=\"\\\"unelevated\\\"\" -c web_search=\"\\\"disabled\\\"\" -c mcp_servers={} -c plugins={} -c notify=[] -c cli_auth_credentials_store=\"\\\"ephemeral\\\"\" -c features.apps=false -c features.hooks=false -c features.plugins=false -c features.skip_host_skill_discovery=true -c suppress_unstable_features_warning=true -c approval_policy=\"\\\"never\\\"\" app-server --listen stdio://",command_image)>0);server=command_spawn(arguments,cwd);command_server=server.hProcess;command_image_read(server.hProcess,command_image_hash,TRUE);printf("{\"event\":\"A\",\"identity\":");identity(server.hProcess);printf(",\"token\":");command_token(server.hProcess);printf(",\"imageSha256\":\"%s\",\"creationJob\":true}\n",command_image_hash);}
-    else if(!strcmp(line,"R")){need(server.hProcess&&ResumeThread(server.hThread)==1);command_server_released=TRUE;puts("{\"event\":\"R\"}");}
+    else if(!strcmp(line,"R")){need(!command_closing&&server.hProcess&&ResumeThread(server.hThread)==1);command_server_released=TRUE;puts("{\"event\":\"R\"}");}
     else if(!strncmp(line,"J ",2)){need(command_input&&!command_closing);size_t n=strlen(line+2);need(n>0&&n<=131072&&!(n%2));BYTE *bytes=malloc(n/2);need(bytes);for(size_t i=0;i<n/2;i++)bytes[i]=(BYTE)(nibble(line[2+2*i])*16+nibble(line[3+2*i]));need(WriteFile(command_input,bytes,(DWORD)(n/2),&count,NULL)&&count==n/2);free(bytes);}
     else if(!strcmp(line,"E")){need(command_input&&CloseHandle(command_input));command_input=NULL;puts("{\"event\":\"E\"}");}
     else if(!strcmp(line,"B"))command_barrier();
@@ -860,7 +882,7 @@ static int command_main(int argc,WCHAR **argv) {
       }BOOL closed=command_capture_close();
       if(!release_handle(&command_gate,"pipe-close"))closed=FALSE;
       for(unsigned i=0;i<6;i++)if(!release_handle(i<4?&command_files[i]:&command_parents[i-4],"file-close"))closed=FALSE;
-      for(unsigned i=0;i<command_count;i++){if(!release_handle(&command_processes[i],"process-close"))closed=FALSE;if(!release_handle(&command_threads[i],"thread-close"))closed=FALSE;}
+      for(unsigned i=0;i<command_count;i++)if(!command_child_close(i))closed=FALSE;
       if(!release_handle(&command_output,"pipe-close"))closed=FALSE;if(!release_handle(&command_error,"pipe-close"))closed=FALSE;
       HANDLE *held[]={&command_helper_file,&command_image_file,&command_build_parent,&command_null};for(unsigned i=0;i<4;i++)if(!release_handle(held[i],"file-close"))closed=FALSE;
       if(!release_handle(&command_broker_token,"command-token-close"))closed=FALSE;if(!command_broker_events_close())closed=FALSE;if(!close_job(FALSE))closed=FALSE;

@@ -2169,8 +2169,17 @@ available privileges and effective File System success coverage for the held
 broker token and gate. The workflow never enables system auditing, invents
 admission or restores unrelated descriptors to obtain a pass; unavailable native
 coverage remains BLOCKED.
-The suspended admission child's original termination and wait remain distinct
-from whole-Job retirement. On refusal, one bounded `native-windows-command: state`
+The suspended admission child is registered immediately after creation, before
+launch-resource cleanup can fail. Admission requires its checked termination,
+signaled process and zero exit status, then releases its original thread and
+process references before querying the complete Job. Cleared slots are not
+closed again or retained as stale server aliases. The ready record retains the
+child PID/thread/birth, exit status, returned assignment/list counts and checked
+reference release; the caller rejects missing or inconsistent facts. The existing
+independent broker checks still require an empty whole Job, exact birth/token/image
+and held-object joins. Neither that ready record nor a process signal supplies
+independent retirement proof.
+On refusal, one bounded `native-windows-command: state`
 record is emitted before emergency cleanup, beside the original first cause and
 separate cleanup cause. It retains the admission PID/thread/birth, matching held
 process/thread slot counts, and original census members. Its ten `status` slots
@@ -2179,8 +2188,16 @@ assigned-count/listed-count/matching-admission-count; `-1` means unattempted or
 unavailable. Returned bytes remain unknown on query failure. Failed queries
 leave process counts unknown except the documented partial list on
 `ERROR_MORE_DATA`; that list never establishes completeness. Original completeness,
-member validation and `command-admission-members` refusal remain unchanged;
-a signaled process with retained references cannot prove an empty Job.
+member validation and `command-admission-members` refusal remain unchanged. Held
+slot counts describe the original references before release, not an empty Job.
+Domain retirement checks each retained child's signaling and exit status and
+releases both references before each complete Job census. Live children retain
+their references, and every surviving member, including unregistered or nested
+descendants, keeps retirement pending within the existing deadline. Wait, status,
+closure or census failures cannot produce a retirement acknowledgment. Independent
+restoration and whole-domain verification remain mandatory; matching native CI
+must establish the lifecycle repair separately from subscription delivery.
+The original lifetime launch count and census capacity remain unchanged.
 The nine `audit` slots retain the reached stage (0 admission, 1 admitted,
 2 held files prepared, 3 subscribed, 4 policy/SACL installed, 5 control read,
 6 control acknowledged), subscription status, notifications, enumeration calls,

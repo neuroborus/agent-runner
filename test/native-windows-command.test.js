@@ -2966,12 +2966,18 @@ test("actual admission launch cleanup preserves creation status and independentl
     [true, 999, null, undefined],
   ]) {
     const closed = [],
-      records = [];
+      records = [],
+      processes = [],
+      threads = [];
     let lastError = launchError,
       outcome;
     try {
       dispatch.runInNewContext({
         created,
+        p: { hProcess: 41, hThread: 42 },
+        command_processes: processes,
+        command_threads: threads,
+        command_count: 0,
         ERROR_SUCCESS: 0,
         ERROR_NOT_SUPPORTED: 50,
         ERROR_CALL_NOT_IMPLEMENTED: 120,
@@ -3011,6 +3017,8 @@ test("actual admission launch cleanup preserves creation status and independentl
     }
     assert.equal(outcome, expectedCode);
     assert.deepEqual(closed, ["medium", "in", "out", "err"]);
+    assert.deepEqual(processes, created ? [41] : []);
+    assert.deepEqual(threads, created ? [42] : []);
     if (!created)
       assert.deepEqual(records[0], [
         "command-process-create",
@@ -3976,14 +3984,14 @@ test("actual gate-read source captures the first API cause before independent ha
   );
 });
 
-test("actual admission observations preserve the signaled child, held references and complete census refusal", async () => {
+async function commandLifetimeSource() {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
   );
   const body = (name) =>
     new RegExp(
-      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|DWORD|BOOL) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const translate = (text) =>
@@ -4002,28 +4010,42 @@ test("actual admission observations preserve the signaled child, held references
         "const born={},exited={},kernel={},user={};",
       )
       .replace("DWORD exitCode=0", "const exitCode={value:0}")
+      .replace("DWORD code,waited=", "const code={value:0};let waited=")
+      .replace("code!=STILL_ACTIVE", "code.value!=STILL_ACTIVE")
+      .replace("BOOL member;", "const member={value:false};")
+      .replace("invariant(member,", "invariant(member.value,")
       .replace(
         "command_observed.status[4]=exitCode",
         "command_observed.status[4]=exitCode.value",
       )
+      .replace("invariant(exitCode==0", "invariant(exitCode.value==0")
       .replace(
         "((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime",
         "born.dwHighDateTime*2**32+born.dwLowDateTime",
       )
       .replace(
-        /&(born|exited|kernel|user|exitCode|used|member|diagnosticOutputLock)\b/gu,
+        /&(born|exited|kernel|user|exitCode|code|used|member|diagnosticOutputLock)\b/gu,
         "$1",
       )
       .replace(/&command_(input|output|error)\b/gu, '"$1"')
+      .replace(
+        /(?<!&)&command_(processes|threads)\[([^\]]+)\]/gu,
+        "(value=command_$1[$2])=>command_$1[$2]=value",
+      )
       .replaceAll("(DWORD)", "")
       .replace(/\b(?:DWORD|BOOL|HANDLE|unsigned)\b/gu, "let")
       .replaceAll("->", ".");
+  return { source, body, translate };
+}
+
+test("actual admission releases the checked child before a complete Job census without accepting survivors", async () => {
+  const { source, body, translate } = await commandLifetimeSource();
   const admission = source.slice(
     source.indexOf("  command_observed.pid=admission.dwProcessId;"),
     source.indexOf("  command_files_prepare();"),
   );
   const projected = new Script(
-    `function command_members(job){${translate(body("command_members")).replace("let member;", "const member={value:false};").replace("invariant(member,", "invariant(member.value,")}} function emit(){${translate(body("command_observe_failure"))}} ${translate(admission)}`,
+    `function command_members(job){${translate(body("command_members"))}} function command_child_close(index){${translate(body("command_child_close"))}} function emit(){${translate(body("command_observe_failure"))}} ${translate(admission)}`,
   );
   for (const fault of [
     null,
@@ -4035,11 +4057,17 @@ test("actual admission observations preserve the signaled child, held references
     "close",
     "terminate",
     "wait",
+    "birth",
+    "status",
+    "exit",
+    "thread-close",
+    "process-close",
   ]) {
     let error = 17,
       diagnosis,
       output = "",
       queries = 0;
+    const released = [];
     const observed = {
       active: true,
       census: false,
@@ -4058,6 +4086,7 @@ test("actual admission observations preserve the signaled child, held references
       command_processes: [41],
       command_threads: [42],
       command_count: 1,
+      command_server: null,
       ownedJob: 7,
       TRUE: true,
       FALSE: false,
@@ -4079,7 +4108,8 @@ test("actual admission observations preserve the signaled child, held references
       GetProcessTimes: (_, born) => {
         born.dwHighDateTime = 0;
         born.dwLowDateTime = 90;
-        return true;
+        error = 5;
+        return fault !== "birth";
       },
       TerminateProcess: () => {
         error = 5;
@@ -4087,13 +4117,28 @@ test("actual admission observations preserve the signaled child, held references
       },
       WaitForSingleObject: () => (fault === "wait" ? 258 : 0),
       GetExitCodeProcess: (_, code) => {
-        code.value = 0;
+        code.value = fault === "exit" ? 259 : 0;
+        error = 5;
+        return fault !== "status";
+      },
+      release_handle: (slot, operation) => {
+        if (typeof slot !== "function") return true;
+        const handle = slot();
+        slot(null);
+        if (!handle) return true;
+        released.push(handle);
+        if (fault === operation) {
+          diagnosis ??= operation;
+          return false;
+        }
         return true;
       },
-      release_handle: () => true,
       QueryInformationJobObject: (job, kind, list, size, used) => {
         assert.deepEqual([job, kind, size], [7, 3, 272]);
         queries++;
+        assert.deepEqual(api.command_processes, [null]);
+        assert.deepEqual(api.command_threads, [null]);
+        assert.equal(api.command_count, 1);
         const members = ["survivor", "close", "more-data"].includes(fault)
           ? [43]
           : fault === "unexpected"
@@ -4131,7 +4176,7 @@ test("actual admission observations preserve the signaled child, held references
         }
       },
       failure: () => {
-        diagnosis = "process-close";
+        diagnosis ??= "process-close";
         api.emit();
         throw diagnosis;
       },
@@ -4153,13 +4198,26 @@ test("actual admission observations preserve the signaled child, held references
       assert.equal(fault, null);
     } catch (cause) {
       assert.equal(cause, diagnosis);
-      assert.notEqual(fault, null);
+      assert.notEqual(fault, null, String(cause));
     }
     assert.deepEqual(observed.held, [1, 1]);
     assert.equal(observed.pid, 43);
     assert.equal(observed.thread, 44);
-    assert.equal(observed.birth, 90);
-    assert.equal(queries, ["terminate", "wait"].includes(fault) ? 0 : 1);
+    assert.equal(observed.birth, fault === "birth" ? 0 : 90);
+    const beforeRelease = [
+      "birth",
+      "terminate",
+      "wait",
+      "status",
+      "exit",
+    ].includes(fault);
+    assert.deepEqual(released, beforeRelease ? [] : [42, 41]);
+    assert.equal(
+      queries,
+      beforeRelease || ["thread-close", "process-close"].includes(fault)
+        ? 0
+        : 1,
+    );
     if (fault) {
       const expected = {
         survivor: "command-admission-members",
@@ -4170,10 +4228,25 @@ test("actual admission observations preserve the signaled child, held references
         close: "process-close",
         terminate: "command-admission-terminate",
         wait: "command-admission-wait",
+        birth: "command-admission-birth",
+        status: "command-admission-status",
+        exit: "command-admission-status",
+        "thread-close": "thread-close",
+        "process-close": "process-close",
       }[fault];
       assert.equal(diagnosis, expected);
-      const carrier = `native-windows: operation=${expected} domain=${["query", "more-data", "terminate", "close"].includes(fault) ? "win32" : "invariant"} value=${fault === "more-data" ? 234 : ["query", "terminate"].includes(fault) ? 5 : fault === "close" ? 6 : 0}\n`;
-      assert.ok(windowsFeasibilityDiagnostics(carrier + output));
+      const nativeError = [
+        "query",
+        "more-data",
+        "birth",
+        "status",
+        "terminate",
+        "close",
+        "thread-close",
+        "process-close",
+      ].includes(fault);
+      const carrier = `native-windows: operation=${expected} domain=${nativeError ? "win32" : "invariant"} value=${fault === "more-data" ? 234 : nativeError ? 5 : 0}\n`;
+      assert.ok(windowsFeasibilityDiagnostics(carrier + output), String(fault));
       assert.equal(
         windowsFeasibilityDiagnostics(carrier + output + output),
         null,
@@ -4199,6 +4272,231 @@ test("actual admission observations preserve the signaled child, held references
       if (fault === "query")
         assert.deepEqual(observed.status.slice(5), [5, -1, -1, -1, -1]);
     }
+  }
+});
+
+test("actual retirement releases only exited children before the complete whole-Job census and never closes a slot twice", async () => {
+  const { source, body, translate } = await commandLifetimeSource();
+  const retirement = body("command_retire_domain");
+  const final = source.slice(source.indexOf('else if(!strcmp(line,"S"))'));
+  const closeChildren =
+    /for\(unsigned i=0;i<command_count;i\+\+\)if\(!command_child_close\(i\)\)closed=FALSE;/u.exec(
+      final,
+    )[0];
+  const program = new Script(`
+    function command_child_close(index){${translate(body("command_child_close"))}}
+    function command_release_exited(){${translate(body("command_release_exited"))}}
+    function command_members(job){${translate(body("command_members"))}}
+    function retire(){${translate(retirement.slice(retirement.indexOf("for(;;)"), retirement.indexOf("/* Admitted")))}}
+    function finish(){let closed=true;${translate(closeChildren)}return closed;}
+  `);
+  for (const fault of [
+    null,
+    "live",
+    "missing-member",
+    "unexpected",
+    "partial",
+    "query",
+    "wait",
+    "status",
+    "active-status",
+    "thread-close",
+    "process-close",
+    "orphan",
+  ]) {
+    const processes = [41, 51],
+      threads = [42, 52],
+      released = [],
+      events = [];
+    let ticks = 0,
+      queries = 0,
+      active = ["live", "missing-member"].includes(fault),
+      first;
+    if (fault === "orphan") processes[0] = null;
+    const api = {
+      command_processes: processes,
+      command_threads: threads,
+      command_count: 2,
+      command_server: 51,
+      command_control: false,
+      command_observed: { census: false },
+      ownedJob: 7,
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      WAIT_FAILED: 0xffffffff,
+      WAIT_OBJECT_0: 0,
+      WAIT_TIMEOUT: 258,
+      STILL_ACTIVE: 259,
+      ERROR_SUCCESS: 0,
+      ERROR_MORE_DATA: 234,
+      MAXDWORD: 0xffffffff,
+      JobObjectBasicProcessIdList: 3,
+      PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
+      SYNCHRONIZE: 0x100000,
+      command_bound: () => {
+        if (++ticks > 2) api.invariant(false, "command-deadline");
+      },
+      WaitForSingleObject: (handle, timeout) => {
+        assert.equal(timeout, 0);
+        events.push(`wait:${handle}`);
+        return fault === "wait"
+          ? 0xffffffff
+          : active && handle === 41
+            ? 258
+            : 0;
+      },
+      GetExitCodeProcess: (handle, code) => {
+        events.push(`exit:${handle}`);
+        code.value = fault === "active-status" ? 259 : 0;
+        return fault !== "status";
+      },
+      release_handle: (slot, operation) => {
+        const handle = slot();
+        slot(null);
+        if (!handle) return true;
+        events.push(`close:${handle}`);
+        released.push(handle);
+        if (fault === operation) {
+          first ??= operation;
+          return false;
+        }
+        return true;
+      },
+      QueryInformationJobObject: (job, kind, list, size, used) => {
+        assert.deepEqual([job, kind, size], [7, 3, 272]);
+        queries++;
+        events.push("census");
+        // A member unknown to the local slots, including a nested descendant,
+        // must remain in the original whole-Job census.
+        const members =
+          active && fault !== "missing-member"
+            ? [41]
+            : fault === "unexpected"
+              ? [99]
+              : [];
+        assert.deepEqual(processes, active ? [41, null] : [null, null]);
+        assert.deepEqual(threads, active ? [42, null] : [null, null]);
+        Object.assign(list, {
+          NumberOfAssignedProcesses:
+            members.length + (fault === "partial" ? 1 : 0),
+          NumberOfProcessIdsInList: members.length,
+          ProcessIdList: members,
+        });
+        used.value = 16 + members.length * 8;
+        return fault !== "query";
+      },
+      OpenProcess: (rights, inherit, pid) => {
+        assert.ok([41, 99].includes(pid));
+        return 61;
+      },
+      IsProcessInJob: (_, job, member) => {
+        assert.equal(job, 7);
+        member.value = true;
+        return true;
+      },
+      close_handle: () => true,
+      GetLastError: () => 5,
+      SetLastError: () => {},
+      command_capture: () => {},
+      command_pump: () => {},
+      Sleep: (milliseconds) => {
+        assert.equal(milliseconds, 1);
+        active = false;
+      },
+      invariant: (ok, operation) => {
+        if (!ok) {
+          first ??= operation;
+          throw operation;
+        }
+      },
+      win32_check: (ok, operation) => api.invariant(ok, operation),
+      failure: () => {
+        throw first;
+      },
+    };
+    program.runInNewContext(api);
+    if ([null, "live"].includes(fault)) {
+      api.retire();
+      assert.equal(queries, fault === "live" ? 2 : 1);
+      assert.equal(api.command_server, null);
+      assert.deepEqual(
+        released,
+        fault === "live" ? [52, 51, 42, 41] : [42, 41, 52, 51],
+      );
+      assert.ok(events.indexOf("exit:51") < events.indexOf("close:52"));
+      ticks = 0;
+      api.retire();
+      assert.equal(api.finish(), true);
+      assert.equal(released.length, 4);
+    } else {
+      const expected = {
+        unexpected: "command-deadline",
+        "missing-member": "command-retirement-state",
+        partial: "command-members-count",
+        query: "command-members-query",
+        wait: "command-retirement-wait",
+        status: "command-retirement-status",
+        "active-status": "command-retirement-status",
+        "thread-close": "thread-close",
+        "process-close": "process-close",
+        orphan: "command-retirement-slot",
+      }[fault];
+      assert.throws(
+        () => api.retire(),
+        (error) => error === expected,
+        fault,
+      );
+      assert.equal(first, expected);
+      if (
+        [
+          "thread-close",
+          "process-close",
+          "unexpected",
+          "partial",
+          "query",
+        ].includes(fault)
+      )
+        assert.deepEqual(released, [42, 41, 52, 51]);
+      else
+        assert.deepEqual(released, fault === "missing-member" ? [52, 51] : []);
+      assert.equal(
+        queries,
+        fault === "unexpected"
+          ? 2
+          : ["partial", "query", "missing-member"].includes(fault)
+            ? 1
+            : 0,
+      );
+      assert.ok(
+        windowsFeasibilityDiagnostics(
+          `native-windows: operation=${expected} domain=${["wait", "status", "query", "thread-close", "process-close"].includes(fault) ? "win32" : "invariant"} value=${["wait", "status", "query", "thread-close", "process-close"].includes(fault) ? 5 : 0}\n`,
+        ),
+      );
+    }
+  }
+  const resume = new Script(
+    /else if\(!strcmp\(line,"R"\)\)\{([^\n]+)\}/u.exec(source)[1],
+  );
+  for (const closing of [false, true]) {
+    let resumed = 0;
+    const api = {
+      command_closing: closing,
+      server: { hProcess: 51, hThread: 52 },
+      command_server_released: false,
+      TRUE: true,
+      need: assert.ok,
+      ResumeThread: (thread) => {
+        assert.equal(thread, 52);
+        resumed++;
+        return 1;
+      },
+      puts: () => {},
+    };
+    if (closing) assert.throws(() => resume.runInNewContext(api));
+    else resume.runInNewContext(api);
+    assert.equal(resumed, closing ? 0 : 1);
+    assert.equal(api.command_server_released, !closing);
   }
 });
 
@@ -4652,7 +4950,7 @@ test("coverage admission and retirement preserve immediate errors and independen
     prefix = retirement
       .slice(
         retirement.indexOf("BOOL notified="),
-        retirement.indexOf("while(command_members"),
+        retirement.indexOf("for(;;)"),
       )
       .replace(/\b(?:BOOL|DWORD)\b/gu, "let")
       .replace(/&([a-z_]+)/gu, '"$1"');
@@ -4698,10 +4996,6 @@ test("coverage admission and retirement preserve immediate errors and independen
     if (failed)
       assert.deepEqual(first, ["command-retirement-event", "win32", 5]);
   }
-  assert.match(
-    retirement,
-    /command-retirement-wait[\s\S]*GetExitCodeProcess[\s\S]*code!=STILL_ACTIVE/u,
-  );
   assert.match(
     retirement,
     /if\(command_coverage_admitted\)\{command_gate_read\(\)[\s\S]*!command_retirement_seen[\s\S]*command-retirement-delivery/u,

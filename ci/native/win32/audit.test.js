@@ -18,7 +18,11 @@ import {
   account,
   fileId,
 } from "./effective.fixture.js";
-import { digest } from "./protocol.js";
+import {
+  closed as assertClosed,
+  digest,
+  normalizeWindowsIdentity,
+} from "./protocol.js";
 import { encode } from "./custody-protocol.js";
 import { withNativeDiagnostics } from "../diagnostics.js";
 
@@ -922,4 +926,90 @@ test("completed cold audit recovery verifies absence without replaying the inter
         assert.deepEqual(observed, ["free", "verified"]);
       }
     }
+});
+
+test("actual broker ready admission retains the child identity and refuses missing or inconsistent lifecycle facts", async () => {
+  const [source, native] = await Promise.all(
+    ["feasibility-command-effects.js", "feasibility-command.h"].map((file) =>
+      readFile(new URL(`./${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = source.indexOf('operation = "ready-admission";');
+  const state = source.indexOf(
+    "let broker,",
+    source.indexOf("export function createWindowsCommandEffects("),
+  );
+  // Keep the actual owner's completion state in scope as well as its guard.
+  const program = new Script(
+    `(admitted) => {${source.slice(state, source.indexOf("const pending =", state))}closed=Promise.resolve();let operation;const value={};${source.slice(start, source.indexOf('operation = "cleanup-reader-admission";', start))}return value;}`,
+  );
+  const accept = program.runInNewContext({
+    assertClosed,
+    normalizeWindowsIdentity,
+    digest,
+    need: assert.ok,
+  });
+  const emit = native.indexOf('printf(",\\"admission\\"');
+  assert.ok(emit > 0);
+  let output;
+  new Script(
+    native.slice(emit, native.indexOf(";printf(", emit)),
+  ).runInNewContext({
+    command_observed: {
+      pid: 43,
+      thread: 44,
+      birth: 90,
+      status: [0, 0, 0, 0, 0, 0, 16, 0, 0, 0],
+    },
+    exitCode: 0,
+    printf: (format, ...values) => {
+      let index = 0;
+      output = format.replace(/%(?:llu|lld|lu)/gu, () =>
+        String(values[index++]),
+      );
+    },
+  });
+  const identity = {
+    pid: 123,
+    creationTime: "101",
+    sessionId: 1,
+    userSid: "S-1-5-21-10-20-30-1001",
+  };
+  const frame = {
+    identity,
+    jobHandle: "7",
+    files: [{}, {}, { identity: "held" }, {}],
+    admission: JSON.parse(`{${output.slice(1)}}`).admission,
+  };
+  assert.deepEqual(frame.admission, {
+    pid: 43,
+    thread: 44,
+    creationTime: "90",
+    exitCode: 0,
+    assigned: 0,
+    listed: 0,
+    referencesReleased: true,
+  });
+  assert.deepEqual(accept(frame).original.admission, frame.admission);
+  for (const change of [
+    null,
+    { pid: identity.pid },
+    { pid: 0x100000000 },
+    { thread: 0 },
+    { creationTime: "0" },
+    { creationTime: "18446744073709551616" },
+    { exitCode: 259 },
+    { assigned: 1 },
+    { listed: 1 },
+    { referencesReleased: false },
+    { extra: true },
+  ]) {
+    assert.throws(() =>
+      accept({
+        ...frame,
+        admission:
+          change === null ? undefined : { ...frame.admission, ...change },
+      }),
+    );
+  }
 });

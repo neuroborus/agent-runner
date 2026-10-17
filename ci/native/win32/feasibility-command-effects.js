@@ -25,6 +25,7 @@ import { observationDigest } from "../index.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import {
   digest,
+  closed as assertClosed,
   normalizeWindowsIdentity,
   sameWindowsIdentity,
 } from "./protocol.js";
@@ -1598,6 +1599,29 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         const admitted = await ready;
         operation = "ready-admission";
         value.observer = normalizeWindowsIdentity(admitted.identity);
+        const admission = admitted.admission;
+        assertClosed(admission, [
+          "pid",
+          "thread",
+          "creationTime",
+          "exitCode",
+          "assigned",
+          "listed",
+          "referencesReleased",
+        ]);
+        need(
+          [admission.pid, admission.thread].every(
+            (id) => Number.isInteger(id) && id > 0 && id <= 0xffffffff,
+          ) &&
+            admission.pid !== value.observer.pid &&
+            typeof admission.creationTime === "string" &&
+            /^[1-9][0-9]{0,19}$/u.test(admission.creationTime) &&
+            BigInt(admission.creationTime) <= 0xffffffffffffffffn &&
+            admission.exitCode === 0 &&
+            admission.assigned === 0 &&
+            admission.listed === 0 &&
+            admission.referencesReleased === true,
+        );
         value.jobHandle = admitted.jobHandle;
         need(
           /^[1-9][0-9]{0,19}$/u.test(value.jobHandle) &&
