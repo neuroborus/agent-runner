@@ -2761,6 +2761,70 @@ test("actual scheduler query explicitly includes hidden instances and selects th
   }
 });
 
+test("actual task removal refuses any live retained process or surviving held Job", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body =
+      /      for \(unsigned i = 0; i < process_count; i\+\+\) need\(WaitForSingleObject\(processes\[i\], 0\) == WAIT_OBJECT_0\);[\s\S]*?(?=      need_hr\(ITaskFolder_DeleteTask)/u.exec(
+        source,
+      )?.[0];
+  assert.ok(body, "Expected the native task-removal retirement boundary");
+  const program = new Script(
+    body
+      .replaceAll("unsigned i", "let i")
+      .replaceAll(
+        "JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current;",
+        "const current = {};",
+      )
+      .replaceAll("sizeof(current)", "1")
+      .replaceAll("&current", "current")
+      .replaceAll("NULL", "null") + "remove();",
+  );
+  for (const fault of [
+    null,
+    "reader",
+    "observer",
+    "verified-job",
+    "named-job",
+    "query",
+  ]) {
+    const processes = [
+        { retired: fault !== "reader" },
+        { retired: fault !== "observer" },
+      ],
+      verified_jobs = [{ active: fault === "verified-job" }],
+      jobs = [{ active: fault === "named-job" }];
+    let removed = false;
+    const run = () =>
+      program.runInNewContext({
+        processes,
+        process_count: processes.length,
+        verified_jobs,
+        jobs,
+        job_count: jobs.length,
+        WAIT_OBJECT_0: 0,
+        JobObjectBasicAccountingInformation: 1,
+        WaitForSingleObject: (process, timeout) => {
+          assert.equal(timeout, 0);
+          return process.retired ? 0 : 258;
+        },
+        QueryInformationJobObject: (job, _kind, current) => {
+          current.ActiveProcesses = job.active ? 1 : 0;
+          return fault !== "query";
+        },
+        need: assert.ok,
+        remove: () => {
+          removed = true;
+        },
+      });
+    if (fault) assert.throws(run);
+    else run();
+    assert.equal(removed, fault === null);
+  }
+});
+
 test("Windows whole-Job retirement and independent transferred handles cannot be replaced by process exit", async () => {
   for (const damage of [
     "extra-handle",
@@ -2866,6 +2930,108 @@ test("Windows completed custody rereads retained subjects and task absence twice
     (await fresh().verifyCompleted(joined.f.input, identities, [nonce])).status,
     "RETIRED",
   );
+});
+
+test("Windows recovery removes original tasks before admitting live dependent observer births", async () => {
+  const k = verificationFixture(),
+    original = [k.f.helper, identity(10, runnerSid)],
+    observer = k.f.fileHelper;
+  k.state.instances = 0;
+  k.state.jobMembers = [];
+  for (const identity of original) k.states.get(identity.pid).retired = true;
+  const proof = await k.verifier.recoverCompleted(k.f.input, original);
+  assert.equal(proof.status, "RETIRED");
+  assert.ok(
+    !k.events.some(
+      (event) =>
+        event.operation === "verify-retain" &&
+        Number(event.args[0]) === observer.pid,
+    ),
+  );
+  await k.verifier.recoverOwnedTask(nonce, hash, original[1]);
+  const custody = await k.verifier.retainObservers(k.f.input, [observer]);
+  assert.equal(custody.independent, true);
+  assert.deepEqual(custody.identities, [observer]);
+  assert.equal(Object.hasOwn(custody, "status"), false);
+  const removal = k.events.findIndex(
+      (event) => event.operation === "verify-task-remove",
+    ),
+    retained = k.events.findIndex(
+      (event) =>
+        event.operation === "verify-retain" &&
+        Number(event.args[0]) === observer.pid,
+    );
+  assert.ok(removal >= 0 && retained > removal);
+  assert.equal(
+    k.events
+      .slice(retained)
+      .filter((event) => event.operation === "verify-process").length,
+    2,
+  );
+  await assert.rejects(
+    k.verifier.recoverCompleted(k.f.input, [...original, observer]),
+  );
+
+  const premature = verificationFixture();
+  premature.state.instances = 0;
+  premature.state.jobMembers = [];
+  for (const identity of original)
+    premature.states.get(identity.pid).retired = true;
+  await premature.verifier.recoverCompleted(premature.f.input, original);
+  await premature.verifier.retainObservers(premature.f.input, [observer]);
+  await assert.rejects(
+    premature.verifier.recoverOwnedTask(nonce, hash, original[1]),
+  );
+  assert.equal(premature.state.removedTasks.size, 0);
+});
+
+test("Windows observer custody rejects missing, substituted or changed births and incomplete inventories", async () => {
+  for (const fault of [
+    "missing",
+    "substituted",
+    "changed",
+    "inventory",
+    "duplicate",
+    "reader",
+  ]) {
+    const k = verificationFixture(),
+      expected = k.f.fileHelper;
+    if (fault === "reader") {
+      k.states.get(expected.pid).retired = true;
+      await k.verifier.recoverCompleted(k.f.input, [expected]);
+    }
+    if (fault === "missing") k.states.delete(expected.pid);
+    if (fault === "substituted")
+      k.states.get(expected.pid).identity = {
+        ...expected,
+        creationTime: "999",
+      };
+    let reads = 0;
+    k.state.damage = (operation, frame) => {
+      if (
+        operation === "verify-process" &&
+        ++reads === 2 &&
+        fault === "changed"
+      )
+        frame.value.identity.creationTime = "999";
+      if (operation === "verify-subjects" && fault === "inventory")
+        frame.value.identities = [];
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    await assert.rejects(
+      k.verifier.retainObservers(
+        k.f.input,
+        fault === "duplicate" ? [expected, expected] : [expected],
+      ),
+    );
+    const commands = k.events.length;
+    await assert.rejects(k.verifier.retainObservers(k.f.input, [expected]));
+    assert.equal(
+      k.events.length,
+      commands,
+      "Failed verification remains terminal",
+    );
+  }
 });
 
 test("Windows verifier captures concurrent caller declarations and bounds protected records before native reads", async () => {

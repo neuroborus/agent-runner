@@ -6589,17 +6589,30 @@ registrations remain protected dependencies. A fresh recovery observer rereads
 the original bounded journals and verifies original process births, whole Jobs
 and task removal before releasing those dependencies, then independently verifies
 every old observer as well. Dependency release matches the original reader and
-bridge births and task digest. Recovery holds old observer births before their
-closure; that custody is not retirement proof. Its own successful finish cannot
-settle an old owner.
+bridge births and task digest. The fresh verifier first retains only the original
+reader/child/helper domain, proves its complete non-emergency retirement and
+removes its exact owned tasks. The native task-removal guard still requires every
+retained process and held Job to be retired; live dependent observers must not
+enter that verifier's retained inventory before this removal. Their original
+registrations and channels retain custody throughout the first pass.
+After task removal, a distinct observer-custody operation retains and rereads
+each exact old helper and bridge birth twice, then checks the complete retained
+inventory. Its evidence carries no RETIRED status and is bound into reader
+release proof. A registry requires explicit no-live-member proof and matching
+custody of its own original observer pair before releasing readers. Missing,
+replaced or changed births, incomplete Job
+proof, changed tasks and cancellation retain exclusion. Only then may the old
+observer close; its separate process/whole-Job and task-removal pass remains
+mandatory. A fresh observer's own successful finish cannot settle an old owner.
 Terminal reader failure rejects outstanding commands, including commands waiting
 for a dependent observer's journal. The channel separately exposes the bridge's
 actual close event: fault-rejected completion can precede that event. Failed
 reader closure waits for bridge exit within the existing cleanup signal before
 fresh original-owner observation. A failed observer finish likewise remains
-cached and is never sent again. Fresh recovery first retains the old observer
-births and proves its registered readers retired, then waits for the original
-bridge exit before the independent observer-retirement pass. These waits provide
+cached and is never sent again. Fresh recovery first proves its registered
+readers retired and their tasks removed, then retains the old observer births
+before releasing registrations or waiting for the original bridge exit. The
+independent observer-retirement pass follows that exit. These waits provide
 ordering only. Reader registration, child/whole-Job retirement and
 owned-task removal still require matching independent proof before the dependent
 observer can close, followed by independent proof for that original observer.
@@ -6613,7 +6626,12 @@ The 3,540,000-ms preparation and 60-minute workflow bounds are unchanged.
 Watchdog exit 124 remains emergency cleanup; EOF, exit 126 and task absence alone
 establish no retirement. Preparation failure stays primary; cleanup and persistence
 failures are reported separately and recorded in the existing bootstrap journal
-when its writer remains usable. Supported injected composition is covered in
+when its writer remains usable. The earlier retention of live observers before
+task removal conflicts with the native all-retained-process guard in source.
+Whether this ordering explains every observed LONG 8/CLOSE 0 cleanup failure is
+still a causal hypothesis. The original trust refusal remains unchanged and must
+settle independently of any future successful verification.
+Supported injected composition is covered in
 `win32/preparation-effects.test.js`; matched MSVC/SDK builds, certificate/trust
 bindings and fresh protected native CI proof remain external. These changes
 establish no Windows GO or production provider dispatch grant.

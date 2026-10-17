@@ -1364,18 +1364,11 @@ export function createWindowsCustodyVerifier(
         noLiveMembers: true,
       };
     },
-    async verifyCompleted(
-      declaration,
-      identities,
-      nonces = [],
-      jobs = [],
-      heldObservers = [],
-    ) {
+    async verifyCompleted(declaration, identities, nonces = [], jobs = []) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
       const observations = [];
-      dense(heldObservers, maximumSubjects);
-      await inventory([...identities, ...heldObservers]);
+      await inventory(identities);
       for (const identity of identities)
         observations.push(await empty(identity), await empty(identity));
       requireWindows(dense(jobs, 32).length === 0); // Missing whole-Job custody cannot be reconstructed from exit.
@@ -1444,15 +1437,9 @@ export function createWindowsCustodyVerifier(
       nonces = [],
       observerOwners = [],
       preSetup = [],
-      heldObservers = [],
     ) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
-      // Preserve old observer births while the original readers retire. These
-      // live held owners are custody only; they receive no retirement proof in
-      // this pass and must join the later complete independent observation.
-      for (const identity of dense(heldObservers, maximumSubjects))
-        await retain(identity);
       for (const identity of identities) await retain(identity);
       const owners = new Map(
         dense(observerOwners, maximumSubjects).map((owner) => {
@@ -1477,13 +1464,7 @@ export function createWindowsCustodyVerifier(
               ) ?? input.nonce,
           })),
         ),
-        proof = await api.verifyCompleted(
-          declaration,
-          identities,
-          nonces,
-          [],
-          heldObservers,
-        );
+        proof = await api.verifyCompleted(declaration, identities, nonces, []);
       const exits = [];
       dense(preSetup, 128);
       requireWindows(
@@ -1510,6 +1491,30 @@ export function createWindowsCustodyVerifier(
       return {
         ...proof,
         nativeEventSha256: observationDigest({ jobs, proof, exits }),
+      };
+    },
+    async retainObservers(declaration, identities) {
+      bind(declaration);
+      requireWindows(dense(identities, maximumSubjects).length > 0);
+      const keys = identities.map((identity) =>
+          observationDigest(normalizeWindowsIdentity(identity)),
+        ),
+        observations = [];
+      requireWindows(
+        new Set(keys).size === keys.length &&
+          keys.every((key) => !subjects.has(key)),
+      );
+      // Task removal checks every process retained by this native verifier.
+      // Admit live dependent observers only after the original tasks are gone,
+      // while their original registrations/channels still hold them. Rejoin
+      // each exact birth twice before those dependencies may be released.
+      for (const identity of identities)
+        observations.push(await observe(identity), await observe(identity));
+      await inventory([...subjects.values()].map((held) => held.identity));
+      return {
+        independent: true,
+        identities: identities.map(normalizeWindowsIdentity),
+        nativeEventSha256: observationDigest(observations),
       };
     },
     async recoverOwnedTask(nonce, sha256, identity) {
@@ -1670,6 +1675,7 @@ export function createWindowsCustodyVerifier(
             "verifyPreparation",
             "recoverCase",
             "recoverCompleted",
+            "retainObservers",
             "recoverOwnedTask",
             "recoverPrerequisite",
           ].includes(name)

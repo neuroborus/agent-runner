@@ -1183,18 +1183,36 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           [],
           [],
           preSetup,
-          observerSubjects,
         );
         requireObservation(
           windowsRetired(result) && result.noLiveMembers === true,
         );
         tasks = await recoverTasks(taskOwners);
+        const observerCustody = await files.verify(
+          "retainObservers",
+          plan.bootstrap,
+          observerSubjects,
+        );
+        requireObservation(
+          observerCustody.independent === true &&
+            hash(observerCustody.nativeEventSha256) &&
+            Array.isArray(observerCustody.identities) &&
+            observerCustody.identities.length === observerSubjects.length &&
+            observerCustody.identities.every((identity, index) =>
+              sameWindowsIdentity(identity, observerSubjects[index]),
+            ),
+        );
         readerProof = {
           ...result,
           tasksRemoved: true,
           readers,
+          observerCustody,
           recordsSha256: observationDigest(records),
-          nativeEventSha256: observationDigest({ result, tasks }),
+          nativeEventSha256: observationDigest({
+            result,
+            tasks,
+            observerCustody,
+          }),
         };
         // Dependent observers may finish only after every original reader/Job
         // and task has independent retirement proof. No registration is dropped

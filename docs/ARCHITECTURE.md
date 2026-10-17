@@ -86,8 +86,15 @@ renewing the original observer deadline. Cancellation stops waits on a dependent
 observer without closing it or discarding held custody. Retained readers remain
 in the preparation registry until protected original births, whole Jobs and owned
 tasks have fresh independent retirement proof matching that registration; only
-then may their dependent observer close. Recovery holds the old observer births
-before closure and separately proves their retirement. Explicit recovery can
+then may their dependent observer close. The fresh recovery verifier removes
+original reader tasks before retaining live dependent observers, preserving the
+native all-retained-process and whole-Job task-removal guards. Original observer
+registrations/channels hold custody during that first pass. A distinct operation
+then retains and rereads both exact observer births twice and verifies the
+complete inventory before reader registrations may be released. This custody
+proof is bound to reader release without claiming observer retirement. The
+separate observer-retirement and owned-task-removal pass follows closure.
+Explicit recovery can
 progress after a cached close failure without replaying setup, native opens or
 compilation.
 Receipt and cleanup failures remain separate from the preparation cause, including

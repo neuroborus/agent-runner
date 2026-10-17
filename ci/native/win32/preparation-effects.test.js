@@ -2398,6 +2398,7 @@ function rawPreparation({ experiment = false } = {}) {
           jobCreators.get(pid) === creator.pid,
       );
       assert.ok(owned.length <= 128);
+      for (const [pid] of owned) scope.recoveryJobs.add(pid);
       const observed = {
         nonce: args[1],
         identity: creator,
@@ -2476,6 +2477,12 @@ function rawPreparation({ experiment = false } = {}) {
       assert.ok(task && actors.get(task.pid).retired);
       assert.equal(args[2], hash);
       assert.ok(retained[Number(args[3])].retired);
+      assert.ok(
+        retained.every((process) => process.retired),
+        "Native task removal requires every retained process to be retired",
+      );
+      for (const pid of scope.recoveryJobs)
+        assert.equal(job(actors.get(pid).identity).members.length, 0);
       tasks.delete(decode(args[1]));
       return { removed: true, sha256: hash };
     }
@@ -2956,6 +2963,7 @@ function rawPreparation({ experiment = false } = {}) {
         heldFiles: [],
         entries: selected,
         boundJobs: new Set(),
+        recoveryJobs: new Set(),
       },
       queue = [],
       bridge = actor(false),
@@ -3686,8 +3694,17 @@ test("Windows post-startup open rejection retains original owners until fresh co
   assert.throws(() =>
     native.files.releaseRecoveredReaders({
       ...retired,
+      noLiveMembers: true,
       tasksRemoved: true,
       recordsSha256: hash,
+      observerCustody: {
+        independent: true,
+        identities: [
+          native.files.verification.identity,
+          native.files.verification.bridge,
+        ],
+        nativeEventSha256: hash,
+      },
       readers: [{ ...native.reader.retirementBinding, helper: identity(999) }],
     }),
   );
@@ -3729,6 +3746,193 @@ test("Windows post-startup open rejection retains original owners until fresh co
     [1, 2],
     "recovery must not repeat verification",
   );
+});
+
+test("Windows original trust refusal settles reader tasks before observer custody and preserves incomplete recovery", async () => {
+  for (const fault of [
+    null,
+    "reader-missing",
+    "reader-replaced",
+    "task",
+    "observer-missing",
+    "observer-replaced",
+    "observer-recheck",
+    "custody-cancel",
+    "observer-job",
+  ]) {
+    const f = rawPreparation({ experiment: true }),
+      source = await compilerTrustFixture({
+        entries: f.prepared.entries,
+        files: f.files,
+        identity: f.rawFileId,
+        inspect: f.objectRead,
+        result: 8,
+        closed: 0,
+      }),
+      cleanup = new AbortController();
+    let native,
+      primary,
+      original,
+      observer,
+      releaseCalls = 0,
+      observerReads = 0,
+      releasedAt,
+      armed = false;
+    f.accessNative = async (operation, args, scope, _, sequence) => {
+      if (operation === "open") {
+        try {
+          return await source.open(Number(args[0]), sequence);
+        } catch (cause) {
+          primary = cause;
+          throw cause;
+        }
+      }
+      if (!armed) return;
+      if (
+        operation === "verify-retain" &&
+        Number(args[0]) === observer.identity.pid
+      ) {
+        assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), false);
+        assert.deepEqual(native.reader.retirementBinding, original);
+        assert.equal(releaseCalls, 0);
+      }
+      if (
+        operation === "verify-process" &&
+        scope.retained[Number(args[0])].identity.pid ===
+          observer.identity.pid &&
+        releaseCalls === 0
+      ) {
+        observerReads++;
+        if (fault === "observer-recheck" && observerReads === 2) {
+          const value = structuredClone(scope.retained[Number(args[0])]);
+          value.identity.creationTime = "999";
+          return value;
+        }
+        if (fault === "custody-cancel")
+          cleanup.abort(new Error("observer custody cleanup cancelled"));
+      }
+    };
+    await assert.rejects(
+      openWindowsExperimentNative(f.prepared, {
+        ...f.options,
+        reopen: true,
+        retain: (owner) => {
+          native = owner;
+        },
+      }),
+      (cause) => cause === primary,
+    );
+    original = native.reader.retirementBinding;
+    observer = {
+      identity: native.files.verification.identity,
+      bridge: native.files.verification.bridge,
+    };
+    const observerState = f.actors.get(observer.identity.pid);
+    for (const identity of [original.helper, original.bridge]) {
+      f.actors.get(identity.pid).retired = true;
+      f.rawExitCodes.set(identity.pid, 126);
+    }
+    assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), true);
+    const release = native.files.releaseRecoveredReaders;
+    native.files.releaseRecoveredReaders = (proof) => {
+      assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), false);
+      assert.equal(observerReads, 2);
+      assert.equal(proof.observerCustody.independent, true);
+      assert.equal(Object.hasOwn(proof.observerCustody, "status"), false);
+      if (fault === null) {
+        for (const incomplete of [
+          { ...proof, noLiveMembers: undefined },
+          { ...proof, noLiveMembers: false },
+        ]) {
+          assert.throws(() => release(incomplete));
+          assert.equal(observerState.retired, false);
+          assert.deepEqual(native.reader.retirementBinding, original);
+        }
+        for (const custody of [
+          undefined,
+          { ...proof.observerCustody, independent: false },
+          { ...proof.observerCustody, identities: [observer.identity] },
+          {
+            ...proof.observerCustody,
+            identities: [
+              observer.identity,
+              { ...observer.bridge, creationTime: "999" },
+            ],
+          },
+        ]) {
+          assert.throws(() => release({ ...proof, observerCustody: custody }));
+          assert.equal(observerState.retired, false);
+          assert.deepEqual(native.reader.retirementBinding, original);
+        }
+      }
+      releasedAt = f.rawEvents.length;
+      releaseCalls++;
+      release(proof);
+      if (fault === "observer-job") f.coldDamage = "surviving-compiler-job";
+    };
+    const damaged = fault?.startsWith("reader-")
+      ? original.helper
+      : observer.identity;
+    if (fault?.endsWith("missing")) f.actors.delete(damaged.pid);
+    if (fault?.endsWith("replaced"))
+      f.actors.get(damaged.pid).identity = { ...damaged, creationTime: "999" };
+    if (fault === "task") f.coldDamage = "task";
+    const before = f.rawEvents.length;
+    armed = true;
+    const recovering = native.recover({ signal: cleanup.signal });
+    if (fault) {
+      await assert.rejects(
+        recovering,
+        (cause) => cause.settlement.status === "RETAINED",
+      );
+      assert.equal(releaseCalls, fault === "observer-job" ? 1 : 0);
+      if (!releaseCalls) {
+        assert.equal(observerState.retired, false);
+        await assert.rejects(native.files.settleFiles());
+      }
+    } else {
+      assert.equal((await recovering).status, "RETIRED");
+      assert.equal(releaseCalls, 1);
+      const frames = f.rawEvents,
+        removedAt = frames.findIndex(
+          (frame, index) =>
+            index >= before && frame.startsWith("verify-task-remove "),
+        ),
+        heldAt = frames.findIndex(
+          (frame, index) =>
+            index >= before &&
+            new RegExp(
+              `^verify-retain [0-9]+ ${observer.identity.pid} `,
+              "u",
+            ).test(frame),
+        ),
+        finishedAt = frames.findIndex(
+          (frame, index) => index >= releasedAt && frame.startsWith("finish "),
+        );
+      assert.ok(
+        removedAt >= before &&
+          heldAt > removedAt &&
+          releasedAt > heldAt &&
+          finishedAt >= releasedAt,
+      );
+      assert.ok(
+        frames
+          .slice(finishedAt)
+          .some((frame) => frame.startsWith("verify-recovery-jobs ")),
+      );
+      assert.equal(f.rawTasks.size, 0);
+      assert.ok([...f.actors.values()].every((actor) => actor.retired));
+    }
+    assert.deepEqual(native.reader.retirementBinding, original);
+    assert.deepEqual(source.calls, [1, 2]);
+    assert.equal(primary.custodyReaderFailure.trust.result, "0x00000008");
+    assert.equal(primary.custodyReaderFailure.trust.closeResult, "0x00000000");
+    assert.ok(
+      !f.rawEvents
+        .slice(before)
+        .some((frame) => /^(?:open|helper-start|publish-build) /u.test(frame)),
+    );
+  }
 });
 
 test("Windows original compiler refusal waits for bridge exit before independent recovery", async () => {

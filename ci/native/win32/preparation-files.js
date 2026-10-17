@@ -745,6 +745,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
         proof?.status === "RETIRED" &&
           proof.independent === true &&
           proof.emergencyCleanup === false &&
+          proof.noLiveMembers === true &&
           proof.tasksRemoved === true &&
           hash(proof.nativeEventSha256) &&
           hash(proof.recordsSha256) &&
@@ -753,6 +754,19 @@ export function createWindowsPreparationFiles(input, options = {}) {
       // Only the fresh reader's proof of these original protected declarations
       // can release a dependency after a failed close. A new observer's own
       // successful finish is never proof of an old reader's retirement.
+      if (readers.size > 0) {
+        const custody = proof.observerCustody;
+        requireObservation(
+          custody?.independent === true &&
+            hash(custody.nativeEventSha256) &&
+            Array.isArray(custody.identities) &&
+            [identity, bridge].every((original) =>
+              custody.identities.some((held) =>
+                sameWindowsIdentity(held, original),
+              ),
+            ),
+        );
+      }
       for (const reader of readers.keys()) {
         const original = reader.retirementBinding;
         requireObservation(

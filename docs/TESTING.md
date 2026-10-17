@@ -1476,6 +1476,20 @@ the dependent observer. A consumed observer finish with a lost acknowledgement
 is cached once; fresh recovery must retain the old observer before waiting for
 its bridge exit and independently proving original observer retirement. These
 portable fixtures exercise ordering, not native trust success or retirement.
+The preparation fixture also enforces the native task-removal guard over every
+retained process and previously observed whole Job. An actual-source custody
+regression executes the original process/Job guard loops without a Windows tool.
+The original LONG 8/CLOSE 0 caller now proves reader task removal before live
+observer retention, two exact-birth reads before registration release, then
+separate observer retirement. Missing/replaced readers or observers, a changed
+second birth read, task substitution, surviving Jobs and cancellation cannot
+release unproved dependencies or establish complete retirement. Registry checks
+reject missing no-live-member proof and absent or incomplete custody of its own
+original observer pair. Existing
+lost-finish, bridge-exit, emergency-retirement and bounded-cancellation coverage
+remains active; no command or trust verification is replayed. These portable
+cases retain the selected native harness and add no slow-tier assignment or
+native acceptance claim.
 Distinct regressions reject unsigned/source/output substitution, publication changes
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers
