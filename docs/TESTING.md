@@ -710,6 +710,19 @@ cannot reuse that budget. Historical matches and incomplete diagnostics still
 refuse probes and preserve independent restoration and separate cleanup failure.
 These focused portable fixtures add no slow-tier requirement and establish no
 Windows event generation, native XPath/SDK acceptance or hosted audit delivery.
+The same actual-body fixtures cover original setter start/completion binding and
+immediate-error preservation, File System snapshot projection, and a separate
+installation-to-control 4912 query. They exercise principal/logon/target/GUID
+matches and unknown fields, original query preservation, shared record/render
+charges through later capture, and independent query/event/context closure.
+Fixed-buffer channel fixtures cover Boolean values, unavailable reads, malformed
+types/sizes and separate closure failures, including zero-error failed reads
+and consumed-slot closure failures that must still refuse capture retirement.
+Strict caller fixtures bind the installation and original control intervals,
+reject inconsistent scalar authority, and retain the original missing-delivery
+refusal. All APIs and clocks are injected; these additions perform no native
+tool, policy or channel change and add no slow-tier assignment or native
+acceptance claim.
 The production coverage sequence also drives the actual policy/SACL installer,
 gate open/read, bounded delivery loop and capture/bookmark bodies together.
 Injected APIs verify the fresh `CreateFileW` pathname open under the held broker

@@ -4616,8 +4616,12 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     command_bytes: 0,
     command_scanned: 0,
     command_scanned_bytes: 0,
+    command_prerequisite_cleanup_failed: false,
     ref,
     GetLastError: () => lastError,
+    SetLastError: (value) => {
+      lastError = value;
+    },
     remember: (...cause) => {
       api.first ??= cause;
     },
@@ -5251,14 +5255,17 @@ async function commandAuditInstallProgram() {
       source.indexOf("static void command_token_read("),
     ),
     script = new Script(
-      body
-        .replace(
-          "static void command_audit_install(void)",
-          "function install()",
-        )
-        .replace(/AUDIT_POLICY_INFORMATION policy=\{0\}/u, "let policy={}")
-        .replace(/\b(?:DWORD|unsigned)\b/gu, "let")
-        .replace("&policy", "policy") + "install();",
+      "var command_install_from={}, command_install_to={}, command_install_error;" +
+        body
+          .replace(
+            "static void command_audit_install(void)",
+            "function install()",
+          )
+          .replace(/AUDIT_POLICY_INFORMATION policy=\{0\}/u, "let policy={}")
+          .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let")
+          .replace(/&command_install_(from|to)/gu, "command_install_$1")
+          .replace("&policy", "policy") +
+        "install();",
     );
   return script;
 }
@@ -5267,7 +5274,9 @@ test("native audit installation records intent first and preserves exact setter 
   const script = await commandAuditInstallProgram();
   for (const fault of [null, "wait", "intent", "policy", 0, 1, 2, 3]) {
     const calls = [];
-    let first;
+    let first,
+      clock = 0,
+      lastError = 5;
     const remember = (...cause) => {
         first ??= cause;
       },
@@ -5282,19 +5291,28 @@ test("native audit installation records intent first and preserves exact setter 
         WAIT_FAILED: -1,
         WAIT_TIMEOUT: 258,
         FALSE: false,
+        ERROR_SUCCESS: 0,
         NULL: null,
         PER_USER_AUDIT_SUCCESS_INCLUDE: 1,
         PER_USER_AUDIT_FAILURE_INCLUDE: 4,
         SE_FILE_OBJECT: 1,
         SACL_SECURITY_INFORMATION: 8,
         WaitForSingleObject: () => (fault === "wait" ? -1 : 258),
-        GetLastError: () => 5,
+        GetLastError: () => lastError,
+        SetLastError: (value) => {
+          lastError = value;
+        },
+        GetSystemTimePreciseAsFileTime: (value) => {
+          value.time = ++clock;
+          lastError = 99;
+        },
         SetEvent: () => {
           calls.push("intent");
           return fault !== "intent";
         },
         AuditSetPerUserPolicy: () => {
           calls.push("policy");
+          lastError = 5;
           return fault !== "policy";
         },
         SetSecurityInfo: (file) => {
@@ -5309,7 +5327,7 @@ test("native audit installation records intent first and preserves exact setter 
         },
         win32_check: (ok, operation) => {
           if (!ok) {
-            remember(operation, "win32", 5);
+            remember(operation, "win32", lastError);
             throw 126;
           }
         },
@@ -5323,6 +5341,9 @@ test("native audit installation records intent first and preserves exact setter 
     if (fault === null) {
       script.runInNewContext(api);
       assert.deepEqual(calls, ["baseline", "intent", "policy", 0, 1, 2, 3]);
+      assert.equal(api.command_install_from.time, 1);
+      assert.equal(api.command_install_to.time, 2);
+      assert.equal(api.command_install_error, 0);
     } else {
       assert.throws(
         () => script.runInNewContext(api),
@@ -5356,7 +5377,7 @@ test("effective audit reads retain both outcomes and the immediate native query 
     ),
     body = source.slice(
       source.indexOf("static void command_effective(HANDLE token) {"),
-      source.indexOf("static void command_image_read("),
+      source.indexOf("static void command_system_observation("),
     ),
     script = new Script(
       body
@@ -6644,6 +6665,694 @@ async function commandCoverageControlProgram() {
   return program;
 }
 
+test("original prerequisite scalars retain unknown channel readings and independent close status", async () => {
+  const { source } = await commandCaptureProgram();
+  const body =
+    /static void command_channel_observe\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
+  const script = new Script(
+    body
+      .replace("EVT_VARIANT value={0}", "let value={}")
+      .replace(/\b(?:DWORD|LONGLONG|BOOL|EVT_HANDLE)\b/gu, "let")
+      .replaceAll("sizeof(value)", "16")
+      .replace("&value,&size", "value,n=>size=n")
+      .replaceAll("(let)", "")
+      .replace(/\bL(?=")/gu, ""),
+  );
+  for (const fault of [
+    null,
+    "false",
+    "open",
+    "open-zero",
+    "read",
+    "read-zero",
+    "short",
+    "type",
+    "array",
+    "boolean",
+    "insufficient",
+    "close",
+    "close-zero",
+  ]) {
+    let lastError = 77,
+      receipt,
+      reads = 0,
+      closes = 0;
+    const cleanup = [];
+    const api = {
+      NULL: null,
+      TRUE: 1,
+      FALSE: 0,
+      ERROR_SUCCESS: 0,
+      ERROR_INSUFFICIENT_BUFFER: 122,
+      EvtChannelConfigEnabled: 0,
+      EvtVarTypeBoolean: 13,
+      command_preflight_owned: {},
+      command_prerequisite_cleanup_failed: false,
+      command_bound: () => {},
+      GetLastError: () => lastError,
+      SetLastError: (v) => {
+        lastError = v;
+      },
+      EvtOpenChannelConfig: (...args) => {
+        assert.deepEqual(args, [null, "Security", 0]);
+        lastError = fault === "open-zero" ? 0 : 5;
+        return fault?.startsWith("open") ? null : "channel";
+      },
+      EvtGetChannelConfigProperty: (
+        handle,
+        property,
+        flags,
+        capacity,
+        value,
+        size,
+      ) => {
+        reads++;
+        assert.deepEqual(
+          [handle, property, flags, capacity],
+          ["channel", 0, 0, 16],
+        );
+        size(fault === "insufficient" ? 64 : fault === "short" ? 8 : 16);
+        Object.assign(value, {
+          Type: fault === "type" ? 1 : fault === "array" ? 141 : 13,
+          BooleanVal: fault === "boolean" ? 2 : fault === "false" ? 0 : 1,
+        });
+        lastError =
+          fault === "insufficient" ? 122 : fault === "read-zero" ? 0 : 5;
+        return !["read", "read-zero", "insufficient"].includes(fault);
+      },
+      EvtClose: (handle) => {
+        closes++;
+        assert.equal(handle, "channel");
+        lastError = fault === "close-zero" ? 0 : 6;
+        return !fault?.startsWith("close");
+      },
+      remember: () => {},
+      cleanup_error: (...v) => cleanup.push(v),
+      printf: (_format, ...v) => {
+        receipt = v;
+      },
+    };
+    script.runInNewContext(api);
+    assert.equal(
+      Boolean(api.command_prerequisite_cleanup_failed),
+      Boolean(fault?.startsWith("close")),
+    );
+    assert.equal(lastError, 77);
+    assert.equal(reads, fault?.startsWith("open") ? 0 : 1);
+    assert.equal(closes, reads);
+    assert.equal(
+      receipt[5],
+      fault === null || fault?.startsWith("close")
+        ? 1
+        : fault === "false"
+          ? 0
+          : -1,
+    );
+    assert.equal(
+      receipt[1],
+      fault?.startsWith("open")
+        ? -1
+        : fault === "read"
+          ? 5
+          : fault === "insufficient"
+            ? 122
+            : 0,
+    );
+    assert.equal(receipt[4], fault === "insufficient" ? 64 : -1);
+    assert.equal(
+      receipt[6],
+      fault?.startsWith("open") ? -1 : fault === "close" ? 6 : 0,
+    );
+    assert.equal(cleanup.length, fault?.startsWith("close") ? 1 : 0);
+  }
+  const system =
+    /static void command_system_observation\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
+  const project = new Script(
+    system
+      .replace(/\b(?:BOOL|DWORD|ULONG)\b/gu, "let")
+      .replaceAll(
+        "&command_system[i].AuditSubCategoryGuid",
+        "command_system[i].AuditSubCategoryGuid",
+      )
+      .replaceAll("&command_category", "command_category"),
+  );
+  for (const policy of [
+    null,
+    [],
+    [{ AuditSubCategoryGuid: "other", AuditingInformation: 3 }],
+    [{ AuditSubCategoryGuid: "file", AuditingInformation: 0 }],
+    [{ AuditSubCategoryGuid: "file", AuditingInformation: 3 }],
+  ]) {
+    const output = [];
+    project.runInNewContext({
+      FALSE: false,
+      TRUE: true,
+      command_system: policy,
+      command_category_count: policy?.length ?? 0,
+      command_category: "file",
+      IsEqualGUID: (a, b) => a === b,
+      printf: (_f, v) => output.push(v),
+      fputs: (v) => output.push(v),
+      putchar: () => {},
+      stdout: {},
+    });
+    assert.deepEqual(
+      output,
+      policy?.[0]?.AuditSubCategoryGuid === "file"
+        ? ["true", policy[0].AuditingInformation]
+        : ["false", "null"],
+    );
+  }
+});
+
+test("4912 query binds original installation, charges later capture and independently closes each resource", async () => {
+  const program = await commandCaptureProgram();
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(program.source)[1];
+  const translate = (text) =>
+    text
+      .replace(
+        "WCHAR from[40],to[40],query[512];",
+        "let from={},to={},query={};",
+      )
+      .replace(/const WCHAR \*paths\[\]=\{([^;]+)\};/u, "const paths=[$1];")
+      .replace("TOKEN_STATISTICS stats={0};", "let stats={};")
+      .replace(/ULONGLONG logon=[^;]+;/u, "let logon=1n;")
+      .replace(/ULARGE_INTEGER end;[^\n]+/u, "const end={QuadPart:last.value};")
+      .replace(
+        "struct command_policy_counts counts={0};",
+        "let counts={unavailable:0};",
+      )
+      .replace("BYTE *raw", "let raw")
+      .replace("BYTE *buffer", "let buffer")
+      .replaceAll("sizeof(EVT_VARIANT)", "16")
+      .replaceAll("sizeof(stats)", "56")
+      .replaceAll("(EVT_VARIANT *)buffer", "buffer")
+      .replaceAll("(DWORD)", "")
+      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
+      .replace(/\bL(?=")/gu, "")
+      .replace(
+        /&command_preflight_owned\.(queryItem|query|queryContext)\b/gu,
+        'ref(command_preflight_owned,"$1")',
+      )
+      .replace(/,&(count|length|properties|used)\b/gu, ",value=>$1=value")
+      .replaceAll("&stats", "stats")
+      .replaceAll("&counts", "counts");
+  const script = new Script(
+    `function command_policy_observe(event,xmlLength,logonKnown,logon,counts){${translate(body("command_policy_observe"))}};last=>{${translate(body("command_policy_query"))}}`,
+  );
+  for (const fault of [
+    null,
+    "open",
+    "next",
+    "render",
+    "context",
+    "values-query",
+    "values-render",
+    "values-size",
+    "missing",
+    "records",
+    "bytes",
+    "combined",
+    "close-event",
+    "close-query",
+    "close-context",
+    "later-records",
+    "later-bytes",
+    "token",
+  ]) {
+    const f = commandCaptureFixture(program, {
+      fault: ["next", "render"].includes(fault) ? fault : null,
+      closeFailures:
+        {
+          "close-event": ["query-event"],
+          "close-query": ["query"],
+          "close-context": ["query-context"],
+        }[fault] ?? [],
+    });
+    const next = f.api.EvtNext,
+      render = f.api.EvtRender;
+    let receipt,
+      selected,
+      installation,
+      rendered = 0;
+    Object.assign(f.api, {
+      command_install_from: { value: "installation-start" },
+      command_broker_token: "token",
+      TokenStatistics: 10,
+      GetTokenInformation: (token, kind, _stats, size, used) => {
+        assert.deepEqual([token, kind, size], ["token", 10, 56]);
+        used(56);
+        f.api.SetLastError(5);
+        return fault !== "token";
+      },
+      EvtQueryChannelPath: 1,
+      EvtQueryForwardDirection: 256,
+      EvtRenderContextValues: 0,
+      EvtRenderEventValues: 0,
+      ERROR_INVALID_DATA: 13,
+      ERROR_OUTOFMEMORY: 14,
+      command_query_time: (time, text) => {
+        text.value = time.value;
+      },
+      swprintf_s: (out, _size, format, from, to) => {
+        out.value = format.replace("%ls", from.value).replace("%ls", to.value);
+        return out.value.length;
+      },
+      command_bound: () => {},
+      command_installation: () => {
+        installation = true;
+      },
+      fputs: () => {},
+      stdout: {},
+      EvtQuery: (_session, channel, query, flags) => {
+        assert.equal(channel, "Security");
+        assert.equal(flags, 257);
+        selected = query.value;
+        if (fault === "open") {
+          f.api.SetLastError(5);
+          return null;
+        }
+        f.notify(["query-event"]);
+        return "query";
+      },
+      EvtNext: (handle, size, slot, timeout, flags, count) => {
+        assert.deepEqual([handle, size, timeout, flags], ["query", 1, 0, 0]);
+        const rows = [];
+        const ok = next("subscription", 16, rows, 0, 0, count);
+        slot.value = rows[0] ?? null;
+        return ok;
+      },
+      EvtCreateRenderContext: (count, paths, flags) => {
+        assert.equal(count, 5);
+        assert.equal(flags, 0);
+        assert.equal(paths[4], "Event/EventData/Data[@Name='SubcategoryGuid']");
+        if (fault === "context") {
+          f.api.SetLastError(5);
+          return null;
+        }
+        return "query-context";
+      },
+      EvtRender: (context, event, flags, size, buffer, length, properties) => {
+        if (flags === 1)
+          return render(
+            context,
+            event,
+            flags,
+            size,
+            buffer,
+            length,
+            properties,
+          );
+        length(fault === "combined" ? 65536 : 80);
+        properties(fault === "values-size" ? 4 : 5);
+        if (fault === (size ? "values-render" : "values-query")) {
+          f.api.SetLastError(5);
+          return false;
+        }
+        if (!size) {
+          f.api.SetLastError(122);
+          return false;
+        }
+        rendered++;
+        return true;
+      },
+      command_policy_fields: (_values, _buffer, _length, known, logon) => {
+        assert.equal(known, fault !== "token");
+        assert.equal(logon, 1n);
+        return ["missing", "token"].includes(fault) ? 13 : 0;
+      },
+      printf: (format, ...values) => {
+        if (format.includes("scannedRecords")) {
+          const [
+            to,
+            records,
+            bytes,
+            scannedRecords,
+            scannedBytes,
+            error,
+            observationError,
+            complete,
+            logonError,
+          ] = values;
+          receipt = {
+            to,
+            records,
+            bytes,
+            scannedRecords,
+            scannedBytes,
+            error,
+            observationError,
+            complete: complete === "true",
+            logonError,
+          };
+        }
+      },
+    });
+    f.api.command_scanned = ["records", "later-records"].includes(fault)
+      ? fault === "records"
+        ? 4096
+        : 4095
+      : 128;
+    f.api.command_scanned_bytes =
+      fault === "bytes" ? 8388608 : fault === "later-bytes" ? 8388520 : 512;
+    script.runInNewContext(f.api)({ value: "original-P-end" });
+    assert.equal(installation, true);
+    assert.equal(receipt.to, "original-P-end");
+    assert.ok(
+      selected.includes(
+        'EventID=4912 and TimeCreated[@SystemTime>="installation-start" and @SystemTime<="original-P-end"]',
+      ),
+    );
+    assert.equal(selected.includes("ProcessID"), false);
+    assert.equal(
+      f.api.command_scanned,
+      receipt.scannedRecords + receipt.records,
+    );
+    assert.equal(
+      f.api.command_scanned_bytes,
+      receipt.scannedBytes + receipt.bytes,
+    );
+    assert.equal(f.api.command_records, 0);
+    assert.deepEqual(f.projected, []);
+    assert.equal(receipt.complete, !fault || fault === "later-bytes", fault);
+    if (
+      [
+        "context",
+        "values-query",
+        "values-render",
+        "values-size",
+        "missing",
+        "combined",
+        "token",
+      ].includes(fault)
+    )
+      assert.notEqual(receipt.observationError, 0, fault);
+    if (fault?.startsWith("close-")) {
+      assert.equal(f.cleanup.length, 1);
+      assert.deepEqual(f.closed, ["query-event", "query", "query-context"]);
+      assert.equal(f.api.command_capture_close(), false);
+      assert.deepEqual(f.closed.slice(3), [
+        "subscription",
+        "bookmark",
+        "notification",
+      ]);
+    }
+    if (fault === "values-render") assert.equal(receipt.bytes, 88);
+    if (fault === "combined") assert.equal(rendered, 0);
+    if (["later-records", "later-bytes"].includes(fault)) {
+      f.api.EvtNext = next;
+      f.notify(["later-capture"]);
+      assert.throws(
+        () => f.capture(),
+        (code) => code === 126,
+      );
+      assert.equal(
+        f.calls.some(([name]) => name === "bookmark"),
+        false,
+      );
+    }
+  }
+});
+
+test("4912 typed fields join principal, logon, target and subcategory without an execution PID", async () => {
+  const { source } = await commandCaptureProgram();
+  const body = (name) =>
+    new RegExp(
+      `static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const fields = body("command_policy_fields")
+    .replaceAll("counts->", "counts.")
+    .replace(/&values\[(\d)\]/gu, "values[$1]")
+    .replace(/,&(event|subjectLogon)/gu, ",v=>$1=v")
+    .replace(/\b(?:ULONGLONG|BOOL|int)\b/gu, "let");
+  const category = body("command_policy_category")
+    .replaceAll("value->", "value.")
+    .replace(
+      /ULONG_PTR first=[^;]+;/u,
+      "const first=value.GuidVal?.address,base=0;",
+    )
+    .replaceAll("sizeof(GUID)", "16")
+    .replaceAll("sizeof(DWORD)", "4")
+    .replaceAll("&command_category", "command_category")
+    .replace("const WCHAR *text", "const text")
+    .replace(/\bL(?=["'])/gu, "")
+    .replace(/\bunsigned\b/gu, "let");
+  const project = new Script(
+    `function command_policy_category(value,buffer,length){${category}};(values,counts,logonKnown,logon)=>{${fields.replaceAll("buffer,length", "null,128")}}`,
+  ).runInNewContext({
+    EvtVarTypeGuid: 15,
+    command_category: "file",
+    ERROR_SUCCESS: 0,
+    ERROR_INVALID_DATA: 13,
+    command_query_number: (v, _b, _l, set) => {
+      if (typeof v !== "number") return false;
+      set(v);
+      return true;
+    },
+    command_query_sid: (v) => (v === null ? -1 : v === "principal" ? 1 : 0),
+    command_query_string: (v) => (v?.Type === 1 ? v.StringVal : null),
+    IsEqualGUID: (a, b) => a.value === b,
+    wcslen: (v) => v.length,
+    _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+    iswxdigit: (v) => /^[a-fA-F0-9]$/u.test(v),
+  });
+  for (const fault of [
+    null,
+    "principal",
+    "target",
+    "logon",
+    "category",
+    "missing",
+    "unavailable-logon",
+    "wrong-event",
+    "guid",
+    "short-guid",
+    "bad-guid",
+  ]) {
+    const values = [
+      4912,
+      "principal",
+      1,
+      "principal",
+      { Type: 1, StringVal: "{0CCE921D-69AE-11D9-BED3-505054503030}" },
+    ];
+    if (fault === "principal") values[1] = "other";
+    if (fault === "target") values[3] = "other";
+    if (fault === "logon") values[2] = 2;
+    if (fault === "category")
+      values[4].StringVal = "{00000000-0000-0000-0000-000000000000}";
+    if (fault === "missing") values[3] = null;
+    if (fault === "wrong-event") values[0] = 4663;
+    if (fault?.includes("guid"))
+      values[4] =
+        fault === "bad-guid"
+          ? { Type: 1, StringVal: "{invalid}" }
+          : {
+              Type: 15,
+              GuidVal: {
+                address: fault === "short-guid" ? 120 : 32,
+                value: "file",
+              },
+            };
+    const counts = Object.fromEntries(
+      [
+        "principal",
+        "target",
+        "subcategory",
+        "logon",
+        "intersection",
+        "principalUnknown",
+        "targetUnknown",
+        "subcategoryUnknown",
+        "logonUnknown",
+      ].map((k) => [k, 0]),
+    );
+    const result = project(values, counts, fault !== "unavailable-logon", 1);
+    assert.equal(
+      counts.intersection,
+      fault === null || fault === "guid" ? 1 : 0,
+    );
+    assert.equal(
+      result,
+      [
+        "missing",
+        "unavailable-logon",
+        "wrong-event",
+        "short-guid",
+        "bad-guid",
+      ].includes(fault)
+        ? 13
+        : 0,
+    );
+    if (fault === "missing") assert.equal(counts.targetUnknown, 1);
+    if (fault === "unavailable-logon") assert.equal(counts.logonUnknown, 1);
+  }
+});
+
+test("optional original prerequisites preserve missing-delivery refusal and discard malformed scalar authority", async () => {
+  const value = {
+    nonce: "a".repeat(32),
+    observer: identity,
+    gateFile: "C:\\fixture\\gate",
+  };
+  const original = await brokerCapture(value);
+  original.events = [];
+  original.end.records = 0;
+  Object.assign(original.control, {
+    delivered: false,
+    endRecords: 0,
+    query: {
+      from: original.start.time,
+      to: original.end.time,
+      records: 0,
+      bytes: 0,
+      candidates: 0,
+      error: 0,
+      complete: true,
+      gateIdentity: value.original.files[3].identity,
+      requestedAccess: 0x80000080,
+      performedAccess: 1,
+      readBytes: 32,
+      scannedRecords: 0,
+      scannedBytes: 0,
+      ...queryObservations(identity.pid),
+    },
+  });
+  original.installation = {
+    from: (BigInt(original.start.time) - 100n).toString(),
+    to: (BigInt(original.start.time) - 50n).toString(),
+    error: 0,
+  };
+  original.control.prerequisites = {
+    policy: {
+      installation: { ...original.installation },
+      to: original.end.time,
+      records: 1,
+      bytes: 88,
+      scannedRecords: 0,
+      scannedBytes: 0,
+      error: 0,
+      observationError: 0,
+      complete: true,
+      logonError: 0,
+      logonId: "0000000000000001",
+      unavailableRecords: 0,
+      matches: [1, 1, 1, 1, 1],
+      unknown: [0, 0, 0, 0],
+    },
+    channel: {
+      openError: 0,
+      readError: 0,
+      size: 16,
+      usedBytes: 16,
+      requiredBytes: -1,
+      enabled: 1,
+      closeError: 0,
+    },
+  };
+  for (const read of [
+    value.original.cleanup,
+    original.baseline.audit,
+    original.before.audit,
+    original.after.audit,
+  ])
+    read.fileSystem = { available: true, value: 0 };
+  for (const fault of [
+    null,
+    "interval",
+    "logon",
+    "budget",
+    "intersection",
+    "shape",
+    "unknown",
+    "unknown-logon",
+    "query-error",
+    "channel-read",
+    "channel-read-zero",
+    "channel-type",
+    "channel-close",
+    "system",
+  ]) {
+    const observed = structuredClone(original),
+      p = observed.control.prerequisites.policy,
+      c = observed.control.prerequisites.channel;
+    if (fault === "interval") p.installation.from = "102";
+    if (fault === "logon") p.logonId = "0000000000000002";
+    if (fault === "budget") p.scannedBytes = 8388608;
+    if (fault === "intersection") p.matches = [0, 1, 1, 1, 1];
+    if (fault === "shape") p.foreign = "untrusted-data";
+    if (fault === "unknown")
+      Object.assign(p, {
+        complete: false,
+        observationError: 13,
+        unavailableRecords: 1,
+        matches: [1, 1, 0, 1, 0],
+        unknown: [0, 0, 1, 0],
+      });
+    if (fault === "query-error")
+      Object.assign(p, { complete: false, error: 5 });
+    if (fault === "unknown-logon")
+      Object.assign(p, {
+        complete: false,
+        observationError: 13,
+        logonError: 5,
+        logonId: null,
+        unavailableRecords: 1,
+        matches: [1, 0, 1, 1, 0],
+        unknown: [0, 1, 0, 0],
+      });
+    if (fault === "channel-read")
+      Object.assign(c, { readError: 5, size: 0, usedBytes: -1, enabled: -1 });
+    if (fault === "channel-read-zero")
+      Object.assign(c, { readError: 0, size: 0, usedBytes: -1, enabled: -1 });
+    if (fault === "channel-type") c.enabled = true;
+    if (fault === "channel-close") c.closeError = 6;
+    if (fault === "system")
+      observed.before.audit.fileSystem.value = "untrusted-data";
+    assert.throws(
+      () => windowsCommandBrokerCoverage(value, observed),
+      (error) => {
+        assert.equal(error.code, 78);
+        assert.equal(error.brokerCoverage.reason, "delivery-missing");
+        assert.equal(error.feasibilityCause.code, "prerequisite-unavailable");
+        const diagnostic = error.brokerCoverage.control.prerequisites;
+        assert.deepEqual(
+          diagnostic.policy,
+          ["interval", "logon", "budget", "intersection", "shape"].includes(
+            fault,
+          )
+            ? null
+            : p,
+        );
+        assert.deepEqual(
+          diagnostic.channel,
+          fault === "channel-type" ? null : c,
+        );
+        assert.deepEqual(
+          error.brokerCoverage.systemPolicy[2],
+          fault === "system"
+            ? { available: false, value: null }
+            : { available: true, value: 0 },
+        );
+        assert.equal(
+          JSON.stringify(error.brokerCoverage).includes("untrusted-data"),
+          false,
+        );
+        return true;
+      },
+    );
+  }
+});
+
 test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
   const program = await commandCoverageControlProgram();
   for (const fault of [
@@ -6668,6 +7377,9 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
       GetTickCount64: () => clock,
       GetSystemTimePreciseAsFileTime: () => {},
       command_delivery_query: () => assert.equal(delivered, false),
+      command_policy_query: () => assert.equal(delivered, false),
+      command_channel_observe: () => assert.equal(delivered, false),
+      putchar: () => {},
       fputs: () => {},
       puts: () => {},
       stdout: {},
@@ -6860,6 +7572,9 @@ test("production coverage joins a fresh audited open to native capture and rejec
           stdout: {},
           fputs: () => {},
           puts: () => {},
+          putchar: () => {},
+          command_policy_query: () => {},
+          command_channel_observe: () => {},
           command_policy_equal: () => calls.push("system-baseline"),
           command_principal_exists: () => policy,
           WaitForSingleObject: (event, timeout) =>

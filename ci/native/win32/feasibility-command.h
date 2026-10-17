@@ -22,6 +22,10 @@ static DWORD command_lifetime = 150000;
 static unsigned command_count, command_action, command_barriers, command_records, command_bytes;
 static unsigned command_scanned, command_scanned_bytes;
 static DWORD command_gate_bytes;
+static FILETIME command_install_from, command_install_to;
+static DWORD command_install_error;
+/* Consuming an owned slot cannot erase a failed prerequisite-handle close. */
+static BOOL command_prerequisite_cleanup_failed;
 static char command_ids[4][50], command_helper_hash[65], command_image_hash[65];
 static WCHAR command_paths[4][4096], command_helper[4096], command_image[4096], command_pipe[128];
 static PSECURITY_DESCRIPTOR command_baseline[4], command_parent_baseline[2];
@@ -45,7 +49,7 @@ static PSECURITY_DESCRIPTOR command_protection[3];
 static struct command_preflight_resources {
   BOOL active, impersonating, comReady;
   HANDLE token, medium, launch, mutableNull, event, gateRead;
-  EVT_HANDLE metadata, enumerator, subscription, item, query, queryItem, queryContext;
+  EVT_HANDLE metadata, enumerator, subscription, item, query, queryItem, queryContext, channel;
   EVT_HANDLE capture[16];
   BCRYPT_ALG_HANDLE algorithm;
   BCRYPT_HASH_HANDLE hash;
@@ -83,11 +87,12 @@ static BOOL command_event_close(EVT_HANDLE *slot) {
   DWORD error = GetLastError(); remember("command-metadata-close", "win32", error); cleanup_error("command-metadata-close", "win32", error); return FALSE;
 }
 static BOOL command_capture_close(void) {
-  BOOL ok = TRUE;
+  BOOL ok = !command_prerequisite_cleanup_failed;
   for (unsigned i = 0; i < 16; i++) if (!command_event_close(&command_preflight_owned.capture[i])) ok = FALSE;
   if (!command_event_close(&command_preflight_owned.queryItem)) ok = FALSE;
   if (!command_event_close(&command_preflight_owned.query)) ok = FALSE;
   if (!command_event_close(&command_preflight_owned.queryContext)) ok = FALSE;
+  if (!command_event_close(&command_preflight_owned.channel)) ok = FALSE;
   if (!command_event_close(&command_subscription)) ok = FALSE;
   if (!command_event_close(&command_bookmark)) ok = FALSE;
   if (!release_handle(&command_event, "command-event-close")) ok = FALSE;
@@ -405,7 +410,10 @@ static void command_audit_install(void) {
   DWORD waited=WaitForSingleObject(command_audit_intent,0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-intent-wait");invariant(waited==WAIT_TIMEOUT,"command-intent-state");
   win32_check(SetEvent(command_audit_intent),"command-intent-set");
   AUDIT_POLICY_INFORMATION policy={0}; policy.AuditSubCategoryGuid=command_category; policy.AuditingInformation=PER_USER_AUDIT_SUCCESS_INCLUDE|PER_USER_AUDIT_FAILURE_INCLUDE;
-  win32_check(AuditSetPerUserPolicy(userSid,&policy,1),"command-policy-install");
+  GetSystemTimePreciseAsFileTime(&command_install_from);
+  BOOL installed=AuditSetPerUserPolicy(userSid,&policy,1);command_install_error=installed?ERROR_SUCCESS:GetLastError();
+  GetSystemTimePreciseAsFileTime(&command_install_to);
+  SetLastError(command_install_error);win32_check(installed,"command-policy-install");
   for(unsigned i=0;i<4;i++)status_check(SetSecurityInfo(command_files[i],SE_FILE_OBJECT,SACL_SECURITY_INFORMATION,NULL,NULL,NULL,command_sacls[i]),"command-sacl-install");
 }
 static void command_token_read(HANDLE token) {
@@ -428,6 +436,12 @@ static void command_effective(HANDLE token) {
   if(available){invariant(policy&&IsEqualGUID(&policy->AuditSubCategoryGuid,&command_category),"command-effective-policy");success=(policy->AuditingInformation&POLICY_AUDIT_EVENT_SUCCESS)!=0;failed=(policy->AuditingInformation&POLICY_AUDIT_EVENT_FAILURE)!=0;}
   if(policy)AuditFree(policy);
   printf("{\"available\":%s,\"success\":%s,\"failure\":%s,\"error\":%lu}",available?"true":"false",success?"true":"false",failed?"true":"false",error);
+}
+/* Project only the original snapshot; this observation performs no policy read. */
+static void command_system_observation(void) {
+  BOOL available=FALSE;DWORD bits=0;
+  for(ULONG i=0;command_system&&i<command_category_count;i++)if(IsEqualGUID(&command_system[i].AuditSubCategoryGuid,&command_category)){bits=command_system[i].AuditingInformation;available=TRUE;break;}
+  printf("{\"available\":%s,\"value\":",available?"true":"false");if(available)printf("%lu",bits);else fputs("null",stdout);putchar('}');
 }
 static void command_image_read(HANDLE process, const char *expected, BOOL provider) {
   WCHAR path[4096]; DWORD length=4096; win32_check(QueryFullProcessImageNameW(process,0,path,&length),"command-image-query"); HANDLE h=file(path,GENERIC_READ); char hash[65];
@@ -525,6 +539,11 @@ static void command_query_time(FILETIME time, WCHAR text[40]) {
   SYSTEMTIME value;win32_check(FileTimeToSystemTime(&time,&value),"command-capture-query");
   ULARGE_INTEGER ticks;ticks.LowPart=time.dwLowDateTime;ticks.HighPart=time.dwHighDateTime;
   invariant(swprintf_s(text,40,L"%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ",value.wYear,value.wMonth,value.wDay,value.wHour,value.wMinute,value.wSecond,ticks.QuadPart%10000000)>0,"command-subscription-query");
+}
+static void command_installation(void) {
+  ULARGE_INTEGER first,last;first.LowPart=command_install_from.dwLowDateTime;first.HighPart=command_install_from.dwHighDateTime;
+  last.LowPart=command_install_to.dwLowDateTime;last.HighPart=command_install_to.dwHighDateTime;
+  printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"error\":%lu}",first.QuadPart,last.QuadPart,command_install_error);
 }
 /* Optional diagnostic fields never enter the strict admission XML decoder. */
 struct command_query_counts {
@@ -644,6 +663,98 @@ static void command_delivery_query(FILETIME first, FILETIME last) {
     counts.pid,counts.gate,counts.successRead,counts.sid,counts.type,counts.pidGate,counts.pidGateReadSid,counts.pidGateReadType,counts.pidGateReadSidType,
     command_observed.audit[0],command_observed.audit[1],command_observed.audit[2],command_observed.audit[3],command_observed.audit[4],command_observed.audit[5],command_observed.audit[6],command_observed.audit[7],command_observed.audit[8]);
 }
+struct command_policy_counts {
+  DWORD principal,logon,target,subcategory,intersection,principalUnknown,logonUnknown,targetUnknown,subcategoryUnknown,unavailable;
+};
+static int command_policy_category(const EVT_VARIANT *value, const BYTE *buffer, DWORD length) {
+  if(value->Type==EvtVarTypeGuid){
+    ULONG_PTR first=(ULONG_PTR)value->GuidVal,base=(ULONG_PTR)buffer;
+    if(first<base||first-base>length||length-(first-base)<sizeof(GUID)||(first-base)%sizeof(DWORD))return -1;
+    return IsEqualGUID(value->GuidVal,&command_category)?1:0;
+  }
+  const WCHAR *text=command_query_string(value,buffer,length);
+  if(!text||wcslen(text)!=38||text[0]!=L'{'||text[37]!=L'}')return -1;
+  for(unsigned i=1;i<37;i++)if(i==9||i==14||i==19||i==24){if(text[i]!=L'-')return -1;}else if(!iswxdigit(text[i]))return -1;
+  return !_wcsicmp(text,L"{0cce921d-69ae-11d9-bed3-505054503030}")?1:0;
+}
+static DWORD command_policy_fields(const EVT_VARIANT *values, const BYTE *buffer, DWORD length, BOOL logonKnown, ULONGLONG logon, struct command_policy_counts *counts) {
+  ULONGLONG event=0,subjectLogon=0;
+  if(!command_query_number(&values[0],buffer,length,&event)||event!=4912){counts->principalUnknown++;counts->logonUnknown++;counts->targetUnknown++;counts->subcategoryUnknown++;return ERROR_INVALID_DATA;}
+  int principal=command_query_sid(&values[1],buffer,length),target=command_query_sid(&values[3],buffer,length),category=command_policy_category(&values[4],buffer,length);
+  BOOL known=command_query_number(&values[2],buffer,length,&subjectLogon)&&logonKnown;
+  counts->principal+=principal==1;counts->target+=target==1;counts->subcategory+=category==1;counts->logon+=known&&subjectLogon==logon;
+  counts->principalUnknown+=principal<0;counts->targetUnknown+=target<0;counts->subcategoryUnknown+=category<0;counts->logonUnknown+=!known;
+  counts->intersection+=principal==1&&target==1&&category==1&&known&&subjectLogon==logon;
+  return principal>=0&&target>=0&&category>=0&&known?ERROR_SUCCESS:ERROR_INVALID_DATA;
+}
+static DWORD command_policy_observe(EVT_HANDLE event, DWORD xmlLength, BOOL logonKnown, ULONGLONG logon, struct command_policy_counts *counts) {
+  if(!command_preflight_owned.queryContext){
+    const WCHAR *paths[]={L"Event/System/EventID",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/EventData/Data[@Name='TargetUserSid']",L"Event/EventData/Data[@Name='SubcategoryGuid']"};
+    command_preflight_owned.queryContext=EvtCreateRenderContext(5,paths,EvtRenderContextValues);
+    if(!command_preflight_owned.queryContext){DWORD error=GetLastError();return error?error:ERROR_INVALID_DATA;}
+  }
+  DWORD length=0,properties=0;BOOL measured=EvtRender(command_preflight_owned.queryContext,event,EvtRenderEventValues,0,NULL,&length,&properties);
+  DWORD error=measured?ERROR_SUCCESS:GetLastError();
+  if(measured||error!=ERROR_INSUFFICIENT_BUFFER)return measured||!error?ERROR_INVALID_DATA:error;
+  if(length<5*sizeof(EVT_VARIANT)||length>65536-xmlLength||command_scanned_bytes+length>8388608)return ERROR_INVALID_DATA;
+  BYTE *buffer=calloc(1,length);if(!buffer)return ERROR_OUTOFMEMORY;
+  DWORD capacity=length;command_scanned_bytes+=capacity;
+  BOOL rendered=EvtRender(command_preflight_owned.queryContext,event,EvtRenderEventValues,capacity,buffer,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
+  if(rendered)error=properties==5&&length>=5*sizeof(EVT_VARIANT)&&length<=capacity?command_policy_fields((EVT_VARIANT *)buffer,buffer,length,logonKnown,logon,counts):ERROR_INVALID_DATA;
+  else if(!error)error=ERROR_INVALID_DATA;
+  free(buffer);return error;
+}
+/* Observe the original installation only. No Execution/ProcessID predicate:
+ * the event's system execution PID does not identify the original broker. */
+static void command_policy_query(FILETIME last) {
+  DWORD saved=GetLastError();command_bound();
+  WCHAR from[40],to[40],query[512];command_query_time(command_install_from,from);command_query_time(last,to);
+  invariant(swprintf_s(query,512,L"*[System[EventID=4912 and TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]]]",from,to)>0,"command-subscription-query");
+  TOKEN_STATISTICS stats={0};DWORD used=0;BOOL token=GetTokenInformation(command_broker_token,TokenStatistics,&stats,sizeof(stats),&used);
+  DWORD tokenError=token?ERROR_SUCCESS:GetLastError();BOOL logonKnown=token&&used==sizeof(stats);
+  ULONGLONG logon=((ULONGLONG)(DWORD)stats.AuthenticationId.HighPart<<32)|stats.AuthenticationId.LowPart;
+  DWORD records=0,error=ERROR_SUCCESS,observationError=ERROR_SUCCESS,scannedRecords=command_scanned,scannedBytes=command_scanned_bytes;BOOL complete=FALSE;
+  struct command_policy_counts counts={0};
+  command_preflight_owned.query=EvtQuery(NULL,L"Security",query,EvtQueryChannelPath|EvtQueryForwardDirection);
+  if(!command_preflight_owned.query){error=GetLastError();if(!error)error=ERROR_INVALID_DATA;}
+  while(command_preflight_owned.query&&!error){command_bound();DWORD count=0,length=0,properties=0;
+    if(command_scanned>=4096){error=ERROR_INVALID_DATA;break;}
+    BOOL next=EvtNext(command_preflight_owned.query,1,&command_preflight_owned.queryItem,0,0,&count);
+    if(!next){error=GetLastError();if(error==ERROR_NO_MORE_ITEMS){error=ERROR_SUCCESS;complete=TRUE;}else if(!error)error=ERROR_INVALID_DATA;break;}
+    if(count!=1){error=ERROR_INVALID_DATA;break;}records++;command_scanned++;
+    BOOL measured=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,0,NULL,&length,&properties);DWORD measuredError=measured?ERROR_SUCCESS:GetLastError();
+    if(measured||measuredError!=ERROR_INSUFFICIENT_BUFFER){error=measured||!measuredError?ERROR_INVALID_DATA:measuredError;break;}
+    if(length<4||length>65536||(length%2)||command_scanned_bytes+length>8388608){error=ERROR_INVALID_DATA;break;}
+    BYTE *raw=calloc(1,length);if(!raw){error=ERROR_OUTOFMEMORY;break;}
+    DWORD capacity=length;command_scanned_bytes+=capacity;
+    BOOL rendered=EvtRender(NULL,command_preflight_owned.queryItem,EvtRenderEventXml,capacity,raw,&length,&properties);error=rendered?ERROR_SUCCESS:GetLastError();
+    if(rendered&&(length<4||length>capacity||(length%2)))error=ERROR_INVALID_DATA;else if(!rendered&&!error)error=ERROR_INVALID_DATA;free(raw);
+    if(!error){DWORD observed=command_policy_observe(command_preflight_owned.queryItem,capacity,logonKnown,logon,&counts);if(observed){counts.unavailable++;if(!observationError)observationError=observed;}}
+    BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!closed){command_prerequisite_cleanup_failed=TRUE;if(!error)error=ERROR_INVALID_DATA;}
+    if(observationError&&!command_preflight_owned.queryContext)break;
+  }
+  BOOL closed=command_event_close(&command_preflight_owned.queryItem);if(!command_event_close(&command_preflight_owned.query))closed=FALSE;
+  if(!command_event_close(&command_preflight_owned.queryContext))closed=FALSE;if(!closed){command_prerequisite_cleanup_failed=TRUE;complete=FALSE;if(!error)error=ERROR_INVALID_DATA;}
+  ULARGE_INTEGER end;end.LowPart=last.dwLowDateTime;end.HighPart=last.dwHighDateTime;
+  printf("{\"installation\":");command_installation();printf(",\"to\":\"%llu\",\"records\":%lu,\"bytes\":%lu,\"scannedRecords\":%lu,\"scannedBytes\":%lu,\"error\":%lu,\"observationError\":%lu,\"complete\":%s,\"logonError\":%lu,\"logonId\":",end.QuadPart,records,(DWORD)(command_scanned_bytes-scannedBytes),scannedRecords,scannedBytes,error,observationError,complete&&!observationError?"true":"false",tokenError);
+  if(logonKnown)printf("\"%016llx\"",logon);else fputs("null",stdout);
+  printf(",\"unavailableRecords\":%lu,\"matches\":[%lu,%lu,%lu,%lu,%lu],\"unknown\":[%lu,%lu,%lu,%lu]}",counts.unavailable,counts.principal,counts.logon,counts.target,counts.subcategory,counts.intersection,counts.principalUnknown,counts.logonUnknown,counts.targetUnknown,counts.subcategoryUnknown);
+  SetLastError(saved);
+}
+static void command_channel_observe(void) {
+  DWORD saved=GetLastError(),openError=0,size=0;LONGLONG readError=-1,used=-1,required=-1,enabled=-1,closeError=-1;
+  EVT_VARIANT value={0};command_bound();
+  command_preflight_owned.channel=EvtOpenChannelConfig(NULL,L"Security",0);
+  if(!command_preflight_owned.channel)openError=GetLastError();
+  else {
+    BOOL read=EvtGetChannelConfigProperty(command_preflight_owned.channel,EvtChannelConfigEnabled,0,sizeof(value),&value,&size);readError=read?ERROR_SUCCESS:GetLastError();
+    if(read)used=size;else if(readError==ERROR_INSUFFICIENT_BUFFER)required=size;
+    if(read&&size==sizeof(value)&&value.Type==EvtVarTypeBoolean&&(value.BooleanVal==FALSE||value.BooleanVal==TRUE))enabled=value.BooleanVal?1:0;
+    closeError=0;EVT_HANDLE handle=command_preflight_owned.channel;command_preflight_owned.channel=NULL;
+    if(!EvtClose(handle)){closeError=GetLastError();command_prerequisite_cleanup_failed=TRUE;remember("command-metadata-close","win32",(DWORD)closeError);cleanup_error("command-metadata-close","win32",(DWORD)closeError);}
+  }
+  printf("{\"openError\":%lu,\"readError\":%lld,\"size\":%lu,\"usedBytes\":%lld,\"requiredBytes\":%lld,\"enabled\":%lld,\"closeError\":%lld}",openError,readError,size,used,required,enabled,closeError);SetLastError(saved);
+}
 static void command_coverage_control(void) {
   unsigned records=command_records;ULONGLONG started=GetTickCount64();
   FILETIME first,last;GetSystemTimePreciseAsFileTime(&first);
@@ -652,7 +763,7 @@ static void command_coverage_control(void) {
   while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture(1);}
   command_probing=FALSE;GetSystemTimePreciseAsFileTime(&last);ULONGLONG elapsed=GetTickCount64()-started;
   printf("{\"event\":\"P\",\"delivered\":%s,\"startRecords\":%u,\"endRecords\":%u,\"elapsedMs\":%llu,\"query\":",command_coverage_seen?"true":"false",records,command_records,elapsed);
-  if(command_coverage_seen)fputs("null",stdout);else command_delivery_query(first,last);puts("}");
+  if(command_coverage_seen)fputs("null",stdout);else {command_delivery_query(first,last);fputs(",\"prerequisites\":{\"policy\":",stdout);command_policy_query(last);fputs(",\"channel\":",stdout);command_channel_observe();putchar('}');}puts("}");
 }
 static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }
@@ -768,7 +879,7 @@ static void command_audit_read(HANDLE files[4]) {
   win32_check(AuditEnumerateSubCategories(NULL,TRUE,&command_categories,&command_category_count),"command-audit-categories");invariant(command_category_count&&command_category_count<=128,"command-audit-count");
   win32_check(AuditQuerySystemPolicy(command_categories,command_category_count,&command_system),"command-policy-query");
   char hash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),hash);BOOL included=command_owned_policy(TRUE);
-  printf("{\"systemSha256\":\"%s\",\"included\":%s,\"files\":[",hash,included?"true":"false");
+  printf("{\"systemSha256\":\"%s\",\"included\":%s,\"fileSystem\":",hash,included?"true":"false");command_system_observation();fputs(",\"files\":[",stdout);
   for(unsigned i=0;i<4;i++){char id[50];fileid(files[i],id);command_sacl_read(files[i],hash);printf("%s{\"identity\":\"%s\",\"saclSha256\":\"%s\"}",i?",":"",id,hash);}printf("]}");
   AuditFree(command_system);command_system=NULL;AuditFree(command_categories);command_categories=NULL;
 }
@@ -935,7 +1046,7 @@ static int command_main(int argc,WCHAR **argv) {
   command_subscription=EvtSubscribe(NULL,command_event,L"Security",query,NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
   PSECURITY_DESCRIPTOR gateSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GRGW;;;WD)",SDDL_REVISION_1,&gateSd,NULL),"command-gate-descriptor");SECURITY_ATTRIBUTES gateSa={sizeof(gateSa),gateSd,FALSE};
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
-  printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);printf("\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
+  printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);fputs("\"fileSystem\":",stdout);command_system_observation();printf(",\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
   for(unsigned i=0;i<6;i++){HANDLE h=i<4?command_files[i]:command_parents[i-4];PSECURITY_DESCRIPTOR baseline=i<4?command_baseline[i]:command_parent_baseline[i-4];char id[50];fileid(h,id);if(i)putchar(',');printf("{\"handle\":\"%llu\",\"identity\":\"%s\",\"baselineHex\":\"",(ULONGLONG)(ULONG_PTR)h,id);hex(baseline,GetSecurityDescriptorLength(baseline));printf("\",\"saclHex\":\"");if(i<4)hex(command_sacls[i],command_sacls[i]->AclSize);char saclHash[65];command_sacl_read(h,saclHash);printf("\",\"baselineSaclSha256\":\"%s\"}",saclHash);}puts("]}}");
   invariant(!ferror(stdout),"command-ready-output");
   PROCESS_INFORMATION server={0}; char line[131100];HANDLE input=GetStdHandle(STD_INPUT_HANDLE);unsigned size=0;
@@ -943,7 +1054,7 @@ static int command_main(int argc,WCHAR **argv) {
     win32_check(PeekNamedPipe(input,NULL,0,NULL,&available,NULL),"command-owner-read");if(!available){Sleep(1);continue;}char c;DWORD count;
     win32_check(ReadFile(input,&c,1,&count,NULL),"command-owner-read");invariant(count==1&&size+1<sizeof(line),"command-owner-bound");if(c!='\n'){line[size++]=c;continue;}line[size]=0;size=0;
     WCHAR arguments[16384],cwd[4096];
-    if(!strcmp(line,"I")){command_audit_install();command_observed.audit[0]=4;puts("{\"event\":\"I\"}");}
+    if(!strcmp(line,"I")){command_audit_install();command_observed.audit[0]=4;fputs("{\"event\":\"I\",\"installation\":",stdout);command_installation();puts("}");}
     else if(!strcmp(line,"P")){DWORD waited=WaitForSingleObject(command_audit_intent,0);if(waited==WAIT_FAILED)win32_check(FALSE,"command-coverage-wait");invariant(waited==WAIT_OBJECT_0,"command-coverage-wait");invariant(!command_coverage_admitted,"command-coverage-state");command_coverage_control();}
     else if(!strcmp(line,"M")){invariant(command_coverage_seen&&!command_coverage_admitted,"command-coverage-state");command_coverage_admitted=TRUE;command_observed.audit[0]=6;command_observed.audit[8]=1;puts("{\"event\":\"M\"}");}
     else if(!strcmp(line,"V")||!strcmp(line,"G")){need(command_coverage_admitted);name(cwd,L"schema-home");need(SetEnvironmentVariableW(L"CODEX_HOME",cwd)&&SetEnvironmentVariableW(L"HOME",cwd)&&SetEnvironmentVariableW(L"USERPROFILE",cwd)&&SetEnvironmentVariableW(L"TEMP",cwd)&&SetEnvironmentVariableW(L"TMP",cwd));name(cwd,L"schema");if(line[0]=='V')need(swprintf_s(arguments,16384,L"\"%ls\" --version",command_image)>0);else need(swprintf_s(arguments,16384,L"\"%ls\" app-server generate-json-schema --out \"%ls\"",command_image,cwd)>0);command_probe_output(command_spawn(arguments,root),line);}

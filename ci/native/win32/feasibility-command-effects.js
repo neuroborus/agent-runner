@@ -126,6 +126,131 @@ function commandAuditSnapshot(value, read, installed) {
     );
   }
 }
+const diagnosticStatus = (value) =>
+  Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
+const diagnosticShape = (value, keys) =>
+  value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  Object.keys(value).sort().join() === keys;
+function commandSystemPolicy(read) {
+  const value = read?.fileSystem;
+  return diagnosticShape(value, "available,value") &&
+    typeof value.available === "boolean" &&
+    (value.available ? diagnosticStatus(value.value) : value.value === null)
+    ? { ...value }
+    : { available: false, value: null };
+}
+/** Optional carriers are never admission evidence. Invalid carriers become
+ * unknown without replacing the original missing-delivery cause. */
+function commandPrerequisites(
+  value,
+  installation,
+  broker,
+  start,
+  query,
+  authenticationId,
+) {
+  if (!diagnosticShape(value, "channel,policy")) return null;
+  const stamp = (v) =>
+    typeof v === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(v) &&
+    BigInt(v) <= 0xffffffffffffffffn;
+  const installed = (v) =>
+    diagnosticShape(v, "error,from,to") &&
+    diagnosticStatus(v.error) &&
+    stamp(v.from) &&
+    stamp(v.to) &&
+    BigInt(v.from) <= BigInt(v.to);
+  const count = (v, maximum) =>
+    Number.isSafeInteger(v) && v >= 0 && v <= maximum;
+  const p = value.policy,
+    c = value.channel;
+  const policy =
+    diagnosticShape(
+      p,
+      "bytes,complete,error,installation,logonError,logonId,matches,observationError,records,scannedBytes,scannedRecords,to,unavailableRecords,unknown",
+    ) &&
+    installed(p.installation) &&
+    installed(installation) &&
+    p.installation.from === installation.from &&
+    p.installation.to === installation.to &&
+    p.installation.error === installation.error &&
+    p.installation.error === 0 &&
+    BigInt(p.installation.from) > BigInt(broker.creationTime) &&
+    BigInt(p.installation.to) <= BigInt(start.time) &&
+    query &&
+    p.to === query.to &&
+    stamp(p.to) &&
+    BigInt(p.to) >= BigInt(p.installation.to) &&
+    diagnosticStatus(p.error) &&
+    diagnosticStatus(p.observationError) &&
+    diagnosticStatus(p.logonError) &&
+    typeof p.complete === "boolean" &&
+    (p.logonId === null ||
+      (p.logonError === 0 &&
+        /^[a-f0-9]{16}$/u.test(p.logonId) &&
+        p.logonId === authenticationId.replace(":", ""))) &&
+    count(p.records, 4096) &&
+    count(p.scannedRecords, 4096) &&
+    p.scannedRecords === query.scannedRecords + query.records &&
+    p.scannedRecords + p.records <= 4096 &&
+    count(p.bytes, p.records * 65536) &&
+    p.scannedBytes === query.scannedBytes + query.bytes &&
+    count(p.scannedBytes + p.bytes, 8388608) &&
+    (!p.complete ||
+      (p.error === 0 &&
+        p.observationError === 0 &&
+        p.bytes >= p.records * 4)) &&
+    count(p.unavailableRecords, p.records) &&
+    Boolean(p.unavailableRecords) === Boolean(p.observationError) &&
+    Array.isArray(p.matches) &&
+    p.matches.length === 5 &&
+    p.matches.every((v) => count(v, p.records)) &&
+    (p.logonId !== null || (p.matches[1] === 0 && p.matches[4] === 0)) &&
+    Array.isArray(p.unknown) &&
+    p.unknown.length === 4 &&
+    p.unknown.every(
+      (v, i) => count(v, p.unavailableRecords) && v + p.matches[i] <= p.records,
+    ) &&
+    p.matches[4] <= Math.min(...p.matches.slice(0, 4)) &&
+    p.matches[4] >=
+      Math.max(
+        0,
+        p.matches.slice(0, 4).reduce((a, b) => a + b, 0) - 3 * p.records,
+      );
+  const optionalStatus = (v) => v === -1 || diagnosticStatus(v);
+  const channel =
+    diagnosticShape(
+      c,
+      "closeError,enabled,openError,readError,requiredBytes,size,usedBytes",
+    ) &&
+    diagnosticStatus(c.openError) &&
+    diagnosticStatus(c.size) &&
+    [c.readError, c.usedBytes, c.requiredBytes, c.closeError].every(
+      optionalStatus,
+    ) &&
+    [-1, 0, 1].includes(c.enabled) &&
+    (c.readError === -1
+      ? c.enabled === -1 &&
+        c.usedBytes === -1 &&
+        c.requiredBytes === -1 &&
+        c.closeError === -1 &&
+        c.size === 0
+      : c.openError === 0 && c.closeError >= 0) &&
+    (c.readError === 0 && c.usedBytes !== -1
+      ? c.usedBytes === c.size && c.requiredBytes === -1
+      : c.usedBytes === -1 &&
+        c.enabled === -1 &&
+        (c.readError === 122
+          ? c.requiredBytes === c.size
+          : c.requiredBytes === -1)) &&
+    (c.enabled === -1 || (c.readError === 0 && c.usedBytes === 16));
+  return {
+    policy: policy ? structuredClone(p) : null,
+    channel: channel ? { ...c } : null,
+  };
+}
 /** Fixed operation labels explain local admission failures even when no native
  * stderr exists. A native/transport first cause remains authoritative. */
 function commandCoverageFailure(operation, error) {
@@ -246,7 +371,27 @@ export function windowsCommandBrokerCoverage(value, observation) {
             records: start.records,
           },
           end: { sequence: end.sequence, time: end.time, records: end.records },
-          control: { ...control },
+          control: {
+            ...control,
+            ...(Object.hasOwn(control, "prerequisites")
+              ? {
+                  prerequisites: commandPrerequisites(
+                    control.prerequisites,
+                    observation.installation,
+                    broker,
+                    start,
+                    control.query,
+                    before.token.details.authenticationId,
+                  ),
+                }
+              : {}),
+          },
+          systemPolicy: [
+            value.original.cleanup,
+            baseline.audit,
+            before.audit,
+            after.audit,
+          ].map(commandSystemPolicy),
           ...delivery,
         },
       },
@@ -274,8 +419,11 @@ export function windowsCommandBrokerCoverage(value, observation) {
   );
   need(
     control?.event === "P" &&
-      Object.keys(control).sort().join() ===
-        "delivered,elapsedMs,endRecords,event,query,startRecords" &&
+      Object.keys(control)
+        .filter((key) => key !== "prerequisites")
+        .sort()
+        .join() === "delivered,elapsedMs,endRecords,event,query,startRecords" &&
+      (!control.delivered || !Object.hasOwn(control, "prerequisites")) &&
       typeof control.delivered === "boolean" &&
       Number.isSafeInteger(control.elapsedMs) &&
       control.elapsedMs >= 0 &&
@@ -1809,7 +1957,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         );
         commandAuditSnapshot(value, baseline.audit, false);
         operation = "audit-installation";
-        await call("I");
+        const installation = (await call("I"))?.installation;
         operation = "installed-audit-read";
         const before = await inspect();
         commandAuditSnapshot(value, before.audit, true);
@@ -1836,6 +1984,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           start,
           end,
           control,
+          installation,
           captureComplete: state.ready && !failed,
           events: state.events
             .slice(start.records, end.records)

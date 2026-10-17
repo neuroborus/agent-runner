@@ -2735,6 +2735,28 @@ control, subscription retry or policy setter are introduced. Complete zero
 results and historical matches both preserve the original missing-delivery
 refusal. These observations supply diagnostics, not an audit repair or native
 acceptance; matching Windows CI must establish the next supported correction.
+The original system-policy snapshots also project the selected File System
+`AuditingInformation` scalar with explicit availability, without another policy
+read. Hashes, effective-policy observations and all SACL comparisons remain
+independent preservation evidence.
+The original `I` receipt retains FILETIME start/completion bounds and its setter
+status. After the unchanged failed `P` query, a separate 4912 query spans that
+installation start through the original `P` completion. Its match counts are
+principal SID, subject logon, target SID, subcategory and their complete
+intersection; unknown counts follow the first four fields. It retains query,
+render and optional held-token logon-read statuses. The system execution PID is
+never treated as the broker PID. These rows consume the same remaining capture
+budgets, including rejected rows and both render reservations.
+That failure path reads local Security channel configuration once with reserved
+flags zero and fixed caller-owned storage. It retains actual open/read/close
+statuses, returned size and used/required sizes; only a scalar Boolean of the
+expected size yields a known enabled value. It never enables or saves the
+channel. Its owned handle closes independently; failed prerequisite-handle
+closure remains a capture-retirement refusal after its slot is consumed.
+Missing or malformed optional carriers become unknown in caller diagnostics
+without replacing the original delivery refusal. None of these observations
+establishes event absence, generation, delivery, admission or cleanup, or selects
+a functional repair.
 Fixed operation labels distinguish startup, cleanup admission, baseline reads,
 installation, effective reads, delivery and the final join. They preserve the
 original native or transport cause and report local admission failures even when
