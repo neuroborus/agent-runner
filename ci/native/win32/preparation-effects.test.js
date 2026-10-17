@@ -4114,7 +4114,7 @@ test("original failed compiler trust observes bounded optional provider data bef
   }
 });
 
-test("actual experiment compiler open requires noninteractive paired trust, zero results and unchanged pins", async () => {
+test("actual experiment compiler open initializes held input before noninteractive paired trust and preserves pins", async () => {
   for (const fault of [
     "none",
     "positive",
@@ -4122,6 +4122,7 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
     "close",
     "negative-close",
     "unavailable",
+    "seek",
     "content",
     "signature",
   ]) {
@@ -4132,6 +4133,7 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
       ),
       entries = structuredClone(f.prepared.entries),
       files = new Map(f.files),
+      inputSize = files.get(compiler.path).length,
       verificationResult = ["negative", "negative-close"].includes(fault)
         ? -2146762496 // Signed LONG for TRUST_E_NOSIGNATURE (0x800b0100).
         : ["positive", "unavailable"].includes(fault)
@@ -4152,6 +4154,7 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
       result: verificationResult,
       closed: closureResult,
       unavailable: fault === "unavailable",
+      seekFailure: fault === "seek",
     });
     f.accessNative = (operation, args, _, __, sequence) =>
       operation === "open" ? source.open(Number(args[0]), sequence) : undefined;
@@ -4165,6 +4168,7 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
     });
     if (fault === "none") {
       native = await opening;
+      assert.deepEqual(source.seeks, [inputSize, inputSize]);
       assert.deepEqual(source.calls, [1, 2, 1, 2]);
       assert.deepEqual(source.events, ["verify", "close", "verify", "close"]);
       assert.equal(source.provider, undefined);
@@ -4205,12 +4209,20 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
             failure.trust.inputs.slice(14),
             fault === "unavailable"
               ? [7, -1, 7, -1, 7, -1]
-              : [0, 0, 0, 1024, 0, 1024],
+              : [0, 0, 0, inputSize, 0, 0],
           );
         } else assert.equal(Object.hasOwn(failure, "trust"), false);
         return true;
       });
-      assert.deepEqual(source.calls, fault === "content" ? [] : [1, 2]);
+      assert.deepEqual(source.seeks, fault === "content" ? [] : [inputSize]);
+      assert.deepEqual(
+        source.calls,
+        ["content", "seek"].includes(fault) ? [] : [1, 2],
+      );
+      if (fault === "seek") {
+        assert.deepEqual(source.events, []);
+        assert.equal(source.provider, undefined);
+      }
       // Independent raw observations retire the failed original reader; its
       // dependent file observer remains live until production recovery joins it.
       const observer = native.files.verification;
@@ -4227,9 +4239,17 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
       ])
         f.rawExitCodes.set(actor.pid, 126);
     }
-    const settlement =
-      fault === "none" ? await native.close() : await native.recover();
+    const calls = [...source.calls],
+      seeks = [...source.seeks],
+      settlement =
+        fault === "none" ? await native.close() : await native.recover();
     assert.equal(settlement.status, "RETIRED");
+    assert.deepEqual(source.calls, calls, "retirement must not repeat trust");
+    assert.deepEqual(
+      source.seeks,
+      seeks,
+      "retirement must not seek trust input",
+    );
     assert.equal(f.rawTasks.size, 0);
     assert.ok([...f.actors.values()].every((actor) => actor.retired));
   }

@@ -17,6 +17,7 @@ export async function compilerTrustFixture({
   result = 0,
   closed = 0,
   unavailable = false,
+  seekFailure = false,
   provider = {},
 }) {
   const header = await readFile(
@@ -35,6 +36,8 @@ export async function compilerTrustFixture({
     calls = [],
     records = [],
     events = [],
+    positions = new Map(),
+    seeks = [],
     signature_trust = { inputs: {}, provider: {} },
     refusal = new Error("native guard rejected"),
     held = entries.map((entry) => ({
@@ -131,6 +134,7 @@ export async function compilerTrustFixture({
           "LARGE_INTEGER size = {0}, position = {0}, zero = {0};",
           "const size = {QuadPart:0}, position = {QuadPart:0}, zero = {QuadPart:0};",
         )
+        .replace("LARGE_INTEGER zero = {0};", "const zero = {QuadPart:0};")
         .replace("WINTRUST_FILE_INFO *info", "let info")
         .replaceAll("sizeof(signature_trust.inputs)", "512")
         .replace("(LONGLONG)flags", "flags.value")
@@ -222,6 +226,7 @@ export async function compilerTrustFixture({
     FILE_LIST_DIRECTORY: 4,
     FILE_ADD_FILE: 8,
     FILE_ADD_SUBDIRECTORY: 16,
+    FILE_BEGIN: 0,
     FILE_CURRENT: 1,
     WRITE_DAC: 32,
     WRITE_OWNER: 64,
@@ -280,14 +285,26 @@ export async function compilerTrustFixture({
       flags.value = 0;
       return !unavailable;
     },
-    GetFileSizeEx: (_, size) => {
-      size.QuadPart = 1024;
+    GetFileSizeEx: (handle, size) => {
+      size.QuadPart = handle.size;
       return !unavailable;
     },
-    SetFilePointerEx: (_, zero, position, method) => {
+    SetFilePointerEx: (handle, zero, position, method) => {
       assert.equal(zero.QuadPart, 0);
-      assert.equal(method, 1);
-      position.QuadPart = 1024;
+      assert.equal(handle, held[api.openIndex].file.handle);
+      assert.ok(positions.has(handle));
+      if (method === api.FILE_BEGIN) {
+        assert.equal(position, null);
+        seeks.push(positions.get(handle));
+        if (seekFailure) {
+          lastError = 5;
+          return false;
+        }
+        positions.set(handle, 0);
+        return true;
+      }
+      assert.equal(method, api.FILE_CURRENT);
+      position.QuadPart = positions.get(handle);
       return !unavailable;
     },
     wcslen: (path) => path.length,
@@ -322,6 +339,11 @@ export async function compilerTrustFixture({
         return closed;
       }
       assert.equal(trust.dwStateAction, 1);
+      assert.equal(
+        positions.get(file.handle),
+        0,
+        "original VERIFY starts at zero",
+      );
       events.push("verify");
       assert.equal(activeTrust, undefined);
       assert.ok(!verifiedHandles.has(file.handle), "never retry verification");
@@ -357,7 +379,11 @@ export async function compilerTrustFixture({
         })),
       };
     },
-    read_file: (file) => file.bytes,
+    read_file: (file) => {
+      // The injected byte read models read_file consuming this handle to EOF.
+      positions.set(file.handle, file.bytes.length);
+      return file.bytes;
+    },
     sum: (bytes, size, actual) => {
       actual.text = digest(bytes.subarray(0, size));
     },
@@ -380,11 +406,14 @@ export async function compilerTrustFixture({
     stock_security: () => {},
     bridge_security: () => {},
     hold_shared: (path, _directory, _private, access) => {
-      const [volume, id] = identity(path).split(":");
+      const [volume, id] = identity(path).split(":"),
+        bytes = files.get(path),
+        handle = Object.freeze({ access, size: bytes.length });
+      positions.set(handle, 0);
       return {
-        handle: Object.freeze({ access }),
+        handle,
         path,
-        bytes: files.get(path),
+        bytes,
         id: {
           VolumeSerialNumber: BigInt("0x" + volume),
           FileId: { Identifier: Buffer.from(id, "hex") },
@@ -439,6 +468,7 @@ export async function compilerTrustFixture({
     calls,
     events,
     records,
+    seeks,
     get inputs() {
       return JSON.parse(signature_trust.inputs.text);
     },

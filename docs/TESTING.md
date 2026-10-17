@@ -885,9 +885,16 @@ both original statuses. These checks extend the existing caller matrix and
 preserve the original LONG 8/CLOSE 0 settlement regressions.
 The actual trust-input snapshot and authenticated failure carrier retain the
 original result 8/CLOSE 0 alongside unchanged call inputs, held handle flags,
-size and current position, including failed optional queries. The fixture checks
-that position observation uses zero `FILE_CURRENT` without a rewind. Malformed
-input arrays cannot become trusted failure context or retirement receipts.
+size and current position, including failed optional queries. Per-handle positions
+model EOF after byte reads. Embedded verification requires checked `FILE_BEGIN`
+initialization of the original held handle before observation and VERIFY; seek
+failure invokes neither VERIFY nor CLOSE. Unavailable optional queries do not
+prevent initialization, and every attempted VERIFY starts at zero while retaining
+the separate same-state CLOSE. Position observation remains passive zero
+`FILE_CURRENT`. Microsoft's contract documents a readable open handle, not an
+EOF-specific diagnosis; deterministic initialization proves neither the cause of
+`0x8` nor native trust success. Malformed input arrays cannot become trusted
+failure context or retirement receipts.
 These cases run in the existing selected native harness, add no slow-tier
 requirement and establish no Windows trust cause or native acceptance.
 The same compiler-trust fixture executes the production failure-only provider

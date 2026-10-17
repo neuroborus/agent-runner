@@ -257,6 +257,10 @@ static void signature_observe(struct held_file *file, WINTRUST_DATA *trust) {
 }
 static void signature_verify(struct held_file *file, const char *expected, WINTRUST_DATA *trust) {
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+  if (trust->dwUnionChoice == WTD_CHOICE_FILE) {
+    LARGE_INTEGER zero = {0};
+    need(SetFilePointerEx(file->handle, zero, NULL, FILE_BEGIN));
+  }
   signature_observe(file, trust);
   /* INVALID_HANDLE_VALUE declares that no interactive user is available. */
   LONG result = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, trust);
