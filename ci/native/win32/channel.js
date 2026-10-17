@@ -292,6 +292,60 @@ export function windowsCustodyChannel(
                 ),
             );
           }
+          if (Object.hasOwn(trust, "provider")) {
+            trustFields.push("provider");
+            // Compact failure fields mirror signature_provider_observe; even
+            // complete provider data supplies no acceptance or retirement.
+            const p = trust.provider;
+            requireWindows(
+              trust.result !== "0x00000000" &&
+                Array.isArray(p) &&
+                p.length === 13 &&
+                p.every(
+                  (n) => Number.isInteger(n) && n >= -1 && n <= 0xffffffff,
+                ) &&
+                [0, 1, 2, 3, 12].every((i) => [0, 1].includes(p[i])) &&
+                (!p[2] || (p[0] === 1 && p[1] === 1)) &&
+                (!p[3] || p[2] === 1),
+            );
+            if (!p[3]) {
+              requireWindows(
+                [4, 5, 6, 7, 9, 10, 11].every((i) => p[i] === -1) &&
+                  p[8] === 0 &&
+                  p[12] === 0,
+              );
+            } else {
+              requireWindows(
+                [4, 5, 6].every((i) => p[i] >= 0) &&
+                  [0, 1].includes(p[7]) &&
+                  p[8] >= 0 &&
+                  p[8] <= Math.min(p[6], 64),
+              );
+              if (p[6] > 0 !== (p[7] === 1) || p[9] === -1) {
+                requireWindows(
+                  p[8] === 0 &&
+                    p[9] === -1 &&
+                    p[10] === -1 &&
+                    p[11] === -1 &&
+                    p[12] === 0,
+                );
+                requireWindows(p[6] > 0 || p[7] === 1);
+              } else {
+                requireWindows(
+                  p[8] === Math.min(p[6], 64) &&
+                    p[9] >= 0 &&
+                    p[9] <= p[8] &&
+                    (p[9] === 0
+                      ? p[10] === -1 && p[11] === -1
+                      : p[10] >= 0 &&
+                        p[10] < p[8] &&
+                        p[9] <= p[8] - p[10] &&
+                        p[11] > 0) &&
+                    p[12] === Number(p[8] === p[6]),
+                );
+              }
+            }
+          }
           closed(trust, trustFields);
           const hash = (pin) =>
             typeof pin === "string" && /^[a-f0-9]{64}$/u.test(pin);

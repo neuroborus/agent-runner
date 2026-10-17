@@ -120,9 +120,13 @@ static void reader_trust_failure(const char *source, unsigned line) {
     sprintf_s(index, sizeof(index), "%u", i); sprintf_s(pin, sizeof(pin), "\"%s\"", entries[i].pin); break;
   }
   if (signature_trust.expected) sprintf_s(expected, sizeof(expected), "\"%s\"", signature_trust.expected);
-  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"trust\":{\"mode\":\"%s\",\"result\":\"0x%08lx\",\"closeResult\":\"0x%08lx\",\"entry\":%s,\"identity\":\"%s\",\"sha256\":%s,\"signatureSha256\":%s,\"inputs\":%s}}\n",
+  const char *provider = "";
+#ifdef NATIVE_CI_EXPERIMENT
+  provider = signature_trust.provider;
+#endif
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"trust\":{\"mode\":\"%s\",\"result\":\"0x%08lx\",\"closeResult\":\"0x%08lx\",\"entry\":%s,\"identity\":\"%s\",\"sha256\":%s,\"signatureSha256\":%s,\"inputs\":%s%s}}\n",
     sequence, reader_command, source, line, signature_trust.choice == WTD_CHOICE_FILE ? "embedded" : "catalog",
-    (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected, signature_trust.inputs);
+    (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected, signature_trust.inputs, provider);
   if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
 }
 static void reader_failure(const char *file, unsigned line) {

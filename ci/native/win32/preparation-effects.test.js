@@ -3674,6 +3674,7 @@ test("Windows post-startup open rejection retains original owners until fresh co
       sha256: compiler.sha256,
       signatureSha256: compiler.signatureSha256,
       inputs: source.inputs,
+      provider: source.provider,
     },
   });
   const original = [...f.files.entries()]
@@ -3687,6 +3688,20 @@ test("Windows post-startup open rejection retains original owners until fresh co
     retained = error;
     return error.settlement.status === "RETAINED";
   });
+  assert.ok(retained instanceof AggregateError);
+  assert.equal(
+    retained.errors[0].message,
+    "Windows reader cleanup handoff failed",
+  );
+  assert.equal(retained.errors[1].message, "Windows readers remain retained");
+  assert.equal(
+    retained.errors[0].errors[0],
+    retained.errors[1].errors[0].errors[0],
+  );
+  assert.deepEqual(
+    primary.custodyReaderFailure.trust.provider,
+    source.provider,
+  );
   assert.equal(f.actors.get(observer.pid).retired, false);
   // The original reader and dependent observer stay registered even if the
   // task disappears. A failed fresh observer is another retained obligation.
@@ -4045,6 +4060,60 @@ test("Windows original compiler refusal waits for bridge exit before independent
   }
 });
 
+test("original failed compiler trust observes bounded optional provider data before CLOSE", async () => {
+  const absent = [0, -1, -1, -1, -1, 0, -1, -1, -1, 0];
+  for (const [provider, expected] of [
+    [{}, [1, 1, 1, 1, 8, 0, 3, 1, 3, 1, 1, 5, 1]],
+    [{ module: false }, [0, 1, 0, ...absent]],
+    [{ api: false }, [0, 1, 0, ...absent]],
+    [{ state: false }, [1, 0, 0, ...absent]],
+    [{ data: false }, [1, 1, 0, ...absent]],
+    [{ structureSize: 0 }, [1, 1, 1, ...absent]],
+    [{ readable: false }, [1, 1, 1, ...absent]],
+    [{ shortRead: true }, [1, 1, 1, ...absent]],
+    [{ count: 3, pointer: false }, [1, 1, 1, 1, 8, 0, 3, 0, 0, -1, -1, -1, 0]],
+    [{ count: 0, pointer: true }, [1, 1, 1, 1, 8, 0, 0, 1, 0, -1, -1, -1, 0]],
+    [{ stepsReadable: false }, [1, 1, 1, 1, 8, 0, 3, 1, 0, -1, -1, -1, 0]],
+    [{ errors: [] }, [1, 1, 1, 1, 8, 0, 0, 0, 0, 0, -1, -1, 1]],
+    [{ errors: [5, 8] }, [1, 1, 1, 1, 8, 0, 2, 1, 2, 2, 0, 5, 1]],
+    [
+      { errors: Array.from({ length: 65 }, (_, i) => (i >= 63 ? 5 : 0)) },
+      [1, 1, 1, 1, 8, 0, 65, 1, 64, 1, 63, 5, 0],
+    ],
+  ]) {
+    const f = rawPreparation({ experiment: true }),
+      compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
+      index = f.prepared.entries.findIndex(
+        (entry) => entry.path === compiler.path,
+      ),
+      source = await compilerTrustFixture({
+        entries: f.prepared.entries,
+        files: f.files,
+        identity: f.rawFileId,
+        inspect: f.objectRead,
+        result: 8,
+        provider,
+      });
+    await assert.rejects(source.open(index, 2), (cause) => {
+      const failure = cause.custodyReaderFailure;
+      assert.equal(failure.sequence, 2);
+      assert.equal(failure.trust.result, "0x00000008");
+      assert.equal(failure.trust.closeResult, "0x00000000");
+      assert.equal(failure.trust.entry, index);
+      assert.equal(failure.trust.identity, f.rawFileId(compiler.path));
+      assert.deepEqual(failure.trust.provider, expected);
+      return true;
+    });
+    assert.deepEqual(source.calls, [1, 2]);
+    assert.equal(source.events[0], "verify");
+    assert.equal(source.events[1], "provider-module");
+    assert.equal(source.events.at(-1), "close");
+    assert.ok(
+      source.records.every((record) => Buffer.byteLength(record) < 1024),
+    );
+  }
+});
+
 test("actual experiment compiler open requires noninteractive paired trust, zero results and unchanged pins", async () => {
   for (const fault of [
     "none",
@@ -4097,6 +4166,8 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
     if (fault === "none") {
       native = await opening;
       assert.deepEqual(source.calls, [1, 2, 1, 2]);
+      assert.deepEqual(source.events, ["verify", "close", "verify", "close"]);
+      assert.equal(source.provider, undefined);
     } else {
       await assert.rejects(opening, (error) => {
         const failure = error.custodyReaderFailure;
@@ -4121,6 +4192,11 @@ test("actual experiment compiler open requires noninteractive paired trust, zero
           );
           assert.equal(failure.trust.entry, index);
           assert.deepEqual(failure.trust.inputs, source.inputs);
+          assert.deepEqual(failure.trust.provider, source.provider);
+          assert.equal(
+            Object.hasOwn(failure.trust, "provider"),
+            verificationResult !== 0,
+          );
           assert.deepEqual(
             failure.trust.inputs.slice(2, 14),
             [1, 1, 1, 0, 2, 0, 1, 0x1010, 0, 0, 0, 0],

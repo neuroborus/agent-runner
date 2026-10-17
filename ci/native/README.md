@@ -8288,6 +8288,24 @@ failures use their actual native status and `-1` for unavailable values. A zero
 `FILE_CURRENT` offset observes position without rewinding; neither EOF nor UI
 settings diagnose a nonzero result. The exact held identities and pins remain
 the existing failure-carrier fields, joined to the original preparation journals.
+After a nonzero experiment VERIFY, one optional provider observation runs before
+the same state's original CLOSE. It dynamically resolves
+[`WTHelperProvDataFromStateData`](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/nf-wintrust-wthelperprovdatafromstatedata)
+only from the already loaded protected Wintrust module. No module load/search or
+alternate verification is added. Bounded current-process reads check the provider
+structure size and counted-step pointer consistency; unreadable data leaves the
+observation unavailable. Native last-error and errno are restored before CLOSE.
+The failure-only `provider` array contains API, state, data and valid-structure
+availability; `dwError`, `dwFinalError`, declared step count and pointer presence;
+inspected count, nonzero count, first nonzero index and code; and completeness.
+Unavailable numeric fields use `-1`. At most the first 64 counted errors are
+read, and truncation or an unreadable/inconsistent array remains explicitly
+incomplete. Step codes supply no inferred cause. Successful VERIFY performs no
+provider observation, including when its separate CLOSE fails; optional API or
+data availability adds no acceptance requirement. Carrier size, channel bounds,
+original sequence/entry/pins and cleanup ownership remain unchanged. Provider
+diagnostics establish neither a Windows trust remedy nor original native
+retirement, and cannot become a receipt or acceptance evidence.
 The experiment opens its build helper before the MSVC compiler at sequence 2;
 the compiler's signature pin identifies the PE signature representation, not an inferred
 signer certificate. The observed original embedded verification returned LONG 8

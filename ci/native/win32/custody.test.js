@@ -1646,6 +1646,7 @@ test("Windows trust diagnostics reject malformed status, entry and held-pin cont
     inputs: [
       88, 32, 1, 1, 1, 0, 2, 0, 1, 0x1010, 0, 0, 0, 0, 0, 0, 0, 1024, 0, 1024,
     ],
+    provider: [1, 1, 1, 1, 8, 0, 3, 1, 3, 1, 1, 5, 1],
   };
   for (const damage of [
     { result: 2148204800 },
@@ -1661,6 +1662,24 @@ test("Windows trust diagnostics reject malformed status, entry and held-pin cont
     { inputs: [] },
     { inputs: Array(20).fill("unknown") },
     { inputs: Array(20).fill(2) },
+    { provider: [] },
+    { provider: Array(13).fill("unknown") },
+    ...[
+      [0, 2],
+      [2, 0],
+      [4, -1],
+      [5, 0x100000000],
+      [6, 2],
+      [7, 0],
+      [8, 65],
+      [9, 4],
+      [10, 3],
+      [11, 0],
+      [12, 0],
+    ].map(([index, value]) => ({
+      provider: trust.provider.with(index, value),
+    })),
+    { result: "0x00000000", closeResult: "0x00000005" },
     { extra: true },
   ]) {
     const f = transport(),

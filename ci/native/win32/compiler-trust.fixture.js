@@ -17,6 +17,7 @@ export async function compilerTrustFixture({
   result = 0,
   closed = 0,
   unavailable = false,
+  provider = {},
 }) {
   const header = await readFile(
       new URL("./custody.h", import.meta.url),
@@ -28,12 +29,13 @@ export async function compilerTrustFixture({
     ),
     body = (source, name) =>
       new RegExp(
-        `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        `static (?:void|BOOL) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
         "u",
       ).exec(source)[1],
     calls = [],
     records = [],
-    signature_trust = { inputs: {} },
+    events = [],
+    signature_trust = { inputs: {}, provider: {} },
     refusal = new Error("native guard rejected"),
     held = entries.map((entry) => ({
       ...entry,
@@ -48,6 +50,37 @@ export async function compilerTrustFixture({
           /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n[\s\S]*?#endif/gu,
           "$1",
         )
+        .replace(/#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu, "$1")
+        .replaceAll('L"wintrust.dll"', '"wintrust.dll"')
+        .replace(
+          "signature_trust.provider[0] = 0;",
+          'signature_trust.provider.text = "";',
+        )
+        .replace(
+          "typedef CRYPT_PROVIDER_DATA *(WINAPI *provider_data)(HANDLE);",
+          "",
+        )
+        .replace("provider_data get", "let get")
+        .replace("(provider_data)", "")
+        .replace("const CRYPT_PROVIDER_DATA *source", "let source")
+        .replace("HMODULE module", "let module")
+        .replace("LONGLONG observed[13] = {", "let observed = [")
+        .replace("-1, -1, -1, 0};", "-1, -1, -1, 0];")
+        .replace("SIZE_T read = 0;", "let read = {value:0};")
+        .replace("read == size", "read.value == size")
+        .replace(
+          "DWORD size = 0; CRYPT_PROVIDER_DATA data = {0};",
+          "let size={value:0}, data={};",
+        )
+        .replace("size >= sizeof(data)", "size.value >= 1")
+        .replace("data.cbStruct == size", "data.cbStruct == size.value")
+        .replace("DWORD errors[64], count", "let errors=[], count")
+        .replaceAll("sizeof(errors[0])", "4")
+        .replaceAll("sizeof(data)", "1")
+        .replaceAll("sizeof(size)", "4")
+        .replaceAll("sizeof(signature_trust.provider)", "256")
+        .replaceAll("&read", "read")
+        .replaceAll("&data", "data")
         .replace(
           "DWORD size; BYTE *bytes = read_file(file, 536870912, &size);",
           "let bytes = read_file(file), size = bytes.length;",
@@ -115,7 +148,7 @@ export async function compilerTrustFixture({
           "struct entry *entry = &entries[index]",
           "let entry = entries[index]",
         )
-        .replace("const char *source", "let source")
+        .replace(/const char \*(source|provider)/gu, "let $1")
         .replace("source+1", "source.slice(1)")
         .replaceAll("identity+17+i*2", "{target:identity, offset:17+i*2}")
         .replaceAll("&entries[i].file", "entries[i].file")
@@ -143,7 +176,18 @@ export async function compilerTrustFixture({
   const open = reader
     .split('} else if (!strcmp(values[0], "open")) {')[1]
     .split('} else if (!strcmp(values[0], "inspect"))')[0];
-  let program, activeTrust;
+  let program,
+    activeTrust,
+    lastError = 7;
+  const errors = provider.errors ?? [0, 5, 0],
+    providerData = {
+      cbStruct: provider.structureSize ?? 1,
+      dwError: 8,
+      dwFinalError: 0,
+      cdwTrustStepErrors: provider.count ?? errors.length,
+      padwTrustStepErrors:
+        (provider.pointer ?? errors.length > 0) ? errors : null,
+    };
   const verifiedHandles = new Set();
   const api = {
     entries: held,
@@ -152,6 +196,7 @@ export async function compilerTrustFixture({
     reader_command: "open",
     reader_diagnostics_ready: true,
     signature_trust,
+    errno: 11,
     control: "authenticated",
     NULL: null,
     INVALID_HANDLE_VALUE: -1,
@@ -186,8 +231,51 @@ export async function compilerTrustFixture({
       program.reader_failure("custody.h", 1);
       throw refusal;
     },
-    GetLastError: () => 7,
-    SetLastError: () => {},
+    GetLastError: () => lastError,
+    SetLastError: (value) => {
+      lastError = value;
+    },
+    GetModuleHandleW: (name) => {
+      assert.equal(name, "wintrust.dll");
+      assert.equal(signature_trust.result, result);
+      assert.notEqual(result, 0);
+      events.push("provider-module");
+      lastError = 101;
+      api.errno = 101;
+      return provider.module === false ? null : "protected-wintrust";
+    },
+    GetProcAddress: (module, name) => {
+      assert.equal(module, "protected-wintrust");
+      assert.equal(name, "WTHelperProvDataFromStateData");
+      lastError = 102;
+      return provider.api === false
+        ? null
+        : (state) => {
+            assert.equal(state, activeTrust.hWVTStateData);
+            assert.equal(activeTrust.dwStateAction, 1);
+            events.push("provider-data");
+            return provider.data === false ? null : providerData;
+          };
+    },
+    GetCurrentProcess: () => "self",
+    ReadProcessMemory: (process, source, out, size, read) => {
+      assert.equal(process, "self");
+      assert.equal(activeTrust.dwStateAction, 1);
+      lastError = 103;
+      events.push("provider-read");
+      if (source === providerData) {
+        if (provider.readable === false) return false;
+        if (Object.hasOwn(out, "value")) out.value = providerData.cbStruct;
+        else Object.assign(out, providerData);
+      } else {
+        assert.equal(source, errors);
+        assert.ok(size <= 64 * 4);
+        if (provider.stepsReadable === false) return false;
+        Object.assign(out, errors.slice(0, size / 4));
+      }
+      read.value = provider.shortRead ? 0 : size;
+      return true;
+    },
     GetHandleInformation: (_, flags) => {
       flags.value = 0;
       return !unavailable;
@@ -217,6 +305,13 @@ export async function compilerTrustFixture({
       assert.ok(file.handle.access & api.GENERIC_READ);
       calls.push(trust.dwStateAction);
       if (trust.dwStateAction === 2) {
+        events.push("close");
+        assert.equal(
+          lastError,
+          7,
+          "diagnostics preserve native error state before CLOSE",
+        );
+        assert.equal(api.errno, 11);
         assert.equal(
           trust,
           activeTrust,
@@ -227,10 +322,12 @@ export async function compilerTrustFixture({
         return closed;
       }
       assert.equal(trust.dwStateAction, 1);
+      events.push("verify");
       assert.equal(activeTrust, undefined);
       assert.ok(!verifiedHandles.has(file.handle), "never retry verification");
       verifiedHandles.add(file.handle);
       activeTrust = trust;
+      trust.hWVTStateData = provider.state === false ? null : "original-state";
       return result;
     },
     headers: (bytes, at) => {
@@ -327,6 +424,8 @@ export async function compilerTrustFixture({
     },
   };
   program = new Script(`
+    function signature_provider_read(source,target,size) {${translate(body(header, "signature_provider_read"))}}
+    function signature_provider_observe(trust) {${translate(body(header, "signature_provider_observe"))}}
     function signature_observe(file,trust) {${translate(body(header, "signature_observe"))}}
     function signature_verify(file,expected,trust) {${translate(body(header, "signature_verify"))}}
     function pin(file,expected) {${translate(body(header, "pin"))}}
@@ -338,8 +437,16 @@ export async function compilerTrustFixture({
   `).runInNewContext(api);
   return {
     calls,
+    events,
+    records,
     get inputs() {
       return JSON.parse(signature_trust.inputs.text);
+    },
+    get provider() {
+      return signature_trust.provider.text
+        ? JSON.parse("{" + signature_trust.provider.text.slice(1) + "}")
+            .provider
+        : undefined;
     },
     async open(index, sequence) {
       api.sequence = sequence;

@@ -79,7 +79,13 @@ before closing its state. Failure-only authenticated diagnostics carry exact
 32-bit verification and closure results, embedded/catalog mode, held file
 identity and the retained entry/pins when present. Only zero succeeds;
 diagnostics never retry verification, relax pins or promote experiment
-observations. The compiler opens after the build
+observations. Failed experiment VERIFY additionally
+observes optional provider state before original CLOSE through the already loaded
+Wintrust module, with size-checked bounded current-process reads, explicit
+unavailability/completeness and restored native error state. The strict failure
+carrier retains its existing bounds and original identity/pin joins. This optional
+observation changes no trust acceptance or original cleanup ownership and proves
+neither a trust remedy nor original retirement. The compiler opens after the build
 helper at sequence 2. Its original trust cause and functional compatibility remain
 pending matching Windows evidence; pipe error 109 supplies no trust diagnosis.
 Windows experiment closure fences admission and coalesces original reader and

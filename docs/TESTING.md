@@ -822,6 +822,16 @@ that position observation uses zero `FILE_CURRENT` without a rewind. Malformed
 input arrays cannot become trusted failure context or retirement receipts.
 These cases run in the existing selected native harness, add no slow-tier
 requirement and establish no Windows trust cause or native acceptance.
+The same compiler-trust fixture executes the production failure-only provider
+observer and bounded memory-read body before original CLOSE. Injected cases cover
+missing module/API/state/data, short or unreadable structures, undersized metadata,
+count/pointer mismatch, unreadable steps, empty and truncated arrays, and first
+nonzero-step summaries. Native error state, one VERIFY and the same-state CLOSE
+remain required; successful VERIFY needs no observation, including CLOSE failure.
+The existing strict carrier matrix rejects malformed provider summaries. Caller
+coverage retains original LONG 8/CLOSE 0 and separate CLOSE failure, along with
+nested original cleanup refusal and independent original-owner recovery. Provider
+data proves neither a trust remedy nor original native retirement.
 Preparation receipt regressions drain aggregate batch deferrals without
 individual reopen amplification, retain oversized-record reads, and preserve
 the complete original access-profile/fault cold-recovery matrix and observer

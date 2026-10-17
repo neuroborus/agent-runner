@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Observe the original failed Windows trust provider phase
+
+Failed experiment trust verification observes optional provider state before its
+original CLOSE, using the already loaded protected module and bounded, checked
+current-process reads. Explicit availability and partial step summaries preserve
+diagnostic limits; successful verification needs no observation. The original
+LONG, separate CLOSE, zero-only acceptance and exact cleanup dependencies remain
+unchanged. Provider data identifies neither a proved trust remedy nor retirement
+of the original failed-owner domain; both still need matching native evidence.
+
 ## 2026-10-17 — Bind the selected SDK to its developer installation
 
 Darwin experiment discovery and sealed commands explicitly pair the selected SDK

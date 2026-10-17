@@ -193,7 +193,50 @@ static void pin(struct held_file *file, const char *expected) {
   DWORD size; BYTE *bytes = read_file(file, 536870912, &size); char actual[65]; sum(bytes, size, actual); need(!strcmp(actual, expected)); free(bytes);
 }
 static struct held_file catalogs[256]; static unsigned catalog_count;
-static struct { struct held_file *file; const char *expected; DWORD choice; LONG result, closed; BOOL active; char inputs[512]; } signature_trust;
+static struct { struct held_file *file; const char *expected; DWORD choice; LONG result, closed; BOOL active; char inputs[512];
+#ifdef NATIVE_CI_EXPERIMENT
+  char provider[256];
+#endif
+} signature_trust;
+#ifdef NATIVE_CI_EXPERIMENT
+static BOOL signature_provider_read(const void *source, void *target, SIZE_T size) {
+  SIZE_T read = 0;
+  return source && ReadProcessMemory(GetCurrentProcess(), source, target, size, &read) && read == size;
+}
+/* Optional failure data from the original state, never another verification.
+ * API/state/data/structure, errors, count/pointer, inspected/nonzero/first/code,
+ * complete. -1 means unavailable; at most 64 counted steps are inspected. */
+static void signature_provider_observe(WINTRUST_DATA *trust) {
+  DWORD saved = GetLastError(); int saved_errno = errno;
+  LONGLONG observed[13] = {0, trust->hWVTStateData != NULL, 0, 0, -1, -1, -1, -1, 0, -1, -1, -1, 0};
+  typedef CRYPT_PROVIDER_DATA *(WINAPI *provider_data)(HANDLE);
+  HMODULE module = GetModuleHandleW(L"wintrust.dll");
+  provider_data get = module ? (provider_data)GetProcAddress(module, "WTHelperProvDataFromStateData") : NULL;
+  observed[0] = get != NULL;
+  const CRYPT_PROVIDER_DATA *source = get && trust->hWVTStateData ? get(trust->hWVTStateData) : NULL;
+  observed[2] = source != NULL;
+  DWORD size = 0; CRYPT_PROVIDER_DATA data = {0};
+  if (signature_provider_read(source, &size, sizeof(size)) && size >= sizeof(data) &&
+      signature_provider_read(source, &data, sizeof(data)) && data.cbStruct == size) {
+    observed[3] = 1; observed[4] = data.dwError; observed[5] = data.dwFinalError;
+    observed[6] = data.cdwTrustStepErrors; observed[7] = data.padwTrustStepErrors != NULL;
+    if (!!data.cdwTrustStepErrors == !!data.padwTrustStepErrors) {
+      DWORD errors[64], count = data.cdwTrustStepErrors < 64 ? data.cdwTrustStepErrors : 64;
+      if (!count || signature_provider_read(data.padwTrustStepErrors, errors, count*sizeof(errors[0]))) {
+        observed[8] = count; observed[9] = 0; observed[12] = count == data.cdwTrustStepErrors;
+        for (DWORD i = 0; i < count; i++) if (errors[i]) {
+          observed[9]++;
+          if (observed[10] == -1) { observed[10] = i; observed[11] = errors[i]; }
+        }
+      }
+    }
+  }
+  sprintf_s(signature_trust.provider, sizeof(signature_trust.provider), ",\"provider\":[%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld]",
+    observed[0], observed[1], observed[2], observed[3], observed[4], observed[5], observed[6], observed[7],
+    observed[8], observed[9], observed[10], observed[11], observed[12]);
+  errno = saved_errno; SetLastError(saved);
+}
+#endif
 static void signature_observe(struct held_file *file, WINTRUST_DATA *trust) {
   DWORD saved = GetLastError(), flags = 0;
   BOOL flagged = GetHandleInformation(file->handle, &flags); DWORD flagStatus = flagged ? 0 : GetLastError();
@@ -220,6 +263,10 @@ static void signature_verify(struct held_file *file, const char *expected, WINTR
   /* Save the original LONG before CLOSE can replace native error state. */
   signature_trust.file = file; signature_trust.expected = expected; signature_trust.choice = trust->dwUnionChoice;
   signature_trust.result = result; signature_trust.closed = ERROR_SUCCESS; signature_trust.active = TRUE;
+#ifdef NATIVE_CI_EXPERIMENT
+  signature_trust.provider[0] = 0;
+  if (result != ERROR_SUCCESS) signature_provider_observe(trust);
+#endif
   trust->dwStateAction = WTD_STATEACTION_CLOSE;
   LONG closed = WinVerifyTrust(INVALID_HANDLE_VALUE, &action, trust); signature_trust.closed = closed;
   DWORD saved = GetLastError();
