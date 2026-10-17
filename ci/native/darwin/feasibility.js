@@ -238,6 +238,84 @@ export function darwinFeasibilityIdentityArguments(input) {
   ].map(String);
 }
 
+function assertDarwinFaultRetirement(evidence, completeFault = true) {
+  const { record, fresh, settled } = evidence;
+  need(
+    evidence.complete === true &&
+      evidence.independent === true &&
+      evidence.nonEmergency === true &&
+      record.stage === 5 &&
+      record.emergency === false &&
+      record.asid > 0 &&
+      (completeFault ? /^[a-f0-9]{64}$/u : /^(?:[a-f0-9]{64})?$/u).test(
+        record.intentSha256,
+      ) &&
+      Array.isArray(record.members) &&
+      record.members.length >= (completeFault ? 2 : 0) &&
+      record.members.length <= 32 &&
+      fresh.complete === true &&
+      fresh.independent === true &&
+      fresh.held === true &&
+      settled.complete === true &&
+      settled.independent === true &&
+      settled.held === false &&
+      settled.record.stage === 6 &&
+      JSON.stringify(fresh.record) === JSON.stringify(record),
+  );
+  const custodian = normalizeDarwinIdentity(record.custodian),
+    verifier = normalizeDarwinIdentity(fresh.verifier),
+    final = normalizeDarwinIdentity(settled.verifier);
+  need(
+    [custodian, verifier, final].every((value) =>
+      ["uid", "ruid", "svuid", "gid", "rgid", "svgid", "auid"].every(
+        (field) => value[field] === 0,
+      ),
+    ) &&
+      verifier.pid !== final.pid &&
+      [custodian, verifier, final].every(
+        (value) => value.asid !== record.asid,
+      ) &&
+      verifier.pid !== custodian.pid &&
+      final.pid !== custodian.pid,
+  );
+  for (const field of [
+    "candidateSha",
+    "caseId",
+    "asid",
+    "intentSha256",
+    "helperSha256",
+    "policySha256",
+    "owner",
+    "descendant",
+    "custodian",
+    "members",
+    "emergency",
+  ])
+    need(
+      JSON.stringify(settled.record[field]) === JSON.stringify(record[field]),
+    );
+  const members = record.members.map(normalizeDarwinIdentity);
+  if (!completeFault) {
+    const owner = normalizeDarwinIdentity(record.owner);
+    need(
+      owner.asid === record.asid &&
+        ["auid", "uid", "ruid", "svuid"].every(
+          (field) => owner[field] === 90001,
+        ) &&
+        ["gid", "rgid", "svgid"].every((field) => owner[field] === 90002),
+    );
+  }
+  need(
+    members.every(
+      (value) => value.asid === record.asid && value.auid === record.owner.auid,
+    ) &&
+      (!completeFault ||
+        [record.owner, record.descendant].every((value) =>
+          members.some((member) => sameDarwinIdentity(member, value)),
+        )),
+  );
+}
+
 /** Individual recorded retirement is cleanup, never a complete domain boundary. */
 export function assessDarwinFeasibilityDomain(observations, evidence = null) {
   need(
@@ -248,67 +326,7 @@ export function assessDarwinFeasibilityDomain(observations, evidence = null) {
       ),
   );
   if (evidence) {
-    const { record, fresh, settled } = evidence;
-    need(
-      evidence.complete === true &&
-        evidence.independent === true &&
-        evidence.nonEmergency === true &&
-        record.stage === 5 &&
-        record.asid > 0 &&
-        /^[a-f0-9]{64}$/u.test(record.intentSha256) &&
-        Array.isArray(record.members) &&
-        record.members.length >= 2 &&
-        record.members.length <= 32 &&
-        fresh.complete === true &&
-        fresh.independent === true &&
-        fresh.held === true &&
-        settled.complete === true &&
-        settled.independent === true &&
-        settled.held === false &&
-        settled.record.stage === 6 &&
-        JSON.stringify(fresh.record) === JSON.stringify(record),
-    );
-    const custodian = normalizeDarwinIdentity(record.custodian),
-      verifier = normalizeDarwinIdentity(fresh.verifier),
-      final = normalizeDarwinIdentity(settled.verifier);
-    need(
-      [custodian, verifier, final].every((value) =>
-        ["uid", "ruid", "svuid", "gid", "rgid", "svgid", "auid"].every(
-          (field) => value[field] === 0,
-        ),
-      ) &&
-        verifier.pid !== final.pid &&
-        [custodian, verifier, final].every(
-          (value) => value.asid !== record.asid,
-        ) &&
-        verifier.pid !== custodian.pid &&
-        final.pid !== custodian.pid,
-    );
-    for (const field of [
-      "candidateSha",
-      "caseId",
-      "asid",
-      "intentSha256",
-      "helperSha256",
-      "policySha256",
-      "owner",
-      "descendant",
-      "custodian",
-      "members",
-    ])
-      need(
-        JSON.stringify(settled.record[field]) === JSON.stringify(record[field]),
-      );
-    const members = record.members.map(normalizeDarwinIdentity);
-    need(
-      members.every(
-        (value) =>
-          value.asid === record.asid && value.auid === record.owner.auid,
-      ) &&
-        [record.owner, record.descendant].every((value) =>
-          members.some((member) => sameDarwinIdentity(member, value)),
-        ),
-    );
+    assertDarwinFaultRetirement(evidence);
     return { status: "PASS", cause: null };
   }
   return observations.some(({ status }) => status === "LIVE")
@@ -371,6 +389,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-write",
     "fault-wait",
     "fault-child-status",
+    "fault-child-backstop",
     "fault-authorization",
     "fault-acknowledgment",
     "fault-command",
@@ -459,6 +478,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-lease-stat",
     "fault-notify-port",
     "fault-output-drain",
+    "fault-output-bound",
     "fault-output-read",
     "fault-output-state",
     "fault-payload-exec",
@@ -2950,10 +2970,26 @@ export async function runDarwinFeasibilityFault(
       );
     } catch (failure) {
       error ??= failure;
+      let recovered;
       try {
-        await domain.abort();
+        if (typeof domain.recover === "function") {
+          recovered = await domain.recover();
+          assertDarwinFaultRetirement(recovered, false);
+          need(
+            recovered.record.candidateSha === checkoutSha &&
+              recovered.record.caseId === caseId &&
+              recovered.record.helperSha256 === helperHash &&
+              recovered.record.policySha256 === digest(policyBytes),
+          );
+        } else await domain.abort();
       } catch (cleanupFailure) {
+        recovered = null;
         cleanupError = cleanupFailure;
+        try {
+          await domain.abort();
+        } catch {
+          /* Emergency exit cannot supply proof. */
+        }
       }
       const entry = unavailable(
         [id],
@@ -2961,19 +2997,24 @@ export async function runDarwinFeasibilityFault(
         components,
         true,
       )[0];
-      entry.cleanup = {
-        ...uncertain(true),
-        cause: darwinFeasibilityCause(
-          "fault-domain-cleanup",
-          cleanupError ?? error,
-        ),
-      };
+      entry.cleanup = recovered
+        ? settled(
+            { originalFailure: entry.cause, domain: recovered },
+            now() - started,
+          )
+        : {
+            ...uncertain(true),
+            cause: darwinFeasibilityCause(
+              "fault-domain-cleanup",
+              cleanupError ?? error,
+            ),
+          };
       try {
         await save(root, `${caseId}-custody`, {
           ...custody,
           error: entry.cause,
           cleanup: entry.cleanup,
-          domain: proof ?? null,
+          domain: recovered ?? proof ?? null,
         });
       } catch {
         /* Original failure and retained exclusion survive publication loss. */

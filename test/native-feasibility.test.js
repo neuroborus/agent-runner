@@ -3593,6 +3593,7 @@ function darwinFaultFixture(
         intent: async (pin) => {
           events.push("protected-intent");
           admission = {
+            emergency: false,
             candidateSha: SHA,
             caseId,
             stage: 2,
@@ -3929,7 +3930,17 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     ["owner-loss", "unclosed"],
     ["cancel", "startup"],
     ["owner-loss", "startup"],
+    ["cancel", "preexec"],
+    ["owner-loss", "preexec"],
+    ["cancel", "preexec-signal"],
+    ["cancel", "recovery-incomplete"],
+    ["cancel", "recovery-birth"],
+    ["cancel", "recovery-close"],
+    ["cancel", "recovery-emergency"],
+    ["cancel", "admission"],
   ]) {
+    const recovering =
+      trailing?.startsWith("preexec") || trailing?.startsWith("recovery-");
     const owner = {
       pid: 42,
       pidVersion: 7,
@@ -3976,6 +3987,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         stream.destroy();
     });
     let record = {
+      emergency: false,
       candidateSha: SHA,
       caseId,
       asid: 55,
@@ -4026,6 +4038,12 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       else if (operation === "retire") {
         record = { ...record, stage: 5 };
         value = record;
+      } else if (operation === "recover" || operation === "emergency") {
+        record = { ...record, stage: 5 };
+        if (trailing === "recovery-emergency") record.emergency = true;
+        if (operation === "recover" && trailing === "recovery-birth")
+          record = { ...record, owner: { ...record.owner, startSeconds: 101 } };
+        value = record;
       } else if (operation === "close") {
         record = { ...record, stage: 6 };
         value = record;
@@ -4040,7 +4058,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         );
       }
       if (operation === "close") {
-        if (trailing && trailing !== "unclosed")
+        if (trailing && !recovering && trailing !== "unclosed")
           child.stdout.write(trailing === "partial" ? "{" : "malformed\n");
         child.stdout.end();
         child.stderr.end();
@@ -4048,6 +4066,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         closeReply();
       }
     });
+    let acquired;
     const opening = openDarwinFaultDomain(
       "/fixture",
       SHA,
@@ -4060,6 +4079,9 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       {
         uid: 501,
         gid: 20,
+        retain: (value) => {
+          acquired = value;
+        },
         launch: (file, args) => {
           assert.equal(file, "/usr/bin/sudo");
           assert.ok(args.includes("fault-domain") && args.includes("-i"));
@@ -4071,7 +4093,26 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
               child.emit("close", 126, null);
               return;
             }
+            if (trailing === "admission") {
+              send({ ready: { ...record, candidateSha: "f".repeat(40) } });
+              return;
+            }
             send({ ready: record });
+            if (recovering) {
+              send({
+                stream: "stderr",
+                hex: Buffer.from(
+                  "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n",
+                ).toString("hex"),
+              });
+              send({
+                exit:
+                  trailing === "preexec-signal"
+                    ? { code: -1, signal: 5 }
+                    : { code: 126, signal: 0 },
+              });
+              return;
+            }
             send({
               stream: "stderr",
               hex: Buffer.from(
@@ -4090,11 +4131,13 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         execute: async (file, args) => {
           assert.equal(file, "/usr/bin/sudo");
           const closed = args.includes("fault-closed");
+          if (closed && trailing === "recovery-close")
+            throw new Error("Custodian remains unverified");
           actions.push(closed ? "verified-close" : "verified-empty");
           return {
             stdout: JSON.stringify({
               independent: true,
-              complete: true,
+              complete: trailing !== "recovery-incomplete",
               held: !closed,
               record,
               verifier: { ...custodian, pid: closed ? 9200 : 9100 },
@@ -4105,6 +4148,9 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     );
     if (trailing === "startup") {
       await assert.rejects(opening, (error) => {
+        assert.equal(error.faultDomain, acquired);
+        assert.equal(acquired.owner, child);
+        assert.equal(child.stdin.writableEnded, true);
         assert.equal(error.exitCode, 126);
         assert.match(
           darwinFeasibilityCause(caseId, error).detail,
@@ -4118,6 +4164,17 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       });
       assert.deepEqual(frames, []);
       assert.deepEqual(actions, []);
+      continue;
+    }
+    if (trailing === "admission") {
+      await assert.rejects(opening, (error) => {
+        assert.equal(error.faultDomain, acquired);
+        assert.equal(acquired.owner, child);
+        assert.equal(child.stdin.writableEnded, true);
+        return true;
+      });
+      assert.deepEqual(actions, []);
+      child.emit("close", 126, null);
       continue;
     }
     const domain = await opening;
@@ -4147,6 +4204,40 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       child.emit("close", 0, null);
     }
     const entry = await work;
+    if (recovering) {
+      assert.notEqual(entry.status, "PASS", trailing);
+      assert.match(entry.cause.detail, /fault-access-authority/u);
+      assert.deepEqual(frames, []);
+      assert.ok(actions.includes("recover"));
+      assert.ok(
+        !actions.some((action) =>
+          ["payload", "intent", "fault", "retire"].includes(action),
+        ),
+      );
+      assert.equal(
+        entry.cleanup.status,
+        trailing.startsWith("preexec") ? "PASS" : "UNCERTAIN",
+        trailing,
+      );
+      assert.equal(
+        entry.cleanup.emergency,
+        !trailing.startsWith("preexec"),
+        trailing,
+      );
+      if (trailing.startsWith("preexec")) {
+        assert.deepEqual(actions, [
+          "recover",
+          "verified-empty",
+          "close",
+          "verified-close",
+        ]);
+        assert.equal(
+          saved.get(`${caseId}-custody`).domain.record.owner.pidVersion,
+          6,
+        );
+      }
+      continue;
+    }
     if (trailing) {
       assert.notEqual(entry.status, "PASS", trailing);
       assert.equal(entry.cleanup.status, "UNCERTAIN", trailing);
@@ -4432,6 +4523,7 @@ test("Darwin fault failure hook closes owned gates and checks only unreleased or
       EINTR: 4,
       WNOHANG: 1,
       settle_bundle: () => {},
+      settle_domain: () => {},
       settle_prerequisite: () => {},
       write: (fd, byte, size) => {
         assert.deepEqual([fd, byte, size], [12, "A", 1]);

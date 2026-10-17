@@ -29,7 +29,7 @@ static struct identity fault_inspect(pid_t pid) {
 #undef emit
 
 struct fault_record {
-  unsigned version, stage, members;
+  unsigned version, stage, members, emergency;
   uid_t uid; gid_t gid; au_asid_t asid;
   char candidate[41], case_id[16], helper_hash[65], policy_hash[65], intent[65];
   struct identity custodian, owner, descendant, known[32];
@@ -39,6 +39,56 @@ static char domain_path[4096], domain_helper[4096], domain_policy[4096];
 static int domain_root = -1, domain_journal = -1;
 static mach_port_t domain_pin;
 static bool domain_fenced;
+static pid_t domain_controller, domain_child = -1;
+static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
+static bool domain_released, domain_exit_reported;
+/* Failure owns acquired pipe endpoints before any subsequent operation. An
+ * unreleased direct child exits on EOF; no numeric-PID signal is authorized. */
+static void settle_domain(void) {
+  if (domain_controller != getpid()) return;
+  for (unsigned pipe = 0; pipe < 5; pipe++) for (unsigned end = 0; end < 2; end++) {
+    int fd = domain_pipes[pipe][end]; domain_pipes[pipe][end] = -1;
+    if (fd >= 0 && close(fd)) remember_cleanup("fault-close", "errno", errno);
+  }
+  if (domain_child <= 0 || domain_released) return;
+  for (unsigned pass = 0; pass < 200; pass++) {
+    pid_t reaped = waitpid(domain_child, &domain_status, WNOHANG);
+    if (reaped == domain_child) { domain_child = -1; return; }
+    if (reaped < 0 && errno != EINTR) { remember_cleanup("fault-wait", "errno", errno); return; }
+    (void)poll(NULL, 0, 10);
+  }
+  remember_cleanup("fault-wait", "invariant", 0);
+}
+static void domain_close(int *fd) {
+  int held = *fd; *fd = -1;
+  if (held >= 0) posix_check(close(held), "fault-close");
+}
+static void domain_reap(void) {
+  if (domain_child <= 0) return;
+  pid_t reaped = waitpid(domain_child, &domain_status, WNOHANG);
+  if (reaped == domain_child) {
+    domain_child = -1;
+    invariant(!(WIFSIGNALED(domain_status) && WTERMSIG(domain_status) == SIGALRM), "fault-child-backstop");
+  } else domain_check(reaped == 0 || (reaped < 0 && errno == EINTR), "fault-wait", "errno", errno);
+}
+static void domain_output(int *fd, const char *stream) {
+  unsigned total = 0;
+  while (*fd >= 0) {
+    unsigned char bytes[4096]; ssize_t size = read(*fd, bytes, sizeof(bytes));
+    posix_check((int)size, "fault-output-read");
+    if (!size) { domain_close(fd); return; }
+    total += (unsigned)size; invariant(total <= 65536, "fault-output-bound");
+    printf("{\"stream\":\"%s\",\"hex\":\"", stream);
+    for (ssize_t at = 0; at < size; at++) printf("%02x", bytes[at]); puts("\"}");
+  }
+}
+static void domain_exited(void) {
+  if (domain_child > 0 || domain_exit_reported) return;
+  invariant(WIFEXITED(domain_status) || WIFSIGNALED(domain_status), "fault-child-status");
+  domain_exit_reported = true;
+  printf("{\"exit\":{\"code\":%d,\"signal\":%d}}\n", WIFEXITED(domain_status) ? WEXITSTATUS(domain_status) : -1,
+    WIFSIGNALED(domain_status) ? WTERMSIG(domain_status) : 0);
+}
 static void domain_hex(const void *bytes, size_t length, char out[65]) {
   unsigned char sum[32]; need(CC_SHA256(bytes, (CC_LONG)length, sum));
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
@@ -91,8 +141,8 @@ static void domain_store(unsigned stage) {
 }
 static void domain_emit(void) {
   char pin[65]; domain_hex(&domain_record, sizeof(domain_record), pin);
-  printf("{\"candidateSha\":\"%s\",\"caseId\":\"%s\",\"asid\":%u,\"stage\":%u,\"receiptSha256\":\"%s\",\"intentSha256\":\"%s\",\"helperSha256\":\"%s\",\"policySha256\":\"%s\",\"custodian\":",
-    domain_record.candidate, domain_record.case_id, domain_record.asid, domain_record.stage, pin, domain_record.intent, domain_record.helper_hash, domain_record.policy_hash);
+  printf("{\"candidateSha\":\"%s\",\"caseId\":\"%s\",\"asid\":%u,\"stage\":%u,\"emergency\":%s,\"receiptSha256\":\"%s\",\"intentSha256\":\"%s\",\"helperSha256\":\"%s\",\"policySha256\":\"%s\",\"custodian\":",
+    domain_record.candidate, domain_record.case_id, domain_record.asid, domain_record.stage, domain_record.emergency ? "true" : "false", pin, domain_record.intent, domain_record.helper_hash, domain_record.policy_hash);
   emit_identity(domain_record.custodian); fputs(",\"owner\":", stdout); emit_identity(domain_record.owner);
   fputs(",\"descendant\":", stdout); emit_identity(domain_record.descendant); fputs(",\"members\":[", stdout);
   for (unsigned i = 0; i < domain_record.members; i++) { if(i) putchar(','); emit_identity(domain_record.known[i]); } fputs("]}",stdout);
@@ -249,6 +299,7 @@ static void domain_recheck(void) {
 static void domain_retire(void) {
   need(domain_record.stage == 3 && domain_pin != MACH_PORT_NULL); domain_fenced = true; domain_store(4);
   for (unsigned pass = 0; pass < 32; pass++) {
+    domain_reap();
     struct audit_domain_view view = audit_census(domain_record.uid, domain_record.asid); domain_recheck();
     for (unsigned i = 0; i < view.nd; i++) {
       bool known = false; for (unsigned j = 0; j < domain_record.members; j++) {
@@ -256,7 +307,7 @@ static void domain_retire(void) {
         if (domain_birth_same(value, view.dead[i])) known = true;
       } need(known);
     }
-    if (!view.nl && !view.nd) { domain_store(5); domain_emit(); return; }
+    if (!view.nl && !view.nd && domain_child < 0) { domain_store(5); return; }
     for (unsigned i = 0; i < view.nl; i++) {
       domain_known(view.live[i]); domain_store(4); /* exact signal intent precedes the effect */
       need(audit_identity_same(view.live[i], fault_inspect(view.live[i].token.val[5]))); signal_identity(view.live[i], SIGKILL);
@@ -277,7 +328,7 @@ static void domain_open(const char *nonce, const char *pin) {
     st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && st.st_size == sizeof(domain_record), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
   domain_io(pread(domain_journal, &domain_record, sizeof(domain_record), 0), sizeof(domain_record), "fault-journal-read");
   char hash[65]; domain_hex(&domain_record, sizeof(domain_record), hash);
-  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == 1, "fault-journal-binding");
+  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == 2, "fault-journal-binding");
 }
 static void domain_transfer(void) {
   struct stat inherited, held;
@@ -291,7 +342,7 @@ static void domain_transfer(void) {
   posix_check(fcntl(domain_journal, F_SETFD, FD_CLOEXEC), "fault-journal-flags");
 }
 static void domain_verify(bool closed, const char *nonce, const char *pin) {
-  domain_open(nonce, pin); need(domain_record.stage == (closed ? 6 : 5));
+  domain_open(nonce, pin); need(!domain_record.emergency && domain_record.stage == (closed ? 6 : 5));
   domain_policy_check();
   audit_fresh(0); /* sudo preserves the runner's login audit identity. */
   struct identity verifier = fault_inspect(getpid()); need(verifier.token.val[6] != domain_record.asid);
@@ -330,7 +381,7 @@ static void domain_start(int argc, char **argv) {
   domain_initialize(domain_root, true);
   domain_journal = openat(domain_root, "receipt", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); posix_check(domain_journal, "fault-journal-open");
   domain_initialize(domain_journal, false);
-  domain_record.version = 1; domain_record.uid = 90001; domain_record.gid = 90002;
+  domain_record.version = 2; domain_record.uid = 90001; domain_record.gid = 90002;
   strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
   domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   char source[4096]; snprintf(source, sizeof(source), "%s/build/helper", canonical); domain_copy(source, "helper", argv[6], 0555, uid, gid);
@@ -378,7 +429,9 @@ static void domain_start(int argc, char **argv) {
   domain_shape(domain_file_same(&lease_stat, &lease_named), &lease_named, "fault-lease-shape");
   /* Keep this description locked through custody; never unlink or replace it. */
   struct audit_domain_view absent = audit_census(domain_record.uid, 0); invariant(!absent.nl && !absent.nd, "fault-uid-empty");
-  int in[2], out[2], err[2], ready[2], release[2];
+  domain_controller = getpid();
+  invariant(signal(SIGPIPE, SIG_IGN) != SIG_ERR, "fault-signal");
+  int *in = domain_pipes[0], *out = domain_pipes[1], *err = domain_pipes[2], *ready = domain_pipes[3], *release = domain_pipes[4];
   posix_check(pipe(in), "fault-pipe"); posix_check(pipe(out), "fault-pipe"); posix_check(pipe(err), "fault-pipe");
   posix_check(pipe(ready), "fault-pipe"); posix_check(pipe(release), "fault-pipe");
   domain_access_observe("custodian-fork");
@@ -399,29 +452,40 @@ static void domain_start(int argc, char **argv) {
     execl(domain_helper, domain_helper, "exec", domain_policy, domain_helper, "fault", NULL);
     int exec_error = errno; remember("fault-payload-exec", "errno", exec_error); failure(126);
   }
-  posix_check(close(ready[1]), "fault-close"); posix_check(close(release[0]), "fault-close"); posix_check(close(in[0]), "fault-close");
-  posix_check(close(out[1]), "fault-close"); posix_check(close(err[1]), "fault-close");
+  domain_child = child;
+  domain_close(&ready[1]); domain_close(&release[0]); domain_close(&in[0]);
+  domain_close(&out[1]); domain_close(&err[1]);
   domain_io(read(ready[0], &domain_record.owner, sizeof(domain_record.owner)), sizeof(domain_record.owner), "fault-birth-read");
-  posix_check(close(ready[0]), "fault-close");
+  domain_close(&ready[0]);
   invariant(domain_record.owner.token.val[5] == (unsigned)child && audit_identity_same(domain_record.owner, fault_inspect(child)), "fault-birth-binding");
   domain_record.asid = domain_record.owner.token.val[6]; domain_store(1); domain_pin = audit_hold(domain_record.asid);
   invariant(audit_identity_same(domain_record.owner,fault_inspect(child)), "fault-birth-binding");
-  domain_io(write(release[1], "P", 1), 1, "fault-gate-write"); posix_check(close(release[1]), "fault-close");
+  domain_released = true; /* A failed write cannot prove the child remained parked. */
+  domain_io(write(release[1], "P", 1), 1, "fault-gate-write"); domain_close(&release[1]);
   fputs("{\"ready\":", stdout); domain_emit(); puts("}");
   unsigned expected_sequence = 0;
   for (;;) {
     struct pollfd streams[] = {{0,POLLIN,0}, {out[0],POLLIN,0}, {err[0],POLLIN,0}};
-    int polled = poll(streams, 3, 12000), poll_error = errno;
-    domain_check(polled > 0, "fault-poll", polled < 0 ? "errno" : "status", polled < 0 ? poll_error : polled);
+    bool closing = out[0] < 0 && err[0] < 0 && !domain_exit_reported;
+    int polled = poll(streams, 3, closing ? 10 : 12000), poll_error = errno;
+    domain_check(polled > 0 || (closing && !polled), "fault-poll", polled < 0 ? "errno" : "status", polled < 0 ? poll_error : polled);
     for (unsigned i = 1; i < 3; i++) if (streams[i].fd >= 0 && (streams[i].revents & (POLLIN | POLLHUP))) {
       unsigned char bytes[4096]; ssize_t size = read(streams[i].fd, bytes, sizeof(bytes)); posix_check((int)size, "fault-output-read");
-      if (!size) { close(streams[i].fd); if (i == 1) out[0] = -1; else err[0] = -1; continue; }
+      if (!size) { domain_close(i == 1 ? &out[0] : &err[0]); continue; }
       printf("{\"stream\":\"%s\",\"hex\":\"", i == 1 ? "stdout" : "stderr"); for (ssize_t at = 0; at < size; at++) printf("%02x",bytes[at]); puts("\"}");
     }
+    if (out[0] < 0 && err[0] < 0) { domain_reap(); domain_exited(); }
     if (!(streams[0].revents & (POLLIN | POLLHUP))) continue;
     char line[1024]; need(fgets(line, sizeof(line), stdin) && strchr(line, '\n')); char *fields[20]; unsigned count = 0;
     for (char *word = strtok(line, " \n"); word; word = strtok(NULL, " \n")) { need(count < 20); fields[count++] = word; }
-    need(count >= 2); unsigned sequence = number(fields[0]); need(sequence == ++expected_sequence); printf("{\"sequence\":%u,\"value\":", sequence);
+    need(count >= 2); unsigned sequence = number(fields[0]); need(sequence == ++expected_sequence);
+    if (!strcmp(fields[1], "recover")) {
+      need(count == 2 && !domain_record.emergency && ((domain_record.stage >= 1 && domain_record.stage <= 3) || domain_record.stage == 5) && domain_pin != MACH_PORT_NULL);
+      domain_fenced = true; domain_close(&in[1]);
+      if (domain_record.stage != 5) { domain_store(3); domain_retire(); }
+      domain_output(&out[0], "stdout"); domain_output(&err[0], "stderr"); domain_exited();
+    }
+    printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
     } else if (!strcmp(fields[1], "identity")) {
       need(count == 4); pid_t pid = number(fields[2]); struct identity value = fault_inspect(pid);
@@ -441,17 +505,19 @@ static void domain_start(int argc, char **argv) {
       need(count == 2 && domain_record.stage == 2); domain_store(3); signal_identity(domain_record.owner, !strcmp(domain_record.case_id,"cancel") ? SIGTERM : SIGKILL);
       int status; pid_t reaped; do { reaped = waitpid(child,&status,0); } while (reaped < 0 && errno == EINTR);
       posix_check(reaped, "fault-wait"); invariant(reaped == child, "fault-wait");
+      domain_child = -1; domain_status = status; domain_exit_reported = true;
       domain_check(WIFSIGNALED(status) && WTERMSIG(status) == (!strcmp(domain_record.case_id,"cancel") ? SIGTERM : SIGKILL), "fault-child-status", "status", status);
       char trailing; invariant(out[0] >= 0 && err[0] >= 0, "fault-output-state");
       domain_io(read(out[0],&trailing,1), 0, "fault-output-drain"); domain_io(read(err[0],&trailing,1), 0, "fault-output-drain");
-      posix_check(close(out[0]), "fault-close"); posix_check(close(err[0]), "fault-close");
-      out[0] = err[0] = -1; fputs("{\"status\":\"RETIRED\"}",stdout);
-    } else if (!strcmp(fields[1], "retire")) { need(count == 2); domain_retire();
+      domain_close(&out[0]); domain_close(&err[0]); fputs("{\"status\":\"RETIRED\"}",stdout);
+    } else if (!strcmp(fields[1], "retire")) { need(count == 2); domain_retire(); domain_emit();
+    } else if (!strcmp(fields[1], "recover")) { domain_emit();
     } else if (!strcmp(fields[1], "emergency")) {
-      need(count == 2 && domain_record.stage >= 1 && domain_record.stage <= 3); domain_store(3);
-      domain_fenced = true; close(in[1]); signal_identity(domain_record.owner,SIGKILL); int status;
-      while(waitpid(child,&status,0)<0) { if(errno == ECHILD) break; need(errno == EINTR); }
-      domain_retire();
+      need(count == 2 && domain_record.stage >= 1 && domain_record.stage <= 3); domain_record.emergency = 1; domain_store(3);
+      domain_fenced = true; domain_close(&in[1]); signal_identity(domain_record.owner,SIGKILL);
+      pid_t reaped; do { reaped = waitpid(child,&domain_status,0); } while (reaped < 0 && errno == EINTR);
+      need(reaped == child || (reaped < 0 && errno == ECHILD && domain_child < 0));
+      domain_child = -1; domain_retire(); domain_emit();
     } else if (!strcmp(fields[1], "close")) {
       need(count == 2 && domain_record.stage == 5); domain_recheck(); struct audit_domain_view view = audit_census(domain_record.uid,domain_record.asid); need(!view.nl && !view.nd);
       domain_store(6); need(!fchmod(domain_root,0700) && mach_port_deallocate(mach_task_self(),domain_pin) == KERN_SUCCESS); domain_emit(); puts("}"); return;

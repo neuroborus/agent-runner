@@ -1922,6 +1922,14 @@ descriptors and Mach rights. An ordinary host port is required because SIP
 prevents clearing that special slot; privileged/unknown host or uncleared
 task-access authority blocks launch. Root custody acquires the new session's
 send right only after fork, and is tracked separately by stable native identity.
+The feasibility fault owner retains partial pipes and its direct child before
+failure, reports original pre-exec exits separately from control-channel closure,
+and recovers the held audit domain without repeating payload work or finish.
+Cleanup requires direct-child reaping, the complete bounded native census and
+independent verification before and after custodian closure; it cannot turn the
+original refusal into a passing case. The inherited live task-access slot remains
+an explicit technical blocker: copied-reference release and unrelated setters
+prove no confinement, and no supported replacement launch is established.
 Thin x64 Mach-O structure, root-owned immutable bytes, native signature/CDHash,
 permitted entitlements and independently reviewed loader closure precede literal
 `execve`. A parked pipe barrier joins separately inspected task audit tokens,

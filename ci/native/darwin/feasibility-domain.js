@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { spawn, execFile } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { constants } from "node:os";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
 import { nativeDiagnostic } from "../diagnostics.js";
@@ -45,8 +46,10 @@ export async function openDarwinFaultDomain(
     execute = promisify(execFile),
     uid = process.getuid(),
     gid = process.getgid(),
+    retain = () => {},
   } = {},
 ) {
+  need(typeof retain === "function");
   const directory = feasibilityDomainPath(nonce),
     helper = directory + "/helper";
   const owner = launch(
@@ -76,11 +79,34 @@ export async function openDarwinFaultDomain(
     failed,
     bytes = Buffer.alloc(0),
     stderr = Buffer.alloc(0),
-    total = 0;
+    total = 0,
+    running,
+    payloadExit;
+  // Keep the original acquisition reachable even when admission never completes.
+  const acquired = { owner, directory };
+  const rejectAdmission = (error) => {
+    error.faultDomain = acquired;
+    error.stderr ??= stderr;
+    try {
+      owner.stdin.end();
+    } catch (cleanupError) {
+      error.cleanupError = cleanupError;
+    }
+    return error;
+  };
   const virtual = Object.assign(new EventEmitter(), {
     stdout: new PassThrough(),
     stderr: new PassThrough(),
   });
+  const closePayload = (code, signal) => {
+    need(!payloadExit);
+    payloadExit = { code, signal };
+    if (running) {
+      virtual.stdout.end();
+      virtual.stderr.end();
+      virtual.emit("close", code, signal);
+    }
+  };
   const fail = (error) => {
     failed ??= error;
     failed.stderr = stderr;
@@ -198,6 +224,23 @@ export async function openDarwinFaultDomain(
               /^(?:[a-f0-9]{2})*$/u.test(value.hex),
           );
           virtual[value.stream].write(Buffer.from(value.hex, "hex"));
+        } else if (value.exit) {
+          const { code, signal } = value.exit;
+          const signalName = Object.entries(constants.signals).find(
+            ([, number]) => number === signal,
+          )?.[0];
+          need(
+            !payloadExit &&
+              Number.isInteger(code) &&
+              code >= -1 &&
+              code <= 255 &&
+              Number.isInteger(signal) &&
+              signal >= 0 &&
+              signal <= 31 &&
+              ((code >= 0 && signal === 0) ||
+                (code === -1 && signalName !== undefined)),
+          );
+          closePayload(code >= 0 ? code : null, signal ? signalName : null);
         } else {
           need(pending && value.sequence === pending.id);
           const request = pending;
@@ -223,32 +266,50 @@ export async function openDarwinFaultDomain(
       );
     close({ code, signal });
   });
+  try {
+    retain(acquired);
+  } catch (error) {
+    throw rejectAdmission(error);
+  }
   const initial = await new Promise((resolve, reject) => {
     ready = { resolve, reject };
     const timer = setTimeout(() => {
       if (ready) fail(new Error("Fault custody admission deadline"));
     }, 12000);
     closed.finally(() => clearTimeout(timer));
+  }).catch((error) => {
+    throw rejectAdmission(error);
   });
-  const custodian = normalizeDarwinIdentity(initial.custodian);
-  need(
-    initial.candidateSha === candidate &&
-      initial.caseId === caseId &&
-      initial.stage === 1 &&
-      initial.helperSha256 === helperHash &&
-      initial.policySha256 === policyHash &&
-      initial.asid > 0 &&
-      custodian.asid !== initial.asid,
-  );
-  virtual.pid = initial.owner.pid;
-  const running = openSession(
-    root,
-    "exec",
-    [root + `/evidence/${caseId}.sb`, root + "/build/helper", "fault"],
-    { launch: () => virtual },
-  );
+  let custodian;
+  try {
+    custodian = normalizeDarwinIdentity(initial.custodian);
+    need(
+      initial.candidateSha === candidate &&
+        initial.caseId === caseId &&
+        initial.stage === 1 &&
+        initial.helperSha256 === helperHash &&
+        initial.policySha256 === policyHash &&
+        initial.asid > 0 &&
+        custodian.asid !== initial.asid,
+    );
+    virtual.pid = initial.owner.pid;
+    running = openSession(
+      root,
+      "exec",
+      [root + `/evidence/${caseId}.sb`, root + "/build/helper", "fault"],
+      { launch: () => virtual },
+    );
+  } catch (error) {
+    throw rejectAdmission(error);
+  }
+  if (payloadExit) {
+    virtual.stdout.end();
+    virtual.stderr.end();
+    virtual.emit("close", payloadExit.code, payloadExit.signal);
+  }
   let faulted = false,
     finalized = false,
+    emergency = false,
     admission;
   const witness = async (record, finished = false) => {
     const { stdout } = await execute(
@@ -277,6 +338,69 @@ export async function openDarwinFaultDomain(
     need(verifier.pid !== custodian.pid && verifier.asid !== initial.asid);
     return value;
   };
+  const retire = async (recovering = false) => {
+    need(!emergency);
+    const record = await rpc(recovering ? "recover" : "retire");
+    const fields = [
+      "candidateSha",
+      "caseId",
+      "asid",
+      "helperSha256",
+      "policySha256",
+    ];
+    need(
+      record.stage === 5 &&
+        record.emergency === false &&
+        fields.every((field) => record[field] === initial[field]) &&
+        [
+          "pid",
+          "auid",
+          "uid",
+          "gid",
+          "ruid",
+          "rgid",
+          "svuid",
+          "svgid",
+          "asid",
+          "startSeconds",
+          "startMicroseconds",
+        ].every((field) => record.owner[field] === initial.owner[field]) &&
+        sameDarwinIdentity(record.custodian, custodian),
+    );
+    const fresh = await witness(record);
+    // Failure stays terminal. Recovery drains the original pipes and proves the
+    // original domain; it never repeats payload work or a consumed finish.
+    if (!recovering)
+      await running.finish(caseId === "cancel" ? "SIGTERM" : "SIGKILL");
+    running.closeInput();
+    const final = await rpc("close");
+    need(
+      final.stage === 6 &&
+        [
+          ...fields,
+          "intentSha256",
+          "custodian",
+          "owner",
+          "descendant",
+          "members",
+          "emergency",
+        ].every(
+          (field) =>
+            JSON.stringify(final[field]) === JSON.stringify(record[field]),
+        ),
+    );
+    await settle();
+    finalized = true;
+    const settled = await witness(final, true);
+    return {
+      complete: true,
+      independent: true,
+      nonEmergency: true,
+      record,
+      fresh,
+      settled,
+    };
+  };
   return {
     running: {
       ...running,
@@ -291,7 +415,7 @@ export async function openDarwinFaultDomain(
     parentPid: custodian.pid,
     helper,
     policyHash,
-    initial,
+    initial: structuredClone(initial),
     inspect: async (_root, operation, ...args) => {
       if (operation === "files") return rpc("files");
       if (operation === "cancel" || operation === "retire") {
@@ -303,13 +427,7 @@ export async function openDarwinFaultDomain(
         const result = await rpc("fault");
         faulted = true;
         // Drain final original payload output before closing its virtual stdio.
-        virtual.stdout.end();
-        virtual.stderr.end();
-        virtual.emit(
-          "close",
-          null,
-          caseId === "cancel" ? "SIGTERM" : "SIGKILL",
-        );
+        closePayload(null, caseId === "cancel" ? "SIGTERM" : "SIGKILL");
         return result;
       }
       return rpc(
@@ -342,33 +460,11 @@ export async function openDarwinFaultDomain(
       );
       return record;
     },
-    retire: async () => {
-      const record = await rpc("retire");
-      need(
-        record.stage === 5 &&
-          record.candidateSha === candidate &&
-          record.caseId === caseId &&
-          sameDarwinIdentity(record.custodian, custodian),
-      );
-      const fresh = await witness(record);
-      await running.finish(caseId === "cancel" ? "SIGTERM" : "SIGKILL");
-      running.closeInput();
-      const final = await rpc("close");
-      need(final.stage === 6);
-      await settle();
-      finalized = true;
-      const settled = await witness(final, true);
-      return {
-        complete: true,
-        independent: true,
-        nonEmergency: true,
-        record,
-        fresh,
-        settled,
-      };
-    },
+    retire: () => retire(),
+    recover: () => retire(true),
     abort: async () => {
       if (finalized) return;
+      emergency = true;
       await rpc("emergency");
       await rpc("close");
       await settle();

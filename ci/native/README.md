@@ -3120,6 +3120,40 @@ launch and independent retirement of both original faults while all eight earlie
 capabilities remain passing.
 Portable classification and caller coverage supply no native acceptance.
 
+The live inherited slot remains a technical blocker. The pinned public XNU
+`ipc_task_init` copies it on fork; `task_set_special_port` refuses overwriting a
+valid slot, and `ipc_task_reset` does not clear it. No supported confined launch
+or endpoint ownership has been established. The smallest missing authority fact
+is a public-contract-supported launch with absent authority, or an independently
+identified endpoint with proved confinement and ownership. No unidentified
+endpoint is contacted, and successful unrelated setters cannot discharge this
+requirement. The original live-right refusal and all eight earlier capability
+obligations remain owned.
+
+Failure settlement corrects two separate source defects: acquired domain pipes
+and the direct child previously lived only in `domain_start` locals, and an
+unexpected child exit never reached the payload protocol. Custody now retains
+each acquired endpoint and the original direct child before later operations
+can fail. Before gate release, EOF and checked bounded reaping settle that
+direct child without a numeric-PID signal. Possible gate release is recorded
+before the write; it cannot be inferred absent from a failed write. Partial or
+unverified acquisition retains uncertainty, and the JavaScript admission error
+retains the original acquisition while closing its input.
+
+Once the original audit pin and birth are held, an unexpected original exit
+drains its original diagnostics and reaches the payload protocol promptly. A
+separate `recover` fences further work, reaps the direct child and uses the
+existing complete census, exact-birth checks and journal-before-signal ordering.
+The same 32-pass retirement bound and 20-second helper backstop remain in force;
+backstop termination cannot supply successful proof. Fresh independent held and
+closed-domain verification is required before cleanup can pass. Recovery can
+finish an already empty held domain after a lost finish, without repeating
+payload commands or finish. The failed scenario remains failed even when its
+cleanup is independently proved. This settlement ordering is a source-supported
+candidate, not proof of native retirement or a remedy for inherited authority.
+Version-2 fault receipts pin emergency intervention before its effects; both
+independent verifiers refuse that marker. Legacy receipt layouts are not adopted.
+
 After each acknowledged fault, the root holder fences admissions and recovers
 the complete held session through the shared `custody.h` all-UID census. Every
 new member is journaled before a full audit-token/birth-checked signal. Stale

@@ -48,6 +48,7 @@ static pid_t bundle_child = -1;
 static int fault_gate[2] = {-1, -1}, fault_ack[2] = {-1, -1};
 static pid_t fault_child = -1;
 static bool fault_release_possible;
+static void settle_domain(void);
 static void remember(const char *operation, const char *domain, int value) {
   if (!failed_operation) { failed_operation = operation; failed_domain = domain; failed_value = value; }
 }
@@ -126,6 +127,7 @@ static void failure(int code) {
   if (prerequisite_mode) settle_prerequisite();
   settle_bundle();
   settle_fault();
+  settle_domain();
   fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",
     failed_operation ? failed_operation : "helper-invariant", failed_domain ? failed_domain : "invariant",
     failed_operation ? failed_value : 0, admitted_effects ? "possible" : "none",

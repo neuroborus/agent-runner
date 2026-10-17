@@ -244,6 +244,19 @@ authority refusal. The custody caller fixture forwards fragmented raw lifecycle
 and malformed metadata while preserving the original authority failure and separate
 release cause, including when the raw diagnostic sink throws. These portable
 fixtures run no native compiler or macOS tool and add no slow-tier assignment.
+
+The original fault transport matrix also injects pre-exec live-authority refusal
+for both fault roles. An original exit delivered alongside admission must retain
+its diagnostic and reach separate recovery without payload release, fault
+replay or finish replay. Independent held/closed proof permits cleanup only;
+the scenario remains failed. Changed original births, incomplete census and
+missing custodian retirement retain uncertainty. Actual-body fixtures execute
+partial pipe/direct-child settlement and the original domain retirement loop:
+unreleased EOF, release uncertainty, failed close/reap, bounded cancellation,
+unknown zombies, replaced owners and alarm exit cannot establish retirement.
+These tests retain the existing fast and native-harness assignments and all
+future check assignments. They establish no supported confinement of the live
+inherited slot and no native cleanup result.
 Matching macOS CI must resolve the observed live send right (`type=0x10000/query=0`)
 without weakening admission and verify functional
 recovery and complete independent retirement.

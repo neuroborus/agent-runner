@@ -2378,7 +2378,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       "  if (!child) {",
       source.indexOf("static void domain_start("),
     ),
-    end = source.indexOf("\n  }\n  posix_check(close(ready[1])", start);
+    end = source.indexOf("\n  }\n  domain_child = child;", start);
   assert.ok(sanitation && start > 0 && end > start);
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
@@ -3010,7 +3010,10 @@ test("Darwin fault start initializes only its exclusive new lease and refuses un
     source.indexOf("static void domain_start("),
   );
   assert.ok(start > 0);
-  const body = source.slice(start, source.indexOf("  int in[2]", start));
+  const body = source.slice(
+    start,
+    source.indexOf("  domain_controller = getpid();", start),
+  );
   const same = /static bool same_file_stat\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
     helper,
   )?.[1];
@@ -3443,6 +3446,244 @@ test("Darwin fault audit sessions retain exact create/read failures before valid
       calls,
       fault === "create" ? ["create"] : ["create", "read"],
     );
+  }
+});
+
+test("Darwin fault acquisition retains partial pipes and the unreleased direct child through failure", async () => {
+  const source = await readFile(
+      new URL("feasibility-domain.h", SOURCE),
+      "utf8",
+    ),
+    helper = await readFile(new URL("feasibility-helper.c", SOURCE), "utf8"),
+    body = /static void settle_domain\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
+  assert.match(helper, /settle_fault\(\);\s*settle_domain\(\)/u);
+  assert.ok(
+    source.indexOf("domain_child = child;") <
+      source.indexOf("domain_close(&ready[1])"),
+  );
+  assert.ok(
+    source.indexOf("domain_released = true;") <
+      source.indexOf('write(release[1], "P"'),
+  );
+  const script = new Script(
+    `() => {${body
+      .replace(/\b(?:unsigned|int|pid_t) /gu, "let ")
+      .replace("&domain_status", "{set value(v) {domain_status = v;}}")
+      .replaceAll("(void)", "")}}`,
+  );
+  for (const fault of [
+    null,
+    "partial",
+    "child",
+    "released",
+    "wait",
+    "deadline",
+    "eintr",
+    "close",
+  ]) {
+    const events = [],
+      diagnostics = [],
+      pipes = Array.from({ length: 5 }, (_, at) => [10 + at * 2, 11 + at * 2]);
+    if (fault === "partial")
+      pipes.splice(1, 4, ...Array.from({ length: 4 }, () => [-1, -1]));
+    let waits = 0;
+    const context = {
+      domain_controller: 9000,
+      domain_child: 42,
+      domain_status: 0,
+      domain_pipes: pipes,
+      domain_released: fault === "released",
+      getpid: () => (fault === "child" ? 42 : 9000),
+      errno: fault === "eintr" ? 4 : 10,
+      EINTR: 4,
+      WNOHANG: 1,
+      NULL: null,
+      close(fd) {
+        events.push(fd);
+        return fault === "close" && fd === 10 ? -1 : 0;
+      },
+      waitpid(pid, status) {
+        assert.equal(pid, 42);
+        status.value = 0;
+        waits++;
+        if (fault === "wait" || (fault === "eintr" && waits === 1)) return -1;
+        return fault === "deadline" ? 0 : 42;
+      },
+      poll: () => 0,
+      remember_cleanup: (...value) => diagnostics.push(value),
+    };
+    script.runInNewContext(context)();
+    assert.equal(
+      events.length,
+      fault === "child" ? 0 : fault === "partial" ? 2 : 10,
+    );
+    assert.equal(
+      waits,
+      ["child", "released"].includes(fault)
+        ? 0
+        : fault === "deadline"
+          ? 200
+          : fault === "eintr"
+            ? 2
+            : 1,
+    );
+    if (fault !== "child") assert.ok(pipes.flat().every((fd) => fd === -1));
+    assert.equal(
+      context.domain_child === -1,
+      !["child", "released", "wait", "deadline"].includes(fault),
+    );
+    assert.equal(
+      diagnostics.length,
+      ["wait", "deadline", "close"].includes(fault) ? 1 : 0,
+    );
+    if (diagnostics.length)
+      assert.equal(
+        diagnostics[0][0],
+        fault === "close" ? "fault-close" : "fault-wait",
+      );
+  }
+});
+
+test("Darwin fault recovery requires reaping and complete original-domain retirement within the original bound", async () => {
+  const source = await readFile(
+      new URL("feasibility-domain.h", SOURCE),
+      "utf8",
+    ),
+    body = (name) =>
+      new RegExp(
+        `static void ${name}\\(void\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (value) =>
+      value
+        .replace(/struct audit_domain_view /gu, "let ")
+        .replace(/struct identity /gu, "let ")
+        .replace(/\b(?:unsigned|int|pid_t|bool) /gu, "let ")
+        .replaceAll("&domain_status", "{set value(v) {domain_status = v;}}")
+        .replaceAll("(void)", "");
+  const script =
+    new Script(`function domain_reap() {${translate(body("domain_reap"))}}
+    () => {${translate(body("domain_retire"))}}`);
+  const verification =
+    /static void domain_verify\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)[1];
+  const gate = new Script(
+    verification.slice(0, verification.indexOf("domain_policy_check();")),
+  );
+  for (const closed of [false, true]) {
+    assert.throws(() =>
+      gate.runInNewContext({
+        closed,
+        nonce: "nonce",
+        pin: "pin",
+        domain_record: { stage: closed ? 6 : 5, emergency: 1 },
+        domain_open() {},
+        need(ok) {
+          assert.ok(ok);
+        },
+      }),
+    );
+  }
+  const emergency = source.slice(
+    source.indexOf('!strcmp(fields[1], "emergency")'),
+  );
+  assert.ok(
+    emergency.indexOf("domain_record.emergency = 1") <
+      emergency.indexOf("domain_store(3)"),
+  );
+  for (const fault of [
+    null,
+    "live",
+    "zombie",
+    "unreaped",
+    "replaced",
+    "backstop",
+    "cancel",
+    "pin",
+  ]) {
+    const events = [],
+      owner = {
+        token: { val: [90001, 90001, 90002, 90001, 90002, 42, 55, 1] },
+      };
+    let stopped = fault !== "live",
+      scans = 0;
+    const context = {
+      domain_record: { stage: 3, uid: 90001, asid: 55, members: 0, known: [] },
+      domain_child: 42,
+      domain_status: 0,
+      domain_pin: fault === "pin" ? 0 : 200,
+      domain_fenced: false,
+      MACH_PORT_NULL: 0,
+      SIGALRM: 14,
+      SIGKILL: 9,
+      NULL: null,
+      errno: 0,
+      EINTR: 4,
+      WNOHANG: 1,
+      waitpid(_pid, output) {
+        output.value = fault === "backstop" ? 14 : 9;
+        return stopped && fault !== "unreaped" ? 42 : 0;
+      },
+      WIFSIGNALED: () => true,
+      WTERMSIG: (status) => status,
+      need(ok) {
+        if (!ok) throw new Error("Incomplete domain");
+      },
+      invariant(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      domain_check(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      domain_store(stage) {
+        context.domain_record.stage = stage;
+        events.push(`store:${stage}`);
+      },
+      audit_census(uid, asid) {
+        assert.deepEqual([uid, asid], [90001, 55]);
+        scans++;
+        return {
+          nl: stopped ? 0 : 1,
+          nd: fault === "zombie" ? 1 : 0,
+          live: [owner],
+          dead: [{}],
+        };
+      },
+      domain_recheck() {
+        if (fault === "replaced") throw new Error("Replaced owner");
+      },
+      domain_birth_same: () => false,
+      domain_known(value) {
+        context.domain_record.known.push(value);
+        context.domain_record.members++;
+      },
+      fault_inspect: () => owner,
+      audit_identity_same: (a, b) => a === b,
+      signal_identity(value, signal) {
+        assert.equal(value, owner);
+        assert.equal(signal, 9);
+        assert.equal(events.at(-1), "store:4");
+        stopped = true;
+        events.push("signal");
+      },
+      poll() {
+        if (fault === "cancel") throw new Error("Canceled recovery");
+        return 0;
+      },
+    };
+    if (fault === "cancel") stopped = false;
+    const retire = script.runInNewContext(context);
+    if (fault && fault !== "live") {
+      assert.throws(retire);
+      assert.ok(!events.includes("store:5"), fault);
+      if (fault === "unreaped") assert.equal(scans, 32);
+    } else {
+      retire();
+      assert.equal(context.domain_child, -1);
+      assert.equal(events.at(-1), "store:5");
+      assert.equal(scans, fault === "live" ? 2 : 1);
+    }
   }
 });
 
