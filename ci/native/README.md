@@ -448,6 +448,22 @@ and lengths, sampled file/symlink predicates, stat identity, ownership, link
 count, size, timestamps and the applicable size maximum. Predicates without a
 sampled boolean remain null. Rejected contents remain unread;
 diagnostic construction or sink failure preserves the original rejection.
+The native `custody.h` reader separately observes only its failed initial file
+admission. Each original predicate runs once in its original short-circuit order,
+including the nested single-link/installed-input branch. Unsampled predicates
+use `-1`; uncalled `fstat` uses `-2`, distinct from native failure `-1`.
+Fixed stderr records carry the complete requested path as hex with its exact
+byte length, expected group/mode, installed flag, limit and sampled results.
+Successful canonicalization/equality already bounds that path by `PATH_MAX`;
+diagnostics add no admission condition or truncation. Metadata comes only from
+successful original `fstat`, with signed device/size and full-width identities,
+ownership, links and mode. Pin length appears only when its predicate ran.
+Diagnostic writes and flushing restore the original errno, including zero,
+before the unchanged refusal/exit 126, even when output fails. Success emits
+no new diagnostics. There is no additional filesystem observation, acquisition,
+command or replay, and no change to later reading, stability, hashing or closing.
+Portable fixtures prove these observation boundaries, not the failed native
+filename/predicate, a remedy, successful selected-SDK queries or native readiness.
 The sealed build entry separately samples the original SDK guard in its existing
 short-circuit order: native realpath result and errno, exact path equality,
 lstat result and errno, directory kind, root owner and group/other write bits.

@@ -142,8 +142,18 @@ proof; successful cleanup never publishes preparation.
 The same fast build-source suite executes the original SDK admission predicate
 with injected realpath/lstat and sampled metadata. It covers each short-circuit
 stop, unknown later terms, single native-call evaluation, successful unchanged
-admission and failed diagnostic writes without changing the guard errno. The
-same actual-body fixture executes helper admission before those predicates,
+admission and failed diagnostic writes without changing the guard errno.
+The same suite executes the complete protected-file reader body, including its
+original hex encoder and refusal path, with injected native calls. It protects
+initial admission order/counts, nested installed-input branches, inaccessible
+metadata on open/stat failure, explicit unsampled states and errno-zero refusal.
+Special path bytes and near-`PATH_MAX` lengths retain complete hex encoding;
+BigInt metadata and format-aware output assertions preserve signed and full-width
+values. Failed diagnostic writes/flushes retain refusal, successful reads stay
+silent, later denials remain unchanged, and output stays within existing bounds.
+These fixtures add no harness or slow-tier assignment and establish no native
+filename, failed predicate, selected-SDK success, retirement or acceptance proof.
+The same actual-body fixture executes helper admission before those predicates,
 joining fresh audit-session creation, birth announcement and the original `P`
 barrier before protected tool checks. The raw build transport injects the
 original SDK refusal for reviewed and experiment purposes, preserving the exact

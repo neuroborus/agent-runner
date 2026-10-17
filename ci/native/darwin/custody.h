@@ -131,11 +131,35 @@ static unsigned char *read_file(const char *name, gid_t gid, mode_t mode,
   char canonical[PATH_MAX], hash[65]; unsigned char sum[CC_SHA256_DIGEST_LENGTH];
   need(realpath(name, canonical) && !strcmp(name, canonical));
   int fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
-  need(fd >= 0 && !fstat(fd, identity) && S_ISREG(identity->st_mode) &&
-       identity->st_uid == 0 && identity->st_gid == gid &&
-       (identity->st_nlink == 1 || (installed && installed_input(name, identity))) &&
-       (identity->st_mode & 07777) == mode && identity->st_size > 0 &&
-       (uint64_t)identity->st_size <= limit && strlen(pin) == 64);
+  /* Sample only evaluated terms; -2 distinguishes an uncalled fstat from -1. */
+  int file_fd = -1, file_stat = -2, file_kind = -1, file_owner = -1, file_group = -1;
+  int file_single = -1, file_installed = -1, file_eligible = -1, file_mode = -1;
+  int file_positive = -1, file_limit = -1, file_pin = -1; size_t pin_length = 0;
+  bool file_ok = (file_fd = fd >= 0) && (file_stat = fstat(fd, identity), !file_stat) &&
+       (file_kind = S_ISREG(identity->st_mode)) && (file_owner = identity->st_uid == 0) &&
+       (file_group = identity->st_gid == gid) &&
+       ((file_single = identity->st_nlink == 1) ||
+        ((file_installed = !!installed) && (file_eligible = installed_input(name, identity)))) &&
+       (file_mode = (identity->st_mode & 07777) == mode) && (file_positive = identity->st_size > 0) &&
+       (file_limit = (uint64_t)identity->st_size <= limit) && (pin_length = strlen(pin), file_pin = pin_length == 64);
+  if (!file_ok) {
+    int file_error = errno;
+    /* Successful canonicalization/equality already bounds the complete name. */
+    size_t path_length = strlen(name); char path_hex[2*PATH_MAX] = {0};
+    hex((const unsigned char *)name, path_length, path_hex);
+    fprintf(stderr, "native-darwin-file: path-length=%zu path-hex=%s expected-gid=%ju expected-mode=%#jo installed=%d limit=%zu errno=%d\n",
+      path_length, path_hex, (uintmax_t)gid, (uintmax_t)mode, installed, limit, file_error);
+    fprintf(stderr, "native-darwin-file-predicates: fd=%d fstat=%d kind=%d owner=%d group=%d single=%d installed=%d eligible=%d mode=%d positive=%d limit=%d pin=%d\n",
+      file_fd, file_stat, file_kind, file_owner, file_group, file_single, file_installed,
+      file_eligible, file_mode, file_positive, file_limit, file_pin);
+    if (file_stat == 0)
+      fprintf(stderr, "native-darwin-file-metadata: dev=%jd inode=%ju uid=%ju gid=%ju links=%ju mode=%#jo size=%jd\n",
+        (intmax_t)identity->st_dev, (uintmax_t)identity->st_ino, (uintmax_t)identity->st_uid,
+        (uintmax_t)identity->st_gid, (uintmax_t)identity->st_nlink, (uintmax_t)identity->st_mode, (intmax_t)identity->st_size);
+    if (file_pin != -1) fprintf(stderr, "native-darwin-file-pin: length=%zu\n", pin_length);
+    fflush(stderr); errno = file_error;
+  }
+  need(file_ok);
   size_t size = (size_t)identity->st_size, offset = 0;
   unsigned char *bytes = calloc(size + 1, 1); need(bytes != NULL);
   while (offset < size) {

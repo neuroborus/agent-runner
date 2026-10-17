@@ -208,6 +208,467 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
   }
 });
 
+test("Darwin protected-file admission observes original short circuits without changing reads or refusal", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
+    body =
+      /static unsigned char \*read_file\([\s\S]*?\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1],
+    hexBody = /static void hex\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)?.[1],
+    guardBody = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body && hexBody && guardBody);
+  // Translate C declarations, casts and pointer outputs, retaining the complete
+  // admission, diagnostic, read/stability/hash/close and refusal bodies.
+  const script = new Script(`
+    function hex(data, n, out) {${hexBody
+      .replace("size_t i", "let i")
+      .replace("out + 2*i,", "out, 2*i,")}}
+    function guard(ok, file, line) {${guardBody.replace("int error", "let error")}}
+    function reader(name, gid, mode, limit, pin, identity, installed) {${body
+      .replace(
+        "char canonical[PATH_MAX], hash[65]; unsigned char sum[CC_SHA256_DIGEST_LENGTH];",
+        "const canonical = {}, hash = Buffer.alloc(65), sum = Buffer.alloc(32);",
+      )
+      .replace(
+        "char path_hex[2*PATH_MAX] = {0};",
+        "const path_hex = Buffer.alloc(2*PATH_MAX);",
+      )
+      .replace("unsigned char *bytes", "let bytes")
+      .replace(
+        "unsigned char extra; struct stat after, named;",
+        "const extra = {}, after = {}, named = {};",
+      )
+      .replace(/\b(?:int|bool|size_t|ssize_t) /gu, "let ")
+      .replace(
+        /\((?:const unsigned char \*|uint64_t|uintmax_t|intmax_t|size_t|CC_LONG)\)/gu,
+        "",
+      )
+      .replaceAll("->", ".")
+      .replace("offset = 0;", "offset = 0n;")
+      .replace("size + 1", "size + 1n")
+      .replaceAll("bytes + offset", "({ bytes, offset })")
+      .replace(/&(extra|after|named)\b/gu, "$1")
+      .replaceAll("07777", "0o7777n")}}
+    ({reader, guard});
+  `);
+  const payload = Buffer.from("abc"),
+    special = Buffer.concat([
+      Buffer.from("/fixture/a \t\n\r\"'\\"),
+      Buffer.from([0x80, 0xff]),
+    ]),
+    nearBound = Buffer.concat([Buffer.from("/"), Buffer.alloc(1022, 0xff)]);
+  const stops = {
+    open: 0,
+    stat: 1,
+    kind: 2,
+    owner: 3,
+    group: 4,
+    links: 7,
+    "installed-disabled": 6,
+    "installed-refused": 7,
+    "installed-inner": 7,
+    mode: 8,
+    zero: 9,
+    negative: 9,
+    ceiling: 10,
+    pin: 11,
+    "pin-long": 11,
+    write: 8,
+    stale: 8,
+    "path-bytes": 8,
+    "path-bound": 8,
+    "full-width": 3,
+    "full-width-positive": 10,
+  };
+  for (const fault of [
+    ...Object.keys(stops),
+    null,
+    "single-installed",
+    "multi-installed",
+    "at-limit",
+    "pin-mismatch",
+    "close",
+  ]) {
+    const calls = [],
+      samples = [],
+      records = [];
+    const multi = [
+        "links",
+        "installed-disabled",
+        "installed-refused",
+        "installed-inner",
+        "multi-installed",
+      ].includes(fault),
+      installed =
+        (multi && fault !== "installed-disabled") ||
+        fault === "single-installed"
+          ? 1
+          : 0,
+      name =
+        fault === "path-bytes"
+          ? special
+          : fault === "path-bound"
+            ? nearBound
+            : Buffer.from("/fixture/input"),
+      pin = Buffer.from(
+        fault === "pin"
+          ? "a".repeat(63)
+          : fault === "pin-long"
+            ? "a".repeat(65)
+            : fault === "pin-mismatch"
+              ? "a".repeat(64)
+              : digest(payload),
+      );
+    const metadata = {
+      st_dev: 1n,
+      st_ino: 42n,
+      st_uid: fault === "owner" ? 501n : 0n,
+      st_gid: fault === "group" ? 21n : 20n,
+      st_mode:
+        fault === "kind"
+          ? 0o40400n
+          : ["mode", "write", "stale", "path-bytes", "path-bound"].includes(
+                fault,
+              )
+            ? 0o100600n
+            : 0o100400n,
+      st_nlink: fault === "links" ? 0n : multi ? 2n : 1n,
+      st_size:
+        fault === "zero"
+          ? 0n
+          : fault === "negative"
+            ? -9223372036854775808n
+            : fault === "ceiling"
+              ? 17n
+              : 3n,
+    };
+    let gid = 20n,
+      mode = 0o400n,
+      limit = fault === "at-limit" ? 3n : 16n;
+    if (fault === "full-width") {
+      Object.assign(metadata, {
+        st_dev: -2147483648n,
+        st_ino: 18446744073709551615n,
+        st_uid: 4294967295n,
+        st_gid: 4294967295n,
+        st_nlink: 65535n,
+        st_mode: 0o100777n,
+        st_size: -9223372036854775808n,
+      });
+      gid = 4294967295n;
+      mode = 0o7777n;
+      limit = 18446744073709551615n;
+    }
+    if (fault === "full-width-positive") {
+      metadata.st_dev = 2147483647n;
+      metadata.st_ino = 9007199254740993n;
+      metadata.st_size = 9223372036854775807n;
+      limit = 9007199254740993n;
+    }
+    let initialized = false,
+      sampling = true,
+      guards = 0,
+      flushes = 0,
+      refusedErrno,
+      attempted = "";
+    const identity = new Proxy(
+      {},
+      {
+        get(_target, key) {
+          assert.ok(initialized, `uninitialized metadata: ${String(key)}`);
+          if (sampling) samples.push(key);
+          return metadata[key];
+        },
+      },
+    );
+    const observe = (operation) => {
+      calls.push(operation);
+      if (sampling) samples.push(operation);
+    };
+    const cString = (value) =>
+      value.subarray(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0));
+    const context = {
+      Buffer,
+      PATH_MAX: 1024,
+      NULL: null,
+      errno: 7,
+      stderr: {},
+      O_RDONLY: 1,
+      O_NOFOLLOW: 2,
+      O_NONBLOCK: 4,
+      O_CLOEXEC: 8,
+      realpath(input, output) {
+        observe("realpath");
+        assert.equal(input, name);
+        output.value = input;
+        return output;
+      },
+      strcmp(a, b) {
+        observe(a === name ? "equal" : "hash-equal");
+        return Buffer.compare(cString(a), b.value ?? b);
+      },
+      open(input, flags) {
+        observe("open");
+        assert.equal(input, name);
+        assert.equal(flags, 15);
+        context.errno = fault === "open" ? 13 : 11;
+        return fault === "open" ? -1 : 7;
+      },
+      fstat(fd, output) {
+        observe("fstat");
+        assert.equal(fd, 7);
+        context.errno = fault === "stat" ? 5 : fault === "stale" ? 44 : 0;
+        if (fault === "stat") return -1;
+        if (output === identity) initialized = true;
+        else Object.assign(output, metadata);
+        return 0;
+      },
+      S_ISREG(value) {
+        observe("kind");
+        return (value & 0o170000n) === 0o100000n;
+      },
+      installed_input(input, value) {
+        observe("installed");
+        assert.equal(input, name);
+        assert.ok(value === identity || value.st_ino === metadata.st_ino);
+        context.errno = 17;
+        if (fault === "installed-inner") context.need(false);
+        return ["links", "installed-refused"].includes(fault) ? 0 : 1;
+      },
+      strlen(value) {
+        if (value === name) sampling = false;
+        else {
+          assert.equal(value, pin);
+          observe("pin-length");
+        }
+        return value.length;
+      },
+      sprintf(output, offset, format, byte) {
+        assert.equal(format, "%02x");
+        assert.ok(offset + 2 < output.length);
+        output.write(byte.toString(16).padStart(2, "0"), offset, "ascii");
+        output[offset + 2] = 0;
+        context.errno = 97;
+        return 2;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, context.stderr);
+        records.push({ format, values });
+        let at = 0;
+        attempted += format.replace(
+          /%(#?)(ju|jd|jo|zu|d|s|u)/gu,
+          (_token, alternate, type) => {
+            const value = values[at++];
+            if (type === "s")
+              return Buffer.isBuffer(value) ? cString(value).toString() : value;
+            const integer =
+              type === "jd" || type === "d"
+                ? BigInt.asIntN(type === "d" ? 32 : 64, BigInt(value))
+                : BigInt.asUintN(type === "u" ? 32 : 64, BigInt(value));
+            const text = integer.toString(type === "jo" ? 8 : 10);
+            return alternate && integer !== 0n ? "0" + text : text;
+          },
+        );
+        assert.equal(at, values.length);
+        context.errno = 99;
+        return ["write", "stale"].includes(fault) ? -1 : 1;
+      },
+      fflush() {
+        flushes++;
+        context.errno = 98;
+        return ["write", "stale"].includes(fault) ? -1 : 0;
+      },
+      _exit(code) {
+        throw Object.assign(new Error("refusal"), {
+          code,
+          errno: refusedErrno,
+        });
+      },
+      calloc(size, count) {
+        observe("allocate");
+        assert.equal(size, 4n);
+        assert.equal(count, 1);
+        return Buffer.alloc(4);
+      },
+      read(fd, output, count) {
+        observe("read");
+        assert.equal(fd, 7);
+        if (output.bytes) {
+          assert.equal(output.offset, 0n);
+          assert.equal(count, 3n);
+          payload.copy(output.bytes);
+          return 3n;
+        }
+        assert.equal(count, 1);
+        return 0n;
+      },
+      lstat(input, output) {
+        observe("lstat");
+        assert.equal(input, name);
+        Object.assign(output, metadata);
+        return 0;
+      },
+      file_stat_same() {
+        observe("same");
+        return true;
+      },
+      CC_SHA256(bytes, size, sum) {
+        observe("hash");
+        assert.equal(size, 3n);
+        assert.deepEqual(bytes.subarray(0, 3), payload);
+        createHash("sha256").update(payload).digest().copy(sum);
+        return sum;
+      },
+      sizeof: (value) => value.length,
+      close(fd) {
+        observe("close");
+        assert.equal(fd, 7);
+        return fault === "close" ? -1 : 0;
+      },
+    };
+    const { reader, guard } = script.runInNewContext(context);
+    context.need = (ok) => {
+      if (++guards === 2) sampling = false;
+      observe("guard");
+      if (!ok) refusedErrno = context.errno;
+      guard(ok, "custody.h", 1);
+    };
+    const run = () => reader(name, gid, mode, limit, pin, identity, installed),
+      admissionFailure = Object.hasOwn(stops, fault),
+      denied = admissionFailure || ["pin-mismatch", "close"].includes(fault);
+    if (denied) assert.throws(run, { code: 126 });
+    else assert.deepEqual(run().subarray(0, 3), payload);
+    const end = stops[fault] ?? 11,
+      expectedSamples = ["realpath", "equal", "guard", "open"];
+    if (end > 0) expectedSamples.push("fstat");
+    if (end > 1) expectedSamples.push("st_mode", "kind");
+    if (end > 2) expectedSamples.push("st_uid");
+    if (end > 3) expectedSamples.push("st_gid");
+    if (end > 4) expectedSamples.push("st_nlink");
+    if (multi && installed) expectedSamples.push("installed");
+    if (end >= 8) expectedSamples.push("st_mode");
+    if (end >= 9) expectedSamples.push("st_size");
+    if (end >= 10) expectedSamples.push("st_size");
+    if (end >= 11) expectedSamples.push("pin-length");
+    assert.deepEqual(samples, expectedSamples, String(fault));
+    const diagnostics = records.filter(({ format }) =>
+      format.startsWith("native-darwin-file"),
+    );
+    if (admissionFailure && fault !== "installed-inner") {
+      const error =
+        fault === "open"
+          ? 13
+          : fault === "stat"
+            ? 5
+            : fault === "stale"
+              ? 44
+              : ["links", "installed-refused"].includes(fault)
+                ? 17
+                : 0;
+      assert.equal(refusedErrno, error, String(fault));
+      const expected = [1, 0, 1, 1, 1, 1, -1, -1, 1, 1, 1, 1];
+      expected[end] = end === 1 ? -1 : 0;
+      expected.fill(-1, end + 1);
+      if (end === 0) expected[1] = -2;
+      if (multi) {
+        expected[5] = 0;
+        expected[6] = installed;
+      }
+      assert.deepEqual(
+        diagnostics[1].values.map((value) =>
+          typeof value === "boolean" ? +value : value,
+        ),
+        expected,
+      );
+      assert.match(
+        attempted,
+        new RegExp(
+          `path-length=${name.length} path-hex=${name.toString("hex")} `,
+        ),
+      );
+      assert.ok(
+        attempted.includes(
+          `expected-gid=${gid} expected-mode=0${mode.toString(8)} installed=${installed} limit=${limit} errno=${error}\n`,
+        ),
+      );
+      const stat = diagnostics.find(({ format }) =>
+        format.startsWith("native-darwin-file-metadata:"),
+      );
+      assert.equal(Boolean(stat), !["open", "stat"].includes(fault));
+      if (stat)
+        assert.ok(
+          attempted.includes(
+            `dev=${metadata.st_dev} inode=${metadata.st_ino} uid=${metadata.st_uid} gid=${metadata.st_gid} links=${metadata.st_nlink} mode=0${metadata.st_mode.toString(8)} size=${metadata.st_size}\n`,
+          ),
+        );
+      assert.equal(
+        diagnostics.some(({ format }) =>
+          format.startsWith("native-darwin-file-pin:"),
+        ),
+        ["pin", "pin-long"].includes(fault),
+      );
+      if (["pin", "pin-long"].includes(fault))
+        assert.ok(
+          attempted.includes(`native-darwin-file-pin: length=${pin.length}\n`),
+        );
+      assert.equal(
+        diagnostics.length,
+        2 + (stat ? 1 : 0) + (end === 11 ? 1 : 0),
+      );
+      assert.deepEqual(calls, [
+        ...expectedSamples.filter((item) => !item.startsWith("st_")),
+        "guard",
+      ]);
+    } else {
+      assert.deepEqual(diagnostics, []);
+      if (fault === "installed-inner") {
+        assert.equal(refusedErrno, 17);
+        assert.deepEqual(calls, [
+          ...expectedSamples.filter((item) => !item.startsWith("st_")),
+          "guard",
+        ]);
+      } else
+        assert.deepEqual(
+          calls.slice(
+            expectedSamples.filter((item) => !item.startsWith("st_")).length,
+          ),
+          [
+            "guard",
+            "allocate",
+            "guard",
+            "read",
+            "guard",
+            "read",
+            "fstat",
+            "lstat",
+            "same",
+            "same",
+            ...(multi ? ["installed"] : []),
+            "guard",
+            "hash",
+            "guard",
+            "hash-equal",
+            ...(fault === "pin-mismatch" ? [] : ["close"]),
+            "guard",
+          ],
+        );
+    }
+    assert.equal(
+      records.filter(({ format }) => format.startsWith("native-darwin-guard:"))
+        .length,
+      denied ? 1 : 0,
+    );
+    assert.equal(records.length, diagnostics.length + (denied ? 1 : 0));
+    assert.equal(flushes, diagnostics.length ? 2 : denied ? 1 : 0);
+    assert.ok(
+      Buffer.byteLength(attempted) < 65536,
+      "existing diagnostic capture bound",
+    );
+  }
+});
+
 test("Darwin selected SDK native admission rejects ACL, identity and settings drift before query or compilation", async () => {
   const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
     start = source.indexOf("  ancestors(sdk);"),

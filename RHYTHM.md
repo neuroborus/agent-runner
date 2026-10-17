@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Observe failed native protected-file admission
+
+Darwin's protected-file reader samples its original admission expression without
+changing predicate order, short circuits or native calls. Failure-only bounded
+stderr records retain complete path bytes, explicit unsampled states and exact
+metadata; diagnostic output restores the original errno before refusal. Later
+reads and successful admission remain unchanged. Portable actual-body coverage
+supplies the missing observation contract, without selecting a native remedy or
+closing independent SDK, authority, retirement or acceptance obligations.
+
 ## 2026-10-17 — Preserve exact Darwin acquisition identities and pre-seal uncertainty
 
 Darwin experiment acquisition and affected snapshots preserve BigInt filesystem
