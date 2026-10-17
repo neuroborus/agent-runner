@@ -7678,13 +7678,23 @@ an unexpected reserved-UID session rejects the view. Known births are independen
 reconciled even after an empty view, so a credential/session escape cannot become
 absence. Enumeration receipts identify their audit-session scope explicitly.
 
+Each census allows three immediate complete attempts. Only `PROC_PIDTBSDINFO`
+with arg=1 returning `0` with captured `ESRCH`, or `A_GETPINFO_ADDR` returning
+`-1/ESRCH`, at either sample discards the whole view and reacquires
+`PROC_ALL_PIDS` with freshly initialized storage. No unreadable PID is skipped;
+there is no sleep or partial result. Every other failure remains terminal, as
+does third-attempt disappearance. Public XNU
+[`proc_info.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/xnu-11417.140.69/bsd/kern/proc_info.c)
+and [`audit_syscalls.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/xnu-11417.140.69/bsd/security/audit/audit_syscalls.c)
+support this list-to-sample lifetime race, not an observed failed-PID history or
+exact hosted-build approval. Portable retry coverage supplies no retirement proof.
+
 Enumeration includes zombies. Private `PROC_PIDTBSDINFO` with arg=1 reads their
 native exited state twice. A zombie contributes no creator only when its PID,
 BSD start identity and credentials match a previously verified member in the
 protected ledger. Unknown or substituted zombies retain exclusion; they are
-never signalled or equated with an empty PID list. A process disappearing during
-inspection is unverifiable for that attempt. Fresh recovery may subsequently
-establish a complete view; uncertainty cannot itself become success.
+never signalled or equated with an empty PID list. A discarded view supplies no
+absence evidence; independent original-owner and domain retirement remain mandatory.
 
 Before signalling, the helper compares the complete current audit token, BSD
 start and saved credentials with the protected target. The private

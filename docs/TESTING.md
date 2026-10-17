@@ -139,6 +139,15 @@ cleanup signal after work cancellation. A lost `finish` reply is never replayed.
 The experiment build caller retains the original error separately from close
 failure and records cleanup success only after fresh original-owner and domain
 proof; successful cleanup never publishes preparation.
+One compact actual-body census fixture injects all four BSD/audit sampling
+points. It proves whole-view discard, fresh complete enumeration/storage,
+zombie visibility, success on the third attempt and deterministic exhaustion
+with the original sampling-stage errno diagnosis.
+Permission, malformed-result, list/PID/duplicate, birth/credential/session and
+live-inspection failures refuse immediately. Neutral records use no native tools,
+delays or new harness. This protects the source-supported lifetime-race handling;
+it proves neither an observed failed-PID history, exact hosted-build approval nor
+independent original-owner/domain retirement.
 The same fast build-source suite executes the original SDK admission predicate
 with injected realpath/lstat and sampled metadata. It covers each short-circuit
 stop, unknown later terms, single native-call evaluation, successful unchanged

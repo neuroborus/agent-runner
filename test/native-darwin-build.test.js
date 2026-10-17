@@ -3507,6 +3507,191 @@ test("experiment PF writes preserve foreign policy and journal each conditional 
   assert.equal(accepts("REMOVED", true), false);
 });
 
+test("Darwin audit census restarts whole views only for exact vanished-process results", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
+    body =
+      /static struct audit_domain_view audit_census\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1];
+  assert.ok(body);
+  // Translate only C storage, types and pointer outputs; retain the full census.
+  const script = new Script(
+    `(uid, asid) => {${body
+      .replace(
+        /struct audit_domain_view view = \{0\}; pid_t pids\[4096\](?: = \{0\})?;/u,
+        "let view = {live: [], dead: [], nl: 0, nd: 0}, pids = Array(4096).fill(0);",
+      )
+      .replace(
+        "struct proc_bsdinfo before, after; auditpinfo_addr_t audit = {.ap_pid = pids[i]}, again = {.ap_pid = pids[i]};",
+        "const before = {}, after = {}, audit = {ap_pid: pids[i]}, again = {ap_pid: pids[i]};",
+      )
+      .replace("struct identity value", "let value")
+      .replaceAll("sizeof(pids)", "16384")
+      .replaceAll("sizeof(pid_t)", "4")
+      .replace(/sizeof\((?:before|after)\)/gu, "BSD_SIZE")
+      .replace(/sizeof\((?:audit|again)\)/gu, "AUDIT_SIZE")
+      .replace(/&(before|after|audit|again)\b/gu, "$1")
+      .replace(/\(unsigned\)/gu, "")
+      .replace(/\b(?:unsigned|int|bool) /gu, "let ")}}`,
+  );
+  const BSD_SIZE = 128,
+    AUDIT_SIZE = 64,
+    ESRCH = 3,
+    uid = 501,
+    asid = 77,
+    scenarios = [
+      {},
+      ...[
+        [1, 0],
+        [2, -1],
+        [3, 0],
+        [4, -1],
+      ].flatMap(([point, result]) =>
+        [1, 2, 3].map((misses) => ({ point, result, misses })),
+      ),
+      ...[
+        [1, 0, 1],
+        [1, -1, ESRCH],
+        [1, BSD_SIZE - 1, ESRCH],
+        [1, 0, 0],
+        [2, -1, 1],
+        [2, 1, ESRCH],
+        [2, -2, ESRCH],
+      ].map(([point, result, error]) => ({
+        point,
+        result,
+        error,
+        misses: 3,
+        hard: true,
+      })),
+      ...[
+        "list",
+        "pid",
+        "duplicate",
+        "birth",
+        "credential",
+        "session",
+        "inspect",
+      ].map((fault) => ({ fault, hard: true })),
+    ];
+  for (const scenario of scenarios) {
+    const { point, result, misses = 0, error = ESRCH, fault, hard } = scenario;
+    const lists = [],
+      inspected = [];
+    let sample = 0,
+      bsdCalls = 0;
+    const record = (pid) => ({
+      pbi_pid: pid,
+      pbi_status: pid % 10 === 2 ? 5 : 2,
+      pbi_start_tvsec: pid + 100,
+      pbi_start_tvusec: 42,
+      pbi_uid: uid,
+      pbi_gid: uid,
+      pbi_ruid: uid,
+      pbi_rgid: uid,
+      pbi_svuid: uid,
+      pbi_svgid: uid,
+    });
+    const absent = (pid) =>
+      pid % 10 === 3 && ++sample === point && lists.length <= misses;
+    const context = {
+      Array,
+      BSD_SIZE,
+      AUDIT_SIZE,
+      ESRCH,
+      SZOMB: 5,
+      PROC_ALL_PIDS: 1,
+      PROC_PIDTBSDINFO: 2,
+      A_GETPINFO_ADDR: 3,
+      errno: 0,
+      proc_listpids(kind, type, pids, size) {
+        assert.deepEqual([kind, type, size], [1, 0, 16384]);
+        for (const previous of lists) assert.notEqual(pids, previous);
+        assert.equal(pids.length, 4096);
+        assert.ok(pids.every((pid) => pid === 0));
+        lists.push(pids);
+        sample = bsdCalls = 0;
+        pids[0] = lists.length * 10 + 1;
+        pids[1] = pids[0] + 1;
+        pids[2] = pids[0] + 2;
+        if (fault === "pid") pids[0] = -1;
+        if (fault === "duplicate") pids[1] = pids[0];
+        if (fault === "list") {
+          context.errno = ESRCH;
+          return 0;
+        }
+        return 16;
+      },
+      proc_pidinfo(pid, kind, includeZombies, target, size) {
+        assert.deepEqual([kind, includeZombies, size], [2, 1, BSD_SIZE]);
+        bsdCalls++;
+        if (absent(pid)) {
+          context.errno = error;
+          return result;
+        }
+        Object.assign(target, record(pid));
+        if (bsdCalls === 2 && fault === "birth") target.pbi_start_tvsec++;
+        if (bsdCalls === 2 && fault === "credential") target.pbi_uid++;
+        return BSD_SIZE;
+      },
+      auditon(kind, target, size) {
+        assert.deepEqual([kind, size], [3, AUDIT_SIZE]);
+        if (absent(target.ap_pid)) {
+          context.errno = error;
+          return result;
+        }
+        target.ap_asid = fault === "session" ? asid + 1 : asid;
+        target.ap_auid = uid;
+        return 0;
+      },
+      AUDIT_DOMAIN_INSPECT(pid) {
+        inspected.push(pid);
+        const bsd = record(pid);
+        if (fault === "inspect") bsd.pbi_start_tvsec++;
+        return { bsd, token: { val: [uid, 0, 0, 0, 0, pid, asid, 1] } };
+      },
+      AUDIT_DOMAIN_DIAG(ok, operation, kind, value) {
+        if (!ok)
+          throw Object.assign(new Error("census refused"), {
+            operation,
+            kind,
+            value,
+          });
+      },
+    };
+    const census = script.runInNewContext(context),
+      run = () => census(uid, asid);
+    if (hard) {
+      assert.throws(run, { message: "census refused" });
+    } else if (misses === 3) {
+      assert.throws(run, {
+        message: "census refused",
+        operation: `audit-census-${point % 2 ? "bsd" : "audit"}${point > 2 ? "-again" : ""}`,
+        kind: "errno",
+        value: ESRCH,
+      });
+    } else {
+      const view = run(),
+        pid = (misses + 1) * 10 + 1;
+      assert.equal(view.nl, 2);
+      assert.equal(view.nd, 1);
+      assert.deepEqual(
+        Array.from(view.live, (value) => value.bsd.pbi_pid),
+        [pid, pid + 2],
+      );
+      assert.deepEqual(
+        Array.from(view.dead, (value) => value.pbi_pid),
+        [pid + 1],
+      );
+      assert.deepEqual(inspected, [
+        ...Array.from({ length: misses + 1 }, (_, i) => (i + 1) * 10 + 1),
+        pid + 2,
+      ]);
+    }
+    assert.equal(lists.length, hard ? 1 : Math.min(misses + 1, 3));
+  }
+});
+
 test("Darwin audit custody binds all-UID census, native controls and recoverable reference lifetimes", async () => {
   const [shared, launcher, reader] = await Promise.all(
     ["custody.h", "launcher.c", "custody-reader.c"].map((name) =>

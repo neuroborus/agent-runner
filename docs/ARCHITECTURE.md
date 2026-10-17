@@ -245,7 +245,15 @@ negative controls. Protected admission joins those controls to candidate, policy
 exact session, process births and a separately held custody reference before
 release. The shared native census scans every UID, bounds host and domain views,
 and revalidates audit tokens and births; known processes cannot disappear through
-credential changes or an empty filtered view. Recovery fences admission and rejoins
+credential changes or an empty filtered view. A census permits three immediate
+complete attempts, restarting only for captured `PROC_PIDTBSDINFO` arg=1
+`0/ESRCH` or `A_GETPINFO_ADDR` `-1/ESRCH` at either sample. Each restart discards
+the entire view and freshly initializes the all-PID storage. Zombies remain
+included; other errors and invariants fail immediately, and exhaustion blocks
+without sleeping, skipping a PID or returning partial evidence. Public XNU
+supports the lifetime race, not an observed failed-PID history, exact hosted-build
+approval or independent retirement proof.
+Recovery fences admission and rejoins
 the original protected audit-custody journal before retiring old holders. The
 bounded journal retains each original session for successive Git controls. A
 bounded root custodian keeps each active session alive through reader loss and

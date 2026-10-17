@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Reacquire complete Darwin census after vanished processes
+
+The shared census now allows three immediate complete attempts, restarting only
+for exact absent-process BSD/audit samples. Each restart discards the whole view
+and freshly initializes all-PID storage; zombies and every identity, credential,
+session and capacity guard remain included. Hard failures and exhaustion block
+without sleeping, skipping unreadable PIDs or returning partial evidence.
+Public XNU supports the lifetime race, not an observed failed-PID history or
+exact hosted-build approval. Portable actual-body coverage proves the bounded
+restart contract; independent original-owner/domain retirement remains mandatory.
+
 ## 2026-10-17 — Observe original Darwin signature admission failures
 
 Darwin's signature guard retains its original calls, flags and short circuits
