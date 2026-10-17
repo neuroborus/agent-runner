@@ -1575,6 +1575,9 @@ test("Windows trust diagnostics reject malformed status, entry and held-pin cont
     identity: id(11),
     sha256: hash,
     signatureSha256: hash,
+    inputs: [
+      88, 32, 1, 1, 1, 0, 2, 0, 1, 0x1010, 0, 0, 0, 0, 0, 0, 0, 1024, 0, 1024,
+    ],
   };
   for (const damage of [
     { result: 2148204800 },
@@ -1587,6 +1590,9 @@ test("Windows trust diagnostics reject malformed status, entry and held-pin cont
     { identity: [id(11)] },
     { sha256: null },
     { signatureSha256: "substituted" },
+    { inputs: [] },
+    { inputs: Array(20).fill("unknown") },
+    { inputs: Array(20).fill(2) },
     { extra: true },
   ]) {
     const f = transport(),

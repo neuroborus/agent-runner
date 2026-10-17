@@ -193,17 +193,38 @@ static void pin(struct held_file *file, const char *expected) {
   DWORD size; BYTE *bytes = read_file(file, 536870912, &size); char actual[65]; sum(bytes, size, actual); need(!strcmp(actual, expected)); free(bytes);
 }
 static struct held_file catalogs[256]; static unsigned catalog_count;
-static struct { struct held_file *file; const char *expected; DWORD choice; LONG result, closed; BOOL active; } signature_trust;
+static struct { struct held_file *file; const char *expected; DWORD choice; LONG result, closed; BOOL active; char inputs[512]; } signature_trust;
+static void signature_observe(struct held_file *file, WINTRUST_DATA *trust) {
+  DWORD saved = GetLastError(), flags = 0;
+  BOOL flagged = GetHandleInformation(file->handle, &flags); DWORD flagStatus = flagged ? 0 : GetLastError();
+  LARGE_INTEGER size = {0}, position = {0}, zero = {0};
+  BOOL sized = GetFileSizeEx(file->handle, &size); DWORD sizeStatus = sized ? 0 : GetLastError();
+  /* FILE_CURRENT + zero observes the held offset without rewinding the file. */
+  BOOL positioned = SetFilePointerEx(file->handle, zero, &position, FILE_CURRENT); DWORD positionStatus = positioned ? 0 : GetLastError();
+  WINTRUST_FILE_INFO *info = trust->dwUnionChoice == WTD_CHOICE_FILE ? trust->pFile : NULL;
+  sprintf_s(signature_trust.inputs, sizeof(signature_trust.inputs), "[%lu,%lld,%d,%d,%d,%d,%lu,%lu,%lu,%lu,%lu,%d,%d,%d,%lu,%lld,%lu,%lld,%lu,%lld]",
+    trust->cbStruct, info ? (LONGLONG)info->cbStruct : -1,
+    info && info->pcwszFilePath && wcslen(info->pcwszFilePath)>3 && info->pcwszFilePath[1]==':' && info->pcwszFilePath[2]=='\\',
+    info && info->pcwszFilePath==file->path, info && info->hFile==file->handle, info && info->pgKnownSubject!=NULL,
+    trust->dwUIChoice, trust->fdwRevocationChecks, trust->dwStateAction, trust->dwProvFlags, trust->dwUIContext,
+    trust->pPolicyCallbackData!=NULL, trust->pSIPClientData!=NULL, trust->hWVTStateData!=NULL,
+    flagStatus, flagged ? (LONGLONG)flags : -1, sizeStatus, sized && size.QuadPart>=0 && size.QuadPart<=536870912 ? size.QuadPart : -1,
+    positionStatus, positioned && position.QuadPart>=0 && position.QuadPart<=536870912 ? position.QuadPart : -1);
+  SetLastError(saved);
+}
 static void signature_verify(struct held_file *file, const char *expected, WINTRUST_DATA *trust) {
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+  signature_observe(file, trust);
   LONG result = WinVerifyTrust(NULL, &action, trust);
   /* Save the original LONG before CLOSE can replace native error state. */
   signature_trust.file = file; signature_trust.expected = expected; signature_trust.choice = trust->dwUnionChoice;
   signature_trust.result = result; signature_trust.closed = ERROR_SUCCESS; signature_trust.active = TRUE;
   trust->dwStateAction = WTD_STATEACTION_CLOSE;
   LONG closed = WinVerifyTrust(NULL, &action, trust); signature_trust.closed = closed;
+  DWORD saved = GetLastError();
   if (result != ERROR_SUCCESS || closed != ERROR_SUCCESS)
     fprintf(stderr, "native-windows-trust: choice=%lu result=0x%08lx close-result=0x%08lx\n", signature_trust.choice, (unsigned long)(DWORD)result, (unsigned long)(DWORD)closed);
+  SetLastError(saved);
   need(result == ERROR_SUCCESS); need(closed == ERROR_SUCCESS);
   signature_trust.active = FALSE;
 }

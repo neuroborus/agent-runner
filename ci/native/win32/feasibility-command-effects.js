@@ -232,8 +232,21 @@ export function windowsCommandBrokerCoverage(value, observation) {
     query === null ||
       (!control.delivered &&
         query &&
-        Object.keys(query).sort().join() ===
+        Object.keys(query)
+          .filter((key) => key !== "audit")
+          .sort()
+          .join() ===
           "bytes,candidates,complete,error,from,gateIdentity,performedAccess,readBytes,records,requestedAccess,scannedBytes,scannedRecords,to" &&
+        (!Object.hasOwn(query, "audit") ||
+          (Array.isArray(query.audit) &&
+            query.audit.length === 9 &&
+            query.audit.every(
+              (entry) =>
+                Number.isInteger(entry) && entry >= -1 && entry <= 0xffffffff,
+            ) &&
+            query.audit[0] >= 0 &&
+            query.audit[0] <= 6 &&
+            [0, 1].includes(query.audit[8]))) &&
         typeof query.complete === "boolean" &&
         Number.isInteger(query.error) &&
         query.error >= 0 &&

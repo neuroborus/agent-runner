@@ -595,7 +595,55 @@ export function windowsFeasibilityDiagnostics(output) {
     !text.endsWith("\n")
   )
     return null;
-  const lines = text.replace(/\r\n/gu, "\n").slice(0, -1).split("\n");
+  let lines = text.replace(/\r\n/gu, "\n").slice(0, -1).split("\n");
+  const observations = lines.filter((line) =>
+    line.startsWith("native-windows-command: state="),
+  );
+  if (observations.length) {
+    if (observations.length !== 1) return null;
+    try {
+      const row = JSON.parse(
+        observations[0].slice("native-windows-command: state=".length),
+      );
+      const numbers = (value, length, maximum = 0xffffffff) =>
+        Array.isArray(value) &&
+        value.length === length &&
+        value.every(
+          (entry) => Number.isInteger(entry) && entry >= -1 && entry <= maximum,
+        );
+      if (
+        !wfpClosed(row, [
+          "pid",
+          "thread",
+          "birth",
+          "status",
+          "held",
+          "members",
+          "audit",
+        ]) ||
+        !wfpUint(row.pid) ||
+        !wfpUint(row.thread) ||
+        typeof row.birth !== "string" ||
+        !/^(0|[1-9][0-9]{0,19})$/u.test(row.birth) ||
+        BigInt(row.birth) > 0xffffffffffffffffn ||
+        !numbers(row.status, 10) ||
+        !numbers(row.held, 2, 16) ||
+        row.held.some((entry) => entry < 0) ||
+        !Array.isArray(row.members) ||
+        row.members.length > 32 ||
+        !row.members.every((entry) => wfpUint(entry) && entry > 0) ||
+        !numbers(row.audit, 9) ||
+        row.audit[0] < 0 ||
+        row.audit[0] > 6 ||
+        ![0, 1].includes(row.audit[8])
+      )
+        return null;
+    } catch {
+      return null;
+    }
+    // Bounded observation metadata is never promoted to a cause or proof.
+    lines = lines.filter((line) => line !== observations[0]);
+  }
   if (lines.length > 2) return null;
   const read = (line, cleanup) => {
     const match =
@@ -1336,14 +1384,17 @@ function tcpTransferObservation(value) {
     (row.identity === null ||
       (row.status[1] === 0 &&
         Array.isArray(row.identity) &&
-        row.identity.length === 4 &&
+        row.identity.length === 5 &&
         row.identity
           .slice(0, 3)
           .every(
             (entry) =>
               typeof entry === "string" && /^[a-f0-9]{16}$/u.test(entry),
           ) &&
-        wfpUint(row.identity[3]))) &&
+        [1, 2].includes(row.identity[3]) &&
+        (row.identity[3] === 2
+          ? wfpUint(row.identity[4]) && row.identity[4] <= 3
+          : row.identity[4] === null))) &&
     (row.appContainer === null ||
       (row.status[2] === 0 && wfpUint(row.appContainer))) &&
     (row.status[0] === 0
@@ -1364,6 +1415,7 @@ function tcpTransferObservation(value) {
       "creationFlags",
       "destination",
       "source",
+      "qos",
       "provider",
     ]) &&
     wfpUint(value.error) &&
@@ -1386,11 +1438,19 @@ function tcpTransferObservation(value) {
         destination.token.status[0] !== null
       : destination.status.slice(1).every((entry) => entry === null) &&
         destination.token.status[0] === null) &&
-    wfpClosed(source, ["pid", "token"]) &&
+    wfpClosed(source, ["pid", "token", "effective"]) &&
     wfpUint(source.pid) &&
     source.pid > 0 &&
     token(source.token) &&
     source.token.status[0] !== null &&
+    token(source.effective) &&
+    source.effective.status[0] !== null &&
+    status(value.qos, 5) &&
+    value.qos[0] !== null &&
+    (value.qos[0] === 0 ? wfpUint(value.qos[1]) : value.qos[1] === null) &&
+    (value.qos[0] === 0 && value.qos[1] === 80
+      ? value.qos.slice(2).every(wfpUint)
+      : value.qos.slice(2).every((entry) => entry === null)) &&
     typeof value.provider === "string" &&
     /^[a-f0-9]{224}$/u.test(value.provider)
   );

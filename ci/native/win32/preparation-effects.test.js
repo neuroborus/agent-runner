@@ -3616,6 +3616,7 @@ test("Windows post-startup open rejection retains original owners until fresh co
       identity: f.rawFileId(compiler.path),
       sha256: compiler.sha256,
       signatureSha256: compiler.signatureSha256,
+      inputs: source.inputs,
     },
   });
   const original = [...f.files.entries()]
@@ -3682,7 +3683,14 @@ test("Windows post-startup open rejection retains original owners until fresh co
 });
 
 test("actual experiment compiler open requires zero trust and unchanged content/signature pins", async () => {
-  for (const fault of ["none", "positive", "close", "content", "signature"]) {
+  for (const fault of [
+    "none",
+    "positive",
+    "close",
+    "unavailable",
+    "content",
+    "signature",
+  ]) {
     const f = rawPreparation({ experiment: true }),
       compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
       index = f.prepared.entries.findIndex(
@@ -3701,8 +3709,9 @@ test("actual experiment compiler open requires zero trust and unchanged content/
       files,
       identity: f.rawFileId,
       inspect: f.objectRead,
-      result: fault === "positive" ? 1 : 0,
+      result: ["positive", "unavailable"].includes(fault) ? 8 : 0,
       closed: fault === "close" ? 5 : 0,
+      unavailable: fault === "unavailable",
     });
     f.accessNative = (operation, args, _, __, sequence) =>
       operation === "open" ? source.open(Number(args[0]), sequence) : undefined;
@@ -3722,16 +3731,27 @@ test("actual experiment compiler open requires zero trust and unchanged content/
         const failure = error.custodyReaderFailure;
         assert.equal(error.experimentNative, native);
         assert.equal(failure.sequence, 2);
-        if (["positive", "close"].includes(fault)) {
+        if (["positive", "close", "unavailable"].includes(fault)) {
           assert.equal(
             failure.trust.result,
-            fault === "positive" ? "0x00000001" : "0x00000000",
+            fault === "close" ? "0x00000000" : "0x00000008",
           );
           assert.equal(
             failure.trust.closeResult,
             fault === "close" ? "0x00000005" : "0x00000000",
           );
           assert.equal(failure.trust.entry, index);
+          assert.deepEqual(failure.trust.inputs, source.inputs);
+          assert.deepEqual(
+            failure.trust.inputs.slice(2, 14),
+            [1, 1, 1, 0, 2, 0, 1, 0x1010, 0, 0, 0, 0],
+          );
+          assert.deepEqual(
+            failure.trust.inputs.slice(14),
+            fault === "unavailable"
+              ? [7, -1, 7, -1, 7, -1]
+              : [0, 0, 0, 1024, 0, 1024],
+          );
         } else assert.equal(Object.hasOwn(failure, "trust"), false);
         return true;
       });

@@ -6027,8 +6027,8 @@ test("original socket transfer validates its actual input and partial-transfer c
     .replace("DWORD count", "const count")
     .replace("DWORD error", "const error")
     .replaceAll(
-      "socket_transfer_observe(&offer,",
-      "socket_transfer_observe(offer,",
+      "socket_transfer_observe(socket, &offer,",
+      "socket_transfer_observe(socket, offer,",
     )
     .replaceAll(
       "socket_transfer_controls(&offer,",
@@ -6857,7 +6857,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       .replaceAll("->", ".")
       .replaceAll("sizeof(DWORD)", "4")
       .replace(
-        /\((?:const )?(?:BYTE|char|DWORD|int|ULONGLONG|unsigned)(?: \*)?\)/gu,
+        /\((?:const )?(?:BYTE|char|DWORD|int|ULONGLONG|LONGLONG|unsigned)(?: \*)?\)/gu,
         "",
       )
       .replace(/&(?=[a-zA-Z_])/gu, "")
@@ -6955,6 +6955,18 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};",
       "const source = tokenObservation(), destination = tokenObservation();",
     )
+    .replace(
+      "struct socket_token_observation effective = {{-1, -1, -1, -1, -1}};",
+      "const effective = tokenObservation();",
+    )
+    .replace(
+      "QOS qos = {0}; let qosBytes = 0;",
+      "const qos = {SendingFlowspec:{},ReceivingFlowspec:{},ProviderSpecific:{}}, qosBytes = {value:0};",
+    )
+    .replaceAll("sizeof(qos)", "80")
+    .replaceAll("qosBytes ==", "qosBytes.value ==")
+    .replace("? -1 : qosBytes)", "? -1 : qosBytes.value)")
+    .replace("int qosResult", "let qosResult")
     .replace(
       "FILETIME born = {0}, exited, kernel, user;",
       "const born = {}, exited = {}, kernel = {}, user = {};",
@@ -7076,9 +7088,9 @@ test("original TCP caller retains source duplication failures and bounded prereq
     function socket_protocol_same(a,b) {${native(body("socket_protocol_same"))}}
     function socket_target_binding(expected) {${binding}}
     function socket_status(value) {${native(body("socket_status"))}}
-    function socket_token_observe(process,value) {${tokenRead}}
+    function socket_token_observe(process,value,effective) {${tokenRead}}
     function socket_token_write(value) {${tokenWrite}}
-    function socket_transfer_observe(offer,error) {${observation}}
+    function socket_transfer_observe(socket,offer,error) {${observation}}
     function socket_transfer_refusal(line,size) {${transferRefusal}}
     function socket_control_identity(value,appContainer) {${controlIdentity}}
     function socket_control_protocol(socket,expected,actual) {${controlProtocol}}
@@ -7131,10 +7143,15 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "token-read",
       "token-short",
       "restricted-read",
+      "effective-token",
+      "qos-unavailable",
+      "qos-short",
       "diagnostic-close",
       "diagnostic-output",
       "diagnostic-form",
       "diagnostic-private",
+      "diagnostic-qos",
+      "diagnostic-effective",
       "10022-close",
       "birth",
       "token",
@@ -7146,6 +7163,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "control-create-destination",
       "control-duplicate-self",
       "control-duplicate-destination",
+      "control-duplicate-both",
       "control-import-self",
       "control-import-destination",
       "control-provider",
@@ -7187,6 +7205,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       creations = 0,
       controlCarrier,
       controlAcknowledged = false,
+      effectiveRead = false,
       clock = 10;
     const failsTransfer = ![
       null,
@@ -7201,6 +7220,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "diagnostic-output",
       "diagnostic-form",
       "diagnostic-private",
+      "diagnostic-qos",
+      "diagnostic-effective",
       "control-observation-form",
       "control-observation-replay",
       "control-observation-bound",
@@ -7353,6 +7374,16 @@ test("original TCP caller retains source duplication failures and bounded prereq
             observed =
               context.TCP_PREFIX + " transfer=" + JSON.stringify(value) + "\n";
           }
+          if (["diagnostic-qos", "diagnostic-effective"].includes(fault)) {
+            const value = JSON.parse(
+              line.slice((context.TCP_PREFIX + " transfer=").length),
+            );
+            if (fault === "diagnostic-qos")
+              value.qos = [0, 80, null, null, null];
+            else value.source.effective.extra = true;
+            observed =
+              context.TCP_PREFIX + " transfer=" + JSON.stringify(value) + "\n";
+          }
           transport.child.stderr.write(observed);
         } else if (line.startsWith(context.TCP_PREFIX + " control=")) {
           let observed = line;
@@ -7428,6 +7459,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       WAIT_FAILED: 0xffffffff,
       TOKEN_QUERY: 8,
       TokenStatistics: 10,
+      TokenImpersonation: 2,
       TokenIsAppContainer: 29,
       PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
       SOCKET_PREFIX: "native-windows-socket: ",
@@ -7529,10 +7561,38 @@ test("original TCP caller retains source duplication failures and bounded prereq
       GetCurrentProcess: () => (inLauncher ? 41 : 43),
       GetCurrentProcessId: () => (inLauncher ? 41 : 43),
       GetCurrentThread: () => 42,
-      OpenThreadToken(thread, access, self) {
+      OpenThreadToken(thread, access, self, token) {
         assert.deepEqual([thread, access, self], [42, 8, true]);
+        if (fault === "effective-token" && !effectiveRead) {
+          effectiveRead = true;
+          token.value = 144;
+          return true;
+        }
         lastError = 1008;
         return false;
+      },
+      SIO_GET_QOS: 0xc8000007,
+      WSAIoctl(
+        socket,
+        command,
+        input,
+        inputSize,
+        qos,
+        size,
+        used,
+        overlapped,
+        completion,
+      ) {
+        assert.deepEqual(
+          [socket, command, input, inputSize, size, overlapped, completion],
+          [17, 0xc8000007, null, 0, 80, null, null],
+        );
+        used.value = fault === "qos-short" ? 16 : 80;
+        qos.SendingFlowspec.ServiceType = 1;
+        qos.ReceivingFlowspec.ServiceType = 1;
+        qos.ProviderSpecific.len = 0;
+        lastError = 10045;
+        return fault === "qos-unavailable" ? -1 : 0;
       },
       WaitForSingleObject(process) {
         assert.equal(process, 41);
@@ -7618,6 +7678,10 @@ test("original TCP caller retains source duplication failures and bounded prereq
               order.includes(`exclusive:${socket}`),
           );
           order.push(`control-duplicate:${socket}`);
+          if (fault === "control-duplicate-both") {
+            lastError = 10022;
+            return -1;
+          }
           if (
             fault ===
             `control-duplicate-${socket === 81 ? "self" : "destination"}`
@@ -7696,7 +7760,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return true;
       },
       GetTokenInformation(token, kind, value, size, used) {
-        assert.ok([141, 143, 161].includes(token));
+        assert.ok([141, 143, 144, 161].includes(token));
         if (token === 141 && fault === "control-import-late") clock = 5000;
         used.value = size;
         lastError = 5;
@@ -7706,7 +7770,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
             TokenId: { HighPart: 0, LowPart: token === 143 ? 5 : 3 },
             AuthenticationId: { HighPart: 0, LowPart: 2 },
             ModifiedId: { HighPart: 0, LowPart: 4 },
-            TokenType: 1,
+            TokenType: token === 144 ? 2 : 1,
+            ImpersonationLevel: 2,
           });
           if (token === 141 && creations && fault === "control-target-token")
             value.ModifiedId.LowPart++;
@@ -7728,7 +7793,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return token === 143;
       },
       CloseHandle(handle) {
-        assert.ok([61, 141, 143, 161].includes(handle));
+        assert.ok([61, 141, 143, 144, 161].includes(handle));
         order.push(`handle-close:${handle}`);
         lastError = 6;
         return fault !== "diagnostic-close";
@@ -7937,6 +8002,23 @@ test("original TCP caller retains source duplication failures and bounded prereq
               assert.equal(observation.transfer.error, 10022);
               assert.deepEqual(observation.transfer.winsock, [514, 514]);
               assert.equal(observation.transfer.creationFlags, 0);
+              assert.equal(
+                observation.transfer.source.effective.status[0],
+                fault === "effective-token" ? 0 : 1008,
+              );
+              if (fault === "effective-token")
+                assert.deepEqual(
+                  observation.transfer.source.effective.identity.slice(3),
+                  [2, 2],
+                );
+              assert.deepEqual(
+                observation.transfer.qos,
+                fault === "qos-unavailable"
+                  ? [10045, null, null, null, null]
+                  : fault === "qos-short"
+                    ? [0, 16, null, null, null]
+                    : [0, 80, 1, 1, 0],
+              );
               assert.equal(observation.transfer.destination.access, 0x1000);
               assert.equal(
                 observation.transfer.provider,
@@ -8039,6 +8121,11 @@ test("original TCP caller retains source duplication failures and bounded prereq
           if (fault === "control-duplicate-destination") {
             assert.equal(sources[0].status[6], 0);
             assert.equal(sources[1].status[5], 10022);
+          }
+          if (fault === "control-duplicate-both") {
+            assert.equal(imported, undefined);
+            for (const row of sources)
+              assert.deepEqual(row.status.slice(5, 9), [10022, null, null, 0]);
           }
           if (fault === "control-import-self")
             assert.equal(sources[0].status[6], 10045);

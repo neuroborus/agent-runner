@@ -249,7 +249,7 @@ export function windowsCustodyChannel(
         if (Object.hasOwn(value, "trust")) {
           fields.push("trust");
           const trust = value.trust;
-          closed(trust, [
+          const trustFields = [
             "mode",
             "result",
             "closeResult",
@@ -257,7 +257,24 @@ export function windowsCustodyChannel(
             "identity",
             "sha256",
             "signatureSha256",
-          ]);
+          ];
+          if (Object.hasOwn(trust, "inputs")) {
+            trustFields.push("inputs");
+            requireWindows(
+              Array.isArray(trust.inputs) &&
+                trust.inputs.length === 20 &&
+                trust.inputs.every(
+                  (entry) =>
+                    Number.isInteger(entry) &&
+                    entry >= -1 &&
+                    entry <= 0xffffffff,
+                ) &&
+                [2, 3, 4, 5, 11, 12, 13].every((index) =>
+                  [0, 1].includes(trust.inputs[index]),
+                ),
+            );
+          }
+          closed(trust, trustFields);
           const hash = (pin) =>
             typeof pin === "string" && /^[a-f0-9]{64}$/u.test(pin);
           requireWindows(

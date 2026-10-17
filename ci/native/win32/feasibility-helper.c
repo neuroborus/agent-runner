@@ -91,6 +91,7 @@ static BOOL settle_transport(void);
 static BOOL settle_null_map(void);
 #ifdef NATIVE_COMMAND_EXPERIMENT
 static BOOL command_preflight_close(BOOL keepBroker);
+static void command_observe_failure(void);
 #endif
 static volatile LONG failing;
 static void remember(const char *operation, const char *domain, DWORD value) {
@@ -121,6 +122,9 @@ static void failure(DWORD code) {
   AcquireSRWLockExclusive(&diagnosticOutputLock);
   fprintf(stderr, "native-windows: operation=%s domain=%s value=%lu\n", first.operation, first.domain, first.value); fflush(stderr);
   ReleaseSRWLockExclusive(&diagnosticOutputLock);
+#ifdef NATIVE_COMMAND_EXPERIMENT
+  command_observe_failure();
+#endif
   close_job(TRUE);
 #ifdef NATIVE_COMMAND_EXPERIMENT
   command_preflight_close(FALSE);
@@ -1179,9 +1183,9 @@ struct socket_token_observation {
   LONGLONG status[5]; TOKEN_STATISTICS statistics; DWORD container;
   BOOL statisticsRead, containerRead, restricted;
 };
-static void socket_token_observe(HANDLE process, struct socket_token_observation *value) {
+static void socket_token_observe(HANDLE process, struct socket_token_observation *value, BOOL effective) {
   HANDLE token = NULL; DWORD used = 0;
-  BOOL opened = OpenProcessToken(process, TOKEN_QUERY, &token);
+  BOOL opened = effective ? OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &token) : OpenProcessToken(process, TOKEN_QUERY, &token);
   value->status[0] = opened ? 0 : GetLastError();
   if (!opened) return;
   BOOL read = GetTokenInformation(token, TokenStatistics, &value->statistics, sizeof(value->statistics), &used);
@@ -1205,9 +1209,10 @@ static void socket_token_write(const struct socket_token_observation *value) {
   fputs("],\"identity\":", stderr);
   if (value->statisticsRead) {
     const TOKEN_STATISTICS *s = &value->statistics;
-    fprintf(stderr, "[\"%08lx%08lx\",\"%08lx%08lx\",\"%08lx%08lx\",%u]",
+    fprintf(stderr, "[\"%08lx%08lx\",\"%08lx%08lx\",\"%08lx%08lx\",%u,",
       (DWORD)s->TokenId.HighPart, s->TokenId.LowPart, (DWORD)s->AuthenticationId.HighPart, s->AuthenticationId.LowPart,
       (DWORD)s->ModifiedId.HighPart, s->ModifiedId.LowPart, (unsigned)s->TokenType);
+    if (s->TokenType == TokenImpersonation) fprintf(stderr, "%u]", (unsigned)s->ImpersonationLevel); else fputs("null]", stderr);
   } else fputs("null", stderr);
   fputs(",\"appContainer\":", stderr);
   if (value->containerRead) fprintf(stderr, "%lu", value->container); else fputs("null", stderr);
@@ -1216,18 +1221,25 @@ static void socket_token_write(const struct socket_token_observation *value) {
 /* Observe the original failed call without a second transfer or new payload
  * rights. These query-only reads cannot diagnose which parameter caused 10022.
  * Close every acquired diagnostic handle before writing optional output. */
-static void socket_transfer_observe(const struct socket_offer *offer, DWORD error) {
+static void socket_transfer_observe(SOCKET socket, const struct socket_offer *offer, DWORD error) {
   struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};
+  struct socket_token_observation effective = {{-1, -1, -1, -1, -1}};
+  /* SIO_GET_QOS only reads the original socket. An unsupported/short query
+   * leaves QoS unknown; it never proves the documented sharing prerequisite. */
+  QOS qos = {0}; DWORD qosBytes = 0;
+  int qosResult = WSAIoctl(socket, SIO_GET_QOS, NULL, 0, &qos, sizeof(qos), &qosBytes, NULL, NULL);
+  DWORD qosStatus = qosResult == SOCKET_ERROR ? WSAGetLastError() : 0;
   FILETIME born = {0}, exited, kernel, user; LONGLONG timeStatus = -1, closeStatus = -1;
   HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, offer->target.pid);
   DWORD openStatus = process ? 0 : GetLastError();
   if (process) {
     BOOL read = GetProcessTimes(process, &born, &exited, &kernel, &user); timeStatus = read ? 0 : GetLastError();
-    socket_token_observe(process, &destination);
+    socket_token_observe(process, &destination, FALSE);
     BOOL closed = CloseHandle(process); DWORD closeError = closed ? 0 : GetLastError(); closeStatus = closeError;
     if (!closed) cleanup_error("observer-diagnostic-process-close", "win32", closeError);
   }
-  socket_token_observe(GetCurrentProcess(), &source);
+  socket_token_observe(GetCurrentProcess(), &source, FALSE);
+  socket_token_observe(GetCurrentProcess(), &effective, TRUE);
   fprintf(stderr, TCP_PREFIX " transfer={\"error\":%lu,\"winsock\":[%u,%u],\"creationFlags\":0,\"destination\":{\"pid\":%lu,\"access\":%lu,\"status\":[%lu,",
     error, (unsigned)socketVersion, (unsigned)socketHighVersion, offer->target.pid, (DWORD)PROCESS_QUERY_LIMITED_INFORMATION, openStatus);
   socket_status(timeStatus); fputc(',', stderr); socket_status(closeStatus);
@@ -1235,7 +1247,11 @@ static void socket_transfer_observe(const struct socket_offer *offer, DWORD erro
   if (!timeStatus) fprintf(stderr, "\"%llu\"", wfp_time(born)); else fputs("null", stderr);
   fputs(",\"token\":", stderr); socket_token_write(&destination);
   fprintf(stderr, "},\"source\":{\"pid\":%lu,\"token\":", GetCurrentProcessId()); socket_token_write(&source);
-  fputs("},\"provider\":\"", stderr);
+  fputs(",\"effective\":", stderr); socket_token_write(&effective);
+  fprintf(stderr, "},\"qos\":[%lu,", qosStatus); socket_status(qosResult == SOCKET_ERROR ? -1 : (LONGLONG)qosBytes); fputc(',', stderr);
+  if (qosResult != SOCKET_ERROR && qosBytes == sizeof(qos)) fprintf(stderr, "%lu,%lu,%lu", qos.SendingFlowspec.ServiceType, qos.ReceivingFlowspec.ServiceType, qos.ProviderSpecific.len);
+  else fputs("null,null,null", stderr);
+  fputs("],\"provider\":\"", stderr);
   /* Public numeric protocol fields, GUID, catalog and complete chain only;
    * never inspect, synthesize or publish provider-private transfer storage. */
   _Static_assert(offsetof(WSAPROTOCOL_INFOW, dwProviderReserved) == 112, "Public protocol prefix");
@@ -1494,7 +1510,7 @@ static BOOL wfp_transfer(SOCKET socket, ULONGLONG end, struct diagnosis *problem
       if (WSADuplicateSocketW(socket, offer.target.pid, &offer.protocol) == SOCKET_ERROR) {
         DWORD error = WSAGetLastError(); *problem = (struct diagnosis){"observer-transfer", "win32", error};
         remember("observer-transfer", "win32", error);
-        socket_transfer_observe(&offer, error);
+        socket_transfer_observe(socket, &offer, error);
         socket_transfer_controls(&offer, error, end); return FALSE;
       }
       *transferred = TRUE;

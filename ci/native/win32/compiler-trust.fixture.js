@@ -16,6 +16,7 @@ export async function compilerTrustFixture({
   inspect,
   result = 0,
   closed = 0,
+  unavailable = false,
 }) {
   const header = await readFile(
       new URL("./custody.h", import.meta.url),
@@ -32,7 +33,7 @@ export async function compilerTrustFixture({
       ).exec(source)[1],
     calls = [],
     records = [],
-    signature_trust = {},
+    signature_trust = { inputs: {} },
     refusal = new Error("native guard rejected"),
     held = entries.map((entry) => ({
       ...entry,
@@ -83,9 +84,23 @@ export async function compilerTrustFixture({
         )
         .replace(
           "WINTRUST_FILE_INFO info = {sizeof(info), file->path, file->handle, NULL};",
-          "let info = {path: file.path, handle: file.handle};",
+          "let info = {cbStruct:1, pcwszFilePath: file.path, hFile: file.handle, pgKnownSubject:null};",
         )
-        .replace("WINTRUST_DATA trust = {0};", "let trust = {};")
+        .replace(
+          "WINTRUST_DATA trust = {0};",
+          "let trust = {dwUIContext:0,pPolicyCallbackData:null,pSIPClientData:null,hWVTStateData:null};",
+        )
+        .replace(
+          "DWORD saved = GetLastError(), flags = 0;",
+          "let saved = GetLastError(); const flags = {value:0};",
+        )
+        .replace(
+          "LARGE_INTEGER size = {0}, position = {0}, zero = {0};",
+          "const size = {QuadPart:0}, position = {QuadPart:0}, zero = {QuadPart:0};",
+        )
+        .replace("WINTRUST_FILE_INFO *info", "let info")
+        .replaceAll("sizeof(signature_trust.inputs)", "512")
+        .replace("(LONGLONG)flags", "flags.value")
         .replace(
           "GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;",
           "let action = 0;",
@@ -120,8 +135,8 @@ export async function compilerTrustFixture({
             })[name],
         )
         .replaceAll("&written", "NULL")
-        .replace(/&(action|trust|info)\b/gu, "$1")
-        .replace(/\(unsigned long\)|\(DWORD\)/gu, "")
+        .replace(/&(action|trust|info|flags|size|position)\b/gu, "$1")
+        .replace(/\(unsigned long\)|\(DWORD\)|\(LONGLONG\)/gu, "")
         .replace(/\b(?:unsigned|DWORD|LONG|BOOL|int) /gu, "let ")
         .replaceAll("->", ".")
         .replaceAll("\\036", "\\x1e");
@@ -160,6 +175,7 @@ export async function compilerTrustFixture({
     FILE_LIST_DIRECTORY: 4,
     FILE_ADD_FILE: 8,
     FILE_ADD_SUBDIRECTORY: 16,
+    FILE_CURRENT: 1,
     WRITE_DAC: 32,
     WRITE_OWNER: 64,
     stderr: null,
@@ -168,8 +184,23 @@ export async function compilerTrustFixture({
       program.reader_failure("custody.h", 1);
       throw refusal;
     },
-    GetLastError: () =>
-      assert.fail("WinVerifyTrust diagnostics must use its original LONG"),
+    GetLastError: () => 7,
+    SetLastError: () => {},
+    GetHandleInformation: (_, flags) => {
+      flags.value = 0;
+      return !unavailable;
+    },
+    GetFileSizeEx: (_, size) => {
+      size.QuadPart = 1024;
+      return !unavailable;
+    },
+    SetFilePointerEx: (_, zero, position, method) => {
+      assert.equal(zero.QuadPart, 0);
+      assert.equal(method, 1);
+      position.QuadPart = 1024;
+      return !unavailable;
+    },
+    wcslen: (path) => path.length,
     WinVerifyTrust: (_, __, trust) => {
       calls.push(trust.dwStateAction);
       assert.equal(trust.dwUnionChoice, 1);
@@ -251,14 +282,17 @@ export async function compilerTrustFixture({
     },
     sprintf_s: (destination, maximum, format, ...values) => {
       let index = 0;
-      const value = format.replace(/%(016llx|08lx|02x|[su])/gu, (_, type) => {
-        const value = values[index++];
-        if (type.endsWith("x"))
-          return BigInt.asUintN(type === "016llx" ? 64 : 32, BigInt(value))
-            .toString(16)
-            .padStart(parseInt(type), "0");
-        return text(value);
-      });
+      const value = format.replace(
+        /%(016llx|08lx|02x|lld|lu|[sud])/gu,
+        (_, type) => {
+          const value = values[index++];
+          if (type.endsWith("x"))
+            return BigInt.asUintN(type === "016llx" ? 64 : 32, BigInt(value))
+              .toString(16)
+              .padStart(parseInt(type), "0");
+          return type === "s" ? text(value) : Number(value);
+        },
+      );
       assert.ok(Buffer.byteLength(value) < maximum);
       const target = destination.target ?? destination,
         offset = destination.offset ?? 0;
@@ -272,6 +306,7 @@ export async function compilerTrustFixture({
     },
   };
   program = new Script(`
+    function signature_observe(file,trust) {${translate(body(header, "signature_observe"))}}
     function signature_verify(file,expected,trust) {${translate(body(header, "signature_verify"))}}
     function pin(file,expected) {${translate(body(header, "pin"))}}
     function signature(file,expected,actual) {${translate(body(header, "signature"))}}
@@ -282,6 +317,9 @@ export async function compilerTrustFixture({
   `).runInNewContext(api);
   return {
     calls,
+    get inputs() {
+      return JSON.parse(signature_trust.inputs.text);
+    },
     async open(index, sequence) {
       api.sequence = sequence;
       try {

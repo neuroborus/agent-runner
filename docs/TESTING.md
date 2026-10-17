@@ -396,8 +396,13 @@ failure transport without importing the original socket, connecting or admitting
 it. Query-only destination
 access failures, failed/short token reads, failed restriction queries,
 diagnostic-output failure and separate diagnostic/source closure failures
-preserve the original cause. The same caller
-coverage runs every source/destination failure for both read/edit roles and
+preserve the original cause. The same caller coverage samples the effective
+thread-token type/impersonation level and the original socket's query-only QoS
+status, including unsupported/short replies. Malformed new metadata stays
+incomplete without replacing `10022`; failed-query byte counts remain unknown.
+Both fresh unbound duplication refusals
+can remain `10022` with imports unattempted and independent source closure.
+Coverage runs every source/destination failure for both read/edit roles and
 protects destination drift, lost `D/T/U` acknowledgments and failed import;
 malformed/PID-only carriers, partial writes and original pipe bounds retain their
 existing regressions. No changed transfer boundary is replaced by an idealized
@@ -725,6 +730,11 @@ They retain the original nonzero LONG separately from closure failures, reject
 positive nonzero results and substituted content/signature pins, and exercise
 original owner settlement without repeating verification. Malformed status,
 identity, slot and pin carriers remain failures without diagnostic authority.
+The actual trust-input snapshot and authenticated failure carrier retain the
+original result 8/CLOSE 0 alongside unchanged call inputs, held handle flags,
+size and current position, including failed optional queries. The fixture checks
+that position observation uses zero `FILE_CURRENT` without a rewind. Malformed
+input arrays cannot become trusted failure context or retirement receipts.
 These cases run in the existing selected native harness, add no slow-tier
 requirement and establish no Windows trust cause or native acceptance.
 Preparation receipt regressions drain aggregate batch deferrals without
@@ -734,6 +744,16 @@ command bounds.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.
+Actual admission/census bodies preserve original termination, signaling, retained
+process/thread slots, returned assignment/list counts and matching/unexpected
+members. Partial lists, query/closure failures and surviving members still refuse;
+one process signal never establishes whole-Job retirement. Fragmented observation
+metadata preserves the original broker refusal and separate cleanup cause;
+repeated or malformed records provide no proof. Existing capture/coverage fixtures
+also check the cached notification, drain, reset, bookmark and control counters
+without adding gate I/O or policy changes. Missing delivery carries the counters
+through its existing diagnostic query even without a native fatal error; malformed
+counters are rejected and valid counters cannot satisfy subscription delivery.
 Source-executed gate/retirement regressions protect immediate error capture,
 independent closure and impersonation reversal within the existing deadlines.
 Controlled capture APIs execute the actual notification, enumeration, rendering,

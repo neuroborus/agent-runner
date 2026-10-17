@@ -870,8 +870,18 @@ public provider bytes. Destination reads request only
 process-open, creation-time and handle-close results. Source and destination
 token observations retain token-open, statistics, AppContainer and close results;
 available statistics include token/authentication/modified identifiers, token
-type, alongside restricted-token and AppContainer reads. Process-token
-observations omit the inapplicable impersonation-level member.
+type, alongside restricted-token and AppContainer reads. The source also queries
+its effective thread token with `TOKEN_QUERY`; `ERROR_NO_TOKEN` 1008 leaves that
+observation unavailable and identifies the existing process token as the effective
+context. Token identity arrays end with type and impersonation level; primary
+tokens use `null` for the inapplicable level. No impersonation is introduced.
+The original socket receives one query-only `SIO_GET_QOS` call. `qos` contains
+native status, returned byte count, sending/receiving service types and provider
+buffer length. The last three values are `null` unless the complete x64 `QOS`
+structure was returned; a failed query also leaves the byte count `null`.
+Unsupported or short reads leave the documented QoS sharing prerequisite
+unknown; no provider-private bytes, transfer retry or new
+control is introduced. Creation and import options retain their existing joins.
 Status arrays use `null` for unattempted operations, zero for API success and the
 saved native error for failure. A successful short read leaves its value `null`.
 Destination process statuses are ordered open/time/close; token statuses are
@@ -2159,6 +2169,28 @@ available privileges and effective File System success coverage for the held
 broker token and gate. The workflow never enables system auditing, invents
 admission or restores unrelated descriptors to obtain a pass; unavailable native
 coverage remains BLOCKED.
+The suspended admission child's original termination and wait remain distinct
+from whole-Job retirement. On refusal, one bounded `native-windows-command: state`
+record is emitted before emergency cleanup, beside the original first cause and
+separate cleanup cause. It retains the admission PID/thread/birth, matching held
+process/thread slot counts, and original census members. Its ten `status` slots
+are birth-query/termination/wait/exit-query/exit-code/Job-query/returned-bytes/
+assigned-count/listed-count/matching-admission-count; `-1` means unattempted or
+unavailable. Returned bytes remain unknown on query failure. Failed queries
+leave process counts unknown except the documented partial list on
+`ERROR_MORE_DATA`; that list never establishes completeness. Original completeness,
+member validation and `command-admission-members` refusal remain unchanged;
+a signaled process with retained references cannot prove an empty Job.
+The nine `audit` slots retain the reached stage (0 admission, 1 admitted,
+2 held files prepared, 3 subscribed, 4 policy/SACL installed, 5 control read,
+6 control acknowledged), subscription status, notifications, enumeration calls,
+returned events, resets, successful selected bookmarks, control read bytes and
+acknowledgment. These cache existing operations only, without additional gate
+I/O or policy changes. The strict caller retains the raw record within its
+existing 4 KiB failure bound; malformed metadata cannot supply a cause or proof.
+Missing delivery also carries these audit counters in the existing diagnostic
+query object, since a normally returned `P` control need not trigger native
+fatal-error reporting. The counters never satisfy delivery or its held-object joins.
 The command subscription filters the original principal, file type and event
 classes, retaining loss/clear events. A native case-insensitive filter forwards
 only the original four held names, and unrelated rows consume the same limits.
@@ -8032,10 +8064,19 @@ file identity and retained entry/content/signature pins when available. Both
 statuses use exact eight-digit hexadecimal 32-bit representations; only zero
 succeeds. The carrier remains strict, bounded and failure-only. Verification is
 never retried for diagnostics, and failed trust cannot fall back to a digest.
+Its optional twenty-element `inputs` array retains the original trust/file-info
+structure sizes; full-path, held-path, held-handle and known-subject flags; UI,
+revocation, state-action, provider and UI-context values; policy/SIP/state-handle
+presence; and handle-flags, size and position query status/value pairs. Query
+failures use their actual native status and `-1` for unavailable values. A zero
+`FILE_CURRENT` offset observes position without rewinding; neither EOF nor UI
+settings diagnose a nonzero result. The exact held identities and pins remain
+the existing failure-carrier fields, joined to the original preparation journals.
 The experiment opens its build helper before the MSVC compiler at sequence 2;
 the compiler's signature pin identifies the PE signature representation, not an inferred
-signer certificate. The historical artifact lacks the original LONG, so neither
-its trust predicate nor pipe error 109 establishes the native cause. The
+signer certificate. The observed original embedded verification returned LONG 8
+with CLOSE 0 at sequence 2/open, entry 14. That status alone establishes neither
+an EOF, UI nor resource cause; later pipe error 109 cannot replace it. The
 functional compiler-trust repair remains pending original-call Windows evidence.
 Error 109 does not identify a reader wait/exit cause. Original native
 command acceptance remains unproved until matching hosted execution; preparation

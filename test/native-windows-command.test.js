@@ -2743,6 +2743,10 @@ test("command preflight source preserves API-specific causes, independent cleanu
       failure.indexOf("command_preflight_close(FALSE)"),
   );
   assert.ok(
+    failure.indexOf("command_observe_failure()") <
+      failure.indexOf("close_job(TRUE)"),
+  );
+  assert.ok(
     failure.indexOf("command_preflight_close(FALSE)") <
       failure.indexOf("struct diagnosis cleanup = cleanup_failure"),
   );
@@ -3425,18 +3429,25 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
     [primary, ""],
     [primary, cleanup],
     [
+      "native-windows: operation=command-admission-members domain=invariant value=0\r\n",
+      'native-windows-command: state={"pid":43,"thread":44,"birth":"90","status":[0,0,0,0,0,0,24,1,1,1],"held":[1,1],"members":[43],"audit":[0,-1,0,0,0,0,0,0,0]}\r\n' +
+        cleanup,
+    ],
+    [
       "native-windows: operation=command-process-create domain=win32 value=5\r\n",
       "native-windows-cleanup: operation=command-environment-close domain=win32 value=6\r\n",
     ],
   ]) {
     const f = open(),
       bytes = Buffer.from(first + tail),
-      diagnosis =
-        first === primary
+      diagnosis = first.includes("command-admission-members")
+        ? "command-admission-members failed (invariant=0)"
+        : first === primary
           ? "file-size failed (invariant=0)"
           : "command-process-create failed (win32=5)",
-      cleanupOperation =
-        first === primary ? "file-close" : "command-environment-close";
+      cleanupOperation = first.includes("command-process-create")
+        ? "command-environment-close"
+        : "file-close";
     for (const chunk of [
       bytes.subarray(0, 3),
       bytes.subarray(3, 47),
@@ -3965,6 +3976,232 @@ test("actual gate-read source captures the first API cause before independent ha
   );
 });
 
+test("actual admission observations preserve the signaled child, held references and complete census refusal", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (text) =>
+    text
+      .replace(
+        /BYTE bytes\[[^;]+; JOBOBJECT_BASIC_PROCESS_ID_LIST \*list=\(void \*\)bytes; DWORD used=0;/u,
+        "const bytes={}, list={}; const used={value:0};",
+      )
+      .replaceAll("sizeof(bytes)", "272")
+      .replaceAll(
+        "command_observed.status[6]=queried?(LONGLONG)used:-1",
+        "command_observed.status[6]=queried?used.value:-1",
+      )
+      .replace(
+        "FILETIME born,exited,kernel,user;",
+        "const born={},exited={},kernel={},user={};",
+      )
+      .replace("DWORD exitCode=0", "const exitCode={value:0}")
+      .replace(
+        "command_observed.status[4]=exitCode",
+        "command_observed.status[4]=exitCode.value",
+      )
+      .replace(
+        "((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime",
+        "born.dwHighDateTime*2**32+born.dwLowDateTime",
+      )
+      .replace(
+        /&(born|exited|kernel|user|exitCode|used|member|diagnosticOutputLock)\b/gu,
+        "$1",
+      )
+      .replace(/&command_(input|output|error)\b/gu, '"$1"')
+      .replaceAll("(DWORD)", "")
+      .replace(/\b(?:DWORD|BOOL|HANDLE|unsigned)\b/gu, "let")
+      .replaceAll("->", ".");
+  const admission = source.slice(
+    source.indexOf("  command_observed.pid=admission.dwProcessId;"),
+    source.indexOf("  command_files_prepare();"),
+  );
+  const projected = new Script(
+    `function command_members(job){${translate(body("command_members")).replace("let member;", "const member={value:false};").replace("invariant(member,", "invariant(member.value,")}} function emit(){${translate(body("command_observe_failure"))}} ${translate(admission)}`,
+  );
+  for (const fault of [
+    null,
+    "survivor",
+    "unexpected",
+    "partial",
+    "more-data",
+    "query",
+    "close",
+    "terminate",
+    "wait",
+  ]) {
+    let error = 17,
+      diagnosis,
+      output = "",
+      queries = 0;
+    const observed = {
+      active: true,
+      census: false,
+      pid: 0,
+      thread: 0,
+      birth: 0,
+      status: Array(10).fill(-1),
+      held: [0, 0],
+      members: [],
+      memberCount: 0,
+      audit: [0, -1, 0, 0, 0, 0, 0, 0, 0],
+    };
+    const api = {
+      command_observed: observed,
+      admission: { hProcess: 41, hThread: 42, dwProcessId: 43, dwThreadId: 44 },
+      command_processes: [41],
+      command_threads: [42],
+      command_count: 1,
+      ownedJob: 7,
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      ERROR_MORE_DATA: 234,
+      WAIT_OBJECT_0: 0,
+      WAIT_FAILED: 0xffffffff,
+      MAXDWORD: 0xffffffff,
+      JobObjectBasicProcessIdList: 3,
+      PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
+      SYNCHRONIZE: 0x100000,
+      diagnosticOutputLock: {},
+      stderr: {},
+      GetLastError: () => error,
+      SetLastError: (value) => {
+        error = value;
+      },
+      GetProcessTimes: (_, born) => {
+        born.dwHighDateTime = 0;
+        born.dwLowDateTime = 90;
+        return true;
+      },
+      TerminateProcess: () => {
+        error = 5;
+        return fault !== "terminate";
+      },
+      WaitForSingleObject: () => (fault === "wait" ? 258 : 0),
+      GetExitCodeProcess: (_, code) => {
+        code.value = 0;
+        return true;
+      },
+      release_handle: () => true,
+      QueryInformationJobObject: (job, kind, list, size, used) => {
+        assert.deepEqual([job, kind, size], [7, 3, 272]);
+        queries++;
+        const members = ["survivor", "close", "more-data"].includes(fault)
+          ? [43]
+          : fault === "unexpected"
+            ? [43, 99]
+            : [];
+        Object.assign(list, {
+          NumberOfAssignedProcesses:
+            members.length + (["partial", "more-data"].includes(fault) ? 1 : 0),
+          NumberOfProcessIdsInList: members.length,
+          ProcessIdList: members,
+        });
+        used.value = 16 + members.length * 8;
+        error = fault === "more-data" ? 234 : 5;
+        return !["query", "more-data"].includes(fault);
+      },
+      OpenProcess: () => 61,
+      IsProcessInJob: (_, job, member) => {
+        assert.equal(job, 7);
+        member.value = true;
+        return true;
+      },
+      close_handle: () => fault !== "close",
+      win32_check: (ok, operation) => {
+        if (!ok) {
+          diagnosis = operation;
+          api.emit();
+          throw operation;
+        }
+      },
+      invariant: (ok, operation) => {
+        if (!ok) {
+          diagnosis = operation;
+          api.emit();
+          throw operation;
+        }
+      },
+      failure: () => {
+        diagnosis = "process-close";
+        api.emit();
+        throw diagnosis;
+      },
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      fflush: () => {},
+      fprintf: (_, format, ...values) => {
+        let i = 0;
+        output += format.replace(/%(?:lld|llu|lu|s)/gu, () =>
+          String(values[i++]),
+        );
+      },
+      fputs: (text) => {
+        output += text;
+      },
+    };
+    try {
+      projected.runInNewContext(api);
+      assert.equal(fault, null);
+    } catch (cause) {
+      assert.equal(cause, diagnosis);
+      assert.notEqual(fault, null);
+    }
+    assert.deepEqual(observed.held, [1, 1]);
+    assert.equal(observed.pid, 43);
+    assert.equal(observed.thread, 44);
+    assert.equal(observed.birth, 90);
+    assert.equal(queries, ["terminate", "wait"].includes(fault) ? 0 : 1);
+    if (fault) {
+      const expected = {
+        survivor: "command-admission-members",
+        unexpected: "command-admission-members",
+        partial: "command-members-count",
+        "more-data": "command-members-query",
+        query: "command-members-query",
+        close: "process-close",
+        terminate: "command-admission-terminate",
+        wait: "command-admission-wait",
+      }[fault];
+      assert.equal(diagnosis, expected);
+      const carrier = `native-windows: operation=${expected} domain=${["query", "more-data", "terminate", "close"].includes(fault) ? "win32" : "invariant"} value=${fault === "more-data" ? 234 : ["query", "terminate"].includes(fault) ? 5 : fault === "close" ? 6 : 0}\n`;
+      assert.ok(windowsFeasibilityDiagnostics(carrier + output));
+      assert.equal(
+        windowsFeasibilityDiagnostics(carrier + output + output),
+        null,
+      );
+      assert.equal(
+        windowsFeasibilityDiagnostics(
+          carrier + output.replace('"held":[1,1]', '"held":[17,1]'),
+        ),
+        null,
+      );
+      assert.equal(
+        windowsFeasibilityDiagnostics(output),
+        null,
+        "observations never establish a cause",
+      );
+      if (["survivor", "unexpected"].includes(fault)) {
+        assert.equal(observed.status[2], 0);
+        assert.equal(observed.status[9], 1);
+        assert.equal(observed.status[7], fault === "survivor" ? 1 : 2);
+      }
+      if (fault === "more-data")
+        assert.deepEqual(observed.status.slice(5), [234, -1, 2, 1, 1]);
+      if (fault === "query")
+        assert.deepEqual(observed.status.slice(5), [5, -1, -1, -1, -1]);
+    }
+  }
+});
+
 async function commandCaptureProgram() {
   const [source, helper] = await Promise.all(
     ["feasibility-command.h", "feasibility-helper.c"].map((file) =>
@@ -4073,6 +4310,7 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     INVALID_HANDLE_VALUE: -1,
     EvtRenderEventXml: 1,
     command_preflight_owned: { active: false, capture: Array(16).fill(null) },
+    command_observed: { audit: Array(9).fill(0) },
     command_subscription: "subscription",
     command_bookmark: "bookmark",
     command_event: "notification",
@@ -4264,6 +4502,7 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
   f.capture(10);
   assert.deepEqual(f.projected, ["a", "b", "c", "later"]);
   assert.equal(f.api.command_records, 4);
+  assert.deepEqual(f.api.command_observed.audit.slice(2, 7), [2, 7, 4, 2, 4]);
   assert.equal(f.api.command_bytes, 32);
   assert.equal(f.api.command_capture_close(), true);
   assert.deepEqual(f.closed, [
@@ -5494,6 +5733,7 @@ test("failed delivery queries only its original interval within capture bounds a
         readBytes,
         scannedRecords,
         scannedBytes,
+        ...audit
       ) => {
         receipt = {
           from: from.toString(),
@@ -5510,6 +5750,7 @@ test("failed delivery queries only its original interval within capture bounds a
           readBytes,
           scannedRecords,
           scannedBytes,
+          audit,
         };
       },
     });
@@ -5522,6 +5763,7 @@ test("failed delivery queries only its original interval within capture bounds a
     assert.equal(selected.includes("ObjectName"), false);
     assert.equal(receipt.from, epoch.toString());
     assert.equal(receipt.to, (epoch + 100n).toString());
+    assert.deepEqual(receipt.audit, f.api.command_observed.audit);
     assert.equal(receipt.complete, !fault);
     assert.equal(
       receipt.error,
@@ -5577,6 +5819,7 @@ test("failed delivery queries only its original interval within capture bounds a
     readBytes: 32,
     scannedRecords: 0,
     scannedBytes: 0,
+    audit: [5, 0, 1, 2, 0, 1, 0, 32, 0],
   };
   for (const [field, replacement] of [
     ["from", (BigInt(observed.start.time) - 1n).toString()],
@@ -5590,6 +5833,9 @@ test("failed delivery queries only its original interval within capture bounds a
     ["readBytes", 31],
     ["gateIdentity", "foreign"],
     ["requestedAccess", 2],
+    ["audit", []],
+    ["audit", Array(9).fill("untrusted-query-field")],
+    ["audit", Array(9).fill(7)],
     ["unexpected", "untrusted-query-field"],
   ]) {
     const rejected = structuredClone(observed);
@@ -5603,6 +5849,17 @@ test("failed delivery queries only its original interval within capture bounds a
       },
     );
   }
+  assert.throws(
+    () => windowsCommandBrokerCoverage(value, observed),
+    (error) => {
+      assert.equal(error.brokerCoverage?.reason, "delivery-missing");
+      assert.deepEqual(
+        error.brokerCoverage.control.query.audit,
+        observed.control.query.audit,
+      );
+      return true;
+    },
+  );
 });
 
 async function commandCoverageControlProgram() {
@@ -5642,6 +5899,8 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
       TRUE: true,
       FALSE: false,
       command_records: 0,
+      command_gate_bytes: 32,
+      command_observed: { audit: Array(9).fill(0) },
       GetTickCount64: () => clock,
       GetSystemTimePreciseAsFileTime: () => {},
       command_delivery_query: () => assert.equal(delivered, false),
@@ -5674,6 +5933,8 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
     };
     program.runInNewContext(api);
     assert.equal(reads, 1);
+    assert.equal(api.command_observed.audit[0], 5);
+    assert.equal(api.command_observed.audit[7], 32);
     assert.equal(captures, delivered ? 1 : 2);
     assert.equal(api.command_probing, false);
     const value = {
