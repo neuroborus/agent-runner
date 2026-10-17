@@ -211,6 +211,209 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
   }
 });
 
+test("Darwin signature admission observes only original failures with bounded bytes and signed statuses", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
+    body = /static void signature\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1],
+    hexBody = /static void hex\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)?.[1],
+    guardBody = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body && hexBody && guardBody);
+  // Retain the complete admission, diagnostics, downstream guards and cleanup.
+  const script = new Script(`
+    function hex(data, n, out) {${hexBody.replace("size_t i", "let i").replace("out + 2*i,", "out, 2*i,")}}
+    function guard(ok, file, line) {${guardBody.replace("int error", "let error")}}
+    function signature(name, pin) {${body
+      .replace(/^#.*$/gmu, "")
+      .replace(
+        "SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;",
+        "const code = {}, info = {};",
+      )
+      .replace(
+        "char path_hex[2*PATH_MAX] = {0};",
+        "const path_hex = Buffer.alloc(2*PATH_MAX);",
+      )
+      .replace("char actual[41];", "const actual = Buffer.alloc(41);")
+      .replace(
+        "const void *keys[2], *values[2];",
+        "const keys = [], values = [];",
+      )
+      .replace(
+        /\((?:const UInt8 \*|const unsigned char \*|CFIndex|intmax_t)\)/gu,
+        "",
+      )
+      .replace(
+        /\b(?:size_t|CFURLRef|bool|OSStatus|int|CFDataRef|CFDictionaryRef|CFIndex) /gu,
+        "let ",
+      )
+      .replace(/&(code|info)\b/gu, "$1")}}
+    ({signature, guard});
+  `);
+  const PATH_MAX = 1024,
+    operations = ["url", "create", "validity", "info"],
+    special = Buffer.concat([
+      Buffer.from('/fixture/\t\n\r"\\'),
+      Buffer.from([0x80, 0xff]),
+    ]),
+    cases = [
+      ...operations.flatMap((stop) =>
+        (stop === "url" ? [0] : [-1, -2147483648, 2147483647]).map(
+          (status) => ({ stop, status }),
+        ),
+      ),
+      ...[0, PATH_MAX - 2, PATH_MAX - 1, PATH_MAX, PATH_MAX + 7].map(
+        (length) => ({ stop: "info", name: Buffer.alloc(length, 0xff) }),
+      ),
+      ...["encode", "write", "flush"].map((fault) => ({
+        stop: "info",
+        fault,
+      })),
+      { name: Buffer.alloc(PATH_MAX + 7, 0xff) },
+    ];
+  for (const { stop, status = -1, name = special, fault } of cases) {
+    const calls = [],
+      releases = [],
+      url = {},
+      code = {},
+      info = {},
+      hash = Buffer.alloc(20, 0xab),
+      terminal = operations.indexOf(stop),
+      originalError = stop === "info" ? 0 : 2;
+    let output = "",
+      encoded = 0,
+      flushes = 0,
+      refusedErrno;
+    const cString = (value) =>
+      Buffer.isBuffer(value)
+        ? value.subarray(0, value.indexOf(0)).toString()
+        : value;
+    const context = {
+      Buffer,
+      PATH_MAX,
+      NULL: null,
+      stderr: {},
+      errno: 7,
+      kSecCSDefaultFlags: 1,
+      kSecCSStrictValidate: 2,
+      kSecCSSigningInformation: 4,
+      errSecSuccess: 0,
+      kSecCodeInfoUnique: "hash",
+      kSecCodeInfoEntitlementsDict: "entitlements",
+      reviewed_image(input) {
+        calls.push(["reviewed", input]);
+      },
+      strlen(input) {
+        calls.push(["strlen", input]);
+        return input.length;
+      },
+      CFURLCreateFromFileSystemRepresentation(...args) {
+        calls.push(["url", ...args]);
+        context.errno = originalError;
+        return stop === "url" ? null : url;
+      },
+      SecStaticCodeCreateWithPath(input, flags, target) {
+        calls.push(["create", input, flags]);
+        target.value = code;
+        context.errno = originalError;
+        return stop === "create" ? status : 0;
+      },
+      SecStaticCodeCheckValidity(input, flags, requirement) {
+        calls.push(["validity", input.value, flags, requirement]);
+        context.errno = originalError;
+        return stop === "validity" ? status : 0;
+      },
+      SecCodeCopySigningInformation(input, flags, target) {
+        calls.push(["info", input.value, flags]);
+        target.value = info;
+        context.errno = originalError;
+        return stop === "info" ? status : 0;
+      },
+      CFDictionaryGetValue(input, key) {
+        assert.equal(input.value, info);
+        return key === "hash" ? hash : null;
+      },
+      CFGetTypeID: () => "data",
+      CFDataGetTypeID: () => "data",
+      CFDataGetLength: (value) => value.length,
+      CFDataGetBytePtr: (value) => value,
+      CFRelease: (value) => releases.push(value.value ?? value),
+      strcmp: (actual, pin) => (cString(actual) === pin ? 0 : 1),
+      sprintf(target, offset, format, byte) {
+        assert.equal(format, "%02x");
+        assert.equal(offset, 2 * encoded++);
+        assert.ok(offset + 2 < target.length);
+        context.errno = 97;
+        if (fault === "encode") return -1;
+        target.write(byte.toString(16).padStart(2, "0"), offset, "ascii");
+        target[offset + 2] = 0;
+        return 2;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, context.stderr);
+        let at = 0;
+        output += format.replace(/%(zu|jd|d|s|u)/gu, (_token, type) => {
+          const value = values[at++];
+          if (type === "s") return cString(value);
+          return (
+            type === "jd" || type === "d"
+              ? BigInt.asIntN(type === "d" ? 32 : 64, BigInt(value))
+              : BigInt.asUintN(type === "u" ? 32 : 64, BigInt(value))
+          ).toString();
+        });
+        assert.equal(at, values.length);
+        context.errno = 99;
+        return fault === "write" ? -1 : 1;
+      },
+      fflush(stream) {
+        assert.equal(stream, context.stderr);
+        flushes++;
+        context.errno = 98;
+        return fault === "flush" ? -1 : 0;
+      },
+      need(ok) {
+        if (!ok) refusedErrno = context.errno;
+        executed.guard(!!ok, "fixture", 1);
+      },
+      _exit(code) {
+        throw Object.assign(new Error("refusal"), {
+          code,
+          errno: refusedErrno,
+        });
+      },
+    };
+    const executed = script.runInNewContext(context),
+      run = () => executed.signature(name, hash.toString("hex"));
+    if (stop) assert.throws(run, { code: 126, errno: originalError });
+    else run();
+    assert.deepEqual(calls, [
+      ["reviewed", name],
+      ["strlen", name],
+      ...[
+        ["url", null, name, name.length, false],
+        ["create", url, 1],
+        ["validity", code, 2, null],
+        ["info", code, 4],
+      ].slice(0, terminal < 0 ? 4 : terminal + 1),
+    ]);
+    assert.deepEqual(releases, stop ? [] : [info, code, url]);
+    const emitted = Math.min(name.length, PATH_MAX - 1);
+    assert.equal(encoded, terminal < 0 ? 20 : emitted);
+    assert.equal(flushes, terminal < 0 ? 0 : 2);
+    let expected = "";
+    if (terminal >= 0) {
+      expected = `native-darwin-signature: path-length=${name.length} path-emitted=${emitted} path-truncated=${Number(emitted !== name.length)} path-hex=${fault === "encode" ? "" : name.subarray(0, emitted).toString("hex")} url=${Number(stop !== "url")}\n`;
+      for (const [index, operation] of operations.slice(1).entries())
+        expected += `native-darwin-signature-${operation}: ${index + 1 > terminal ? "uncalled" : `status=${operation === stop ? status : 0}`}\n`;
+    }
+    if (stop)
+      expected += `native-darwin-guard: file=fixture line=1 errno=${originalError}\n`;
+    assert.equal(output, expected);
+    assert.ok(Buffer.byteLength(output) < 2 * PATH_MAX + 512);
+  }
+});
+
 test("Darwin protected-file admission observes original short circuits without changing reads or refusal", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
     body =

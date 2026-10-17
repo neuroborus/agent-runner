@@ -221,12 +221,32 @@ static void signature(const char *name, const char *pin) {
 #ifndef NATIVE_CI_EXPERIMENT
   reviewed_image(name);
 #endif
+  size_t path_length = strlen(name);
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)name,
-                                                        (CFIndex)strlen(name), false);
+                                                        (CFIndex)path_length, false);
   SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
-  need(url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
-       SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess &&
-       SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess);
+  bool create_called = false, validity_called = false, info_called = false;
+  OSStatus create_status = 0, validity_status = 0, info_status = 0;
+  bool signature_ok = url &&
+       (create_called = true, create_status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code), create_status == errSecSuccess) &&
+       (validity_called = true, validity_status = SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL), validity_status == errSecSuccess) &&
+       (info_called = true, info_status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info), info_status == errSecSuccess);
+  if (!signature_ok) {
+    int signature_error = errno;
+    size_t emitted = path_length < PATH_MAX ? path_length : PATH_MAX - 1;
+    char path_hex[2*PATH_MAX] = {0};
+    hex((const unsigned char *)name, emitted, path_hex);
+    fprintf(stderr, "native-darwin-signature: path-length=%zu path-emitted=%zu path-truncated=%d path-hex=%s url=%d\n",
+      path_length, emitted, emitted != path_length, path_hex, url != NULL);
+    if (create_called) fprintf(stderr, "native-darwin-signature-create: status=%jd\n", (intmax_t)create_status);
+    else fprintf(stderr, "native-darwin-signature-create: uncalled\n");
+    if (validity_called) fprintf(stderr, "native-darwin-signature-validity: status=%jd\n", (intmax_t)validity_status);
+    else fprintf(stderr, "native-darwin-signature-validity: uncalled\n");
+    if (info_called) fprintf(stderr, "native-darwin-signature-info: status=%jd\n", (intmax_t)info_status);
+    else fprintf(stderr, "native-darwin-signature-info: uncalled\n");
+    fflush(stderr); errno = signature_error;
+  }
+  need(signature_ok);
   CFDataRef hash = CFDictionaryGetValue(info, kSecCodeInfoUnique);
   need(hash && CFGetTypeID(hash) == CFDataGetTypeID() && CFDataGetLength(hash) == 20);
   char actual[41]; hex(CFDataGetBytePtr(hash), 20, actual); need(!strcmp(actual, pin));

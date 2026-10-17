@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Observe original Darwin signature admission failures
+
+Darwin's signature guard retains its original calls, flags and short circuits
+while observing failure-only bounded requested-path bytes and exact signed
+statuses, separately marking uncalled APIs. Diagnostics restore original errno
+before refusal; success, pins, entitlements, custody, cleanup and limits stay fixed.
+The composite source line and errno identify no failed API. Portable actual-body
+injections prove observation behavior, not native validity, a unique remedy or
+closure of the separate native acceptance obligations.
+
 ## 2026-10-17 — Align selected Darwin toolchain input limits
 
 The sealed experiment compiler entry applies an explicit 512 MiB per-call ceiling

@@ -464,6 +464,18 @@ no new diagnostics. There is no additional filesystem observation, acquisition,
 command or replay, and no change to later reading, stability, hashing or closing.
 Portable fixtures prove these observation boundaries, not the failed native
 filename/predicate, a remedy, successful selected-SDK queries or native readiness.
+
+Signature admission separately samples its original URL/create/strict-validity/
+signing-information composite, retaining each call, flag and short circuit.
+Only composite failure emits the URL outcome, exact signed `OSStatus` values
+and explicit `uncalled` states. Requested path hex uses at most `PATH_MAX - 1`
+bytes, with requested/emitted lengths and truncation; the original length sample
+is reused without adding path admission. Encoding, writes and flushing restore
+original errno before refusal/exit 126, including diagnostic failures. Success,
+reviewed-image, pin/entitlement and cleanup behavior remain unchanged. A composite
+source line and errno identify no particular API failure; portable injections
+prove observation behavior, not native validity or a unique functional remedy.
+
 The sealed build entry separately samples the original SDK guard in its existing
 short-circuit order: native realpath result and errno, exact path equality,
 lstat result and errno, directory kind, root owner and group/other write bits.
