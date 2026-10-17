@@ -29,7 +29,7 @@ import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
 import {
   normalizeWindowsExperimentPreparation,
-  windowsPreparationOptions,
+  recoverWindowsPreparationOwners,
 } from "./preparation.js";
 import { normalizeNativePolicyBinding } from "./experiment-policy.js";
 import { createWindowsSystemEffects } from "./effects.js";
@@ -419,16 +419,21 @@ export async function prepareWindowsExperiment(
       receiptSha256: null,
     }),
   );
+  let bootstrapSequence = 0,
+    bootstrapRecorded = false;
+  const writeBootstrap =
+    options.persistBootstrap ??
+    (async (record) =>
+      writeFile(
+        `${options.bootstrapJournal ?? directory}-bootstrap-${bootstrapSequence++}.json`,
+        JSON.stringify(record) + "\n",
+        { flag: "wx" },
+      ));
+  const persistBootstrap = async (record) => {
+    await writeBootstrap(record);
+    bootstrapRecorded = true;
+  };
   try {
-    let bootstrapSequence = 0;
-    const persistBootstrap =
-      options.persistBootstrap ??
-      (async (record) =>
-        writeFile(
-          `${options.bootstrapJournal ?? directory}-bootstrap-${bootstrapSequence++}.json`,
-          JSON.stringify(record) + "\n",
-          { flag: "wx" },
-        ));
     prepared = await (options.bootstrap ?? bootstrapWindowsExperiment)(
       job,
       directory,
@@ -649,17 +654,33 @@ export async function prepareWindowsExperiment(
     };
   } catch (error) {
     primary = error;
+    const cleanupFailures = [],
+      signal = AbortSignal.timeout(30000),
+      reportCleanup = (cause) => {
+        cleanupFailures.push(cause);
+        try {
+          nativeException("windows-experiment-preparation-cleanup", cause);
+        } catch {
+          /* preserve both failures */
+        }
+      };
     try {
       nativeException("windows-experiment-preparation", error);
     } catch {
       /* Preserve the original cause and independent cleanup. */
     }
-    native ??= error.experimentNative;
+    native ??= error?.experimentNative;
     // Failed/partial native startup never becomes retirement by catching an
     // exception. Retain its write-ahead intent and original first cause.
     if (native) {
+      let settlement;
       try {
-        const settlement = await native.close();
+        settlement = await native.close({ signal });
+      } catch (cleanup) {
+        reportCleanup(cleanup);
+        settlement = cleanup?.settlement;
+      }
+      try {
         if (retired(settlement))
           await save(
             recordExperimentPreparationEffect(job, {
@@ -673,18 +694,32 @@ export async function prepareWindowsExperiment(
             }),
           );
       } catch (cleanup) {
-        try {
-          nativeException("windows-experiment-preparation-cleanup", cleanup);
-        } catch {
-          /* The first cause and retained cleanup outcome remain authoritative. */
-        }
-        /* independent recovery owns unsettled resources */
+        reportCleanup(cleanup);
       }
     }
-    await save({ ...job, failure: "preparation-failed" });
+    const failedJob = { ...job, failure: "preparation-failed" };
+    try {
+      await save(failedJob);
+    } catch (cleanup) {
+      reportCleanup(cleanup);
+    }
+    if (bootstrapRecorded && cleanupFailures.length)
+      try {
+        await persistBootstrap({
+          purpose: "experiment",
+          phase: "preparation-cleanup-failed",
+          candidateSha: job.candidateSha,
+          failures: cleanupFailures.map((cause) => ({
+            name: String(cause?.name ?? "Error").slice(0, 128),
+            message: String(cause?.message ?? cause).slice(0, 4096),
+          })),
+        });
+      } catch (cleanup) {
+        reportCleanup(cleanup);
+      }
     throw Object.assign(
       new Error("Windows experiment preparation failed", { cause: primary }),
-      { experimentJob: job },
+      { experimentJob: failedJob, cleanupFailures },
     );
   }
 }
@@ -1070,7 +1105,7 @@ export async function recoverWindowsExperimentPreparation(
     job.preparationEffects.settlement.status === "RETIRED"
   )
     return job;
-  let result, files;
+  let result;
   try {
     const prepared = await bootstrapSelector(job, directory, options),
       plan = { purpose: "experiment", bootstrap: prepared.bootstrap },
@@ -1092,60 +1127,19 @@ export async function recoverWindowsExperimentPreparation(
           },
         },
       };
-    files = createWindowsPreparationFiles(input, options);
-    const owners = new Map();
-    // Pass the same fresh observer to recovery rather than opening an untracked second owner.
-    const key = observationDigest({
-      context: prepared.bootstrap.context,
-      manifest: input.manifest,
-      output: input.output,
-      directory,
+    // Cleanup has its own finite signal; a failed preparation signal cannot
+    // cancel original-owner recovery before its first independent attempt.
+    result = await recoverWindowsPreparationOwners(input, options, {
+      signal: AbortSignal.timeout(30000),
     });
-    owners.set(key, files);
-    const native = windowsPreparationOptions(input, options, owners),
-      names = await files.readdir(directory),
-      records = [];
-    await files.beginCleanup(options.signal ?? new AbortController().signal);
-    for (const name of names.filter((name) =>
-      /^windows-(?:files-|bootstrap-|command-)/u.test(name),
-    ))
-      records.push({
-        name,
-        record: JSON.parse(
-          (
-            await files.readProtected({
-              file: path.join(directory, name),
-              receipt: true,
-            })
-          ).bytes,
-        ),
-      });
-    requireObservation(records.length > 0);
-    result = await native.recover(
-      {
-        request: { candidateSha: job.candidateSha, platform: "win32" },
-        records,
-        plan: input.manifest.windowsPreparation,
-      },
-      { signal: options.signal },
-    );
     requireObservation(retired(result));
-    const custody = await native.settleFiles();
-    requireObservation(retired(custody));
-    files = null;
-    result.nativeEventSha256 = observationDigest({
-      recovery: result.nativeEventSha256,
-      custody,
-    });
-  } catch {
+  } catch (cause) {
+    try {
+      nativeException("windows-experiment-preparation-recovery", cause);
+    } catch {
+      /* retain uncertainty */
+    }
     result = retained();
-  } finally {
-    if (files)
-      try {
-        await files.settleFiles();
-      } catch {
-        /* original uncertainty remains */
-      }
   }
   const settled = recordExperimentPreparationEffect(job, {
     admission: "possible",

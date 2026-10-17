@@ -101,6 +101,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     opening = false,
     retiring = false,
     closing = false,
+    retiredOwner = false,
     failed = false,
     firstCause,
     lastCommand,
@@ -111,6 +112,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     auditOwned = false,
     auditRestoring = false,
     cleanup = false,
+    cleanupSignal,
     admitted = false,
     parked,
     setupAuthorized = false,
@@ -487,6 +489,16 @@ export function createWindowsCustodyReader(value, options = {}) {
     }
   };
   return {
+    get retirementBinding() {
+      // A failure must not erase the original birth while the ordinary command
+      // guard stays closed. This snapshot admits no further reader operation.
+      return structuredClone({
+        inputSha256: observationDigest(input),
+        helper: helper ?? null,
+        bridge: bridge ?? null,
+        taskSha256: taskSha256 ?? null,
+      });
+    },
     verification: Object.freeze({
       get input() {
         return structuredClone(input);
@@ -516,6 +528,29 @@ export function createWindowsCustodyReader(value, options = {}) {
       },
     }),
     async beginCleanup({ signal: finish }) {
+      requireWindows(
+        started &&
+          owner &&
+          finish instanceof AbortSignal &&
+          !finish.aborted &&
+          (!cleanupSignal || cleanupSignal === finish) &&
+          (cleanup || !signal || signal.aborted || options.admissionClosed?.()),
+      );
+      if (!cleanupSignal) {
+        cleanupSignal = finish;
+        // Install cancellation before waiting for work already in the pipe.
+        // D acknowledgement and bridge completion are still owned IPC, too.
+        finish.addEventListener(
+          "abort",
+          () => {
+            if (!retiredOwner) {
+              failed = true;
+              owner.close();
+            }
+          },
+          { once: true },
+        );
+      }
       await serial;
       requireWindows(
         started &&
@@ -524,7 +559,10 @@ export function createWindowsCustodyReader(value, options = {}) {
           !closing &&
           !opening &&
           (!cleanup || signal === finish) &&
-          (cleanup || !signal || signal.aborted) &&
+          (cleanup ||
+            !signal ||
+            signal.aborted ||
+            options.admissionClosed?.()) &&
           finish instanceof AbortSignal &&
           !finish.aborted,
       );
@@ -533,16 +571,6 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(!finish.aborted);
       cleanup = true;
       signal = finish;
-      finish.addEventListener(
-        "abort",
-        () => {
-          if (!closing) {
-            failed = true;
-            owner?.close();
-          }
-        },
-        { once: true },
-      );
     },
     async authorizeRestoration(retirement) {
       guard();
@@ -2447,6 +2475,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             preSetup: true,
           });
           owner.settle?.();
+          retiredOwner = true;
           closing = true;
           return {
             ...final,
@@ -2528,6 +2557,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           nativeEventSha256: final.nativeEventSha256,
         });
         owner.settle?.();
+        retiredOwner = true;
         return {
           ...final,
           bridge: structuredClone(bridge),

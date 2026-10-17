@@ -6373,8 +6373,28 @@ allowance to their existing `(sessionLimit + 1) * 90-second` bounds. Custody's
 19-minute-30-second lifetime covers the longest recipe, separate settlement and
 entry margin; transport, native watchdogs and the one-shot task share that bound.
 Workflow probe/job deadlines continue deriving from the fixed recipes.
-Supported injected composition is covered
-in `win32/preparation-effects.test.js`; matched MSVC/SDK builds, certificate/trust
+Windows experiment close fences new admission before attempting every original
+reader and independent file-observer obligation. Concurrent closes share one
+attempt; failed receipt writes cannot suppress observer settlement. Failed reader
+registrations remain protected dependencies. A fresh recovery observer rereads
+the original bounded journals and verifies original process births, whole Jobs
+and task removal before releasing those dependencies, then independently verifies
+every old observer as well. Dependency release matches the original reader and
+bridge births and task digest. Recovery holds old observer births before their
+closure; that custody is not retirement proof. Its own successful finish cannot
+settle an old owner.
+Explicit recovery after a cached failure never replays startup, native opens or
+compilation. A separate 30-second cleanup signal interrupts pending IPC and does
+not renew the original observer deadline. Cancellation covers queued reader work,
+task acknowledgement and bridge completion. A dependent file observer retains
+custody on cancellation until fresh original-reader proof releases its registry;
+abandoning an IPC acknowledgement never releases that dependency.
+The 3,540,000-ms preparation and 60-minute workflow bounds are unchanged.
+Watchdog exit 124 remains emergency cleanup; EOF, exit 126 and task absence alone
+establish no retirement. Preparation failure stays primary; cleanup and persistence
+failures are reported separately and recorded in the existing bootstrap journal
+when its writer remains usable. Supported injected composition is covered in
+`win32/preparation-effects.test.js`; matched MSVC/SDK builds, certificate/trust
 bindings and fresh protected native CI proof remain external. These changes
 establish no Windows GO or production provider dispatch grant.
 

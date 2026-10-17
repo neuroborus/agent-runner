@@ -72,6 +72,21 @@ publication, PE and custody owners reject promotion. Original creation identitie
 whole Jobs, owned task removal and independent settlement govern load and partial
 recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
 recompilation or resource release. Ordinary CI consumes this experiment preparer.
+Windows experiment closure fences admission and coalesces original reader and
+file-observer settlement. Its separate 30-second cleanup signal interrupts IPC
+through queued reader work, task acknowledgement and bridge completion without
+renewing the original observer deadline. Cancellation stops waits on a dependent
+observer without closing it or discarding held custody. Retained readers remain
+in the preparation registry until protected original births, whole Jobs and owned
+tasks have fresh independent retirement proof matching that registration; only
+then may their dependent observer close. Recovery holds the old observer births
+before closure and separately proves their retirement. Explicit recovery can
+progress after a cached close failure without replaying setup, native opens or
+compilation.
+Receipt and cleanup failures remain separate from the preparation cause, including
+failed failure-record persistence. Every old observer must independently retire
+before aggregate settlement changes from RETAINED. The preparation and workflow
+bounds remain unchanged.
 Darwin's native owners bind experiment purpose into build requests, custody
 plans/journals, launch digests and policies using shared experiment validators.
 Observed pins never become approval fields. Marked Mach-O images and purpose-specific

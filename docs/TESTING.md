@@ -1306,6 +1306,48 @@ thirteen compiles, and rejoin prepared bytes and settle the build case without
 another compiler or bootstrap.
 Signal handoff coverage ends preparation before verification and preserves the
 original observer deadline, cancellation checks and first transport failure.
+The real experiment open/close and preparation catch also use that raw fixture.
+The fast experiment suite exercises the actual preparation registry rather than
+extracting the changing close method from source. Parked-admission closure is
+covered through the real experiment owner; raw observer finish rejects a live
+held subject, and EOF exit 126 still requires complete independent recovery proof.
+Each injected observer owns its file/read/upload slots and directory snapshot;
+an independently retired fresh observer cannot consume or settle an original
+observer's pending read.
+Partial package recovery models the failed cold observer's eventual EOF exit 126
+when its channel closes. The former no-op close left that observer permanently
+live after per-observer custody stopped a fresh finish from discarding its held
+subjects. The regression retains every original live owner after the rejected
+cold pass, leaves observer tasks for independent removal, and requires fresh
+complete recovery to retire all actors and tasks without admitting publication.
+The access matrix's cold recovery first settles the actual preparation owner.
+The public factory deliberately reuses a live observer; leaving that owner open
+incorrectly spent its shared 32,768-command budget on reconstruction and retained
+`access.workspace-write.none`. The regression now proves that original preparation
+owners retired and their tasks were removed before constructing fresh recovery,
+preserving all nine profile/fault variants, native command bounds and independent
+recovery assertions.
+The cancellation fixture keeps EOF exit status separate from the closed process
+observations, matching native `process_read` and `verify-process-exit`; embedding
+`exitCode` in those observations incorrectly blocked complete recovery. Its
+channel close is idempotent, matching `windowsCustodyChannel`: a late cleanup
+callback previously reread an already removed task and raised an asynchronous
+`TypeError` after the test passed. Controlled recovery cancellation now exercises
+that callback immediately after complete retirement, without waiting for a timer.
+Normal observer disposal also preserves the distinction between successful
+verification and explicit cleanup/recovery fencing. Setting that fence during
+ordinary `settleFiles` made `verifyBuild` reject its own verified settlement. Reader
+registration still rejects admission once observer settlement starts or completes.
+Regressions cover post-startup open rejection, retained/thrown reader settlement,
+receipt failure, concurrent/repeated close, interrupted explicit recovery and
+cleanup IPC cancellation. The actual preparation-files registry preserves reader
+dependencies until fresh original process/Job/task proof permits observer closure.
+Cancellation covers queued reader work, consumed receipt acknowledgements, task
+acknowledgement and bridge completion while preserving dependent observer custody.
+A wrong original birth cannot release registration, and recovery holds the old
+observer births before closing them without treating that custody as retirement.
+A later observer's success, missing task or watchdog exit cannot retire an old
+owner. Original preparation and cleanup/persistence causes remain separate.
 Distinct regressions reject unsigned/source/output substitution, publication changes
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers

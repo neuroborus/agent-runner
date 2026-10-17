@@ -75,9 +75,22 @@ export function createWindowsPreparationFiles(input, options = {}) {
     nonce,
     declaration,
     deadline,
+    settling,
+    cleanupSignal,
     workSignal = input.signal;
   const readers = new Map();
   const caseOwners = new Map();
+  const cleanupWaiters = new Set();
+  const closeIndependentOwner = () => {
+    if (readers.size === 0) owner?.close();
+  };
+  const wait = (value) => {
+    const pending = Promise.withResolvers();
+    cleanupWaiters.add(pending.reject);
+    Promise.resolve(value).then(pending.resolve, pending.reject);
+    if (cleanupSignal?.aborted) pending.reject(failed ?? cleanupSignal.reason);
+    return pending.promise.finally(() => cleanupWaiters.delete(pending.reject));
+  };
   let admissionClosed = false;
   let admissionChecked = false;
   const guard = (signal = workSignal) => {
@@ -153,6 +166,8 @@ export function createWindowsPreparationFiles(input, options = {}) {
       shell: false,
       stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
     });
+    if (cleanupSignal?.aborted) closeIndependentOwner();
+    guard();
     const intent = await owner.receive();
     closed(intent, ["phase", "taskSha256", "bridge", "intentSha256"]);
     bridge = normalizeWindowsIdentity(intent.bridge);
@@ -212,21 +227,22 @@ export function createWindowsPreparationFiles(input, options = {}) {
   const ensure = () =>
     (starting ??= start().catch((error) => {
       failed ??= error;
-      owner?.close();
+      closeIndependentOwner();
       throw failed;
     }));
   const command = (name, args = []) => {
     const work = serial.then(async () => {
       guard();
-      await ensure();
+      await wait(ensure());
+      guard();
       requireObservation(
         ++sequence <=
           (declaration.context.executionId === "package.git-for-windows"
             ? 1048576
             : 32768),
       );
-      await owner.send([name, sequence, ...args].join(" ") + "\n");
-      const reply = await owner.receive();
+      await wait(owner.send([name, sequence, ...args].join(" ") + "\n"));
+      const reply = await wait(owner.receive());
       closed(reply, ["sequence", "value"]);
       requireObservation(reply.sequence === sequence);
       guard();
@@ -234,7 +250,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
     });
     serial = work.catch((error) => {
       failed ??= error;
-      owner?.close();
+      closeIndependentOwner();
     });
     return work;
   };
@@ -265,7 +281,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
       command("verify-" + name, windowsVerificationArguments(name, args)),
   };
   const observer = async () => {
-    await ensure();
+    await wait(ensure());
     return (verifier ??= createWindowsCustodyVerifier(
       { verification: native },
       { clock, maximumSubjects: 128, deadline },
@@ -631,10 +647,16 @@ export function createWindowsPreparationFiles(input, options = {}) {
       admissionChecked = true;
     },
     retainReader(reader, signal) {
-      readers.set(reader, signal);
+      requireObservation(
+        !closedOwner && !settling && (!admissionClosed || readers.has(reader)),
+      );
+      const retained = readers.get(reader);
+      if (retained) retained.signal = signal;
+      else readers.set(reader, { signal });
     },
     releaseReader(reader) {
       readers.delete(reader);
+      if (failed) closeIndependentOwner();
     },
     beginVerification(signal) {
       requireObservation(
@@ -648,94 +670,171 @@ export function createWindowsPreparationFiles(input, options = {}) {
     },
     async beginCleanup(signal) {
       requireObservation(signal instanceof AbortSignal && !signal.aborted);
+      admissionClosed = true;
       workSignal = signal;
-      let failure;
-      for (const [reader, prior] of readers)
-        if (!prior || prior.aborted) {
+      if (cleanupSignal !== signal) {
+        cleanupSignal = signal;
+        signal.addEventListener(
+          "abort",
+          () => {
+            if (!closedOwner && cleanupSignal === signal) {
+              failed ??= signal.reason;
+              // Stop callers waiting for IPC without discarding the dependent
+              // observer's original process/Job custody. No command is replayed.
+              for (const reject of cleanupWaiters) reject(failed);
+              closeIndependentOwner();
+            }
+          },
+          { once: true },
+        );
+      }
+      const failures = [];
+      for (const [reader, retained] of readers)
+        if (retained.signal !== signal) {
           try {
-            await reader.beginCleanup({ signal });
-            readers.set(reader, signal);
+            await (retained.cleanup ??= reader.beginCleanup({ signal }));
+            retained.signal = signal;
           } catch (cause) {
-            failure ??= cause;
+            failures.push(cause);
           }
         }
-      if (failure) throw failure;
+      if (failures.length)
+        throw new AggregateError(
+          failures,
+          "Windows reader cleanup handoff failed",
+        );
     },
     async retireReaders() {
-      let failure;
-      for (const reader of readers.keys()) {
+      admissionClosed = true;
+      const failures = [],
+        results = [];
+      try {
+        await api.beginCleanup(cleanupSignal ?? AbortSignal.timeout(30000));
+      } catch (cause) {
+        failures.push(cause);
+      }
+      for (const [reader, retained] of readers) {
         try {
-          const result = await reader.close();
-          requireObservation(
-            result.status === "RETIRED" &&
-              result.independent === true &&
-              result.taskRemoved === true,
-          );
-          readers.delete(reader);
+          const result = await (retained.closing ??= Promise.resolve().then(
+            () => reader.close(),
+          ));
+          if (!(
+            result?.status === "RETIRED" &&
+            result.independent === true &&
+            result.emergencyCleanup === false &&
+            result.taskRemoved === true
+          ))
+            throw Object.assign(
+              new Error("Windows reader retirement unverified", {
+                cause: result?.cause,
+              }),
+              { primaryCause: result?.primaryCause ?? null },
+            );
+          api.releaseReader(reader);
+          results.push(result);
         } catch (cause) {
-          failure ??= cause;
+          failures.push(cause);
         }
       }
-      if (failure) throw failure;
+      if (failures.length)
+        throw new AggregateError(failures, "Windows readers remain retained");
+      return results;
+    },
+    releaseRecoveredReaders(proof) {
+      requireObservation(
+        proof?.status === "RETIRED" &&
+          proof.independent === true &&
+          proof.emergencyCleanup === false &&
+          proof.tasksRemoved === true &&
+          hash(proof.nativeEventSha256) &&
+          hash(proof.recordsSha256) &&
+          Array.isArray(proof.readers),
+      );
+      // Only the fresh reader's proof of these original protected declarations
+      // can release a dependency after a failed close. A new observer's own
+      // successful finish is never proof of an old reader's retirement.
+      for (const reader of readers.keys()) {
+        const original = reader.retirementBinding;
+        requireObservation(
+          original?.helper &&
+            original.bridge &&
+            hash(original.taskSha256) &&
+            proof.readers.some(
+              (binding) =>
+                observationDigest(binding) === observationDigest(original),
+            ),
+        );
+      }
+      readers.clear();
+      // A failed transport stays failed. Once exact original-reader proof has
+      // released every dependency, recovery may close it and independently
+      // observe this old owner; closure itself supplies no retirement proof.
+      if (failed) closeIndependentOwner();
     },
     async verify(name, ...args) {
       return (await observer())[name](...args);
     },
     async preSetupVerifier() {
       guard();
-      await ensure();
+      await wait(ensure());
       return createWindowsCustodyVerifier(
         { verification: native },
         { clock, maximumSubjects: 128, deadline },
       );
     },
     async settleFiles() {
-      if (!starting) return null;
-      guard();
-      await fileSerial;
+      // Ordinary verification also disposes its observer here; only explicit
+      // cleanup/recovery closes the wider admission gate.
+      // Do not cache a dependency refusal: protected recovery may independently
+      // retire the registered readers later. Never replay an attempted finish.
       requireObservation(readers.size === 0);
-      const value = await command("finish");
-      closed(value, ["closed"]);
-      requireObservation(value.closed === true);
-      const stopped = await owner.receive();
-      closed(stopped, ["phase", "helper", "exitCode"]);
-      requireObservation(
-        stopped.phase === "helper-retired" &&
-          stopped.exitCode === 0 &&
-          sameWindowsIdentity(stopped.helper, identity),
-      );
-      guard();
-      await owner.send("D");
-      const final = await owner.receive();
-      closed(final, [
-        "phase",
-        "taskSha256",
-        "taskRemoved",
-        "helperRetired",
-        "helper",
-        "observations",
-      ]);
-      const exit = await owner.completion;
-      requireObservation(
-        final.phase === "retired" &&
-          final.taskSha256 === taskSha256 &&
-          final.taskRemoved === true &&
-          final.helperRetired === true &&
-          final.observations === 2 &&
-          sameWindowsIdentity(final.helper, identity) &&
-          exit.code === 0 &&
-          exit.signal === null,
-      );
-      closedOwner = true;
-      owner.settle?.();
-      return {
-        status: "RETIRED",
-        independent: true,
-        noLiveMembers: true,
-        taskRemoved: true,
-        emergencyCleanup: false,
-        nativeEventSha256: observationDigest({ final, bridge }),
-      };
+      if (!starting) return null;
+      return (settling ??= (async () => {
+        guard();
+        await fileSerial;
+        const value = await command("finish");
+        closed(value, ["closed"]);
+        requireObservation(value.closed === true);
+        const stopped = await owner.receive();
+        closed(stopped, ["phase", "helper", "exitCode"]);
+        requireObservation(
+          stopped.phase === "helper-retired" &&
+            stopped.exitCode === 0 &&
+            sameWindowsIdentity(stopped.helper, identity),
+        );
+        guard();
+        await owner.send("D");
+        const final = await owner.receive();
+        closed(final, [
+          "phase",
+          "taskSha256",
+          "taskRemoved",
+          "helperRetired",
+          "helper",
+          "observations",
+        ]);
+        const exit = await owner.completion;
+        requireObservation(
+          final.phase === "retired" &&
+            final.taskSha256 === taskSha256 &&
+            final.taskRemoved === true &&
+            final.helperRetired === true &&
+            final.observations === 2 &&
+            sameWindowsIdentity(final.helper, identity) &&
+            exit.code === 0 &&
+            exit.signal === null,
+        );
+        closedOwner = true;
+        owner.settle?.();
+        return {
+          status: "RETIRED",
+          independent: true,
+          noLiveMembers: true,
+          taskRemoved: true,
+          emergencyCleanup: false,
+          nativeEventSha256: observationDigest({ final, bridge }),
+        };
+      })());
     },
   };
   return api;

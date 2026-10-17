@@ -4,6 +4,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
 import { win32 as path } from "node:path";
+
+import { createWindowsPreparationFiles } from "../ci/native/win32/preparation-files.js";
 import {
   initializeNativeJob,
   observationDigest,
@@ -705,25 +707,21 @@ test("experiment startup retains the original owner across lost open completion 
   }
 });
 
-test("experiment close releases its outer observer only after independent pre-setup task settlement", async () => {
-  const source = await readFile(
-      new URL("../ci/native/win32/experiment-native.js", import.meta.url),
-      "utf8",
-    ),
-    start = source.indexOf(
-      "    close() {",
-      source.indexOf("  const native = {"),
-    ),
-    end = source.indexOf("\n    },\n  };", start),
-    program = new Script(
-      `(async()=>{let closing;const native={${source.slice(start, end)} }};return native.close();})()`,
-    );
-  assert.ok(start > 0 && end > start);
+test("experiment registry retains pre-setup dependencies until independent task settlement", async () => {
   for (const fault of [null, "retained", "emergency"]) {
+    const f = fixture(),
+      files = createWindowsPreparationFiles({
+        job: f.job,
+        directory,
+        output: f.prepared.output,
+        manifest: { windowsPreparation: { bootstrap: f.prepared.bootstrap } },
+      }),
+      signal = new AbortController().signal;
     const primary = new Error("rejected admission"),
       cleanup = new Error("cleanup interrupted"),
       calls = [],
       reader = {
+        beginCleanup: async () => calls.push("cleanup"),
         close: async () => {
           calls.push("bootstrap");
           return {
@@ -737,43 +735,23 @@ test("experiment close releases its outer observer only after independent pre-se
             cause: cleanup,
           };
         },
-      },
-      files = {
-        releaseReader: (actual) => {
-          assert.equal(actual, reader);
-          calls.push("release");
-        },
-        verification: {
-          input: { nonce: "a".repeat(32) },
-          identity: {},
-          bridge: {},
-          taskSha256: H,
-        },
-        settleFiles: async () => {
-          calls.push("observer");
-          return {
-            status: "RETIRED",
-            independent: true,
-            emergencyCleanup: false,
-          };
-        },
       };
-    const closing = program.runInNewContext({
-      reader,
-      files,
-      requireObservation: assert.ok,
-      observationDigest,
-      write: async () => calls.push("receipt"),
-    });
+    files.retainReader(reader);
+    await files.beginCleanup(signal);
     if (fault) {
       await assert.rejects(
-        closing,
-        (error) => error.cause === cleanup && error.primaryCause === primary,
+        files.retireReaders(),
+        (error) =>
+          error.errors.length === 1 &&
+          error.errors[0].cause === cleanup &&
+          error.errors[0].primaryCause === primary,
       );
-      assert.deepEqual(calls, ["bootstrap"]);
+      await assert.rejects(files.settleFiles());
     } else {
-      assert.equal((await closing).bootstrapSettlement.preSetup, true);
-      assert.deepEqual(calls, ["bootstrap", "release", "receipt", "observer"]);
+      const [settlement] = await files.retireReaders();
+      assert.equal(settlement.preSetup, true);
+      assert.equal(await files.settleFiles(), null); // No observer was started.
     }
+    assert.deepEqual(calls, ["cleanup", "bootstrap"]);
   }
 });

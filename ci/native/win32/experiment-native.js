@@ -4,7 +4,11 @@ import { win32 as path } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { attemptNativeBuilds, diagnosticCommand } from "../diagnostics.js";
+import {
+  attemptNativeBuilds,
+  diagnosticCommand,
+  nativeException,
+} from "../diagnostics.js";
 import { selectInstalledWindowsToolchain } from "../feasibility/windows-toolchain.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { digest, inspectWindowsPe } from "./protocol.js";
@@ -18,6 +22,10 @@ import {
 import { encodeWindowsCustodyPlan, location } from "./custody-protocol.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { createWindowsCustodyReader } from "./custody.js";
+import {
+  recoverWindowsPreparationOwners,
+  windowsRetired,
+} from "./preparation.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 
 const execute = diagnosticCommand("windows-experiment", promisify(execFile)),
@@ -358,26 +366,44 @@ export async function bootstrapWindowsExperiment(
 
 /** Reuse the live System observer, held-file readers and compiler controller.
  * Local expectations have no source, release, template or custody approvals. */
-export async function openWindowsExperimentNative(
-  prepared,
-  { signal, reopen = false, retain, files: suppliedFiles } = {},
-) {
+export async function openWindowsExperimentNative(prepared, options = {}) {
+  const { signal, reopen = false, retain, files: suppliedFiles } = options;
   const { bootstrap, job, directory, output, helpers, entries } = prepared,
-    files =
-      suppliedFiles ??
-      createWindowsPreparationFiles({
-        job,
-        directory,
-        output,
-        manifest: { helpers, windowsPreparation: { bootstrap } },
-      }),
+    input = {
+      job,
+      directory,
+      output,
+      signal,
+      manifest: {
+        purpose: "experiment",
+        candidateSha: job.candidateSha,
+        platform: "win32",
+        helpers,
+        tools: prepared.tools,
+        environment: prepared.environment,
+        windowsPreparation: {
+          purpose: "experiment",
+          bootstrap,
+          sourceDirectory: prepared.sourceDirectory,
+          sources: prepared.sources,
+        },
+      },
+    },
+    files = suppliedFiles ?? createWindowsPreparationFiles(input, options),
     write = async (name, record) =>
       files.writeProtected({
         file: path.join(directory, name),
         bytes: Buffer.from(JSON.stringify(record) + "\n"),
         exclusive: true,
       });
-  retain?.({ files, close: () => files.settleFiles() });
+  retain?.({
+    files,
+    close: async ({ signal = AbortSignal.timeout(30000) } = {}) => {
+      files.fenceAdmission();
+      await files.beginCleanup(signal);
+      return files.settleFiles();
+    },
+  });
   await files.verifyDirectory({ directory, context: bootstrap.context });
   const names = await files.readdir(directory),
     sequence = names.filter((name) =>
@@ -393,6 +419,8 @@ export async function openWindowsExperimentNative(
     status: "POSSIBLE",
   });
   const reader = createWindowsCustodyReader(bootstrap, {
+    ...options.readerOptions,
+    admissionClosed: () => files.admissionClosed,
     preSetupVerifier: () => files.preSetupVerifier(),
     ...Object.fromEntries(
       verifierMethods.map((name) => [
@@ -419,7 +447,28 @@ export async function openWindowsExperimentNative(
     })(),
   });
   files.retainReader(reader, signal);
-  let closing;
+  let closing,
+    finished = false,
+    complete = false;
+  const recover = (signal, failures, explicit) =>
+    recoverWindowsPreparationOwners(input, options, {
+      signal,
+      onReadersRetired: async (proof) => {
+        files.releaseRecoveredReaders(proof);
+        try {
+          await files.settleFiles();
+        } catch (cause) {
+          if (!explicit) failures.push(cause);
+          else {
+            try {
+              nativeException("windows-experiment-recovery-observer", cause);
+            } catch {
+              /* Fresh whole-owner proof remains mandatory below. */
+            }
+          }
+        }
+      },
+    });
   const native = {
     prepared,
     files,
@@ -437,49 +486,105 @@ export async function openWindowsExperimentNative(
       files.readExperimentImage(file, installed),
     resolveImport: (name) => files.resolveExperimentImport(name),
     prepareVolume: () => files.prepareExperimentVolume(),
-    close() {
-      return (closing ??= (async () => {
-        const settlement = await reader.close();
-        if (!(
-          settlement.status === "RETIRED" &&
-          settlement.independent &&
-          !settlement.emergencyCleanup &&
-          settlement.taskRemoved
-        ))
+    close({ signal: suppliedSignal, recovery = false } = {}) {
+      if (closing && (!recovery || !finished || complete)) return closing;
+      files.fenceAdmission();
+      const signal = suppliedSignal
+        ? AbortSignal.any([suppliedSignal, AbortSignal.timeout(30000)])
+        : AbortSignal.timeout(30000);
+      finished = false;
+      closing = (async () => {
+        const failures = [];
+        let settlement, custody, observer, recovered;
+        if (recovery) {
+          try {
+            await files.beginCleanup(signal);
+          } catch (cause) {
+            // A cached reader handoff failure is not replayed. Fresh protected
+            // recovery must still prove it retired before observer closure.
+            try {
+              nativeException("windows-experiment-recovery-handoff", cause);
+            } catch {
+              /* Keep recovery and the original failure independent. */
+            }
+          }
+        }
+        if (!recovery) {
+          try {
+            await files.beginCleanup(signal);
+          } catch (cause) {
+            failures.push(cause);
+          }
+          try {
+            [settlement] = await files.retireReaders();
+          } catch (cause) {
+            failures.push(cause);
+          }
+          try {
+            observer = {
+              nonce: files.verification.input.nonce,
+              helper: files.verification.identity,
+              bridge: files.verification.bridge,
+              taskSha256: files.verification.taskSha256,
+            };
+            if (settlement)
+              await write("windows-experiment-close.json", {
+                purpose: "experiment",
+                bootstrapSettlement: settlement,
+                observer,
+              });
+          } catch (cause) {
+            failures.push(cause);
+          }
+          // A failed receipt cannot suppress independent observer settlement.
+          // The registry itself still rejects closure with a retained reader.
+          try {
+            custody = await files.settleFiles();
+          } catch (cause) {
+            failures.push(cause);
+          }
+        }
+        if (!windowsRetired(custody)) {
+          try {
+            recovered = await recover(signal, failures, recovery);
+          } catch (cause) {
+            failures.push(cause);
+          }
+        }
+        const result =
+          recovered ??
+          (windowsRetired(settlement) && windowsRetired(custody)
+            ? {
+                status: "RETIRED",
+                independent: true,
+                emergencyCleanup: false,
+                bootstrapSettlement: settlement,
+                observer,
+                observerSettlement: custody,
+                nativeEventSha256: observationDigest({ settlement, custody }),
+              }
+            : {
+                status: "RETAINED",
+                independent: false,
+                emergencyCleanup: false,
+              });
+        if (failures.length)
           throw Object.assign(
-            new Error("Windows experiment bootstrap retirement unverified", {
-              cause: settlement.cause,
+            new AggregateError(failures, "Windows experiment cleanup failed", {
+              cause: failures[0],
             }),
-            { primaryCause: settlement.primaryCause ?? null },
+            { settlement: result },
           );
-        files.releaseReader(reader);
-        const observer = {
-          nonce: files.verification.input.nonce,
-          helper: files.verification.identity,
-          bridge: files.verification.bridge,
-          taskSha256: files.verification.taskSha256,
-        };
-        await write("windows-experiment-close.json", {
-          purpose: "experiment",
-          bootstrapSettlement: settlement,
-          observer,
-        });
-        const custody = await files.settleFiles();
-        requireObservation(
-          custody.status === "RETIRED" &&
-            custody.independent &&
-            !custody.emergencyCleanup,
-        );
-        return {
-          status: "RETIRED",
-          independent: true,
-          emergencyCleanup: false,
-          bootstrapSettlement: settlement,
-          observer,
-          observerSettlement: custody,
-          nativeEventSha256: observationDigest({ settlement, custody }),
-        };
-      })());
+        requireObservation(windowsRetired(result));
+        complete = true;
+        return result;
+      })().finally(() => {
+        finished = true;
+      });
+      return closing;
+    },
+    recover(settings = {}) {
+      return native.close({ ...settings, recovery: true });
     },
   };
   // The owner is retained before startup can release a process or lose its
@@ -517,6 +622,7 @@ export async function openWindowsExperimentNative(
       return null;
     },
     async run(request, operation) {
+      requireObservation(!files.admissionClosed);
       const tool = entries.findIndex((entry) => entry.path === request.file),
         pin = prepared.tools.find((entry) => entry.path === request.file);
       let index = 0;

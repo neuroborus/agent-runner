@@ -13,10 +13,12 @@ import { join, win32 as path } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
+import { withNativeDiagnostics } from "../diagnostics.js";
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
 import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import {
   observationDigest,
+  initializeNativeJob,
   nativePolicyLaunchData,
   nativePolicyContext,
   nativePolicyTemplateDigest,
@@ -69,8 +71,13 @@ import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { windowsPreparationOptions } from "./preparation.js";
 import {
   bootstrapWindowsExperiment,
+  openWindowsExperimentNative,
   WINDOWS_EXPERIMENT_SOURCES,
 } from "./experiment-native.js";
+import {
+  prepareWindowsExperiment,
+  recoverWindowsExperimentPreparation,
+} from "./experiment-preparation.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -2058,25 +2065,26 @@ test("Windows interrupted publication retires held workers and retains objects w
   assert.ok(!f.rawEvents.some((event) => event.startsWith("case-retire ")));
 });
 
-function rawPreparation() {
+function rawPreparation({ experiment = false } = {}) {
   const f = wiring(),
     { unsigned, signed } = publicationBytes(),
+    helperBytes = experiment ? experimentImage() : signed,
+    helperSha = digest(helperBytes),
+    helperSignature = experiment
+      ? helperSha
+      : inspectWindowsPe(signed).signatureSha256,
     imageSha = digest(signed),
     signatureSha = inspectWindowsPe(signed).signatureSha256,
     actors = new Map(),
+    exitCodes = new Map(),
     images = new Map(),
-    retained = [],
-    heldFiles = [],
     jobs = new Map(),
     jobNonces = new Map(),
     jobCreators = new Map(),
     tasks = new Map(),
     events = [],
     fileIds = new Map();
-  let nextPid = 100,
-    upload,
-    readBytes,
-    listedNames;
+  let nextPid = 100;
   const encode = (text) => Buffer.from(text, "utf16le").toString("hex"),
     decode = (text) => Buffer.from(text, "hex").toString("utf16le"),
     fileId = (file) => {
@@ -2135,9 +2143,10 @@ function rawPreparation() {
     declaration.custody.context = nativePolicyContext(f.job, declaration.id);
   for (const file of [...f.files.keys()])
     if (path.basename(file).startsWith("windows-")) f.files.delete(file);
-  for (const helper of f.manifest.helpers) helper.sha256 = imageSha;
+  for (const helper of f.manifest.helpers) helper.sha256 = helperSha;
   for (const tool of f.manifest.tools) {
     tool.sha256 = imageSha;
+    if (experiment) tool.signatureSha256 = signatureSha;
     f.files.set(tool.path, signed);
   }
   const plan = f.manifest.windowsPreparation;
@@ -2146,8 +2155,8 @@ function rawPreparation() {
     plan.bootstrap.bridge,
     plan.command.helper,
   ]) {
-    pin.sha256 = imageSha;
-    pin.signatureSha256 = signatureSha;
+    pin.sha256 = helperSha;
+    pin.signatureSha256 = helperSignature;
   }
   plan.command.helperSignatures = Object.fromEntries(
     WINDOWS_HELPER_NAMES.map((name) => [name, signatureSha]),
@@ -2157,7 +2166,27 @@ function rawPreparation() {
   );
   plan.command.toolSignatures = { compiler: signatureSha, sdk: signatureSha };
   for (const helper of f.manifest.helpers)
-    f.files.set(path.join(sourceDirectory, helper.name + ".exe"), signed);
+    f.files.set(path.join(sourceDirectory, helper.name + ".exe"), helperBytes);
+  if (experiment) {
+    f.job = initializeNativeJob(
+      {
+        candidateSha,
+        platform: "win32",
+        repository: "fixture/repository",
+        runId: f.job.runId,
+        runAttempt: 1,
+      },
+      { schemaVersion: 7, purpose: "experiment" },
+    );
+    f.manifest.purpose = plan.purpose = plan.bootstrap.purpose = "experiment";
+    plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
+    delete plan.bootstrap.reviewSha256;
+    plan.sources.push({ name: "experiment.h", sha256: hash });
+    plan.bootstrap.sources.push({
+      path: path.join(sourceDirectory, "experiment.h"),
+      sha256: hash,
+    });
+  }
   for (const source of plan.sources)
     f.files.set(path.join(sourceDirectory, source.name), bytes);
   const sdkFile =
@@ -2168,8 +2197,8 @@ function rawPreparation() {
     ...f.manifest.helpers.map(({ name }) => ({
       kind: "helper",
       path: path.join(sourceDirectory, name + ".exe"),
-      sha256: imageSha,
-      signatureSha256: signatureSha,
+      sha256: helperSha,
+      signatureSha256: helperSignature,
     })),
     { kind: "directory", path: output, sha256: null, signatureSha256: null },
     ...f.manifest.tools.map((tool) => ({
@@ -2185,7 +2214,12 @@ function rawPreparation() {
       signatureSha256: null,
     })),
   ];
-  const planBytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
+  const planBytes = encodeWindowsCustodyPlan({
+    ...(experiment ? { purpose: "experiment" } : {}),
+    candidateSha,
+    nonce,
+    entries,
+  });
   plan.bootstrap.plan.sha256 = digest(planBytes);
   f.files.set(plan.bootstrap.plan.path, planBytes);
   for (const request of f.requests) request.toolSha256 = imageSha;
@@ -2225,7 +2259,7 @@ function rawPreparation() {
     if (operation === "prepare-list") {
       const offset = Number(args[0]);
       if (!offset)
-        listedNames = [...f.files.keys()]
+        scope.listedNames = [...f.files.keys()]
           .filter(
             (file) =>
               path.dirname(file) === directory &&
@@ -2233,8 +2267,8 @@ function rawPreparation() {
           )
           .map((file) => path.basename(file));
       return {
-        names: listedNames.slice(offset, offset + 128).map(encode),
-        complete: offset + 128 >= listedNames.length,
+        names: scope.listedNames.slice(offset, offset + 128).map(encode),
+        complete: offset + 128 >= scope.listedNames.length,
       };
     }
     if (operation === "prepare-directory")
@@ -2244,47 +2278,51 @@ function rawPreparation() {
         protectedParents: true,
       };
     if (operation === "prepare-read") {
-      assert.ok(!readBytes && !upload);
+      assert.ok(!scope.readBytes && !scope.upload);
       const file = decode(args[0]);
       assert.notEqual(file, f.forbiddenPreparationRead);
-      readBytes = f.files.get(file);
-      assert.ok(readBytes, file);
-      if (args[1] !== "-") assert.equal(digest(readBytes), args[1]);
+      scope.readBytes = f.files.get(file);
+      assert.ok(scope.readBytes, file);
+      if (args[1] !== "-") assert.equal(digest(scope.readBytes), args[1]);
       return {
         identity: fileId(file),
         daclSha256: hash,
         protectedParents: true,
-        sha256: digest(readBytes),
-        bytes: readBytes.length,
+        sha256: digest(scope.readBytes),
+        bytes: scope.readBytes.length,
         slot: 0,
       };
     }
     if (operation === "prepare-bytes")
       return {
-        hex: readBytes
+        hex: scope.readBytes
           .subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
           .toString("hex"),
       };
     if (operation === "prepare-release") {
-      readBytes = null;
+      scope.readBytes = null;
       return { closed: true };
     }
     if (operation === "prepare-write") {
-      assert.ok(!readBytes && !upload);
+      assert.ok(!scope.readBytes && !scope.upload);
       const file = path.join(directory, decode(args[0]));
       assert.ok(!f.files.has(file));
-      upload = { file, bytes: Buffer.alloc(Number(args[1])), sha256: args[2] };
+      scope.upload = {
+        file,
+        bytes: Buffer.alloc(Number(args[1])),
+        sha256: args[2],
+      };
       return { created: true };
     }
     if (operation === "prepare-chunk") {
-      Buffer.from(args[1], "hex").copy(upload.bytes, Number(args[0]));
+      Buffer.from(args[1], "hex").copy(scope.upload.bytes, Number(args[0]));
       return { written: args[1].length / 2 };
     }
     if (operation === "prepare-seal") {
-      assert.equal(digest(upload.bytes), upload.sha256);
-      f.files.set(upload.file, upload.bytes);
-      const sha256 = upload.sha256;
-      upload = null;
+      assert.equal(digest(scope.upload.bytes), scope.upload.sha256);
+      f.files.set(scope.upload.file, scope.upload.bytes);
+      const sha256 = scope.upload.sha256;
+      scope.upload = null;
       return { sha256, writerClosed: true };
     }
     if (operation === "verify-case") {
@@ -2459,7 +2497,12 @@ function rawPreparation() {
       return {
         identity: fileId(file),
         sha256: digest(data),
-        signatureSha256: args[2] === "-" ? null : signatureSha,
+        signatureSha256:
+          args[2] === "-"
+            ? null
+            : experiment && digest(data) === helperSha
+              ? helperSignature
+              : signatureSha,
         daclSha256: hash,
         slot,
         bytes: data.length,
@@ -2475,8 +2518,12 @@ function rawPreparation() {
     }
     if (operation === "verify-process") return retained[Number(args[0])];
     if (operation === "verify-process-exit") {
-      assert.ok(retained[Number(args[0])].retired);
-      return { exitCode: f.preSetupExitCode ?? 0 };
+      const process = retained[Number(args[0])];
+      assert.ok(process.retired);
+      return {
+        exitCode:
+          f.preSetupExitCode ?? exitCodes.get(process.identity.pid) ?? 0,
+      };
     }
     if (operation === "verify-task-instance") {
       const helper = retained[Number(args[1])].identity;
@@ -2511,12 +2558,18 @@ function rawPreparation() {
         },
       };
     }
-    if (operation === "verify-image")
+    if (operation === "verify-image") {
+      const file = images.get(retained[Number(args[0])].identity.pid),
+        helper = [
+          plan.bootstrap.reader.path,
+          plan.bootstrap.bridge.path,
+        ].includes(file);
       return {
-        sha256: imageSha,
-        signatureSha256: signatureSha,
-        pathHex: encode(images.get(retained[Number(args[0])].identity.pid)),
+        sha256: helper ? helperSha : imageSha,
+        signatureSha256: helper ? helperSignature : signatureSha,
+        pathHex: encode(file),
       };
+    }
     if (operation === "verify-transfer") {
       const child = retained[Number(args[0])].identity;
       scope.boundJobs.add(child.pid);
@@ -3217,9 +3270,9 @@ function rawPreparation() {
           } else if (operation === "finish") {
             if (observer)
               assert.ok(
-                !upload &&
-                  !readBytes &&
-                  retained.every((subject) => subject.retired),
+                !scope.upload &&
+                  !scope.readBytes &&
+                  scope.retained.every((subject) => subject.retired),
               );
             actors.get(helper.pid).retired = true;
             value = { closed: true };
@@ -3277,8 +3330,29 @@ function rawPreparation() {
     readerOptions: { open: async (declaration) => channel(declaration) },
   };
   return Object.assign(f, {
+    ...(experiment
+      ? {
+          prepared: {
+            purpose: "experiment",
+            job: f.job,
+            directory,
+            output,
+            sourceDirectory,
+            bootstrap: plan.bootstrap,
+            sources: plan.sources,
+            tools: f.manifest.tools,
+            environment: f.manifest.environment,
+            entries,
+            helpers: f.manifest.helpers.map((helper) => ({
+              ...helper,
+              path: path.join(sourceDirectory, helper.name + ".exe"),
+            })),
+          },
+        }
+      : {}),
     rawEvents: events,
     rawTasks: tasks,
+    rawExitCodes: exitCodes,
     signed,
     unsigned,
     actors,
@@ -3289,6 +3363,718 @@ function rawPreparation() {
     rawImages: images,
   });
 }
+
+function experimentImage() {
+  const bytes = Buffer.alloc(1024);
+  publicationBytes().unsigned.copy(bytes);
+  bytes.write(".nexp", 328);
+  bytes.writeUInt32LE(512, 336);
+  bytes.writeUInt32LE(4096, 340);
+  bytes.writeUInt32LE(512, 344);
+  bytes.writeUInt32LE(512, 348);
+  bytes.writeUInt32LE(0x40000040, 364);
+  bytes.write("native-ci-experiment-v1\0", 512);
+  return bytes;
+}
+
+test("Windows experiment close coalesces original reader and observer retirement", async () => {
+  const f = rawPreparation({ experiment: true }),
+    work = new AbortController();
+  const native = await openWindowsExperimentNative(f.prepared, {
+    ...f.options,
+    signal: work.signal,
+    reopen: true,
+  });
+  const entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  f.beforeRawCommand = async (operation) => {
+    if (operation === "finish") {
+      entered.resolve();
+      await release.promise;
+    }
+  };
+  const first = native.close();
+  await entered.promise;
+  assert.equal(native.close(), first);
+  assert.equal(native.files.admissionClosed, true);
+  await assert.rejects(native.run({}, {}));
+  // Work cancellation after handoff cannot cancel the finite cleanup signal.
+  work.abort();
+  release.resolve();
+  const result = await first;
+  assert.equal(result.status, "RETIRED");
+  assert.equal(await native.close(), result);
+  assert.equal(
+    f.rawEvents.filter((frame) => /^finish /u.test(frame)).length,
+    2,
+  );
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("Windows experiment close independently retires rejected parked admission before its observer", async () => {
+  const f = rawPreparation({ experiment: true });
+  f.preSetupRejected = true;
+  let native;
+  await assert.rejects(
+    openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+      retain: (owner) => {
+        native = owner;
+      },
+    }),
+    (error) =>
+      error.admission?.predicates.unique === false &&
+      error.experimentNative === native,
+  );
+  const first = f.rawEvents.length,
+    settlement = await native.close(),
+    events = f.rawEvents.slice(first);
+  assert.equal(settlement.bootstrapSettlement.preSetup, true);
+  const abort = events.indexOf("X"),
+    task = events.indexOf("D"),
+    observer = events.findIndex((frame) => /^finish /u.test(frame));
+  assert.ok(abort >= 0 && task > abort && observer > task);
+  assert.equal(settlement.status, "RETIRED");
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("Windows preparation observer cannot finish while its raw held subject is live", async () => {
+  const f = rawPreparation(),
+    files = createWindowsPreparationFiles(f, f.options);
+  await files.readdir(directory);
+  const subject = f.rawActor();
+  await assert.rejects(
+    files.verify("recoverCompleted", f.manifest.windowsPreparation.bootstrap, [
+      subject,
+    ]),
+  );
+  await assert.rejects(files.settleFiles(), { code: "ERR_ASSERTION" });
+  assert.equal(f.actors.get(subject.pid).retired, false);
+});
+
+test("Windows fresh file observer cannot consume or release an original observer's pending read", async () => {
+  const f = rawPreparation(),
+    original = createWindowsPreparationFiles(f, f.options),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  await original.readdir(directory);
+  const birth = original.verification.identity;
+  f.beforeRawCommand = async (operation) => {
+    if (operation === "prepare-bytes") {
+      f.beforeRawCommand = null;
+      entered.resolve();
+      await release.promise;
+    }
+  };
+  const pending = original.readProtected({ file: f.sdkFile, sha256: hash });
+  await entered.promise;
+  try {
+    const fresh = createWindowsPreparationFiles(f, f.options),
+      read = await fresh.readProtected({
+        file: path.join(sourceDirectory, "custody.h"),
+        sha256: hash,
+      }),
+      reader = createWindowsCustodyReader(
+        f.manifest.windowsPreparation.bootstrap,
+      );
+    assert.deepEqual(read.bytes, bytes);
+    const finishing = fresh.settleFiles();
+    assert.throws(() => fresh.retainReader(reader));
+    assert.equal((await finishing).status, "RETIRED");
+    assert.throws(() => fresh.retainReader(reader));
+    assert.equal(f.actors.get(birth.pid).retired, false);
+  } finally {
+    release.resolve();
+    assert.deepEqual((await pending).bytes, bytes);
+    assert.equal((await original.settleFiles()).status, "RETIRED");
+  }
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("Windows experiment receipt rejection still settles the real file observer", async () => {
+  const f = rawPreparation({ experiment: true }),
+    native = await openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+    });
+  f.accessNative = (operation, args) => {
+    if (
+      operation === "prepare-write" &&
+      Buffer.from(args[0], "hex").toString("utf16le") ===
+        "windows-experiment-close.json"
+    )
+      return { created: false };
+  };
+  let failed;
+  await assert.rejects(native.close(), (error) => {
+    failed = error;
+    return (
+      error instanceof AggregateError && error.settlement.status === "RETIRED"
+    );
+  });
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+  const commands = f.rawEvents.length;
+  await assert.rejects(native.close(), (error) => error === failed);
+  assert.equal(f.rawEvents.length, commands);
+  assert.equal((await native.recover()).status, "RETIRED");
+  assert.ok(
+    !f.rawEvents
+      .slice(commands)
+      .some((frame) => /^(?:open|helper-start) /u.test(frame)),
+  );
+  assert.equal(f.rawTasks.size, 0);
+});
+
+test("Windows explicit recovery can retire an observer after its cached finish failure", async () => {
+  const f = rawPreparation({ experiment: true }),
+    native = await openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+    });
+  let finishes = 0;
+  f.beforeRawCommand = (operation) => {
+    if (operation === "finish" && ++finishes === 2)
+      throw new Error("observer finish acknowledgement lost");
+  };
+  await assert.rejects(
+    native.close(),
+    (error) => error.settlement.status === "RETAINED",
+  );
+  // Independent raw process observations now show all old owners retired;
+  // cached channel failure cannot stand in for, or prevent, fresh proof.
+  for (const actor of f.actors.values()) actor.retired = true;
+  const before = f.rawEvents.length;
+  assert.equal((await native.recover()).status, "RETIRED");
+  assert.ok(
+    !f.rawEvents
+      .slice(before)
+      .some((frame) => /^(?:open|helper-start) /u.test(frame)),
+  );
+  assert.equal(f.rawTasks.size, 0);
+});
+
+test("Windows post-startup open rejection retains original owners until fresh complete recovery", async () => {
+  const f = rawPreparation({ experiment: true }),
+    primary = new Error("original image open rejected");
+  let opens = 0,
+    native;
+  f.beforeRawCommand = (operation) => {
+    if (operation === "open" && ++opens === 2) throw primary;
+  };
+  await assert.rejects(
+    openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+      retain: (owner) => {
+        native = owner;
+      },
+    }),
+    (error) => error === primary && error.experimentNative === native,
+  );
+  const original = [...f.files.entries()]
+    .filter(([file]) => /custody-[0-9]+\.json$/u.test(file))
+    .map(([, bytes]) => JSON.parse(bytes))
+    .find((record) => record.phase === "admitted");
+  assert.ok(original);
+  const observer = native.files.verification.identity;
+  let retained;
+  await assert.rejects(native.close(), (error) => {
+    retained = error;
+    return error.settlement.status === "RETAINED";
+  });
+  assert.equal(f.actors.get(observer.pid).retired, false);
+  // The original reader and dependent observer stay registered even if the
+  // task disappears. A failed fresh observer is another retained obligation.
+  f.rawTasks.delete(f.prepared.bootstrap.nonce);
+  assert.throws(() =>
+    native.files.releaseRecoveredReaders({
+      ...retired,
+      tasksRemoved: true,
+      recordsSha256: hash,
+      readers: [{ ...native.reader.retirementBinding, helper: identity(999) }],
+    }),
+  );
+  await assert.rejects(native.files.settleFiles());
+  const before = f.rawEvents.length;
+  await assert.rejects(native.close(), (error) => error === retained);
+  assert.equal(f.rawEvents.length, before);
+  for (const actor of f.actors.values())
+    if (
+      ![observer.pid, native.files.verification.bridge.pid].includes(
+        actor.identity.pid,
+      )
+    )
+      actor.retired = true;
+  const recoveryStart = f.rawEvents.length;
+  const first = native.recover(),
+    second = native.recover();
+  assert.equal(first, second);
+  assert.equal((await first).status, "RETIRED");
+  const recoveredFrames = f.rawEvents.slice(recoveryStart),
+    observerHeld = recoveredFrames.findIndex((frame) =>
+      new RegExp(`^verify-retain [0-9]+ ${observer.pid} `, "u").test(frame),
+    ),
+    observerFinish = recoveredFrames.findIndex((frame) =>
+      /^finish /u.test(frame),
+    );
+  assert.ok(observerHeld >= 0 && observerHeld < observerFinish);
+  assert.equal(opens, 2, "recovery must not repeat native open or compilation");
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+  assert.equal(primary.message, "original image open rejected");
+});
+
+test("Windows registry attempts retained and thrown readers without bypassing dependencies", async () => {
+  const f = rawPreparation(),
+    files = createWindowsPreparationFiles(f, f.options),
+    calls = [];
+  await files.readdir(directory);
+  const retainedCause = new Error("retained close"),
+    thrownCause = new Error("thrown close");
+  const reader = (name, close) => ({
+    beginCleanup: async () => calls.push(name + " cleanup"),
+    close,
+  });
+  files.retainReader(
+    reader("retained", async () => {
+      calls.push("retained");
+      return { status: "RETAINED", cause: retainedCause };
+    }),
+  );
+  files.retainReader(
+    reader("thrown", async () => {
+      calls.push("thrown");
+      throw thrownCause;
+    }),
+  );
+  files.retainReader(
+    reader("retired", async () => {
+      calls.push("retired");
+      return { ...retired, taskRemoved: true };
+    }),
+  );
+  await files.beginCleanup(AbortSignal.timeout(30000));
+  const attempts = [files.retireReaders(), files.retireReaders()];
+  for (const attempt of attempts)
+    await assert.rejects(
+      attempt,
+      (error) =>
+        error.errors[0].cause === retainedCause &&
+        error.errors[1] === thrownCause,
+    );
+  assert.deepEqual(calls, [
+    "retained cleanup",
+    "thrown cleanup",
+    "retired cleanup",
+    "retained",
+    "thrown",
+    "retired",
+  ]);
+  await assert.rejects(files.settleFiles());
+  assert.throws(() =>
+    files.retainReader(reader("late", () => assert.fail("late admission"))),
+  );
+  assert.ok(!f.rawEvents.some((frame) => /^finish /u.test(frame)));
+});
+
+test("Windows experiment attempts fresh settlement after an actual reader close throws", async () => {
+  const f = rawPreparation({ experiment: true }),
+    primary = new Error("open failed"),
+    diagnostic = new Error("cleanup diagnostic unavailable");
+  let native;
+  f.beforeRawCommand = (operation) => {
+    if (operation === "open") throw primary;
+  };
+  await assert.rejects(
+    openWindowsExperimentNative(f.prepared, {
+      ...f.options,
+      reopen: true,
+      retain: (owner) => {
+        native = owner;
+      },
+    }),
+    (error) => error === primary,
+  );
+  const observer = native.files.verification.identity;
+  for (const actor of f.actors.values())
+    if (
+      ![observer.pid, native.files.verification.bridge.pid].includes(
+        actor.identity.pid,
+      )
+    )
+      actor.retired = true;
+  f.accessNative = (operation, args) => {
+    if (
+      operation === "prepare-write" &&
+      /custody-[0-9]+\.json$/u.test(
+        Buffer.from(args[0], "hex").toString("utf16le"),
+      )
+    )
+      return { created: false };
+  };
+  // The real reader's retained-receipt write fails, and its diagnostic sink
+  // throws. Neither failure replaces close or supplies settlement evidence.
+  await assert.rejects(
+    withNativeDiagnostics(
+      () => native.close(),
+      () => {
+        throw diagnostic;
+      },
+    ),
+    (error) =>
+      error.settlement.status === "RETIRED" &&
+      error.errors.some((cause) => cause.errors?.includes(diagnostic)),
+  );
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("Windows file observer cleanup cancellation ends pending IPC without replaying finish", async () => {
+  const f = rawPreparation(),
+    open = f.options.openPreparation,
+    entered = Promise.withResolvers(),
+    blocked = Promise.withResolvers(),
+    cleanup = new AbortController();
+  blocked.promise.catch(() => {});
+  let closed = 0;
+  f.options.openPreparation = async (...args) => {
+    const channel = await open(...args),
+      send = channel.send.bind(channel),
+      receive = channel.receive.bind(channel);
+    let finishing = false;
+    return {
+      ...channel,
+      send: async (frame) => {
+        await send(frame);
+        if (/^finish /u.test(frame)) {
+          finishing = true;
+          entered.resolve();
+        }
+      },
+      receive: () => (finishing ? blocked.promise : receive()),
+      close: () => {
+        closed++;
+        blocked.reject(cleanup.signal.reason);
+        channel.close();
+      },
+    };
+  };
+  const files = createWindowsPreparationFiles(f, f.options);
+  await files.readdir(directory);
+  await files.beginCleanup(cleanup.signal);
+  const pending = files.settleFiles();
+  await entered.promise;
+  cleanup.abort(new Error("cleanup interval exhausted"));
+  await assert.rejects(pending, /cleanup interval exhausted/u);
+  await assert.rejects(
+    files.settleFiles(),
+    (error) => error === cleanup.signal.reason,
+  );
+  assert.ok(closed > 0);
+  assert.equal(
+    f.rawEvents.filter((frame) => /^finish /u.test(frame)).length,
+    1,
+  );
+});
+
+test("Windows cleanup cancellation bounds reader IPC while retaining dependent observer custody", async () => {
+  for (const phase of ["serial", "receipt", "task", "completion"]) {
+    const f = rawPreparation({ experiment: true }),
+      cleanup = new AbortController(),
+      recovery = new AbortController(),
+      expired = new Error("cleanup interval exhausted at " + phase),
+      entered = Promise.withResolvers(),
+      blocked = Promise.withResolvers(),
+      fault = Promise.withResolvers(),
+      openReader = f.options.readerOptions.open,
+      openObserver = f.options.openPreparation,
+      observerCloses = [];
+    fault.promise.catch(() => {});
+    const wait = (value) => Promise.race([value, fault.promise]);
+    let armed = false,
+      readerClosed = 0,
+      originalObserver;
+    f.options.readerOptions.open = async (...args) => {
+      const channel = await openReader(...args);
+      let stalled = false;
+      return {
+        ...channel,
+        wait,
+        send: async (frame) => {
+          await wait(channel.send(frame));
+          if (
+            armed &&
+            ((phase === "serial" && /^inspect /u.test(frame)) ||
+              (phase === "task" && frame === "D"))
+          ) {
+            stalled = true;
+            entered.resolve();
+          }
+        },
+        receive: () => wait(stalled ? blocked.promise : channel.receive()),
+        get completion() {
+          if (armed && phase === "completion") {
+            entered.resolve();
+            return wait(blocked.promise);
+          }
+          return channel.completion;
+        },
+        close: () => {
+          readerClosed++;
+          fault.reject(expired);
+          channel.close();
+        },
+      };
+    };
+    f.options.openPreparation = async (...args) => {
+      const channel = await openObserver(...args),
+        nonce = args[1][6];
+      originalObserver ??= { bridge: channel.pid, nonce };
+      let stalled = false,
+        closed = false;
+      return {
+        ...channel,
+        send: async (frame) => {
+          await channel.send(frame);
+          // Seal has consumed the write and protected the receipt. Losing its
+          // acknowledgement must neither replay it nor destroy reader custody.
+          if (
+            armed &&
+            phase === "receipt" &&
+            channel.pid === originalObserver.bridge &&
+            /^prepare-seal /u.test(frame)
+          ) {
+            stalled = true;
+            entered.resolve();
+          }
+        },
+        receive: () => (stalled ? blocked.promise : channel.receive()),
+        close: () => {
+          if (closed) return;
+          closed = true;
+          if (channel.pid === originalObserver.bridge) {
+            observerCloses.push(f.rawEvents.length);
+            // Raw process observations model eventual non-emergency EOF exit;
+            // production recovery still verifies births, whole Jobs and tasks.
+            for (const pid of [channel.pid, f.rawTasks.get(nonce).pid]) {
+              f.actors.get(pid).retired = true;
+              f.rawExitCodes.set(pid, 126);
+            }
+          }
+          channel.close();
+        },
+      };
+    };
+    const native = await openWindowsExperimentNative(f.prepared, {
+        ...f.options,
+        reopen: true,
+      }),
+      observer = native.files.verification.identity,
+      original = native.reader.retirementBinding;
+    armed = true;
+    let work;
+    if (["serial", "receipt"].includes(phase)) {
+      const helper = f.prepared.helpers.find(
+          (entry) => entry.name === "build-helper",
+        ),
+        index = f.prepared.entries.findIndex(
+          (entry) => entry.path === helper.path,
+        );
+      work = native.reader.inspect(index);
+      work.catch(() => {});
+      await entered.promise;
+    }
+    const attempt = native.close({ signal: cleanup.signal }),
+      rejected = assert.rejects(
+        attempt,
+        (error) => error.settlement.status === "RETAINED",
+      );
+    if (!work) await entered.promise;
+    cleanup.abort(expired);
+    if (work) await assert.rejects(work, (error) => error === expired);
+    await rejected;
+    assert.ok(readerClosed > 0);
+    assert.deepEqual(native.reader.retirementBinding, original);
+    assert.deepEqual(
+      observerCloses,
+      [],
+      "timeout must not close a dependent observer",
+    );
+    assert.equal(f.actors.get(observer.pid).retired, false);
+    await assert.rejects(native.files.settleFiles());
+    // A new interval may recover the original owners, without treating the
+    // cancelled close as proof or replaying its potentially consumed commands.
+    for (const actor of f.actors.values())
+      if (![observer.pid, originalObserver.bridge].includes(actor.identity.pid))
+        actor.retired = true;
+    const before = f.rawEvents.length;
+    assert.equal(
+      (await native.recover({ signal: recovery.signal })).status,
+      "RETIRED",
+    );
+    // Exercise late cleanup after the original task has already been removed.
+    recovery.abort(expired);
+    assert.equal(observerCloses.length, 1);
+    assert.ok(
+      f.rawEvents
+        .slice(before, observerCloses[0])
+        .some((frame) =>
+          new RegExp(`^verify-retain [0-9]+ ${observer.pid} `, "u").test(frame),
+        ),
+    );
+    assert.ok(
+      !f.rawEvents
+        .slice(before)
+        .some((frame) => /^(?:open|inspect|helper-start) /u.test(frame)),
+    );
+    assert.equal(f.rawTasks.size, 0);
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
+  }
+});
+
+test("Windows interrupted recovery preserves every old observer and rejects emergency retirement", async () => {
+  for (const fault of ["interrupted", "emergency"]) {
+    const f = rawPreparation({ experiment: true });
+    let native,
+      failed = false;
+    f.beforeRawCommand = (operation) => {
+      if (operation === "open") throw new Error("open rejected");
+      if (
+        operation === "verify-recovery-jobs" &&
+        fault === "interrupted" &&
+        !failed
+      ) {
+        failed = true;
+        throw new Error("recovery acknowledgement lost");
+      }
+    };
+    await assert.rejects(
+      openWindowsExperimentNative(f.prepared, {
+        ...f.options,
+        reopen: true,
+        retain: (owner) => {
+          native = owner;
+        },
+      }),
+    );
+    const observer = native.files.verification.identity;
+    for (const actor of f.actors.values())
+      if (
+        ![observer.pid, native.files.verification.bridge.pid].includes(
+          actor.identity.pid,
+        )
+      )
+        actor.retired = true;
+    if (fault === "emergency") f.preSetupExitCode = 124;
+    await assert.rejects(
+      native.close(),
+      (error) => error.settlement.status === "RETAINED",
+    );
+    await assert.rejects(native.files.settleFiles());
+    assert.equal(f.actors.get(observer.pid).retired, false);
+    if (fault === "interrupted") {
+      // Model observed eventual exits of the interrupted recovery owner, not
+      // an EOF acknowledgement or its own later successful replacement.
+      for (const actor of f.actors.values())
+        if (
+          ![observer.pid, native.files.verification.bridge.pid].includes(
+            actor.identity.pid,
+          )
+        )
+          actor.retired = true;
+      assert.equal((await native.recover()).status, "RETIRED");
+      assert.equal(f.rawTasks.size, 0);
+    }
+  }
+});
+
+test("Windows preparation preserves the open failure and separately persists cleanup and receipt failures", async () => {
+  const f = rawPreparation({ experiment: true }),
+    primary = new Error("original compiler open"),
+    receipt = new Error("job receipt unavailable"),
+    saved = [],
+    journal = [];
+  f.beforeRawCommand = (operation) => {
+    if (operation === "open") throw primary;
+  };
+  await assert.rejects(
+    prepareWindowsExperiment(
+      f.job,
+      directory,
+      async (value) => {
+        saved.push(value);
+        if (value.failure === "preparation-failed") throw receipt;
+      },
+      {
+        ...f.options,
+        platform: "win32",
+        architecture: "x64",
+        nodeVersion: "v24.21.0",
+        binding: {
+          checkoutSha: candidateSha,
+          osBuild: "10.0.26100",
+          nodeVersion: "v24.21.0",
+        },
+        env: {
+          ...f.options.env,
+          RUNNER_ENVIRONMENT: "github-hosted",
+          RUNNER_OS: "Windows",
+          GITHUB_REPOSITORY: f.job.repository,
+          GITHUB_RUN_ID: f.job.runId,
+          GITHUB_RUN_ATTEMPT: "1",
+        },
+        persistBootstrap: async (record) => journal.push(record),
+        bootstrap: async (_job, _directory, _binding, persist) => {
+          await persist({
+            purpose: "experiment",
+            phase: "bootstrap-seal-possible",
+            ...f.prepared,
+          });
+          return f.prepared;
+        },
+      },
+    ),
+    (error) =>
+      error.cause === primary &&
+      error.cleanupFailures.length === 2 &&
+      error.cleanupFailures[1] === receipt &&
+      error.experimentJob.failure === "preparation-failed",
+  );
+  assert.equal(saved.at(-1).preparationEffects.settlement.status, "RETAINED");
+  assert.equal(journal.at(-1).phase, "preparation-cleanup-failed");
+  assert.equal(journal.at(-1).failures[1].message, receipt.message);
+  for (const actor of f.actors.values()) actor.retired = true;
+  const recovered = await recoverWindowsExperimentPreparation(
+    saved.at(-1),
+    directory,
+    async (value) => saved.push(value),
+    {
+      ...f.options,
+      platform: "win32",
+      architecture: "x64",
+      signal: AbortSignal.abort(new Error("preparation already ended")),
+      env: {
+        ...f.options.env,
+        RUNNER_ENVIRONMENT: "github-hosted",
+        RUNNER_OS: "Windows",
+        GITHUB_REPOSITORY: f.job.repository,
+        GITHUB_RUN_ID: f.job.runId,
+        GITHUB_RUN_ATTEMPT: "1",
+      },
+      readdir: async () => [path.basename(directory) + "-bootstrap-0.json"],
+      read: async () => Buffer.from(JSON.stringify(journal[0])),
+    },
+  );
+  assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(recovered.failure, "preparation-failed");
+  assert.equal(f.rawTasks.size, 0);
+  assert.equal(f.rawEvents.filter((frame) => /^open /u.test(frame)).length, 1);
+});
 
 test("fixed provider helper preparation rejoins Windows System custody and helpers without compiling", async () => {
   for (const fault of [
@@ -3606,7 +4392,7 @@ test("Windows fixed access entry owns all profiles and faults through raw filesy
           fault,
           profile === "workspace-write" && fault === "none" ? 3 : 0,
         );
-      await buildRawPreparation(f);
+      const build = await buildRawPreparation(f);
       const system = await createSystemEffects(f, f.options),
         records = [],
         prepared = await system.prepare(recipe, {
@@ -3658,6 +4444,15 @@ test("Windows fixed access entry owns all profiles and faults through raw filesy
         operations.indexOf("audit-restore") <
           operations.indexOf("access-policy-restore"),
       );
+      // End original preparation custody before reconstructing cold recovery;
+      // the public factory otherwise reuses that live observer's command budget.
+      const custody = await build.settle();
+      assert.equal(custody.status, "RETIRED");
+      assert.equal(custody.independent, true);
+      assert.equal(custody.emergencyCleanup, false);
+      assert.equal(custody.taskRemoved, true);
+      assert.equal(f.rawTasks.size, 0);
+      assert.ok([...f.actors.values()].every((actor) => actor.retired));
       await recoverRecordedCase(f);
     }
 });
@@ -5955,11 +6750,35 @@ test("fixed prerequisite extraction reconstructs partial setup, pre-admission an
     }
     for (const helper of f.manifest.helpers)
       f.files.delete(path.join(output, helper.name + ".exe"));
+    const open = f.options.openPreparation,
+      closedObservers = new Set(),
+      originalOwners = [...f.actors.values()].filter((actor) => !actor.retired);
+    assert.ok(originalOwners.length > 0);
+    f.options.openPreparation = async (...args) => {
+      const channel = await open(...args),
+        nonce = args[1][6];
+      return {
+        ...channel,
+        close: () => {
+          if (closedObservers.has(nonce)) return;
+          channel.close();
+          // Model the failed cold observer's eventual EOF exit, leaving its
+          // task and the original owners for fresh independent retirement.
+          for (const pid of [channel.pid, f.rawTasks.get(nonce).pid]) {
+            f.actors.get(pid).retired = true;
+            f.rawExitCodes.set(pid, 126);
+          }
+          closedObservers.add(nonce);
+        },
+      };
+    };
     const before = f.rawEvents.length,
       cold = createPrerequisiteEffects(prerequisiteInput, f.options),
       options = await cold.packageOptions(entry);
     assert.equal(f.rawEvents.length, before);
     await assert.rejects(options.custody.recover());
+    assert.ok(closedObservers.size > 0);
+    assert.ok(originalOwners.every((actor) => !actor.retired));
     assert.ok(
       f.rawEvents
         .slice(before)
@@ -5981,6 +6800,8 @@ test("fixed prerequisite extraction reconstructs partial setup, pre-admission an
     assert.equal(result.status, "RETAINED");
     assert.equal(result.admitted, false);
     assert.ok([...f.accounts.values()].every((account) => account.retired));
+    assert.equal(f.rawTasks.size, 0);
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
     assert.ok(
       !f.rawEvents
         .slice(before)

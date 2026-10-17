@@ -1364,11 +1364,18 @@ export function createWindowsCustodyVerifier(
         noLiveMembers: true,
       };
     },
-    async verifyCompleted(declaration, identities, nonces = [], jobs = []) {
+    async verifyCompleted(
+      declaration,
+      identities,
+      nonces = [],
+      jobs = [],
+      heldObservers = [],
+    ) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
       const observations = [];
-      await inventory(identities);
+      dense(heldObservers, maximumSubjects);
+      await inventory([...identities, ...heldObservers]);
       for (const identity of identities)
         observations.push(await empty(identity), await empty(identity));
       requireWindows(dense(jobs, 32).length === 0); // Missing whole-Job custody cannot be reconstructed from exit.
@@ -1437,9 +1444,15 @@ export function createWindowsCustodyVerifier(
       nonces = [],
       observerOwners = [],
       preSetup = [],
+      heldObservers = [],
     ) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
+      // Preserve old observer births while the original readers retire. These
+      // live held owners are custody only; they receive no retirement proof in
+      // this pass and must join the later complete independent observation.
+      for (const identity of dense(heldObservers, maximumSubjects))
+        await retain(identity);
       for (const identity of identities) await retain(identity);
       const owners = new Map(
         dense(observerOwners, maximumSubjects).map((owner) => {
@@ -1464,30 +1477,35 @@ export function createWindowsCustodyVerifier(
               ) ?? input.nonce,
           })),
         ),
-        proof = await api.verifyCompleted(declaration, identities, nonces);
-      const exits = [];
-      if (dense(preSetup, 128).length) {
-        requireWindows(
-          preSetup.every((helper) =>
-            identities.some((identity) =>
-              sameWindowsIdentity(identity, helper),
-            ),
-          ),
+        proof = await api.verifyCompleted(
+          declaration,
+          identities,
+          nonces,
+          [],
+          heldObservers,
         );
-        for (const identity of identities) {
-          const held = await retain(identity),
-            exit = await call("process-exit", [held.slot]);
-          closed(exit, ["exitCode"]);
-          requireWindows(
-            integer(exit.exitCode) &&
-              exit.exitCode !== 124 &&
-              (!preSetup.some((helper) =>
-                sameWindowsIdentity(helper, identity),
-              ) ||
-                exit.exitCode === 0),
-          );
-          exits.push(exit);
-        }
+      const exits = [];
+      dense(preSetup, 128);
+      requireWindows(
+        preSetup.every((helper) =>
+          identities.some((identity) => sameWindowsIdentity(identity, helper)),
+        ),
+      );
+      // Watchdog expiry is emergency cleanup even after every process is now
+      // absent. Neither that exit nor a successful later observer retires it.
+      for (const identity of identities) {
+        const held = await retain(identity),
+          exit = await call("process-exit", [held.slot]);
+        closed(exit, ["exitCode"]);
+        requireWindows(
+          integer(exit.exitCode) &&
+            exit.exitCode !== 124 &&
+            (!preSetup.some((helper) =>
+              sameWindowsIdentity(helper, identity),
+            ) ||
+              exit.exitCode === 0),
+        );
+        exits.push(exit);
       }
       return {
         ...proof,

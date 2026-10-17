@@ -848,9 +848,15 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       requireObservation(!signal?.aborted && result.tasksRemoved === true);
       return { ...result, commandsSha256: observationDigest(commands) };
     },
-    async recover({ request, records, plan }, { signal }) {
+    async recover(
+      { request, records, plan },
+      { signal, onReadersRetired } = {},
+    ) {
       requireObservation(!signal?.aborted);
       const subjects = [],
+        observerSubjects = [],
+        observerTasks = [],
+        readers = [],
         preSetup = [],
         taskOwners = [],
         byName = new Map(records.map(({ name, record }) => [name, record]));
@@ -883,8 +889,8 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             hash(birth.taskSha256),
         );
         if (observerPrefix !== filePrefix) {
-          subjects.push(birth.helper, birth.bridge);
-          taskOwners.push(birth);
+          observerSubjects.push(birth.helper, birth.bridge);
+          observerTasks.push(birth);
         }
         const journal = [];
         for (const { name, record } of records.filter(({ name }) =>
@@ -1033,6 +1039,12 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         requireObservation(
           (admitted || bound) && registered && hash(registered.taskSha256),
         );
+        readers.push({
+          inputSha256: observationDigest(plan.bootstrap),
+          helper: (admitted ?? bound).helper,
+          bridge: registered.bridge,
+          taskSha256: registered.taskSha256,
+        });
         if (bound) {
           requireObservation(
             parked &&
@@ -1122,10 +1134,79 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         );
         subjects.push(workers[0].record.worker, workers[0].record.helper);
       }
-      await files.retireReaders();
+      // A failed live close must not suppress fresh original-owner evidence.
+      // Registration remains until that evidence also proves task removal.
+      try {
+        await files.retireReaders();
+      } catch (cause) {
+        try {
+          nativeException("windows-preparation-readers", cause);
+        } catch {
+          /* Keep protected original-owner evidence available to recovery. */
+        }
+      }
+      const recoverTasks = async (owners) => {
+        const tasks = [],
+          failures = [];
+        for (const owner of owners)
+          try {
+            const task = await files.verify(
+              "recoverOwnedTask",
+              owner.nonce,
+              owner.taskSha256,
+              owner.bridge,
+            );
+            requireObservation(windowsRetired(task));
+            tasks.push(task);
+          } catch (cause) {
+            failures.push(cause);
+          }
+        if (failures.length)
+          throw new AggregateError(
+            failures,
+            "Windows preparation task recovery failed",
+          );
+        return tasks;
+      };
+      let readerProof,
+        tasks = [];
+      if (onReadersRetired) {
+        const identities = [
+          ...new Map(
+            subjects.map((identity) => [observationDigest(identity), identity]),
+          ).values(),
+        ];
+        const result = await files.verify(
+          "recoverCompleted",
+          plan.bootstrap,
+          identities,
+          [],
+          [],
+          preSetup,
+          observerSubjects,
+        );
+        requireObservation(
+          windowsRetired(result) && result.noLiveMembers === true,
+        );
+        tasks = await recoverTasks(taskOwners);
+        readerProof = {
+          ...result,
+          tasksRemoved: true,
+          readers,
+          recordsSha256: observationDigest(records),
+          nativeEventSha256: observationDigest({ result, tasks }),
+        };
+        // Dependent observers may finish only after every original reader/Job
+        // and task has independent retirement proof. No registration is dropped
+        // merely to let an observer's own finish succeed.
+        await onReadersRetired(readerProof);
+      }
       const identities = [
         ...new Map(
-          subjects.map((identity) => [observationDigest(identity), identity]),
+          [...subjects, ...observerSubjects].map((identity) => [
+            observationDigest(identity),
+            identity,
+          ]),
         ).values(),
       ];
       const result = await files.verify(
@@ -1146,16 +1227,14 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           }),
         preSetup,
       );
-      const tasks = [];
-      for (const owner of taskOwners)
-        tasks.push(
-          await files.verify(
-            "recoverOwnedTask",
-            owner.nonce,
-            owner.taskSha256,
-            owner.bridge,
-          ),
-        );
+      requireObservation(
+        windowsRetired(result) && result.noLiveMembers === true,
+      );
+      tasks.push(
+        ...(await recoverTasks(
+          readerProof ? observerTasks : [...taskOwners, ...observerTasks],
+        )),
+      );
       requireObservation(
         !signal?.aborted &&
           tasks.length > 0 &&
@@ -1169,8 +1248,13 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       const settlement = {
         ...result,
         tasksRemoved: true,
+        readers,
         nativeEventSha256: observationDigest({ result, tasks }),
       };
+      files.releaseRecoveredReaders({
+        ...settlement,
+        recordsSha256: observationDigest(records),
+      });
       return {
         ...settlement,
         recordsSha256: observationDigest(records),
@@ -1188,4 +1272,75 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
     get: (injected, key) =>
       key === "fs" ? fs : (injected[key] ?? defaults[key]),
   });
+}
+
+/** Fresh, protected original-call recovery. This never opens a build entry,
+ * recompiles, or trusts the retirement of its own new observer as old proof. */
+export async function recoverWindowsPreparationOwners(
+  input,
+  options,
+  { signal, onReadersRetired } = {},
+) {
+  const cleanupSignal = signal ?? AbortSignal.timeout(30000),
+    files = createWindowsPreparationFiles(
+      { ...input, signal: cleanupSignal },
+      options,
+    ),
+    owners = new Map(),
+    key = observationDigest({
+      context: input.manifest.windowsPreparation.bootstrap.context,
+      manifest: input.manifest,
+      output: input.output ?? input.helpers,
+      directory: input.directory ?? path.dirname(input.output ?? input.helpers),
+    });
+  owners.set(key, files);
+  const native = windowsPreparationOptions(input, options, owners),
+    failures = [];
+  let result, custody;
+  files.fenceAdmission();
+  try {
+    await files.beginCleanup(cleanupSignal);
+    const names = (await files.readdir(input.directory)).filter((name) =>
+        /^windows-(?:files-|bootstrap-|command-)/u.test(name),
+      ),
+      records = [];
+    requireObservation(names.length > 0 && names.length <= 65536);
+    let total = 0;
+    for (let offset = 0; offset < names.length; offset += 16) {
+      const group = names.slice(offset, offset + 16),
+        bytes = await files.readReceipts(group);
+      for (const [index, value] of bytes.entries()) {
+        total += value.length;
+        requireObservation(total <= 67108864);
+        records.push({ name: group[index], record: JSON.parse(value) });
+      }
+    }
+    result = await native.recover(
+      {
+        request: { candidateSha: input.job.candidateSha, platform: "win32" },
+        records,
+        plan: input.manifest.windowsPreparation,
+      },
+      { signal: cleanupSignal, onReadersRetired },
+    );
+    requireObservation(windowsRetired(result));
+  } catch (cause) {
+    failures.push(cause);
+  }
+  try {
+    custody = await files.settleFiles();
+    requireObservation(windowsRetired(custody));
+  } catch (cause) {
+    failures.push(cause);
+  }
+  if (failures.length)
+    throw new AggregateError(
+      failures,
+      "Windows preparation recovery retained original owners",
+    );
+  return {
+    ...result,
+    observerSettlement: custody,
+    nativeEventSha256: observationDigest({ result, custody }),
+  };
 }
