@@ -44,8 +44,8 @@ documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), and each pipeline
 owns its specification under its workspace.
 
 Read the [operator guide](docs/OPERATOR_GUIDE.md) for the complete CLI/MCP
-supervision procedure, pause recovery, validation boundaries, and safe
-project-local operating guidance.
+procedure, including optional observation, recovery through the same Runner
+workflow, validation boundaries, and safe project-local operating guidance.
 
 ## Core Guarantees
 
@@ -178,6 +178,29 @@ aliases pinned to one backend: Codex aliases map to native profile names and
 Claude aliases map to absolute isolated configuration directories. Profile
 entries contain provider selectors and execution preferences. A selected alias
 supplies its backend; a conflicting explicit backend is invalid.
+
+`maxEventLogBytes` limits each run's journal append capacity in bytes. Root and
+safe project configuration accept only numeric integers from `1` through
+`2147483647`; the default is `536870912` (512 MiB), and the project value wins.
+Strings, unit suffixes, fractions, and non-finite values are invalid. This is a
+storage-only exception to configuration freezing: current root capacity applies
+to subsequent appends without replacing saved roles, settings, trusted commands,
+or inputs. Only the originally selected, unchanged protected project overlay may
+override it; legacy runs never discover a new overlay. There is no environment,
+CLI, or MCP capacity override.
+
+Capacity exhaustion returns `ERR_EVENT_LOG_LIMIT` without discarding history.
+Status and history remain readable under a lower append policy, subject to the
+fixed `2147483647`-byte read ceiling. When root policy is effective, increase it
+within the validated range and resume the same run. Preserve protected project
+configuration and all state/resource records. With a protected project override,
+public API callers may supply a larger explicit policy through
+`createRunStore({ maxEventLogBytes: 1073741824 })` and
+`createRunner({ runStore })`. A store also accepts a policy callback, validated
+for each append, so an already constructed Runner can retry with increased
+injected capacity. A replacement Runner cannot take over a live owner: restart
+recovery requires the exact former owner to be proven dead or replaced. If no
+permitted increase exists, the run remains blocked with ownership intact.
 
 `issueReporting` is a runner-local boolean and defaults to `true`. It controls
 the MCP-only unexpected-issue tool described below. Set it to `false` and
@@ -480,11 +503,14 @@ form one complete ordered gate for the same content,
 validation-infrastructure, command, and trusted-configuration fingerprints.
 
 A longer deadline changes only when an exact command times out. It cannot make
-an incompatible sandbox work or improve native diagnostics. Trusted execution
-deliberately retains no stdout or stderr, so a full repository check that passes
-on the host can still fail closed in isolation with only a generic nonzero exit
-status. Reproduce that incompatibility in an equivalent safe environment rather
-than treating the timeout as a diagnostic or containment bypass.
+an incompatible sandbox work or restore historical discarded output. Trusted
+execution discards raw stdout/stderr, retaining only bounded normalized error
+classes, check stages, test failure types, and omission explanations. CLI/MCP
+expose diagnostics bound to failed runner checks and their generated issue IDs;
+they add no retry authority.
+A host pass can still fail closed in isolation. Follow the
+[operator guide](docs/OPERATOR_GUIDE.md) to diagnose and use current actions;
+the timeout is not a diagnostic or containment bypass.
 
 For an offline build whose project-provided `build.js` supports `--out-dir`, a
 trusted declaration can request transient output and cache storage:
@@ -609,6 +635,19 @@ the source again. Commit-readiness availability rejection requires persisted
 proof that the executor never started and unchanged Git verification before
 retiring the consumed authorization and scheduling a fresh one. Potentially
 executed effects remain verification-only; native error details are discarded.
+
+Codex commit-readiness policy rejections distinguish a reported workspace
+change, a forbidden Git operation, and an invalid readiness object through the
+same fixed CLI/MCP pause explanation. The category persists across interrupted
+Git verification. Only verification that no commit was created permits
+authorization retirement and a supported COMMIT resume with a fresh
+authorization. Repair the installed adapter before retrying and use supported
+runner reconciliation, preserving resumable workspace content. A reported
+file-change item does not prove that content changed. Keep frozen inputs,
+configuration, and finalization guidance unchanged; unsafe reconciliation
+requires a new run. Legacy records retain their generic explanation. No
+commands, native output, paths, or identity values are exposed, and these
+categories do not identify the cause of historical rejections.
 
 For failures without explicit availability evidence, when bounded adapter
 recovery ends in an eligible transient pre-effect launch
@@ -845,6 +884,20 @@ historical `turn_server_overloaded` failures remain immutable `FAILED` runs and
 are not reopened by migration.
 See the [operator guide](docs/OPERATOR_GUIDE.md) for recovery boundaries.
 
+Newly diagnosed lazy Worker `CHECK_AND_FIX` acquisition failures may offer a
+null resume action targeting that checkpoint. The adapter's matched completed-
+turn evidence and the continuous journal must prove safe reconciliation,
+retirement, frozen bindings and correction accounting. Resume reconstructs a
+fresh Worker request without reforking, preserves commits, dirty content, grants
+and charged rounds, and requires fresh convergence, finalization and terminal
+confirmation. Protocol errors remain terminal to automatic retries. Historical
+opaque failures without this provenance cannot reopen. After ownership and
+inputs are reconciled, use polishing to freshly validate and stage valid dirty
+work without committing or granting commit authority; further execution needs
+an appropriately prepared clean base and revised remaining plan. Preserve
+completed commits and useful content. Earlier failed fixture repairs have no
+accepted fresh full gate, and repair checks do not establish native PoC acceptance.
+
 Plan execution and polishing accept one applicable resume action at a time:
 
 ```bash
@@ -964,7 +1017,7 @@ status retains a resumable `FINALIZE` checkpoint and exposes only a bounded
 diagnostic through both the CLI and MCP.
 
 When plan execution is environment-blocked in finding resolution solely by
-opaque runner-trusted check failures, an explicit resume retries complete
+eligible runner-trusted check failures, an explicit resume retries complete
 finalization on the unchanged content. A repeated failure returns to resolution
 and needs another explicit resume if blocked again. Mixed blockers retain their
 ordinary resolution path; host check results never replace runner evidence.
@@ -1242,8 +1295,20 @@ Git services; pipeline workspaces own mode and workflow policy.
 
 ```text
 .
+├── .github/workflows/
+│   └── native-poc.yml
 ├── bin/
 │   └── agent-run.js
+├── ci/
+│   └── native/
+│       ├── catalog.js
+│       ├── dispatch.js
+│       ├── evidence.js
+│       ├── harness.test.js
+│       ├── index.js
+│       ├── reports.js
+│       ├── run.js
+│       └── README.md
 ├── src/
 │   ├── agents/
 │   │   ├── adapter-contract.js
@@ -1297,7 +1362,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── input.js
 │   │   ├── migration.js
 │   │   ├── roles.js
-│   │   └── service.js
+│   │   ├── service.js
+│   │   └── store.js
 │   ├── state/
 │   │   ├── actions.js
 │   │   ├── files.js
@@ -1305,6 +1371,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── journal.js
 │   │   ├── lease.js
 │   │   ├── service.js
+│   │   ├── storage-policy.js
 │   │   └── validation.js
 │   └── trusted-validation/
 │       ├── execution.js

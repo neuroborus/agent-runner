@@ -4314,6 +4314,9 @@ ${establishedValidationPrompt(state())}${
         evidence: executed.evidence,
         executor: "runner",
         commandIdentity: executed.commandIdentity,
+        ...(Object.hasOwn(executed, "diagnosticInventory")
+          ? { diagnosticInventory: executed.diagnosticInventory }
+          : {}),
         exitCode: executed.exitCode,
         signal: executed.signal,
         timedOut: executed.timedOut,

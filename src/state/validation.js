@@ -6,6 +6,7 @@ import {
   isAdapterDiagnosticClass,
   normalizeClientAttribution,
 } from "../agents/index.js";
+import { validateTrustedFinalizationEvidence } from "../trusted-validation/index.js";
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
@@ -1180,6 +1181,14 @@ export function normalizeRunState(value, expectedRunId) {
     fail("Run provider recovery policy or evidence is invalid.");
   }
   assertSerializedSize(normalized, "run");
+  try {
+    validateTrustedFinalizationEvidence(
+      normalized.pipelineState,
+      normalized.pause,
+    );
+  } catch {
+    fail("Run trusted validation observations are invalid.");
+  }
   return normalized;
 }
 

@@ -1405,7 +1405,12 @@ for (const mode of ["independent", "lazy"]) {
               exitCode: failed ? 1 : 0,
               signal: null,
               timedOut: false,
-              evidence: ["The runner executed the persisted vector."],
+              evidence: [
+                "The runner executed the persisted vector.",
+                ...(failed
+                  ? ["Trusted check error class: ERR_ASSERTION."]
+                  : []),
+              ],
             };
           },
         });
@@ -1415,6 +1420,11 @@ for (const mode of ["independent", "lazy"]) {
             targetCalls.push(request);
             attempts += 1;
             for (const prompt of [request.prompt, request.recoveryPrompt]) {
+              if (needsResolution)
+                assert.match(
+                  prompt,
+                  /Trusted check error class: ERR_ASSERTION\./u,
+                );
               const match =
                 /Exact runner-trusted commands reserved for FINALIZE:\n([^\n]+)/u.exec(
                   prompt,

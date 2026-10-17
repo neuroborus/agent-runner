@@ -96,6 +96,25 @@ write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
 
+Journal append policy is separately bounded by
+`maxEventLogBytes` (default `536870912`, numeric integers `1` through
+`2147483647`), while safe chunked reads use the fixed `2147483647`-byte ceiling.
+Raw-byte record offsets preserve split UTF-8 and incomplete tails. Capacity
+rejection precedes any journal, state, progress, or tail change; valid history
+is never rotated, compacted, truncated, or discarded to make room.
+
+Current root capacity is the sole storage exception to configuration freezing.
+An original project override retains precedence only through unchanged protected
+identity; legacy runs never discover new configuration. Larger explicit policy
+may be supplied through the public store/Runner construction boundaries without
+editing that protected file or any ownership record. Existing trusted cleanup
+must journal retirement before either lease releases. Its original finite error
+and private cause survive both release failures; exact same-Runner handles permit
+verified retry after an allowed increase. Other owners remain excluded. A new
+Runner cannot take over a live owner; restart requires proof of exact former
+owner death or replacement. Without an allowed increase, ownership stays durable
+and the run remains blocked. Public diagnostics remain redacted.
+
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended
 journal checkpoint and existing blockers; cancellation cannot be downgraded.
@@ -175,8 +194,37 @@ identity, frozen authority and trusted-configuration fingerprint, and the run's
 validation bindings.
 Timeout configuration changes only the execution deadline. It does not weaken
 isolation, make an incompatible sandbox usable, or cross the deliberate
-no-output-retention boundary. Trusted stdout/stderr remain discarded, so a host
-pass can still produce only a generic isolated nonzero exit result.
+raw-output boundary. Trusted stdout/stderr are continuously drained, with bounded
+finite normalized error classes, check stages, and test failure types retained
+from narrowly supported formats. Node dot/spec failed-test headers and positive
+TAP/spec failure
+summaries provide `tests` stage evidence without requiring an allowlisted class;
+bounded reporter indentation and quoted-field punctuation preserve allowlisted
+classes and failure types. Unknown failure types remain omitted. Banners,
+stage starts and zero-failure summaries are not failure evidence. Arbitrary text,
+unverified paths, titles, assertion values, messages, stacks,
+provider output, secrets and ambient context remain excluded. A bounded omission
+explanation covers unusable lines while collection of supported evidence
+continues; successful output yields no diagnostics.
+The exact supported repository-check launcher can retain a canonical relative
+failing-file identity only from a failed Node TAP diagnostic location matching
+its pre-execution, Git-inspected inventory. Bound inventory membership is
+revalidated on service acceptance, persistence/reload and public projection;
+later worktree discovery cannot replace it. Absolute paths, aliases, symlinks,
+traversal, controls, malformed encodings and arbitrary output remain excluded.
+Unsupported launchers and blocked outcomes retain the finite-label boundary.
+Runner-measured monotonic elapsed milliseconds are bounded observational
+evidence with strict Runner provenance. Success retains timing while disposing
+of diagnostics; preparation and unstarted checks omit it. Legacy absence stays
+valid. Timing neither accepts a failed check nor changes any effect gate.
+Service revalidation and check/issue-bound public projection preserve this
+boundary. Neither diagnostics nor historical opaque results grant validation
+authority, broader isolation or a new recovery action. A host pass can still
+produce a generic isolated nonzero exit result.
+Existing eligible explicit null-action resume revalidates unchanged frozen inputs
+and failed fingerprints and repeats complete `FINALIZE` for fresh evidence.
+Historical discarded output is unrecoverable; retry neither rewrites persisted
+history nor changes eligibility, correction accounting or terminal confirmation.
 Plan-execution and polishing capability reports are exact-command, additive requirements stored
 before availability inspection. They cannot replace frozen declarations or grant
 permissions. Read-only bootstrap and legacy discovery precede writable entry;
@@ -302,6 +350,16 @@ common contracts and never enter role prompts or run state.
 
 ## Effect reconciliation
 
+Diagnosed lazy check/fix reconstruction requires closed adapter-owned completed-
+turn acquisition evidence and a continuous journal-proven non-commit checkpoint.
+Retired process/resources and safe workspace reconciliation precede metadata
+publication. Execution rechecks exact frozen bindings and Git controls under
+leases and publishes intent before fresh work. It preserves commits, workspace,
+source-fork consumption, budgets and charged corrections; clears stale approvals
+and requires all acceptance gates again. Unknown/legacy provenance, stronger
+safety failures, ambiguous effects and pending commit authority grant no retry.
+Protocol classification stays terminal to automatic retry policy.
+
 Legacy terminal-confirmation recovery is gated by complete journal provenance,
 current inputs and Git controls, unchanged finalized content, and valid
 validation infrastructure and check evidence. Missing, discontinuous,
@@ -315,11 +373,10 @@ does not cross public CLI or MCP projections.
 Intent is durable before any commit, handoff, editor, or MCP mutation. If a
 process stops after an effect may have started, recovery inspects the observed
 state before acting. A consumed commit authorization stays on a verification-
-only path; it is never replayed. A persisted explicit availability or
-authentication rejection with validated proof that the executor never started
-permits retirement only after Git verifies no commit and unchanged
-controls/content/index. Retirement and saving the retry or authentication
-checkpoint are one durable transition. Authorization
+only path; it is never replayed. A persisted pre-effect rejection with validated
+proof that the executor never started permits retirement only after Git verifies
+no commit and unchanged controls/content/index. Retirement and saving the retry
+or authentication checkpoint are one durable transition. Authorization
 consumption alone never proves executor activity. A handoff may be accepted as already complete
 or retried only from its exact unchanged pre-effect state. Ambiguous partial
 effects fail closed.

@@ -1,0 +1,2 @@
+ci/native/win32/*.c text eol=lf
+ci/native/win32/*.h text eol=lf

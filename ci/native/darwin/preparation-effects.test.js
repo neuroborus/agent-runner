@@ -1,0 +1,11306 @@
+import assert from "node:assert/strict";
+import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
+import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
+import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
+import { providerPreparationFixture } from "../providers/preparation.fixture.js";
+import test from "node:test";
+import path from "node:path";
+import { constants } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+import { deflateSync } from "node:zlib";
+import { createHash } from "node:crypto";
+import {
+  createNativeDiagnosticWriter,
+  withNativeDiagnostics,
+} from "../diagnostics.js";
+import { createBuildEffects, createSystemEffects } from "../native-effects.mjs";
+import {
+  observationDigest,
+  initialExperimentJob,
+  recordExperimentPreparationEffect,
+  nativePolicyLaunchData,
+  nativePolicyTemplateDigest,
+  materializeNativePolicy,
+  verifyExperimentPolicy,
+  NATIVE_EFFECT_CLASSES,
+  NATIVE_GROUPS,
+  releaseClosureDigest,
+} from "../index.js";
+import {
+  prepareDarwinExperiment,
+  loadDarwinExperiment,
+  recoverDarwinExperimentPreparation,
+  createDarwinExperimentSystemEffects,
+  createDarwinBuildEffects,
+  createDarwinSystemEffects,
+  normalizeDarwinPreparation,
+  DARWIN_HELPER_NAMES,
+  DARWIN_LITERAL_ARGUMENTS,
+  darwinCompilerArguments,
+  darwinBuildOperation,
+  runDarwinBuildCommand,
+  darwinSystemRecipes,
+  DARWIN_SYSTEM_PREPARATION_MS,
+  observeDarwinRelease,
+  buildDarwinPolicy,
+  encodeDarwinCustodyPlan,
+} from "./index.js";
+import { digest, darwinLaunchDigest, sameDarwinIdentity } from "./protocol.js";
+import { DARWIN_OWNERSHIP_CASES, runDarwinOwnershipCase } from "./ownership.js";
+import { runDarwinFileCase, DARWIN_FILE_CASE_IDS } from "./files-cases.js";
+import { runDarwinGitCase } from "./git.js";
+import { DARWIN_ACCESS_DENIALS, runDarwinAccessCase } from "./access.js";
+import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
+import { darwinGitPolicies } from "./git-effects.js";
+import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
+import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
+import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
+import {
+  darwinPfRootDigest,
+  observeDarwinPfCapabilities,
+  observeDarwinPfExecutable,
+} from "./pf-preparation.js";
+import { assertDarwinLiteralObservation } from "./literal.js";
+import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
+import { darwinCustodyChannel } from "./channel.js";
+import {
+  prepareDarwinExperimentBuild,
+  loadDarwinExperimentBuild,
+  recoverDarwinExperimentBuild,
+  darwinExperimentDependencies,
+  darwinExperimentBuildInput,
+} from "./experiment-build.js";
+import {
+  acquireDarwinExperimentBuild,
+  DARWIN_EXPERIMENT_SOURCES,
+  DARWIN_PF_ABI_REFERENCE,
+} from "./experiment-build-inputs.js";
+import { readDarwinBootstrapTools } from "./bootstrap-tools.js";
+
+const candidateSha = "a".repeat(40),
+  bytes = Buffer.from("sealed reviewed bytes"),
+  hash = digest(bytes),
+  cdhash = "c".repeat(40),
+  output = "/fixture/report/platform-build",
+  directory = path.dirname(output),
+  sourceDirectory = "/fixture/sealed/darwin";
+const retired = {
+  status: "RETIRED",
+  independent: true,
+  emergencyCleanup: false,
+  nativeEventSha256: hash,
+};
+const sdkSelection = {
+  path: "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+  dev: "1",
+  ino: "99",
+  settingsSha256: hash,
+};
+const toolchainSelection = {
+  developer: {
+    path: "/Library/Developer/CommandLineTools",
+    dev: "1",
+    ino: "99",
+  },
+  compiler: {
+    path: "/Library/Developer/CommandLineTools/usr/bin/clang",
+    sha256: hash,
+    dev: "1",
+    ino: "99",
+    cdhash,
+  },
+  delegated: [
+    {
+      path: "/Library/Developer/CommandLineTools/usr/bin/ld",
+      sha256: hash,
+      dev: "1",
+      ino: "99",
+      cdhash,
+    },
+  ],
+};
+const identity = (pid) => ({
+  pid,
+  pidVersion: 1,
+  uid: 0,
+  gid: 0,
+  ruid: 0,
+  rgid: 0,
+  svuid: 0,
+  svgid: 0,
+  auid: 0,
+  asid: 0,
+  startSeconds: 100,
+  startMicroseconds: pid,
+});
+const context = (executionId) => ({
+  candidateSha,
+  platform: "darwin",
+  tier: "system",
+  runId: "1",
+  runAttempt: 1,
+  jobBindingSha256: hash,
+  executionId,
+  closureSha256: hash,
+  selectedSystemSha256: null,
+});
+const custody = (id) => ({
+  context: context(id),
+  reader: { path: "/fixture/sealed/custody-reader", sha256: hash, cdhash },
+  sources: [
+    "custody-reader.c",
+    "custody.h",
+    "file-identity.h",
+    "effective-reader.h",
+    "feasibility-sandbox.h",
+  ].map((name) => ({ path: `/fixture/sealed/${name}`, sha256: hash })),
+  plan: { path: `/fixture/sealed/${id}-plan`, sha256: hash },
+  tools: {
+    elevation: { path: "/usr/bin/sudo", sha256: hash },
+    environment: { path: "/usr/bin/env", sha256: hash },
+  },
+  reportDirectory: directory,
+  reviewSha256: hash,
+  sdkSha256: hash,
+  buildSha256: hash,
+});
+
+function wiring({ defaultRead = false } = {}) {
+  let nextReaderPid = 20;
+  const events = [],
+    files = new Map(),
+    env = {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      ImageOS: "macos15",
+      RUNNER_TEMP: "/fixture",
+    };
+  const manifest = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    environment: {
+      SDKROOT: "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+    },
+    tools: [
+      ["compiler", "/usr/bin/clang"],
+      ["sdk", "/usr/bin/xcrun"],
+      ["signer", "/usr/bin/codesign"],
+    ].map(([name, file]) => ({
+      name,
+      path: file,
+      sha256: hash,
+      version: "reviewed",
+    })),
+    helpers: DARWIN_HELPER_NAMES.map((name) => ({
+      name,
+      sourceSha256: hash,
+      sha256: hash,
+    })),
+    inputs: [],
+    darwinPreparation: {
+      schemaVersion: 1,
+      sourceDirectory,
+      sources: [
+        ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
+        "custody.h",
+        "file-identity.h",
+        "effective-reader.h",
+        "feasibility-sandbox.h",
+      ].map((name) => ({ name, sha256: hash })),
+      bootstrap: custody("build"),
+      command: {
+        helper: { path: "/fixture/sealed/build-helper", sha256: hash, cdhash },
+        toolCdhashes: { compiler: cdhash, sdk: cdhash, signer: cdhash },
+      },
+      cases: darwinSystemRecipes()
+        .filter((recipe) => recipe.id !== "build")
+        .map((recipe) => ({
+          id: recipe.id,
+          custody: custody(recipe.id),
+          bindings: {},
+        })),
+    },
+  };
+  const job = { candidateSha, platform: "darwin" };
+  const request = (tool, args) => ({
+    candidateSha,
+    platform: "darwin",
+    toolSha256: tool.sha256,
+    file: tool.path,
+    args,
+    cwd: output,
+    env: {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      LANG: "C",
+      SDKROOT: manifest.environment.SDKROOT,
+    },
+    deadlineMs: 30000,
+  });
+  const requests = [
+    request(manifest.tools[0], ["--version"]),
+    request(manifest.tools[1], ["--show-sdk-build-version"]),
+  ];
+  for (const name of DARWIN_HELPER_NAMES) {
+    requests.push(
+      request(
+        manifest.tools[0],
+        darwinCompilerArguments(
+          path.join(sourceDirectory, name + ".c"),
+          path.join(output, name),
+          manifest.environment,
+        ),
+      ),
+    );
+    requests.push(
+      request(manifest.tools[2], [
+        "--force",
+        "--sign",
+        "-",
+        "--timestamp=none",
+        path.join(output, name),
+      ]),
+    );
+  }
+  const preparation = {
+    schemaVersion: 1,
+    status: "PASS",
+    candidateSha,
+    platform: "darwin",
+    reviewSha256: observationDigest(manifest),
+    helpers: manifest.helpers.map(({ name, sha256 }) => ({ name, sha256 })),
+    versions: manifest.tools.map(({ name, version, sha256 }) => ({
+      name,
+      version,
+      sha256,
+    })),
+    commands: [],
+  };
+  for (const value of requests) {
+    const id = observationDigest(value),
+      result = {
+        requestSha256: id,
+        toolSha256: hash,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+        independent: true,
+        identity: identity(11),
+        helperIdentity: identity(12),
+        nativeEventSha256: hash,
+        settlement: retired,
+        bootstrapSettlement: {
+          status: "RETIRED",
+          independent: true,
+          closed: true,
+        },
+        stdout: "reviewed\n",
+        stderr: "",
+      };
+    files.set(path.join(directory, `darwin-command-${id}-intent.json`), {
+      candidateSha,
+      request: value,
+      requestSha256: id,
+      status: "POSSIBLE",
+    });
+    files.set(path.join(directory, `darwin-command-${id}-result.json`), result);
+    preparation.commands.push({
+      requestSha256: id,
+      status: "RETIRED",
+      receiptSha256: observationDigest(result),
+    });
+  }
+  const options = {
+    env,
+    ownerUid: () => 1001,
+    fs: {
+      realpath: async (file) => file,
+      lstat: async () => ({
+        isDirectory: () => true,
+        isSymbolicLink: () => false,
+        uid: 1001,
+        mode: 0o700,
+      }),
+      readdir: async () => [...files.keys()].map((file) => path.basename(file)),
+      async writeFile(file, value, settings) {
+        assert.equal(settings.flag, "wx");
+        assert.equal(settings.mode, 0o400);
+        assert.ok(!files.has(file));
+        files.set(file, JSON.parse(value));
+        events.push(path.basename(file));
+      },
+    },
+    ...(!defaultRead
+      ? {
+          read: async () => {
+            events.push("sealed-read");
+            return bytes;
+          },
+        }
+      : {}),
+    inspectImage: (value) => assert.ok(Buffer.isBuffer(value)),
+    readReceipt: async (file) => {
+      assert.ok(files.has(file));
+      return Buffer.from(JSON.stringify(files.get(file)));
+    },
+    createReader: (value, readerOptions) => {
+      const building = value.context.executionId === "build",
+        pid = nextReaderPid++,
+        helper = building
+          ? { ...identity(pid), asid: 100 + pid }
+          : identity(20),
+        verifier = identity(nextReaderPid++);
+      return {
+        async start() {
+          events.push(`start:${value.context.executionId}`);
+          assert.notEqual(helper.pid, verifier.pid);
+          const request = { helper, verifier };
+          for (const [sequence, phase] of (building
+            ? ["entry", "admitted"]
+            : ["entry"]
+          ).entries())
+            await readerOptions.persist({
+              ...(value.purpose === "experiment"
+                ? { purpose: "experiment" }
+                : {}),
+              schemaVersion: 1,
+              context: value.context,
+              sequence,
+              phase,
+              request,
+              requestSha256: digest(JSON.stringify(request)),
+              [value.purpose === "experiment"
+                ? "bindingSha256"
+                : "reviewSha256"]: value.bindingSha256 ?? value.reviewSha256,
+              custody: "POSSIBLE",
+              ...(phase === "admitted" ? { subjects: request } : {}),
+            });
+          return { helper, independent: true, planSha256: hash };
+        },
+        async beginCleanup({ signal }) {
+          assert.ok(signal instanceof AbortSignal && !signal.aborted);
+          events.push("cleanup");
+        },
+        async retired(value) {
+          assert.ok(value.pid);
+          if (building) assert.notEqual(value.pid, helper.pid);
+          events.push("fresh-retirement");
+          return retired;
+        },
+        ...(building
+          ? {
+              async retiredRootDomain(value) {
+                assert.ok(value.asid > 0);
+                assert.notEqual(value.asid, helper.asid);
+                events.push("fresh-root-retirement");
+                return { independent: true, complete: true, members: [] };
+              },
+            }
+          : {}),
+        async close() {
+          events.push(`close:${value.context.executionId}`);
+          return {
+            status: "RETIRED",
+            independent: true,
+            emergencyCleanup: false,
+            closed: true,
+            nativeEventSha256: hash,
+          };
+        },
+      };
+    },
+    createReaders: () => ({
+      gitSnapshot: async () => {
+        events.push("git-snapshot");
+        return {};
+      },
+    }),
+    provisionBuild: async () => {
+      events.push("provision-build");
+    },
+  };
+  const input = {
+    job,
+    manifest,
+    output,
+    directory,
+    preparation,
+    api: { mustNotClone() {} },
+  };
+  return { input, options, manifest, preparation, requests, events, files };
+}
+
+function experimentBuildFixture(failure = null) {
+  const f = wiring(),
+    image = Buffer.alloc(384),
+    imageHash = () => digest(image);
+  f.files.clear();
+  for (const [offset, value] of [
+    [0, 0xfeedfacf],
+    [4, 0x01000007],
+    [12, 2],
+    [16, 4],
+    [20, 256],
+    [32, 0xe],
+    [36, 32],
+    [40, 12],
+    [64, 0x1d],
+    [68, 16],
+    [72, 368],
+    [76, 16],
+    [80, 0x19],
+    [84, 152],
+    [136, 5],
+    [140, 5],
+    [144, 1],
+    [200, 304],
+    [232, 0xc],
+    [236, 56],
+    [240, 24],
+  ])
+    image.writeUInt32LE(value, offset);
+  image.write("/usr/lib/dyld\0", 44);
+  image.write("__TEXT", 88);
+  image.writeBigUInt64LE(384n, 112);
+  image.writeBigUInt64LE(384n, 128);
+  image.write("__nexp", 152);
+  image.write("__TEXT", 168);
+  image.writeBigUInt64LE(304n, 184);
+  image.writeBigUInt64LE(
+    BigInt(Buffer.byteLength("native-ci-experiment-v1\0")),
+    192,
+  );
+  image.write("/usr/lib/libSystem.B.dylib\0", 256);
+  image.write("native-ci-experiment-v1\0", 304);
+  const job = initialExperimentJob({
+      candidateSha,
+      platform: "darwin",
+      repository: "fixture/native",
+      runId: "1",
+      runAttempt: 1,
+    }),
+    binding = {
+      ...jobContextForTest(job),
+      checkoutSha: candidateSha,
+      image: "macos-15-intel",
+      osBuild: "24A",
+      architecture: "x64",
+      nodeVersion: "v24.21.0",
+      workflow: "native-poc",
+      jobId: "2",
+    },
+    sources = DARWIN_EXPERIMENT_SOURCES.map((name) => ({ name, sha256: hash })),
+    bootstrap = {
+      ...custody("build"),
+      purpose: "experiment",
+      bindingSha256: hash,
+      sources: sources.map((source) => ({
+        path: "/fixture/sealed/" + source.name,
+        sha256: hash,
+      })),
+    };
+  delete bootstrap.reviewSha256;
+  bootstrap.context.jobBindingSha256 = observationDigest(binding);
+  const prepared = {
+    purpose: "experiment",
+    job,
+    binding,
+    directory,
+    output,
+    sourceDirectory: "/fixture/sealed",
+    bootstrapSeed: {
+      path: "/fixture/sealed/bootstrap-seed",
+      sha256: hash,
+      acquisition: {
+        tools: bootstrap.tools,
+        owner: identity(19),
+        receipt: { path: "/fixture/sealed/bootstrap-tools.json", sha256: hash },
+        settlement: {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: false,
+        },
+      },
+    },
+    sources,
+    tools: f.manifest.tools.map(({ name, path, sha256 }) => ({
+      name,
+      path,
+      sha256,
+      cdhash,
+    })),
+    inputs: [
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/SDKSettings.json",
+      "/usr/lib/dyld",
+      "/Library/Developer/CommandLineTools/usr/bin/clang",
+      "/Library/Developer/CommandLineTools/usr/bin/ld",
+    ].map((path) => ({ path, sha256: hash })),
+    environment: {
+      ...f.manifest.environment,
+      DEVELOPER_DIR: toolchainSelection.developer.path,
+    },
+    helpers: f.manifest.helpers.map((helper) => ({
+      ...helper,
+      sha256: ["custody-reader", "build-helper"].includes(helper.name)
+        ? hash
+        : null,
+    })),
+    bootstrap,
+    command: {
+      ...f.manifest.darwinPreparation.command,
+      sdk: { ...sdkSelection },
+      toolchain: structuredClone(toolchainSelection),
+    },
+    cachePath: "/System/Library/dyld/dyld_shared_cache_x86_64h",
+  };
+  const options = {
+    ...f.options,
+    binding,
+    platform: "darwin",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    readCandidate: async () => bytes,
+    readInstalled: async () => bytes,
+    env: {
+      ...f.options.env,
+      RUNNER_ENVIRONMENT: "github-hosted",
+      RUNNER_OS: "macOS",
+      GITHUB_REPOSITORY: job.repository,
+      GITHUB_RUN_ID: job.runId,
+      GITHUB_RUN_ATTEMPT: "1",
+    },
+    acquire: async (actual) => {
+      f.events.push("acquire");
+      assert.equal(actual.preparationEffects.admission, "possible");
+      return { ...prepared, job: actual };
+    },
+    readSelector: f.options.readReceipt,
+    readBootstrapTools: async () =>
+      structuredClone(prepared.bootstrapSeed.acquisition),
+    digestIntermediate: async () => imageHash(),
+  };
+  delete options.provisionBuild;
+  let births = 20;
+  const id = "1:2:3:99:100:0:" + "d".repeat(32);
+  options.createReader = (input, settings) => {
+    const helper = { ...identity(births++), asid: 51 },
+      verifier = identity(births++);
+    let sequence = 0,
+      joined = false;
+    const save = (phase, request) =>
+      settings.persist({
+        purpose: "experiment",
+        schemaVersion: 1,
+        context: input.context,
+        sequence: sequence++,
+        phase,
+        request,
+        requestSha256: observationDigest(request),
+        bindingSha256: input.bindingSha256,
+        custody: "POSSIBLE",
+        ...(phase === "admitted" ? { subjects: request } : {}),
+      });
+    return {
+      async start() {
+        for (const phase of ["entry", "admitted"])
+          await save(phase, { helper, verifier });
+        return {
+          purpose: "experiment",
+          independent: true,
+          helper,
+          planSha256: hash,
+        };
+      },
+      verifyBuildReceipt: async () => {
+        f.events.push("receipt-read");
+      },
+      provisionBuild: async () => ({ independent: true, identity: id }),
+      readBuildDirectory: async () => {
+        joined = true;
+        return { independent: true, identity: id, uid: 0, gid: 0, mode: 0o555 };
+      },
+      readBuildInput: async (file, pin, toolCdhash) => ({
+        sha256: pin,
+        ...(toolCdhash ? { cdhash: toolCdhash } : {}),
+        object: { identity: file === "/usr/lib/dyld" ? "held-loader" : id },
+        ...(file.endsWith("/SDKSettings.json")
+          ? {
+              sdk: { identity: id, directory: true },
+              developer: { identity: id, directory: true },
+              compilerPathHex: Buffer.from(
+                toolchainSelection.compiler.path,
+              ).toString("hex"),
+            }
+          : {}),
+        ...(file === "/usr/lib/dyld" ? { macho: { dependencies: [] } } : {}),
+        independent: true,
+        held: true,
+        unchanged: true,
+        nativeEventSha256: hash,
+      }),
+      readBuildRuntime: async () => {
+        f.events.push("runtime-read");
+        return {
+          object: { identity: id },
+          runtime: {
+            sha256: hash,
+            signatureSha256: hash,
+            macho: { dependencies: [] },
+          },
+          independent: failure !== "runtime",
+          held: true,
+          unchanged: true,
+          nativeEventSha256: hash,
+        };
+      },
+      readBuildImage: async (file) => {
+        assert.equal(
+          joined,
+          false,
+          "A read-only root join must close before a fresh output session",
+        );
+        const dependencies = file.endsWith(".deps"),
+          name = path.basename(file).replace(/\.deps$/u, ""),
+          data = dependencies
+            ? Buffer.from(
+                `${name}: /fixture/sealed/${name}.c /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/input.h${["launcher", "custody-reader"].includes(name) ? " /fixture/sealed/custody.h" : ""}${name === "custody-reader" ? " /fixture/sealed/pf-abi.h /fixture/sealed/feasibility-sandbox.h /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach/task_info.h /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach-o/dyld_images.h" : ""}\n`,
+              )
+            : image;
+        return {
+          purpose: "experiment",
+          bytes: data,
+          sha256: digest(data),
+          identity: id,
+          rootIdentity: id,
+          independent: true,
+          held: true,
+          unchanged: true,
+          nativeEventSha256: hash,
+          ...(!dependencies
+            ? {
+                signature: { valid: true, cdhash },
+                macho: {
+                  dependencies: ["/usr/lib/dyld", "/usr/lib/libSystem.B.dylib"],
+                  rpaths: [],
+                  sdk: 1,
+                  minimum: 1,
+                  uuid: "0".repeat(32),
+                  headerSha256: hash,
+                },
+              }
+            : {}),
+        };
+      },
+      build: async () => {
+        // The native reader journals this ABI command before sending it.
+        await save("build", { sequence: 1, arguments: [] });
+        return {
+          purpose: "experiment",
+          osBuild: "24A",
+          observedBindings: { sdkSha256: hash, buildSha256: hash },
+        };
+      },
+      retired: async () => {
+        f.events.push("original-retirement");
+        return retired;
+      },
+      retiredRootDomain: async () => ({
+        independent: true,
+        complete: true,
+        members: [],
+      }),
+      close: async () => ({ ...retired, helper, verifier, closed: true }),
+    };
+  };
+  options.runCommand = async (
+    request,
+    operation,
+    entry,
+    reader,
+    persist,
+    control,
+  ) => {
+    f.events.push("compile-owner:" + operation.mode);
+    if (operation.mode === "sdk-version") {
+      assert.deepEqual(request.args, [
+        "--sdk",
+        prepared.environment.SDKROOT,
+        "--show-sdk-build-version",
+      ]);
+      assert.deepEqual(operation.sdk, prepared.command.sdk);
+    }
+    const helper = { ...identity(10), asid: 51 },
+      worker = { ...identity(11), asid: 51 },
+      compilerPolicy = {
+        identity: worker,
+        uid: 0,
+        gid: 0,
+        ruid: 0,
+        rgid: 0,
+        sandboxed: false,
+        descriptors: [
+          { fd: 0, type: "vnode" },
+          { fd: 1, type: "pipe" },
+          { fd: 2, type: "pipe" },
+        ],
+      },
+      requestSha256 = observationDigest(request);
+    await persist({
+      purpose: "experiment",
+      phase: "helper",
+      helper,
+      requestSha256,
+    });
+    await persist({
+      purpose: "experiment",
+      phase: "worker",
+      helper,
+      worker,
+      compilerPolicy,
+      requestSha256,
+    });
+    await control.beforeRelease();
+    if (failure === "compile" && operation.mode === "compile")
+      throw new Error("Original compile failure");
+    return {
+      purpose: "experiment",
+      requestSha256,
+      toolSha256: request.toolSha256,
+      identity: worker,
+      helperIdentity: helper,
+      compilerPolicy,
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+      independent: true,
+      nativeEventSha256: hash,
+      settlement: retired,
+      stdout:
+        operation.mode === "compiler-version"
+          ? "Apple clang version 17.0\n"
+          : operation.mode === "sdk-version"
+            ? "24A\n"
+            : "",
+      stderr: "",
+    };
+  };
+  const jobs = [],
+    persist = async (value) => {
+      jobs.push(value);
+      f.events.push("job:" + value.preparationEffects.admission);
+    };
+  return { ...f, prepared, job, options, jobs, persist, image };
+}
+const jobContextForTest = (job) =>
+  Object.fromEntries(
+    ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+      (key) => [key, job[key]],
+    ),
+  );
+
+const privilegedPfQueries = [
+  ["-n", "--", "/usr/bin/id", "-u"],
+  ...["info", "rules", "Anchors"].map((selector) => [
+    "-n",
+    "--",
+    "/sbin/pfctl",
+    "-s",
+    selector,
+  ]),
+];
+test("Darwin PF executable observations require stable protected identities without image reads", async () => {
+  for (const file of ["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"])
+    for (const fault of [
+      null,
+      "execute-only",
+      "missing",
+      "alias",
+      "symlink",
+      "owner",
+      "group",
+      "writable",
+      "not-executable",
+      "parent",
+      "parent-owner",
+      "changed",
+      "parent-changed",
+    ]) {
+      const samples = new Map(),
+        absent = Object.assign(new Error("Missing fixed executable"), {
+          code: "ENOENT",
+        }),
+        fs = {
+          realpath: async (name) =>
+            name === file && fault === "alias" ? "/usr/bin/substitute" : name,
+          lstat: async (name) => {
+            if (name === file && fault === "missing") throw absent;
+            const count = (samples.get(name) ?? 0) + 1;
+            samples.set(name, count);
+            const leaf = name === file;
+            return {
+              isFile: () => leaf,
+              isDirectory: () => !leaf,
+              isSymbolicLink: () => leaf && fault === "symlink",
+              dev: 1,
+              ino:
+                count > 1 &&
+                ((leaf && fault === "changed") ||
+                  (!leaf && fault === "parent-changed"))
+                  ? 2
+                  : 1,
+              uid:
+                (leaf && fault === "owner") ||
+                (!leaf && fault === "parent-owner")
+                  ? 1
+                  : 0,
+              gid: leaf && fault === "group" ? 1 : 0,
+              mode: leaf
+                ? (file === "/usr/bin/sudo" ? 0o104000 : 0o100000) |
+                  (fault === "execute-only"
+                    ? 0o111
+                    : fault === "not-executable"
+                      ? 0o644
+                      : fault === "writable"
+                        ? 0o777
+                        : 0o755)
+                : fault === "parent"
+                  ? 0o40777
+                  : 0o40755,
+              nlink: 2,
+              size: 32,
+              mtimeMs: 1,
+              ctimeMs: 1,
+            };
+          },
+          readFile: () =>
+            assert.fail("Executable observation must not read image bytes"),
+        };
+      if (!fault || fault === "execute-only") {
+        const observed = await observeDarwinPfExecutable(file, fs);
+        assert.equal(observed.path, file);
+        assert.equal(observed.identity.nlink, 2);
+        assert.equal(Object.hasOwn(observed, "sha256"), false);
+      } else
+        await assert.rejects(
+          observeDarwinPfExecutable(file, fs),
+          fault === "missing" ? (error) => error === absent : undefined,
+        );
+    }
+  await assert.rejects(
+    observeDarwinPfExecutable("/usr/bin/env", {
+      realpath: () => assert.fail("No generic executable observation"),
+    }),
+  );
+});
+test("selected SDK PF observations retain bounded privileged facts without admitting PF capabilities", async () => {
+  for (const mode of [
+    "installed",
+    "absent",
+    "dependency",
+    "timeout",
+    "capture",
+    "cancelled",
+    "denied",
+    "sudo-absent",
+    "id-absent",
+    "sudo-unavailable",
+    "privileged-timeout",
+    "privileged-cancelled",
+    "privileged-partial",
+    "privileged-truncated",
+    "privileged-overflow",
+    "deadline",
+    "sudo-unreadable",
+    "id-unreadable",
+    "pf-unreadable",
+    "identity-changed",
+    "identity-after-failure",
+    "unreadable-cancelled",
+    "unreadable-partial",
+  ]) {
+    const calls = [],
+      diagnostics = [],
+      controller = new AbortController();
+    const original = Object.assign(new Error("native capability failure"), {
+      code: 1,
+      signal: null,
+      stderr: "selected SDK missing a dependency",
+    });
+    if (mode === "cancelled") controller.abort(original);
+    const context = { candidateSha, runId: "1", runAttempt: 1, jobId: "2" };
+    let facts,
+      clock = 0,
+      caught;
+    let sudoObservations = 0;
+    try {
+      facts = await withNativeDiagnostics(
+        () =>
+          observeDarwinPfCapabilities("/fixture/sdk", "/fixture/clang", {
+            signal: controller.signal,
+            context,
+            now: () => clock,
+            executable: async (file) => ({
+              path: file,
+              identity: {
+                ino:
+                  ["identity-changed", "identity-after-failure"].includes(
+                    mode,
+                  ) &&
+                  file === "/usr/bin/sudo" &&
+                  ++sudoObservations > (mode === "identity-changed" ? 2 : 3)
+                    ? 2
+                    : 1,
+              },
+            }),
+            read: async (file) => {
+              assert.ok(
+                [
+                  "/fixture/sdk/usr/include/net/pfvar.h",
+                  "/sbin/pfctl",
+                  "/usr/bin/sudo",
+                  "/usr/bin/id",
+                ].includes(file),
+              );
+              if (
+                file === "/usr/bin/sudo" &&
+                ["unreadable-cancelled", "unreadable-partial"].includes(mode)
+              ) {
+                if (mode === "unreadable-cancelled") controller.abort(original);
+                throw Object.assign(original, {
+                  code: "EACCES",
+                  partial: mode === "unreadable-partial",
+                });
+              }
+              if (
+                (mode === "absent" && file.endsWith("pfvar.h")) ||
+                (mode === "sudo-absent" && file === "/usr/bin/sudo") ||
+                (mode === "id-absent" && file === "/usr/bin/id")
+              )
+                throw Object.assign(new Error("absent installed header"), {
+                  code: "ENOENT",
+                });
+              if (
+                (mode === "sudo-unreadable" && file === "/usr/bin/sudo") ||
+                (mode === "id-unreadable" && file === "/usr/bin/id") ||
+                (mode === "pf-unreadable" && file === "/sbin/pfctl")
+              )
+                throw Object.assign(
+                  new Error("Installed image is execute-only"),
+                  { code: "EACCES" },
+                );
+              return bytes;
+            },
+            run: async (file, args, settings) => {
+              calls.push([file, args]);
+              assert.deepEqual(settings, {
+                timeout:
+                  mode === "deadline" && file === "/usr/bin/sudo" ? 500 : 3000,
+                maxBuffer: 65536,
+              });
+              if (file === "/fixture/clang") {
+                assert.deepEqual(args, [
+                  "-M",
+                  "-x",
+                  "c",
+                  "-isysroot",
+                  "/fixture/sdk",
+                  "/fixture/sdk/usr/include/net/pfvar.h",
+                ]);
+                if (mode === "dependency") throw original;
+                if (mode === "timeout")
+                  throw Object.assign(original, { timedOut: true });
+                if (mode === "capture")
+                  throw Object.assign(original, {
+                    code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+                  });
+              } else if (file === "/usr/bin/sudo") {
+                assert.ok(
+                  privilegedPfQueries.some(
+                    (query) => JSON.stringify(query) === JSON.stringify(args),
+                  ),
+                );
+                if (mode === "denied" || mode === "identity-after-failure")
+                  throw original;
+                if (mode === "sudo-unavailable")
+                  throw Object.assign(original, { code: "ENOENT" });
+                if (mode === "privileged-timeout")
+                  throw Object.assign(original, { timedOut: true });
+                if (mode === "privileged-cancelled") {
+                  controller.abort(original);
+                  throw original;
+                }
+                if (mode === "privileged-partial")
+                  return { stdout: "partial facts", partial: true };
+                if (mode === "privileged-truncated")
+                  throw Object.assign(original, { truncated: true });
+                if (mode === "privileged-overflow")
+                  return {
+                    stdout: "€".repeat(21846),
+                    stderr: Buffer.alloc(65536, 0xff),
+                  };
+                if (mode === "deadline") clock = 40000;
+              } else {
+                assert.equal(file, "/sbin/pfctl");
+                assert.ok(args[0] === "-V" || args[0] === "-s");
+                if (mode === "deadline" && args[1] === "Anchors") clock = 39500;
+              }
+              return { stdout: "installed capability facts", stderr: "" };
+            },
+          }),
+        (owner, value) => diagnostics.push({ owner, value }),
+      );
+    } catch (error) {
+      caught = error;
+      if (["privileged-partial", "privileged-overflow"].includes(mode))
+        assert.equal(error.message, "Incomplete Darwin PF capability capture");
+      else if (mode === "deadline")
+        assert.match(error.message, /deadline exhausted/u);
+      else if (mode === "identity-changed")
+        assert.match(error.message, /Darwin/u);
+      else assert.equal(error, original);
+      facts = JSON.parse(diagnostics.at(-1).value.stderr).facts;
+    }
+    const unsafe = [
+      "timeout",
+      "capture",
+      "cancelled",
+      "sudo-unavailable",
+      "privileged-timeout",
+      "privileged-cancelled",
+      "privileged-partial",
+      "privileged-truncated",
+      "privileged-overflow",
+      "deadline",
+      "identity-changed",
+      "identity-after-failure",
+      "unreadable-cancelled",
+      "unreadable-partial",
+    ].includes(mode);
+    assert.equal(!!caught, unsafe);
+    assert.equal(facts.length, 13);
+    assert.deepEqual(
+      JSON.parse(diagnostics.at(-1).value.stderr).context,
+      context,
+    );
+    assert.equal(
+      facts[0].status,
+      mode === "absent"
+        ? "ABSENT"
+        : mode === "cancelled"
+          ? "UNATTEMPTED"
+          : "OBSERVED",
+    );
+    assert.equal(
+      facts[1].status,
+      mode === "absent" || mode === "cancelled"
+        ? "UNATTEMPTED"
+        : ["dependency", "timeout", "capture"].includes(mode)
+          ? "FAILED"
+          : "OBSERVED",
+    );
+    assert.equal(
+      facts.at(-1).status,
+      unsafe || mode === "sudo-absent"
+        ? "UNATTEMPTED"
+        : mode === "denied"
+          ? "FAILED"
+          : "OBSERVED",
+    );
+    assert.deepEqual(
+      facts.slice(9).map(({ file, args }) => [file, args]),
+      privilegedPfQueries.map((args) => ["/usr/bin/sudo", args]),
+    );
+    if (mode === "sudo-absent") assert.equal(facts[7].status, "ABSENT");
+    if (mode === "id-absent") {
+      assert.equal(facts[8].status, "ABSENT");
+      assert.equal(facts[9].status, "UNATTEMPTED");
+    }
+    if (mode === "privileged-partial") assert.equal(facts[9].partial, true);
+    if (mode === "capture") assert.equal(facts[1].truncated, true);
+    if (["privileged-truncated", "privileged-overflow"].includes(mode))
+      assert.equal(facts[9].truncated, true);
+    if (mode === "privileged-overflow")
+      for (const stream of ["stdout", "stderr"])
+        assert.equal(Buffer.byteLength(facts[9][stream]), 65535);
+    if (
+      !unsafe &&
+      ![
+        "sudo-absent",
+        "id-absent",
+        "denied",
+        "sudo-unreadable",
+        "id-unreadable",
+      ].includes(mode)
+    )
+      assert.ok(facts.slice(7, 9).every(({ sha256 }) => sha256 === hash));
+    if (mode.endsWith("-unreadable")) {
+      const name =
+        mode === "sudo-unreadable"
+          ? "sudo"
+          : mode === "id-unreadable"
+            ? "id"
+            : "pf";
+      const fact = facts.find(
+        (entry) => entry.name === "installed-" + name + "-tool",
+      );
+      assert.equal(fact.status, "OBSERVED");
+      assert.equal(fact.image.status, "FAILED");
+      assert.equal(fact.image.code, "EACCES");
+      assert.equal(fact.sha256, null);
+      assert.equal(
+        facts.slice(9).every((entry) => entry.status === "OBSERVED"),
+        true,
+      );
+    }
+    if (
+      [
+        "dependency",
+        "timeout",
+        "capture",
+        "unreadable-cancelled",
+        "unreadable-partial",
+      ].includes(mode)
+    )
+      assert.ok(diagnostics.some(({ value }) => value.exception === original));
+    assert.equal(
+      calls.length,
+      mode === "cancelled"
+        ? 0
+        : ["timeout", "capture"].includes(mode)
+          ? 1
+          : mode === "absent"
+            ? 8
+            : mode === "sudo-absent"
+              ? 5
+              : mode === "id-absent"
+                ? 8
+                : [
+                      "identity-changed",
+                      "unreadable-cancelled",
+                      "unreadable-partial",
+                    ].includes(mode)
+                  ? 5
+                  : unsafe
+                    ? 6
+                    : 9,
+    );
+  }
+});
+
+test("Darwin experiment builds bind actual outputs and cold-load original native receipts without compilation", async () => {
+  const f = experimentBuildFixture();
+  const journal = "/fixture/public/native",
+    readSelector = f.options.readSelector;
+  f.options.bootstrapJournal = journal;
+  f.options.fs = {
+    ...f.options.fs,
+    readFile: async (file) => {
+      assert.equal(path.dirname(file), path.dirname(journal));
+      return Buffer.from(JSON.stringify(f.files.get(file)));
+    },
+    readdir: async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file)),
+  };
+  f.options.readSelector = () =>
+    assert.fail("Cold reconstruction reads the original public journal");
+  const acquire = f.options.acquire;
+  f.options.acquire = async (...args) => {
+    const prepared = await acquire(...args);
+    await args[3]({ purpose: "experiment", phase: "seal-possible", prepared });
+    return prepared;
+  };
+  const result = await prepareDarwinExperimentBuild(
+    f.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(f.events[0], "job:possible");
+  assert.equal(result.job.preparation, null);
+  assert.equal(result.build.helpers.length, DARWIN_HELPER_NAMES.length);
+  assert.deepEqual(result.build.pfAbi, {
+    reference: DARWIN_PF_ABI_REFERENCE,
+    adapter: { path: "/fixture/sealed/pf-abi.h", sha256: hash },
+    runtimeCompatibility: "UNPROVED",
+  });
+  assert.ok(
+    result.build.helpers.every(
+      (helper) => helper.sha256 === digest(f.image) && helper.sha256 !== hash,
+    ),
+  );
+  assert.equal(
+    result.build.commands.length,
+    2 + DARWIN_HELPER_NAMES.length * 2,
+  );
+  assert.ok(!JSON.stringify(result.build).includes("reviewSha256"));
+  f.options.runCommand = () => assert.fail("Cold load cannot compile");
+  const loaded = await loadDarwinExperimentBuild(result.job, directory, {
+    ...f.options,
+    binding: Object.fromEntries(Object.entries(f.options.binding).reverse()),
+  });
+  assert.deepEqual(loaded.build, result.build);
+  assert.ok(f.events.includes("original-retirement"));
+  for (const [header, name] of [
+    "custody.h",
+    "pf-abi.h",
+    "feasibility-sandbox.h",
+  ].flatMap((header) => [null, "substitute.h"].map((name) => [header, name]))) {
+    const prepared = structuredClone(f.prepared);
+    prepared.sources = prepared.sources.flatMap((source) =>
+      source.name !== header ? [source] : name ? [{ ...source, name }] : [],
+    );
+    assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
+  }
+  const originalReader = f.options.createReader;
+  for (const [header, helper, fault] of [
+    ["custody.h", "launcher"],
+    ["custody.h", "custody-reader"],
+    ["pf-abi.h", "custody-reader"],
+    ["feasibility-sandbox.h", "custody-reader"],
+  ].flatMap(([header, helper]) =>
+    ["candidate", "held", "dependency-missing", "dependency-substituted"].map(
+      (fault) => [header, helper, fault],
+    ),
+  )) {
+    let observed = false;
+    const options = { ...f.options };
+    if (fault === "candidate")
+      options.readCandidate = async (file) => {
+        if (file.endsWith("/" + header)) {
+          observed = true;
+          return Buffer.from("substituted adapter bytes");
+        }
+        return bytes;
+      };
+    else
+      options.createReader = (...args) => {
+        const reader = originalReader(...args),
+          readInput = reader.readBuildInput,
+          readImage = reader.readBuildImage;
+        reader.readBuildInput = async (file, pin, ...rest) => {
+          const value = await readInput(file, pin, ...rest);
+          if (fault === "held" && file.endsWith("/" + header)) {
+            observed = true;
+            value.sha256 = "e".repeat(64);
+          }
+          return value;
+        };
+        reader.readBuildImage = async (file, ...rest) => {
+          const value = await readImage(file, ...rest);
+          if (
+            fault.startsWith("dependency-") &&
+            file.endsWith("/" + helper + ".deps")
+          ) {
+            observed = true;
+            value.bytes = Buffer.from(
+              value.bytes
+                .toString()
+                .replace(
+                  "/fixture/sealed/" + header,
+                  fault === "dependency-missing"
+                    ? ""
+                    : `/fixture/sealed/${header} /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/${header}`,
+                ),
+            );
+          }
+          return value;
+        };
+        return reader;
+      };
+    await assert.rejects(
+      loadDarwinExperimentBuild(result.job, directory, options),
+    );
+    assert.equal(observed, true, fault);
+  }
+  const recorded = f.files.get(
+    path.join(directory, "darwin-experiment-build.json"),
+  ).build;
+  recorded.pfAbi.reference = { ...DARWIN_PF_ABI_REFERENCE, tag: "substituted" };
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  recorded.pfAbi.reference = DARWIN_PF_ABI_REFERENCE;
+  const publicSelector = f.files.get(journal + "-bootstrap-0.json");
+  publicSelector.prepared = structuredClone(publicSelector.prepared);
+  publicSelector.prepared.binding.jobId = "3";
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  publicSelector.prepared = structuredClone(result.prepared);
+  f.files.set(journal + "-bootstrap-0.json", {
+    purpose: "experiment",
+    phase: "seal-possible",
+    prepared: null,
+  });
+  f.files.set(journal + "-bootstrap-1.json", publicSelector);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  f.files.delete(journal + "-bootstrap-1.json");
+  f.files.set(journal + "-bootstrap-0.json", publicSelector);
+  // Missing or reordered journals cannot fall back to private selectors.
+  f.files.delete(journal + "-bootstrap-0.json");
+  f.files.set(journal + "-bootstrap-1.json", publicSelector);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  f.files.delete(journal + "-bootstrap-1.json");
+  f.files.set(journal + "-bootstrap-0.json", publicSelector);
+  // Retain the original private-selector substitution regressions as well.
+  delete f.options.bootstrapJournal;
+  f.options.readSelector = readSelector;
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, {
+      ...f.options,
+      binding: { ...f.options.binding, jobId: "3" },
+    }),
+  );
+  const createReader = f.options.createReader;
+  for (const input of [
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/SDKSettings.json",
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach/task_info.h",
+    "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/usr/include/mach-o/dyld_images.h",
+  ]) {
+    assert.ok(result.build.sdk.inputs.some((value) => value.path === input));
+    let substituted = false;
+    f.options.createReader = (...args) => {
+      const reader = createReader(...args),
+        read = reader.readBuildInput;
+      reader.readBuildInput = async (file, pin, ...rest) => {
+        const value = await read(file, pin, ...rest);
+        if (file === input) {
+          substituted = true;
+          value.sha256 = "e".repeat(64);
+        }
+        return value;
+      };
+      return reader;
+    };
+    await assert.rejects(
+      loadDarwinExperimentBuild(result.job, directory, f.options),
+    );
+    assert.equal(substituted, true, input);
+  }
+  f.options.createReader = createReader;
+  const selector = f.files.get(
+    path.join(directory, "darwin-experiment-build-selector.json"),
+  );
+  selector.bootstrap.sdkSha256 = "e".repeat(64);
+  let attempted = false;
+  f.options.createReader = () => {
+    attempted = true;
+    throw new Error("Substituted reader");
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  assert.equal(attempted, false);
+  selector.bootstrap.sdkSha256 = hash;
+  f.options.createReader = createReader;
+  f.files.get(
+    path.join(directory, "darwin-experiment-build.json"),
+  ).build.helpers[0].sha256 = "e".repeat(64);
+  await assert.rejects(
+    loadDarwinExperimentBuild(result.job, directory, f.options),
+  );
+  f.options.bootstrapJournal = journal;
+  const recovered = await recoverDarwinExperimentBuild(
+    result.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+});
+
+test("Darwin selected SDK commands reject query, settings and argument drift before effects", async () => {
+  const f = experimentBuildFixture(),
+    declaration = darwinExperimentBuildInput(f.prepared, f.job, directory),
+    request = {
+      ...f.requests[1],
+      purpose: "experiment",
+      env: {
+        ...f.requests[1].env,
+        DEVELOPER_DIR: toolchainSelection.developer.path,
+      },
+      args: ["--sdk", sdkSelection.path, "--show-sdk-build-version"],
+    };
+  assert.deepEqual(
+    darwinBuildOperation(request, declaration.manifest, output).sdk,
+    sdkSelection,
+  );
+  for (const args of [
+    ["--show-sdk-build-version"],
+    ["--sdk", "/fixture/other-sdk", "--show-sdk-build-version"],
+    ["--sdk", sdkSelection.path, "--show-sdk-build-version", "--verbose"],
+  ]) {
+    const effects = createDarwinBuildEffects(declaration, f.options);
+    await assert.rejects(effects.run({ ...request, args }));
+    assert.equal(
+      f.events.some((event) => event.startsWith("compile-owner:")),
+      false,
+    );
+  }
+  for (const fault of [
+    "root",
+    "settings",
+    "identity",
+    "developer",
+    "compiler",
+    "delegated",
+    "missing-pin",
+  ]) {
+    const prepared = structuredClone(f.prepared);
+    if (fault === "root") prepared.environment.SDKROOT = "/fixture/other-sdk";
+    if (fault === "settings")
+      prepared.command.sdk.settingsSha256 = "e".repeat(64);
+    if (fault === "identity") prepared.command.sdk.ino = "-1";
+    if (fault === "developer")
+      prepared.environment.DEVELOPER_DIR =
+        "/Applications/Other.app/Contents/Developer";
+    if (fault === "compiler")
+      prepared.command.toolchain.compiler.path = "/usr/bin/clang";
+    if (fault === "delegated")
+      prepared.command.toolchain.delegated[0].path = "/fixture/ld";
+    if (fault === "missing-pin")
+      prepared.inputs = prepared.inputs.filter(
+        ({ path }) => path !== prepared.command.toolchain.compiler.path,
+      );
+    assert.throws(() => darwinExperimentBuildInput(prepared, f.job, directory));
+  }
+});
+
+test("Darwin cold build reads rejoin selected SDK and settings identities without discovery or compilation", async () => {
+  const f = experimentBuildFixture(),
+    result = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    createReader = f.options.createReader;
+  assert.equal(result.build.sdk.path, sdkSelection.path);
+  f.options.acquire =
+    f.options.command =
+    f.options.runCommand =
+      () => assert.fail("Cold loading cannot discover or compile");
+  for (const fault of [
+    "directory",
+    "settings",
+    "missing",
+    "pin",
+    "developer",
+    "compiler-path",
+    "compiler-identity",
+    "compiler-cdhash",
+    "delegated-identity",
+  ]) {
+    let inspected = false;
+    const options = {
+      ...f.options,
+      createReader: (...args) => {
+        const reader = createReader(...args),
+          read = reader.readBuildInput;
+        reader.readBuildInput = async (file, pin, ...rest) => {
+          const value = await read(file, pin, ...rest);
+          if (file.endsWith("/SDKSettings.json")) {
+            inspected = true;
+            if (fault === "directory")
+              value.sdk.identity = value.sdk.identity.replace(":99:", ":98:");
+            if (fault === "settings")
+              value.object.identity = value.object.identity.replace(
+                ":99:",
+                ":98:",
+              );
+            if (fault === "missing") delete value.sdk;
+            if (fault === "pin") value.sha256 = "e".repeat(64);
+            if (fault === "developer")
+              value.developer.identity = value.developer.identity.replace(
+                ":99:",
+                ":98:",
+              );
+            if (fault === "compiler-path")
+              value.compilerPathHex = Buffer.from(
+                "/fixture/substituted/clang",
+              ).toString("hex");
+          }
+          if (
+            file === toolchainSelection.compiler.path &&
+            fault.startsWith("compiler-")
+          ) {
+            inspected = true;
+            if (fault === "compiler-identity")
+              value.object.identity = value.object.identity.replace(
+                ":99:",
+                ":98:",
+              );
+            if (fault === "compiler-cdhash") value.cdhash = "e".repeat(40);
+          }
+          if (
+            file === toolchainSelection.delegated[0].path &&
+            fault === "delegated-identity"
+          ) {
+            inspected = true;
+            value.object.identity = value.object.identity.replace(
+              ":99:",
+              ":98:",
+            );
+          }
+          return value;
+        };
+        return reader;
+      },
+    };
+    await assert.rejects(
+      loadDarwinExperimentBuild(result.job, directory, options),
+    );
+    assert.equal(inspected, true, fault);
+  }
+  assert.deepEqual(
+    (await loadDarwinExperimentBuild(result.job, directory, f.options)).build,
+    result.build,
+  );
+});
+
+test("Darwin full-width build identities persist and cold reads reject adjacent native and snapshot substitutions", async () => {
+  for (const inode of [9007199254740995n, 18446744073709551615n])
+    for (const snapshot of [
+      null,
+      "snapshot-inode",
+      "snapshot-device",
+      "snapshot-ns",
+    ]) {
+      const f = experimentBuildFixture(),
+        device = 18446744073709551615n,
+        adjacent = inode === device ? inode - 1n : inode + 1n,
+        sdk = f.prepared.command.sdk,
+        toolchain = f.prepared.command.toolchain,
+        createReader = f.options.createReader,
+        originalStat = f.options.fs.lstat,
+        samples = new Map();
+      assert.equal(Number(inode), Number(adjacent));
+      for (const entry of [
+        sdk,
+        toolchain.developer,
+        toolchain.compiler,
+        ...toolchain.delegated,
+      ])
+        Object.assign(entry, { dev: String(device), ino: String(inode) });
+      let fault = snapshot,
+        inspected = false;
+      const header = sdk.path + "/input.h";
+      delete f.options.readInstalled;
+      f.options.fs.readFile = async () => bytes;
+      f.options.fs.lstat = async (file, settings) => {
+        if (!settings?.bigint) return originalStat(file);
+        const count = (samples.get(file) ?? 0) + 1;
+        samples.set(file, count);
+        const stat = {
+          isFile: () => true,
+          isSymbolicLink: () => false,
+          dev: device,
+          ino: inode,
+          uid: 0n,
+          gid: 0n,
+          mode: 0o100444n,
+          nlink: 1n,
+          size: BigInt(bytes.length),
+          mtimeNs: 1000000n,
+          ctimeNs: 1000000n,
+        };
+        if (file === header && count === 2 && fault?.startsWith("snapshot-")) {
+          inspected = true;
+          if (fault === "snapshot-inode") stat.ino = adjacent;
+          if (fault === "snapshot-device") stat.dev--;
+          if (fault === "snapshot-ns") stat.ctimeNs++;
+        }
+        return stat;
+      };
+      f.options.createReader = (...args) => {
+        const reader = createReader(...args),
+          read = reader.readBuildInput;
+        reader.readBuildInput = async (file, ...rest) => {
+          const value = await read(file, ...rest);
+          for (const key of ["object", "sdk", "developer"]) {
+            if (!value[key] || value[key].identity === "held-loader") continue;
+            const id = value[key].identity.split(":");
+            id[0] = String(device);
+            id[3] = String(inode);
+            if (
+              (fault === key && file.endsWith("SDKSettings.json")) ||
+              (key === "object" &&
+                file === toolchain.compiler.path &&
+                fault === "compiler") ||
+              (key === "object" &&
+                file === toolchain.delegated[0].path &&
+                fault === "delegated")
+            ) {
+              id[3] = String(adjacent);
+              inspected = true;
+            }
+            value[key].identity = id.join(":");
+          }
+          return value;
+        };
+        return reader;
+      };
+      if (snapshot) {
+        await assert.rejects(
+          prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+          undefined,
+          snapshot,
+        );
+        assert.equal(inspected, true, snapshot);
+        continue;
+      }
+      const built = await prepareDarwinExperimentBuild(
+        f.job,
+        directory,
+        f.persist,
+        f.options,
+      );
+      const selector = f.files.get(
+        path.join(directory, "darwin-experiment-build-selector.json"),
+      );
+      assert.deepEqual(
+        JSON.parse(JSON.stringify(selector)).command,
+        f.prepared.command,
+      );
+      f.options.acquire = f.options.runCommand = () =>
+        assert.fail("Cold reads cannot discover or compile");
+      assert.deepEqual(
+        (await loadDarwinExperimentBuild(built.job, directory, f.options))
+          .build,
+        built.build,
+      );
+      for (fault of ["object", "sdk", "developer", "compiler", "delegated"]) {
+        inspected = false;
+        samples.clear();
+        await assert.rejects(
+          loadDarwinExperimentBuild(built.job, directory, f.options),
+          undefined,
+          fault,
+        );
+        assert.equal(inspected, true, fault);
+      }
+    }
+});
+
+test("Darwin selected toolchain still requires the original successful SDK build query", async () => {
+  for (const result of [
+    { exitCode: 1, stdout: "" },
+    { exitCode: 0, stdout: "" },
+    { exitCode: 0, stdout: "15.5 SDK version\n" },
+    { exitCode: 0, stdout: 42 },
+    { exitCode: 0, stdout: null },
+    { exitCode: 0, stdout: undefined },
+  ]) {
+    const f = experimentBuildFixture(),
+      run = f.options.runCommand;
+    f.options.runCommand = async (...args) => {
+      const observed = await run(...args);
+      return args[1].mode === "sdk-version"
+        ? { ...observed, ...result }
+        : observed;
+    };
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+    );
+    assert.equal(f.events.includes("compile-owner:compile"), false);
+    assert.equal(
+      f.files.has(path.join(directory, "darwin-experiment-build.json")),
+      false,
+    );
+    assert.ok(f.events.includes("original-retirement"));
+  }
+});
+
+test("Darwin protected builds continue only after settled failures and never publish partial preparation", async () => {
+  for (const uncertain of [false, true]) {
+    const f = experimentBuildFixture(),
+      run = f.options.runCommand,
+      attempted = [];
+    f.options.runCommand = async (...args) => {
+      const result = await run(...args),
+        operation = args[1];
+      if (operation.mode === "compile") {
+        attempted.push(operation.helper.name);
+        result.exitCode = 1;
+        result.stderr = "compiler failure " + attempted.length;
+        if (uncertain && attempted.length === 2)
+          result.settlement = { ...result.settlement, independent: false };
+      }
+      return result;
+    };
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+      (error) => error.stderr === "compiler failure 1",
+    );
+    assert.deepEqual(
+      attempted,
+      uncertain ? DARWIN_HELPER_NAMES.slice(0, 2) : [...DARWIN_HELPER_NAMES],
+    );
+    assert.equal(f.jobs.at(-1).failure, "preparation-failed");
+    assert.equal(f.jobs.at(-1).preparation, null);
+    assert.ok(
+      !f.files.has(path.join(directory, "darwin-experiment-build.json")),
+    );
+  }
+});
+
+test("Darwin experiment build recovery fences admissions and preserves interrupted or unavailable observations", async () => {
+  for (const failure of ["compile", "runtime"]) {
+    const f = experimentBuildFixture(failure);
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+      failure === "compile" ? /Original compile failure/u : /./u,
+    );
+    const failed = f.jobs.at(-1);
+    if (failure === "runtime") assert.ok(f.events.includes("runtime-read"));
+    f.options.runCommand = () => assert.fail("Recovery cannot compile");
+    const recovered = await recoverDarwinExperimentBuild(
+      failed,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(recovered.preparation, null);
+    assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+    const declaration = {
+      job: failed,
+      directory,
+      output,
+      manifest: {
+        purpose: "experiment",
+        candidateSha,
+        platform: "darwin",
+        helpers: f.prepared.helpers,
+        tools: f.prepared.tools,
+        environment: f.prepared.environment,
+        darwinPreparation: {
+          purpose: "experiment",
+          schemaVersion: 1,
+          sourceDirectory: f.prepared.sourceDirectory,
+          sources: f.prepared.sources,
+          bootstrap: f.prepared.bootstrap,
+          command: f.prepared.command,
+          cases: [],
+        },
+      },
+    };
+    const effects = createDarwinBuildEffects(declaration, f.options);
+    await assert.rejects(effects.bootstrap());
+    assert.ok(
+      [...f.files.keys()].some((file) => file.includes("darwin-recovery-")),
+    );
+  }
+  for (const refusal of ["birth", "descendant", "tool-receipt"]) {
+    const f = experimentBuildFixture("compile");
+    let attempted = false,
+      descendantObserved = false;
+    await assert.rejects(
+      prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+    );
+    if (refusal === "birth") {
+      f.files.delete(
+        [...f.files.keys()].find((file) =>
+          /darwin-command-.*-0\.json$/u.test(file),
+        ),
+      );
+      f.options.createReader = () => {
+        attempted = true;
+        throw new Error("Missing original birth");
+      };
+    } else if (refusal === "tool-receipt") {
+      f.options.readBootstrapTools = async () => {
+        throw new Error("Original acquisition receipt unavailable");
+      };
+    } else {
+      const createReader = f.options.createReader;
+      f.options.createReader = (...args) => ({
+        ...createReader(...args),
+        retiredRootDomain: async () => {
+          descendantObserved = true;
+          return { independent: true, complete: true, members: [identity(10)] };
+        },
+      });
+    }
+    const recovered = await recoverDarwinExperimentBuild(
+      f.jobs.at(-1),
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(attempted, false);
+    assert.equal(descendantObserved, refusal === "descendant");
+  }
+});
+
+test("Darwin experiment acquisition refuses foreign workers and substituted candidate/dependency inputs", async () => {
+  const f = experimentBuildFixture();
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, {
+      ...f.options,
+      platform: "linux",
+    }),
+  );
+  assert.deepEqual(f.events, []);
+  f.options.readCandidate = async () => Buffer.from("substituted candidate");
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+  );
+  assert.ok(!f.events.some((event) => event.startsWith("compile-owner:")));
+  assert.deepEqual(
+    darwinExperimentDependencies(
+      Buffer.from(
+        "fixture: /fixture/source.c /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/a\\ b.h \\\n /Library/Developer/CommandLineTools/SDKs/Fixture.sdk/next.h\n",
+      ),
+      "/fixture/source.c",
+      "/fixture",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+    ),
+    [
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/a b.h",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/next.h",
+      "/fixture/source.c",
+    ],
+  );
+  const resources = [
+    "/Library/Developer/CommandLineTools/usr/lib/clang/1/include/stddef.h",
+  ];
+  assert.deepEqual(
+    darwinExperimentDependencies(
+      Buffer.from(`fixture: /fixture/source.c ${resources.join(" ")}\n`),
+      "/fixture/source.c",
+      "/fixture",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+    ),
+    [...resources, "/fixture/source.c"],
+  );
+  for (const text of [
+    "fixture: /fixture/source.c /Applications/Fixture.app/Contents/Developer/Toolchains/Fixture.xctoolchain/usr/lib/clang/1/include/stddef.h",
+    "fixture: /outside/source.c",
+    "fixture: /fixture/source.c /outside/input.h",
+    "fixture: /fixture/source.c ../../input.h",
+    "fixture: /fixture/source.c /Library/Developer/CommandLineTools/SDKs/Other.sdk/usr/include/input.h",
+    "fixture: /fixture/source.c /Applications/Fixture.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/Other.sdk/usr/include/input.h",
+  ])
+    assert.throws(() =>
+      darwinExperimentDependencies(
+        Buffer.from(text),
+        "/fixture/source.c",
+        "/fixture",
+        "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk",
+      ),
+    );
+  await assert.rejects(
+    acquireDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.options.binding,
+      () => assert.fail("No bootstrap before matching worker"),
+      { ...f.options, platform: "linux" },
+    ),
+  );
+});
+
+test("Darwin experiment dependencies cannot canonicalize into another installed SDK", async () => {
+  const f = experimentBuildFixture(),
+    realpath = f.options.fs.realpath,
+    installedReads = [];
+  let substituted = false;
+  f.options.fs.realpath = async (file) => {
+    if (
+      file === "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/input.h"
+    ) {
+      substituted = true;
+      return "/Library/Developer/CommandLineTools/SDKs/Other.sdk/usr/include/input.h";
+    }
+    return realpath(file);
+  };
+  f.options.readInstalled = async (file) => {
+    installedReads.push(file);
+    return bytes;
+  };
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+  );
+  assert.equal(substituted, true);
+  assert.deepEqual(installedReads, []);
+});
+
+test("Darwin experiment recovery fences admission before the report directory or selector exists", async () => {
+  const f = experimentBuildFixture(),
+    fs = f.options.fs,
+    lstat = fs.lstat;
+  let exists = false,
+    commands = 0;
+  fs.lstat = async (file) => {
+    if (file === directory && !exists)
+      throw Object.assign(new Error("Missing report directory"), {
+        code: "ENOENT",
+      });
+    return lstat(file);
+  };
+  fs.mkdir = async (file, settings) => {
+    assert.equal(file, directory);
+    assert.deepEqual(settings, { mode: 0o700 });
+    assert.equal(f.jobs.at(-1).preparationEffects.admission, "possible");
+    exists = true;
+  };
+  const job = {
+    ...recordExperimentPreparationEffect(f.job, {
+      admission: "possible",
+      settlement: {
+        status: "RETAINED",
+        independent: false,
+        emergencyCleanup: false,
+      },
+      receiptSha256: null,
+    }),
+    failure: "preparation-failed",
+  };
+  const recovered = await recoverDarwinExperimentBuild(
+    job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+  assert.equal(recovered.failure, job.failure);
+  assert.ok(
+    [...f.files.keys()].some((file) => file.includes("darwin-recovery-")),
+  );
+  await assert.rejects(
+    acquireDarwinExperimentBuild(
+      recovered,
+      directory,
+      f.options.binding,
+      async () => {},
+      {
+        ...f.options,
+        command: async () => {
+          commands++;
+          return { stdout: candidateSha, stderr: "" };
+        },
+      },
+    ),
+  );
+  assert.equal(commands, 0);
+});
+
+test("Darwin pre-seal recovery fences incomplete acquisition and retains effects without replacement proof", async () => {
+  for (const fault of [
+    "before-directory",
+    "staged",
+    "missing",
+    "torn",
+    "gap",
+    "duplicate-seed",
+    "binding",
+    "unsealed-tool",
+    "sealed-without-seed",
+    "command-shape",
+  ]) {
+    const f = experimentBuildFixture(),
+      journal = "/fixture/public/native",
+      command = {
+        purpose: "experiment",
+        phase: "seed-command-possible",
+        file: "git",
+        args: ["rev-parse", "HEAD"],
+      },
+      seed = {
+        purpose: "experiment",
+        phase: "seed-possible",
+        directory,
+        staging: directory + "-seed",
+        output,
+        bindingSha256: observationDigest(f.options.binding),
+        sourceDirectory:
+          "/Library/native-poc-" + observationDigest(f.options.binding),
+      },
+      records =
+        fault === "before-directory"
+          ? [command]
+          : [
+              command,
+              seed,
+              {
+                ...command,
+                file: "/usr/bin/codesign",
+                args: ["-d", "--verbose=4", "/usr/bin/clang"],
+              },
+            ],
+      diagnostics = [],
+      originalStat = f.options.fs.lstat;
+    if (fault === "missing") records.length = 0;
+    if (fault === "duplicate-seed") records.push(seed);
+    if (fault === "binding") seed.bindingSha256 = "e".repeat(64);
+    if (fault === "unsealed-tool")
+      records.push({
+        purpose: "experiment",
+        phase: "tool-acquisition-retired",
+      });
+    if (fault === "sealed-without-seed")
+      records.push({ purpose: "experiment", phase: "sealed", prepared: {} });
+    if (fault === "command-shape") command.extra = true;
+    for (const [index, record] of records.entries())
+      f.files.set(
+        journal +
+          "-bootstrap-" +
+          (fault === "gap" && index === 1 ? 3 : index) +
+          ".json",
+        fault === "torn" && index === 1 ? Buffer.from("{") : record,
+      );
+    let exists = fault !== "before-directory",
+      replayed = 0;
+    f.options.bootstrapJournal = journal;
+    f.options.fs.lstat = async (file) => {
+      if (file === directory && !exists)
+        throw Object.assign(new Error("No report directory"), {
+          code: "ENOENT",
+        });
+      return originalStat(file);
+    };
+    f.options.fs.mkdir = async (file, settings) => {
+      assert.equal(file, directory);
+      assert.deepEqual(settings, { mode: 0o700 });
+      assert.equal(f.jobs.at(-1).preparationEffects.admission, "possible");
+      exists = true;
+    };
+    f.options.fs.readdir = async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file));
+    f.options.fs.readFile = async (file) => {
+      assert.ok(
+        [...f.files.keys()].some((name) => name.includes("darwin-recovery-")),
+      );
+      const value = f.files.get(file);
+      return Buffer.isBuffer(value)
+        ? value
+        : Buffer.from(JSON.stringify(value));
+    };
+    for (const name of [
+      "acquire",
+      "command",
+      "runCommand",
+      "readBootstrapTools",
+      "readCandidate",
+      "readSelector",
+      "createReader",
+    ])
+      f.options[name] = () => {
+        replayed++;
+        assert.fail(
+          "Pre-seal recovery cannot replay or replace original proof",
+        );
+      };
+    const job = {
+      ...recordExperimentPreparationEffect(f.job, {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: true,
+        },
+        receiptSha256: null,
+      }),
+      failure: "preparation-failed",
+    };
+    const recovered = await withNativeDiagnostics(
+      () => recoverDarwinExperimentBuild(job, directory, f.persist, f.options),
+      (owner) => diagnostics.push(owner),
+    );
+    assert.equal(recovered.failure, job.failure, fault);
+    assert.equal(recovered.preparation, null, fault);
+    assert.deepEqual(
+      recovered.preparationEffects,
+      {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: true,
+        },
+        receiptSha256: null,
+      },
+      fault,
+    );
+    assert.ok(
+      [...f.files.keys()].some((name) => name.includes("darwin-recovery-")),
+    );
+    assert.equal(
+      f.files.has(
+        path.join(directory, "darwin-experiment-build-selector.json"),
+      ),
+      false,
+    );
+    assert.equal(
+      diagnostics.includes("darwin-experiment-build-recovery"),
+      !["before-directory", "staged"].includes(fault),
+      fault,
+    );
+    await assert.rejects(
+      loadDarwinExperimentBuild(
+        {
+          ...recovered,
+          preparationEffects: {
+            admission: "possible",
+            settlement: {
+              status: "RETIRED",
+              independent: true,
+              emergencyCleanup: false,
+            },
+            receiptSha256: hash,
+          },
+        },
+        directory,
+        { ...f.options, recovery: true },
+      ),
+    );
+    assert.equal(replayed, 0, fault);
+    await assert.rejects(
+      acquireDarwinExperimentBuild(
+        recovered,
+        directory,
+        f.options.binding,
+        async () => {},
+        f.options,
+      ),
+    );
+    assert.equal(replayed, 0, fault);
+  }
+});
+
+test("Darwin bootstrap recovery rejoins the original acquisition without a build selector or replay", async () => {
+  for (const fault of [null, "no-digests", "birth", "build-intent"]) {
+    const f = experimentBuildFixture(),
+      journal = "/fixture/public/native",
+      seed = structuredClone(f.prepared);
+    seed.bootstrapSeed.acquisition = null;
+    seed.bootstrap.tools = null;
+    f.files.set(journal + "-bootstrap-0.json", {
+      purpose: "experiment",
+      phase: "seal-possible",
+      prepared: seed,
+    });
+    f.options.bootstrapJournal = journal;
+    f.options.fs.readFile = async (file) =>
+      Buffer.from(JSON.stringify(f.files.get(file)));
+    f.options.fs.readdir = async (root) =>
+      [...f.files.keys()]
+        .filter((file) => path.dirname(file) === root)
+        .map((file) => path.basename(file));
+    if (fault === "birth")
+      f.options.readBootstrapTools = async () => {
+        throw new Error("Missing original acquisition birth");
+      };
+    if (fault === "no-digests")
+      f.options.readBootstrapTools = async () => ({
+        ...f.prepared.bootstrapSeed.acquisition,
+        tools: null,
+        receipt: null,
+      });
+    if (fault === "build-intent")
+      f.files.set(path.join(directory, "darwin-bootstrap-0-intent.json"), {
+        purpose: "experiment",
+      });
+    f.options.createReader = () =>
+      assert.fail("No new build admission during acquisition recovery");
+    const job = {
+      ...recordExperimentPreparationEffect(f.job, {
+        ...f.job.preparationEffects,
+        admission: "possible",
+      }),
+      failure: "preparation-failed",
+    };
+    const recovered = await recoverDarwinExperimentBuild(
+      job,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.failure, job.failure);
+    assert.equal(recovered.preparation, null);
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      fault && fault !== "no-digests" ? "RETAINED" : "RETIRED",
+    );
+    assert.ok(!f.events.includes("acquire"));
+  }
+});
+
+test("Darwin experiment recovery rejoins interrupted cold readers after the original build was retired", async () => {
+  const f = experimentBuildFixture(),
+    built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    createReader = f.options.createReader;
+  let lost,
+    observed = false;
+  f.options.createReader = (...args) => {
+    const reader = createReader(...args),
+      start = reader.start;
+    reader.start = async (...args) => {
+      const result = await start(...args);
+      lost = result.helper;
+      return result;
+    };
+    reader.close = async () => ({
+      status: "RETAINED",
+      independent: false,
+      emergencyCleanup: false,
+      closed: false,
+    });
+    return reader;
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(built.job, directory, f.options),
+  );
+  assert.ok(lost);
+  f.options.createReader = (...args) => {
+    const reader = createReader(...args),
+      domain = reader.retiredRootDomain;
+    reader.retiredRootDomain = async (subject) => {
+      if (subject.pid === lost.pid) {
+        observed = true;
+        return { independent: true, complete: true, members: [subject] };
+      }
+      return domain(subject);
+    };
+    return reader;
+  };
+  const recovered = await recoverDarwinExperimentBuild(
+    { ...built.job, failure: "preparation-failed" },
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(observed, true);
+  assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+  assert.equal(recovered.preparationEffects.receiptSha256, null);
+  assert.equal(recovered.failure, "preparation-failed");
+  f.options.createReader = createReader;
+  const settled = await recoverDarwinExperimentBuild(
+    {
+      ...recovered,
+      preparationEffects: {
+        ...recovered.preparationEffects,
+        settlement: {
+          ...recovered.preparationEffects.settlement,
+          emergencyCleanup: true,
+        },
+      },
+    },
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(settled.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(settled.preparationEffects.settlement.emergencyCleanup, true);
+  assert.equal(settled.failure, "preparation-failed");
+  const healthy = experimentBuildFixture(),
+    result = await prepareDarwinExperimentBuild(
+      healthy.job,
+      directory,
+      healthy.persist,
+      healthy.options,
+    );
+  const closed = await recoverDarwinExperimentBuild(
+    result.job,
+    directory,
+    healthy.persist,
+    healthy.options,
+  );
+  assert.equal(
+    closed.preparationEffects.receiptSha256,
+    result.job.preparationEffects.receiptSha256,
+  );
+  assert.equal(closed.failure, null);
+  assert.ok(healthy.events.includes("original-retirement"));
+});
+
+test("Darwin experiment acquisition seals exact candidate seeds after observing delegated tools and fences interrupted acquisition", async () => {
+  for (const failure of [
+    null,
+    "installed-links",
+    "full-width",
+    "uint64-max",
+    "identity-read",
+    "identity-late",
+    "identity-nanoseconds",
+    "identity-ancestry",
+    "identity-installed-parent",
+    "identity-missing",
+    "identity-negative",
+    "identity-range",
+    "stat-bigint",
+    "sdk-default-rejected",
+    "sdk-default-unavailable",
+    "sdk-default-safe",
+    "sdk-canonical-clt",
+    "sdk-no-alternative",
+    "sdk-unsafe-alternative",
+    "sdk-alternative-escape",
+    "sdk-deduplicated",
+    "sdk-settings-rejected",
+    "sdk-settings-drift",
+    "sdk-ancestry-changed",
+    "developer-unpaired",
+    "developer-drift",
+    "compiler-pairing",
+    "compiler-inode",
+    "delegated-other",
+    "seed-links",
+    "compiler-failures",
+    "elevation-denied",
+    "elevation-unavailable",
+    "sudo-read-denied",
+    "diagnostic-unsafe",
+    "pf-timeout",
+    "pf-cancelled",
+    "pf-capture",
+    "pf-selected-dependencies",
+    "preexisting",
+    "substitution",
+    "adapter-missing",
+    "adapter-bytes",
+    "adapter-target",
+    "spi-missing",
+    "spi-bytes",
+    "spi-target",
+    "fence",
+    "stat-file",
+    "stat-symlink",
+    "stat-links",
+    "stat-empty",
+    "stat-size",
+    "stat-sink",
+    "stat-facts",
+    "stat-original",
+    "stat-path",
+    "tool-execute-only",
+    "tool-source",
+    "tool-inode",
+    "tool-bytes",
+    "tool-identity",
+    "tool-owner",
+    "tool-lost-reply",
+    "tool-interrupted",
+    "tool-unreleased",
+    "tool-verifier",
+  ]) {
+    const header = failure?.startsWith("spi-")
+        ? "feasibility-sandbox.h"
+        : "pf-abi.h",
+      wide =
+        failure === "full-width" ||
+        failure === "uint64-max" ||
+        failure?.startsWith("identity-") ||
+        failure === "stat-bigint",
+      inode =
+        failure === "uint64-max"
+          ? 18446744073709551615n
+          : wide
+            ? 9007199254740995n
+            : 1n,
+      device = wide ? 18446744073709551615n : 1n,
+      adjacent = inode === 18446744073709551615n ? inode - 1n : inode + 1n,
+      statFailure = failure?.startsWith("stat-"),
+      toolFailure =
+        failure?.startsWith("tool-") && failure !== "tool-execute-only",
+      rejectedPath =
+        failure === "stat-path"
+          ? "/Library/Developer/" + "\u0001".repeat(8192) + "clang"
+          : "/usr/bin/clang",
+      originalError = new Error("Original stat predicate failure"),
+      diagnosticError = new Error("Diagnostic failure"),
+      controller = new AbortController(),
+      observed = {
+        type: "Darwin",
+        release: "24.0.0",
+        version: "Darwin Kernel Version 24.0.0",
+        arch: "x64",
+      },
+      compilerFailure = [
+        "compiler-failures",
+        "elevation-denied",
+        "elevation-unavailable",
+        "sudo-read-denied",
+        "diagnostic-unsafe",
+      ].includes(failure);
+    const f = experimentBuildFixture(),
+      storage =
+        failure === "seed-links"
+          ? "/Library/Developer/native-fixture/native"
+          : path.join(directory, "native"),
+      developer =
+        failure === "sdk-default-safe"
+          ? "/Applications/Fixture.app/Contents/Developer"
+          : "/Library/Developer/CommandLineTools",
+      bin =
+        developer +
+        (failure === "sdk-default-safe"
+          ? "/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          : "/usr/bin"),
+      compiler =
+        failure === "stat-path"
+          ? rejectedPath
+          : bin + (failure === "compiler-pairing" ? "/other-clang" : "/clang"),
+      clt = "/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      sdk =
+        failure === "sdk-canonical-clt"
+          ? "/Library/Developer/CommandLineTools/SDKs/MacOSX15.5.sdk"
+          : clt,
+      defaultSdk =
+        failure === "developer-unpaired"
+          ? "/Library/Developer/Unpaired/SDKs/MacOSX.sdk"
+          : failure?.startsWith("sdk-")
+            ? "/Applications/Fixture.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+            : sdk,
+      selectedSdk = failure === "sdk-default-safe" ? defaultSdk : sdk,
+      linker = bin + "/ld",
+      cache = "/System/Library/dyld/dyld_shared_cache_x86_64h",
+      permissions = new Map(),
+      files = new Map(
+        [
+          "/usr/bin/clang",
+          "/usr/bin/xcrun",
+          "/usr/bin/codesign",
+          "/usr/bin/sudo",
+          "/usr/bin/id",
+          "/sbin/pfctl",
+          "/usr/bin/env",
+          "/usr/lib/dyld",
+          compiler,
+          linker,
+          sdk + "/SDKSettings.json",
+          defaultSdk + "/SDKSettings.json",
+          cache,
+        ].map((file) => [file, bytes]),
+      ),
+      directories = new Set([
+        "/",
+        "/usr",
+        "/usr/bin",
+        "/sbin",
+        "/Library",
+        "/Library/Developer",
+        path.dirname(storage),
+        "/fixture",
+        directory,
+        sdk,
+      ]),
+      intents = [],
+      commands = [],
+      candidates = [],
+      reads = [],
+      diagnostics = [],
+      chunks = [],
+      sdkLookups = [],
+      sdkStats = new Map(),
+      exactSamples = new Map(),
+      writer = createNativeDiagnosticWriter((chunk) => chunks.push(chunk));
+    for (const file of [...files.keys(), defaultSdk + "/SDKSettings.json"])
+      for (
+        let parent = path.dirname(file);
+        parent !== "/";
+        parent = path.dirname(parent)
+      )
+        directories.add(parent);
+    if (failure === "pf-selected-dependencies")
+      files.set(sdk + "/usr/include/net/pfvar.h", bytes);
+    if (failure === "sdk-no-alternative") {
+      directories.delete(clt);
+      files.delete(clt + "/SDKSettings.json");
+    }
+    if (failure === "sdk-default-unavailable") {
+      directories.delete(defaultSdk);
+      files.delete(defaultSdk + "/SDKSettings.json");
+    }
+    if (failure === "elevation-unavailable") files.delete("/usr/bin/sudo");
+    if (failure === "seed-links")
+      f.options.env.RUNNER_TEMP = path.dirname(storage);
+    files.set(path.join(directory, "native-job.json"), bytes);
+    if (failure === "preexisting") directories.add(storage);
+    let sdkReads = 0,
+      verifierNonce = 0,
+      rejectedStats = 0,
+      fileSamples = 0,
+      linkSamples = 0,
+      sdkParentStats = 0;
+    const absent = () =>
+      Object.assign(new Error("Missing fixture input"), { code: "ENOENT" });
+    const fs = {
+      realpath: async (file) => {
+        if (file === bin + "/clang")
+          return failure === "compiler-pairing" ? file : compiler;
+        sdkLookups.push(file);
+        if (file === clt && failure === "sdk-canonical-clt") return sdk;
+        if (file === clt && failure === "sdk-alternative-escape")
+          return "/fixture/escaped-sdk";
+        if (file === clt && failure === "sdk-deduplicated") return defaultSdk;
+        if (!files.has(file) && !directories.has(file)) throw absent();
+        if (
+          ["adapter-target", "spi-target"].includes(failure) &&
+          file.endsWith("/" + header)
+        )
+          return path.join(path.dirname(file), "substitute.h");
+        return file;
+      },
+      lstat: async (file, options = {}) => {
+        if ([defaultSdk, sdk].includes(file))
+          sdkStats.set(file, (sdkStats.get(file) ?? 0) + 1);
+        if (!files.has(file) && !directories.has(file)) throw absent();
+        const sampled = {
+          isFile: () => files.has(file),
+          isDirectory: () => directories.has(file),
+          isSymbolicLink: () => false,
+          dev: 1,
+          ino:
+            failure === "substitution" && file.endsWith("SDKSettings.json")
+              ? ++sdkReads
+              : 1,
+          mode: permissions.get(file) ?? (files.has(file) ? 0o100444 : 0o40755),
+          uid: 0,
+          gid: 0,
+          nlink: 1,
+          size: files.get(file)?.length,
+          atimeMs: 2,
+          mtimeMs: 1,
+          ctimeMs: 1,
+          birthtimeMs: 0,
+        };
+        if (
+          file === defaultSdk &&
+          failure?.startsWith("sdk-") &&
+          failure !== "sdk-default-safe"
+        )
+          sampled.uid = 501;
+        if (file === sdk && failure === "sdk-unsafe-alternative")
+          sampled.mode = 0o40775;
+        if (
+          file === sdk + "/SDKSettings.json" &&
+          failure === "sdk-settings-rejected"
+        )
+          sampled.mode = 0o100666;
+        if (
+          file === developer &&
+          failure === "developer-drift" &&
+          intents.some(({ phase }) => phase === "seed-possible")
+        )
+          sampled.ino++;
+        if (
+          file === compiler &&
+          failure === "compiler-inode" &&
+          commands.some(
+            (entry) => entry.file === compiler && entry.args[0] === "-###",
+          )
+        )
+          sampled.ino++;
+        if (file === path.dirname(sdk) && failure === "sdk-ancestry-changed")
+          sampled.ino += sdkParentStats++;
+        if (["/usr/bin/sudo", "/usr/bin/id", "/sbin/pfctl"].includes(file))
+          sampled.mode = file === "/usr/bin/sudo" ? 0o104755 : 0o100755;
+        if (
+          ["sudo-read-denied", "tool-execute-only"].includes(failure) &&
+          file === "/usr/bin/sudo"
+        )
+          sampled.mode = 0o104111;
+        if (failure === "diagnostic-unsafe" && file === "/usr/bin/sudo")
+          sampled.mode = 0o104110;
+        if (
+          ["installed-links", "identity-installed-parent"].includes(failure) &&
+          file === "/usr/bin/clang"
+        ) {
+          sampled.mode = 0o100755;
+          sampled.nlink = 78;
+        }
+        if (
+          failure === "seed-links" &&
+          file === storage + "-seed/custody-reader"
+        ) {
+          sampled.mode = 0o100555;
+          sampled.nlink = 2;
+        }
+        if (statFailure && file === rejectedPath) {
+          rejectedStats++;
+          sampled.isFile = () => {
+            fileSamples++;
+            return failure !== "stat-file";
+          };
+          sampled.isSymbolicLink = () => {
+            linkSamples++;
+            return failure === "stat-symlink";
+          };
+          sampled.nlink = 2;
+          if (failure === "stat-empty") {
+            sampled.nlink = 1;
+            sampled.size = 0;
+          }
+          if (failure === "stat-size") {
+            sampled.nlink = 1;
+            sampled.size = 134217729;
+          }
+          if (failure === "stat-original")
+            sampled.isFile = () => {
+              fileSamples++;
+              throw originalError;
+            };
+          if (failure === "stat-facts")
+            Object.defineProperty(sampled, "uid", {
+              get() {
+                throw diagnosticError;
+              },
+            });
+        }
+        if (options.bigint) {
+          for (const key of [
+            "dev",
+            "ino",
+            "mode",
+            "uid",
+            "gid",
+            "nlink",
+            "size",
+            "atimeMs",
+            "mtimeMs",
+            "ctimeMs",
+            "birthtimeMs",
+          ])
+            if (
+              !(
+                failure === "stat-facts" &&
+                file === rejectedPath &&
+                key === "uid"
+              ) &&
+              typeof sampled[key] === "number"
+            )
+              sampled[key] = BigInt(sampled[key]);
+          sampled.mtimeNs = 1000000n;
+          sampled.ctimeNs = 1000000n;
+          if (
+            wide &&
+            [
+              compiler,
+              linker,
+              sdk,
+              developer,
+              path.dirname(sdk),
+              sdk + "/SDKSettings.json",
+              "/usr/lib/dyld",
+              rejectedPath,
+              "/usr/bin",
+            ].includes(file)
+          ) {
+            sampled.dev = device;
+            sampled.ino = inode;
+            const count = (exactSamples.get(file) ?? 0) + 1;
+            exactSamples.set(file, count);
+            if (
+              (failure === "identity-read" && file === compiler && count > 1) ||
+              (failure === "identity-late" &&
+                file === compiler &&
+                commands.some(
+                  ({ file, args }) =>
+                    file === "/usr/bin/codesign" && args.at(-1) === compiler,
+                )) ||
+              (failure === "identity-ancestry" &&
+                file === path.dirname(sdk) &&
+                count > 1) ||
+              (failure === "identity-installed-parent" &&
+                file === "/usr/bin" &&
+                count > 1)
+            )
+              sampled.ino = adjacent;
+            if (
+              failure === "identity-nanoseconds" &&
+              file === compiler &&
+              count > 1
+            )
+              sampled.ctimeNs++;
+            if (file === "/usr/lib/dyld") {
+              if (failure === "identity-missing") delete sampled.ino;
+              if (failure === "identity-negative") sampled.ino = -1n;
+              if (failure === "identity-range")
+                sampled.ino = 18446744073709551616n;
+            }
+          }
+        }
+        return sampled;
+      },
+      open: async (file) => {
+        let reads = 0;
+        return {
+          stat: async () => {
+            const stat = await fs.lstat(file, { bigint: true });
+            if (failure === "tool-inode" && file.endsWith("/custody-reader"))
+              stat.ino += BigInt(reads++);
+            return stat;
+          },
+          read: async (buffer, offset, length, position) => ({
+            bytesRead: files
+              .get(file)
+              .copy(buffer, offset, position, position + length),
+          }),
+          close: async () => {},
+        };
+      },
+      readFile: async (file) => {
+        reads.push(file);
+        if (
+          ["adapter-bytes", "spi-bytes"].includes(failure) &&
+          file.endsWith("/" + header)
+        )
+          return Buffer.from("substituted adapter bytes");
+        if (
+          ["sudo-read-denied", "tool-execute-only"].includes(failure) &&
+          file === "/usr/bin/sudo"
+        )
+          throw Object.assign(new Error("Execute-only sudo image"), {
+            code: "EACCES",
+          });
+        return files.get(file);
+      },
+      readdir: async (file) => {
+        if (!directories.has(file)) throw absent();
+        return [...files.keys()]
+          .filter((name) => path.dirname(name) === file)
+          .map((name) => path.basename(name));
+      },
+      mkdir: async (file, settings) => {
+        assert.ok(intents.some((record) => record.phase === "seed-possible"));
+        assert.deepEqual(settings, { mode: 0o700 });
+        if (directories.has(file))
+          throw Object.assign(new Error("Existing native storage"), {
+            code: "EEXIST",
+          });
+        directories.add(file);
+      },
+      writeFile: async (file, data, { flag, mode }) => {
+        assert.equal(flag, "wx");
+        assert.ok(!files.has(file));
+        files.set(file, Buffer.from(data));
+        permissions.set(file, 0o100000 | mode);
+      },
+    };
+    const job = recordExperimentPreparationEffect(f.job, {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: false,
+        },
+        receiptSha256: null,
+      }),
+      persist = async (record) => {
+        intents.push(structuredClone(record));
+        if (
+          failure === "sdk-settings-drift" &&
+          record.phase === "seed-possible"
+        )
+          files.set(
+            sdk + "/SDKSettings.json",
+            Buffer.from("changed SDK settings"),
+          );
+        if (failure === "tool-source" && record.phase === "seed-sealed")
+          files.set(
+            path.join(record.prepared.sourceDirectory, "custody.h"),
+            Buffer.from("substituted seed source"),
+          );
+        if (
+          failure === "fence" &&
+          record.phase === "seed-command-possible" &&
+          record.args[0] === "-###"
+        )
+          files.set(
+            path.join(storage, "darwin-recovery-0-intent.json"),
+            Buffer.from("fenced"),
+          );
+      },
+      command = async (file, args, settings) => {
+        assert.deepEqual(intents.at(-1), {
+          purpose: "experiment",
+          phase: "seed-command-possible",
+          file,
+          args,
+        });
+        const bound =
+          (file === "/usr/bin/xcrun" && args[0] === "--sdk") ||
+          file === compiler;
+        assert.deepEqual(Object.keys(settings.env).sort(), [
+          "CI",
+          ...(bound ? ["DEVELOPER_DIR"] : []),
+          "GITHUB_ACTIONS",
+          "LANG",
+          "PATH",
+          ...(bound ? ["SDKROOT"] : []),
+        ]);
+        if (bound) {
+          assert.equal(settings.env.DEVELOPER_DIR, developer);
+          assert.equal(settings.env.SDKROOT, selectedSdk);
+        }
+        commands.push({ file, args });
+        if (file === "git") return { stdout: candidateSha + "\n", stderr: "" };
+        if (file === "/usr/bin/xcrun")
+          return {
+            stdout: (args.at(-1) === "clang" ? compiler : defaultSdk) + "\n",
+            stderr: "",
+          };
+        if (file === "/usr/bin/codesign")
+          return { stdout: "", stderr: "CDHash=" + cdhash + "\n" };
+        if (file === "/sbin/pfctl")
+          throw Object.assign(
+            new Error("Unsupported version or denied unprivileged PF read"),
+            { code: 1, signal: null },
+          );
+        if (
+          file === "/usr/bin/sudo" &&
+          privilegedPfQueries.some(
+            (query) => JSON.stringify(query) === JSON.stringify(args),
+          )
+        ) {
+          assert.equal(settings.timeout, 3000);
+          assert.equal(settings.maxBuffer, 65536);
+          assert.ok(
+            !intents.some((record) => record.phase === "seal-possible"),
+          );
+          assert.ok(
+            !commands.some(
+              (record) =>
+                record.file === compiler &&
+                (failure !== "pf-selected-dependencies" ||
+                  record.args[0] !== "-M"),
+            ),
+          );
+          if (failure === "elevation-denied")
+            throw Object.assign(new Error("Noninteractive sudo denied"), {
+              code: 1,
+              signal: null,
+            });
+          if (failure === "pf-timeout")
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              timedOut: true,
+            });
+          if (failure === "pf-cancelled") {
+            controller.abort(originalError);
+            throw originalError;
+          }
+          if (failure === "pf-capture")
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              partial: true,
+            });
+          return {
+            stdout: args[2] === "/usr/bin/id" ? "0\n" : "read-only PF facts",
+            stderr: "",
+          };
+        }
+        if (file === compiler) {
+          if (args[0] === "-M") {
+            assert.equal(failure, "pf-selected-dependencies");
+            assert.equal(settings.timeout, 3000);
+            assert.equal(settings.maxBuffer, 65536);
+            assert.deepEqual(args, [
+              "-M",
+              "-x",
+              "c",
+              "-isysroot",
+              selectedSdk,
+              selectedSdk + "/usr/include/net/pfvar.h",
+            ]);
+            return { stdout: "fixture: " + args.at(-1), stderr: "" };
+          }
+          if (args[0] === "-###")
+            return {
+              stdout: "",
+              stderr: ` "${compiler}" "-cc1"\n "${failure === "delegated-other" ? "/fixture/other-toolchain/ld" : linker}" "-dynamic"\n`,
+            };
+          const source = args[args.indexOf("-o") - 1];
+          assert.ok(
+            candidates.includes("ci/native/darwin/" + path.basename(source)),
+          );
+          assert.deepEqual(
+            args,
+            darwinCompilerArguments(
+              source,
+              args[args.indexOf("-o") + 1],
+              { SDKROOT: selectedSdk },
+              "experiment",
+            ),
+          );
+          if (compilerFailure)
+            throw Object.assign(originalError, {
+              code: 1,
+              signal: null,
+              stderr: "fatal error: 'net/pfvar.h' file not found",
+            });
+          files.set(args[args.indexOf("-o") + 1], f.image);
+        } else {
+          assert.equal(file, "/usr/bin/sudo");
+          assert.ok(intents.some((record) => record.phase === "seal-possible"));
+          if (args[2] === "/bin/mkdir") directories.add(args.at(-1));
+          if (args[2] === "/bin/cp")
+            files.set(args.at(-1), files.get(args.at(-2)));
+          if (args[2] === "/bin/chmod")
+            for (const name of args.slice(4))
+              permissions.set(
+                name,
+                (directories.has(name) ? 0o40000 : 0o100000) | 0o555,
+              );
+        }
+        return { stdout: "", stderr: "" };
+      },
+      acquisitionOptions = {
+        ...f.options,
+        env: {
+          ...f.options.env,
+          DEVELOPER_DIR: "/fixture/ambient",
+          SDKROOT: "/fixture/ambient-sdk",
+          TOOLCHAINS: "ambient",
+        },
+        fs,
+        command,
+        bootstrapNonce: () => String(++verifierNonce).padStart(32, "0"),
+        kill: () => {
+          throw Object.assign(new Error("Retired verifier"), { code: "ESRCH" });
+        },
+        bootstrapTransport: async (prepared, mode, nonce) => {
+          if (mode === "--bootstrap-tools-read")
+            assert.equal(
+              files
+                .get(
+                  path.join(
+                    prepared.directory,
+                    `darwin-tool-verifier-${nonce}.intent`,
+                  ),
+                )
+                .toString(),
+              `${candidateSha} ${prepared.bootstrapSeed.sha256} ${nonce}\n`,
+            );
+          const owner = identity(91),
+            verifier = identity(92),
+            tools = ["/usr/bin/sudo", "/usr/bin/env"].map((file) => ({
+              path: file,
+              sha256: hash,
+              file: {
+                identity: "1:2:3:99:100:0:" + "d".repeat(32),
+                bytes: bytes.length,
+                uid: 0,
+                gid: 0,
+                mode: file.endsWith("sudo") ? 0o4755 : 0o755,
+                directory: false,
+              },
+              signature: { cdhash, entitlementsSha256: hash, valid: true },
+            }));
+          commands.push({ file: "native-bootstrap", args: [mode] });
+          let released = false;
+          return {
+            send: async (value) => {
+              assert.equal(value, "P\n");
+              assert.equal(intents.at(-1).phase, "tool-acquisition-owner");
+              released = true;
+              const record = {
+                purpose: "experiment",
+                candidateSha,
+                seedSha256: prepared.bootstrapSeed.sha256,
+                owner,
+                tools: structuredClone(tools),
+              };
+              if (failure === "tool-bytes")
+                record.tools[0].sha256 = "e".repeat(64);
+              files.set(
+                prepared.sourceDirectory + "/bootstrap-tools.json",
+                Buffer.from(JSON.stringify(record) + "\n"),
+              );
+              if (failure === "tool-interrupted")
+                controller.abort(originalError);
+            },
+            receive: async () => {
+              if (
+                mode === "--bootstrap-tools-read" &&
+                failure === "tool-verifier"
+              )
+                throw originalError;
+              if (mode === "--bootstrap-tools-read")
+                return {
+                  owner: failure === "tool-owner" ? identity(93) : owner,
+                  verifier,
+                  retired: true,
+                  tools:
+                    failure === "tool-identity"
+                      ? tools.map((tool, index) =>
+                          index
+                            ? tool
+                            : {
+                                ...tool,
+                                file: {
+                                  ...tool.file,
+                                  identity: "1:2:3:98:100:0:" + "d".repeat(32),
+                                },
+                              },
+                        )
+                      : tools,
+                  receiptSha256: files.has(
+                    prepared.sourceDirectory + "/bootstrap-tools.json",
+                  )
+                    ? digest(
+                        files.get(
+                          prepared.sourceDirectory + "/bootstrap-tools.json",
+                        ),
+                      )
+                    : null,
+                };
+              if (!released && failure === "tool-unreleased")
+                throw originalError;
+              if (released && failure === "tool-lost-reply")
+                throw originalError;
+              return released ? { published: true } : { owner };
+            },
+            completion: Promise.resolve({ code: 0, signal: null }),
+            close() {},
+          };
+        },
+        signal: controller.signal,
+        os: Object.fromEntries(
+          Object.entries(observed).map(([key, value]) => [key, () => value]),
+        ),
+        readCandidate: async (file) => {
+          candidates.push(file);
+          if (
+            ["adapter-missing", "spi-missing"].includes(failure) &&
+            file.endsWith("/" + header)
+          )
+            throw absent();
+          return bytes;
+        },
+      },
+      acquire = () =>
+        acquireDarwinExperimentBuild(
+          job,
+          storage,
+          f.options.binding,
+          persist,
+          acquisitionOptions,
+        );
+    if (
+      failure &&
+      ![
+        "installed-links",
+        "full-width",
+        "uint64-max",
+        "tool-execute-only",
+        "sdk-default-rejected",
+        "sdk-default-unavailable",
+        "sdk-default-safe",
+        "sdk-canonical-clt",
+        "pf-selected-dependencies",
+      ].includes(failure)
+    ) {
+      let rejected;
+      await assert.rejects(
+        withNativeDiagnostics(acquire, (owner, value) => {
+          diagnostics.push({ owner, value });
+          writer(owner, value);
+          if (["stat-sink", "stat-original"].includes(failure))
+            throw diagnosticError;
+        }),
+        (error) => {
+          rejected = error;
+          if (failure === "preexisting") assert.equal(error.code, "EEXIST");
+          return true;
+        },
+      );
+      if (statFailure) {
+        if (failure === "stat-original") assert.equal(rejected, originalError);
+        else
+          assert.equal(rejected.message, "Unverified native tool observation");
+        assert.notEqual(rejected, diagnosticError);
+        assert.equal(rejectedStats, 1, failure);
+        assert.equal(fileSamples, 1);
+        assert.equal(
+          linkSamples,
+          ["stat-original", "stat-file"].includes(failure) ? 0 : 1,
+        );
+        assert.ok(!reads.includes(rejectedPath));
+        if (failure !== "stat-path")
+          assert.deepEqual(reads, [sdk + "/SDKSettings.json"]);
+        assert.equal(diagnostics.length, failure === "stat-facts" ? 0 : 1);
+        if (diagnostics.length) {
+          const { owner, value } = diagnostics[0],
+            facts = JSON.parse(value.stderr);
+          assert.equal(owner, "darwin-experiment-installed-input");
+          assert.deepEqual(Object.keys(value), ["stderr"]);
+          assert.deepEqual(Object.keys(facts).sort(), [
+            "canonicalPath",
+            "canonicalPathLength",
+            "isFile",
+            "isSymbolicLink",
+            "maximum",
+            "requestedPath",
+            "requestedPathLength",
+            "stat",
+          ]);
+          assert.equal(facts.requestedPath, rejectedPath.slice(0, 1024));
+          assert.equal(facts.canonicalPath, facts.requestedPath);
+          assert.equal(facts.requestedPathLength, rejectedPath.length);
+          assert.equal(facts.canonicalPathLength, rejectedPath.length);
+          assert.equal(
+            facts.maximum,
+            failure === "stat-path" ? 536870912 : 134217728,
+          );
+          assert.equal(
+            facts.isFile,
+            failure === "stat-original" ? null : failure !== "stat-file",
+          );
+          assert.equal(
+            facts.isSymbolicLink,
+            ["stat-original", "stat-file"].includes(failure)
+              ? null
+              : failure === "stat-symlink",
+          );
+          assert.deepEqual(
+            facts.stat,
+            Object.fromEntries(
+              Object.entries({
+                dev: device,
+                ino: inode,
+                mode: 0o100444,
+                uid: 0,
+                gid: 0,
+                nlink: ["stat-empty", "stat-size"].includes(failure) ? 1 : 2,
+                size:
+                  failure === "stat-empty"
+                    ? 0
+                    : failure === "stat-size"
+                      ? 134217729
+                      : bytes.length,
+                atimeMs: 2,
+                mtimeMs: 1,
+                ctimeMs: 1,
+                birthtimeMs: 0,
+                mtimeNs: 1000000n,
+                ctimeNs: 1000000n,
+              }).map(([key, value]) => [key, String(value)]),
+            ),
+          );
+          const output = Buffer.concat(chunks).toString();
+          assert.ok(Buffer.byteLength(output) < 16384);
+          assert.ok(!output.includes(bytes.toString()));
+        }
+        assert.deepEqual(
+          commands.map(({ file, args }) => [file, args[0]]),
+          [
+            ["git", "rev-parse"],
+            ["/usr/bin/xcrun", "--show-sdk-path"],
+            ["/usr/bin/xcrun", "--sdk"],
+            ...(failure === "stat-path"
+              ? Array(3).fill(["/usr/bin/codesign", "-d"])
+              : []),
+          ],
+        );
+      }
+      if (failure.startsWith("sdk-") && failure !== "sdk-settings-drift") {
+        assert.equal(
+          intents.some(({ phase }) => phase === "seed-possible"),
+          false,
+        );
+        assert.deepEqual(
+          commands.map(({ file, args }) => [file, args]),
+          [
+            ["git", ["rev-parse", "HEAD"]],
+            ["/usr/bin/xcrun", ["--show-sdk-path"]],
+          ],
+        );
+        if (failure === "sdk-deduplicated")
+          assert.equal(sdkStats.get(defaultSdk), 1);
+      }
+      if (failure === "sdk-settings-drift") {
+        assert.equal(
+          intents.some(({ phase }) => phase === "seed-possible"),
+          true,
+        );
+        assert.equal(
+          commands.filter(({ file }) => file === compiler).length,
+          0,
+        );
+        assert.deepEqual(
+          commands
+            .filter(({ file }) => file === "/usr/bin/xcrun")
+            .map(({ args }) => args),
+          [["--show-sdk-path"], ["--sdk", sdk, "--find", "clang"]],
+        );
+      }
+      if (!toolFailure)
+        assert.ok(
+          !commands.some(
+            ({ file, args }) =>
+              file === "/usr/bin/sudo" &&
+              !privilegedPfQueries.some(
+                (query) => JSON.stringify(query) === JSON.stringify(args),
+              ),
+          ),
+        );
+      assert.equal(
+        commands.filter(
+          (record) => record.file === compiler && record.args[0] !== "-###",
+        ).length,
+        failure === "seed-links" || compilerFailure || toolFailure
+          ? DARWIN_HELPER_NAMES.length
+          : 0,
+      );
+      if (
+        compilerFailure ||
+        ["pf-timeout", "pf-cancelled", "pf-capture"].includes(failure)
+      )
+        assert.equal(rejected, originalError);
+      if (compilerFailure) {
+        const report = JSON.parse(
+          diagnostics.find(({ owner }) => owner === "darwin-pf-capabilities")
+            .value.stderr,
+        );
+        assert.deepEqual(report.context, {
+          binding: f.options.binding,
+          observed,
+          sdk: { path: sdk, settingsSha256: hash },
+          compiler: { path: compiler, sha256: hash },
+        });
+        assert.equal(report.facts[0].status, "ABSENT");
+        assert.equal(report.facts[1].status, "UNATTEMPTED");
+        assert.deepEqual(
+          report.facts.slice(3, 7).map(({ status }) => status),
+          Array(4).fill("FAILED"),
+        );
+        assert.deepEqual(
+          report.facts.slice(9).map(({ status }) => status),
+          Array(4).fill(
+            failure === "elevation-unavailable" ||
+              failure === "diagnostic-unsafe"
+              ? "UNATTEMPTED"
+              : failure === "elevation-denied"
+                ? "FAILED"
+                : "OBSERVED",
+          ),
+        );
+        if (failure === "sudo-read-denied") {
+          const fact = report.facts.find(
+            ({ name }) => name === "installed-sudo-tool",
+          );
+          assert.equal(fact.status, "OBSERVED");
+          assert.equal(fact.sha256, null);
+          assert.equal(fact.image.code, "EACCES");
+          assert.ok(
+            diagnostics.some(({ value }) => value.exception?.code === "EACCES"),
+          );
+        }
+        assert.ok(!intents.some(({ phase }) => phase === "seal-possible"));
+      }
+      if (failure === "seed-links") {
+        assert.equal(rejected.message, "Unverified native tool observation");
+        assert.ok(!reads.includes(storage + "-seed/custody-reader"));
+      }
+      if (toolFailure) {
+        assert.equal(
+          commands.filter((entry) => entry.args[0] === "--bootstrap-tools")
+            .length,
+          failure === "tool-source" || failure === "tool-inode" ? 0 : 1,
+        );
+        if (["tool-lost-reply", "tool-unreleased"].includes(failure)) {
+          assert.equal(rejected, originalError);
+          assert.equal(intents.at(-1).phase, "tool-acquisition-retired");
+          const seed = intents.find(
+            (record) => record.phase === "seed-sealed",
+          ).prepared;
+          assert.equal(seed.bootstrap.tools, null);
+          const cold = await readDarwinBootstrapTools(seed, {
+            ...acquisitionOptions,
+            allowIncomplete: true,
+          });
+          assert.deepEqual(cold.owner, identity(91));
+          if (failure === "tool-unreleased") {
+            assert.equal(cold.tools, null);
+            await assert.rejects(
+              readDarwinBootstrapTools(seed, acquisitionOptions),
+            );
+          } else assert.equal(cold.tools.elevation.sha256, hash);
+          assert.equal(
+            commands.filter((entry) => entry.args[0] === "--bootstrap-tools")
+              .length,
+            1,
+          );
+        }
+      }
+    } else {
+      const prepared = await withNativeDiagnostics(acquire, (owner, value) => {
+        diagnostics.push({ owner, value });
+        writer(owner, value);
+      });
+      assert.equal(prepared.directory, storage);
+      if (wide) {
+        assert.ok(exactSamples.get(compiler) > 2);
+        assert.equal(Number(inode), Number(adjacent));
+        const persisted = JSON.parse(JSON.stringify(intents.at(-1).prepared));
+        assert.deepEqual(persisted.command, prepared.command);
+      }
+      const selected = failure === "sdk-default-safe" ? defaultSdk : sdk;
+      assert.deepEqual(prepared.command.sdk, {
+        path: selected,
+        dev: String(device),
+        ino: String(inode),
+        settingsSha256: hash,
+      });
+      assert.deepEqual(prepared.environment, {
+        SDKROOT: selected,
+        DEVELOPER_DIR: developer,
+      });
+      assert.deepEqual(prepared.command.toolchain, {
+        developer: { path: developer, dev: String(device), ino: String(inode) },
+        compiler: {
+          path: compiler,
+          sha256: hash,
+          cdhash,
+          dev: String(device),
+          ino: String(inode),
+        },
+        delegated: [
+          {
+            path: linker,
+            sha256: hash,
+            cdhash,
+            dev: String(device),
+            ino: String(inode),
+          },
+        ],
+      });
+      if (failure === "sdk-default-safe")
+        assert.equal(sdkLookups.includes(clt), false);
+      assert.deepEqual(
+        commands
+          .filter(({ file }) => file === "/usr/bin/xcrun")
+          .map(({ args }) => args),
+        [["--show-sdk-path"], ["--sdk", selected, "--find", "clang"]],
+      );
+      assert.equal(prepared.output, path.join(storage, "platform-build"));
+      assert.deepEqual(
+        candidates,
+        DARWIN_EXPERIMENT_SOURCES.map((name) => "ci/native/darwin/" + name),
+      );
+      assert.ok(
+        prepared.inputs.some(
+          (input) => input.path === linker && input.sha256 === hash,
+        ),
+      );
+      assert.ok(
+        prepared.helpers
+          .filter(
+            (helper) =>
+              !["custody-reader", "build-helper"].includes(helper.name),
+          )
+          .every((helper) => helper.sha256 === null),
+      );
+      assert.equal(
+        commands.filter(
+          ({ file, args }) =>
+            file === compiler && args[0] !== "-###" && args[0] !== "-M",
+        ).length,
+        DARWIN_HELPER_NAMES.length,
+      );
+      if (failure === "pf-selected-dependencies")
+        assert.equal(
+          commands.filter(
+            ({ file, args }) => file === compiler && args[0] === "-M",
+          ).length,
+          1,
+        );
+      assert.equal(intents.at(-1).phase, "sealed");
+      assert.ok(
+        intents.findIndex((record) => record.phase === "seed-sealed") <
+          intents.findIndex(
+            (record) => record.phase === "tool-acquisition-possible",
+          ),
+      );
+      assert.equal(prepared.bootstrap.tools.elevation.sha256, hash);
+      if (failure === "tool-execute-only") {
+        const report = JSON.parse(
+            diagnostics.find(({ owner }) => owner === "darwin-pf-capabilities")
+              .value.stderr,
+          ),
+          fact = report.facts.find(
+            ({ name }) => name === "installed-sudo-tool",
+          );
+        assert.equal(fact.sha256, null);
+        assert.equal(fact.image.code, "EACCES");
+      }
+      for (const source of prepared.sources)
+        assert.equal(
+          digest(files.get(path.join(prepared.sourceDirectory, source.name))),
+          source.sha256,
+        );
+    }
+    assert.ok(directories.has(directory));
+    assert.deepEqual(files.get(path.join(directory, "native-job.json")), bytes);
+  }
+});
+const execution = (recipe) => ({
+  id: recipe.id,
+  effects: Object.fromEntries(
+    NATIVE_EFFECT_CLASSES.map((name) => [
+      name,
+      {
+        admission:
+          name === "policy" ||
+          (recipe.id === "build"
+            ? ["builds"]
+            : NATIVE_GROUPS.darwin[recipe.group].effects
+          ).includes(name)
+            ? "possible"
+            : "not-started",
+      },
+    ]),
+  ),
+});
+const settled = (receipts) =>
+  Object.values(receipts).find((value) => value !== null).settlement;
+function policy(value, id) {
+  const request = {
+    schemaVersion: 1,
+    candidateSha,
+    nonce: "d".repeat(32),
+    uid: 90001,
+    gid: 90002,
+    custody: "/fixture/custody",
+    storage: "/fixture/storage",
+    workspace: "/fixture/storage/work",
+    launcher: { path: "/fixture/custody/launcher", sha256: hash },
+    executable: { path: "/fixture/storage/payload", sha256: hash, cdhash },
+    policy: { path: "/fixture/custody/policy", sha256: hash },
+    bindings: { source: hash, system: hash, closure: hash, policy: hash },
+  };
+  const input = id.startsWith("access.")
+    ? {
+        request,
+        profile: id.slice(7),
+        disposable: true,
+        metadata: "/fixture/storage/metadata",
+        pointer: "/fixture/storage/work/.git",
+        checkout: "/protected/checkout",
+        configuration: "/protected/config",
+        credentials: "/protected/credentials",
+        runtime: [
+          {
+            path: request.executable.path,
+            sha256: hash,
+            executable: true,
+            mapped: true,
+          },
+          {
+            path: "/usr/lib/dyld",
+            sha256: hash,
+            executable: false,
+            mapped: true,
+          },
+        ],
+        endpoints: ["inet", "inet6"].flatMap((family, i) =>
+          ["tcp", "udp"].map((protocol, j) => ({
+            family,
+            protocol,
+            clientPort: 41001 + i * 4 + j * 2,
+            serverPort: 41002 + i * 4 + j * 2,
+          })),
+        ),
+        reviewSha256: hash,
+      }
+    : request;
+  let parameters = {};
+  if (input !== request) {
+    const native = buildDarwinPolicy(input);
+    request.policy.sha256 = native.seatbeltSha256;
+    request.bindings.policy = native.compositionSha256;
+    const { request: allocation, ...policy } = native.value;
+    parameters = policy;
+  }
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256: hash,
+    policy: {
+      launch: nativePolicyLaunchData(request, DARWIN_LITERAL_ARGUMENTS),
+      policy: parameters,
+    },
+    bindings: [],
+  };
+  const approval = {
+    candidateSha,
+    platform: "darwin",
+    authority: "operator-protected",
+    manifestSha256: nativePolicyTemplateDigest(template),
+  };
+  const binding = { template, approval, context: context(id) },
+    provisioning = {
+      schemaVersion: 1,
+      context: context(id),
+      authoritySha256: hash,
+      bindings: [],
+      held: true,
+      independent: true,
+      verifierSha256: hash,
+      nativeEventSha256: hash,
+    };
+  const expected = materializeNativePolicy(
+      template,
+      approval,
+      provisioning,
+      binding.context,
+    ),
+    requestSha256 = darwinLaunchDigest(request, DARWIN_LITERAL_ARGUMENTS);
+  const proof = {
+    provisioning,
+    requestSha256,
+    observed: {
+      schemaVersion: 1,
+      context: binding.context,
+      templateSha256: expected.templateSha256,
+      provisioningSha256: expected.provisioningSha256,
+      requestSha256,
+      policySha256: expected.expectedPolicySha256,
+      policy: expected.policy,
+      held: true,
+      complete: true,
+      independent: true,
+      verifierSha256: hash,
+      nativeEventSha256: hash,
+    },
+  };
+  value.options.provision = async () => {
+    assert.ok(
+      value.events.some((event) => event.startsWith(`darwin-case-${id}-`)),
+    );
+    value.events.push("provision");
+    return {
+      input,
+      provisioning,
+      arguments: DARWIN_LITERAL_ARGUMENTS,
+    };
+  };
+  value.options.ownerEffects = async (current) => {
+    assert.equal(typeof current.owners.launch, "function");
+    assert.equal(typeof current.owners.retire, "function");
+    value.events.push("owner-effects");
+    const noop = async () => {};
+    return Object.fromEntries(
+      [
+        "admit",
+        "observe",
+        "armFault",
+        "fireFault",
+        "recoverAndRetire",
+        "verify",
+        "prepare",
+        "verifyPolicy",
+        "retire",
+        "restore",
+        "snapshot",
+        "review",
+        "open",
+        "ordinary",
+        "fileEffects",
+        "verifyRetirement",
+        "privateProbe",
+        "startPublishers",
+        "finishPublishers",
+        "startReader",
+        "finishReader",
+        "applyControl",
+        "observeDenial",
+        "restoreControl",
+        "nameControl",
+        "openHeld",
+        "inspectHeld",
+        "readHeld",
+        "loaderClosure",
+        "buildBindings",
+        "observeAuthority",
+        "inspectProvider",
+        "closeHeld",
+        "verifyClosed",
+        "verifyInputs",
+        "verifyAuthority",
+        "verifyReceipt",
+        "readProvisioning",
+        "readPolicy",
+        "persist",
+      ].map((name) => [name, noop]),
+    );
+  };
+  value.options.readPolicy = async () => {
+    value.events.push("policy-read");
+    return proof;
+  };
+  value.options.retire = async () => {
+    value.events.push("payload-retire");
+    return retired;
+  };
+  value.options.verifyRetirement = async () => true;
+  value.options.releaseAudit = async () => {
+    value.events.push("audit-release");
+    return retired;
+  };
+  value.options.restore = async () => {
+    value.events.push("policy-restore");
+    return { status: "RESTORED", independent: true, nativeEventSha256: hash };
+  };
+  return { binding, proof };
+}
+
+test("Darwin factories construct without effects and retain the complete fixed inventory", () => {
+  const value = wiring();
+  createDarwinBuildEffects(value.input, value.options);
+  createDarwinSystemEffects(value.input, value.options);
+  assert.deepEqual(value.events, []);
+  const incomplete = structuredClone(value.manifest.darwinPreparation);
+  incomplete.cases.pop();
+  assert.throws(() => normalizeDarwinPreparation(incomplete, candidateSha));
+  incomplete.cases.push(incomplete.cases[0]);
+  assert.throws(() => normalizeDarwinPreparation(incomplete, candidateSha));
+  assert.equal(
+    DARWIN_SYSTEM_PREPARATION_MS,
+    60000 +
+      3 * 30000 +
+      DARWIN_HELPER_NAMES.length * 60000 +
+      60000 +
+      (3 + DARWIN_HELPER_NAMES.length + 4 + darwinSystemRecipes().length) *
+        30000 +
+      2 * 120000,
+  );
+  assert.equal(
+    darwinSystemRecipes().find(({ id }) => id === "files.aliases").deadlineMs,
+    360000,
+  );
+});
+
+test("Darwin experimental declarations and fixed compilation cannot borrow reviewed bindings", async () => {
+  const { manifest, requests } = wiring(),
+    reviewed = requests[2],
+    original = darwinBuildOperation(reviewed, manifest, output);
+  manifest.purpose = "experiment";
+  manifest.darwinPreparation.purpose = "experiment";
+  manifest.darwinPreparation.command.sdk = { ...sdkSelection };
+  manifest.darwinPreparation.command.toolchain =
+    structuredClone(toolchainSelection);
+  manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+  for (const request of requests)
+    request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
+  manifest.darwinPreparation.sources.push({
+    name: "experiment.h",
+    sha256: hash,
+  });
+  assert.throws(() =>
+    normalizeDarwinPreparation(manifest.darwinPreparation, candidateSha),
+  );
+  const request = {
+      ...reviewed,
+      purpose: "experiment",
+      args: darwinCompilerArguments(
+        original.source.path,
+        original.target,
+        manifest.environment,
+        "experiment",
+      ),
+    },
+    operation = darwinBuildOperation(request, manifest, output);
+  assert.equal(operation.header.sha256, hash);
+  assert.equal(operation.header.path, sourceDirectory + "/experiment.h");
+  assert.equal(operation.purpose, "experiment");
+  assert.throws(() =>
+    darwinBuildOperation(request, { ...manifest, purpose: "reviewed" }, output),
+  );
+  assert.throws(() =>
+    darwinBuildOperation({ ...request, args: reviewed.args }, manifest, output),
+  );
+  manifest.darwinPreparation.sources.pop();
+  assert.throws(() => darwinBuildOperation(request, manifest, output));
+  await assert.rejects(
+    runDarwinBuildCommand(
+      request,
+      operation,
+      {},
+      {},
+      () => assert.fail("No admission without a compiler-policy reader"),
+      {
+        open: () => {
+          throw new Error("Unexpected native effect");
+        },
+      },
+    ),
+    /Unverified Darwin launch authority/u,
+  );
+});
+
+test("Darwin command admission rejects unreviewed vectors before effects and persists intent before provisioning", async () => {
+  const value = wiring();
+  value.files.clear();
+  value.options.runCommand = async (request) => {
+    assert.ok(value.events.includes("provision-build"));
+    value.events.push("command");
+    return {
+      requestSha256: observationDigest(request),
+      toolSha256: hash,
+      independent: true,
+      nativeEventSha256: hash,
+      settlement: retired,
+      identity: identity(11),
+      helperIdentity: identity(12),
+      exitCode: 0,
+      signal: null,
+      timedOut: false,
+    };
+  };
+  const effects = createDarwinBuildEffects(value.input, value.options);
+  await assert.rejects(
+    effects.run({ ...value.requests[0], args: ["-fplugin=/fixture/plugin"] }),
+  );
+  assert.deepEqual(value.events, []);
+  const result = await effects.run(value.requests[0]);
+  assert.equal(result.bootstrapSettlement.closed, true);
+  assert.ok(
+    value.events.findIndex(
+      (event) =>
+        event.endsWith("-intent.json") && event.startsWith("darwin-command"),
+    ) < value.events.indexOf("provision-build"),
+  );
+  assert.ok(
+    value.events.indexOf("command") < value.events.indexOf("close:build"),
+  );
+  const substituted = wiring();
+  substituted.files.clear();
+  substituted.options.read = async () => Buffer.from("substituted");
+  await assert.rejects(
+    createDarwinBuildEffects(substituted.input, substituted.options).run(
+      substituted.requests[0],
+    ),
+  );
+  assert.ok(!substituted.events.includes("provision-build"));
+});
+
+test("Darwin build entry classifies fixed installed tools through the default preparation reader", async () => {
+  for (const [purpose, scenario, requestIndex = 0] of [
+    ["reviewed", "compiler"],
+    ["experiment", "compiler"],
+    ["reviewed", "full-width"],
+    ["experiment", "full-width"],
+    ["reviewed", "uint64-max"],
+    ["experiment", "uint64-max"],
+    ["reviewed", "sdk", 1],
+    ["reviewed", "signer", 3],
+    ["reviewed", "generated-source"],
+    ["reviewed", "generated-helper"],
+    ["reviewed", "unclassified-tool"],
+    ["reviewed", "unsafe-ancestry"],
+    ["reviewed", "unsafe-single-link"],
+    ["reviewed", "held-bytes"],
+  ]) {
+    const value = wiring({ defaultRead: true }),
+      { manifest, options, events } = value,
+      plan = manifest.darwinPreparation;
+    value.files.clear();
+    assert.equal(Object.hasOwn(options, "read"), false);
+    if (purpose === "experiment") {
+      manifest.purpose = purpose;
+      plan.purpose = purpose;
+      plan.command.sdk = { ...sdkSelection };
+      plan.command.toolchain = structuredClone(toolchainSelection);
+      manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+      for (const request of value.requests)
+        request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
+      plan.cases = [];
+      plan.bootstrap.purpose = purpose;
+      plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
+      delete plan.bootstrap.reviewSha256;
+      for (const name of ["experiment.h", "pf-abi.h"]) {
+        plan.sources.push({ name, sha256: hash });
+        plan.bootstrap.sources.push({
+          path: path.join(path.dirname(plan.bootstrap.reader.path), name),
+          sha256: hash,
+        });
+      }
+    }
+    // Even an installed SDK ancestry cannot classify a sealed source by pin.
+    if (scenario === "generated-source")
+      plan.sourceDirectory = "/Library/Developer/Fixture";
+    const request = {
+      ...value.requests[requestIndex],
+      ...(purpose === "experiment" ? { purpose } : {}),
+    };
+    if (scenario === "unclassified-tool") {
+      request.file = "/fixture/tools/clang";
+      manifest.tools[0].path = request.file;
+    }
+    const sources = new Set(
+        plan.sources.map(({ name }) => path.join(plan.sourceDirectory, name)),
+      ),
+      tools = new Set(manifest.tools.map(({ path }) => path)),
+      helper = plan.command.helper.path,
+      inputs = new Map(
+        [...sources, helper, ...tools].map((file, index) => [file, index + 1]),
+      ),
+      readFiles = [],
+      fullWidthInode =
+        scenario === "full-width"
+          ? 9007199254740995n
+          : scenario === "uint64-max"
+            ? 18446744073709551615n
+            : null;
+    let openFiles = 0,
+      changedTool = false;
+    const stat = (file, bigint = false) => {
+      const leaf = inputs.has(file),
+        privateDirectory =
+          file === directory || file.startsWith(directory + "/"),
+        unsafe =
+          file === "/usr" &&
+          ["unsafe-ancestry", "unsafe-single-link"].includes(scenario),
+        linked =
+          (tools.has(file) && scenario !== "unsafe-single-link") ||
+          (scenario === "generated-source" && sources.has(file)) ||
+          (scenario === "generated-helper" && file === helper),
+        convert = (number) => (bigint ? BigInt(number) : number);
+      return {
+        isFile: () => leaf,
+        isDirectory: () => !leaf,
+        isSymbolicLink: () => false,
+        dev: convert(1),
+        // Only the compatibility sample rounds; held reads use the exact literal.
+        ino:
+          fullWidthInode === null
+            ? convert(inputs.get(file) ?? 1)
+            : bigint
+              ? fullWidthInode
+              : Number(fullWidthInode),
+        uid: convert(!leaf && privateDirectory ? 1001 : 0),
+        gid: convert(0),
+        mode: convert(
+          leaf
+            ? 0o100000 |
+                (tools.has(file) ? 0o755 : file === helper ? 0o555 : 0o444)
+            : 0o040000 | (unsafe ? 0o777 : privateDirectory ? 0o700 : 0o755),
+        ),
+        nlink: convert(linked ? 78 : 1),
+        size: convert(leaf ? bytes.length : 0),
+        mtimeNs: convert(1),
+        ctimeNs: convert(changedTool && file === request.file ? 2 : 1),
+      };
+    };
+    options.fs = {
+      ...options.fs,
+      lstat: async (file, settings) => stat(file, settings?.bigint),
+      open: async (file, flags) => {
+        assert.ok(inputs.has(file));
+        assert.equal(
+          flags,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        openFiles++;
+        let closed = false;
+        return {
+          stat: async () => stat(file, true),
+          async read(buffer, offset, length, position) {
+            const changed = scenario === "held-bytes" && file === request.file;
+            if (changed) changedTool = true;
+            const content = changed ? Buffer.alloc(bytes.length) : bytes,
+              chunk = content.subarray(position, position + length);
+            if (chunk.length) readFiles.push(file);
+            chunk.copy(buffer, offset);
+            return { bytesRead: chunk.length };
+          },
+          async close() {
+            assert.equal(closed, false);
+            closed = true;
+            openFiles--;
+          },
+        };
+      },
+    };
+    options.digestIntermediate = async () => hash;
+    options.runCommand = async (current, operation, entry) => {
+      assert.equal(current.file, request.file);
+      assert.equal(operation.tool.path, request.file);
+      assert.equal(operation.tool.sha256, hash);
+      assert.equal(entry.toolCdhash, cdhash);
+      assert.ok(readFiles.includes(request.file));
+      assert.ok(events.includes("provision-build"));
+      events.push("command");
+      return {
+        ...(purpose === "experiment" ? { purpose } : {}),
+        requestSha256: observationDigest(current),
+        toolSha256: hash,
+        independent: true,
+        nativeEventSha256: hash,
+        settlement: retired,
+        exitCode: 0,
+        signal: null,
+        timedOut: false,
+      };
+    };
+    const effects = createDarwinBuildEffects(value.input, options),
+      accepted = [
+        "compiler",
+        "sdk",
+        "signer",
+        "full-width",
+        "uint64-max",
+      ].includes(scenario);
+    try {
+      if (accepted) {
+        const result = await effects.run(request);
+        assert.equal(result.bootstrapSettlement.closed, true);
+        assert.equal(result.purpose ?? "reviewed", purpose);
+        assert.ok(events.includes("command"));
+      } else {
+        await assert.rejects(effects.run(request), /Unverified/u, scenario);
+        assert.equal(events.includes("command"), false);
+        assert.equal(events.includes("provision-build"), false);
+        assert.equal(
+          [...value.files.keys()].some((file) =>
+            path.basename(file).startsWith("darwin-command-"),
+          ),
+          false,
+        );
+      }
+    } finally {
+      const settlement = await effects.settle();
+      if (events.includes("start:build")) {
+        assert.equal(settlement.status, "RETIRED", scenario);
+        assert.equal(settlement.independent, true, scenario);
+        if (!accepted)
+          assert.ok(events.includes("fresh-root-retirement"), scenario);
+      }
+      assert.equal(openFiles, 0);
+    }
+  }
+});
+
+test("Darwin native compiler entry verifies parked images, bounded output and retirement before publication", async () => {
+  for (const [purpose, scenario] of [
+    ...[
+      "retired",
+      "descendants",
+      "publication-failure",
+      "oversized-output",
+      "malformed-output",
+      "invalid-utf8",
+      "unexpected-field",
+    ].map((scenario) => ["reviewed", scenario]),
+    ...["retired", "descendants", "mutation"].map((scenario) => [
+      "experiment",
+      scenario,
+    ]),
+  ]) {
+    const value = wiring();
+    if (purpose === "experiment") {
+      value.manifest.purpose = purpose;
+      value.manifest.darwinPreparation.purpose = purpose;
+      value.manifest.darwinPreparation.command.sdk = { ...sdkSelection };
+      value.manifest.darwinPreparation.command.toolchain =
+        structuredClone(toolchainSelection);
+      value.manifest.environment.DEVELOPER_DIR =
+        toolchainSelection.developer.path;
+      for (const request of value.requests)
+        request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
+    }
+    const request = {
+        ...value.requests[0],
+        ...(purpose === "experiment" ? { purpose } : {}),
+      },
+      operation = darwinBuildOperation(request, value.manifest, output),
+      admittedRequest = structuredClone(request),
+      admittedTarget = operation.target ?? null,
+      entry = {
+        helper: { path: "/fixture/sealed/build-helper", sha256: hash, cdhash },
+        tools: custody("build").tools,
+        toolCdhash: cdhash,
+      },
+      events = [],
+      helper = { ...identity(10), asid: 51 },
+      worker = { ...identity(11), asid: 51 },
+      result = {
+        exitCode: 0,
+        signal: null,
+        stdoutHex: Buffer.from("reviewed\n").toString("hex"),
+        stderrHex: Buffer.from("bounded warning\n").toString("hex"),
+      };
+    if (scenario === "oversized-output") {
+      result.stdoutHex = "00".repeat(32768);
+      result.stderrHex = "00".repeat(32769);
+    }
+    if (scenario === "malformed-output") result.stderrHex = "0";
+    if (scenario === "invalid-utf8") result.stdoutHex = "ff";
+    if (scenario === "unexpected-field") result.release = true;
+    const frames = [{ helper }, { worker }, result];
+    let domains = 0;
+    const reader = {
+      ...(purpose === "experiment"
+        ? {
+            compilerPolicy: async (identity) => ({
+              identity,
+              sandboxed: false,
+            }),
+          }
+        : {}),
+      helper: async (id) => {
+        events.push(`inspect:${id.pid}`);
+        return { identity: id, sha256: hash, signature: { cdhash } };
+      },
+      retired: async (id) => {
+        events.push(`retired:${id.pid}`);
+        return retired;
+      },
+      rootDomain: async () => ({
+        complete: true,
+        independent: true,
+        members:
+          ++domains === 3
+            ? []
+            : domains === 2 && scenario === "descendants"
+              ? [helper, { ...identity(12), asid: 51 }]
+              : [helper],
+      }),
+    };
+    const pending = runDarwinBuildCommand(
+      request,
+      operation,
+      entry,
+      reader,
+      async (record) => {
+        assert.equal(
+          record.purpose,
+          purpose === "experiment" ? purpose : undefined,
+        );
+        assert.equal(record.requestSha256, observationDigest(admittedRequest));
+        events.push(`persist:${record.phase}`);
+        if (record.phase === "publication-possible") {
+          assert.equal(record.output, admittedRequest.cwd);
+          assert.equal(record.target, admittedTarget);
+          if (scenario === "publication-failure")
+            throw new Error("Cannot persist publication intent");
+        }
+      },
+      {
+        open: async (_, args) => {
+          assert.equal(args.length, purpose === "experiment" ? 26 : 10);
+          if (scenario === "mutation") {
+            delete request.purpose;
+            request.toolSha256 = "e".repeat(64);
+            operation.target = "/fixture/substituted";
+            entry.helper.sha256 = "e".repeat(64);
+          }
+          return {
+            channel: {
+              receive: async () => frames.shift(),
+              send: async (command) => {
+                events.push(command);
+              },
+              completion: Promise.resolve({ code: 0, signal: null }),
+              close() {},
+            },
+          };
+        },
+      },
+    );
+    if (!["retired", "mutation"].includes(scenario)) {
+      await assert.rejects(pending);
+      assert.ok(events.indexOf("persist:worker") < events.indexOf("R"));
+      assert.ok(!events.includes("S"));
+      assert.ok(!events.includes("retired:10"));
+      assert.equal(events.at(-1), "persist:uncertain");
+      continue;
+    }
+    const observed = await pending;
+    assert.equal(
+      observed.purpose,
+      purpose === "experiment" ? purpose : undefined,
+    );
+    assert.equal(observed.requestSha256, observationDigest(admittedRequest));
+    assert.equal(observed.toolSha256, admittedRequest.toolSha256);
+    assert.equal(observed.stdout, "reviewed\n");
+    assert.equal(observed.stderr, "bounded warning\n");
+    assert.ok(!Object.hasOwn(observed, "stdoutHex"));
+    assert.ok(events.indexOf("persist:worker") < events.indexOf("R"));
+    assert.ok(events.indexOf("retired:11") < events.indexOf("S"));
+    assert.ok(
+      events.indexOf("retired:11") <
+        events.indexOf("persist:publication-possible"),
+    );
+    assert.ok(
+      events.indexOf("persist:publication-possible") < events.indexOf("S"),
+    );
+    assert.ok(events.indexOf("S") < events.indexOf("retired:10"));
+  }
+});
+
+test("Darwin prepared-build verification rejoins all pinned bytes and commands without recompiling", async () => {
+  const value = wiring();
+  value.options.runCommand = () => assert.fail("Verification cannot compile");
+  const effects = createDarwinSystemEffects(value.input, value.options),
+    result = await effects.verifyBuild(value.preparation);
+  assert.equal(result.status, "OBSERVED");
+  assert.equal(result.preparationSha256, observationDigest(value.preparation));
+  assert.equal(
+    value.events.filter((event) => event === "fresh-retirement").length,
+    value.requests.length * 2,
+  );
+  value.preparation.commands[0].receiptSha256 = "f".repeat(64);
+  await assert.rejects(effects.verifyBuild(value.preparation));
+});
+
+test("Darwin prepared-build policy observation is bound to the bootstrap execution and independently verified", async () => {
+  for (const failure of [null, "context", "observation"]) {
+    const value = wiring(),
+      { binding, proof } = policy(value, "build"),
+      records = [];
+    value.options.observeBuildPolicy = async (actual, observed) => {
+      assert.deepEqual(actual, binding);
+      assert.equal(observed.status, "OBSERVED");
+      return proof;
+    };
+    if (failure === "context")
+      binding.context.executionId = "ownership.literal";
+    if (failure === "observation") proof.observed.complete = false;
+    const effects = createDarwinSystemEffects(value.input, value.options);
+    const pending = effects.verifyBuild(value.preparation, {
+      policyBinding: binding,
+      recordPolicy: async (record) => records.push(record),
+    });
+    if (failure) {
+      await assert.rejects(pending);
+      assert.deepEqual(records, []);
+      if (failure === "context") assert.deepEqual(value.events, []);
+    } else {
+      assert.equal((await pending).status, "OBSERVED");
+      assert.deepEqual(records, [proof]);
+    }
+  }
+});
+
+test("Darwin composition binds every nonliteral recipe and retires domains before audit, policy and custody", async () => {
+  for (const recipe of darwinSystemRecipes().filter(
+    (entry) =>
+      !["build", "ownership.literal", "ownership.storage"].includes(entry.id),
+  )) {
+    const value = wiring(),
+      { binding } = policy(value, recipe.id),
+      receipts = [],
+      effects = createDarwinSystemEffects(value.input, value.options),
+      prepared = await effects.prepare(
+        { ...recipe, reviewSha256: hash },
+        {
+          policyBinding: binding,
+          recordPolicy: async (proof) => {
+            receipts.push(proof);
+            value.events.push("record-policy");
+          },
+        },
+      );
+    assert.equal(prepared.templateSha256, binding.approval.manifestSha256);
+    if (recipe.id.startsWith("access.")) {
+      assert.equal(
+        prepared.policySha256,
+        buildDarwinPolicy(prepared.input).compositionSha256,
+      );
+      assert.notEqual(prepared.policySha256, receipts[0].observed.policySha256);
+    }
+    assert.equal(receipts.length, 1);
+    assert.ok(
+      value.events.indexOf("policy-read") <
+        value.events.indexOf("record-policy"),
+    );
+    const result = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.equal(settled(result).status, "RETIRED");
+    for (const name of NATIVE_EFFECT_CLASSES) {
+      if (execution(recipe).effects[name].admission === "not-started")
+        assert.equal(result[name], null);
+      else {
+        assert.equal(result[name].executionId, recipe.id);
+        assert.equal(result[name].effectClass, name);
+        assert.equal(result[name].candidateSha, candidateSha);
+      }
+    }
+    for (const [a, b] of [
+      ["payload-retire", "audit-release"],
+      ["audit-release", "policy-restore"],
+      ["policy-restore", `close:${recipe.id}`],
+    ])
+      assert.ok(value.events.indexOf(a) < value.events.indexOf(b));
+  }
+});
+
+test("Darwin literal preparation defers policy observation to the parked payload's two launch barriers", async () => {
+  const value = wiring(),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+    { binding } = policy(value, recipe.id),
+    work = new AbortController(),
+    ownerEffects = value.options.ownerEffects;
+  value.options.ownerEffects = async (...args) => ({
+    ...(await ownerEffects(...args)),
+    async verifyReceipt() {
+      work.abort();
+      return { sha256: hash };
+    },
+  });
+  const effects = createDarwinSystemEffects(value.input, value.options);
+  const prepared = await effects.prepare(
+    { ...recipe, reviewSha256: hash },
+    {
+      signal: work.signal,
+      policyBinding: binding,
+      recordPolicy: () => assert.fail("No installed policy exists before park"),
+    },
+  );
+  assert.equal(prepared.policyProof, undefined);
+  assert.equal(typeof prepared.effects.readPolicy, "function");
+  assert.ok(!value.events.includes("policy-read"));
+  await assert.rejects(prepared.effects.verifyReceipt());
+  await assert.rejects(prepared.effects.readPolicy());
+});
+
+test("Darwin access admission rejects substituted policy parameters and concrete bytes before reader setup", async () => {
+  for (const change of [
+    (input) => {
+      input.profile = "workspace-write";
+    },
+    (input) => {
+      input.endpoints[0].serverPort++;
+    },
+    (input) => {
+      input.request.policy.sha256 = hash;
+    },
+  ]) {
+    const value = wiring(),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "access.read-only",
+      ),
+      { binding } = policy(value, recipe.id),
+      provision = value.options.provision;
+    value.options.provision = async (...args) => {
+      const observed = await provision(...args);
+      change(observed.input);
+      return observed;
+    };
+    await assert.rejects(
+      createDarwinSystemEffects(value.input, value.options).prepare(
+        { ...recipe, reviewSha256: hash },
+        { policyBinding: binding, recordPolicy() {} },
+      ),
+    );
+    assert.ok(!value.events.includes(`start:${recipe.id}`));
+    assert.ok(!value.events.includes("owner-effects"));
+  }
+});
+
+test("Darwin PF composition holds inputs before setup and retains exclusion until verified baseline restoration", async () => {
+  for (const outcome of ["settled", "changed-root", "context"]) {
+    const value = wiring(),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "access.read-only",
+      ),
+      { binding } = policy(value, recipe.id),
+      work = new AbortController(),
+      cleanup = new AbortController(),
+      baseline = {
+        active: true,
+        states: 0,
+        graph: [{ anchor: "", rules: [] }],
+        interfaces: [{ name: "lo0", skip: true }],
+        routesSha256: hash,
+      },
+      installed = {
+        ...baseline,
+        graph: [
+          {
+            anchor: "",
+            rules: [
+              {
+                set: 1,
+                action: 0,
+                quick: true,
+                state: 0,
+                call: "native-poc/*",
+                raw: "00",
+              },
+            ],
+          },
+        ],
+        interfaces: [{ name: "lo0", skip: false }],
+      },
+      rootDigest = digest(
+        JSON.stringify({
+          active: installed.active,
+          root: installed.graph[0],
+          interfaces: installed.interfaces,
+          routesSha256: hash,
+        }),
+      ),
+      pfContext =
+        outcome === "context"
+          ? context("access.workspace-write")
+          : binding.context,
+      pfPreparation = {
+        context: pfContext,
+        approval: {
+          schemaVersion: 1,
+          contextSha256: digest(JSON.stringify(pfContext)),
+          manifestSha256: hash,
+          baselineSha256: darwinPfAuthorityDigest(baseline),
+          installedRootSha256: rootDigest,
+          routesSha256: hash,
+          loopbackSkip: true,
+        },
+        tool: { index: 0, cdhash },
+        install: 1,
+        restore: 2,
+        reservation: 3,
+        nonce: "b".repeat(32),
+      },
+      provision = value.options.provision,
+      createReader = value.options.createReader,
+      ownerEffects = value.options.ownerEffects;
+    let actual = structuredClone(baseline),
+      reserved = false;
+    value.options.provision = async (...args) => ({
+      ...(await provision(...args)),
+      pfPreparation,
+    });
+    value.options.reviewPf = async (approval) => ({
+      status: "MATCHED",
+      contextSha256: approval.contextSha256,
+      manifestSha256: approval.manifestSha256,
+    });
+    value.options.createReader = (input, options) => {
+      const reader = createReader(input, options);
+      if (input.context.executionId === "build") return reader;
+      const held = new Set();
+      return {
+        ...reader,
+        async beginCleanup(args) {
+          assert.ok(work.signal.aborted);
+          await reader.beginCleanup(args);
+        },
+        async open(index) {
+          held.add(index);
+          value.events.push(`held:${index}`);
+        },
+        pf: async () => structuredClone(actual),
+        async reserve(index) {
+          assert.ok(held.has(index));
+          reserved = true;
+          value.events.push("pf-reserve");
+        },
+        reservation: async () => assert.ok(reserved),
+        async writePf(tool, config, signature, operation) {
+          assert.ok(
+            [tool, config, 3].every((index) => held.has(index)) && reserved,
+          );
+          assert.equal(signature, cdhash);
+          value.events.push(`pf:${operation}`);
+          actual = structuredClone(
+            operation === "install" ? installed : baseline,
+          );
+        },
+        async releaseReservation(proof) {
+          assert.equal(proof.pfBaselineSha256, digest(JSON.stringify(actual)));
+          assert.ok(reserved);
+          reserved = false;
+          value.events.push("pf-release");
+        },
+        async close() {
+          assert.ok(!reserved);
+          return reader.close();
+        },
+      };
+    };
+    value.options.ownerEffects = async (...args) => {
+      actual.graph.push({
+        anchor: "native-poc/" + "d".repeat(32),
+        rules: installed.graph[0].rules,
+      });
+      return ownerEffects(...args);
+    };
+    value.options.restore = async () => {
+      assert.ok(reserved);
+      actual.graph.pop();
+      if (outcome === "changed-root") actual.graph[0].rules = [];
+      value.events.push("policy-restore");
+      return {
+        status: "RESTORED",
+        independent: true,
+        nativeEventSha256: hash,
+        reservation: {
+          context: binding.context,
+          nonce: pfPreparation.nonce,
+          status: "RETIRED",
+          independent: true,
+          noLiveUid: true,
+          helpersSettled: true,
+          domain: { uid: 90001, gid: 90002, asid: 1 },
+          verifier: identity(40),
+          receiptSha256: hash,
+          pfBaselineSha256: pfPreparation.approval.baselineSha256,
+        },
+      };
+    };
+    const effects = createDarwinSystemEffects(value.input, value.options),
+      prepare = () =>
+        effects.prepare(
+          { ...recipe, reviewSha256: hash },
+          {
+            signal: work.signal,
+            policyBinding: binding,
+            recordPolicy() {},
+          },
+        );
+    if (outcome === "context") {
+      await assert.rejects(prepare());
+      assert.ok(!value.events.includes("pf-reserve"));
+    } else {
+      const prepared = await prepare();
+      work.abort();
+      const result = await effects.settle(recipe, prepared, {
+        signal: cleanup.signal,
+        execution: execution(recipe),
+      });
+      assert.equal(
+        settled(result).status,
+        outcome === "settled" ? "RETIRED" : "RETAINED",
+      );
+      if (outcome === "settled") {
+        for (const [a, b] of [
+          ["held:3", "pf-reserve"],
+          ["pf-reserve", "pf:install"],
+          ["audit-release", "policy-restore"],
+          ["policy-restore", "pf:restore-skip"],
+          ["pf:restore-skip", "pf-release"],
+          ["pf-release", `close:${recipe.id}`],
+        ])
+          assert.ok(value.events.indexOf(a) < value.events.indexOf(b));
+      } else {
+        assert.ok(reserved && !value.events.includes("pf-release"));
+        assert.ok(!value.events.includes(`close:${recipe.id}`));
+      }
+    }
+    cleanup.abort();
+  }
+});
+
+test("Darwin missing policy observation and uncertain retirement retain custody for independent recovery", async () => {
+  for (const failure of ["policy", "retirement"]) {
+    const value = wiring(),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.fork-exec",
+      ),
+      { binding, proof } = policy(value, recipe.id);
+    if (failure === "policy") proof.observed.independent = false;
+    const effects = createDarwinSystemEffects(value.input, value.options);
+    let prepared;
+    if (failure === "policy")
+      await assert.rejects(
+        effects.prepare(
+          { ...recipe, reviewSha256: hash },
+          { policyBinding: binding, recordPolicy() {} },
+        ),
+      );
+    else
+      prepared = await effects.prepare(
+        { ...recipe, reviewSha256: hash },
+        { policyBinding: binding, recordPolicy() {} },
+      );
+    value.options.retire = async () => ({ ...retired, status: "RETAINED" });
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETAINED",
+    );
+    assert.ok(!value.events.includes("audit-release"));
+    assert.ok(!value.events.includes("policy-restore"));
+    assert.ok(!value.events.includes(`close:${recipe.id}`));
+    assert.ok(
+      [...value.files.keys()].some((file) =>
+        file.includes(`darwin-case-${recipe.id}-`),
+      ),
+    );
+  }
+});
+
+test("Darwin fresh recovery consumes partial immutable intents and requires every effect-class settlement", async () => {
+  const value = wiring();
+  value.files.clear();
+  value.files.set(
+    path.join(directory, "darwin-case-ownership.fork-exec-0.json"),
+    {
+      phase: "provisioning-possible",
+      context: context("ownership.fork-exec"),
+      status: "POSSIBLE",
+    },
+  );
+  const request = {
+    candidateSha,
+    platform: "darwin",
+    jobSha256: observationDigest(value.input.job),
+    preparationSha256: observationDigest(value.preparation),
+  };
+  value.options.recover = async ({ records }) => {
+    assert.equal(records.length, 1);
+    assert.equal(records[0].record.phase, "provisioning-possible");
+    return {
+      ...retired,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, retired]),
+      ),
+    };
+  };
+  const effects = createDarwinSystemEffects(value.input, value.options),
+    input = { request, job: value.input.job, preparation: value.preparation };
+  assert.equal((await effects.recover(input)).status, "RETIRED");
+  value.options.recover = async () => retired;
+  assert.equal((await effects.recover(input)).status, "RETAINED");
+});
+
+test("Darwin fresh recovery rejoins case custody intents after reader admission fails", async () => {
+  const value = wiring(),
+    recipe = darwinSystemRecipes().find(
+      ({ id }) => id === "ownership.fork-exec",
+    ),
+    { binding } = policy(value, recipe.id),
+    createReader = value.options.createReader;
+  value.options.createReader = (input, options) => {
+    const reader = createReader(input, options);
+    return input.context.executionId === "build"
+      ? reader
+      : {
+          ...reader,
+          async start() {
+            await reader.start();
+            await options.persist({
+              context: input.context,
+              sequence: 1,
+              phase: "admitted",
+              custody: "POSSIBLE",
+              subjects: { helper: identity(20), verifier: identity(40) },
+            });
+            throw new Error("Setup acknowledgement unavailable");
+          },
+        };
+  };
+  await assert.rejects(
+    createDarwinSystemEffects(value.input, value.options).prepare(
+      { ...recipe, reviewSha256: hash },
+      { policyBinding: binding, recordPolicy() {} },
+    ),
+  );
+  value.options.recover = async ({ records }) => {
+    const custody = records
+      .filter(({ record }) => record.phase === "custody")
+      .map(({ record }) => record.record);
+    assert.deepEqual(
+      custody.map(({ phase }) => phase),
+      ["entry", "admitted"],
+    );
+    assert.deepEqual(custody[1].context, binding.context);
+    assert.deepEqual(custody[1].subjects, {
+      helper: identity(20),
+      verifier: identity(40),
+    });
+    return {
+      ...retired,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, retired]),
+      ),
+    };
+  };
+  const request = {
+    candidateSha,
+    platform: "darwin",
+    jobSha256: observationDigest(value.input.job),
+    preparationSha256: observationDigest(value.preparation),
+  };
+  assert.equal(
+    (
+      await createDarwinSystemEffects(value.input, value.options).recover({
+        request,
+        job: value.input.job,
+        preparation: value.preparation,
+      })
+    ).status,
+    "RETIRED",
+  );
+});
+
+test("Darwin release joins version-two template observations without promoting a historical concrete hash", async () => {
+  const image = Buffer.alloc(81);
+  image.writeUInt32LE(0xfeedfacf, 0);
+  image.writeUInt32LE(0x01000007, 4);
+  image.writeUInt32LE(2, 12);
+  image.writeUInt32LE(2, 16);
+  image.writeUInt32LE(48, 20);
+  image.writeUInt32LE(0xe, 32);
+  image.writeUInt32LE(32, 36);
+  image.writeUInt32LE(12, 40);
+  image.write("/usr/lib/dyld\0", 44);
+  image.writeUInt32LE(0x1d, 64);
+  image.writeUInt32LE(16, 68);
+  image.writeUInt32LE(80, 72);
+  image.writeUInt32LE(1, 76);
+  const manifest = {
+    schemaVersion: 2,
+    candidateSha,
+    platform: "darwin",
+    image: "macos-15-intel",
+    osBuild: "fixture",
+    sdkBuild: "fixture",
+    policyTemplates: [hash],
+    privileges: [],
+    components: ["helper", "payload"].map((id) => ({
+      id,
+      role: id === "helper" ? "helper" : "executable",
+      sha256: digest(image),
+      format: "macho-x64",
+      loader: [],
+      bindings: {
+        publication: hash,
+        source: hash,
+        build: hash,
+        license: hash,
+        abi: hash,
+      },
+    })),
+    providers: Object.fromEntries(
+      ["codex", "claude"].map((name) => [
+        name,
+        { reviewSha256: hash, closureSha256: hash, members: ["payload"] },
+      ]),
+    ),
+  };
+  const authority = {
+    candidateSha,
+    platform: "darwin",
+    authority: "operator-protected",
+    manifestSha256: releaseClosureDigest(manifest),
+  };
+  const effects = {
+    openHeld: async (id) => id,
+    inspectHeld: async (id) => ({
+      independent: true,
+      held: true,
+      regular: true,
+      reparse: false,
+      identity: `1:2:3:${id === "helper" ? 1 : 2}:100:0:${"d".repeat(32)}`,
+    }),
+    readHeld: async () => image,
+    loaderClosure: async () => ({
+      independent: true,
+      complete: true,
+      ambiguous: false,
+      nativeSha256: hash,
+      components: [],
+    }),
+    buildBindings: async () => ({
+      independent: true,
+      complete: true,
+      bindings: manifest.components[0].bindings,
+    }),
+    observeAuthority: async () => ({
+      ...manifest,
+      ownedChangesOnly: true,
+      independent: true,
+    }),
+    inspectProvider: async (name) => ({
+      ...manifest.providers[name],
+      liveBindingSha256: hash,
+      independent: true,
+    }),
+    closeHeld: async () => {},
+    verifyClosed: async () => ({
+      independent: true,
+      closed: true,
+      nativeSha256: hash,
+    }),
+  };
+  assert.deepEqual(
+    (await observeDarwinRelease(manifest, authority, effects)).closure
+      .policyTemplates,
+    [hash],
+  );
+  effects.observeAuthority = async () => ({
+    ...manifest,
+    policyTemplates: undefined,
+    policySha256: hash,
+    ownedChangesOnly: true,
+    independent: true,
+  });
+  await assert.rejects(observeDarwinRelease(manifest, authority, effects));
+});
+
+// Native records are raw transport data. Repository owners still perform asset
+// admission, persistence, command release, byte joins and fresh retirement.
+function buildTranscripts(experiment = false, complete = false) {
+  const f = wiring(),
+    files = new Map(),
+    events = [],
+    processes = new Map(),
+    auditRecords = new Map(),
+    auditCustodies = new Map();
+  let leaseHolder;
+  const image = experiment ? experimentBuildFixture().image : Buffer.alloc(81);
+  if (!experiment) {
+    image.writeUInt32LE(0xfeedfacf, 0);
+    image.writeUInt32LE(0x01000007, 4);
+    image.writeUInt32LE(2, 12);
+    image.writeUInt32LE(2, 16);
+    image.writeUInt32LE(48, 20);
+    image.writeUInt32LE(0xe, 32);
+    image.writeUInt32LE(32, 36);
+    image.writeUInt32LE(12, 40);
+    image.write("/usr/lib/dyld\0", 44);
+    image.writeUInt32LE(0x1d, 64);
+    image.writeUInt32LE(16, 68);
+    image.writeUInt32LE(80, 72);
+    image.writeUInt32LE(1, 76);
+  }
+  const plan = f.manifest.darwinPreparation;
+  if (experiment) {
+    f.manifest.purpose = plan.purpose = "experiment";
+    plan.command.sdk = { ...sdkSelection };
+    plan.command.toolchain = structuredClone(toolchainSelection);
+    f.manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
+    for (const request of f.requests)
+      request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
+    for (const name of ["experiment.h", "pf-abi.h"])
+      plan.sources.push({ name, sha256: hash });
+    if (!complete)
+      plan.cases = plan.cases.filter(
+        ({ id }) => id.startsWith("ownership.") || id.startsWith("access."),
+      );
+    for (const entry of [
+      plan.bootstrap,
+      ...plan.cases.map(({ custody }) => custody),
+    ]) {
+      entry.purpose = "experiment";
+      entry.bindingSha256 = entry.reviewSha256;
+      delete entry.reviewSha256;
+      for (const name of ["experiment.h", "pf-abi.h"])
+        entry.sources.push({
+          path: path.dirname(entry.reader.path) + "/" + name,
+          sha256: hash,
+        });
+      entry.reader.sha256 = digest(image);
+    }
+    f.input.job = initialExperimentJob({
+      candidateSha,
+      platform: "darwin",
+      repository: "fixture/native",
+      runId: "1",
+      runAttempt: 1,
+    });
+  }
+  plan.bootstrap.reader.sha256 = digest(image);
+  plan.command.helper.sha256 = digest(image);
+  for (const pin of f.manifest.helpers) pin.sha256 = digest(image);
+  const put = (file, bytes, mode = 0o444, uid = 0) => {
+    files.set(file, {
+      bytes: Buffer.from(bytes),
+      mode,
+      uid,
+      ino: files.size + 1,
+      tick: 1,
+    });
+  };
+  put(plan.bootstrap.reader.path, image, 0o555);
+  put(plan.command.helper.path, image, 0o555);
+  put(plan.bootstrap.plan.path, bytes, 0o400);
+  for (const source of plan.bootstrap.sources) put(source.path, bytes);
+  for (const source of plan.sources)
+    put(path.join(sourceDirectory, source.name), bytes);
+  for (const tool of [
+    ...f.manifest.tools,
+    ...Object.values(plan.bootstrap.tools),
+  ])
+    put(tool.path, bytes, 0o555);
+  const directories = new Map([[directory, { uid: 1001, mode: 0o700 }]]);
+  const observerFailure = new Error("Audit observer remains live");
+  let nextPid = 1000,
+    survivor = false,
+    disconnect = false,
+    changed = false,
+    retainedVerifier = false,
+    foreignReceipt = false,
+    compilerPolicyFault = false,
+    caseFault = null,
+    accessSpec,
+    operationFrames,
+    pfInstalled = false,
+    anchorInstalled = false,
+    accessResources = false;
+  const stat = (file, bigint = false) => {
+    const entry = files.get(file),
+      dir = directories.get(file),
+      convert = (value) => (bigint ? BigInt(value) : value);
+    return {
+      uid: convert(entry?.uid ?? dir?.uid ?? 0),
+      gid: convert(0),
+      mode: convert(entry?.mode ?? dir?.mode ?? 0o555),
+      dev: convert(1),
+      ino: convert(entry?.ino ?? 900),
+      nlink: convert(1),
+      size: convert(entry?.bytes.length ?? 0),
+      mtimeNs: convert(entry?.tick ?? 1),
+      ctimeNs: convert(entry?.tick ?? 1),
+      isFile: () => !!entry,
+      isDirectory: () => !entry,
+      isSymbolicLink: () => false,
+    };
+  };
+  const fs = {
+    realpath: async (file) => file,
+    lstat: async (file, options) => stat(file, options?.bigint),
+    readdir: async () =>
+      [...files.keys()]
+        .filter((file) => path.dirname(file) === directory)
+        .map((file) => path.basename(file)),
+    async open(file, flags) {
+      assert.ok(flags & constants.O_NOFOLLOW);
+      assert.ok(files.has(file));
+      const entry = files.get(file);
+      return {
+        stat: async () => stat(file, true),
+        async read(buffer, offset, length, position) {
+          const data = entry.bytes.subarray(position, position + length);
+          data.copy(buffer, offset);
+          return { bytesRead: data.length };
+        },
+        close: async () => {
+          events.push("fd-close");
+        },
+      };
+    },
+    async writeFile(file, value, settings) {
+      assert.equal(settings.flag, "wx");
+      assert.equal(settings.mode, 0o400);
+      assert.ok(!files.has(file));
+      put(file, Buffer.from(value), 0o400, 1001);
+      events.push(path.basename(file));
+    },
+  };
+  const subject = (asid = 0) => ({ ...identity(nextPid++), asid });
+  const live = (id, file) =>
+    processes.set(id.pid, {
+      status: "live",
+      identity: id,
+      sha256: digest(files.get(file).bytes),
+      signature: { cdhash, entitlementsSha256: hash, valid: true },
+      directories: [],
+    });
+  const snapshot = (file, directory = false) => ({
+    identity: `1:2:3:${files.get(file)?.ino ?? directories.get(file)?.ino ?? 900}:100:0:${"d".repeat(32)}`,
+    bytes: directory ? 0 : files.get(file).bytes.length,
+    uid: files.get(file)?.uid ?? directories.get(file)?.uid ?? 0,
+    gid: files.get(file)?.gid ?? directories.get(file)?.gid ?? 0,
+    mode: directory
+      ? (directories.get(file)?.mode ?? 0o700)
+      : (files.get(file)?.mode ?? 0o555),
+    directory,
+  });
+  const transport = async (entry, args) => {
+    if (["--probe", "--probe-domain"].includes(args[0])) {
+      const verifier = subject(),
+        pid = Number(args[1]);
+      events.push("probe:" + pid);
+      let enumeration;
+      if (args[0] === "--probe-domain") {
+        assert.equal(args[2], "90001");
+        assert.equal(args[3], "90002");
+        events.push("fresh-domain");
+        enumeration = {
+          uid: 90001,
+          complete: true,
+          asid: Number(args[4]),
+          scope: Number(args[4]) ? "audit-session" : "reserved-uid",
+          capacity: 33,
+          zombies: [],
+          live: [...processes.values()]
+            .filter(
+              ({ identity }) =>
+                identity.uid === 90001 ||
+                (Number(args[4]) > 0 && identity.asid === Number(args[4])),
+            )
+            .map(({ identity }) => identity),
+        };
+        if (caseFault === "fresh-members-missing") enumeration.complete = false;
+      }
+      return {
+        receive: async () => ({
+          verifier,
+          subject: processes.get(pid) ?? { status: "absent" },
+          ...(enumeration ? { enumeration } : {}),
+        }),
+        completion: Promise.resolve({ code: 0, signal: null }),
+        close() {},
+      };
+    }
+    assert.ok(
+      ["--build-serve", "--case-serve", "--prepare-serve"].includes(args[0]),
+    );
+    const caseMode = args[0] === "--case-serve",
+      planEntries = caseMode
+        ? files
+            .get(args[1])
+            .bytes.toString()
+            .trim()
+            .split("\n")
+            .slice(1)
+            .map((line) => {
+              const [kind, pin, hex] = line.split(" ");
+              return { kind, pin, path: Buffer.from(hex, "hex").toString() };
+            })
+        : null;
+    let ownershipMode,
+      launcher,
+      payload,
+      pfHelper,
+      pfWorker,
+      pfOperation,
+      auditObserver,
+      attemptSubject,
+      attemptIndex,
+      controlAttempt,
+      peerSubject,
+      foreignAnchor = false;
+    let auditSequence = 0,
+      auditTime = 0,
+      auditCount = 0;
+    const auditPending = [],
+      packetCounts = Array(36).fill(0);
+    const word = (n) => {
+      const b = Buffer.alloc(4);
+      b.writeUInt32BE(n);
+      return b;
+    };
+    const pfRead = () => ({
+      active: pfInstalled,
+      states: 0,
+      graph: [
+        {
+          anchor: "",
+          rules: pfInstalled
+            ? caseFault === "recovery-root"
+              ? []
+              : accessSpec.rootRules
+            : [],
+        },
+        ...(foreignAnchor
+          ? [
+              {
+                anchor: "native-poc/" + "f".repeat(32),
+                rules: accessSpec.rootRules,
+              },
+            ]
+          : []),
+        ...(anchorInstalled
+          ? [
+              {
+                anchor: "native-poc/" + args[3].slice(0, 32),
+                rules: accessSpec.anchorRules,
+              },
+            ]
+          : []),
+      ],
+      interfaces: [{ name: "lo0", skip: false }],
+      routesSha256: hash,
+    });
+    const targetFile = (i, controlAttempt) =>
+      controlAttempt && i < 13
+        ? planEntries[0].path + "/outside/control-" + i
+        : accessSpec.attempts[i].target;
+    const socket = (identity, descriptor, endpoint) => ({
+      subject: identity,
+      descriptor,
+      kernelId: (descriptor + 100).toString(16),
+      ...endpoint,
+      exclusive: true,
+    });
+    const attemptTarget = () => {
+      const spec = accessSpec.attempts[attemptIndex];
+      if (attemptIndex < 13) {
+        const file = targetFile(attemptIndex, controlAttempt),
+          dir = directories.has(file),
+          entry = files.get(dir ? file + "/inspection" : file);
+        return {
+          kind: "path",
+          path: file,
+          value: {
+            object: snapshot(file, dir),
+            sha256: digest(entry.bytes),
+            hex: entry.bytes.toString("hex"),
+          },
+        };
+      }
+      if (attemptIndex < 19)
+        return {
+          kind: "ipc",
+          path: spec.target,
+          value: {
+            type: attemptIndex - 9,
+            id:
+              caseFault === "missing-ipc-identity" && attemptIndex === 13
+                ? null
+                : attemptIndex + 50,
+            created: "100",
+            authoritySha256: hash,
+          },
+        };
+      return {
+        kind: "socket",
+        path: "",
+        value: {
+          source: socket(attemptSubject, 10, {
+            family: spec.operation.includes("6") ? "inet6" : "inet",
+            protocol: spec.operation.startsWith("tcp") ? "tcp" : "udp",
+            address: spec.operation.includes("6") ? "::1" : "127.0.0.1",
+            port: spec.local || 45000,
+          }),
+          target: socket(helper, attemptIndex + 20, {
+            family: spec.operation.includes("6") ? "inet6" : "inet",
+            protocol: spec.operation.startsWith("tcp") ? "tcp" : "udp",
+            address: spec.target,
+            port: spec.remote,
+          }),
+        },
+      };
+    };
+    const auditTokens = (nativeCode) => {
+      const spec = accessSpec.attempts[attemptIndex],
+        target = attemptTarget(),
+        metadata = [];
+      if (target.kind === "path") {
+        const token = Buffer.alloc(4 + Buffer.byteLength(target.path));
+        token[0] = 0x23;
+        token.writeUInt16BE(Buffer.byteLength(target.path) + 1, 1);
+        token.write(target.path, 3);
+        const attr = Buffer.alloc(29),
+          object = target.value.object;
+        attr[0] = 0x3e;
+        attr.writeUInt32BE(object.mode, 1);
+        attr.writeUInt32BE(object.uid, 5);
+        attr.writeUInt32BE(object.gid, 9);
+        attr.writeUInt32BE(1, 13);
+        attr.writeBigUInt64BE(BigInt(object.identity.split(":")[3]), 17);
+        metadata.push(token, attr);
+      } else if (target.kind === "ipc") {
+        const token = Buffer.alloc(6);
+        token[0] = 0x22;
+        token[1] = target.value.type;
+        token.writeUInt32BE(target.value.id, 2);
+        metadata.push(token);
+      } else {
+        const v = target.value.target,
+          token = Buffer.alloc(v.family === "inet" ? 9 : 21);
+        token[0] = v.family === "inet" ? 0x80 : 0x81;
+        token.writeUInt16BE(v.family === "inet" ? 2 : 30, 1);
+        token.writeUInt16BE(v.port, 3);
+        if (v.family === "inet")
+          v.address.split(".").forEach((b, i) => {
+            token[5 + i] = Number(b);
+          });
+        else {
+          const parts = v.address.split("::"),
+            left = parts[0] ? parts[0].split(":") : [],
+            right = parts[1] ? parts[1].split(":") : [];
+          [
+            ...left,
+            ...Array(8 - left.length - right.length).fill("0"),
+            ...right,
+          ].forEach((b, i) =>
+            token.writeUInt16BE(Number.parseInt(b, 16), 5 + i * 2),
+          );
+        }
+        const fd = Buffer.alloc(11);
+        fd[0] = 0x2d;
+        fd[1] = 1;
+        fd.writeUInt32BE(10, 2);
+        fd.writeUInt16BE(3, 6);
+        fd.write("fd", 8);
+        metadata.push(token, fd);
+      }
+      const event = controlAttempt ? spec.controlEvent : spec.event;
+      return {
+        tokens: [
+          {
+            kind: "header",
+            version: 11,
+            event,
+            name: Buffer.from(
+              accessSpec.audit.mapping.events.find((v) => v.event === event)
+                .opcode,
+            ).toString("hex"),
+            classes: 1,
+            seconds: 200,
+            milliseconds: ++auditTime,
+          },
+          {
+            kind: "subject",
+            pid: attemptSubject.pid,
+            auid: attemptSubject.auid,
+            asid: attemptSubject.asid,
+            uid: attemptSubject.uid,
+            gid: attemptSubject.gid,
+          },
+          ...metadata.map((b) => ({
+            kind: "metadata",
+            type: b[0],
+            hex: b.toString("hex"),
+          })),
+          { kind: "return", result: nativeCode ? -1 : 10, error: nativeCode },
+          { kind: "trailer" },
+        ],
+      };
+    };
+    const control = [],
+      data = [];
+    const endpoints = [],
+      argsForCase = args[3];
+    const helper = subject(nextPid + 100);
+    live(helper, entry.reader.path);
+    const queue = [{ helper }],
+      held = new Map();
+    let index = 1;
+    const sessions = new Set();
+    let auditKey,
+      reserved = false,
+      fenced = false;
+    return {
+      receive: async () => {
+        assert.ok(queue.length);
+        return queue.shift();
+      },
+      async send(frame) {
+        if (frame === "P\n") {
+          if (caseMode) {
+            // Native receipt custody derives the runner-owned report parent
+            // from the fixed build directory; ordinary plan ancestors are root.
+            const report = planEntries[11];
+            assert.equal(report.kind, "directory");
+            assert.equal(report.path, output);
+            assert.equal(directories.get(report.path).uid, 0);
+            assert.equal(directories.get(path.dirname(report.path)).uid, 1001);
+          }
+          queue.push({
+            ...(entry.purpose === "experiment"
+              ? { purpose: "experiment" }
+              : {}),
+            candidateSha,
+            uid: 90001,
+            gid: 90002,
+            entries: 1,
+          });
+          return;
+        }
+        if (frame.startsWith("V ")) {
+          if (foreignReceipt) throw new Error("Foreign receipt ACL");
+          const [, encoded, pin] = frame.trim().split(" "),
+            file = Buffer.from(encoded, "hex").toString(),
+            entry = files.get(file);
+          assert.equal(entry.uid, 1001);
+          assert.equal(entry.mode, 0o400);
+          assert.equal(digest(entry.bytes), pin);
+          events.push("receipt:" + file);
+          queue.push({ receipt: pin });
+          return;
+        }
+        const [name, sequence, ...args] = frame.trim().split(" ");
+        events.push(name);
+        let value;
+        const raw = operationFrames?.(name, args, {
+          held,
+          planEntries,
+          helper,
+          subject,
+          live,
+          snapshot,
+          sessions,
+        });
+        if (raw !== undefined) value = raw;
+        else if (name === "slots-closed")
+          value = planEntries
+            .map((_, i) => i)
+            .filter((i) => !held.has(String(i)));
+        else if (name === "build")
+          value = {
+            osBuild: Buffer.from("24A100").toString("hex"),
+            macho: {
+              headerSha256: hash,
+              dependencies: [],
+              rpaths: [],
+              sdk: 1,
+              minimum: 1,
+              uuid: "d".repeat(32),
+            },
+          };
+        else if (name === "signature")
+          value = { cdhash, entitlementsSha256: hash, valid: true };
+        else if (name === "location")
+          value = {
+            hex: Buffer.from(planEntries[Number(args[0])].path).toString("hex"),
+          };
+        else if (name === "pf-read")
+          value = experiment ? stockPfFixture(pfRead()) : pfRead();
+        else if (name === "pf-recover") {
+          const reference = files.get(planEntries[1].path + "/pf-reference");
+          assert.ok(
+            reference &&
+              reference.uid === 0 &&
+              reference.mode === 0o400 &&
+              reference.bytes.equals(Buffer.from(argsForCase + " 17\n")),
+          );
+          value = { held: true };
+        } else if (name === "pf-write") {
+          assert.ok(accessSpec);
+          assert.equal(Number(args[0]), accessSpec.pf.tool.index);
+          pfInstalled = args[3] === "install";
+          if (pfInstalled)
+            put(
+              planEntries[1].path + "/pf-reference",
+              Buffer.from(argsForCase + " 17\n"),
+              0o400,
+            );
+          if (caseFault === "pf-install-interrupted")
+            throw new Error("PF installation acknowledgement lost");
+          value = { pid: nextPid++, settled: true };
+        } else if (name === "reservation") value = { held: true };
+        else if (name === "reservation-close") {
+          assert.equal(pfInstalled, false);
+          events.push("access-lease-released");
+          value = null;
+        } else if (name === "socket") {
+          const endpoint = endpoints[Number(args[1]) - 100];
+          value = socket(
+            processes.get(Number(args[0])).identity,
+            Number(args[1]),
+            {
+              ...endpoint,
+              address: endpoint.family === "inet" ? "127.0.0.1" : "::1",
+            },
+          );
+        } else if (name === "bsm") {
+          value = auditRecords.get(args[0]);
+          assert.ok(value);
+        } else if (name === "access-sockets")
+          value = endpoints.map((_, i) => ({
+            subject: helper,
+            descriptor: 100 + i,
+          }));
+        else if (name === "access-payload-sockets") value = { held: 8 };
+        else if (name === "access-pf-start") {
+          pfOperation = args[3];
+          pfHelper = subject(nextPid + 100);
+          live(pfHelper, planEntries[4].path);
+          value = { helper: pfHelper };
+        } else if (name === "access-pf-worker") {
+          pfWorker = subject(pfHelper.asid);
+          live(pfWorker, planEntries[4].path);
+          value = { worker: pfWorker };
+        } else if (name === "access-pf-run") {
+          if (pfOperation === "install") anchorInstalled = true;
+          if (pfOperation === "restore") anchorInstalled = false;
+          if (
+            caseFault === "anchor-install-interrupted" &&
+            pfOperation === "install"
+          )
+            throw new Error("Anchor installation acknowledgement lost");
+          processes.delete(pfHelper.pid);
+          processes.delete(pfWorker.pid);
+          value = { exitCode: 0, signal: null };
+        } else if (name === "access-audit-start") {
+          auditObserver = subject(helper.asid);
+          live(auditObserver, planEntries[Number(args[0])].path);
+          value = { identity: auditObserver };
+        } else if (name === "access-audit") {
+          let bytes;
+          if (args[0] === "A") bytes = word(0);
+          else if (args[0] === "S")
+            bytes = Buffer.concat([
+              word(0xffffffff),
+              word(auditCount * 18),
+              word(auditCount),
+            ]);
+          else
+            bytes = Buffer.concat([
+              ...auditPending.splice(0),
+              word(0xfffffffe),
+              word(++auditSequence),
+              word(200),
+              word(++auditTime),
+            ]);
+          value = { hex: bytes.toString("hex") };
+        } else if (name === "access-audit-close") {
+          if (caseFault === "observer-survives") throw observerFailure;
+          processes.delete(auditObserver.pid);
+          auditObserver = null;
+          value = { code: 0, signal: null };
+        } else if (name === "access-provision") {
+          accessResources = true;
+          for (let i = 0; i < 13; i++) {
+            const file = accessSpec.attempts[i].target;
+            if (!files.has(file) && !directories.has(file))
+              put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
+            if (i === 6) {
+              const control = targetFile(i, true);
+              directories.set(control, {
+                uid: 90001,
+                gid: 90002,
+                mode: 0o700,
+                ino: directories.size + 950,
+              });
+              put(
+                control + "/inspection",
+                Buffer.from(argsForCase.slice(0, 32)),
+                0o600,
+                90001,
+              );
+            } else if (i >= 2)
+              put(
+                targetFile(i, true),
+                Buffer.from(argsForCase.slice(0, 32)),
+                0o600,
+                90001,
+              );
+          }
+          value = null;
+        } else if (name === "access-attempt") {
+          controlAttempt = args[0] === "1";
+          attemptIndex = Number(args[1]);
+          if (caseFault === "control-unavailable" && controlAttempt)
+            throw new Error("Outside control unavailable");
+          peerSubject = null;
+          attemptSubject = controlAttempt
+            ? subject()
+            : { ...payload, pid: nextPid++, startMicroseconds: nextPid };
+          live(attemptSubject, planEntries[5].path);
+          value = { identity: attemptSubject };
+          if (attemptIndex >= 35 && !controlAttempt) {
+            peerSubject = {
+              ...attemptSubject,
+              pid: nextPid++,
+              startMicroseconds: nextPid,
+            };
+            live(peerSubject, planEntries[5].path);
+          }
+        } else if (name === "access-peer")
+          value = {
+            identity: peerSubject,
+            socket: { ...attemptTarget().value.target, subject: peerSubject },
+          };
+        else if (name === "access-target") value = attemptTarget();
+        else if (name === "access-run") {
+          let nativeCode =
+            controlAttempt ||
+            attemptIndex === 0 ||
+            attemptIndex >= 35 ||
+            (attemptIndex === 1 && accessSpec.profile !== "read-only")
+              ? 0
+              : 1;
+          if (
+            caseFault === "unknown-error" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          )
+            nativeCode = 2;
+          if (
+            caseFault === "tcp-deadline" &&
+            !controlAttempt &&
+            attemptIndex === 19
+          )
+            nativeCode = 60;
+          const spec = accessSpec.attempts[attemptIndex];
+          if (!nativeCode && spec.operation === "write")
+            files.get(targetFile(attemptIndex, controlAttempt)).bytes =
+              Buffer.from(argsForCase.slice(0, 32) + "-edit");
+          if (attemptIndex >= 35 && !controlAttempt)
+            for (let i = 0; i < 4; i++)
+              if (caseFault !== "missing-counter-leg" || i !== 2)
+                packetCounts[(attemptIndex - 35) * 8 + i]++;
+          const raw = Buffer.alloc(18);
+          raw.writeUInt32BE(++auditCount);
+          auditRecords.set(raw.toString("hex"), auditTokens(nativeCode));
+          if (!(
+            caseFault === "audit-event-loss" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          ))
+            auditPending.push(word(raw.length), raw);
+          if (
+            caseFault === "stale-attempt" &&
+            !controlAttempt &&
+            attemptIndex === 2
+          )
+            processes.get(attemptSubject.pid).identity = {
+              ...attemptSubject,
+              pidVersion: 9,
+            };
+          if (
+            !controlAttempt &&
+            attemptIndex === 2 &&
+            caseFault === "foreign-anchor"
+          )
+            foreignAnchor = true;
+          if (
+            !controlAttempt &&
+            attemptIndex === 2 &&
+            caseFault === "outside-state"
+          )
+            files.get(accessSpec.attempts[2].target).bytes = Buffer.from(
+              "substituted sentinel",
+            );
+          value = {
+            nonce: argsForCase.slice(0, 32),
+            result: nativeCode ? -1 : 0,
+            nativeCode,
+          };
+        } else if (name === "access-complete") {
+          processes.delete(attemptSubject.pid);
+          if (peerSubject) processes.delete(peerSubject.pid);
+          value = null;
+        } else if (name === "access-counters")
+          value = packetCounts.map((packets, index) => ({
+            ...(experiment
+              ? {
+                  purpose: "experiment",
+                  anchor: "native-poc/" + argsForCase.slice(0, 32),
+                  set: 1,
+                  ticket: 1,
+                  ruleTicket: "1",
+                }
+              : {}),
+            index,
+            packets: String(packets),
+            ruleSha256: digest(
+              Buffer.from(accessSpec.anchorRules[index].raw, "hex"),
+            ),
+            action:
+              accessSpec.anchorRules[index].action === 0 ? "permit" : "deny",
+          }));
+        else if (name === "access-controls-retired") {
+          assert.equal(accessResources, false);
+          value = { absent: true };
+        } else if (name === "access-controls-close") {
+          assert.equal(auditObserver, null);
+          accessResources = false;
+          if (caseFault === "after-controls-close")
+            throw new Error("Lost controls result");
+          value = null;
+        } else if (name === "case-start") {
+          assert.ok(caseMode);
+          ownershipMode = args[0];
+          assert.ok(
+            [
+              "literal",
+              "storage",
+              "access",
+              ...DARWIN_OWNERSHIP_CASES,
+            ].includes(ownershipMode),
+          );
+          assert.equal(args[1], cdhash);
+          launcher = subject();
+          live(launcher, planEntries[4].path);
+          control.push({ helper: launcher, payload: null });
+          value = { pid: launcher.pid };
+        } else if (name === "case-control") {
+          assert.ok(control.length);
+          value = control.shift();
+        } else if (name === "case-eof") {
+          assert.equal(data.length, 0);
+          value = { complete: true };
+        } else if (name === "authority") {
+          const i = Number(args[1]);
+          value = {
+            subject: processes.get(Number(args[0])).identity,
+            sandboxed: true,
+            path: Buffer.from(planEntries[i].path).toString("hex"),
+            object: held.get(args[1]).object,
+            aclSha256: hash,
+            decisions: accessSpec
+              ? accessSpec.objects.find((v) => v.index === i).decisions
+              : [
+                  i === 3 || i === 5 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 3 ? 0 : 1,
+                  i === 5 ? 0 : 1,
+                ],
+          };
+        } else if (name === "case-output") {
+          assert.ok(data.length);
+          value = { hex: Buffer.from(data.shift()).toString("hex") };
+        } else if (name === "case-send") {
+          const event = (phase, pid, count) =>
+            JSON.stringify({
+              nonce: argsForCase.slice(0, 32),
+              phase,
+              pid,
+              count,
+            }) + "\n";
+          if (args[0] === "0" && args[1] === "P") {
+            if (caseFault === "before-park")
+              throw new Error("Interrupted before parked payload creation");
+            payload = {
+              ...subject(nextPid + 200),
+              uid: 90001,
+              ruid: 90001,
+              svuid: 90001,
+              gid: 90002,
+              rgid: 90002,
+              svgid: 90002,
+              auid: 90001,
+            };
+            live(payload, planEntries[5].path);
+            control.push({ helper: launcher, payload, controls: true });
+          } else if (args[0] === "0" && args[1] === "R") {
+            payload = { ...payload, pidVersion: 2 };
+            live(payload, planEntries[5].path);
+            data.push(
+              ["literal", "storage", "access"].includes(ownershipMode)
+                ? '{"phase":"armed"}\n'
+                : event("armed", payload.pid, 0),
+            );
+          } else if (args[0] === "1" && args[1] === "A") {
+            if (["literal", "storage"].includes(ownershipMode)) {
+              data.push(JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n");
+              control.push({ exitCode: 0, signal: null });
+              processes.delete(payload.pid);
+            } else {
+              const count = ownershipMode === "process-limit" ? 31 : 1;
+              for (let i = 0; i < count; i++) {
+                const leaf =
+                  ownershipMode === "stale-identity"
+                    ? { ...payload, pidVersion: 3 }
+                    : {
+                        ...payload,
+                        pid: nextPid++,
+                        startMicroseconds: nextPid,
+                        pidVersion: 2,
+                      };
+                live(leaf, planEntries[5].path);
+                const file = planEntries[3].path + "/nonce-" + leaf.pid;
+                put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
+                files.get(file).gid = 90002;
+                data.push(event("leaf", leaf.pid, 1));
+              }
+              if (ownershipMode !== "stale-identity")
+                data.push(
+                  event(
+                    ownershipMode === "process-limit" ? "limit" : "parent",
+                    payload.pid,
+                    count,
+                  ),
+                );
+              if (caseFault === "outside")
+                files.get(planEntries[6].path).bytes =
+                  Buffer.from("substituted policy");
+            }
+          } else if (args[0] === "1" && args[1] === "B")
+            data.push(event("fault-armed", payload.pid, 0));
+          else if (args[0] === "1" && args[1] === "C") {
+            if (ownershipMode === "reparent") {
+              processes.delete(payload.pid);
+              control.push({ exitCode: 0, signal: null });
+            }
+          } else assert.fail("Unexpected ownership barrier");
+          value = null;
+        } else if (name === "process" || name === "session") {
+          value = processes.get(Number(args[0])).identity;
+          if (name === "session") sessions.add(value.asid);
+        } else if (name === "case-fence") {
+          fenced = true;
+          value = { closed: true };
+        } else if (name === "case-session" || name === "case-session-read") {
+          assert.ok(held.has("1") && held.has("4"));
+          assert.ok(name === "case-session" ? reserved && !fenced : fenced);
+          const keys = [
+            "auid",
+            "uid",
+            "gid",
+            "ruid",
+            "rgid",
+            "pid",
+            "asid",
+            "pidVersion",
+            "startSeconds",
+            "startMicroseconds",
+            "svuid",
+            "svgid",
+          ];
+          const subject = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i])]),
+            ),
+            source = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i + 12])]),
+            );
+          const file = planEntries[1].path + "/audit-custody";
+          const key = file + ":" + subject.asid;
+          if (name === "case-session") {
+            assert.ok(!auditCustodies.has(key));
+            assert.ok(
+              [...auditCustodies].every(
+                ([name, record]) =>
+                  !name.startsWith(file + ":") || record.closed,
+              ),
+            );
+            const custodian = {
+              ...identity(nextPid++),
+              asid: 500000 + nextPid,
+            };
+            live(custodian, planEntries[4].path);
+            auditCustodies.set(
+              key,
+              structuredClone({
+                asid: subject.asid,
+                held: true,
+                closed: false,
+                owner: helper,
+                subject,
+                source,
+                custodian,
+              }),
+            );
+            put(
+              file,
+              Buffer.from(
+                JSON.stringify(
+                  [...auditCustodies]
+                    .filter(([name]) => name.startsWith(file + ":"))
+                    .map(([, record]) => record),
+                ),
+              ),
+              0o400,
+            );
+            if (caseFault === "session-publication")
+              throw new Error("Interrupted audit custody publication");
+          }
+          auditKey = key;
+          const original = auditCustodies.get(key);
+          assert.ok(original);
+          assert.equal(original.subject.pid, subject.pid);
+          assert.equal(
+            original.subject.startMicroseconds,
+            subject.startMicroseconds,
+          );
+          if (!original.closed) {
+            const actual = processes.get(original.custodian.pid)?.identity;
+            if (actual) assert.deepEqual(actual, original.custodian);
+            else
+              assert.ok(
+                [subject, original.source].some((identity) => {
+                  const live = processes.get(identity.pid)?.identity;
+                  return live && sameDarwinIdentity(live, identity);
+                }),
+              );
+          } else assert.ok(!processes.has(original.custodian.pid));
+          if (!original.closed) sessions.add(subject.asid);
+          value = { ...original, owner: helper };
+        } else if (name === "case-session-close") {
+          const original = auditCustodies.get(auditKey);
+          assert.ok(!processes.has(original.custodian.pid));
+          original.closed = true;
+          original.held = false;
+          value = { closed: true };
+        } else if (
+          name === "case-receipt" ||
+          name === "case-receipt-read" ||
+          name === "case-receipt-optional"
+        ) {
+          const file = planEntries[1].path + "/receipt-" + args[0] + ".json";
+          if (name === "case-receipt") {
+            assert.ok(!files.has(file));
+            put(file, Buffer.from(args[2], "hex"), 0o400);
+          }
+          if (name === "case-receipt-optional" && !files.has(file))
+            value = null;
+          else {
+            assert.equal(digest(files.get(file).bytes), args[1]);
+            value = { hex: files.get(file).bytes.toString("hex") };
+          }
+        } else if (name === "case-subject") {
+          if (caseFault === "subject-missing")
+            throw new Error("Payload observation unavailable");
+          const id = processes.get(Number(args[0])).identity;
+          value = {
+            identity: id,
+            imageSha256: digest(files.get(planEntries[5].path).bytes),
+            cwd: {
+              dev: "1",
+              ino: String(directories.get(planEntries[3].path).ino),
+            },
+            sandboxed: true,
+            decisions: [1, 1, 1, 0, 1, 1, 1],
+          };
+          if (caseFault === "subject-authority") value.decisions[1] = 0;
+        } else if (name === "case-members") {
+          if (caseFault === "members-missing")
+            throw new Error("Domain census unavailable");
+          value = {
+            uid: 90001,
+            asid: Number(args[0]),
+            scope: Number(args[0]) ? "audit-session" : "reserved-uid",
+            complete: true,
+            capacity: 33,
+            zombies: [],
+            live: [...processes.values()]
+              .filter(({ identity }) => identity.asid === Number(args[0]))
+              .map(({ identity }) => identity),
+          };
+          if (caseFault === "unknown-zombie") {
+            const { pidVersion, auid, asid, ...dead } = {
+              ...value.live[0],
+              pid: 7654,
+            };
+            value.zombies.push(dead);
+          }
+        } else if (name === "case-empty") {
+          assert.ok(
+            [...processes.values()].every(
+              ({ identity }) => identity.uid !== 90001,
+            ),
+          );
+          value = { uid: 90001, noLiveUid: true };
+        } else if (name === "case-signal") {
+          const keys = [
+              "auid",
+              "uid",
+              "gid",
+              "ruid",
+              "rgid",
+              "pid",
+              "asid",
+              "pidVersion",
+              "startSeconds",
+              "startMicroseconds",
+              "svuid",
+              "svgid",
+            ],
+            target = Object.fromEntries(
+              keys.map((key, i) => [key, Number(args[i])]),
+            ),
+            actual = processes.get(target.pid)?.identity;
+          const outcome = !actual
+            ? "not-found"
+            : !keys.every((key) => actual[key] === target[key])
+              ? "stale"
+              : "sent";
+          if (outcome === "sent") processes.delete(target.pid);
+          value = { identity: target, outcome };
+          if (caseFault === "stale-accepted" && outcome === "stale")
+            value.outcome = "sent";
+        } else if (name === "tree") {
+          const base = held.get(args[0]).file + "/";
+          value = [...files]
+            .filter(([file]) => file.startsWith(base))
+            .map(([file, entry]) => ({
+              name: Buffer.from(file.slice(base.length)).toString("hex"),
+              file: { object: snapshot(file), sha256: digest(entry.bytes) },
+            }));
+        } else if (name === "barrier") {
+          const file =
+            held.get(args[0]).file +
+            "/" +
+            Buffer.from(args[1], "hex").toString();
+          value = {
+            object: snapshot(file),
+            sha256: digest(files.get(file).bytes),
+            hex: files.get(file).bytes.toString("hex"),
+          };
+        } else if (name === "compiler-policy") {
+          value = {
+            identity: processes.get(Number(args[0])).identity,
+            uid: 0,
+            gid: 0,
+            ruid: 0,
+            rgid: 0,
+            sandboxed: false,
+            descriptors: [
+              { fd: 0, type: "vnode" },
+              { fd: 1, type: "pipe" },
+              { fd: 2, type: "pipe" },
+            ],
+          };
+          if (compilerPolicyFault)
+            value.descriptors.push({ fd: 3, type: "socket" });
+        } else if (name === "open") {
+          const file = planEntries[Number(args[0])].path;
+          value = snapshot(file, directories.has(file));
+          held.set(args[0], {
+            file,
+            data: files.get(file)?.bytes,
+            object: value,
+          });
+        } else if (name === "reserve") {
+          assert.ok(
+            !leaseHolder ||
+              !processes.has(leaseHolder) ||
+              leaseHolder === helper.pid,
+          );
+          reserved = true;
+          leaseHolder = helper.pid;
+          value = held.get(args[0]).object;
+        } else if (name === "case-directory") {
+          const i = Number(args[0]),
+            file = planEntries[i].path;
+          assert.ok(!directories.has(file));
+          directories.set(file, {
+            uid: i === 3 ? 90001 : 0,
+            gid: i === 1 || file.endsWith("/custody/files") ? 0 : 90002,
+            mode: file.endsWith("/custody/files")
+              ? 0o700
+              : i === 0 || i === 2 || i >= 12
+                ? 0o710
+                : 0o700,
+            ino: directories.size + 950,
+          });
+          value = snapshot(file, true);
+          held.set(args[0], { file, object: value });
+        } else if (name === "case-rejoin") {
+          assert.ok(
+            reserved || (fenced && [0, 1, 4, 5].includes(Number(args[0]))),
+          );
+          const file = planEntries[Number(args[0])].path;
+          value = snapshot(file, directories.has(file));
+          held.set(args[0], {
+            file,
+            data: files.get(file)?.bytes,
+            object: value,
+          });
+        } else if (name === "case-copy") {
+          if (caseFault === "writer")
+            throw new Error("Case writer interrupted");
+          const i = Number(args[0]),
+            file = planEntries[i].path;
+          put(
+            file,
+            files.get(planEntries[Number(args[1])].path).bytes,
+            planEntries[i].kind === "data" ? 0o400 : 0o550,
+          );
+          files.get(file).gid = i === 5 ? 90002 : 0;
+          if (
+            i >= 12 &&
+            planEntries[i].kind === "data" &&
+            /\/storage\/(?:metadata|control|work|control-work)\//u.test(file)
+          ) {
+            const work = /\/storage\/(?:work|control-work)\//u.test(file);
+            Object.assign(files.get(file), {
+              uid: work ? 90001 : 0,
+              gid: 90002,
+              mode: work ? 0o400 : 0o440,
+            });
+          }
+          value = snapshot(file);
+          held.set(args[0], {
+            file,
+            data: files.get(file)?.bytes,
+            object: value,
+          });
+        } else if (name === "case-endpoint") {
+          endpoints.push({
+            family: args[0] === "4" ? "inet" : "inet6",
+            protocol: args[1] === "6" ? "tcp" : "udp",
+            port: Number(args[2]),
+          });
+          value = null;
+        } else if (name === "case-read") {
+          if (caseFault === "missing") throw new Error("Case read unavailable");
+          value = {
+            contextSha256:
+              caseFault === "context" ? "f".repeat(64) : argsForCase,
+            uid: caseFault === "identity" ? 90003 : 90001,
+            gid: 90002,
+            accountVerified: true,
+            accounts: { uidAccounts: 1, primaryGroupMembers: 1, gidGroups: 1 },
+            objects: [...held]
+              .filter(
+                ([i]) =>
+                  Number(i) < 7 ||
+                  (accessSpec &&
+                    planEntries[Number(i)].path.startsWith(
+                      planEntries[0].path + "/",
+                    )),
+              )
+              .map(([index, { object }]) => ({ index: Number(index), object }))
+              .sort((a, b) => a.index - b.index),
+            endpoints,
+          };
+          if (caseFault === "authority") value.extraAuthority = true;
+          if (caseFault === "account") value.accountVerified = false;
+          if (caseFault === "uid-alias") value.accounts.uidAccounts = 2;
+          if (caseFault === "primary-group")
+            value.accounts.primaryGroupMembers = 2;
+          if (caseFault === "gid-alias") value.accounts.gidGroups = 2;
+          if (caseFault === "endpoint")
+            value.endpoints = [
+              ...endpoints,
+              { family: "inet", protocol: "tcp", port: 42000 },
+            ];
+        } else if (name === "case-retire") {
+          if (caseFault === "survivor")
+            throw new Error("Reserved UID remains live");
+          endpoints.length = 0;
+          value = { noLiveUid: true, closed: true };
+        } else if (name === "build-directory") {
+          const file = Buffer.from(args[0], "hex").toString();
+          assert.equal(file, output);
+          assert.ok(
+            events.some((name) =>
+              /^darwin-command-.*-intent\.json$/u.test(name),
+            ),
+          );
+          directories.set(output, {
+            uid: 0,
+            mode: 0o700,
+            ino: directories.get(output)?.ino ?? 900,
+          });
+          value = snapshot(output, true);
+        } else if (name === "build-root") {
+          assert.equal(Buffer.from(args[0], "hex").toString(), output);
+          value = snapshot(output, true);
+        } else if (name === "build-open") {
+          const file = Buffer.from(args[0], "hex").toString(),
+            data = Buffer.from(files.get(file).bytes);
+          value = {
+            index: index++,
+            object: snapshot(file),
+            root: snapshot(output, true),
+            sha256: digest(data),
+          };
+          held.set(String(value.index), { file, data, object: value.object });
+          if (args[1] !== "-") assert.equal(args[1], value.sha256);
+          events.push("snapshot:" + file);
+        } else if (name === "read") {
+          value = {
+            hex: held
+              .get(args[0])
+              .data.subarray(Number(args[1]), Number(args[1]) + Number(args[2]))
+              .toString("hex"),
+          };
+        } else if (name === "inspect") value = held.get(args[0]).object;
+        else if (name === "close") {
+          held.delete(args[0]);
+          value = null;
+        } else if (name === "root-domain" || name === "root-retired") {
+          const pid = Number(args[0]),
+            asid = Number(args[1]),
+            members = [...processes.values()]
+              .filter((value) => value.identity.asid === asid)
+              .map((value) => value.identity);
+          const id = processes.get(pid)?.identity ?? { ...identity(pid), asid };
+          if (name === "root-domain") sessions.add(asid);
+          value = { helper: id, complete: true, members };
+        } else if (name === "finish") {
+          if (
+            [...processes.values()].some((entry) =>
+              sessions.has(entry.identity.asid),
+            )
+          )
+            throw new Error("Root session retained");
+          processes.delete(helper.pid);
+          value = { closed: true };
+        } else throw new Error("Unexpected native operation: " + name);
+        queue.push({ sequence: Number(sequence), value });
+      },
+      completion: Promise.resolve({ code: 0, signal: null }),
+      close() {
+        processes.delete(helper.pid);
+      },
+    };
+  };
+  const open = async (entry, args, deadlineMs) => {
+    assert.ok(deadlineMs > 0 && deadlineMs <= 30000);
+    events.push("tool:" + args[0]);
+    if (args[0] === "sign") {
+      const target = args[8];
+      if (changed) put(target, Buffer.from("changed intermediate"), 0o555);
+      if (digest(files.get(target).bytes) !== args[7])
+        throw new Error("Intermediate changed before signing");
+    }
+    const helper = subject(nextPid + 100),
+      worker = subject(helper.asid);
+    live(helper, entry.helper.path);
+    processes.get(helper.pid).directories = [
+      {
+        fd: 3,
+        dev: "1",
+        ino: String(directories.get(output).ino),
+        uid: 0,
+        gid: 0,
+        mode: 0o700,
+      },
+    ];
+    const queue = [{ helper }];
+    const channel = {
+      receive: async () => {
+        if (disconnect && queue[0]?.worker)
+          throw new Error("Worker acknowledgement lost");
+        assert.ok(queue.length);
+        return queue.shift();
+      },
+      async send(frame) {
+        events.push("command:" + frame);
+        if (frame === "P") {
+          live(worker, args[1]);
+          queue.push({ worker });
+        } else if (frame === "R") {
+          processes.delete(worker.pid);
+          if (survivor) live(subject(helper.asid), entry.helper.path);
+          queue.push({
+            exitCode: 0,
+            signal: null,
+            stdoutHex: Buffer.from("reviewed\n").toString("hex"),
+            stderrHex: "",
+          });
+        } else if (frame === "S") {
+          if (args[0] === "compile")
+            put(args[8], Buffer.from("unsigned intermediate"), 0o555);
+          if (args[0] === "sign") put(args[8], image, 0o555);
+          directories.set(output, {
+            uid: 0,
+            mode: 0o555,
+            ino: directories.get(output)?.ino ?? 900,
+          });
+          processes.delete(helper.pid);
+        } else throw new Error("Unexpected build barrier");
+      },
+      completion: Promise.resolve({ code: 0, signal: null }),
+      close() {
+        processes.delete(helper.pid);
+        if (!survivor) processes.delete(worker.pid);
+      },
+    };
+    return { channel };
+  };
+  const options = {
+    fs,
+    env: f.options.env,
+    ownerUid: () => 1001,
+    readerOptions: {
+      fs,
+      transport,
+      kill(pid, signal) {
+        assert.equal(signal, 0);
+        if (retainedVerifier) return true;
+        if (processes.has(pid)) return true;
+        throw Object.assign(new Error("Absent kernel PID"), { code: "ESRCH" });
+      },
+      runtime: { platform: "darwin", arch: "x64", env: f.options.env },
+    },
+    commandTransport: { open },
+    now: () => 0,
+  };
+  f.input.preparation = undefined;
+  if (experiment) {
+    f.input.preparation = {
+      purpose: "experiment",
+      build: { helpers: f.manifest.helpers },
+    };
+    options.loadExperimentBuild = async () => {
+      events.push("experiment-build-read");
+      return { ...f.input.preparation, readSha256: hash };
+    };
+    directories.set(output, { uid: 0, mode: 0o555, ino: 900 });
+    for (const helper of f.manifest.helpers)
+      put(path.join(output, helper.name), image, 0o555);
+  }
+  const prepared = () => ({
+    schemaVersion: 1,
+    status: "PASS",
+    candidateSha,
+    platform: "darwin",
+    reviewSha256: observationDigest(f.manifest),
+    helpers: f.manifest.helpers.map(({ name, sha256 }) => ({ name, sha256 })),
+    versions: f.manifest.tools.map(({ name, version, sha256 }) => ({
+      name,
+      version,
+      sha256,
+    })),
+    commands: f.requests.map((request) => {
+      const id = observationDigest(request),
+        record = JSON.parse(
+          files.get(path.join(directory, `darwin-command-${id}-result.json`))
+            .bytes,
+        );
+      return {
+        requestSha256: id,
+        status: "RETIRED",
+        receiptSha256: observationDigest(record),
+      };
+    }),
+  });
+  return {
+    ...f,
+    options,
+    files,
+    events,
+    processes,
+    auditCustodies,
+    directories,
+    observerFailure,
+    prepared,
+    survive: () => {
+      survivor = true;
+    },
+    disconnect: () => {
+      disconnect = true;
+    },
+    change: () => {
+      changed = true;
+    },
+    retainVerifier: () => {
+      retainedVerifier = true;
+    },
+    compilerPolicyFault: () => {
+      compilerPolicyFault = true;
+    },
+    caseFault: (value) => {
+      caseFault = value;
+    },
+    access: (value) => {
+      accessSpec = value;
+    },
+    image,
+    put,
+    operationFrames: (value) => {
+      operationFrames = value;
+    },
+    foreignReceipt: () => {
+      foreignReceipt = true;
+    },
+  };
+}
+
+test("fixed provider helper preparation rejoins Darwin ACL custody and helpers without compiling", async () => {
+  // The raw transport cannot prove native command reachability. Inspect this
+  // read-only guard too; a build-only guard would reject every fresh rejoin.
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    modes =
+      /!strcmp\(tokens\[0\], "root-retired"\)[^{]+\{\s*need\(\(([^)]+)\) && n == 7\)/u
+        .exec(source)?.[1]
+        .split(/\s*\|\|\s*/u);
+  assert.ok(
+    modes?.includes("preparation_mode"),
+    "Native retirement must admit provider preparation",
+  );
+  for (const fault of [
+    null,
+    "acl",
+    "source",
+    "tool-write",
+    "output-write",
+    "retirement",
+    "recovery",
+    "missing-birth",
+  ]) {
+    const f = buildTranscripts(),
+      provider = providerPreparationFixture("darwin"),
+      input = provider.input;
+    delete input.api;
+    input.buildManifest = f.manifest;
+    for (const tool of f.manifest.tools) f.files.get(tool.path).mode = 0o755;
+    input.manifest.providerPreparation.sourceDirectory = sourceDirectory;
+    input.manifest.providerPreparation.bootstrap = {
+      ...f.manifest.darwinPreparation.bootstrap,
+      context: input.manifest.providerPreparation.bootstrap.context,
+    };
+    for (const member of input.manifest.inputs)
+      f.put(member.path, provider.files.get(member.path));
+    f.directories.set(output, { uid: 0, mode: 0o555, ino: 900 });
+    for (const helper of f.manifest.helpers)
+      f.put(path.join(output, helper.name), f.image, 0o555);
+    const base = f.options.fs,
+      fs = {
+        ...base,
+        async open(file, flags, mode) {
+          if (flags & constants.O_CREAT) {
+            assert.ok(flags & constants.O_EXCL);
+            assert.equal(mode, 0o600);
+            assert.ok(!f.files.has(file));
+            f.put(file, Buffer.alloc(0), mode, 1001);
+          }
+          const entry = f.files.get(file);
+          return {
+            stat: () => base.lstat(file, { bigint: true }),
+            async read(buffer, offset, count, position) {
+              const bytes = entry.bytes.subarray(position, position + count);
+              bytes.copy(buffer, offset);
+              return { bytesRead: bytes.length };
+            },
+            async writeFile(bytes) {
+              entry.bytes = Buffer.from(bytes);
+              entry.tick++;
+            },
+            async chmod(mode) {
+              entry.mode = mode;
+              entry.tick++;
+            },
+            sync: async () => {},
+            close: async () => {},
+          };
+        },
+      };
+    let damaged = false;
+    f.operationFrames((name, args) => {
+      if (name !== "prepare-observe") return undefined;
+      const file = Buffer.from(args[0], "hex").toString(),
+        directory = args[2] === "1",
+        entry = f.files.get(file),
+        dir = f.directories.get(file);
+      if (damaged && fault === "acl") throw new Error("Native ACL changed");
+      const object = {
+        identity: `1:2:3:${entry?.ino ?? dir?.ino ?? 900}:100:0:${"d".repeat(32)}`,
+        bytes: directory ? 0 : entry.bytes.length,
+        uid: entry?.uid ?? dir?.uid ?? 0,
+        gid: 0,
+        mode: entry?.mode ?? dir?.mode ?? 0o555,
+        directory,
+      };
+      if (!directory) assert.equal(digest(entry.bytes), args[1]);
+      return {
+        object,
+        sha256: directory ? null : args[1],
+        protectedParents: true,
+      };
+    });
+    const options = {
+        ...f.options,
+        fs,
+        ownerUid: 1001,
+        readerOptions: { ...f.options.readerOptions, fs },
+      },
+      request = {
+        candidateSha,
+        platform: "darwin",
+        reviewSha256: observationDigest(input.manifest),
+        helpers: [],
+        tools: input.buildManifest.tools,
+        output: input.providerHelpers,
+        deadlineMs: 120000,
+        commands: [],
+      },
+      owner = fixedProviderEffects(input, options);
+    assert.equal(f.events.length, 0);
+    const receipt = await owner.prepareBuild(request);
+    input.preparation = {
+      status: "PASS",
+      request,
+      requestSha256: observationDigest(request),
+      receiptSha256: observationDigest(receipt),
+      filesSettlement: await owner.settleBuild(),
+    };
+    if (["recovery", "missing-birth"].includes(fault)) {
+      for (const helper of f.manifest.helpers)
+        f.files.delete(path.join(output, helper.name));
+      f.files.delete(
+        path.join(
+          directory,
+          `provider-build-${observationDigest(request)}-result.json`,
+        ),
+      );
+      if (fault === "missing-birth")
+        for (const [file, entry] of f.files)
+          if (
+            /provider-bootstrap-0-custody-/u.test(file) &&
+            JSON.parse(entry.bytes).phase === "admitted"
+          )
+            f.files.delete(file);
+      const preparation = { status: "POSSIBLE" },
+        recovery = {
+          candidateSha,
+          platform: "darwin",
+          jobSha256: observationDigest(input.job),
+          preparationSha256: observationDigest(preparation),
+          deadlineMs: 120000,
+        };
+      assert.equal(
+        (
+          await fixedProviderEffects(input, options).recover({
+            request: recovery,
+            job: input.job,
+            preparation,
+          })
+        ).status,
+        fault === "recovery" ? "RETIRED" : "RETAINED",
+      );
+      continue;
+    }
+    damaged = true;
+    if (fault === "source")
+      f.files.get(path.join(sourceDirectory, "launcher.c")).bytes =
+        Buffer.from("changed source");
+    if (fault === "tool-write")
+      f.files.get(f.manifest.tools[0].path).mode = 0o775;
+    if (fault === "output-write")
+      f.files.get(path.join(output, f.manifest.helpers[0].name)).mode = 0o755;
+    if (fault === "retirement") f.retainVerifier();
+    const pending = fixedProviderEffects(input, options).verifyBuild();
+    if (fault) await assert.rejects(pending);
+    else assert.equal((await pending).status, "RETIRED");
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+  }
+});
+
+test("fixed Darwin entry supplies protected build defaults and fresh prepared verification", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await createSystemEffects(f.input, f.options);
+  assert.deepEqual(f.events, []);
+  for (const request of f.requests)
+    assert.equal((await build.run(request)).settlement.status, "RETIRED");
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+  assert.ok(f.events.some((name) => name.startsWith("snapshot:")));
+  assert.equal(
+    (
+      await build.readPreparedImage(
+        path.join(output, "launcher"),
+        f.manifest.helpers[0].sha256,
+      )
+    ).length,
+    81,
+  );
+  for (let i = 0; i < 2; i++) {
+    await build.bootstrap();
+    assert.equal((await build.settle()).status, "RETIRED");
+    assert.equal(f.processes.size, 0);
+  }
+  const before = f.events.filter((name) => name.startsWith("tool:")).length;
+  const effects = await createSystemEffects(f.input, f.options);
+  assert.equal((await effects.verifyBuild(f.prepared())).status, "OBSERVED");
+  assert.equal(
+    f.events.filter((name) => name.startsWith("tool:")).length,
+    before,
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin missing source approval and changed intermediates fence compiler release", async () => {
+  const approval = buildTranscripts();
+  approval.manifest.darwinPreparation.bootstrap.reviewSha256 = null;
+  await assert.rejects(createBuildEffects(approval.input, approval.options));
+  assert.deepEqual(approval.events, []);
+  const acl = buildTranscripts();
+  acl.foreignReceipt();
+  await assert.rejects(
+    (await createBuildEffects(acl.input, acl.options)).run(acl.requests[0]),
+  );
+  assert.ok(
+    !acl.events.includes("build-directory") &&
+      !acl.events.some((name) => name.startsWith("tool:")),
+  );
+  const missing = buildTranscripts();
+  missing.manifest.darwinPreparation.sources[0].sha256 = "f".repeat(64);
+  await assert.rejects(
+    (await createBuildEffects(missing.input, missing.options)).run(
+      missing.requests[0],
+    ),
+  );
+  assert.ok(!missing.events.some((name) => name.startsWith("tool:")));
+  for (const [header, fault] of [
+    "custody.h",
+    "pf-abi.h",
+    "feasibility-sandbox.h",
+  ].flatMap((header) =>
+    ["missing", "bytes", "path"].map((fault) => [header, fault]),
+  )) {
+    const adapter = buildTranscripts(true),
+      plan = adapter.manifest.darwinPreparation;
+    if (fault === "missing")
+      plan.sources = plan.sources.filter(({ name }) => name !== header);
+    else if (fault === "bytes")
+      adapter.files.get(path.join(plan.sourceDirectory, header)).bytes =
+        Buffer.from("substituted adapter bytes");
+    else
+      plan.bootstrap.sources.find(({ path }) =>
+        path.endsWith("/" + header),
+      ).path = "/fixture/substitute/" + header;
+    await assert.rejects(async () =>
+      (await createBuildEffects(adapter.input, adapter.options)).run(
+        adapter.requests[0],
+      ),
+    );
+    assert.ok(!adapter.events.some((name) => name.startsWith("tool:")));
+  }
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[2]);
+  f.change();
+  let cause;
+  await assert.rejects(build.run(f.requests[3]), (error) => {
+    cause = error;
+    return /Intermediate changed/u.test(error.message);
+  });
+  await assert.rejects(build.run(f.requests[0]), (error) => error === cause);
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 2);
+});
+
+test("Darwin prepared verification admits the pending prerequisite snapshot without retiring it", async () => {
+  const f = buildTranscripts();
+  // Only the outer receipt-selection contract is under review here; asset and
+  // package acquisition retain their independent prerequisite owner.
+  f.manifest.schemaVersion = 2;
+  f.manifest.prerequisites = { assets: [], packages: [] };
+  const build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  const bootstrap = {
+      requestSha256: observationDigest({ phase: "native-bootstrap" }),
+      status: "POSSIBLE",
+      receiptSha256: null,
+    },
+    preparation = {
+      ...f.prepared(),
+      schemaVersion: 2,
+      commands: [bootstrap, ...f.prepared().commands],
+    };
+  await assert.rejects(
+    (await createSystemEffects(f.input, f.options)).verifyBuild(preparation),
+  );
+  assert.equal(
+    (
+      await (
+        await createSystemEffects(f.input, f.options)
+      ).verifyBuild(preparation, { verificationPending: true })
+    ).status,
+    "OBSERVED",
+  );
+  assert.deepEqual(preparation.commands[0], bootstrap);
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+});
+
+test("Darwin uncertainty persistence cannot replace the original command failure", async () => {
+  const f = buildTranscripts(),
+    write = f.options.fs.writeFile;
+  f.options.fs.writeFile = async (file, value, settings) => {
+    if (JSON.parse(value).phase === "uncertain")
+      throw new Error("Uncertainty receipt unavailable");
+    return write(file, value, settings);
+  };
+  f.disconnect();
+  const build = await createBuildEffects(f.input, f.options);
+  let first;
+  await assert.rejects(build.run(f.requests[0]), (cause) => {
+    first = cause;
+    return cause.message === "Worker acknowledgement lost";
+  });
+  await assert.rejects(build.run(f.requests[1]), (cause) => cause === first);
+  assert.ok(f.events.includes("command:P"));
+  assert.ok(!f.events.includes("command:R"));
+  await build.settle();
+});
+
+test("Darwin compiler release requires the independently observed retained directory", async () => {
+  const f = buildTranscripts(),
+    open = f.options.commandTransport.open;
+  f.options.commandTransport.open = async (...args) => {
+    const owner = await open(...args),
+      helper = [...f.processes.values()].find(
+        (entry) => entry.directories?.length,
+      );
+    helper.directories[0].ino = "901";
+    return owner;
+  };
+  const build = await createBuildEffects(f.input, f.options);
+  await assert.rejects(
+    build.run(f.requests[0]),
+    /Unverified Darwin launch authority/u,
+  );
+  assert.ok(!f.events.includes("command:P"));
+  assert.ok(!f.events.includes("command:R"));
+  await build.settle();
+});
+
+test("Darwin partial-build recovery observes recorded custody without compilation", async () => {
+  for (const condition of ["absent", "surviving", "substituted-directory"]) {
+    const f = buildTranscripts(),
+      build = await createBuildEffects(f.input, f.options);
+    f.disconnect();
+    if (condition === "surviving") f.survive();
+    await assert.rejects(build.run(f.requests[0]));
+    await build.settle();
+    if (condition === "substituted-directory")
+      f.directories.get(output).ino = 901;
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) => name.startsWith("tool:")).length;
+    const result = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      result.status,
+      condition === "absent" ? "RETIRED" : "RETAINED",
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      before,
+    );
+  }
+});
+
+test("Darwin directory refusal settles original custody through a fresh reader without launching a compiler", async () => {
+  for (const fault of [
+    null,
+    "cancelled",
+    "expired-authority",
+    "descendant",
+    "missing-proof",
+    "recovery-close",
+    "missing-birth",
+    "missing-refusal",
+    "unexpected-launch",
+  ]) {
+    const f = buildTranscripts(),
+      original = new Error("Original build-directory guard refusal"),
+      diagnostics = [],
+      controller = new AbortController();
+    if (fault === "expired-authority") f.options.signal = controller.signal;
+    const build = await createBuildEffects(f.input, f.options);
+    let helper,
+      refused = false;
+    f.operationFrames((name, args, owner) => {
+      if (name === "build-directory") {
+        helper = owner.helper;
+        refused = true;
+        if (fault === "cancelled" || fault === "expired-authority")
+          controller.abort();
+        if (fault === "descendant")
+          owner.live(
+            owner.subject(helper.asid),
+            f.manifest.darwinPreparation.bootstrap.reader.path,
+          );
+        throw original;
+      }
+      if (
+        refused &&
+        ((fault === "missing-proof" && name === "root-retired") ||
+          (fault === "recovery-close" && name === "finish"))
+      )
+        throw new Error("Independent cleanup observation unavailable");
+    });
+    await assert.rejects(
+      build.run(f.requests[0], { signal: controller.signal }),
+      (cause) => cause === original,
+    );
+    assert.equal(f.events.includes("finish"), false);
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+    if (fault === "missing-birth")
+      for (const [file, entry] of f.files)
+        if (
+          /darwin-bootstrap-0-custody-/u.test(file) &&
+          JSON.parse(entry.bytes).phase === "admitted"
+        )
+          f.files.delete(file);
+    if (fault === "missing-refusal")
+      f.files.delete(
+        path.join(
+          directory,
+          `darwin-command-${observationDigest(f.requests[0])}-provision-failed.json`,
+        ),
+      );
+    if (fault === "unexpected-launch")
+      f.put(
+        path.join(
+          directory,
+          `darwin-command-${observationDigest(f.requests[0])}-0.json`,
+        ),
+        Buffer.from(
+          JSON.stringify({
+            phase: "helper",
+            helper,
+            requestSha256: observationDigest(f.requests[0]),
+          }),
+        ),
+        0o400,
+        1001,
+      );
+    const result = await withNativeDiagnostics(
+      () => build.settle(),
+      (owner, value) => diagnostics.push({ owner, value }),
+    );
+    const success = !fault || fault === "cancelled";
+    assert.equal(result.status, success ? "RETIRED" : "RETAINED", fault);
+    assert.equal(result.emergencyCleanup, false);
+    if (fault === "expired-authority")
+      assert.equal(f.events.includes("darwin-bootstrap-1-intent.json"), false);
+    if (success) {
+      assert.equal(result.independent, true);
+      assert.equal(result.noLiveMembers, true);
+      assert.equal(f.processes.size, 0);
+      assert.ok(f.events.includes("probe:" + helper.pid));
+      assert.ok(f.events.includes("root-retired"));
+    } else
+      assert.ok(
+        diagnostics.some(({ owner }) => owner === "darwin-build-recovery"),
+      );
+    assert.strictEqual(await build.settle(), result);
+    await assert.rejects(
+      build.run(f.requests[1]),
+      (cause) => cause === original,
+    );
+    assert.equal(
+      f.events.some((event) => event.startsWith("tool:")),
+      false,
+    );
+  }
+});
+
+test("Darwin SDK refusal retains original command custody until independent domain retirement", async () => {
+  for (const [purpose, requestIndex] of [
+    ["reviewed", 2],
+    ["experiment", 2],
+    ["experiment", 1],
+  ])
+    for (const fault of [
+      null,
+      "descendant",
+      "missing-birth",
+      "replaced",
+      "census",
+      "cancelled",
+    ]) {
+      const f = buildTranscripts(purpose === "experiment"),
+        original = Object.assign(
+          new Error("Original SDK root-ownership refusal"),
+          {
+            stderr:
+              "native-darwin-sdk: realpath=1 equal=1 lstat=0 kind=1 owner=0 writable=-1\n",
+          },
+        ),
+        cleanup = new AbortController(),
+        open = f.options.commandTransport.open,
+        order = [];
+      f.options.signal = cleanup.signal;
+      let helper;
+      f.options.commandTransport.open = async (...args) => {
+        const { channel } = await open(...args);
+        let admitted = false;
+        return {
+          channel: {
+            ...channel,
+            receive: async () => {
+              if (admitted) throw original;
+              const frame = await channel.receive();
+              helper = frame.helper;
+              return frame;
+            },
+            send: async (frame) => {
+              assert.equal(frame, "P");
+              admitted = true;
+              order.push("sdk-admission");
+            },
+          },
+        };
+      };
+      const build = await createBuildEffects(f.input, f.options),
+        request = {
+          ...f.requests[requestIndex],
+          ...(purpose === "experiment"
+            ? {
+                purpose,
+                args:
+                  requestIndex === 1
+                    ? ["--sdk", sdkSelection.path, "--show-sdk-build-version"]
+                    : darwinCompilerArguments(
+                        path.join(
+                          sourceDirectory,
+                          DARWIN_HELPER_NAMES[0] + ".c",
+                        ),
+                        path.join(output, DARWIN_HELPER_NAMES[0]),
+                        f.manifest.environment,
+                        purpose,
+                      ),
+              }
+            : {}),
+        };
+      await assert.rejects(build.run(request), (cause) => cause === original);
+      assert.ok(helper);
+      if (fault === "descendant")
+        f.processes.set(9900, {
+          identity: { ...helper, pid: 9900, startMicroseconds: 9900 },
+        });
+      if (fault === "missing-birth")
+        for (const [file, entry] of f.files)
+          if (
+            /darwin-command-.*-[0-9]+\.json$/u.test(file) &&
+            JSON.parse(entry.bytes).phase === "helper"
+          )
+            f.files.delete(file);
+      if (fault === "cancelled") cleanup.abort();
+      f.operationFrames((name, args) => {
+        if (name === "finish") order.push("observer-finish");
+        if (name === "root-retired" && Number(args[0]) === helper.pid) {
+          order.push("original-domain");
+          if (fault === "census")
+            return { helper, complete: false, members: [] };
+          if (fault === "replaced")
+            return {
+              helper: { ...helper, startSeconds: 101 },
+              complete: true,
+              members: [],
+            };
+        }
+      });
+      const result = await build.settle();
+      assert.equal(
+        result.status,
+        fault ? "RETAINED" : "RETIRED",
+        `${purpose}:${fault}`,
+      );
+      assert.equal(result.emergencyCleanup, false);
+      assert.equal(
+        f.events.filter((event) => event.startsWith("tool:")).length,
+        1,
+      );
+      assert.ok(
+        !f.events.includes("command:R") && !f.events.includes("command:S"),
+      );
+      const commandRecords = [...f.files.entries()]
+        .filter(([file]) => /darwin-command-.*-[0-9]+\.json$/u.test(file))
+        .map(([, entry]) => JSON.parse(entry.bytes));
+      assert.ok(
+        commandRecords.some(
+          (record) => record.phase === "uncertain" && record.worker === null,
+        ),
+      );
+      assert.ok(
+        !commandRecords.some((record) =>
+          ["worker", "publication-possible"].includes(record.phase),
+        ),
+      );
+      assert.ok(
+        !f.files.has(
+          path.join(
+            directory,
+            `darwin-command-${observationDigest(request)}-result.json`,
+          ),
+        ),
+      );
+      if (!fault) {
+        assert.equal(result.independent, true);
+        assert.equal(f.processes.size, 0);
+        assert.ok(
+          order.indexOf("original-domain") < order.indexOf("observer-finish"),
+        );
+        assert.equal(
+          order.filter((event) => event === "original-domain").length,
+          2,
+        );
+      }
+      await assert.rejects(
+        build.run({
+          ...f.requests[3],
+          ...(purpose === "experiment" ? { purpose } : {}),
+        }),
+        (cause) => cause === original,
+      );
+    }
+});
+
+test("Darwin lost finish acknowledgment is not replayed during independent recovery", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options),
+    finishes = new Map();
+  let first;
+  f.operationFrames((name, args, { helper }) => {
+    if (name !== "finish") return;
+    finishes.set(helper.pid, (finishes.get(helper.pid) ?? 0) + 1);
+    if (!first) {
+      first = helper.pid;
+      // Native finish consumed the request and exited; only its reply is lost.
+      f.processes.delete(helper.pid);
+      throw new Error("Original finish acknowledgment lost");
+    }
+  });
+  await assert.rejects(build.run(f.requests[0]));
+  const result = await build.settle();
+  assert.equal(result.status, "RETIRED");
+  assert.equal(finishes.get(first), 1);
+  assert.equal(f.processes.size, 0);
+  assert.equal(f.events.filter((event) => event.startsWith("tool:")).length, 1);
+});
+
+test("Darwin build settlement forwards the separate cleanup signal to original-reader recovery", async () => {
+  const f = buildTranscripts(),
+    work = new AbortController(),
+    cleanup = new AbortController();
+  f.options.signal = work.signal;
+  const effects = await createSystemEffects(f.input, f.options);
+  await effects.bootstrap(work.signal);
+  let lost = false;
+  f.operationFrames((name, args, { helper }) => {
+    if (name === "finish" && !lost) {
+      lost = true;
+      f.processes.delete(helper.pid);
+      throw new Error("Original reader finish acknowledgment lost");
+    }
+  });
+  work.abort();
+  const result = await effects.settle(darwinSystemRecipes()[0], undefined, {
+    signal: cleanup.signal,
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [
+          key,
+          {
+            admission: key === "builds" ? "possible" : "not-started",
+          },
+        ]),
+      ),
+    },
+  });
+  assert.equal(lost, true);
+  assert.equal(result.builds.settlement.status, "RETIRED");
+  assert.equal(result.builds.settlement.independent, true);
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin experiment build preserves directory refusal separately from failed close and independent settlement", async () => {
+  for (const unavailable of [false, true]) {
+    const f = experimentBuildFixture(),
+      original = new Error("Original directory guard failure"),
+      cleanup = new Error("Original reader transport closed"),
+      create = f.options.createReader,
+      diagnostics = [];
+    let readers = 0,
+      closes = 0,
+      retirements = 0,
+      domains = 0;
+    f.options.runCommand = () =>
+      assert.fail("Directory refusal must block compiler launch");
+    f.options.createReader = (...args) => {
+      const reader = create(...args);
+      if (++readers === 1)
+        return {
+          ...reader,
+          provisionBuild: async () => {
+            throw original;
+          },
+          close: async () => {
+            closes++;
+            throw cleanup;
+          },
+        };
+      return {
+        ...reader,
+        retired: async (...args) => {
+          retirements++;
+          if (unavailable)
+            throw new Error("Original reader retirement unavailable");
+          return reader.retired(...args);
+        },
+        retiredRootDomain: async (...args) => {
+          domains++;
+          return reader.retiredRootDomain(...args);
+        },
+      };
+    };
+    await withNativeDiagnostics(
+      () =>
+        assert.rejects(
+          prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+          (cause) => cause === original,
+        ),
+      (owner, value) => diagnostics.push({ owner, value }),
+    );
+    assert.equal(closes, 1);
+    assert.ok(retirements > 0);
+    assert.equal(domains > 0, !unavailable);
+    assert.ok(
+      diagnostics.some(
+        ({ owner, value }) =>
+          owner === "darwin-build-close" && value.exception === cleanup,
+      ),
+    );
+    assert.equal(
+      diagnostics.some(
+        ({ owner }) => owner === "darwin-experiment-build-cleanup",
+      ),
+      unavailable,
+    );
+    const job = f.jobs.at(-1);
+    assert.equal(job.failure, "preparation-failed");
+    assert.equal(job.preparation, null);
+    assert.equal(
+      job.preparationEffects.settlement.status,
+      unavailable ? "RETAINED" : "RETIRED",
+    );
+    assert.equal(
+      f.files.has(
+        path.join(directory, "darwin-experiment-build-failure-settlement.json"),
+      ),
+      !unavailable,
+    );
+  }
+});
+
+test("Darwin build lifetimes fence pending IPC and verifier exit requires kernel absence", async () => {
+  assert.equal(DARWIN_BUILD_CUSTODY_MS, 120000 + 22 * 60000);
+  for (const deadlineMs of [12345, DARWIN_BUILD_CUSTODY_MS]) {
+    const child = new EventEmitter();
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    let expire;
+    const channel = darwinCustodyChannel(child, {
+      deadlineMs,
+      schedule(callback, delay) {
+        assert.equal(delay, deadlineMs);
+        expire = callback;
+      },
+      cancel() {},
+    });
+    const pending = assert.rejects(channel.receive()),
+      complete = assert.rejects(channel.completion);
+    expire();
+    await Promise.all([pending, complete]);
+    assert.equal(child.stdin.destroyed, true);
+    child.emit("close", 0, null);
+    child.stdout.destroy();
+  }
+  const f = buildTranscripts();
+  f.retainVerifier();
+  await assert.rejects(
+    (await createBuildEffects(f.input, f.options)).run(f.requests[0]),
+  );
+  assert.ok(!f.events.some((name) => name.startsWith("tool:")));
+});
+
+test("Darwin build and prepared reads reject a substituted native directory identity", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  f.directories.get(output).ino = 901;
+  await assert.rejects(build.run(f.requests[1]));
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 1);
+
+  const complete = buildTranscripts(),
+    owner = await createBuildEffects(complete.input, complete.options);
+  for (const request of complete.requests) await owner.run(request);
+  complete.directories.get(output).ino = 901;
+  const effects = await createSystemEffects(complete.input, complete.options);
+  await assert.rejects(effects.verifyBuild(complete.prepared()));
+  assert.equal(
+    complete.events.filter((name) => name.startsWith("tool:")).length,
+    22,
+  );
+});
+
+test("Darwin prepared verification rejoins intermediate verifier creation identities", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  const record = [...f.files.entries()]
+    .filter(([name]) => /darwin-bootstrap-0-custody-[0-9]+\.json$/u.test(name))
+    .map(([, value]) => JSON.parse(value.bytes))
+    .find((value) => value.phase === "probe-created");
+  const verifier = record.request.verifier;
+  // A reused PID is an accessible kernel observation, never absence of the
+  // previously completed verifier's possible custody.
+  f.processes.set(verifier.pid, {
+    status: "live",
+    identity: { ...verifier, pidVersion: verifier.pidVersion + 1 },
+    sha256: f.manifest.darwinPreparation.bootstrap.reader.sha256,
+    signature: { cdhash, entitlementsSha256: hash, valid: true },
+    directories: [],
+  });
+  const before = f.events.filter(
+    (name) => name === `probe:${verifier.pid}`,
+  ).length;
+  const effects = await createSystemEffects(f.input, f.options);
+  await assert.rejects(
+    effects.verifyBuild(f.prepared()),
+    /Unverified Darwin launch authority/u,
+  );
+  assert.equal(
+    f.events.filter((name) => name === `probe:${verifier.pid}`).length,
+    before + 1,
+  );
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 22);
+});
+
+function buildBinding(f) {
+  const authority = {
+    uid: 0,
+    gid: 0,
+    ruid: 0,
+    rgid: 0,
+    sandboxed: false,
+    descriptors: [
+      { fd: 0, type: "vnode" },
+      { fd: 1, type: "pipe" },
+      { fd: 2, type: "pipe" },
+    ],
+  };
+  const template = {
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    sourceReviewSha256: hash,
+    provisioningReviewSha256:
+      f.manifest.darwinPreparation.bootstrap.reviewSha256,
+    policy: {
+      launch: {
+        commands: f.requests.map((request) => ({
+          requestSha256: observationDigest(request),
+          toolSha256: request.toolSha256,
+        })),
+      },
+      policy: {
+        compilerDomains: f.requests.map(() => authority),
+        output: {
+          path: output,
+          identitySha256: { binding: "build-root" },
+          uid: 0,
+          gid: 0,
+          mode: 0o555,
+        },
+      },
+    },
+    bindings: [
+      {
+        id: "build-root",
+        kind: "custody",
+        paths: [["policy", "output", "identitySha256"]],
+        minimum: null,
+        maximum: null,
+      },
+    ],
+  };
+  return {
+    template,
+    approval: {
+      candidateSha,
+      platform: "darwin",
+      authority: "operator-protected",
+      manifestSha256: nativePolicyTemplateDigest(template),
+    },
+    context: context("build"),
+  };
+}
+function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
+  const experiment = f.manifest.purpose === "experiment",
+    bindingContext = context(id),
+    root =
+      "/private/var/run/native-poc/cases/" + observationDigest(bindingContext);
+  const request = {
+    ...(experiment ? { purpose: "experiment" } : {}),
+    schemaVersion: 1,
+    candidateSha,
+    nonce: observationDigest(bindingContext).slice(0, 32),
+    uid: 90001,
+    gid: 90002,
+    custody: root + "/custody",
+    storage: root + "/storage",
+    workspace: root + "/storage/work",
+    launcher: { path: root + "/custody/launcher", sha256: digest(f.image) },
+    executable: {
+      path: root + "/storage/payload",
+      sha256: digest(f.image),
+      cdhash,
+    },
+    policy: { path: root + "/custody/policy", sha256: hash },
+    bindings: { source: hash, system: hash, closure: hash, policy: hash },
+  };
+  let input = request,
+    parameters = {},
+    policyBytes = bytes;
+  if (id.startsWith("access.")) {
+    input = {
+      ...(experiment ? { purpose: "experiment" } : {}),
+      request,
+      profile: id.slice(7),
+      disposable: true,
+      metadata: request.storage + "/metadata",
+      pointer: request.workspace + "/.git",
+      checkout: "/protected/checkout",
+      configuration: "/protected/config",
+      credentials: "/protected/credentials",
+      runtime: [
+        {
+          path: request.executable.path,
+          sha256: request.executable.sha256,
+          executable: true,
+          mapped: true,
+        },
+        {
+          path: "/usr/lib/dyld",
+          sha256: hash,
+          executable: false,
+          mapped: true,
+        },
+      ],
+      endpoints: ["inet", "inet6"].flatMap((family, i) =>
+        ["tcp", "udp"].map((protocol, j) => ({
+          family,
+          protocol,
+          clientPort: 41001 + i * 4 + j * 2,
+          serverPort: 41002 + i * 4 + j * 2,
+          address: family === "inet" ? "127.0.0.1" : "::1",
+          owned: true,
+        })),
+      ),
+      ...(experiment ? { bindingSha256: hash } : { reviewSha256: hash }),
+    };
+    const native = buildDarwinPolicy(input);
+    request.policy.sha256 = native.seatbeltSha256;
+    request.bindings.policy = native.compositionSha256;
+    const { request: ignored, ...rest } = native.value;
+    parameters = rest;
+    policyBytes = Buffer.from(native.seatbelt);
+  }
+  const argumentsList =
+    id.startsWith("ownership.") &&
+    !["ownership.literal", "ownership.storage"].includes(id)
+      ? [request.nonce, id.slice(10)]
+      : DARWIN_LITERAL_ARGUMENTS;
+  if (ownershipEffects) {
+    policyBytes = Buffer.from(
+      [
+        "(version 1)",
+        "(deny default)",
+        "(allow process-fork)",
+        "(allow process-info* (target same-sandbox))",
+        `(allow file-read* file-write* (subpath ${JSON.stringify(request.workspace)}))`,
+        `(allow file-read-metadata (literal ${JSON.stringify(request.storage)}))`,
+        ...[
+          request.executable.path,
+          "/usr/lib/dyld",
+          "/usr/lib/libSystem.B.dylib",
+        ].map(
+          (name) =>
+            `(allow file-read-data file-read-metadata file-map-executable (literal ${JSON.stringify(name)}))`,
+        ),
+        `(allow process-exec (literal ${JSON.stringify(request.executable.path)}))`,
+        "",
+      ].join("\n"),
+    );
+    request.policy.sha256 = digest(policyBytes);
+    parameters = {
+      kind: "darwin-ownership",
+      seatbeltSha256: request.policy.sha256,
+      processLimit: 32,
+    };
+  }
+  const template = {
+    ...(experiment ? { purpose: "experiment" } : {}),
+    schemaVersion: 1,
+    candidateSha,
+    platform: "darwin",
+    ...(experiment
+      ? { sourceSha256: hash, provisioningSha256: hash }
+      : { sourceReviewSha256: hash, provisioningReviewSha256: hash }),
+    policy: {
+      launch: nativePolicyLaunchData(request, argumentsList),
+      policy: parameters,
+    },
+    bindings: [
+      {
+        id: "uid",
+        kind: "uid",
+        paths: [["launch", "request", "uid"]],
+        minimum: 90001,
+        maximum: 90001,
+      },
+      {
+        id: "gid",
+        kind: "gid",
+        paths: [["launch", "request", "gid"]],
+        minimum: 90002,
+        maximum: 90002,
+      },
+      {
+        id: "nonce",
+        kind: "custody",
+        paths: [["launch", "request", "nonce"]],
+        minimum: null,
+        maximum: null,
+      },
+    ],
+  };
+  for (const rule of template.bindings)
+    template.policy.launch.request[rule.paths[0][2]] = { binding: rule.id };
+  if (id.startsWith("access."))
+    for (const [i, endpoint] of parameters.endpoints.entries())
+      for (const key of ["clientPort", "serverPort"]) {
+        const port = endpoint[key],
+          rule = {
+            id: `port-${i}-${key === "clientPort" ? "client" : "server"}`,
+            kind: "loopback-port",
+            paths: [["policy", "endpoints", i, key]],
+            minimum: port,
+            maximum: port,
+          };
+        template.bindings.push(rule);
+        template.policy.policy.endpoints[i][key] = { binding: rule.id };
+      }
+  const assets = ["case-launcher", "case-payload", "case-policy"].map(
+    (name, i) => {
+      const path = sourceDirectory + "/" + name,
+        data = i === 2 ? policyBytes : f.image;
+      f.put(path, data, i === 2 ? 0o444 : 0o555);
+      return { path, sha256: digest(data) };
+    },
+  );
+  const entries = [
+    { kind: "directory", path: root, sha256: null },
+    ...[request.custody, request.storage, request.workspace].map((path) => ({
+      kind: "authority",
+      path,
+      sha256: null,
+    })),
+    ...[request.launcher, request.executable, request.policy].map(
+      ({ path, sha256 }, i) => ({
+        kind: i === 2 ? "data" : "image",
+        path,
+        sha256,
+      }),
+    ),
+    ...assets.map((asset, i) => ({
+      kind: i === 2 ? "data" : "image",
+      ...asset,
+    })),
+    {
+      kind: "data",
+      path: "/private/var/run/native-poc/pf-lease",
+      sha256: digest(Buffer.from("native-poc-pf-lease-v1\n")),
+    },
+    { kind: "directory", path: output, sha256: null },
+  ];
+  f.put(entries[10].path, Buffer.from("native-poc-pf-lease-v1\n"), 0o400);
+  const declared = f.manifest.darwinPreparation.cases.find(
+      (entry) => entry.id === id,
+    ),
+    plan = encodeDarwinCustodyPlan({
+      ...(experiment ? { purpose: "experiment" } : {}),
+      candidateSha,
+      uid: 90001,
+      gid: 90002,
+      entries,
+    });
+  declared.custody.reader.sha256 = digest(f.image);
+  declared.custody.plan.sha256 = digest(plan);
+  f.put(declared.custody.plan.path, plan, 0o400);
+  declared.bindings = {
+    schemaVersion: 1,
+    ...(experiment ? { bindingSha256: hash } : { authoritySha256: hash }),
+    uid: 90001,
+    gid: 90002,
+    input,
+    assets,
+  };
+  return {
+    template,
+    ...(experiment
+      ? { purpose: "experiment" }
+      : {
+          approval: {
+            candidateSha,
+            platform: "darwin",
+            authority: "operator-protected",
+            manifestSha256: nativePolicyTemplateDigest(template),
+          },
+        }),
+    context: bindingContext,
+  };
+}
+function accessBinding(f, profile, observedPins = false) {
+  const experiment = f.manifest.purpose === "experiment",
+    id = "access." + profile,
+    binding = caseBinding(f, id),
+    declared = f.manifest.darwinPreparation.cases.find(
+      (entry) => entry.id === id,
+    ),
+    input = declared.bindings.input,
+    request = input.request,
+    root = path.dirname(request.custody);
+  input.checkout = root + "/checkout";
+  input.configuration = root + "/configuration";
+  input.credentials = root + "/credentials";
+  const native = buildDarwinPolicy(input),
+    plan = f.files
+      .get(declared.custody.plan.path)
+      .bytes.toString()
+      .trim()
+      .split("\n")
+      .slice(1)
+      .map((line) => {
+        const [kind, sha256, hex] = line.split(" ");
+        return {
+          kind,
+          sha256: sha256 === "-" ? null : sha256,
+          path: Buffer.from(hex, "hex").toString(),
+        };
+      }),
+    assets = [];
+  const add = (kind, file, bytes, source = null) => {
+    const index = 12 + assets.length,
+      sha256 = kind === "authority" ? null : digest(bytes);
+    assets.push({ kind, path: file, sha256, source });
+    if (source === null && kind !== "authority")
+      f.put(file, bytes, kind === "image" || kind === "helper" ? 0o555 : 0o400);
+    return index;
+  };
+  const install = add(
+      "data",
+      sourceDirectory + "/pf-root-install",
+      Buffer.from('anchor "native-poc/*" all quick\n'),
+    ),
+    restore = add(
+      "data",
+      sourceDirectory + "/pf-root-restore",
+      Buffer.from("\n"),
+    ),
+    toolSource = add("helper", "/sbin/pfctl", f.image),
+    tool = add("helper", request.custody + "/pfctl", f.image, toolSource),
+    observerSource = add("image", output + "/observer-helper", f.image),
+    observer = add(
+      "helper",
+      request.custody + "/observer",
+      f.image,
+      observerSource,
+    ),
+    pfSource = add(
+      "data",
+      sourceDirectory + "/pf-anchor",
+      Buffer.from(native.pf),
+    ),
+    configuration = add(
+      "data",
+      request.custody + "/darwin-pf.conf",
+      Buffer.from(native.pf),
+      pfSource,
+    ),
+    beforeSource = add(
+      "data",
+      sourceDirectory + "/pf-anchor-before",
+      Buffer.from("\n"),
+    ),
+    before = add(
+      "data",
+      request.custody + "/darwin-pf-before.conf",
+      Buffer.from("\n"),
+      beforeSource,
+    );
+  const operations = [
+      "read",
+      "write",
+      "write",
+      "write",
+      "unlink",
+      "replace",
+      "parent",
+      "read",
+      "write",
+      "read",
+      "read",
+      "read",
+      "write",
+      "mach",
+      "unix",
+      "shm",
+      "sem",
+      "sysv-shm",
+      "sysv-sem",
+    ],
+    targets = [
+      request.workspace + "/inspection",
+      request.workspace + "/edit",
+      input.metadata + "/sentinel",
+      input.pointer,
+      input.pointer,
+      input.pointer,
+      request.workspace,
+      request.custody + "/sentinel",
+      request.custody + "/sentinel",
+      input.checkout + "/sentinel",
+      input.configuration + "/sentinel",
+      input.credentials + "/sentinel",
+      root + "/outside/sentinel",
+      "org.native-poc." + request.nonce,
+      root + "/ipc",
+      "/native-poc-" + request.nonce,
+      "/native-poc-" + request.nonce,
+      "sysv-shm",
+      "sysv-sem",
+    ],
+    attempts = [
+      "inspection",
+      "edit",
+      ...DARWIN_ACCESS_DENIALS,
+      ...native.value.endpoints.map(
+        ({ family, protocol }) => `loopback-${family}-${protocol}`,
+      ),
+    ].map((id, i) => {
+      const endpoint = i >= 35 ? native.value.endpoints[i - 35] : null;
+      return {
+        id,
+        event: i < 13 ? 1 : i < 19 ? 2 : 3,
+        controlEvent: i < 13 ? 1 : i < 19 ? 2 : 3,
+        operation:
+          operations[i] ??
+          (endpoint
+            ? `${endpoint.protocol}${endpoint.family === "inet" ? 4 : 6}-pair`
+            : `${(i - 19) % 2 ? "udp" : "tcp"}${(i - 19) % 4 >= 2 ? 6 : 4}`),
+        target:
+          targets[i] ??
+          (endpoint
+            ? endpoint.address
+            : Math.floor((i - 19) / 4) === 1
+              ? (i - 19) % 4 >= 2
+                ? "::"
+                : "0.0.0.0"
+              : Math.floor((i - 19) / 4) === 2
+                ? (i - 19) % 4 >= 2
+                  ? "2001:db8::1"
+                  : "192.0.2.1"
+                : (i - 19) % 4 >= 2
+                  ? "::1"
+                  : "127.0.0.1"),
+        remote: endpoint?.serverPort ?? (i < 17 ? 0 : 45001 + i * 2),
+        local: endpoint?.clientPort ?? (i < 19 ? 0 : 45002 + i * 2),
+      };
+    });
+  const bank = Buffer.from(
+      attempts
+        .map(
+          ({ operation, target, remote, local }) =>
+            `${operation} ${Buffer.from(target).toString("hex")} ${remote} ${local}\n`,
+        )
+        .join(""),
+    ),
+    bankSource = add("data", sourceDirectory + "/access-bank", bank);
+  add("data", request.custody + "/access-cases", bank, bankSource);
+  for (const file of [
+    input.metadata,
+    input.checkout,
+    input.configuration,
+    input.credentials,
+    root + "/outside",
+    request.storage + "/work.replacement",
+  ])
+    add("authority", file);
+  add("data", "/usr/lib/dyld", bytes);
+  input.runtime[1].sha256 = hash;
+  // The pointer is exclusively created by the sealed resource owner after the
+  // separately pinned bank is read, then joined by its held identity.
+  const pointer = 12 + assets.length;
+  assets.push({
+    kind: "data",
+    path: input.pointer,
+    sha256: digest(request.nonce),
+    source: null,
+  });
+  const entryList = [...plan, ...assets.map(({ source, ...entry }) => entry)],
+    required = [
+      request.custody,
+      request.storage,
+      request.workspace,
+      input.metadata,
+      input.pointer,
+      input.checkout,
+      input.configuration,
+      input.credentials,
+      request.executable.path,
+      "/usr/lib/dyld",
+    ],
+    objects = required.map((file) => ({
+      index: entryList.findIndex(({ path }) => path === file),
+      decisions: [1, 1, 1, 1, 1],
+      aclSha256: observedPins ? null : hash,
+    })),
+    rootRules = [
+      {
+        set: 1,
+        action: 0,
+        quick: true,
+        state: 0,
+        call: "native-poc/*",
+        raw: "00",
+      },
+    ],
+    anchorRules = Array.from({ length: 36 }, (_, i) => ({
+      set: 1,
+      action: i >= 32 || i % 8 >= 4 ? 1 : 0,
+      quick: true,
+      state: 0,
+      call: "",
+      raw: i.toString(16).padStart(2, "0"),
+      ...(experiment ? { match: darwinPfExpectedRules(native)[i].match } : {}),
+    })),
+    baseline = (experiment ? stockPfFixture : (value) => value)({
+      active: false,
+      states: 0,
+      graph: [{ anchor: "", rules: [] }],
+      interfaces: [{ name: "lo0", skip: false }],
+      routesSha256: hash,
+    }),
+    installed = (experiment ? stockPfFixture : (value) => value)({
+      ...baseline,
+      active: true,
+      graph: [{ anchor: "", rules: rootRules }],
+    }),
+    events = [
+      { event: 1, opcode: "AUE_OPEN", classes: 1, selector: "path" },
+      { event: 2, opcode: "AUE_SEMGET", classes: 1, selector: "ipc" },
+      { event: 3, opcode: "AUE_CONNECT", classes: 1, selector: "socket" },
+    ],
+    record = {
+      ...(experiment ? { purpose: "experiment" } : {}),
+      schemaVersion: 1,
+      contextSha256: observationDigest(binding.context),
+      pf: {
+        [experiment ? "bindings" : "approval"]: {
+          schemaVersion: 1,
+          contextSha256: observationDigest(binding.context),
+          [experiment ? "bindingSha256" : "manifestSha256"]: hash,
+          baselineSha256: darwinPfAuthorityDigest(baseline),
+          installedRootSha256: observedPins
+            ? null
+            : darwinPfRootDigest(installed),
+          routesSha256: hash,
+          loopbackSkip: false,
+        },
+        tool: { index: tool, cdhash },
+        install,
+        restore,
+        configuration,
+        before,
+        anchorRulesSha256: observedPins
+          ? null
+          : digest(
+              JSON.stringify(
+                experiment ? darwinPfExpectedRules(native) : anchorRules,
+              ),
+            ),
+      },
+      audit: {
+        mapping: {
+          sdkSha256: hash,
+          abiSha256: hash,
+          headerVersion: 11,
+          events,
+          mappingSha256: digest(JSON.stringify({ headerVersion: 11, events })),
+        },
+        classes: 1,
+        helper: { index: observer, cdhash },
+      },
+      assets,
+      objects,
+      attempts,
+    };
+  const approvalBytes = Buffer.from(JSON.stringify(record) + "\n"),
+    approval = {
+      path:
+        sourceDirectory + (experiment ? "/access-binding" : "/access-approval"),
+      sha256: digest(approvalBytes),
+    };
+  f.put(approval.path, approvalBytes, 0o400);
+  input[experiment ? "bindingSha256" : "reviewSha256"] = approval.sha256;
+  const policy = buildDarwinPolicy(input);
+  request.policy.sha256 = policy.seatbeltSha256;
+  request.bindings.policy = policy.compositionSha256;
+  f.put(declared.bindings.assets[2].path, Buffer.from(policy.seatbelt));
+  declared.bindings.assets[2].sha256 = policy.seatbeltSha256;
+  entryList[6].sha256 = policy.seatbeltSha256;
+  entryList[9].sha256 = policy.seatbeltSha256;
+  const { request: ignored, ...parameters } = policy.value;
+  binding.template.policy.policy = parameters;
+  for (const rule of binding.template.bindings.filter(
+    ({ kind }) => kind === "loopback-port",
+  )) {
+    const [a, b, i, key] = rule.paths[0];
+    binding.template.policy[a][b][i][key] = { binding: rule.id };
+  }
+  binding.template.policy.launch = nativePolicyLaunchData(
+    request,
+    DARWIN_LITERAL_ARGUMENTS,
+  );
+  for (const rule of binding.template.bindings.filter(
+    ({ kind }) => kind !== "loopback-port",
+  ))
+    binding.template.policy.launch.request[rule.paths[0][2]] = {
+      binding: rule.id,
+    };
+  if (!experiment)
+    binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+      binding.template,
+    );
+  const custody = encodeDarwinCustodyPlan({
+    ...(experiment ? { purpose: "experiment" } : {}),
+    candidateSha,
+    uid: request.uid,
+    gid: request.gid,
+    entries: entryList,
+  });
+  declared.custody.plan.sha256 = digest(custody);
+  f.put(declared.custody.plan.path, custody, 0o400);
+  declared.bindings.access = {
+    [experiment ? "binding" : "approval"]: approval,
+  };
+  f.access({ ...record, profile, rootRules, anchorRules, pointer });
+  return binding;
+}
+
+// Only the selected declaration owns native fixture resources; the remaining
+// fixed declarations are inert expectations for inventory/materialization checks.
+function experimentCase(f, id) {
+  const cases = f.manifest.darwinPreparation.cases,
+    prepare = (id) =>
+      id.startsWith("access.")
+        ? accessBinding(f, id.slice(7), id === "access.trusted-command")
+        : caseBinding(f, id, true);
+  for (const entry of cases) if (entry.id !== id) prepare(entry.id);
+  prepare(id);
+  if (!id.startsWith("access.")) f.access(undefined);
+  for (const [i, entry] of cases.entries()) {
+    if (entry.id === id) continue;
+    const request = entry.bindings.input.request ?? entry.bindings.input;
+    request.uid = entry.bindings.uid = 91000 + i * 2;
+    request.gid = entry.bindings.gid = 91001 + i * 2;
+  }
+  return darwinExperimentCaseDeclarations(cases).policyBindings.find(
+    (binding) => binding.context.executionId === id,
+  );
+}
+
+test("Darwin experiment declarations retain every ownership fault and access profile through existing native owners", async () => {
+  const recipes = darwinSystemRecipes().filter(
+    (recipe) => recipe.group === "ownership" || recipe.id.startsWith("access."),
+  );
+  for (const recipe of recipes) {
+    const f = buildTranscripts(true),
+      binding = experimentCase(f, recipe.id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      work = new AbortController();
+    if (recipe.id === "ownership.literal") {
+      const read = f.options.loadExperimentBuild;
+      f.options.loadExperimentBuild = async (...args) => {
+        recipe.group = "release";
+        return read(...args);
+      };
+    }
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: work.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    if (recipe.id === "ownership.literal") recipe.group = "ownership";
+    assert.equal(prepared.purpose, "experiment");
+    assert.equal(prepared.reviewSha256, undefined);
+    assert.equal(
+      proof.provisioning.bindingSha256,
+      binding.template.provisioningSha256,
+    );
+    assert.equal(proof.provisioning.authoritySha256, undefined);
+    assert.equal(
+      proof.observed.templateSha256,
+      observationDigest(binding.template),
+    );
+    if (recipe.id.startsWith("access.")) {
+      const result = await runDarwinAccessCase(
+        prepared.input,
+        prepared.effects,
+      );
+      assert.equal(result.status, "OBSERVED");
+      assert.equal(
+        result.nativeEvidence.denials.length,
+        DARWIN_ACCESS_DENIALS.length,
+      );
+    } else if (
+      !["ownership.literal", "ownership.storage"].includes(recipe.id)
+    ) {
+      assert.equal(
+        (
+          await runDarwinOwnershipCase(
+            recipe.id.slice(10),
+            prepared.input,
+            prepared.effects,
+          )
+        ).status,
+        "OBSERVED",
+      );
+    } else {
+      prepared.admitted = await prepared.admit();
+      assert.equal(prepared.admitted.record.status, "ADMITTED");
+      await effects.literal(prepared);
+    }
+    work.abort();
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETIRED",
+    );
+    assert.equal(f.processes.size, 0);
+    assert.ok(f.events.includes("experiment-build-read"));
+  }
+});
+
+test("Darwin experiment cases withhold admission for mixed bindings and unavailable or surviving native effects", async () => {
+  for (const fault of [
+    "missing",
+    "context",
+    "subject-authority",
+    "fresh-members-missing",
+    "tcp-deadline",
+  ]) {
+    const access = fault === "tcp-deadline",
+      id = access ? "access.read-only" : "ownership.cancel",
+      f = buildTranscripts(true),
+      binding = experimentCase(f, id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+      work = new AbortController();
+    f.caseFault(fault);
+    let prepared;
+    if (["missing", "context", "subject-authority"].includes(fault))
+      await assert.rejects(
+        effects.prepare(recipe, {
+          signal: work.signal,
+          policyBinding: binding,
+          recordPolicy() {},
+        }),
+      );
+    else {
+      prepared = await effects.prepare(recipe, {
+        signal: work.signal,
+        policyBinding: binding,
+        recordPolicy() {},
+      });
+      const result = access
+        ? await runDarwinAccessCase(prepared.input, prepared.effects)
+        : await runDarwinOwnershipCase(
+            "cancel",
+            prepared.input,
+            prepared.effects,
+          );
+      assert.notEqual(result.status, "OBSERVED");
+    }
+    work.abort();
+    await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    await assert.rejects(
+      effects.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
+    );
+  }
+  const f = buildTranscripts(true),
+    binding = experimentCase(f, "ownership.literal"),
+    cases = f.manifest.darwinPreparation.cases;
+  assert.throws(() => darwinExperimentCaseDeclarations(cases.slice(1)));
+  const mixed = structuredClone(cases);
+  mixed[0].custody.reviewSha256 = hash;
+  assert.throws(() => darwinExperimentCaseDeclarations(mixed));
+  binding.approval = { manifestSha256: hash };
+  await assert.rejects(
+    createDarwinSystemEffects(f.input, f.options).prepare(
+      darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+      { policyBinding: binding, recordPolicy() {} },
+    ),
+  );
+  delete binding.approval;
+  binding.template.sourceSha256 = "e".repeat(64);
+  const fenced = createDarwinSystemEffects(f.input, f.options),
+    literal = darwinSystemRecipes().find(
+      ({ id }) => id === "ownership.literal",
+    );
+  await assert.rejects(
+    fenced.prepare(literal, { policyBinding: binding, recordPolicy() {} }),
+  );
+  const canonical = darwinExperimentCaseDeclarations(cases).policyBindings.find(
+    (value) => value.context.executionId === literal.id,
+  );
+  await assert.rejects(
+    fenced.provision(literal, { policyBinding: canonical, recordPolicy() {} }),
+  );
+  assert.ok(!f.events.includes("experiment-build-read"));
+
+  const active = buildTranscripts(true),
+    first = experimentCase(active, "ownership.literal"),
+    effects = createDarwinSystemEffects(active.input, active.options),
+    work = new AbortController(),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+    prepared = await effects.prepare(recipe, {
+      signal: work.signal,
+      policyBinding: first,
+      recordPolicy() {},
+    }),
+    next = darwinSystemRecipes().find(({ id }) => id === "ownership.storage"),
+    nextBinding = darwinExperimentCaseDeclarations(
+      active.manifest.darwinPreparation.cases,
+    ).policyBindings.find((value) => value.context.executionId === next.id),
+    reads = active.events.filter(
+      (name) => name === "experiment-build-read",
+    ).length;
+  await assert.rejects(
+    effects.prepare(next, { policyBinding: nextBinding, recordPolicy() {} }),
+  );
+  assert.equal(
+    active.events.filter((name) => name === "experiment-build-read").length,
+    reads,
+  );
+  work.abort();
+  assert.equal(
+    settled(
+      await effects.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+
+  const concurrent = buildTranscripts(true),
+    concurrentBinding = experimentCase(concurrent, recipe.id),
+    concurrentNextBinding = darwinExperimentCaseDeclarations(
+      concurrent.manifest.darwinPreparation.cases,
+    ).policyBindings.find((value) => value.context.executionId === next.id),
+    entered = Promise.withResolvers(),
+    release = Promise.withResolvers();
+  let concurrentReads = 0;
+  concurrent.options.loadExperimentBuild = async () => {
+    concurrentReads++;
+    entered.resolve();
+    await release.promise;
+    throw new Error("Interrupted build observation");
+  };
+  const concurrentEffects = createDarwinSystemEffects(
+      concurrent.input,
+      concurrent.options,
+    ),
+    firstRejected = assert.rejects(
+      concurrentEffects.prepare(recipe, {
+        policyBinding: concurrentBinding,
+        recordPolicy() {},
+      }),
+    );
+  await entered.promise;
+  const nextRejected = assert.rejects(
+    concurrentEffects.prepare(next, {
+      policyBinding: concurrentNextBinding,
+      recordPolicy() {},
+    }),
+  );
+  release.resolve();
+  await Promise.all([firstRejected, nextRejected]);
+  assert.equal(concurrentReads, 1);
+});
+
+async function prepareTranscripts(f) {
+  const build = await createBuildEffects(f.input, f.options);
+  for (const request of f.requests) await build.run(request);
+  f.input.preparation = f.prepared();
+  return createSystemEffects(f.input, f.options);
+}
+
+test("fixed Darwin entry observes compiler policy independently and never recompiles at its mandatory gate", async () => {
+  const f = buildTranscripts(),
+    binding = buildBinding(f),
+    effects = await prepareTranscripts(f);
+  let proof;
+  assert.equal(
+    (
+      await effects.build({
+        candidateSha,
+        reviewSha256: hash,
+        policyBinding: binding,
+        recordPolicy: async (record) => {
+          proof = record;
+        },
+      })
+    ).status,
+    "OBSERVED",
+  );
+  assert.equal(proof.observed.policy.policy.compilerDomains.length, 22);
+  assert.equal(
+    f.events.filter((event) => event.startsWith("tool:")).length,
+    22,
+  );
+  assert.equal(
+    f.events.filter((event) => event === "compiler-policy").length,
+    22,
+  );
+  const wrong = structuredClone(binding);
+  wrong.template.policy.policy.compilerDomains[0].sandboxed = true;
+  wrong.approval.manifestSha256 = nativePolicyTemplateDigest(wrong.template);
+  await assert.rejects(
+    effects.build({
+      candidateSha,
+      reviewSha256: hash,
+      policyBinding: wrong,
+      recordPolicy: async () => assert.fail("Substituted policy admitted"),
+    }),
+  );
+});
+
+test("Darwin additional compiler authority and missing parked observations withhold build admission", async () => {
+  const f = buildTranscripts();
+  f.compilerPolicyFault();
+  await assert.rejects(
+    (await createBuildEffects(f.input, f.options)).run(f.requests[0]),
+  );
+  assert.ok(!f.events.includes("command:R"));
+  for (const fault of ["missing", "substitution"]) {
+    const f = buildTranscripts(),
+      binding = buildBinding(f),
+      effects = await prepareTranscripts(f),
+      worker = [...f.files.values()].find(
+        (entry) =>
+          JSON.parse(
+            entry.bytes.toString().startsWith("{") ? entry.bytes : "{}",
+          ).phase === "worker",
+      );
+    const record = JSON.parse(worker.bytes);
+    if (fault === "missing") record.compilerPolicy = null;
+    else record.compilerPolicy.identity.pidVersion++;
+    worker.bytes = Buffer.from(JSON.stringify(record));
+    await assert.rejects(
+      effects.build({
+        candidateSha,
+        reviewSha256: hash,
+        policyBinding: binding,
+        recordPolicy: async () => assert.fail("Missing native read admitted"),
+      }),
+    );
+  }
+});
+
+test("fixed Darwin entry provisions bound private custody using only filesystem and native IPC", async () => {
+  const f = buildTranscripts(),
+    binding = caseBinding(f),
+    effects = await prepareTranscripts(f),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+    work = new AbortController();
+  const actual = await effects.provision(recipe, {
+    signal: work.signal,
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  assert.deepEqual(
+    actual.provisioning.bindings.map(({ value }) => value),
+    [90001, 90002, observationDigest(binding.context).slice(0, 32)],
+  );
+  assert.equal(f.events.filter((name) => name === "case-directory").length, 4);
+  assert.equal(f.events.filter((name) => name === "case-copy").length, 3);
+  work.abort();
+  assert.equal(
+    settled(
+      await effects.settle(recipe, null, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin missing case reads, undeclared identities, extra authority and substituted context withhold provisioning", async () => {
+  for (const fault of [
+    "missing",
+    "identity",
+    "authority",
+    "context",
+    "account",
+    "uid-alias",
+    "primary-group",
+    "gid-alias",
+  ]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.caseFault(fault);
+    let first;
+    await assert.rejects(
+      effects.provision(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+      (cause) => {
+        first = cause;
+        return true;
+      },
+    );
+    await assert.rejects(
+      effects.verifyBuild(f.prepared()),
+      (cause) => cause === first,
+    );
+    assert.ok(!f.events.includes("case-retire"));
+    assert.ok(
+      ![...f.files.values()].some((entry) =>
+        entry.bytes.toString().includes('"phase":"provisioned"'),
+      ),
+    );
+  }
+});
+
+test("Darwin access provisioning holds only approved exclusive loopback endpoints", async () => {
+  for (const fault of [null, "endpoint"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "access.workspace-write"),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "access.workspace-write",
+      );
+    f.caseFault(fault);
+    const operation = effects.provision(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault) await assert.rejects(operation);
+    else {
+      const receipt = await operation;
+      assert.equal(
+        receipt.provisioning.bindings.filter(
+          ({ kind }) => kind === "loopback-port",
+        ).length,
+        8,
+      );
+      assert.equal(
+        settled(
+          await effects.settle(recipe, null, {
+            signal: new AbortController().signal,
+            execution: execution(recipe),
+          }),
+        ).status,
+        "RETIRED",
+      );
+    }
+    assert.equal(f.events.filter((name) => name === "case-endpoint").length, 8);
+  }
+});
+
+test("Darwin partial case recovery rejoins protected births and objects without setup or compilation", async () => {
+  for (const fault of ["missing", "substituted", "surviving", "writer"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f),
+      effects = await prepareTranscripts(f),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.caseFault(fault === "writer" ? "writer" : "missing");
+    await assert.rejects(
+      effects.provision(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      }),
+    );
+    const caseRoot =
+      "/private/var/run/native-poc/cases/" + observationDigest(binding.context);
+    if (fault === "substituted") f.directories.get(caseRoot).ino++;
+    if (fault === "surviving") {
+      const record = [...f.files.values()]
+        .filter((entry) => entry.bytes.toString().startsWith("{"))
+        .map((entry) => JSON.parse(entry.bytes))
+        .find(
+          (entry) =>
+            entry.phase === "custody" && entry.record.phase === "admitted",
+        ).record;
+      f.processes.set(record.subjects.helper.pid, {
+        status: "live",
+        identity: record.subjects.helper,
+        sha256: digest(f.image),
+        signature: { cdhash, entitlementsSha256: hash, valid: true },
+        directories: [],
+      });
+    }
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) =>
+        ["case-directory", "case-copy"].includes(name),
+      ).length;
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      recovered.status,
+      fault === "missing" ? "RETIRED" : "RETAINED",
+    );
+    if (fault === "missing") {
+      const resumed = await (
+        await createSystemEffects(f.input, f.options)
+      ).recover({
+        request,
+        job: f.input.job,
+        preparation: null,
+      });
+      assert.equal(resumed.status, "RETIRED");
+    }
+    assert.equal(
+      f.events.filter((name) => ["case-directory", "case-copy"].includes(name))
+        .length,
+      before,
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("fixed Darwin entry executes each ownership owner through raw custody and held observations", async () => {
+  for (const mode of ["literal", "storage", ...DARWIN_OWNERSHIP_CASES]) {
+    const f = buildTranscripts(),
+      id = "ownership." + mode,
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      controller = new AbortController(),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      };
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    assert.equal(proof.observed.policy.policy.kind, "darwin-ownership");
+    if (["literal", "storage"].includes(mode)) {
+      prepared.admitted = await prepared.admit();
+      const value = await effects.literal(prepared, {
+        signal: controller.signal,
+      });
+      assert.equal(
+        assertDarwinLiteralObservation(
+          prepared.input,
+          DARWIN_LITERAL_ARGUMENTS,
+          prepared.admitted.record,
+          value,
+        ).status,
+        "OBSERVED",
+      );
+      assert.equal(
+        value.output,
+        JSON.stringify(DARWIN_LITERAL_ARGUMENTS) + "\n",
+      );
+    } else {
+      const record = await runDarwinOwnershipCase(
+        mode,
+        prepared.input,
+        prepared.effects,
+      );
+      assert.equal(
+        record.status,
+        "OBSERVED",
+        mode + ": " + JSON.stringify(record),
+      );
+      assert.ok(f.events.includes("case-members"));
+      assert.ok(f.events.includes("fresh-domain"));
+      if (mode === "stale-identity")
+        assert.ok(f.events.includes("case-signal"));
+    }
+    controller.abort();
+    const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    };
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution,
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) => value.settlement.status === "RETIRED",
+      ),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("Darwin ownership admission withholds missing and additional native authority", async () => {
+  for (const fault of ["subject-missing", "subject-authority"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "ownership.literal", true),
+      effects = await prepareTranscripts(f);
+    f.caseFault(fault);
+    await assert.rejects(
+      effects.prepare(
+        {
+          ...darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
+          reviewSha256: hash,
+        },
+        {
+          policyBinding: binding,
+          recordPolicy: async () =>
+            assert.fail("Unobserved authority admitted"),
+        },
+      ),
+    );
+    assert.ok(f.events.includes("case-start"));
+    assert.ok(
+      !f.events.includes("case-send") || !f.events.includes("case-members"),
+    );
+  }
+});
+
+test("Darwin ownership rejects changed outside bytes, incomplete independent census, unknown zombies and accepted stale signalling", async () => {
+  for (const fault of [
+    "outside",
+    "members-missing",
+    "fresh-members-missing",
+    "unknown-zombie",
+    "stale-accepted",
+  ]) {
+    const f = buildTranscripts(),
+      mode = fault === "stale-accepted" ? "stale-identity" : "fork-exec",
+      id = "ownership." + mode,
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      controller = new AbortController(),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      },
+      prepared = await effects.prepare(recipe, {
+        signal: controller.signal,
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      });
+    f.caseFault(fault);
+    const record = await runDarwinOwnershipCase(
+      mode,
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(record.status, "FAIL");
+    assert.equal(
+      record.cleanup.status,
+      fault === "stale-accepted" ? "RETIRED" : "RETAINED",
+    );
+    let first;
+    await assert.rejects(
+      prepared.effects.observe(mode, prepared.input, {}),
+      (cause) => {
+        first = cause;
+        return true;
+      },
+    );
+    await assert.rejects(
+      prepared.effects.observe(mode, prepared.input, {}),
+      (cause) => cause === first,
+    );
+    controller.abort();
+    const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    };
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution,
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) =>
+          value.settlement.status ===
+          (fault === "stale-accepted" ? "RETIRED" : "RETAINED"),
+      ),
+    );
+  }
+});
+
+test("Darwin interrupted ownership admission recovers protected receipts without relaunching", async () => {
+  for (const fault of [
+    "interrupted",
+    "interrupted-members",
+    "surviving",
+    "missing-receipt",
+    "substituted",
+    "pending-writer",
+    "custodian-missing",
+    "custodian-substituted",
+    "custodian-replaced",
+  ]) {
+    const f = buildTranscripts(),
+      id = "ownership.fork-exec",
+      binding = caseBinding(f, id, true),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find((entry) => entry.id === id),
+        reviewSha256: hash,
+      };
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault === "interrupted-members") {
+      await prepared.effects.observe("fork-exec");
+      await prepared.effects.armFault("fork-exec");
+    }
+    const records = [...f.files]
+        .filter(([file]) =>
+          file.startsWith(directory + "/darwin-case-" + id + "-"),
+        )
+        .map(([file, entry]) => ({ file, record: JSON.parse(entry.bytes) })),
+      admission = records.find(
+        ({ record }) =>
+          record.phase === "custody" && record.record.phase === "admitted",
+      ).record.record;
+    if (fault !== "surviving")
+      f.processes.delete(admission.subjects.helper.pid);
+    if (fault === "missing-receipt") {
+      const pin = records
+        .filter(
+          ({ record }) =>
+            record.phase === "ownership-receipt" && record.kind === "admission",
+        )
+        .at(-1).record.pin;
+      const root =
+        "/private/var/run/native-poc/cases/" +
+        observationDigest(binding.context);
+      f.files.delete(root + "/custody/receipt-" + pin.index + ".json");
+    }
+    if (fault === "substituted")
+      f.directories.get(
+        "/private/var/run/native-poc/cases/" +
+          observationDigest(binding.context),
+      ).ino++;
+    if (fault === "custodian-missing")
+      for (const {
+        custodian,
+        owner,
+        source,
+        subject,
+      } of f.auditCustodies.values())
+        for (const identity of [custodian, owner, source, subject])
+          f.processes.delete(identity.pid);
+    if (["custodian-substituted", "custodian-replaced"].includes(fault))
+      for (const { custodian } of f.auditCustodies.values()) {
+        custodian.startMicroseconds++;
+        if (fault === "custodian-replaced")
+          Object.assign(f.processes.get(custodian.pid).identity, custodian);
+      }
+    if (fault === "pending-writer")
+      f.files.delete(
+        records
+          .filter(({ record }) => record.phase === "ownership-receipt")
+          .at(-1).file,
+      );
+    const request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(null),
+      },
+      before = f.events.filter((name) =>
+        ["case-start", "case-directory", "case-copy"].includes(name),
+      ).length;
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(
+      recovered.status,
+      fault.startsWith("interrupted") || fault === "surviving"
+        ? "RETIRED"
+        : "RETAINED",
+      fault,
+    );
+    assert.equal(
+      f.events.filter((name) =>
+        ["case-start", "case-directory", "case-copy"].includes(name),
+      ).length,
+      before,
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+    if (fault === "interrupted") {
+      const resumed = await (
+        await createSystemEffects(f.input, f.options)
+      ).recover({ request, job: f.input.job, preparation: null });
+      assert.equal(resumed.status, "RETIRED");
+      assert.equal(
+        f.events.filter((name) =>
+          ["case-start", "case-directory", "case-copy"].includes(name),
+        ).length,
+        before,
+      );
+    }
+  }
+});
+
+test("Darwin interrupted audit-custody publication retains its original operation without relaunching", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id: actual }) => actual === id),
+      reviewSha256: hash,
+    };
+  f.caseFault("session-publication");
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Unpublished custody"),
+    }),
+  );
+  const holders = [...f.auditCustodies.values()].map(
+    ({ custodian }) => custodian.pid,
+  );
+  assert.equal(holders.length, 1);
+  f.caseFault(null);
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.equal(f.events.filter((name) => name === "case-start").length, 1);
+  assert.equal(f.auditCustodies.size, 1);
+  assert.ok(holders.every((pid) => f.processes.has(pid)));
+});
+
+test("Darwin interrupted root-only admission retires only after independent UID absence", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  f.caseFault("before-park");
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Incomplete admission"),
+    }),
+  );
+  const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    },
+    before = f.events.filter((name) => name === "case-start").length;
+  f.caseFault(null);
+  const recovered = await (
+    await createSystemEffects(f.input, f.options)
+  ).recover({ request, job: f.input.job, preparation: null });
+  assert.equal(recovered.status, "RETIRED");
+  assert.ok(f.events.includes("case-empty"));
+  assert.equal(f.events.filter((name) => name === "case-start").length, before);
+  assert.equal(f.processes.size, 0);
+});
+
+test("fixed Darwin defaults withhold access owners without their separate approvals", async () => {
+  const f = buildTranscripts(),
+    id = "access.read-only",
+    binding = caseBinding(f, id),
+    effects = await prepareTranscripts(f),
+    controller = new AbortController(),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  await assert.rejects(
+    effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async () => assert.fail("Unfinished owner admitted"),
+    }),
+  );
+  assert.ok(!f.events.includes("case-start"));
+  controller.abort();
+  const execution = {
+      id,
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((name) => [name, { admission: "possible" }]),
+      ),
+    },
+    settled = await effects.settle(recipe, null, {
+      signal: new AbortController().signal,
+      execution,
+    });
+  assert.ok(
+    Object.values(settled).every(
+      (value) => value.settlement.status === "RETIRED",
+    ),
+  );
+});
+
+test("fixed Darwin entry composes all access profiles from raw custody and BSM frames", async () => {
+  for (const profile of ["read-only", "workspace-write", "trusted-command"]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, profile),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access." + profile),
+        reviewSha256: hash,
+      },
+      controller = new AbortController();
+    let proof;
+    const prepared = await effects.prepare(recipe, {
+      signal: controller.signal,
+      policyBinding: binding,
+      recordPolicy: async (value) => {
+        proof = value;
+      },
+    });
+    assert.equal(proof.observed.policy.policy.profile, profile);
+    const result = await runDarwinAccessCase(prepared.input, prepared.effects);
+    assert.equal(result.status, "OBSERVED");
+    assert.equal(result.nativeEvidence.denials.length, 33);
+    assert.equal(result.nativeEvidence.loopback.length, 4);
+    controller.abort();
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+    );
+    assert.ok(
+      f.events.indexOf("access-audit-close") <
+        f.events.indexOf("access-controls-close"),
+    );
+    assert.ok(
+      f.events.lastIndexOf("case-retire") <
+        f.events.indexOf("access-lease-released"),
+    );
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("fixed Darwin access retains custody on interrupted setup and rejects missing or substituted native evidence", async () => {
+  for (const fault of [
+    "pf-install-interrupted",
+    "anchor-install-interrupted",
+    "control-unavailable",
+    "missing-ipc-identity",
+    "audit-event-loss",
+    "stale-attempt",
+    "unknown-error",
+    "observer-survives",
+    "missing-counter-leg",
+    "foreign-anchor",
+    "outside-state",
+  ]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    f.caseFault(fault);
+    if (
+      [
+        "pf-install-interrupted",
+        "anchor-install-interrupted",
+        "control-unavailable",
+        "missing-ipc-identity",
+      ].includes(fault)
+    ) {
+      await assert.rejects(
+        effects.prepare(recipe, {
+          signal: new AbortController().signal,
+          policyBinding: binding,
+          recordPolicy: async () => {},
+        }),
+      );
+    } else {
+      const prepared = await effects.prepare(recipe, {
+        signal: new AbortController().signal,
+        policyBinding: binding,
+        recordPolicy: async () => {},
+      });
+      const result = await runDarwinAccessCase(
+        prepared.input,
+        prepared.effects,
+      ).catch((cause) => ({ status: "FAIL", cause }));
+      assert.equal(result.status, "FAIL", fault);
+      if (fault === "observer-survives")
+        await assert.rejects(
+          prepared.effects.verifyPolicy(),
+          (cause) => cause === f.observerFailure,
+        );
+      let first;
+      try {
+        await prepared.effects.observe();
+      } catch (cause) {
+        first = cause;
+      }
+      assert.ok(first, fault);
+      await assert.rejects(
+        prepared.effects.verifyPolicy(),
+        (cause) => cause === first,
+      );
+    }
+    assert.ok(!f.events.includes("access-lease-released"));
+    if (
+      [
+        "pf-install-interrupted",
+        "anchor-install-interrupted",
+        "observer-survives",
+      ].includes(fault)
+    )
+      assert.ok(!f.events.includes("access-controls-close"));
+    assert.equal(
+      f.events.filter((name) => name.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+// Approval records are separate inputs. These fixtures inject only raw native
+// frames and filesystem bytes; no family owner or proof callback is supplied.
+function operationBinding(f, id) {
+  const binding = caseBinding(f, id),
+    experiment = f.manifest.purpose === "experiment",
+    declared = f.manifest.darwinPreparation.cases.find(
+      (value) => value.id === id,
+    );
+  const request = declared.bindings.input,
+    assets = [];
+  const entries = f.files
+    .get(declared.custody.plan.path)
+    .bytes.toString()
+    .trim()
+    .split("\n")
+    .slice(1)
+    .map((line) => {
+      const [kind, pin, hex] = line.split(" ");
+      return {
+        kind,
+        sha256: pin === "-" ? null : pin,
+        path: Buffer.from(hex, "hex").toString(),
+      };
+    });
+  const add = (kind, file, data = null, source = null) => {
+    const index = entries.length + assets.length,
+      sha256 = kind === "authority" ? null : digest(data);
+    assets.push({ kind, path: file, sha256, source });
+    if (source === null && kind !== "authority")
+      f.put(file, data, ["image", "helper"].includes(kind) ? 0o555 : 0o400);
+    return index;
+  };
+  const copy = (kind, file, data) =>
+    add(
+      kind,
+      file,
+      data,
+      add(kind, sourceDirectory + "/asset-" + assets.length, data),
+    );
+  const dynamic = (key, paths) => {
+    binding.template.bindings.push({
+      id: key,
+      kind: "custody",
+      paths,
+      minimum: null,
+      maximum: null,
+    });
+    for (const keys of paths) {
+      let value = binding.template.policy;
+      for (const key of keys.slice(0, -1)) value = value[key];
+      value[keys.at(-1)] = { binding: key };
+    }
+  };
+  const finish = (input, slots, policy) => {
+    if (id.startsWith("files.") || id === "git.fixed")
+      entries[5].kind = entries[8].kind = "helper";
+    const {
+      [experiment ? "bindingSha256" : "reviewSha256"]: inputPin,
+      ...reviewed
+    } = input;
+    const record = {
+      ...(experiment ? { purpose: "experiment" } : {}),
+      schemaVersion: 1,
+      contextSha256: observationDigest(binding.context),
+      id,
+      inputSha256: observationDigest(reviewed),
+      assets,
+      slots,
+    };
+    const data = Buffer.from(JSON.stringify(record) + "\n"),
+      approval = {
+        path: sourceDirectory + "/operations-" + id,
+        sha256: digest(data),
+      };
+    f.put(approval.path, data, 0o400);
+    input[experiment ? "bindingSha256" : "reviewSha256"] = approval.sha256;
+    declared.bindings.input = input;
+    declared.bindings.operations = {
+      [experiment ? "binding" : "approval"]: approval,
+    };
+    binding.template.policy.policy = policy;
+    binding.template.policy.launch = nativePolicyLaunchData(
+      request,
+      DARWIN_LITERAL_ARGUMENTS,
+    );
+    for (const rule of binding.template.bindings.slice(0, 3))
+      binding.template.policy.launch.request[rule.paths[0][2]] = {
+        binding: rule.id,
+      };
+    const plan = [...entries, ...assets.map(({ source, ...value }) => value)];
+    const bytes = encodeDarwinCustodyPlan({
+      ...(experiment ? { purpose: "experiment" } : {}),
+      candidateSha,
+      uid: 90001,
+      gid: 90002,
+      entries: plan,
+    });
+    f.put(declared.custody.plan.path, bytes, 0o400);
+    declared.custody.plan.sha256 = digest(bytes);
+    return {
+      binding,
+      declared,
+      request,
+      assets,
+      slots,
+      plan,
+      dynamic,
+      approve() {
+        if (experiment) return;
+        binding.approval.manifestSha256 = nativePolicyTemplateDigest(
+          binding.template,
+        );
+      },
+    };
+  };
+  return { binding, declared, request, entries, add, copy, finish };
+}
+
+function fileBinding(f, id, fault) {
+  const setup = operationBinding(f, id),
+    { request, add, copy } = setup;
+  const root = add("authority", request.custody + "/files"),
+    outside = add("authority", path.dirname(request.custody) + "/outside");
+  copy(
+    "data",
+    path.dirname(request.custody) + "/outside/sentinel",
+    Buffer.from("outside control\n"),
+  );
+  const alias = add("authority", "/fixture/alias-volume");
+  f.directories.set("/fixture/alias-volume", {
+    uid: 0,
+    gid: 0,
+    mode: 0o700,
+    ino: 930,
+  });
+  const tool = add("helper", "/usr/bin/hdiutil", f.image),
+    image = add("data", "/fixture/control.dmg", bytes);
+  const slots = {
+    base: 1,
+    root,
+    outside,
+    alias,
+    volume: { tool, image, cdhash },
+  };
+  const result = setup.finish(
+    {
+      ...(f.manifest.purpose === "experiment"
+        ? { purpose: "experiment", bindingSha256: null }
+        : { reviewSha256: null }),
+      request,
+      base: null,
+      root: null,
+    },
+    slots,
+    {
+      kind: "darwin-files",
+      base: { identitySha256: null },
+      root: { identitySha256: null },
+      authority: { uid: 0, gid: 0, sandboxed: false },
+    },
+  );
+  result.dynamic("file-base", [["policy", "base", "identitySha256"]]);
+  result.dynamic("file-root", [["policy", "root", "identitySha256"]]);
+  result.approve();
+  let next = 20000,
+    allocation = null,
+    leaf = null,
+    pending = null,
+    fileHelper,
+    probe,
+    callers,
+    reader,
+    volumeOwner,
+    volumeWorker,
+    control;
+  let messages = [],
+    phase,
+    operation,
+    exitCode = 0,
+    decision = null;
+  const object = (directory, data = null) => ({
+    identity: `1:2:3:${next++}:100:0:${"d".repeat(32)}`,
+    namedIdentity: null,
+    uid: 0,
+    gid: 0,
+    mode: directory ? 0o700 : 0o600,
+    links: 1,
+    kind: directory ? "directory" : "file",
+    bytes: data,
+  });
+  const named = (value) => value && { ...value, namedIdentity: value.identity };
+  const rootObject = (ctx, index) => {
+    const value = ctx.snapshot(ctx.planEntries[index].path, true);
+    return {
+      ...named(object(true)),
+      identity: value.identity,
+      namedIdentity: value.identity,
+    };
+  };
+  const view = (ctx) => ({
+    base: rootObject(ctx, 1),
+    root: rootObject(ctx, root),
+    allocation: named(allocation),
+    leaf: named(leaf),
+    temporary: named(pending),
+  });
+  const frame = (ctx, kind) => {
+    phase = kind;
+    const objects = view(ctx);
+    if (kind === "ready")
+      Object.assign(objects, { allocation: null, leaf: null, temporary: null });
+    messages.push({
+      nonce: request.nonce,
+      phase: kind,
+      ...Object.fromEntries(
+        Object.entries(objects).map(([key, value]) => [
+          key,
+          value?.identity ?? null,
+        ]),
+      ),
+      alias: kind !== "ready" && leaf !== null && leaf === pending,
+    });
+  };
+  const spawn = (
+    ctx,
+    file = setup.declared.custody.reader.path,
+    uid = false,
+    asid,
+  ) => {
+    const identity = ctx.subject(asid ?? next++);
+    if (uid)
+      Object.assign(identity, {
+        uid: 90001,
+        ruid: 90001,
+        svuid: 90001,
+        gid: 90002,
+        rgid: 90002,
+        svgid: 90002,
+        auid: 90001,
+      });
+    ctx.live(identity, file);
+    return identity;
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "file-view") {
+      if (fault === "missing-read") throw new Error("File read unavailable");
+      return view(ctx);
+    }
+    if (name === "transfer" || name === "transfer-recovery") {
+      messages = [];
+      exitCode = 0;
+      decision = null;
+      control = null;
+      fileHelper = spawn(ctx, request.executable.path);
+      f.processes.get(fileHelper.pid).directories = [
+        {
+          uid: 0,
+          gid: 0,
+          mode: 0o700,
+          fd: 3,
+          dev: "1",
+          ino: ctx
+            .snapshot(ctx.planEntries[root].path, true)
+            .identity.split(":")[3],
+        },
+        {
+          uid: 0,
+          gid: 0,
+          mode: 0o700,
+          fd: 4,
+          dev: "1",
+          ino: ctx.snapshot(request.custody, true).identity.split(":")[3],
+        },
+      ];
+      frame(ctx, "ready");
+      return { pid: fileHelper.pid };
+    }
+    if (name === "file-read") {
+      const value = messages.shift() ?? { eof: true };
+      if (fault === "interrupted" && value.phase === "complete") {
+        exitCode = 126;
+        return { eof: true };
+      }
+      return value;
+    }
+    if (name === "file-send" || name === "file-send-recovery") {
+      const words = Buffer.from(args[0], "hex").toString().trim().split(" "),
+        type = words[0],
+        hex = words[4];
+      if (type === "start") return null;
+      if (type === "allocate") {
+        allocation = object(true);
+        frame(ctx, "allocated");
+      } else if (type === "recover") frame(ctx, "recovered");
+      else if (type === "publish" || type === "replace") {
+        operation = type;
+        pending = object(false, hex);
+        frame(ctx, "prepared");
+      } else if (type === "inspect") frame(ctx, "inspected");
+      else if (type === "cleanup") frame(ctx, "removing");
+      else if (type === "finish") frame(ctx, "finished");
+      else if (type === "continue") {
+        if (control) {
+          exitCode = 126;
+          decision =
+            "reject-" +
+            {
+              parent: "identity",
+              leaf: "identity",
+              symlink: "symlink",
+              hardlink: "hardlink",
+              "cross-volume": "volume",
+            }[control.kind];
+          messages = [];
+        } else if (phase === "prepared") {
+          if (operation === "publish" && leaf) {
+            pending = null;
+            frame(ctx, "exists");
+          } else if (operation === "publish") {
+            leaf = pending;
+            leaf.links = 2;
+            frame(ctx, "linked");
+          } else {
+            leaf = pending;
+            pending = null;
+            frame(ctx, "published");
+          }
+        } else if (phase === "linked") {
+          leaf.links = 1;
+          pending = null;
+          frame(ctx, "published");
+        } else if (phase === "published") frame(ctx, "complete");
+        else if (phase === "removing") {
+          allocation = leaf = pending = null;
+          frame(ctx, "removed");
+        }
+      } else assert.fail("Unexpected file command " + type);
+      return null;
+    }
+    if (name === "file-close") {
+      if (fault !== "surviving") f.processes.delete(fileHelper.pid);
+      return {
+        code:
+          exitCode ||
+          (["prepared", "linked", "published", "removing"].includes(phase)
+            ? 126
+            : 0),
+        signal: null,
+        drained: true,
+        decision,
+      };
+    }
+    if (name === "file-probe-start") {
+      probe = spawn(ctx, undefined, true);
+      return probe;
+    }
+    if (name === "file-probe-finish") {
+      f.processes.delete(probe.pid);
+      return { code: "EACCES" };
+    }
+    if (name === "file-publishers-start") {
+      callers = Array.from({ length: 3 }, () => spawn(ctx));
+      return callers;
+    }
+    if (name === "file-publishers-ack")
+      return ["006f6c64ff", "006e657700ff", "7365636f6e64"];
+    if (name === "file-publishers-finish") {
+      callers.forEach((value) => f.processes.delete(value.pid));
+      return { reaped: true };
+    }
+    if (name === "file-reader-start") {
+      reader = spawn(ctx);
+      return reader;
+    }
+    if (name === "file-reader-read")
+      return {
+        code: "OK",
+        identity: leaf.identity,
+        bytes: leaf.bytes,
+        links: leaf.links,
+      };
+    if (name === "file-reader-finish") {
+      f.processes.delete(reader.pid);
+      return { reaped: true };
+    }
+    if (name === "file-control-start") {
+      const kind = args[1],
+        parent = ["parent", "cross-volume"].includes(kind),
+        saved = parent ? allocation : leaf;
+      const changed =
+        kind === "hardlink"
+          ? saved
+          : object(parent, kind === "symlink" ? null : "foreign");
+      if (kind === "hardlink") changed.links = 2;
+      if (kind === "symlink")
+        Object.assign(changed, { kind: "symlink", target: ".held-value" });
+      if (kind === "cross-volume")
+        changed.identity = changed.identity.replace(/^1:/u, "9:");
+      control = {
+        kind,
+        saved,
+        object: changed,
+        mountpoint: parent ? named(object(true)) : null,
+      };
+      if (parent) allocation = changed;
+      else leaf = changed;
+      return kind === "cross-volume"
+        ? { prepared: true, mountpoint: control.mountpoint }
+        : {
+            object: named(changed),
+            saved: named(saved),
+            temporary: named(pending),
+          };
+    }
+    if (name === "file-control-read")
+      return {
+        object: named(control.object),
+        saved: named(control.saved),
+        temporary: named(pending),
+      };
+    if (name === "file-control-restore") {
+      if (["parent", "cross-volume"].includes(control.kind))
+        allocation = control.saved;
+      else leaf = control.saved;
+      leaf.links = 1;
+      control = null;
+      return { restored: true };
+    }
+    if (name === "file-volume-start") {
+      control.volumeMode = Number(args[3]);
+      volumeOwner = spawn(ctx);
+      return volumeOwner;
+    }
+    if (name === "file-volume-worker") {
+      volumeWorker = spawn(ctx, "/usr/bin/hdiutil", false, volumeOwner.asid);
+      return volumeWorker;
+    }
+    if (name === "file-volume-run") {
+      f.processes.delete(volumeWorker.pid);
+      return { exitCode: 0 };
+    }
+    if (name === "file-volume-finish") {
+      f.processes.delete(volumeOwner.pid);
+      return {
+        reaped: true,
+        ...(control.volumeMode === 1
+          ? {
+              mountpoint:
+                fault === "mountpoint"
+                  ? { ...control.mountpoint, identity: object(true).identity }
+                  : control.mountpoint,
+            }
+          : {}),
+      };
+    }
+    if (name === "file-name") {
+      const id = object(false).identity;
+      return {
+        nativeIdentity: id,
+        aliasIdentity: id,
+        beforeSha256: hash,
+        afterSha256: hash,
+      };
+    }
+    return undefined;
+  });
+  return result;
+}
+
+async function preparedOperation(f, setup, id, signal) {
+  const effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((value) => value.id === id),
+      reviewSha256: hash,
+    };
+  const prepared = await effects.prepare(recipe, {
+    signal,
+    policyBinding: setup.binding,
+    recordPolicy: async () => {},
+  });
+  return { effects, recipe, prepared };
+}
+
+test("fixed Darwin file defaults execute private, publisher, reader and recovery protocols", async () => {
+  for (const id of DARWIN_FILE_CASE_IDS) {
+    const f = buildTranscripts(),
+      setup = fileBinding(f, id),
+      { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinFileCase(
+      id,
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "OBSERVED", JSON.stringify(result));
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+function gitBinding(f, id, fault) {
+  const setup = operationBinding(f, id),
+    { request, add, copy } = setup,
+    profileBytes = (profile) =>
+      f.manifest.purpose === "experiment"
+        ? darwinGitPolicies({
+            request,
+            git: { path: request.storage + "/git" },
+            metadata: request.storage + "/metadata",
+          }).find((item) => item.profile === profile).bytes
+        : Buffer.from("(version 1)\n(deny default)\n");
+  const git = copy("helper", request.storage + "/git", f.image),
+    metadata = add("authority", request.storage + "/metadata"),
+    hooks = add("authority", request.storage + "/hooks");
+  const outside = add("authority", path.dirname(request.custody) + "/outside");
+  copy("data", path.dirname(request.custody) + "/outside/sentinel", bytes);
+  const object = (kind, body) => {
+    const bytes = Buffer.concat([
+      Buffer.from(kind + " " + body.length + "\0"),
+      body,
+    ]);
+    return {
+      sha: createHash("sha1").update(bytes).digest("hex"),
+      bytes: deflateSync(bytes),
+    };
+  };
+  const graph = (content, parent, subject) => {
+    const blob = object("blob", Buffer.from(content)),
+      tree = object(
+        "tree",
+        Buffer.concat([
+          Buffer.from("100644 content.txt\0"),
+          Buffer.from(blob.sha, "hex"),
+        ]),
+      );
+    const commit = object(
+      "commit",
+      Buffer.from(
+        `tree ${tree.sha}\n${parent ? "parent " + parent + "\n" : ""}author Fixture <fixture@example.invalid> 100 +0000\ncommitter Fixture <fixture@example.invalid> 100 +0000\n\n${subject}\n`,
+      ),
+    );
+    return { blob, tree, commit };
+  };
+  const initial = graph("base\n", null, "test(fixture): seed owned base"),
+    after = graph(
+      "owned edit\n",
+      initial.commit.sha,
+      "test(fixture): record owned edit",
+    );
+  const index = (sha) => {
+    const bytes = Buffer.alloc(100);
+    bytes.write("DIRC");
+    bytes.writeUInt32BE(2, 4);
+    bytes.writeUInt32BE(1, 8);
+    bytes.writeUInt32BE(0o100644, 36);
+    Buffer.from(sha, "hex").copy(bytes, 52);
+    bytes.writeUInt16BE(11, 72);
+    bytes.write("content.txt", 74);
+    return Buffer.concat([bytes, createHash("sha1").update(bytes).digest()]);
+  };
+  const seed = (meta, work) => {
+    for (const name of [
+      "refs",
+      "refs/heads",
+      "objects",
+      "logs",
+      "logs/refs",
+      "logs/refs/heads",
+    ])
+      add("authority", meta + "/" + name);
+    for (const prefix of new Set(
+      Object.values(initial).map((value) => value.sha.slice(0, 2)),
+    ))
+      add("authority", meta + "/objects/" + prefix);
+    const data = {
+      config: Buffer.from(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tlogallrefupdates = true\n[user]\n\tname = Fixture\n\temail = fixture@example.invalid\n",
+      ),
+      HEAD: Buffer.from("ref: refs/heads/proof\n"),
+      "refs/heads/proof": Buffer.from(initial.commit.sha + "\n"),
+      index: index(initial.blob.sha),
+    };
+    for (const value of Object.values(initial))
+      data["objects/" + value.sha.slice(0, 2) + "/" + value.sha.slice(2)] =
+        value.bytes;
+    for (const [name, bytes] of Object.entries(data))
+      copy("data", meta + "/" + name, bytes);
+    copy("data", work + "/.git", Buffer.from("gitdir: " + meta + "\n"));
+    copy("data", work + "/content.txt", Buffer.from("owned edit\n"));
+  };
+  seed(request.storage + "/metadata", request.workspace);
+  const profiles = [],
+    slots = {
+      git,
+      metadata,
+      hooks,
+      outside,
+      control: null,
+      profiles,
+      audit: null,
+    };
+  if (id === "git.ordinary") {
+    const meta = add("authority", request.storage + "/control"),
+      work = add("authority", request.storage + "/control-work"),
+      hook = add("authority", request.storage + "/control-hooks"),
+      helper = copy("helper", request.custody + "/git-executor", f.image);
+    seed(request.storage + "/control", request.storage + "/control-work");
+    slots.control = {
+      metadata: meta,
+      workspace: work,
+      hooks: hook,
+      helper,
+      cdhash,
+    };
+    for (const profile of ["read-only", "workspace-write", "trusted-command"])
+      profiles.push({
+        profile,
+        policy: copy(
+          "data",
+          request.custody + "/git-policy-" + profile,
+          profileBytes(profile),
+        ),
+      });
+    const observer = copy("helper", request.custody + "/observer", f.image),
+      events = [{ event: 1, opcode: "open", classes: 1, selector: "path" }];
+    slots.audit = {
+      helper: { index: observer, cdhash },
+      classes: 1,
+      mapping: {
+        sdkSha256: hash,
+        abiSha256: hash,
+        headerVersion: 11,
+        events,
+        mappingSha256: digest(JSON.stringify({ headerVersion: 11, events })),
+      },
+    };
+  }
+  const input = {
+    request,
+    git: { path: request.storage + "/git", sha256: digest(f.image), cdhash },
+    metadata: request.storage + "/metadata",
+    hooks: request.storage + "/hooks",
+    parent: initial.commit.sha,
+    ...(f.manifest.purpose === "experiment"
+      ? { purpose: "experiment", bindingSha256: null }
+      : { reviewSha256: null }),
+  };
+  const result = setup.finish(input, slots, {
+    kind: "darwin-git",
+    gitSha256: input.git.sha256,
+    metadata: { identitySha256: null },
+    hooks: { identitySha256: null },
+    authority: { uid: 0, gid: 0, sandboxed: false },
+    profiles: profiles.map(({ profile }) => ({
+      profile,
+      seatbeltSha256: digest(profileBytes(profile)),
+    })),
+  });
+  result.dynamic("git-metadata", [["policy", "metadata", "identitySha256"]]);
+  result.dynamic("git-hooks", [["policy", "hooks", "identitySha256"]]);
+  result.approve();
+  let owner,
+    worker,
+    payload,
+    mode,
+    metadataIndex,
+    step = 0,
+    stage = "worker",
+    ordinary = false,
+    observer,
+    sequence = 0,
+    time = 0,
+    auditCount = 0;
+  const records = new Map(),
+    pending = [];
+  const word = (n) => {
+    const b = Buffer.alloc(4);
+    b.writeUInt32BE(n);
+    return b;
+  };
+  const commit = (ctx) => {
+    const meta = ctx.planEntries[metadataIndex].path;
+    for (const value of Object.values(after))
+      f.put(
+        meta + "/objects/" + value.sha.slice(0, 2) + "/" + value.sha.slice(2),
+        value.bytes,
+        0o644,
+      );
+    f.put(
+      meta + "/refs/heads/proof",
+      Buffer.from(after.commit.sha + "\n"),
+      0o644,
+    );
+    f.put(meta + "/index", index(after.blob.sha), 0o644);
+    f.put(meta + "/logs/HEAD", Buffer.from("fixed owned reflog\n"), 0o644);
+    f.put(
+      meta + "/logs/refs/heads/proof",
+      Buffer.from("fixed owned reflog\n"),
+      0o644,
+    );
+  };
+  const spawn = (ctx, file, asid, uid = false) => {
+    const value = ctx.subject(asid);
+    if (uid)
+      Object.assign(value, {
+        uid: 90001,
+        ruid: 90001,
+        svuid: 90001,
+        gid: 90002,
+        rgid: 90002,
+        svgid: 90002,
+        auid: 90001,
+      });
+    ctx.live(value, file);
+    return value;
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "git-object") {
+      const value = f.files.get(
+          ctx.planEntries[Number(args[0])].path +
+            "/objects/" +
+            args[1].slice(0, 2) +
+            "/" +
+            args[1].slice(2),
+        ),
+        file =
+          ctx.planEntries[Number(args[0])].path +
+          "/objects/" +
+          args[1].slice(0, 2) +
+          "/" +
+          args[1].slice(2);
+      return {
+        object: ctx.snapshot(file),
+        sha256: digest(value.bytes),
+        hex: value.bytes.toString("hex"),
+      };
+    }
+    if (name === "git-start") {
+      ordinary = false;
+      metadataIndex = Number(args[1]);
+      owner = spawn(ctx, ctx.planEntries[Number(args[4])].path, 25000);
+      step = 0;
+      stage = "worker";
+      return owner;
+    }
+    if (name === "git-send") {
+      if (args[0] === "S") {
+        step++;
+        stage = "worker";
+      }
+      if (args[0] === "R") {
+        if (step === 4) commit(ctx);
+        if (fault !== "surviving") f.processes.delete(worker.pid);
+        stage = "reaped";
+      }
+      return null;
+    }
+    if (name === "git-event" && !ordinary) {
+      if (step === 5)
+        return { nonce: request.nonce, phase: "finished", pid: owner.pid };
+      if (stage === "worker") {
+        worker = spawn(ctx, input.git.path, owner.asid);
+        if (fault === "stale")
+          f.processes.get(worker.pid).sha256 = "f".repeat(64);
+        return { worker };
+      }
+      return { reaped: worker.pid, exitCode: 0, stdoutHex: "" };
+    }
+    if (name === "git-close") {
+      f.processes.delete(owner.pid);
+      return { code: 0, signal: null, drained: true };
+    }
+    if (name === "git-ordinary-start") {
+      ordinary = true;
+      mode = args[4];
+      stage = "root";
+      owner = spawn(ctx, request.launcher.path, 0);
+      return { pid: owner.pid };
+    }
+    if (name === "git-event" && ordinary) {
+      if (stage === "root") return { helper: owner, payload: null };
+      if (stage === "payload")
+        return { helper: owner, payload, controls: true };
+      if (stage === "ready")
+        return { nonce: request.nonce, parked: true, pid: payload.pid };
+      if (stage === "worker") return { worker };
+      if (stage === "outcome")
+        return {
+          exitCode: mode === "inspect" ? 0 : 1,
+          stdoutHex:
+            mode === "inspect"
+              ? Buffer.from(input.parent + "\n").toString("hex")
+              : "",
+        };
+      if (stage === "exit") return { exitCode: 0, signal: null };
+    }
+    if (name === "git-ordinary-release") {
+      if (args[0] === "0" && args[1] === "P") {
+        payload = spawn(ctx, request.executable.path, 26000 + auditCount, true);
+        stage = "payload";
+      } else if (args[0] === "0" && args[1] === "R") {
+        payload = {
+          ...payload,
+          pidVersion: payload.pidVersion + (fault === "epoch-stale" ? 0 : 1),
+        };
+        if (fault === "epoch-birth") payload.startMicroseconds++;
+        if (fault === "epoch-session") payload.asid++;
+        if (fault === "epoch-credentials") payload.svuid = 0;
+        ctx.live(payload, request.executable.path);
+        stage = "ready";
+      } else if (args[1] === "P") {
+        worker = spawn(ctx, input.git.path, payload.asid, true);
+        stage = "worker";
+      } else if (args[1] === "R") {
+        const raw = word(++auditCount),
+          selector = Buffer.from(input.metadata + "/index.lock\0"),
+          token = Buffer.alloc(selector.length + 3);
+        token[0] = 0x23;
+        token.writeUInt16BE(selector.length, 1);
+        selector.copy(token, 3);
+        records.set(raw.toString("hex"), {
+          tokens: [
+            {
+              kind: "header",
+              version: 11,
+              event: 1,
+              name: Buffer.from("open").toString("hex"),
+              classes: 1,
+              seconds: 200,
+              milliseconds: time + 1,
+            },
+            {
+              kind: "subject",
+              pid: worker.pid,
+              auid: worker.auid,
+              asid: worker.asid,
+              uid: worker.uid,
+              gid: worker.gid,
+            },
+            { kind: "metadata", type: 0x23, hex: token.toString("hex") },
+            {
+              kind: "return",
+              error: mode === "inspect" ? 0 : 1,
+              result: mode === "inspect" ? 0 : -1,
+            },
+            { kind: "trailer" },
+          ],
+        });
+        if (fault !== "event-loss") pending.push(word(raw.length), raw);
+        f.processes.delete(worker.pid);
+        stage = "outcome";
+      } else if (args[1] === "S") {
+        f.processes.delete(payload.pid);
+        stage = "exit";
+      }
+      return null;
+    }
+    if (name === "case-resume") return { resumed: true };
+    if (name === "authority") {
+      const target = ctx.snapshot(ctx.planEntries[Number(args[1])].path, true),
+        subject = f.processes.get(Number(args[0])).identity;
+      return {
+        subject,
+        object: target,
+        path: Buffer.from(ctx.planEntries[Number(args[1])].path).toString(
+          "hex",
+        ),
+        aclSha256: hash,
+        sandboxed: true,
+        decisions: [0, 1, 1, 1, 1],
+      };
+    }
+    if (name === "git-ordinary-finish") {
+      f.processes.delete(owner.pid);
+      return { reaped: true };
+    }
+    if (name === "access-audit-start") {
+      observer = spawn(ctx, ctx.planEntries[Number(args[0])].path, 0);
+      return { identity: observer };
+    }
+    if (name === "access-audit") {
+      let data;
+      if (args[0] === "A") data = word(0);
+      else if (args[0] === "S")
+        data = Buffer.concat([
+          word(0xffffffff),
+          word(auditCount * 4),
+          word(auditCount),
+        ]);
+      else {
+        time += 2;
+        data = Buffer.concat([
+          ...pending.splice(0),
+          word(0xfffffffe),
+          word(++sequence),
+          word(200),
+          word(time),
+        ]);
+      }
+      return { hex: data.toString("hex") };
+    }
+    if (name === "bsm") return records.get(args[0]);
+    if (name === "access-audit-close") {
+      f.processes.delete(observer.pid);
+      return { code: 0, signal: null };
+    }
+    return undefined;
+  });
+  return result;
+}
+
+test("fixed Darwin Git defaults verify loose objects and every native Git child", async () => {
+  for (const id of ["git.fixed", "git.ordinary"]) {
+    const f = buildTranscripts(),
+      setup = gitBinding(f, id),
+      { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinGitCase(
+      id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "OBSERVED", JSON.stringify(result));
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+function releaseBinding(f, fault) {
+  const setup = operationBinding(f, "release"),
+    { request, add } = setup,
+    components = [],
+    manifestComponents = [];
+  const dependency = Buffer.from(f.image);
+  dependency.writeUInt32LE(6, 12);
+  const policy = add("data", sourceDirectory + "/release-policy", bytes);
+  const metadata = {
+    headerSha256: hash,
+    dependencies: [],
+    rpaths: [],
+    sdk: 1,
+    minimum: 1,
+    uuid: "d".repeat(32),
+  };
+  for (const id of ["helper", "payload", "dyld"]) {
+    const image = id === "dyld" ? dependency : f.image,
+      index = add(
+        "image",
+        id === "dyld" ? "/usr/lib/dyld" : sourceDirectory + "/release-" + id,
+        image,
+      ),
+      bindings = {},
+      pins = {};
+    for (const key of ["publication", "source", "build", "license", "abi"]) {
+      const data =
+        key === "build"
+          ? Buffer.from(
+              JSON.stringify({
+                componentSha256: digest(image),
+                contextSha256: observationDigest(setup.binding.context),
+                osBuild: "24A100",
+                sdk: 1,
+                minimum: 1,
+                sdkBuild: "reviewed",
+              }) + "\n",
+            )
+          : Buffer.from("approved " + id + " " + key + "\n");
+      bindings[key] = add(
+        "data",
+        sourceDirectory + "/release-" + id + "-" + key,
+        data,
+      );
+      pins[key] = digest(data);
+    }
+    components.push({
+      id,
+      index,
+      signature: { cdhash, entitlementsSha256: hash },
+      loader: [],
+      bindings,
+    });
+    manifestComponents.push({
+      id,
+      role:
+        id === "helper"
+          ? "helper"
+          : id === "payload"
+            ? "executable"
+            : "dependency",
+      sha256: digest(image),
+      format: "macho-x64",
+      loader: id === "dyld" ? [] : ["dyld"],
+      bindings: pins,
+    });
+  }
+  const dyld = components.find((value) => value.id === "dyld");
+  for (const component of components.filter((value) => value.id !== "dyld"))
+    component.loader.push({
+      id: "dyld",
+      path: "/usr/lib/dyld",
+      index: dyld.index,
+      cache: false,
+      cacheUuid: null,
+      imageUuid: null,
+      signatureSha256: null,
+    });
+  const cache = fault?.startsWith("cache")
+    ? add("cache", sourceDirectory + "/dyld-cache", bytes)
+    : null;
+  if (cache !== null)
+    for (const component of components.filter((value) => value.id !== "dyld"))
+      Object.assign(component.loader[0], {
+        index: cache,
+        cache: true,
+        cacheUuid: "c".repeat(32),
+        imageUuid: metadata.uuid,
+        signatureSha256: hash,
+      });
+  const providers = {},
+    providerSlots = {};
+  for (const name of ["codex", "claude"]) {
+    const record = {
+      reviewSha256: hash,
+      closureSha256: hash,
+      members: ["dyld", "helper", "payload"],
+    };
+    providers[name] = record;
+    providerSlots[name] = add(
+      "data",
+      sourceDirectory + "/package-" + name,
+      Buffer.from(JSON.stringify(record) + "\n"),
+    );
+  }
+  const authority = add(
+    "data",
+    sourceDirectory + "/release-authority",
+    Buffer.from(
+      JSON.stringify({
+        schemaVersion: 1,
+        contextSha256: observationDigest(setup.binding.context),
+        image: "macos-15-intel",
+        sdkBuild: "reviewed",
+        policyTemplates: [policy],
+        privileges: ["root"],
+      }) + "\n",
+    ),
+  );
+  const slots = { components, providers: providerSlots, authority };
+  // The independent template binds the exact declared inventory, before reads.
+  const result = setup.finish({ request, reviewSha256: null }, slots, {
+    kind: "darwin-release",
+    authority: { uid: 0, gid: 0, sandboxed: false },
+    inventorySha256: null,
+  });
+  result.binding.template.policy.policy.inventorySha256 =
+    result.declared.custody.plan.sha256;
+  result.approve();
+  const manifest = {
+    schemaVersion: 2,
+    candidateSha,
+    platform: "darwin",
+    image: "macos-15-intel",
+    osBuild: "24A100",
+    sdkBuild: "reviewed",
+    policyTemplates: [hash],
+    privileges: ["root"],
+    components: manifestComponents,
+    providers,
+  };
+  const approval = {
+    candidateSha,
+    platform: "darwin",
+    authority: "operator-protected",
+    manifestSha256: releaseClosureDigest(manifest),
+  };
+  f.operationFrames((name, args, ctx) => {
+    if (name === "operation-authority")
+      return { identity: ctx.helper, sandboxed: false, noLiveUid: true };
+    if (name === "macho")
+      return {
+        ...metadata,
+        dependencies:
+          Number(args[0]) === dyld.index
+            ? []
+            : [Buffer.from("/usr/lib/dyld").toString("hex")],
+      };
+    if (name === "cache")
+      return fault === "cache-missing"
+        ? null
+        : {
+            cacheUuid:
+              fault === "cache-substitution" ? "e".repeat(32) : "c".repeat(32),
+            imageUuid: metadata.uuid,
+            signatureSha256: hash,
+            macho: metadata,
+          };
+    if (name === "signature" && fault === "signature")
+      return { cdhash: "f".repeat(40), entitlementsSha256: hash, valid: true };
+    if (name === "slots-closed" && fault === "held-reader") return [];
+    if (
+      name === "read" &&
+      fault === "provider" &&
+      Number(args[0]) === providerSlots.claude
+    ) {
+      const value = { ...providers.claude, reviewSha256: "f".repeat(64) };
+      return { hex: Buffer.from(JSON.stringify(value) + "\n").toString("hex") };
+    }
+    return undefined;
+  });
+  return { ...result, manifest, approval };
+}
+
+test("fixed Darwin release defaults bind signed images, native loader reads and both protected packages", async () => {
+  for (const fault of [undefined, "cache"]) {
+    const f = buildTranscripts(),
+      setup = releaseBinding(f, fault),
+      { effects, recipe, prepared } = await preparedOperation(
+        f,
+        setup,
+        "release",
+      );
+    const observed = await observeDarwinRelease(
+      setup.manifest,
+      setup.approval,
+      prepared.effects,
+    );
+    assert.equal(observed.observation.components.length, 3);
+    assert.equal(observed.observation.providers.claude.independent, true);
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETIRED"),
+      JSON.stringify(settled),
+    );
+    assert.equal(f.processes.size, 0);
+    assert.equal(
+      f.events.filter((value) => value.startsWith("tool:")).length,
+      22,
+    );
+  }
+});
+
+test("Darwin file defaults retain missing native reads and surviving writers", async () => {
+  const missing = buildTranscripts(),
+    setup = fileBinding(missing, "files.private", "missing-read"),
+    effects = await prepareTranscripts(missing);
+  await assert.rejects(
+    effects.prepare(
+      {
+        ...darwinSystemRecipes().find((value) => value.id === "files.private"),
+        reviewSha256: hash,
+      },
+      {
+        policyBinding: setup.binding,
+        recordPolicy: async () => assert.fail("Missing observation admitted"),
+      },
+    ),
+  );
+  const f = buildTranscripts(),
+    owner = fileBinding(f, "files.private", "surviving"),
+    { prepared } = await preparedOperation(f, owner, "files.private");
+  await assert.rejects(
+    runDarwinFileCase("files.private", prepared.input, prepared.effects),
+  );
+  assert.ok(f.processes.size > 0);
+});
+
+test("Darwin Git defaults reject substituted execution identities, worker images and lost denial events", async () => {
+  for (const [id, fault] of [
+    ["git.fixed", "stale"],
+    ["git.ordinary", "event-loss"],
+    ...["epoch-birth", "epoch-session", "epoch-credentials", "epoch-stale"].map(
+      (fault) => ["git.ordinary", fault],
+    ),
+  ]) {
+    const f = buildTranscripts(),
+      setup = gitBinding(f, id, fault),
+      { prepared } = await preparedOperation(f, setup, id);
+    const result = await runDarwinGitCase(
+      id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+      prepared.input,
+      prepared.effects,
+    );
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.reservation, "RETAINED");
+    if (fault.startsWith("epoch-"))
+      assert.equal(
+        f.events.filter((name) => name === "git-ordinary-release").length,
+        2,
+        "Rejected execution identity cannot start a worker",
+      );
+  }
+});
+
+test("Darwin release rejects signature, package byte and held-reader substitutions", async () => {
+  for (const fault of [
+    "signature",
+    "provider",
+    "held-reader",
+    "cache-missing",
+    "cache-substitution",
+    "sdk",
+  ]) {
+    const f = buildTranscripts(),
+      setup = releaseBinding(f, fault),
+      { prepared } = await preparedOperation(f, setup, "release");
+    if (fault === "sdk") {
+      const request = f.requests.find(
+        (value) => value.file === "/usr/bin/xcrun",
+      );
+      const file = path.join(
+        directory,
+        `darwin-command-${observationDigest(request)}-result.json`,
+      );
+      const record = JSON.parse(f.files.get(file).bytes);
+      f.files.get(file).bytes = Buffer.from(
+        JSON.stringify({ ...record, stdout: "different SDK build\n" }) + "\n",
+      );
+    }
+    await assert.rejects(
+      observeDarwinRelease(setup.manifest, setup.approval, prepared.effects),
+    );
+  }
+});
+
+test("Darwin file settlement adopts cleanup lifetime and cleans only recorded objects", async () => {
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.private", "interrupted"),
+    controller = new AbortController(),
+    { effects, recipe, prepared } = await preparedOperation(
+      f,
+      setup,
+      "files.private",
+      controller.signal,
+    );
+  assert.equal(
+    (await runDarwinFileCase("files.private", prepared.input, prepared.effects))
+      .status,
+    "FAIL",
+  );
+  controller.abort();
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETIRED"),
+    JSON.stringify(settled),
+  );
+  assert.ok(f.events.includes("transfer-recovery"));
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin file Git and release partial admissions rejoin protected receipts without compilation", async () => {
+  for (const id of ["files.private", "git.fixed", "release"]) {
+    const f = buildTranscripts(),
+      setup =
+        id === "release"
+          ? releaseBinding(f)
+          : id.startsWith("git.")
+            ? gitBinding(f, id)
+            : fileBinding(f, id);
+    await preparedOperation(f, setup, id);
+    f.processes.clear(); // Raw kernel read now reports the interrupted owner absent.
+    const before = f.events.filter(
+      (value) =>
+        value.startsWith("tool:") ||
+        ["case-directory", "case-copy"].includes(value),
+    ).length;
+    const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    };
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(recovered.status, "RETIRED", id + JSON.stringify(recovered));
+    assert.equal(
+      f.events.filter(
+        (value) =>
+          value.startsWith("tool:") ||
+          ["case-directory", "case-copy"].includes(value),
+      ).length,
+      before,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
+test("Darwin operation settlement rejects changed outside objects and unresolved receipt writes", async () => {
+  for (const id of ["files.private", "git.fixed"]) {
+    const f = buildTranscripts(),
+      setup = id.startsWith("git.") ? gitBinding(f, id) : fileBinding(f, id);
+    const { effects, recipe, prepared } = await preparedOperation(f, setup, id);
+    const sentinel = setup.plan[setup.slots.outside].path + "/sentinel";
+    f.files.get(sentinel).bytes = Buffer.from("changed outside bytes\n");
+    const settled = await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(
+      Object.values(settled)
+        .filter(Boolean)
+        .every(({ settlement }) => settlement.status === "RETAINED"),
+    );
+  }
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.private");
+  await preparedOperation(f, setup, "files.private");
+  const prefix = directory + "/darwin-case-files.private-";
+  const pending = [...f.files]
+    .filter(([file]) => file.startsWith(prefix))
+    .map(([file, value]) => ({ file, record: JSON.parse(value.bytes) }))
+    .findLast(({ record }) => record.phase === "operation-receipt");
+  f.files.delete(pending.file);
+  f.processes.clear();
+  const request = {
+    candidateSha,
+    platform: "darwin",
+    jobSha256: observationDigest(f.input.job),
+    preparationSha256: observationDigest(null),
+  };
+  const recovered = await (
+    await createSystemEffects(f.input, f.options)
+  ).recover({ request, job: f.input.job, preparation: null });
+  assert.equal(recovered.status, "RETAINED");
+  assert.ok(!f.events.includes("transfer-recovery"));
+});
+
+test("Darwin file Git and release recovery independently settles completed mutations", async () => {
+  for (const id of ["files.private", "git.fixed", "release"]) {
+    const f = buildTranscripts(),
+      setup =
+        id === "release"
+          ? releaseBinding(f)
+          : id.startsWith("git.")
+            ? gitBinding(f, id)
+            : fileBinding(f, id);
+    const { prepared } = await preparedOperation(f, setup, id);
+    if (id === "release")
+      await observeDarwinRelease(
+        setup.manifest,
+        setup.approval,
+        prepared.effects,
+      );
+    else
+      assert.equal(
+        (
+          await (id.startsWith("git.")
+            ? runDarwinGitCase(
+                "git.fixed-commit",
+                prepared.input,
+                prepared.effects,
+              )
+            : runDarwinFileCase(id, prepared.input, prepared.effects))
+        ).status,
+        "OBSERVED",
+      );
+    f.processes.clear();
+    const before = f.events.filter(
+      (value) =>
+        value.startsWith("tool:") ||
+        ["case-directory", "case-copy", "git-start", "transfer"].includes(
+          value,
+        ),
+    ).length;
+    const request = {
+      candidateSha,
+      platform: "darwin",
+      jobSha256: observationDigest(f.input.job),
+      preparationSha256: observationDigest(null),
+    };
+    const recovered = await (
+      await createSystemEffects(f.input, f.options)
+    ).recover({ request, job: f.input.job, preparation: null });
+    assert.equal(recovered.status, "RETIRED", id);
+    assert.equal(
+      f.events.filter(
+        (value) =>
+          value.startsWith("tool:") ||
+          ["case-directory", "case-copy", "git-start", "transfer"].includes(
+            value,
+          ),
+      ).length,
+      before,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
+test("Darwin volume restoration retains a substituted owned mountpoint", async () => {
+  const f = buildTranscripts(),
+    setup = fileBinding(f, "files.aliases", "mountpoint");
+  const { effects, recipe, prepared } = await preparedOperation(
+    f,
+    setup,
+    "files.aliases",
+  );
+  const result = await runDarwinFileCase(
+    "files.aliases",
+    prepared.input,
+    prepared.effects,
+  ).catch(() => ({ status: "FAIL" }));
+  assert.equal(result.status, "FAIL");
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
+});
+
+const recoveryRequest = (f) => ({
+  candidateSha,
+  platform: "darwin",
+  jobSha256: observationDigest(f.input.job),
+  preparationSha256: observationDigest(null),
+});
+const recoverTranscripts = async (f, signal) =>
+  (await createSystemEffects(f.input, f.options)).recover({
+    request: recoveryRequest(f),
+    job: f.input.job,
+    preparation: null,
+    signal,
+  });
+
+test("Darwin recovery rejects a substituted job before fencing or cleanup", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  const effects = await createSystemEffects(f.input, f.options),
+    job = { ...f.input.job, runId: "2", runAttempt: 2 },
+    request = { ...recoveryRequest(f), jobSha256: observationDigest(job) },
+    before = [...f.events],
+    files = [...f.files.keys()];
+  await assert.rejects(effects.recover({ request, job, preparation: null }));
+  assert.deepEqual(f.events, before);
+  assert.deepEqual([...f.files.keys()], files);
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+});
+
+test("Darwin recovery fences build admission without preparation results or final images", async () => {
+  const f = buildTranscripts(),
+    build = await createBuildEffects(f.input, f.options);
+  await build.run(f.requests[0]);
+  for (const file of f.files.keys())
+    if (file.endsWith("-result.json") || file.startsWith(output + "/"))
+      f.files.delete(file);
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.equal(f.events.filter((name) => name.startsWith("tool:")).length, 1);
+  await assert.rejects(build.run(f.requests[1]));
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin interrupted PF setup recovers its original reference before releasing exclusion", async () => {
+  for (const fault of [
+    null,
+    "missing-reference",
+    "substituted-root",
+    "cancelled",
+  ]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    f.caseFault("pf-install-interrupted");
+    await assert.rejects(
+      effects.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: async () => assert.fail("Incomplete policy"),
+      }),
+    );
+    f.caseFault(null);
+    f.processes.clear();
+    if (fault === "missing-reference")
+      f.files.delete(
+        "/private/var/run/native-poc/cases/" +
+          observationDigest(binding.context) +
+          "/custody/pf-reference",
+      );
+    if (fault === "substituted-root") f.caseFault("recovery-root");
+    const controller = new AbortController();
+    if (fault === "cancelled") {
+      const start = f.options.readerOptions.transport;
+      f.options.readerOptions.transport = async (...args) => {
+        const owner = await start(...args),
+          send = owner.send;
+        owner.send = async (frame) => {
+          if (frame.startsWith("pf-recover")) controller.abort();
+          return send.call(owner, frame);
+        };
+        return owner;
+      };
+    }
+    const before = f.events.filter(
+      (name) =>
+        name.startsWith("tool:") ||
+        ["case-directory", "case-copy", "case-start"].includes(name),
+    ).length;
+    const recovered = await recoverTranscripts(f, controller.signal);
+    assert.equal(recovered.status, fault ? "RETAINED" : "RETIRED", fault);
+    assert.equal(
+      f.events.filter(
+        (name) =>
+          name.startsWith("tool:") ||
+          ["case-directory", "case-copy", "case-start"].includes(name),
+      ).length,
+      before,
+    );
+    assert.equal(f.events.includes("access-lease-released"), fault === null);
+    if (fault === null) {
+      assert.ok(
+        f.events.indexOf("pf-recover") <
+          f.events.indexOf("access-lease-released"),
+      );
+      assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+      await assert.rejects(
+        effects.prepare(recipe, {
+          policyBinding: binding,
+          recordPolicy: async () => {},
+        }),
+      );
+      assert.equal(f.processes.size, 0);
+    }
+  }
+});
+
+test("Darwin access recovery joins drained audit and independent IPC absence after a lost cleanup result", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "read-only"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+      reviewSha256: hash,
+    },
+    controller = new AbortController();
+  const prepared = await effects.prepare(recipe, {
+    signal: controller.signal,
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  f.caseFault("after-controls-close");
+  const observed = await runDarwinAccessCase(
+    prepared.input,
+    prepared.effects,
+  ).catch(() => ({ status: "FAIL" }));
+  assert.equal(observed.status, "FAIL");
+  controller.abort();
+  const settled = await effects.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETAINED"),
+  );
+  f.caseFault(null);
+  const holders = new Set(
+    [...f.auditCustodies.values()].map(({ custodian }) => custodian.pid),
+  );
+  for (const pid of f.processes.keys())
+    if (!holders.has(pid)) f.processes.delete(pid);
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.ok(f.events.includes("access-controls-retired"));
+  assert.ok(f.events.includes("access-lease-released"));
+  assert.equal(f.events.filter((name) => name === "case-start").length, 1);
+  assert.equal(
+    f.events.filter((name) => name === "access-provision").length,
+    1,
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin interrupted pre-policy custody releases exclusion only after fresh baseline and UID absence", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "read-only"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+      reviewSha256: hash,
+    };
+  f.operationFrames((name) => {
+    if (name === "case-receipt")
+      throw new Error("Interrupted initial native receipt");
+  });
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    }),
+  );
+  assert.ok(!f.events.includes("pf-write"));
+  f.operationFrames(null);
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+  assert.ok(f.events.includes("access-lease-released"));
+  assert.ok(!f.events.includes("case-start"));
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin uncertain observation retires possible payloads and retains undrained audit and policy", async () => {
+  const f = buildTranscripts(),
+    binding = accessBinding(f, "workspace-write"),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find(
+        ({ id }) => id === "access.workspace-write",
+      ),
+      reviewSha256: hash,
+    };
+  await effects.prepare(recipe, {
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  const oldReader = [...f.auditCustodies.values()][0].owner,
+    signals = f.events.filter((name) => name === "case-signal").length;
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(
+    f.processes.has(oldReader.pid),
+    "Undrained capture keeps its original consumer",
+  );
+  assert.equal(
+    f.events.filter((name) => name === "case-signal").length,
+    signals,
+  );
+  for (const [pid, process] of f.processes)
+    if (process.identity.uid === 0) f.processes.delete(pid);
+  const before = f.events.filter((name) => name === "pf-write").length;
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(f.events.includes("case-signal"));
+  assert.equal(
+    [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+      .length,
+    0,
+  );
+  assert.equal(f.events.filter((name) => name === "pf-write").length, before);
+  assert.ok(!f.events.includes("access-lease-released"));
+});
+
+test("Darwin failed build evidence cannot suppress independent case retirement", async () => {
+  const f = buildTranscripts(),
+    id = "ownership.fork-exec",
+    binding = caseBinding(f, id, true),
+    effects = await prepareTranscripts(f),
+    recipe = {
+      ...darwinSystemRecipes().find((entry) => entry.id === id),
+      reviewSha256: hash,
+    };
+  await effects.prepare(recipe, {
+    policyBinding: binding,
+    recordPolicy: async () => {},
+  });
+  const command = [...f.files.values()]
+    .map(({ bytes }) => {
+      try {
+        return JSON.parse(bytes);
+      } catch {}
+    })
+    .find((record) => record?.phase === "helper" && record.requestSha256);
+  const intent = [...f.files].find(
+    ([file]) =>
+      file ===
+      directory + "/darwin-command-" + command.requestSha256 + "-intent.json",
+  );
+  const record = JSON.parse(intent[1].bytes);
+  record.candidateSha = "f".repeat(40);
+  intent[1].bytes = Buffer.from(JSON.stringify(record) + "\n");
+  for (const [pid, process] of f.processes)
+    if (
+      process.identity.uid === 0 &&
+      process.sha256 === f.manifest.darwinPreparation.bootstrap.reader.sha256
+    )
+      f.processes.delete(pid);
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  assert.ok(f.events.includes("case-signal"));
+  assert.equal(
+    [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+      .length,
+    0,
+  );
+});
+
+test("Darwin recovery retains an unacknowledged native operation birth", async () => {
+  const f = buildTranscripts(),
+    setup = gitBinding(f, "git.fixed"),
+    transport = f.options.readerOptions.transport,
+    write = f.options.fs.writeFile;
+  let interrupted = false,
+    writerLost = false;
+  f.options.fs.writeFile = async (...args) => {
+    if (writerLost) throw new Error("Interrupted runner receipt writer");
+    return write(...args);
+  };
+  f.options.readerOptions.transport = async (...args) => {
+    const owner = await transport(...args),
+      send = owner.send;
+    owner.send = async (frame) => {
+      await send.call(owner, frame);
+      if (interrupted && frame.startsWith("git-start ")) {
+        writerLost = true;
+        throw new Error("Lost native helper acknowledgement");
+      }
+    };
+    return owner;
+  };
+  const { prepared } = await preparedOperation(f, setup, "git.fixed");
+  interrupted = true;
+  await assert.rejects(
+    runDarwinGitCase("git.fixed-commit", prepared.input, prepared.effects),
+  );
+  interrupted = writerLost = false;
+  assert.ok(
+    [...f.processes.values()].some(({ identity }) => identity.asid === 25000),
+  );
+  // Later absence cannot manufacture the missing immutable birth receipt.
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+});
+
+test("Darwin recovery independently checks sealed root births without a domain acknowledgement", async () => {
+  const f = buildTranscripts(),
+    setup = gitBinding(f, "git.fixed"),
+    write = f.options.fs.writeFile;
+  let interrupted = false,
+    writerLost = false;
+  f.options.fs.writeFile = async (file, bytes, settings) => {
+    if (writerLost) throw new Error("Interrupted runner receipt writer");
+    await write(file, bytes, settings);
+    const record = JSON.parse(bytes);
+    if (interrupted && record.phase === "operation-receipt") {
+      const value = JSON.parse(
+        f.files.get(
+          setup.request.custody + "/receipt-" + record.pin.index + ".json",
+        ).bytes,
+      );
+      if (value.kind === "birth" && value.identity.asid === 25000)
+        writerLost = true;
+    }
+  };
+  const { prepared } = await preparedOperation(f, setup, "git.fixed");
+  interrupted = true;
+  await assert.rejects(
+    runDarwinGitCase("git.fixed-commit", prepared.input, prepared.effects),
+  );
+  interrupted = writerLost = false;
+  assert.ok(
+    ![...f.files.values()]
+      .map(({ bytes }) => {
+        try {
+          return JSON.parse(bytes);
+        } catch {}
+      })
+      .some(
+        ({ record } = {}) =>
+          record?.phase === "root-domain" &&
+          record.request.arguments[1] === 25000,
+      ),
+  );
+  const root = [...f.processes.values()].find(
+    ({ identity }) => identity.asid === 25000,
+  );
+  assert.ok(root);
+  f.processes.clear();
+  // The sealed parent is absent, but its independently read domain still lives.
+  const descendant = { ...root.identity, pid: root.identity.pid + 10000 };
+  f.processes.set(descendant.pid, { ...root, identity: descendant });
+  assert.equal((await recoverTranscripts(f)).status, "RETAINED");
+  f.processes.clear();
+  assert.equal((await recoverTranscripts(f)).status, "RETIRED");
+});
+
+test("Darwin unreadable and undeclared recovery records cannot suppress independent case retirement", async () => {
+  for (const fault of ["malformed", "undeclared", "bootstrap-phase"]) {
+    const f = buildTranscripts(),
+      binding = caseBinding(f, "ownership.fork-exec", true),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "ownership.fork-exec"),
+        reviewSha256: hash,
+      };
+    await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    if (fault === "malformed") {
+      const file = [...f.files].find(([name]) =>
+        /^darwin-command-[a-f0-9]{64}-intent\.json$/u.test(path.basename(name)),
+      );
+      file[1].bytes = Buffer.from("{interrupted record\n");
+    } else if (fault === "bootstrap-phase") {
+      const [, entry] = [...f.files].find(([name]) =>
+        /darwin-bootstrap-0-custody-0\.json$/u.test(name),
+      );
+      const record = JSON.parse(entry.bytes);
+      record.phase = "unannounced";
+      entry.bytes = Buffer.from(JSON.stringify(record) + "\n");
+    } else
+      f.put(
+        directory + "/darwin-unannounced.json",
+        Buffer.from("{}\n"),
+        0o400,
+        1001,
+      );
+    for (const [pid, process] of f.processes)
+      if (process.identity.uid === 0) f.processes.delete(pid);
+    assert.equal((await recoverTranscripts(f)).status, "RETAINED", fault);
+    assert.ok(f.events.includes("case-signal"));
+    assert.equal(
+      [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+        .length,
+      0,
+    );
+  }
+});
+
+test("Darwin recovery retains policy when sealed audit frames or independent IPC absence are missing", async () => {
+  for (const fault of ["audit-frame", "audit-close", "named-ipc"]) {
+    const f = buildTranscripts(),
+      binding = accessBinding(f, "read-only"),
+      effects = await prepareTranscripts(f),
+      recipe = {
+        ...darwinSystemRecipes().find(({ id }) => id === "access.read-only"),
+        reviewSha256: hash,
+      };
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: async () => {},
+    });
+    f.caseFault("after-controls-close");
+    await assert.rejects(runDarwinAccessCase(prepared.input, prepared.effects));
+    f.caseFault(null);
+    f.processes.clear();
+    const records = [...f.files].flatMap(([file, entry]) => {
+      try {
+        return [{ file, record: JSON.parse(entry.bytes) }];
+      } catch {
+        return [];
+      }
+    });
+    if (fault === "audit-frame") {
+      const frame = records.find(
+        ({ record }) => record.phase === "access-audit-frame",
+      );
+      frame.record.hex = "00";
+      f.files.get(frame.file).bytes = Buffer.from(
+        JSON.stringify(frame.record) + "\n",
+      );
+    } else if (fault === "audit-close") {
+      const { record } = records.find(
+        ({ record }) =>
+          record.phase === "ownership-receipt" &&
+          record.kind === "audit-closed",
+      );
+      f.files.delete(
+        path.dirname(prepared.input.request.policy.path) +
+          `/receipt-${record.pin.index}.json`,
+      );
+    } else
+      f.operationFrames((name) =>
+        name === "access-controls-retired" ? { absent: false } : undefined,
+      );
+    const writes = f.events.filter((name) =>
+      ["pf-write", "access-pf-run"].includes(name),
+    ).length;
+    assert.equal((await recoverTranscripts(f)).status, "RETAINED", fault);
+    assert.equal(
+      f.events.filter((name) => ["pf-write", "access-pf-run"].includes(name))
+        .length,
+      writes,
+    );
+    assert.ok(!f.events.includes("access-lease-released"));
+  }
+});
+
+function completeExperimentCase(f, id) {
+  const create = (entry) => {
+    if (entry.startsWith("files.")) return fileBinding(f, entry);
+    if (entry.startsWith("git.")) return gitBinding(f, entry);
+    if (entry.startsWith("access."))
+      return { binding: accessBinding(f, entry.slice(7), true) };
+    if (entry !== "release") return { binding: caseBinding(f, entry, true) };
+    const setup = operationBinding(f, entry);
+    return setup.finish(
+      { purpose: "experiment", request: setup.request, bindingSha256: null },
+      { components: [] },
+      {},
+    );
+  };
+  const cases = f.manifest.darwinPreparation.cases;
+  for (const entry of cases) if (entry.id !== id) create(entry.id);
+  const selected = create(id);
+  if (!id.startsWith("access.")) f.access(undefined);
+  for (const [i, entry] of cases.entries())
+    if (entry.id !== id) {
+      const request = entry.bindings.input.request ?? entry.bindings.input;
+      request.uid = entry.bindings.uid = 92001 + i * 2;
+      request.gid = entry.bindings.gid = 92002 + i * 2;
+    }
+  return {
+    ...selected,
+    binding: darwinExperimentCaseDeclarations(cases).policyBindings.find(
+      (binding) => binding.context.executionId === id,
+    ),
+  };
+}
+
+test("complete Darwin experiments retain all file and Git native owners and original recovery", async () => {
+  for (const id of [...DARWIN_FILE_CASE_IDS, "git.ordinary", "git.fixed"]) {
+    const f = buildTranscripts(true, true),
+      setup = completeExperimentCase(f, id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+      prepared = await effects.prepare(recipe, {
+        policyBinding: setup.binding,
+        recordPolicy() {},
+      });
+    const diagnostics = [],
+      result = await withNativeDiagnostics(
+        () =>
+          id.startsWith("files.")
+            ? runDarwinFileCase(id, prepared.input, prepared.effects)
+            : runDarwinGitCase(
+                id === "git.fixed" ? "git.fixed-commit" : "git.ordinary-denial",
+                prepared.input,
+                prepared.effects,
+              ),
+        (owner, value) =>
+          diagnostics.push(owner + ": " + value.exception?.stack),
+      );
+    assert.equal(result.status, "OBSERVED", id + "\n" + diagnostics.join("\n"));
+    assert.equal(prepared.input.reviewSha256, undefined);
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETIRED",
+      id,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+  for (const id of ["files.private", "git.fixed", "access.read-only"]) {
+    const f = buildTranscripts(true, true),
+      setup = completeExperimentCase(f, id),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find((recipe) => recipe.id === id);
+    await effects.bootstrap();
+    if (id.startsWith("access.")) f.caseFault("pf-install-interrupted");
+    await effects
+      .prepare(recipe, { policyBinding: setup.binding, recordPolicy() {} })
+      .catch((error) => {
+        if (!id.startsWith("access.")) throw error;
+      });
+    f.processes.clear();
+    f.caseFault(null);
+    const before = f.events.filter((event) =>
+        ["case-directory", "case-copy", "git-start", "transfer"].includes(
+          event,
+        ),
+      ).length,
+      request = {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(f.input.preparation),
+      },
+      diagnostics = [],
+      recovered = await withNativeDiagnostics(
+        () =>
+          createDarwinSystemEffects(f.input, f.options).recover({
+            request,
+            job: f.input.job,
+            preparation: f.input.preparation,
+          }),
+        (owner, value) =>
+          diagnostics.push(owner + ": " + value.exception?.stack),
+      );
+    assert.equal(
+      recovered.status,
+      "RETIRED",
+      id + "\n" + diagnostics.join("\n"),
+    );
+    assert.equal(
+      f.events.filter((event) =>
+        ["case-directory", "case-copy", "git-start", "transfer"].includes(
+          event,
+        ),
+      ).length,
+      before,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
+test("Darwin experiment access drains capture before restoring owned PF effects over stock policy", async () => {
+  const f = buildTranscripts(true),
+    id = "access.read-only",
+    setup = completeExperimentCase(f, id),
+    effects = createDarwinSystemEffects(f.input, f.options),
+    recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+    prepared = await effects.prepare(recipe, {
+      policyBinding: setup.binding,
+      recordPolicy() {},
+    });
+  assert.equal(
+    (await runDarwinAccessCase(prepared.input, prepared.effects)).status,
+    "OBSERVED",
+  );
+  assert.equal(
+    settled(
+      await effects.settle(recipe, prepared, {
+        signal: new AbortController().signal,
+        execution: execution(recipe),
+      }),
+    ).status,
+    "RETIRED",
+  );
+  assert.ok(
+    f.events.indexOf("access-audit-close") <
+      f.events.lastIndexOf("access-pf-run"),
+  );
+  assert.ok(
+    f.events.lastIndexOf("access-pf-run") <
+      f.events.indexOf("access-lease-released"),
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+function experimentInputs(f, build) {
+  const events = [
+      { event: 1, opcode: "AUE_OPEN", classes: 1, selector: "path" },
+    ],
+    headerVersion = 11;
+  return {
+    git: { path: "/fixture/git", sha256: hash, cdhash },
+    pfctl: { path: "/sbin/pfctl", sha256: hash, cdhash },
+    hdiutil: { path: "/usr/bin/hdiutil", sha256: hash, cdhash },
+    loader: {
+      path: "/usr/lib/dyld",
+      sha256: hash,
+      identity: "held-loader",
+      macho: { dependencies: [] },
+    },
+    volume: { path: "/fixture/control.dmg", sha256: hash },
+    pf: stockPfFixture({
+      active: false,
+      states: 0,
+      graph: [{ anchor: "", rules: [] }],
+      interfaces: [{ name: "lo0", skip: false }],
+      routesSha256: hash,
+    }),
+    audit: {
+      sdkSha256: build.sdk.sha256,
+      abiSha256: observationDigest(build.abi),
+      headerVersion,
+      events,
+      mappingSha256: digest(JSON.stringify({ headerVersion, events })),
+    },
+    classes: 1,
+    addresses: { inet: "192.0.2.1", inet6: "2001:db8::1" },
+    events: Object.fromEntries(
+      [
+        "read",
+        "write",
+        "unlink",
+        "replace",
+        "parent",
+        "mach",
+        "unix",
+        "shm",
+        "sem",
+        "sysv-shm",
+        "sysv-sem",
+        "tcp4",
+        "udp4",
+        "tcp6",
+        "udp6",
+      ].map((name) => [name, 1]),
+    ),
+  };
+}
+
+test("indexed Darwin experiment preparation seals the complete inventory and cold-loads without compilation", async () => {
+  const f = experimentBuildFixture();
+  f.options.fs.readFile = f.options.readReceipt;
+  f.options.acquireCases = async (prepared, build) => ({
+    inputs: experimentInputs(f, build),
+    publish: async ({ path, bytes, sha256 }) => {
+      assert.equal(digest(bytes), sha256);
+      f.files.set(path, bytes);
+    },
+  });
+  const result = await prepareDarwinExperiment(
+    f.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(result.job.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(
+    result.preparation.system.cases.length,
+    darwinSystemRecipes().length - 1,
+  );
+  assert.deepEqual(result.preparation.recipes, darwinSystemRecipes());
+  assert.equal(
+    result.job.preparation.expected.components.filter(
+      ({ role }) => role === "helper",
+    ).length,
+    DARWIN_HELPER_NAMES.length,
+  );
+  const commands = f.events.filter((event) =>
+    event.startsWith("compile-owner:"),
+  ).length;
+  const loaded = await loadDarwinExperiment(result.job, directory, f.options);
+  const reloaded = await loadDarwinExperiment(result.job, directory, f.options);
+  assert.equal(observationDigest(reloaded), observationDigest(loaded));
+  assert.equal(
+    f.events.filter((event) => event.startsWith("compile-owner:")).length,
+    commands,
+  );
+  assert.equal(
+    observationDigest(loaded.preparation),
+    observationDigest(result.preparation),
+  );
+  const before = [...f.events];
+  const owner = createDarwinExperimentSystemEffects(
+    loaded.job,
+    loaded.preparation,
+    f.options,
+  );
+  assert.equal(typeof owner.prepare, "function");
+  assert.deepEqual(f.events, before);
+  assert.equal(
+    (await owner.verifyBuild(loaded.preparation)).status,
+    "OBSERVED",
+  );
+  const binding = darwinExperimentBuildBinding(loaded.preparation);
+  let compilerPolicy;
+  await owner.build({
+    candidateSha,
+    policyBinding: binding,
+    recordPolicy: async (proof) => {
+      compilerPolicy = verifyExperimentPolicy(
+        binding.template,
+        proof.provisioning,
+        binding.context,
+        proof.requestSha256,
+        proof.observed,
+      );
+    },
+  });
+  assert.equal(compilerPolicy.independent, true);
+  assert.deepEqual(loaded.runtime, loaded.job.preparation.observed.components);
+  const build = darwinSystemRecipes()[0];
+  const receipts = await owner.settle(build, undefined, {
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((key) => [
+          key,
+          {
+            admission: ["builds", "policy"].includes(key)
+              ? "possible"
+              : "not-started",
+          },
+        ]),
+      ),
+    },
+  });
+  assert.equal(receipts.builds.settlement.status, "RETIRED");
+  const missing = structuredClone(loaded.preparation);
+  missing.system.cases.pop();
+  assert.throws(() =>
+    createDarwinExperimentSystemEffects(loaded.job, missing, f.options),
+  );
+  const createReader = f.options.createReader;
+  f.options.createReader = (input, settings) => {
+    const reader = createReader(input, settings),
+      read = reader.readBuildInput,
+      close = reader.close;
+    let interrupted = false;
+    reader.readBuildInput = async (file, pin, ...rest) => {
+      if (file.includes("experiment-asset-")) {
+        interrupted = true;
+        throw new Error("Original cold input read failure");
+      }
+      return read(file, pin, ...rest);
+    };
+    reader.close = async () => {
+      if (interrupted)
+        throw new Error("Lost cold reader close acknowledgement");
+      return close();
+    };
+    return reader;
+  };
+  await assert.rejects(
+    loadDarwinExperiment(result.job, directory, f.options),
+    /Original cold input read failure/,
+  );
+  const failed = { ...result.job, failure: "preparation-failed" };
+  f.options.createReader = (input, settings) => ({
+    ...createReader(input, settings),
+    retired: async () => {
+      throw new Error("Unavailable original reader retirement");
+    },
+  });
+  const retained = await recoverDarwinExperimentPreparation(
+    failed,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(retained.failure, failed.failure);
+  assert.equal(retained.preparationEffects.settlement.status, "RETAINED");
+  f.options.createReader = createReader;
+  const recovered = await recoverDarwinExperimentPreparation(
+    retained,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(recovered.failure, failed.failure);
+  assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(
+    recovered.preparationEffects.receiptSha256,
+    result.job.preparationEffects.receiptSha256,
+  );
+  assert.deepEqual(recovered.preparation, result.job.preparation);
+  assert.equal(
+    f.events.filter((event) => event.startsWith("compile-owner:")).length,
+    commands,
+  );
+  const closePath = path.join(
+    directory,
+    "darwin-experiment-preparation-close.json",
+  );
+  f.files.set(closePath, {
+    ...f.files.get(closePath),
+    nativeEventSha256: "e".repeat(64),
+  });
+  const substituted = await recoverDarwinExperimentPreparation(
+    recovered,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(substituted.preparationEffects.settlement.status, "RETAINED");
+  assert.equal(substituted.failure, failed.failure);
+  f.files.set(closePath, { ...f.files.get(closePath), purpose: "reviewed" });
+  const mixed = await recoverDarwinExperimentPreparation(
+    substituted,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.equal(mixed.preparationEffects.settlement.status, "RETAINED");
+});
+
+test("Darwin experiment runtime requires every held helper and original loader/ABI observations", async () => {
+  const f = experimentBuildFixture(),
+    built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    slots = {
+      components: built.build.helpers.map(({ name }, index) => ({
+        id: name,
+        index,
+      })),
+      loader: 10,
+      cachePath: built.prepared.cachePath,
+    },
+    core = {
+      state: {
+        preparation: {
+          build: built.build,
+          inputs: {
+            loader: {
+              sha256: hash,
+              identity: "held-loader",
+              macho: { dependencies: [] },
+            },
+          },
+        },
+      },
+      current: { binding: { purpose: "experiment" } },
+      specification: {
+        slots,
+        entries: Array.from({ length: 11 }, () => ({ sha256: hash })),
+      },
+      persist: async () => {},
+      latch: (fn) => fn,
+      reader: {
+        inspect: async (index) => ({
+          identity:
+            index === 10 ? "held-loader" : built.build.helpers[index].identity,
+          uid: 0,
+          mode: 0o555,
+          directory: false,
+        }),
+        read: async (index) => (index === 10 ? bytes : f.image),
+        signature: async () => ({ valid: true, cdhash }),
+        macho: async (index) =>
+          index === 10 ? { dependencies: [] } : built.build.helpers[0].macho,
+        readBuildRuntime: async (_, file) =>
+          built.build.sdk.runtime.find((entry) => entry.path === file)
+            .observation,
+        build: async () => built.build.abi,
+      },
+    };
+  assert.equal(
+    (await createDarwinExperimentRuntimeEffects(core).effects.observe()).status,
+    "OBSERVED",
+  );
+  slots.components.pop();
+  assert.throws(() => createDarwinExperimentRuntimeEffects(core));
+  slots.components.push({ id: DARWIN_HELPER_NAMES.at(-1), index: 9 });
+  const inspect = core.reader.inspect;
+  core.reader.inspect = async (index) => ({
+    ...(await inspect(index)),
+    identity: "substituted-held-image",
+  });
+  await assert.rejects(
+    createDarwinExperimentRuntimeEffects(core).effects.observe(),
+  );
+  core.reader.inspect = inspect;
+  core.reader.build = async () => ({ ...built.build.abi, osBuild: "changed" });
+  await assert.rejects(
+    createDarwinExperimentRuntimeEffects(core).effects.observe(),
+  );
+  await assert.rejects(
+    observeDarwinRelease(
+      {},
+      {},
+      createDarwinExperimentRuntimeEffects(core).effects,
+    ),
+  );
+});
+
+test("Darwin preparation recovery preserves failure and cannot settle admitted cases from build receipts alone", async () => {
+  for (const admitted of [false, true]) {
+    const f = experimentBuildFixture(),
+      built = await prepareDarwinExperimentBuild(
+        f.job,
+        directory,
+        f.persist,
+        f.options,
+      ),
+      job = {
+        ...built.job,
+        failure: "preparation-failed",
+        preparationEffects: {
+          admission: "possible",
+          settlement: {
+            status: "RETAINED",
+            independent: false,
+            emergencyCleanup: false,
+          },
+          receiptSha256: null,
+        },
+      };
+    f.options.fs.readFile = f.options.readReceipt;
+    if (admitted)
+      f.files.set(
+        path.join(directory, "darwin-case-ownership.cancel-0.json"),
+        Buffer.from("{}\n"),
+      );
+    const commands = f.events.filter((event) =>
+        event.startsWith("compile-owner:"),
+      ).length,
+      published = [];
+    const result = await recoverDarwinExperimentPreparation(
+      job,
+      directory,
+      async (value) => published.push(value),
+      f.options,
+    );
+    assert.equal(result.failure, "preparation-failed");
+    assert.equal(result.preparation, null);
+    assert.equal(
+      result.preparationEffects.settlement.status,
+      admitted ? "RETAINED" : "RETIRED",
+    );
+    assert.equal(
+      f.events.filter((event) => event.startsWith("compile-owner:")).length,
+      commands,
+    );
+    if (admitted)
+      assert.ok(
+        published.every(
+          (value) => value.preparationEffects.settlement.status !== "RETIRED",
+        ),
+      );
+  }
+});
+
+test("Darwin case input acquisition joins installed audit declarations before private publication", async () => {
+  const f = experimentBuildFixture(),
+    built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    names = [
+      "OPEN_R",
+      "OPEN_W",
+      "UNLINK",
+      "RENAME",
+      "BSLOOKUP",
+      "CONNECT",
+      "SHMOPEN",
+      "SEMOPEN",
+      "SHMGET",
+      "SEMGET",
+      "SENDTO",
+      "OPEN_RWTC",
+    ],
+    headerPath = path.join(
+      built.prepared.environment.SDKROOT,
+      "usr/include/bsm/audit_kevents.h",
+    ),
+    records = new Map([
+      [
+        headerPath,
+        Buffer.from(
+          names
+            .map((name, index) => `#define AUE_${name} ${index + 1}`)
+            .join("\n"),
+        ),
+      ],
+      [
+        path.join(
+          built.prepared.environment.SDKROOT,
+          "usr/include/bsm/audit_record.h",
+        ),
+        Buffer.from("#define AUDIT_HEADER_VERSION 11\n"),
+      ],
+      [
+        "/etc/security/audit_event",
+        Buffer.from(
+          names
+            .map(
+              (name, index) =>
+                `${index + 1}:AUE_${name}:event:${name === "OPEN_RWTC" ? "all,extra" : "all"}`,
+            )
+            .join("\n"),
+        ),
+      ],
+      [
+        "/etc/security/audit_class",
+        Buffer.from("0x1:all:all events\n0x2:extra:extra events\n"),
+      ],
+    ]),
+    commands = [],
+    journal = [],
+    pins = [],
+    read = async (file) => records.get(file) ?? bytes,
+    options = {
+      ...f.options,
+      fs: {
+        readdir: async () => [],
+        mkdir: async () => {},
+        realpath: async (file) => file,
+        lstat: async (file) => ({
+          isFile: () => true,
+          isSymbolicLink: () => false,
+          uid: 0,
+          gid: 0,
+          mode: 0o444,
+          nlink: 1,
+          size: (await read(file)).length,
+        }),
+        readFile: read,
+        writeFile: async (file, value) => records.set(file, Buffer.from(value)),
+      },
+      networkInterfaces: () => ({
+        fixture: [
+          { internal: false, family: "IPv4", address: "192.0.2.1" },
+          { internal: false, family: "IPv6", address: "2001:db8::1" },
+        ],
+      }),
+      command: async (file, args) => {
+        assert.equal(journal.at(-1).phase, "case-input-command-possible");
+        commands.push([file, args]);
+        return {
+          stdout: file === "/usr/bin/xcrun" ? "/usr/bin/git\n" : "",
+          stderr: file === "/usr/bin/codesign" ? `CDHash=${cdhash}\n` : "",
+        };
+      },
+    },
+    reader = {
+      readBuildInput: async (file, sha256) => {
+        pins.push([file, sha256]);
+        return { object: { identity: "held" }, macho: { dependencies: [] } };
+      },
+      pf: async () => kernelPfFixture(experimentInputs(f, built.build).pf),
+    },
+    persist = async (value) => journal.push(value);
+  const acquired = await acquireDarwinExperimentInputs(
+    built.prepared,
+    built.build,
+    reader,
+    persist,
+    options,
+  );
+  assert.equal(acquired.inputs.events.mach, names.indexOf("BSLOOKUP") + 1);
+  assert.ok(
+    acquired.inputs.audit.events.some(
+      ({ opcode }) => opcode === "AUE_OPEN_RWTC",
+    ),
+  );
+  assert.equal(acquired.inputs.classes, 1);
+  assert.equal(acquired.inputs.loader.identity, "held");
+  const asset = {
+    path: path.join(built.prepared.sourceDirectory, "experiment-asset-1"),
+    bytes,
+    sha256: hash,
+  };
+  await acquired.publish(asset);
+  assert.ok(
+    pins.some(([file, sha256]) => file === asset.path && sha256 === hash),
+  );
+  await assert.rejects(
+    acquired.publish({ ...asset, path: "/outside/experiment-asset-1" }),
+  );
+  records.set(headerPath, Buffer.from("#define AUE_OPEN_R 1\n"));
+  const before = commands.length;
+  await assert.rejects(
+    acquireDarwinExperimentInputs(
+      built.prepared,
+      built.build,
+      reader,
+      persist,
+      options,
+    ),
+  );
+  assert.ok(
+    commands
+      .slice(before)
+      .every(([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file)),
+  );
+});
