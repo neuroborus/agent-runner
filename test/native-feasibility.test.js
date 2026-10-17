@@ -10524,7 +10524,8 @@ test("Darwin preparation preserves the first native cause while attempting indep
 
 test("Darwin native diagnostics retain bounded operation and error domains without arbitrary output", () => {
   const metadata =
-    "native-darwin-fault-metadata: object=created-root uid=0 gid=20 mode=040700 links=2 size=64 dev=1 inode=42\n";
+    "native-darwin-fault-metadata: object=created-root uid=0 gid=20 mode=040700 links=2 size=64 dev=1 inode=42\n" +
+    "native-darwin-fault-access: name=200 type=0x10000 query=0\n";
   for (const [operation, domain, value] of [
     ["fault-journal-access", "invariant", 0],
     ["fault-journal-owner", "errno", 1],
@@ -10536,6 +10537,9 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     ["fault-birth-read", "status", 0],
     ["fault-child-status", "status", 256],
     ["fault-host-port", "mach", 5],
+    ["fault-access-kind", "mach", 15],
+    ["fault-access-authority", "invariant", 0],
+    ["fault-access-release", "mach", 15],
     ["audit-session-create", "errno", 1],
     ["audit-census-bsd", "status", 12],
     ["audit-census-audit-again", "errno", 3],

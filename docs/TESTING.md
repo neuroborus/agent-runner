@@ -201,6 +201,24 @@ harness and all future check assignments remain unchanged.
 Fault transition regressions execute the original writable-journal handoff and
 audit-session creation bodies with injected native calls, covering descriptor
 substitution, read-only access, exact errors and preserved reexec effects.
+
+Task-access regressions execute the actual complete sanitation body through
+the original child launch branch, using only injected Mach and process calls.
+Null and dead sentinels need no namespace release; allocated dead names require
+a successful type query and checked release. Live, mixed, unknown and empty
+types, failed getters/queries, refused deallocation and retained foreign rights
+cannot reach the payload exec. Unexpected types without a send, send-once or
+dead-name reference stop before deallocation can raise an invalid-right guard
+exception; the original authority refusal survives. Combined authority/release
+failures preserve
+the primary refusal and independent cleanup error. The same execution retains
+ordinary-host checks, descriptor closure, bootstrap/registered/exception clearing
+and foreign-name destruction. Existing cancel/owner-loss caller and independent
+domain-retirement cases remain required; bounded task-access metadata alone
+supplies no success or retirement evidence. These portable fixtures run no native
+compiler or macOS tool and add no slow-tier assignment. Matching macOS CI must
+resolve the original unobserved port name/type and verify functional recovery.
+
 Held-initialization regressions execute the actual creation helper with synthetic
 inherited metadata, failed setters and substituted identities. They retain the
 strict root/journal modes, ACL refusal and creation-only normalization boundary;

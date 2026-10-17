@@ -2935,6 +2935,35 @@ and Mach rights, bounded process count and native credential/session/delegation
 negative controls. Image, birth, parent, credentials and Seatbelt observations
 join candidate, case and exact policy bytes before protected intent and release.
 
+At this feasibility-only launch boundary, task-access sanitation accepts
+`MACH_PORT_NULL`, the `MACH_PORT_DEAD` sentinel, or a successfully queried
+name whose complete type is exactly `MACH_PORT_TYPE_DEAD_NAME`. Pinned
+[XNU task special-port reads](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ipc_tt.c)
+use `ipc_port_copy_send_mqueue`, which can return a dead port; the
+[Mach port contract](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/mach/port.h)
+distinguishes that sentinel from an allocated dead name. Neither carries live
+authority. Every allocated name must pass `mach_port_type`; query failures
+stop the owned child without an unverified-name release and are never treated
+as absent rights. Checked deallocation releases only an inspected send,
+send-once or dead-name reference, including a rejected live reference; it does
+not clear the task's special slot. Types without such a reference stop without
+another namespace operation, preserving the authority refusal rather than
+risking an invalid-right guard exception. A release failure remains blocking
+and retains separate cleanup diagnosis without
+replacing the first authority refusal. Null/dead sentinels allocate no
+name to release. All remaining descriptor, bootstrap, registered-port,
+exception and foreign-name sanitation still precedes the original payload exec.
+The slot is never blindly overwritten: XNU refuses replacement of an already
+valid task-access port, and live or unknown authority cannot reach payload exec
+without a separately source-supported confined launch correction.
+One bounded numeric observation of the original task-access read preserves its
+returned name, queried type and query status. The prior CI record did not
+observe these values; fresh matching macOS CI must establish that the failing
+launch reaches a demonstrated harmless state and that both original faults
+retire independently while all eight earlier capabilities remain passing.
+Portable classification and caller coverage supply neither that observation
+nor native acceptance.
+
 After each acknowledged fault, the root holder fences admissions and recovers
 the complete held session through the shared `custody.h` all-UID census. Every
 new member is journaled before a full audit-token/birth-checked signal. Stale

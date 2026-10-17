@@ -1859,6 +1859,430 @@ test("Darwin feasibility fault custody keeps privileged effects behind sealed re
   assert.match(fixture, /command == 'C' \|\| command == 'L'/u);
 });
 
+test("Darwin fault sanitation admits only absent or dead access rights before the original payload exec", async () => {
+  const source = await readFile(
+      new URL("feasibility-domain.h", SOURCE),
+      "utf8",
+    ),
+    sanitation = /static void domain_sanitize\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1],
+    start = source.indexOf(
+      "  if (!child) {",
+      source.indexOf("static void domain_start("),
+    ),
+    end = source.indexOf("\n  }\n  posix_check(close(ready[1])", start);
+  assert.ok(sanitation && start > 0 && end > start);
+  // Project only C declarations, output pointers and sizeof into JS. The
+  // sanitation decisions and the original child launch body execute unchanged.
+  const translate = (body) =>
+    body
+      .replace("extern mach_port_t bootstrap_port;", "")
+      .replace(
+        "struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32};",
+        "const limit = {rlim_cur:32, rlim_max:32};",
+      )
+      .replace("struct identity birth", "const birth")
+      .replace("struct proc_fdinfo fds[512];", "const fds = [];")
+      .replace("char gate;", "let gate;")
+      .replace("char parent[24];", "const parent = {};")
+      .replaceAll("&birth", "birth")
+      .replaceAll("&limit", "limit")
+      .replaceAll("in[", "input[")
+      .replace(
+        /&(host|access|type|address|access_type|names|types|n|nt|gate)\b/gu,
+        (_, name) => `{set value(v) {${name} = v;}}`,
+      )
+      .replaceAll("sizeof(*names)", "1")
+      .replaceAll("sizeof(*types)", "1")
+      .replaceAll("sizeof(fds[0])", "1")
+      .replaceAll("sizeof(fds)", "512")
+      .replaceAll("sizeof(birth)", "1")
+      .replaceAll("sizeof(parent)", "24")
+      .replace(/\(mach_vm_address_t\)|\(unsigned\)/gu, "")
+      .replace(
+        /\b(?:task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|unsigned|int) /gu,
+        "let ",
+      );
+  const script = new Script(`
+    function domain_sanitize() {${translate(sanitation)}}
+    () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
+  `);
+  const SEND = 0x10000,
+    RECEIVE = 0x20000,
+    SEND_ONCE = 0x40000,
+    PORT_SET = 0x80000,
+    DEAD_NAME = 0x100000,
+    DEAD = 0xffffffff;
+  for (const [label, options, operation, value, cleanupValue] of [
+    ["null", {}],
+    ["dead sentinel", { access: DEAD }],
+    ["allocated dead name", { access: 200, rights: DEAD_NAME }],
+    ["live send", { access: 200, rights: SEND }, "fault-access-authority", 0],
+    [
+      "live send/receive",
+      { access: 200, rights: SEND | RECEIVE },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "live send-once",
+      { access: 200, rights: SEND_ONCE },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "receive",
+      { access: 200, rights: RECEIVE, noRelease: true },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "port set",
+      { access: 200, rights: PORT_SET, noRelease: true },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "empty type",
+      { access: 200, rights: 0, noRelease: true },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "mixed dead/live",
+      { access: 200, rights: DEAD_NAME | SEND },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "unknown type",
+      { access: 200, rights: 0x1000000, noRelease: true },
+      "fault-access-authority",
+      0,
+    ],
+    ["getter refused", { get: 5 }, "fault-access-port", 5],
+    ["invalid name query", { access: 200, query: 15 }, "fault-access-kind", 15],
+    ["query refused", { access: 200, query: 5 }, "fault-access-kind", 5],
+    [
+      "dead-name release refused",
+      { access: 200, rights: DEAD_NAME, release: 15 },
+      "fault-access-release",
+      15,
+      15,
+    ],
+    [
+      "live release refused",
+      { access: 200, rights: SEND, release: 15 },
+      "fault-access-authority",
+      0,
+      15,
+    ],
+    ["privileged host", { host: 4 }, "fault-host-kind", 0],
+    ["foreign right retained", { destroy: 5 }, "fault-port-destroy", 5],
+    ["port census refused", { census: 5 }, "fault-port-list", 5],
+    ["gate refused", { gate: "N" }, "fault-gate-value", 0],
+  ]) {
+    const calls = [],
+      diagnostics = [],
+      cleanup = [],
+      executed = {},
+      originalBirth = { pid: 42 },
+      domain = { uid: 90001, gid: 90002 };
+    let first,
+      replies = 0;
+    const context = {
+      errno: 0,
+      stderr: {},
+      NULL: null,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      MACH_PORT_DEAD: DEAD,
+      MACH_PORT_TYPE_NONE: 0,
+      MACH_PORT_TYPE_SEND: SEND,
+      MACH_PORT_TYPE_SEND_ONCE: SEND_ONCE,
+      MACH_PORT_TYPE_DEAD_NAME: DEAD_NAME,
+      MACH_PORT_VALID: (name) => name !== 0 && name !== DEAD,
+      TASK_HOST_PORT: 1,
+      TASK_ACCESS_PORT: 2,
+      TASK_BOOTSTRAP_PORT: 3,
+      TASK_DEBUG_CONTROL_PORT: 4,
+      TASK_RESOURCE_NOTIFY_PORT: 5,
+      EXC_MASK_ALL: 0xffff,
+      EXCEPTION_DEFAULT: 1,
+      THREAD_STATE_NONE: 0,
+      bootstrap_port: 110,
+      RLIMIT_NPROC: 1,
+      PROC_PIDLISTFDS: 1,
+      ready: [16, 17],
+      release: [18, 19],
+      input: [10, 11],
+      out: [12, 13],
+      err: [14, 15],
+      domain_record: domain,
+      parent_asid: 3,
+      domain_helper: "/fixture/helper",
+      domain_policy: "/fixture/policy",
+      remember(op, kind, number) {
+        first ??= { operation: op, kind, value: number };
+      },
+      remember_cleanup(op, kind, number) {
+        cleanup.push({ operation: op, kind, value: number });
+      },
+      failure(code) {
+        throw Object.assign(new Error(first.operation), first, { code });
+      },
+      invariant(ok, op) {
+        if (!ok) {
+          context.remember(op, "invariant", 0);
+          context.failure(126);
+        }
+      },
+      domain_mach(result, op) {
+        if (result !== 0) {
+          context.remember(op, "mach", result);
+          context.failure(126);
+        }
+      },
+      posix_check(result, op) {
+        assert.ok(result >= 0, op);
+      },
+      domain_check(ok, op) {
+        context.invariant(ok, op);
+      },
+      domain_io(result, expected, op) {
+        assert.equal(result, expected, op);
+      },
+      alarm: (seconds) => calls.push(["alarm", seconds]),
+      close: (fd) => {
+        calls.push(["close", fd]);
+        return 0;
+      },
+      audit_fresh: (uid) => calls.push(["audit", uid]),
+      setrlimit: (_resource, limit) => {
+        assert.equal(limit.rlim_max, 32);
+        return 0;
+      },
+      setgroups: () => 0,
+      setgid: () => 0,
+      setuid: () => 0,
+      getpid: () => 42,
+      fault_inspect: () => originalBirth,
+      write(fd, birth) {
+        assert.equal(fd, 17);
+        assert.equal(birth, originalBirth);
+        return 1;
+      },
+      read(fd, target) {
+        assert.equal(fd, 18);
+        target.value = options.gate ?? "P";
+        return 1;
+      },
+      dup2: () => 0,
+      proc_pidinfo(_pid, _operation, _unused, fds) {
+        fds.push(...[0, 1, 2, 3, 4].map((proc_fd) => ({ proc_fd })));
+        return fds.length;
+      },
+      snprintf(target, _size, _format, asid) {
+        target.text = String(asid);
+      },
+      setenv(name, parent) {
+        calls.push(["environment", name, parent.text]);
+        return 0;
+      },
+      unsetenv: () => 0,
+      execl(...args) {
+        calls.push(["exec", ...args]);
+        throw executed;
+      },
+      mach_task_self: () => 101,
+      mach_thread_self: () => 102,
+      task_get_special_port(self, which, target) {
+        assert.equal(self, 101);
+        calls.push(["get", which]);
+        target.value = which === 1 ? 103 : (options.access ?? 0);
+        return which === 2 ? (options.get ?? 0) : 0;
+      },
+      mach_port_kobject(_self, _host, type, address) {
+        type.value = options.host ?? 3;
+        address.value = 0;
+        return 0;
+      },
+      mach_port_type(self, name, target) {
+        assert.equal(self, 101);
+        assert.equal(name, 200);
+        calls.push(["type", name]);
+        if (!options.query) target.value = options.rights ?? DEAD_NAME;
+        return options.query ?? 0;
+      },
+      mach_port_deallocate(_self, name) {
+        if (name === 200)
+          assert.ok(
+            !options.noRelease,
+            "No getter reference was proved for deallocation",
+          );
+        calls.push(["release", name]);
+        return name === 200 ? (options.release ?? 0) : 0;
+      },
+      task_set_special_port(_self, which, port) {
+        calls.push(["clear", which, port]);
+        return 0;
+      },
+      mach_ports_register(_self, ports, count) {
+        calls.push(["registered", ports, count]);
+        return 0;
+      },
+      task_set_exception_ports: (...args) => {
+        calls.push(["task-exceptions", ...args]);
+        return 0;
+      },
+      thread_set_exception_ports: (...args) => {
+        calls.push(["thread-exceptions", ...args]);
+        return 0;
+      },
+      mig_get_reply_port: () => (++replies === 1 ? 77 : 104),
+      mig_dealloc_reply_port: (name) => calls.push(["reply", name]),
+      mach_port_names(_self, names, count, types, typeCount) {
+        names.value = [101, 102, 104, 111];
+        count.value = 4;
+        types.value = [SEND, SEND, RECEIVE, SEND];
+        typeCount.value = 4;
+        return options.census ?? 0;
+      },
+      mach_port_destroy(_self, name) {
+        calls.push(["destroy", name]);
+        return options.destroy ?? 0;
+      },
+      mach_vm_deallocate: () => 0,
+      fprintf(_stream, _format, ...values) {
+        diagnostics.push(values);
+      },
+      fflush() {},
+    };
+    const launch = script.runInNewContext(context);
+    assert.throws(launch, (error) => {
+      if (!operation) return error === executed;
+      assert.equal(error.operation, operation, label);
+      assert.equal(error.value, value, label);
+      assert.equal(
+        error.kind,
+        operation.endsWith("authority") ||
+          (operation.endsWith("kind") && value === 0) ||
+          operation === "fault-gate-value"
+          ? "invariant"
+          : "mach",
+        label,
+      );
+      return true;
+    });
+    assert.equal(
+      calls.some(([op]) => op === "exec"),
+      !operation,
+      label,
+    );
+    assert.deepEqual(
+      cleanup,
+      cleanupValue === undefined
+        ? []
+        : [
+            {
+              operation: "fault-access-release",
+              kind: "mach",
+              value: cleanupValue,
+            },
+          ],
+      label,
+    );
+    const queried = calls.some(([op]) => op === "type"),
+      released = calls.some(([op, name]) => op === "release" && name === 200);
+    assert.equal(queried, options.access === 200 && !options.get, label);
+    assert.equal(
+      released,
+      queried && !options.query && !options.noRelease,
+      label,
+    );
+    assert.equal(
+      calls.filter(([op, name]) => op === "release" && name === 200).length,
+      released ? 1 : 0,
+      label,
+    );
+    assert.ok(
+      !calls.some(
+        ([op, name]) => op === "release" && (name === 0 || name === DEAD),
+      ),
+      label,
+    );
+    assert.ok(
+      !calls.some(([op, which]) => op === "clear" && which === 2),
+      label,
+    );
+    if (!operation) {
+      assert.equal(context.bootstrap_port, 0);
+      assert.deepEqual(
+        calls.filter(([op]) => op === "clear"),
+        [
+          ["clear", 3, 0],
+          ["clear", 4, 0],
+          ["clear", 5, 0],
+        ],
+      );
+      assert.deepEqual(
+        calls.filter(([op]) => op === "destroy"),
+        [["destroy", 111]],
+      );
+      assert.deepEqual(
+        calls.filter(([op]) => op === "registered"),
+        [["registered", null, 0]],
+      );
+      assert.deepEqual(
+        calls.filter(([op]) => op === "task-exceptions"),
+        [["task-exceptions", 101, 0xffff, 0, 1, 0]],
+      );
+      assert.deepEqual(
+        calls.filter(([op]) => op === "thread-exceptions"),
+        [["thread-exceptions", 102, 0xffff, 0, 1, 0]],
+      );
+      assert.deepEqual(
+        calls.filter(([op]) => op === "release"),
+        [
+          ["release", 103],
+          ...(released ? [["release", 200]] : []),
+          ["release", 102],
+        ],
+      );
+      assert.deepEqual(calls.at(-1), [
+        "exec",
+        "/fixture/helper",
+        "/fixture/helper",
+        "exec",
+        "/fixture/policy",
+        "/fixture/helper",
+        "fault",
+        null,
+      ]);
+      assert.ok(calls.some(([op, fd]) => op === "close" && fd === 3));
+      assert.ok(calls.some(([op, fd]) => op === "close" && fd === 4));
+    }
+    if (options.access && !options.get)
+      assert.deepEqual(
+        diagnostics,
+        [
+          [
+            options.access,
+            options.access === DEAD
+              ? DEAD_NAME
+              : options.query
+                ? 0
+                : (options.rights ?? DEAD_NAME),
+            options.query ?? 0,
+          ],
+        ],
+        label,
+      );
+    else assert.deepEqual(diagnostics, [], label);
+  }
+});
+
 test("Darwin fault creation initializes only held new objects and refuses failed setters or changed identities", async () => {
   const [source, helper] = await Promise.all(
     ["feasibility-domain.h", "feasibility-helper.c"].map((name) =>

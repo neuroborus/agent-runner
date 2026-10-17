@@ -137,7 +137,32 @@ static void domain_sanitize(void) {
   domain_mach(task_get_special_port(self,TASK_HOST_PORT,&host), "fault-host-port");
   domain_mach(mach_port_kobject(self,host,&type,&address), "fault-host-kind"); invariant(type == 3, "fault-host-kind");
   domain_mach(mach_port_deallocate(self,host), "fault-host-release");
-  domain_mach(task_get_special_port(self,TASK_ACCESS_PORT,&access), "fault-access-port"); invariant(access == MACH_PORT_NULL, "fault-access-port");
+  domain_mach(task_get_special_port(self,TASK_ACCESS_PORT,&access), "fault-access-port");
+  /* XNU's copy_send_mqueue can return a dead sentinel or a right that dies
+   * before inspection. Neither delegates work; live or unknown rights block exec.
+   * The task-access slot cannot be overwritten while its port is valid. */
+  mach_port_type_t access_type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
+  kern_return_t access_query = KERN_SUCCESS;
+  if (MACH_PORT_VALID(access)) access_query = mach_port_type(self, access, &access_type);
+  if (access != MACH_PORT_NULL) {
+    fprintf(stderr, "native-darwin-fault-access: name=%u type=%#x query=%d\n", access, access_type, access_query);
+    fflush(stderr);
+  }
+  /* A failed query cannot authorize another operation on an uninspected name. */
+  domain_mach(access_query, "fault-access-kind");
+  if (MACH_PORT_VALID(access)) {
+    bool harmless = access_type == MACH_PORT_TYPE_DEAD_NAME;
+    if (!harmless) remember("fault-access-authority", "invariant", 0);
+    kern_return_t released = KERN_SUCCESS;
+    /* Release only the getter's inspected reference, never an unrelated right. */
+    if (access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME))
+      released = mach_port_deallocate(self, access);
+    if (released != KERN_SUCCESS) {
+      remember("fault-access-release", "mach", released);
+      remember_cleanup("fault-access-release", "mach", released);
+    }
+    if (!harmless || released != KERN_SUCCESS) failure(126);
+  }
   domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
   domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
   domain_mach(task_set_special_port(self,TASK_RESOURCE_NOTIFY_PORT,MACH_PORT_NULL), "fault-notify-port");
