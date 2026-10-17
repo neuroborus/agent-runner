@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Collect existing logs for the original Darwin signature failure
+
+Original build-admission failure diagnostics retain the native caller birth,
+available credential/audit context and the single strict-call interval without
+new admission guards. The existing ordinary hosted Darwin/x64 stderr observer
+joins complete markers to that original helper, then performs one bounded
+existing-authority unified-log read. Exact timestamps, selector rounding and
+unjoined log-side identity remain explicit uncertainty. Bounded available output
+and empty/partial/error outcomes cannot replace primary failure or independent
+cleanup; the reporting scope joins completion after cleanup within existing
+budgets. Apple's CMS-signer Syslog branch motivates collection, but other sites
+may emit nothing. No trust replay, comparison payload, logging enablement,
+privilege or native acceptance/retirement claim is introduced; outstanding native
+obligations and the canceled comparison remain unchanged.
+
 ## 2026-10-17 — Capture the original Darwin strict signature error
 
 The single strict validity call now requests its original CFError. The old API

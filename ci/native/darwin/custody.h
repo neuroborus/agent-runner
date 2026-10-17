@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <sys/acl.h>
 #include <sys/stat.h>
+#include <time.h>
 static void need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
     int error = errno;
@@ -245,6 +246,41 @@ static void signature_error_details(CFErrorRef error) {
   signature_text("description", description);
   if (description) CFRelease(description);
 }
+struct identity { audit_token_t token; struct proc_bsdinfo bsd; };
+/* Reuse a successfully inspected self identity, including its audit context. */
+static struct identity signature_caller;
+struct signature_sample {
+  struct identity caller; struct timespec before, after;
+  int pid, birth, audit, started, ended;
+};
+static void signature_begin(struct signature_sample *sample) {
+  int saved = errno; sample->pid = getpid();
+  if (signature_caller.token.val[5] == (unsigned)sample->pid) {
+    sample->caller = signature_caller; sample->birth = sample->audit = 1;
+  } else {
+    sample->birth = proc_pidinfo(sample->pid, PROC_PIDTBSDINFO, 0, &sample->caller.bsd, sizeof(sample->caller.bsd)) == (int)sizeof(sample->caller.bsd);
+    mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
+    sample->audit = task_info(mach_task_self(), TASK_AUDIT_TOKEN, (task_info_t)&sample->caller.token, &count) == KERN_SUCCESS && count == TASK_AUDIT_TOKEN_COUNT;
+  }
+  sample->started = clock_gettime(CLOCK_REALTIME, &sample->before) == 0;
+  errno = saved;
+}
+static void signature_end(struct signature_sample *sample) {
+  int saved = errno;
+  sample->ended = clock_gettime(CLOCK_REALTIME, &sample->after) == 0;
+  errno = saved;
+}
+static void signature_sample_report(struct signature_sample *sample, OSStatus status) {
+  struct proc_bsdinfo *b = &sample->caller.bsd; unsigned *t = sample->caller.token.val;
+  fprintf(stderr, "native-darwin-signature-call: {\"pid\":%d,\"birthAvailable\":%d,\"birth\":[%ju,%ju],"
+    "\"credentials\":[%u,%u,%u,%u,%u,%u],\"auditAvailable\":%d,\"auditToken\":[%u,%u,%u,%u,%u,%u,%u,%u],"
+    "\"startAvailable\":%d,\"start\":[%jd,%jd],\"endAvailable\":%d,\"end\":[%jd,%jd],\"status\":%jd}\n",
+    sample->pid, sample->birth, (uintmax_t)b->pbi_start_tvsec, (uintmax_t)b->pbi_start_tvusec,
+    b->pbi_uid, b->pbi_gid, b->pbi_ruid, b->pbi_rgid, b->pbi_svuid, b->pbi_svgid,
+    sample->audit, t[0], t[1], t[2], t[3], t[4], t[5], t[6], t[7],
+    sample->started, (intmax_t)sample->before.tv_sec, (intmax_t)sample->before.tv_nsec,
+    sample->ended, (intmax_t)sample->after.tv_sec, (intmax_t)sample->after.tv_nsec, (intmax_t)status);
+}
 static void signature(const char *name, const char *pin) {
 #ifndef NATIVE_CI_EXPERIMENT
   reviewed_image(name);
@@ -256,11 +292,12 @@ static void signature(const char *name, const char *pin) {
   CFErrorRef error = NULL;
   bool create_called = false, validity_called = false, info_called = false;
   OSStatus create_status = 0, validity_status = 0, info_status = 0;
+  struct signature_sample sample = {0};
   /* The old API delegates with NULL errors; requesting errors additionally
    * enables internal full-report work. */
   bool signature_ok = url &&
        (create_called = true, create_status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code), create_status == errSecSuccess) &&
-       (validity_called = true, validity_status = SecStaticCodeCheckValidityWithErrors(code, kSecCSStrictValidate, NULL, &error), validity_status == errSecSuccess) &&
+       (validity_called = true, signature_begin(&sample), validity_status = SecStaticCodeCheckValidityWithErrors(code, kSecCSStrictValidate, NULL, &error), signature_end(&sample), validity_status == errSecSuccess) &&
        (info_called = true, info_status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info), info_status == errSecSuccess);
   int signature_errno = errno;
   if (!signature_ok) {
@@ -275,7 +312,9 @@ static void signature(const char *name, const char *pin) {
     else fprintf(stderr, "native-darwin-signature-validity: uncalled\n");
     if (info_called) fprintf(stderr, "native-darwin-signature-info: status=%jd\n", (intmax_t)info_status);
     else fprintf(stderr, "native-darwin-signature-info: uncalled\n");
-    if (validity_called && validity_status != errSecSuccess) signature_error_details(error);
+    if (validity_called && validity_status != errSecSuccess) {
+      signature_error_details(error); signature_sample_report(&sample, validity_status);
+    }
     fflush(stderr);
   }
   if (error) CFRelease(error);
@@ -321,7 +360,6 @@ static inline void developer_paths(const char *sdk, char developer[PATH_MAX], ch
   need(!strncmp(compiler, named, strlen(named)) && compiler[strlen(named)] && !strchr(compiler + strlen(named), '/'));
 }
 #endif
-struct identity { audit_token_t token; struct proc_bsdinfo bsd; };
 static struct identity inspect(pid_t pid) {
   struct identity value = {0}; struct proc_bsdinfo after; audit_token_t again;
   mach_port_t task = MACH_PORT_NULL; mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
@@ -339,6 +377,9 @@ static struct identity inspect(pid_t pid) {
        value.token.val[1] == after.pbi_uid && value.token.val[2] == after.pbi_gid &&
        value.token.val[3] == after.pbi_ruid && value.token.val[4] == after.pbi_rgid &&
        mach_port_deallocate(mach_task_self(), task) == KERN_SUCCESS);
+  int inspected_errno = errno;
+  if (pid == getpid()) signature_caller = value;
+  errno = inspected_errno;
   return value;
 }
 static void emit(struct identity value) {

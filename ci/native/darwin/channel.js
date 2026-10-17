@@ -326,9 +326,15 @@ export function darwinFileChannel(
  * native retirement. Completion also requires consumed, complete frames. */
 export function darwinCustodyChannel(
   child,
-  { schedule = setTimeout, cancel = clearTimeout, deadlineMs = 120000 } = {},
+  {
+    schedule = setTimeout,
+    cancel = clearTimeout,
+    deadlineMs = 120000,
+    diagnostics,
+  } = {},
 ) {
-  observeNativeProcess("darwin-custody-helper", child, undefined, ["stderr"]);
+  observeNativeProcess("darwin-custody-helper", child, diagnostics, ["stderr"]);
+  const report = diagnostics ?? nativeDiagnostic;
   requireDarwin(
     Number.isSafeInteger(deadlineMs) &&
       ((deadlineMs > 0 && deadlineMs <= 30000) ||
@@ -347,7 +353,7 @@ export function darwinCustodyChannel(
   const wait = (value) => Promise.race([value, fault]);
   const queue = [];
   const fail = (cause) => {
-    if (cause !== undefined) nativeException("darwin-custody", cause);
+    if (cause !== undefined) report("darwin-custody", { exception: cause });
     if (failure) return;
     failure = new Error("Darwin custody transport unavailable");
     cancel(timer);
@@ -372,7 +378,7 @@ export function darwinCustodyChannel(
   child.stdin.on("error", fail);
   child.stdout.on("error", fail);
   child.stdout.on("data", (chunk) => {
-    nativeDiagnostic("darwin/channel.js", { stdout: chunk });
+    report("darwin/channel.js", { stdout: chunk });
     try {
       requireDarwin(
         !failure && !finished && buffer.length + chunk.length <= 262144,

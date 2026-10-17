@@ -73,11 +73,50 @@ export function withNativeDiagnostics(
   action,
   diagnostics = createNativeDiagnosticWriter(),
 ) {
-  return ordinaryCI.run(diagnostics, action);
+  const completions = [];
+  return ordinaryCI.run({ diagnostics, completions }, () => {
+    const finish = (outcome) =>
+      completions.length
+        ? Promise.all(
+            completions.map(async (complete) => {
+              try {
+                await complete();
+              } catch {
+                /* Diagnostics cannot replace the outcome. */
+              }
+            }),
+          ).then(outcome)
+        : outcome();
+    let result;
+    try {
+      result = action();
+    } catch (error) {
+      return finish(() => {
+        throw error;
+      });
+    }
+    if (!result?.then) return finish(() => result);
+    const completed = result.then(
+      (value) => finish(() => value),
+      (error) =>
+        finish(() => {
+          throw error;
+        }),
+    );
+    if (result.child) completed.child = result.child;
+    return completed;
+  });
 }
 
 export function nativeDiagnostic(owner, value) {
-  ordinaryCI.getStore()?.(owner, value);
+  ordinaryCI.getStore()?.diagnostics?.(owner, value);
+}
+
+/** Join bounded passive reads at the existing reporting boundary, after cleanup. */
+export function nativeDiagnosticCompletion(complete) {
+  const scope = ordinaryCI.getStore();
+  if (scope?.diagnostics) scope.completions.push(complete);
+  return scope?.diagnostics;
 }
 
 export function nativeException(owner, exception) {
@@ -241,14 +280,14 @@ export async function attemptNativeBuilds(
 }
 
 export function hasNativeDiagnostics() {
-  return Boolean(ordinaryCI.getStore());
+  return Boolean(ordinaryCI.getStore()?.diagnostics);
 }
 
 /** Observe existing streams without changing their consumers or capture limits. */
 export function observeNativeProcess(
   owner,
   child,
-  diagnostics = ordinaryCI.getStore(),
+  diagnostics = ordinaryCI.getStore()?.diagnostics,
   streams = ["stdout", "stderr"],
 ) {
   if (!diagnostics) return child;

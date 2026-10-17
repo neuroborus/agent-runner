@@ -7,6 +7,7 @@ import {
 } from "../diagnostics.js";
 import { observationObject, observationDigest } from "../index.js";
 import { darwinCustodyChannel } from "./channel.js";
+import { darwinSignatureDiagnostics } from "./signature-logs.js";
 import { purposeData } from "./experiment-policy.js";
 import {
   normalizeDarwinIdentity,
@@ -296,8 +297,13 @@ function transport(entry, args, deadlineMs) {
       stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
     },
   );
+  const diagnostics = darwinSignatureDiagnostics({ deadlineMs });
   return {
-    channel: darwinCustodyChannel(child, { deadlineMs }),
+    channel: darwinCustodyChannel(child, {
+      deadlineMs,
+      diagnostics: diagnostics?.diagnostics,
+    }),
+    bindSignatureCaller: diagnostics?.bind,
   };
 }
 function commandResult(value) {
@@ -404,7 +410,11 @@ export async function runDarwinBuildCommand(
       ...purposeData(request),
       ...record,
     });
-  const { channel } = await open(entry, args, request.deadlineMs),
+  const { channel, bindSignatureCaller } = await open(
+      entry,
+      args,
+      request.deadlineMs,
+    ),
     id = observationDigest(request);
   let helper,
     worker,
@@ -416,6 +426,7 @@ export async function runDarwinBuildCommand(
     const announced = await channel.receive();
     observationObject(announced, ["helper"]);
     helper = normalizeDarwinIdentity(announced.helper);
+    bindSignatureCaller?.(helper);
     const actualHelper = await reader.helper(helper);
     requireDarwin(
       helper.asid > 0 &&
@@ -545,8 +556,12 @@ export async function runDarwinBuildCommand(
       },
     };
   } catch (cause) {
-    nativeException("darwin/build.js:exception", cause);
     firstFailure = cause;
+    try {
+      nativeException("darwin/build.js:exception", cause);
+    } catch {
+      /* Preserve admission failure. */
+    }
     throw cause;
   } finally {
     signal?.removeEventListener("abort", abort);
@@ -560,7 +575,11 @@ export async function runDarwinBuildCommand(
           worker: worker ?? null,
         });
       } catch (cause) {
-        nativeException("darwin/build.js:exception", cause);
+        try {
+          nativeException("darwin/build.js:exception", cause);
+        } catch {
+          /* Preserve cleanup failure. */
+        }
         if (!firstFailure) throw cause;
       }
     }

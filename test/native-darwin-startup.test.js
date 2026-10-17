@@ -10,6 +10,8 @@ import {
   DARWIN_STARTUP_TRACE_INTENT,
   openDarwinStartupTrace,
 } from "../ci/native/darwin/startup-trace.js";
+import { darwinSignatureDiagnostics } from "../ci/native/darwin/signature-logs.js";
+import { darwinCustodyChannel } from "../ci/native/darwin/channel.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -36,6 +38,439 @@ import {
 
 const SHA = "a".repeat(64),
   FIXTURE_SHA = "b".repeat(64);
+
+const SIGNATURE_ENV = {
+  CI: "true",
+  GITHUB_ACTIONS: "true",
+  ImageOS: "macos15",
+  RUNNER_ENVIRONMENT: "github-hosted",
+  RUNNER_OS: "macOS",
+};
+const signatureOptions = (run) => ({
+  platform: "darwin",
+  arch: "x64",
+  env: SIGNATURE_ENV,
+  deadlineMs: 30000,
+  now: () => 0,
+  run,
+});
+const signatureSample = () => ({
+  pid: IDENTITY.pid,
+  birthAvailable: 1,
+  birth: [IDENTITY.startSeconds, IDENTITY.startMicroseconds],
+  credentials: [501, 20, 501, 20, 501, 20],
+  auditAvailable: 1,
+  auditToken: [501, 501, 20, 501, 20, 42, 2, 7],
+  startAvailable: 1,
+  start: [101, 125000000],
+  endAvailable: 1,
+  end: [101, 250000000],
+  status: -67061,
+});
+const signatureMarker = (sample = signatureSample()) =>
+  "native-darwin-signature-validity: status=-67061\nnative-darwin-signature-call: " +
+  JSON.stringify(sample) +
+  "\n";
+const signatureEvent = () => ({
+  timestamp: "1970-01-01 00:01:41.200000+0000",
+  processID: 42,
+  senderImagePath: "/fixture/security",
+  subsystem: "fixture.signature",
+  eventMessage: "fixture reason",
+});
+
+test("Darwin original signature diagnostics preserve channels and cleanup while reporting joins a bounded query", async (t) => {
+  for (const fault of [null, "sink", "query", "parsing", "observation"]) {
+    const query = Promise.withResolvers(),
+      entered = Promise.withResolvers(),
+      cleaned = Promise.withResolvers();
+    const logChild = Object.assign(new EventEmitter(), {
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    query.promise.child = logChild;
+    const chunks = [],
+      metadata = [],
+      cleanup = { status: "RETIRED", independent: true };
+    let primary,
+      completed = false,
+      queries = 0;
+    const child = Object.assign(new EventEmitter(), {
+      pid: 99,
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+    });
+    t.after(() => {
+      query.resolve({ stdout: Buffer.alloc(0) });
+      for (const stream of [
+        child.stdin,
+        child.stdout,
+        child.stderr,
+        logChild.stdout,
+        logChild.stderr,
+      ])
+        stream.destroy();
+    });
+    const observing = withNativeDiagnostics(
+      async () => {
+        const reporter = darwinSignatureDiagnostics(
+          signatureOptions((file, args, options) => {
+            queries++;
+            assert.equal(file, "/usr/bin/sudo");
+            assert.deepEqual(args, [
+              "--non-interactive",
+              "--",
+              "/usr/bin/log",
+              "show",
+              "--style",
+              "ndjson",
+              "--start",
+              "1970-01-01 00:01:41+0000",
+              "--end",
+              "1970-01-01 00:01:42+0000",
+              "--info",
+              "--debug",
+              "--predicate",
+              "processID == 42",
+            ]);
+            assert.deepEqual(options, {
+              env: { PATH: "/usr/bin:/bin", LANG: "C" },
+              timeout: 12000,
+              maxBuffer: 65536,
+              encoding: "buffer",
+            });
+            entered.resolve();
+            return query.promise;
+          }),
+        );
+        const channel = darwinCustodyChannel(child, {
+          diagnostics: reporter.diagnostics,
+          schedule: () => 0,
+          cancel() {},
+        });
+        const announcement = channel.receive();
+        child.stdout.write(JSON.stringify({ helper: IDENTITY }) + "\n");
+        reporter.bind((await announcement).helper);
+        const waiting = channel.receive(),
+          completion = channel.completion;
+        const bytes = Buffer.from(signatureMarker());
+        for (const chunk of [
+          bytes.subarray(0, 9),
+          bytes.subarray(9, 98),
+          bytes.subarray(98),
+        ])
+          child.stderr.write(chunk);
+        child.emit("close", 126, null);
+        try {
+          await assert.rejects(waiting, (error) => {
+            primary = error;
+            return /Darwin custody transport unavailable/u.test(error.message);
+          });
+          await assert.rejects(completion, (error) => error === primary);
+        } finally {
+          cleaned.resolve(cleanup);
+        }
+        throw primary;
+      },
+      (owner, value) => {
+        if (value.stdout) chunks.push(Buffer.from(value.stdout));
+        if (value.stderr) {
+          chunks.push(Buffer.from(value.stderr));
+          if (owner === "darwin-signature-logs")
+            metadata.push(JSON.parse(value.stderr).signatureLogs);
+        }
+        if (fault === "sink") throw new Error("sink unavailable");
+      },
+    );
+    const settled = assert.rejects(observing, (error) => {
+      completed = true;
+      return error === primary;
+    });
+    await Promise.race([
+      entered.promise,
+      settled.then(() => assert.fail("Query did not start")),
+    ]);
+    assert.equal(await cleaned.promise, cleanup);
+    assert.equal(completed, false);
+    const stdout = Buffer.from(
+        fault === "parsing"
+          ? "invalid JSON\n"
+          : (JSON.stringify(signatureEvent()) + "\n").repeat(
+              fault === "query" ? 256 : 1,
+            ),
+      ),
+      stderr = Buffer.from("query stderr");
+    logChild.stdout.write(stdout);
+    logChild.stderr.write(stderr);
+    if (fault === "observation")
+      logChild.emit(
+        "error",
+        Object.defineProperty(new Error("observer unavailable"), "stdout", {
+          get() {
+            throw new Error("capture unavailable");
+          },
+        }),
+      );
+    logChild.emit("close", fault === "query" ? 64 : 0, null);
+    if (fault === "query")
+      query.reject(
+        Object.assign(new Error("query failed"), { code: 64, stdout, stderr }),
+      );
+    else query.resolve({ stdout, stderr });
+    await settled;
+    assert.equal(queries, 1);
+    assert.ok(Buffer.concat(chunks).includes(stdout));
+    assert.ok(Buffer.concat(chunks).includes(stderr));
+    assert.equal(
+      metadata[0].status,
+      ["query", "parsing", "observation"].includes(fault)
+        ? "error"
+        : "available",
+    );
+    assert.equal(metadata[0].truncated, false);
+    assert.deepEqual(metadata[0].caller.birth, [100, 1]);
+    assert.match(
+      metadata[0].uncertainty,
+      /log-side-birth-and-context-unjoined/u,
+    );
+  }
+});
+
+test("Darwin signature log reads reject unusable bindings and retain bounded empty, partial and failed output", async () => {
+  const event = JSON.stringify(signatureEvent()) + "\n";
+  for (const [change, expected, calls] of [
+    [{}, "available", 1],
+    [{ result: { stdout: "" } }, "empty", 1],
+    [{ result: { stdout: '{"count":0,"finished":1}\n' } }, "empty", 1],
+    [{ result: { stdout: Buffer.alloc(65537, 120) } }, "truncated", 1],
+    [{ result: { stdout: event, partial: true } }, "partial", 1],
+    [{ result: { stdout: "invalid JSON\n" } }, "error", 1],
+    [{ result: {} }, "unavailable", 1],
+    [{ result: { stdout: "\ud800" } }, "error", 1],
+    [{ result: { stdout: event, exitCode: 64 } }, "error", 1],
+    [
+      { result: { stdout: event, killed: true, signal: "SIGTERM" } },
+      "error",
+      1,
+    ],
+    [
+      {
+        result: {
+          error: Object.assign(new Error("query unavailable"), {
+            code: "ENOENT",
+          }),
+        },
+      },
+      "error",
+      1,
+    ],
+    [
+      {
+        result: {
+          stdout: JSON.stringify({ ...signatureEvent(), processID: 99 }),
+        },
+      },
+      "error",
+      1,
+    ],
+    [
+      {
+        result: {
+          stdout: JSON.stringify({
+            ...signatureEvent(),
+            timestamp: "1970-01-01T00:01:45Z",
+          }),
+        },
+      },
+      "error",
+      1,
+    ],
+    [
+      {
+        error: Object.assign(new Error("query failed"), {
+          code: 64,
+          stdout: event,
+          stderr: "partial stderr",
+        }),
+      },
+      "error",
+      1,
+    ],
+    [
+      {
+        error: Object.assign(new Error("capture failed"), {
+          code: "ENOBUFS",
+          stdout: "partial stdout",
+          partial: true,
+        }),
+      },
+      "error",
+      1,
+    ],
+    [
+      { sample: { auditAvailable: 0, auditToken: Array(8).fill(0) } },
+      "available",
+      1,
+    ],
+    [
+      {
+        caller: { ...IDENTITY, startSeconds: 4294967296 },
+        sample: {
+          birth: [4294967296, 1],
+          start: [4294967297, 125000000],
+          end: [4294967297, 250000000],
+        },
+        result: { stdout: "" },
+      },
+      "empty",
+      1,
+    ],
+    ...[
+      { birthAvailable: 0 },
+      { startAvailable: 0 },
+      { endAvailable: 0 },
+      { pid: 99 },
+      { birth: [100, 2] },
+      { credentials: [0, 20, 501, 20, 501, 20] },
+      { auditToken: Array(8).fill(0) },
+      { start: [101, 0.5] },
+      { end: [101, 1000000000] },
+      { end: [100, 0] },
+      { start: [253402300799, 0] },
+      { status: 0 },
+    ].map((sample) => [{ sample }, "unavailable", 0]),
+    [{ unbound: true }, "unavailable", 0],
+    [{ missing: true }, "unavailable", 0],
+    [{ conflict: true }, "unavailable", 0],
+    [{ incomplete: true }, "unavailable", 0],
+    [{ marker: "native-darwin-signature-call: invalid\n" }, "unavailable", 0],
+    ...[null, false].map((sample) => [
+      {
+        marker:
+          "native-darwin-signature-call: " +
+          JSON.stringify(sample) +
+          "\n" +
+          signatureMarker(),
+      },
+      "unavailable",
+      0,
+    ]),
+    ...["status=0", "uncalled"].flatMap((status) => [
+      [
+        {
+          marker:
+            `native-darwin-signature-validity: ${status}\n` + signatureMarker(),
+        },
+        "unavailable",
+        0,
+      ],
+      [
+        {
+          marker:
+            signatureMarker() + `native-darwin-signature-validity: ${status}\n`,
+        },
+        "unavailable",
+        0,
+      ],
+    ]),
+    [
+      { marker: signatureMarker().replace('"pid":42', '"pid":99,"pid":42') },
+      "unavailable",
+      0,
+    ],
+    [
+      { marker: "native-darwin-signature-call: " + "x".repeat(2048) + "\n" },
+      "unavailable",
+      0,
+    ],
+    [{ budget: true }, "unavailable", 0],
+    [{ remaining: true }, "available", 1],
+    [{ open: true }, "unavailable", 0],
+    [{ clockFails: true }, "unavailable", 0],
+    [{ marker: "native-darwin-signature-validity: uncalled\n" }, undefined, 0],
+    [{ marker: "native-darwin-signature-validity: status=0\n" }, undefined, 0],
+  ]) {
+    let queries = 0,
+      outcome,
+      clock = 0;
+    const streams = [];
+    await withNativeDiagnostics(
+      () => {
+        const reporter = darwinSignatureDiagnostics({
+          ...signatureOptions(async (_file, _args, options) => {
+            assert.equal(options.timeout, change.remaining ? 100 : 12000);
+            queries++;
+            if (change.error) throw change.error;
+            return change.result ?? { stdout: event, stderr: "query stderr" };
+          }),
+          now: () => {
+            if (change.clockFails) throw new Error("clock unavailable");
+            return clock;
+          },
+        });
+        if (!change.unbound) reporter.bind(change.caller ?? IDENTITY);
+        let marker =
+          change.marker ??
+          signatureMarker({ ...signatureSample(), ...change.sample });
+        if (change.missing)
+          marker = "native-darwin-signature-validity: status=-67061\n";
+        if (change.conflict) marker += signatureMarker();
+        if (change.incomplete) marker = marker.slice(0, -1);
+        if (change.budget) clock = 30000;
+        if (change.remaining) clock = 29900;
+        reporter.diagnostics("helper", { stderr: Buffer.from(marker) });
+        if (!change.open)
+          reporter.diagnostics("helper", { exitCode: 126, signal: null });
+      },
+      (owner, value) => {
+        if (owner === "darwin-signature-logs")
+          outcome = JSON.parse(value.stderr).signatureLogs;
+        else if (owner === "darwin-unified-log")
+          for (const stream of ["stdout", "stderr"])
+            if (value[stream]) streams.push(Buffer.from(value[stream]));
+      },
+    );
+    assert.equal(queries, calls);
+    assert.equal(outcome?.status, expected);
+    if (change.error) {
+      assert.equal(outcome.partial, true);
+      if (change.error.stdout)
+        assert.ok(
+          Buffer.concat(streams).includes(Buffer.from(change.error.stdout)),
+        );
+    }
+    if (change.budget) assert.equal(outcome.reason, "budget");
+    if (change.result?.killed) {
+      assert.equal(outcome.killed, true);
+      assert.equal(outcome.signal, "SIGTERM");
+      assert.equal(outcome.timedOut, null);
+    }
+    if (change.result?.stdout?.length === 65537)
+      assert.equal(Buffer.concat(streams).length, 65536);
+  }
+  for (const options of [
+    { platform: "linux" },
+    { arch: "arm64" },
+    { env: { ...SIGNATURE_ENV, ImageOS: "macos14" } },
+    { env: { ...SIGNATURE_ENV, RUNNER_ENVIRONMENT: "self-hosted" } },
+  ])
+    await withNativeDiagnostics(() =>
+      assert.equal(
+        darwinSignatureDiagnostics({
+          ...signatureOptions(() => assert.fail("wrong host query")),
+          ...options,
+        }),
+        undefined,
+      ),
+    );
+  assert.equal(
+    darwinSignatureDiagnostics(
+      signatureOptions(() => assert.fail("unscoped query")),
+    ),
+    undefined,
+  );
+});
 
 test("Darwin publishes selected unusable crash and log bytes before strict attribution rejects them", async () => {
   const captured = [];

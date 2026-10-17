@@ -488,6 +488,32 @@ A composite source line and errno identify no particular API failure; `-67061`
 alone establishes no unique corruption, profile, memory or SDK cause and permits
 no bypass. Portable injections prove diagnostics, not native validity or retirement.
 
+Original strict-validity failures additionally retain the native caller PID,
+birth, available BSD credentials/audit token and realtime bounds around that
+single call. Existing inspected self identity is reused; optional sampling
+preserves errno and cannot refuse admission. Unavailable samples are explicit.
+Only the original build-admission stderr observer installs the passive reporter,
+inside ordinary diagnostics on hosted Darwin/x64 `macos15`. Complete markers must
+join the announced helper birth/context. Fragmented input is assembled within a
+fixed bound; conflicting or incomplete bindings cannot authorize a query.
+Later verifier/cleanup failures do not select it.
+One existing-authority `/usr/bin/log show` read uses a numeric caller `processID`
+and explicit original start/end bounds, rounded outward to log's documented
+whole-second date precision. Exact native nanoseconds and rounding uncertainty
+remain alongside caller context; returned source/timestamp bytes establish only
+uncertain correlation without log-side birth/context joins. Query and publication
+retain the 12-second/64-KiB ceilings within the original command budget. Missing
+budget/bindings, empty, partial/truncated and failed reads remain explicit, with
+available stdout/stderr preserved. Cleanup proceeds independently and the existing
+diagnostic reporting boundary awaits completion without changing primary errors,
+exit, protocol or separate cleanup outcomes, including sink failures.
+Apple's [CMS-signer failure branch](https://github.com/apple-oss-distributions/Security/blob/main/OSX/libsecurity_codesigning/lib/StaticCode.cpp#L818-L847)
+logs reason/status to Syslog before the generic signature failure. Other throw
+sites may emit nothing; collected records prove no unique cause or functional
+cure. No logging channel, subscription, trust retry, privilege or comparison
+payload is introduced. All native acceptance and independent retirement
+obligations remain open.
+
 The sealed build entry separately samples the original SDK guard in its existing
 short-circuit order: native realpath result and errno, exact path equality,
 lstat result and errno, directory kind, root owner and group/other write bits.

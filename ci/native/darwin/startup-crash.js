@@ -253,7 +253,7 @@ function observationText(value, limit, kind) {
 
 // Normalize timezone spelling and fractional seconds, never round a birth or
 // widen its window. Native timestamps remain private integer microseconds.
-function startupTimestamp(value) {
+export function startupTimestamp(value) {
   if (value === undefined) return { reason: "timestamp-missing" };
   if (typeof value !== "string") return { reason: "timestamp-type" };
   const match =
@@ -380,7 +380,7 @@ const DENIALS = new Set([
   "syscall-sandbox",
 ]);
 
-function denialEvents(text) {
+export function denialEvents(text) {
   const decoded = observationText(text, 65536, "log-record");
   if (decoded.status) return decoded;
   try {
@@ -450,6 +450,31 @@ function denialEvents(text) {
     nativeException("darwin/startup-crash.js:exception", diagnosticError);
     return rejected("unusable", "log-record", "json");
   }
+}
+
+/** Existing observer authority and capture ceilings; selectors remain caller-owned. */
+export function readDarwinUnifiedLog(
+  args,
+  { run = execute, timeout = 12000 } = {},
+) {
+  return diagnosticCommand("darwin-unified-log", run)(
+    "/usr/bin/sudo",
+    [
+      "--non-interactive",
+      "--",
+      "/usr/bin/log",
+      "show",
+      "--style",
+      "ndjson",
+      ...args,
+    ],
+    {
+      env: { PATH: "/usr/bin:/bin", LANG: "C" },
+      timeout,
+      maxBuffer: 65536,
+      encoding: "buffer",
+    },
+  );
 }
 
 /** Related kernel denials are diagnosis, not proof of the abort's cause. */
@@ -541,15 +566,8 @@ export async function readDarwinStartupDenial(
   let stdout;
   try {
     const names = images.map(({ image }) => path.basename(image));
-    ({ stdout } = await diagnosticCommand("darwin-unified-log", run)(
-      "/usr/bin/sudo",
+    ({ stdout } = await readDarwinUnifiedLog(
       [
-        "--non-interactive",
-        "--",
-        "/usr/bin/log",
-        "show",
-        "--style",
-        "ndjson",
         "--last",
         "1m",
         "--info",
@@ -557,12 +575,7 @@ export async function readDarwinStartupDenial(
         "--predicate",
         `(((processID == 0) AND (senderImagePath CONTAINS "/Sandbox")) OR (subsystem == "com.apple.sandbox.reporting")) AND (${names.map((name) => `(eventMessage CONTAINS "${name}(${binding.pid})")`).join(" OR ")})`,
       ],
-      {
-        env: { PATH: "/usr/bin:/bin", LANG: "C" },
-        timeout: 12000,
-        maxBuffer: 65536,
-        encoding: "buffer",
-      },
+      { run },
     ));
   } catch (error) {
     nativeException("darwin/startup-crash.js:exception", error);

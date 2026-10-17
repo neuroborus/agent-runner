@@ -185,6 +185,23 @@ The composite source line and errno identify no failed API; `-67061` establishes
 no unique corruption, profile, memory or SDK cause or authorized bypass.
 Portable injections prove diagnostics, not native validity, retirement or acceptance.
 
+Original Darwin build-admission failures also publish best-effort caller
+birth/credential/audit context and the original strict-call realtime interval,
+reusing inspected self identity and preserving errno. The existing custody stderr
+observer binds complete failure markers to the announced original helper. Only
+ordinary hosted Darwin/x64 `macos15` diagnostics may issue one existing-authority
+unified-log read with numeric PID and explicit original interval selectors.
+Whole-second selector rounding and absent log-side birth/context joins remain
+uncertain correlation; raw source/timestamp output is retained. Existing
+12-second/64-KiB ceilings fit the original command budget, with unavailable budget,
+empty, partial/truncated and error outcomes. The diagnostic scope joins bounded
+reads after its action, allowing independent cleanup without changing admission,
+protocol, exception identity, exit or separate cleanup results. Sink failures
+cannot change those outcomes. No later verifier/cleanup failure can initiate this
+capture. The [native owner](../ci/native/README.md) cites Apple's CMS-signer Syslog
+branch; other failure sites may emit no record, and diagnostics prove no cause,
+remedy, native acceptance or independent retirement.
+
 Experiment acquisition, installed-input ancestry and build snapshots use BigInt
 filesystem statistics, including nanosecond modification/change timestamps.
 Device/inode identities remain exact unsigned-64-bit values through comparisons

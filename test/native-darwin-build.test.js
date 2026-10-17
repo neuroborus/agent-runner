@@ -227,6 +227,30 @@ test("Darwin signature admission observes only original failures with bounded by
       /static void signature_error_details\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
         source,
       )?.[1];
+  const sampleBody = (name) => {
+    const body = new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+    assert.ok(body);
+    return body
+      .replaceAll("sample->", "sample.")
+      .replace(
+        "struct proc_bsdinfo *b = &sample.caller.bsd; unsigned *t = sample.caller.token.val;",
+        "const b = sample.caller.bsd, t = sample.caller.token.val;",
+      )
+      .replaceAll("b->", "b.")
+      .replaceAll("(int)sizeof(sample.caller.bsd)", "BSD_SIZE")
+      .replaceAll("sizeof(sample.caller.bsd)", "BSD_SIZE")
+      .replaceAll("&sample.caller.bsd", "sample.caller.bsd")
+      .replaceAll("(task_info_t)&sample.caller.token", "sample.caller.token")
+      .replaceAll("&sample.before", "sample.before")
+      .replaceAll("&sample.after", "sample.after")
+      .replaceAll("&count", "(value) => { count = value; }")
+      .replace(/\((?:intmax_t|uintmax_t|unsigned)\)/gu, "")
+      .replace(/\b(?:int|mach_msg_type_number_t) /gu, "let ")
+      .replace(/"\s*\n\s*"/gu, "");
+  };
   assert.ok(body && hexBody && guardBody && textBody && errorBody);
   // Retain the complete admission, diagnostics, downstream guards and cleanup.
   const script = new Script(`
@@ -243,6 +267,9 @@ test("Darwin signature admission observes only original failures with bounded by
     function signature_error_details(error) {${errorBody
       .replace(/\(intmax_t\)/gu, "")
       .replace(/\b(?:bool|CFStringRef) /gu, "let ")}}
+    function signature_begin(sample) {${sampleBody("signature_begin")}}
+    function signature_end(sample) {${sampleBody("signature_end")}}
+    function signature_sample_report(sample, status) {${sampleBody("signature_sample_report")}}
     function signature(name, pin) {${body
       .replace(/^#.*$/gmu, "")
       .replace(
@@ -267,6 +294,11 @@ test("Darwin signature admission observes only original failures with bounded by
         "let ",
       )
       .replace("CFErrorRef error = NULL;", "let error = NULL;")
+      .replace(
+        "struct signature_sample sample = {0};",
+        "const sample = newSample();",
+      )
+      .replaceAll("&sample", "sample")
       .replace("&error", "(value) => { error = value; }")
       .replace(/&(code|info)\b/gu, "$1")}}
     ({signature, guard});
@@ -303,6 +335,11 @@ test("Darwin signature admission observes only original failures with bounded by
         "code-boundary",
       ].map((detail) => ({ stop: "validity", detail })),
       ...["write", "flush"].map((fault) => ({ stop: "validity", fault })),
+      ...["uncached", "birth", "audit", "start", "end"].map((sampleFault) => ({
+        stop: "validity",
+        sampleFault,
+      })),
+      { stop: "validity", sampleFault: "end", zeroErrno: true },
       { errorOnSuccess: true },
       { stop: "info", errorOnSuccess: true },
       { name: Buffer.alloc(PATH_MAX + 7, 0xff) },
@@ -314,6 +351,8 @@ test("Darwin signature admission observes only original failures with bounded by
     fault,
     detail,
     errorOnSuccess,
+    sampleFault,
+    zeroErrno,
   } of cases) {
     const calls = [],
       releases = [],
@@ -322,7 +361,7 @@ test("Darwin signature admission observes only original failures with bounded by
       info = {},
       hash = Buffer.alloc(20, 0xab),
       terminal = operations.indexOf(stop),
-      originalError = stop === "info" ? 0 : 2;
+      originalError = stop === "info" || zeroErrno ? 0 : 2;
     const text = (value) => ({ type: "string", text: value }),
       domain =
         detail === "domain-type" ? { type: "data" } : text("fixture.domain"),
@@ -356,6 +395,18 @@ test("Darwin signature admission observes only original failures with bounded by
       flushes = 0,
       descriptions = 0,
       refusedErrno;
+    const bsd = {
+      pbi_start_tvsec: 10,
+      pbi_start_tvusec: 20,
+      pbi_uid: 2,
+      pbi_gid: 3,
+      pbi_ruid: 4,
+      pbi_rgid: 5,
+      pbi_svuid: 2,
+      pbi_svgid: 3,
+    };
+    const token = { val: [1, 2, 3, 4, 5, 42, 6, 7] },
+      samples = [];
     const cString = (value) =>
       Array.isArray(value)
         ? value.join("").split("\0")[0]
@@ -368,6 +419,58 @@ test("Darwin signature admission observes only original failures with bounded by
       NULL: null,
       stderr: {},
       errno: 7,
+      BSD_SIZE: 64,
+      PROC_PIDTBSDINFO: 1,
+      TASK_AUDIT_TOKEN: 2,
+      TASK_AUDIT_TOKEN_COUNT: 8,
+      KERN_SUCCESS: 0,
+      CLOCK_REALTIME: 0,
+      signature_caller: {
+        bsd,
+        token: sampleFault ? { val: Array(8).fill(0) } : token,
+      },
+      newSample: () => ({
+        caller: {
+          bsd: Object.fromEntries(Object.keys(bsd).map((key) => [key, 0])),
+          token: { val: Array(8).fill(0) },
+        },
+        before: { tv_sec: 0, tv_nsec: 0 },
+        after: { tv_sec: 0, tv_nsec: 0 },
+        pid: 0,
+        birth: 0,
+        audit: 0,
+        started: 0,
+        ended: 0,
+      }),
+      getpid: () => 42,
+      proc_pidinfo(pid, kind, arg, target, size) {
+        assert.deepEqual([pid, kind, arg, size], [42, 1, 0, 64]);
+        samples.push("birth");
+        context.errno = 80;
+        if (sampleFault === "birth") return -1;
+        Object.assign(target, bsd);
+        return size;
+      },
+      mach_task_self: () => 9,
+      task_info(task, kind, target, count) {
+        assert.deepEqual([task, kind], [9, 2]);
+        samples.push("audit");
+        context.errno = 81;
+        count(8);
+        if (sampleFault === "audit") return -1;
+        target.val = token.val;
+        return 0;
+      },
+      clock_gettime(clock, target) {
+        assert.equal(clock, 0);
+        const phase = samples.includes("start") ? "end" : "start";
+        samples.push(phase);
+        context.errno = 82;
+        if (sampleFault === phase) return -1;
+        target.tv_sec = 12;
+        target.tv_nsec = phase === "start" ? 100 : 200;
+        return 0;
+      },
       kSecCSDefaultFlags: 1,
       kSecCSStrictValidate: 2,
       kSecCSSigningInformation: 4,
@@ -393,6 +496,7 @@ test("Darwin signature admission observes only original failures with bounded by
         return stop === "create" ? status : 0;
       },
       SecStaticCodeCheckValidityWithErrors(input, flags, requirement, target) {
+        assert.equal(context.errno, originalError);
         calls.push(["validity", input.value, flags, requirement]);
         assert.equal(typeof target, "function");
         if (error) target(error);
@@ -400,6 +504,7 @@ test("Darwin signature admission observes only original failures with bounded by
         return stop === "validity" ? status : 0;
       },
       SecCodeCopySigningInformation(input, flags, target) {
+        assert.equal(context.errno, originalError);
         calls.push(["info", input.value, flags]);
         target.value = info;
         context.errno = originalError;
@@ -472,7 +577,7 @@ test("Darwin signature admission observes only original failures with bounded by
       fprintf(stream, format, ...values) {
         assert.equal(stream, context.stderr);
         let at = 0;
-        output += format.replace(/%(zu|jd|d|s|u)/gu, (_token, type) => {
+        output += format.replace(/%(zu|jd|ju|d|s|u)/gu, (_token, type) => {
           const value = values[at++];
           if (type === "s") return cString(value);
           return (
@@ -516,6 +621,12 @@ test("Darwin signature admission observes only original failures with bounded by
         ["info", code, 4],
       ].slice(0, terminal < 0 ? 4 : terminal + 1),
     ]);
+    assert.deepEqual(
+      samples,
+      terminal >= 0 && terminal < 2
+        ? []
+        : [...(sampleFault ? ["birth", "audit"] : []), "start", "end"],
+    );
     const hasDetails = stop === "validity" && error?.type === "error";
     assert.equal(descriptions, Number(hasDetails));
     assert.deepEqual(releases, [
@@ -543,6 +654,23 @@ test("Darwin signature admission observes only original failures with bounded by
             bytes = available ? Buffer.from(value.text) : Buffer.alloc(0);
           expected += `native-darwin-signature-error-${field}: available=${Number(!!available)} truncated=${Number(bytes.length > 128)} utf8-hex=${bytes.subarray(0, 128).toString("hex")}\n`;
         }
+        expected +=
+          "native-darwin-signature-call: " +
+          JSON.stringify({
+            pid: 42,
+            birthAvailable: Number(sampleFault !== "birth"),
+            birth: sampleFault === "birth" ? [0, 0] : [10, 20],
+            credentials:
+              sampleFault === "birth" ? Array(6).fill(0) : [2, 3, 4, 5, 2, 3],
+            auditAvailable: Number(sampleFault !== "audit"),
+            auditToken: sampleFault === "audit" ? Array(8).fill(0) : token.val,
+            startAvailable: Number(sampleFault !== "start"),
+            start: sampleFault === "start" ? [0, 0] : [12, 100],
+            endAvailable: Number(sampleFault !== "end"),
+            end: sampleFault === "end" ? [0, 0] : [12, 200],
+            status,
+          }) +
+          "\n";
       }
     }
     if (stop)
@@ -550,7 +678,7 @@ test("Darwin signature admission observes only original failures with bounded by
     assert.equal(output, expected);
     assert.ok(
       Buffer.byteLength(output) <
-        2 * PATH_MAX + (stop === "validity" ? 1280 : 512),
+        2 * PATH_MAX + (stop === "validity" ? 2304 : 512),
     );
   }
 });
