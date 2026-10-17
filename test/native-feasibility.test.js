@@ -5928,7 +5928,7 @@ test("TCP setup and observer failures retain native causes and close each acquir
   }
 });
 
-test("original socket transfer validates its actual input and retains 10022 and partial-transfer cleanup", async () => {
+test("original socket transfer validates its actual input and partial-transfer cleanup", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
@@ -5993,6 +5993,10 @@ test("original socket transfer validates its actual input and retains 10022 and 
       "socket_transfer_observe(&offer,",
       "socket_transfer_observe(offer,",
     )
+    .replaceAll(
+      "socket_transfer_controls(&offer,",
+      "socket_transfer_controls(offer,",
+    )
     .replace("int protocolSize = 628;", "const protocolSize = {value:628};")
     .replaceAll("&offer.source", "offer.source")
     .replaceAll("&offer.protocol", "offer.protocol")
@@ -6041,8 +6045,6 @@ test("original socket transfer validates its actual input and retains 10022 and 
     "self",
     "wrong-pid",
     "protocol",
-    "10022",
-    "10022-close",
     "birth",
     "token",
     "exited",
@@ -6163,17 +6165,15 @@ test("original socket transfer validates its actual input and retains 10022 and 
         assert.equal(socket, 17);
         assert.equal(pid, 41);
         events.push("duplicate");
-        if (["10022", "10022-close"].includes(fault)) {
-          lastError = 10022;
-          return -1;
-        }
         value.ticket = 1;
         return 0;
       },
-      socket_transfer_observe(_offer, error) {
-        assert.equal(error, 10022);
-        lastError = 5; // Optional observations cannot replace the saved failure.
-      },
+      // Refused-duplication observations and controls are exercised together by
+      // the actual-source/caller regression below; never replace them here.
+      socket_transfer_observe: () =>
+        assert.fail("Unexpected duplication refusal"),
+      socket_transfer_controls: () =>
+        assert.fail("Unexpected control dispatch"),
       offerByte(value) {
         offer = value;
         return 0;
@@ -6247,7 +6247,7 @@ test("original socket transfer validates its actual input and retains 10022 and 
         assert.equal(socket, 17);
         events.push("close");
         lastError = 10038;
-        return ["close", "10022-close"].includes(fault) ? -1 : 0;
+        return fault === "close" ? -1 : 0;
       },
       remember(...facts) {
         if (!failures.length) failures.push(facts);
@@ -6287,15 +6287,13 @@ test("original socket transfer validates its actual input and retains 10022 and 
     );
     assert.equal(events.filter((event) => event === "close").length, 1, fault);
     assert.equal(events.includes("U"), context.transferState.value, fault);
-    if (["10022", "10022-close"].includes(fault))
-      assert.deepEqual(failures[0], ["observer-transfer", "win32", 10022]);
     if (["wrong-pid", "birth", "token", "exited", "reused"].includes(fault))
       assert.equal(failures[0][0], "observer-owner-binding");
     if (["partial", "input-partial"].includes(fault))
       assert.equal(failures[0][0], "observer-carrier");
     if (["ack", "input-ack"].includes(fault))
       assert.deepEqual(failures[0], ["ack-read", "win32", 109]);
-    if (["close", "10022-close"].includes(fault))
+    if (fault === "close")
       assert.deepEqual(secondary[0], ["tcp-close", "win32", 10038]);
   }
 });
@@ -6307,7 +6305,7 @@ test("native TCP acknowledgments use bounded pipe reads and retain their actual 
   );
   const begin = source.indexOf("static BOOL tcp_ack(");
   const body = source
-    .slice(begin, source.indexOf("static BOOL wfp_transfer(", begin))
+    .slice(begin, source.indexOf("/* Controls never", begin))
     .replace(
       "static BOOL tcp_ack(char expected, ULONGLONG end, struct diagnosis *problem)",
       "function tcp_ack(expected, end, problem)",
@@ -6330,7 +6328,7 @@ test("native TCP acknowledgments use bounded pipe reads and retain their actual 
       "size.value != 1 || value.value != expected",
     );
   const exercise = new Script(body + "result = tcp_ack(expected, 5, problem);");
-  for (const expected of ["T", "U"])
+  for (const expected of ["D", "T", "U", "V"])
     for (const scenario of [
       "ready",
       "delayed",
@@ -6799,7 +6797,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
   ]);
   const body = (name) =>
     new RegExp(
-      `static (?:BOOL|void) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:BOOL|void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   // Translate syntax and pointer carriers only. Acquisition, failed-call
@@ -6814,6 +6812,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       .replaceAll("*transferred", "transferState.value")
       .replaceAll("((BYTE *)&offer.target)[i]", "targetBytes[i]")
       .replaceAll("((BYTE *)&offer)[i]", "carrier[i]")
+      .replaceAll("((BYTE *)&control)[i]", "controlCarrier[i]")
       .replaceAll(
         "((const BYTE *)&offer->source)[i]",
         "protocolBytes(offer.source)[i]",
@@ -6842,9 +6841,10 @@ test("original TCP caller retains source duplication failures and bounded prereq
       .replaceAll("sizeof(offer.source)", "628")
       .replaceAll("sizeof(offer.protocol)", "628")
       .replaceAll("sizeof(offer)", "1296")
+      .replaceAll("sizeof(control)", "1312")
       .replaceAll("offsetof(WSAPROTOCOL_INFOW, dwProviderReserved)", "112")
       .replace(
-        /\b(?:BOOL|DWORD|HANDLE|SOCKET|LONGLONG|BYTE|unsigned)\b/gu,
+        /\b(?:BOOL|DWORD|HANDLE|SOCKET|LONGLONG|ULONGLONG|BYTE|unsigned)\b/gu,
         "let",
       );
   const protocol = native(body("socket_protocol"))
@@ -6868,6 +6868,10 @@ test("original TCP caller retains source duplication failures and bounded prereq
     .replace("int protocolSize = 628;", "const protocolSize = {value:628};")
     .replace("protocolSize != 628", "protocolSize.value != 628")
     .replaceAll("carrier[i]", "offerByte(offer, i)")
+    .replace(
+      "socket_transfer_controls(offer, error, end)",
+      "await socket_transfer_controls(offer, error, end)",
+    )
     .replaceAll("!tcp_ack(", "!await tcp_ack(");
   const preparation = native(body("wfp_prepare").split("  wfp_exclusive();")[0])
     .replace(
@@ -6919,6 +6923,103 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "const born = {}, exited = {}, kernel = {}, user = {};",
     )
     .replace(/_Static_assert\([^;]+;/u, "");
+  const controlIdentity = native(body("socket_control_identity"))
+    .replace(
+      "let token = NULL; TOKEN_STATISTICS statistics; let used = 0, container = 0, status = 0;",
+      "const token = {value:null}, statistics = {}, used = {value:0}, container = {value:0}; let status = 0;",
+    )
+    .replace(
+      "FILETIME born, exited, kernel, user;",
+      "const born = {}, exited = {}, kernel = {}, user = {};",
+    )
+    .replaceAll("sizeof(statistics)", "56")
+    .replaceAll("sizeof(container)", "4")
+    .replaceAll(
+      "GetTokenInformation(token,",
+      "GetTokenInformation(token.value,",
+    )
+    .replaceAll("used !=", "used.value !=")
+    .replaceAll("!!container", "!!container.value")
+    .replace("CloseHandle(token)", "CloseHandle(token.value)");
+  const controlProtocol = native(body("socket_control_protocol"))
+    .replace("int size = sizeof(*actual);", "const size = {value:628};")
+    .replace("size == sizeof(*actual)", "size.value == 628");
+  const transferRefusal = native(body("socket_transfer_refusal"))
+    .replaceAll("const char *", "const ")
+    .replace("line + offset", "line.subarray(offset)");
+  const controlClose = native(body("socket_control_close")).replaceAll(
+    "*status",
+    "result[index]",
+  );
+  const controlReceive = native(body("socket_control_receive"))
+    .replace(
+      "let offset = sizeof(SOCKET_CONTROL_PREFIX) - 1, end = size - 1;",
+      "let offset = SOCKET_CONTROL_PREFIX.length, end = size - 1;",
+    )
+    .replace(
+      "struct socket_control_offer control = {0};",
+      "const control = {error:0,offer:{target:{},source:{},protocol:{}}}, carrier = Buffer.alloc(1312);",
+    )
+    .replaceAll("controlCarrier[i]", "carrier[i]")
+    .replace(
+      "invariant(control.error",
+      "decodeControl(carrier, control); invariant(control.error",
+    )
+    .replace(
+      "let status[11] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};",
+      "const status = Array(11).fill(-1);",
+    )
+    .replace(
+      "struct socket_target actualTarget = {0}; WSAPROTOCOL_INFOW actual = {0};",
+      "const actualTarget = {}, actual = {};",
+    )
+    .replace(
+      "let exclusive = FALSE; int length = sizeof(exclusive);",
+      "const exclusive = {value:false}, length = {value:4};",
+    )
+    .replace("sizeof(exclusive)", "4")
+    .replace("length == 4 && exclusive", "length.value == 4 && exclusive.value")
+    .replace("int result", "const result")
+    .replace("let sent = 0;", "const sent = {value:0};")
+    .replaceAll("sent ==", "sent.value ==")
+    .replaceAll(
+      "socket_control_close(imported, status[7])",
+      "socket_control_close(imported, status, 7)",
+    );
+  const controls = native(body("socket_transfer_controls"))
+    .replace("struct socket_target source = {0};", "const source = {};")
+    .replace(
+      "struct socket_control_offer control = {0};",
+      "const control = {error:0,offer:{target:{},source:{},protocol:{}}};",
+    )
+    .replace(
+      "let status[11] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};",
+      "const status = Array(11).fill(-1);",
+    )
+    .replace(
+      "WSAPROTOCOL_INFOW actual = {0}, selection = original.source; struct socket_target current = {0}; u_long nonblocking = 1;",
+      "const actual = {}, selection = structuredClone(original.source), current = {}, nonblocking = {value:1};",
+    )
+    .replaceAll("sizeof(source)", "40")
+    .replaceAll("sizeof(exclusive)", "4")
+    .replaceAll("controlCarrier[i]", "controlByte(control, i)")
+    .replace(
+      "struct diagnosis acknowledgment = {0};",
+      "const acknowledgment = {};",
+    )
+    .replace("tcp_ack(86", "await tcp_ack(86")
+    .replaceAll(
+      "socket_control_close(imported, status[7])",
+      "socket_control_close(imported, status, 7)",
+    )
+    .replaceAll(
+      "socket_control_close(socket, status[8])",
+      "socket_control_close(socket, status, 8)",
+    )
+    // Preserve the C single-exit cleanup when translating goto to a scoped loop.
+    .replaceAll("goto closed;", "break;")
+    .replace("status[0] = identity;", "do { status[0] = identity;")
+    .replace("closed:", "} while (false);");
   const tcp = source.slice(
     source.indexOf("static int tcp_connection("),
     source.indexOf("static int connection("),
@@ -6941,6 +7042,13 @@ test("original TCP caller retains source duplication failures and bounded prereq
     function socket_token_observe(process,value) {${tokenRead}}
     function socket_token_write(value) {${tokenWrite}}
     function socket_transfer_observe(offer,error) {${observation}}
+    function socket_transfer_refusal(line,size) {${transferRefusal}}
+    function socket_control_identity(value,appContainer) {${controlIdentity}}
+    function socket_control_protocol(socket,expected,actual) {${controlProtocol}}
+    function socket_control_close(socket,result,index) {${controlClose}}
+    function socket_control_write(kind,side,target,status) {${native(body("socket_control_write"))}}
+    function socket_control_receive(line,size) {${controlReceive}}
+    async function socket_transfer_controls(original,error,end) {${controls}}
     async function wfp_transfer(socket,end,problem) {${transfer}}
     function wfp_prepare(line,size) {${preparation} observerReady();}
     function wfp_close() {${native(body("wfp_close"))}}
@@ -6951,7 +7059,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       }
       transferred = transferState.value; return closeSource();
     }
-    ({prepare:wfp_prepare, run:runSource, close:wfp_close, bind:socket_target_binding});
+    ({prepare:wfp_prepare, control:socket_control_receive, refusal:socket_transfer_refusal, run:runSource, close:wfp_close, bind:socket_target_binding});
   `);
   const loopStart = driver.indexOf("for (const operation of OPERATIONS)");
   const loop = driver.slice(
@@ -6976,8 +7084,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
     ["iSecurityScheme", 104],
     ["dwMessageSize", 108],
   ];
-  for (const [mode, fault] of [
-    ...[
+  for (const [mode, fault] of ["read", "edit"].flatMap((mode) =>
+    [
       null,
       "10022",
       "destination-open",
@@ -6993,14 +7101,40 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "10022-close",
       "birth",
       "token",
-      "ack",
+      "ack-D",
+      "ack-T",
+      "ack-U",
       "import",
-    ].map((fault) => ["read", fault]),
-    ["edit", "10022"],
-  ]) {
+      "control-create-self",
+      "control-create-destination",
+      "control-duplicate-self",
+      "control-duplicate-destination",
+      "control-import-self",
+      "control-import-destination",
+      "control-provider",
+      "control-close-self",
+      "control-close-self-import",
+      "control-close-destination",
+      "control-close-destination-import",
+      "control-ack",
+      "control-replay",
+      "control-short",
+      "control-budget",
+      "control-arrival-late",
+      "control-import-late",
+      "control-deadline-extended",
+      "control-target-birth",
+      "control-target-token",
+      "control-observation-form",
+      "control-observation-replay",
+      "control-observation-bound",
+      "control-observation-target",
+    ].map((fault) => [mode, fault]),
+  )) {
     const f = tcpDenialFixture(),
       order = [],
       primary = [],
+      launcherPrimary = [],
       cleanup = [],
       saved = new Map(),
       acknowledgments = new Map();
@@ -7012,10 +7146,29 @@ test("original TCP caller retains source duplication failures and bounded prereq
       offerCarrier,
       output = "",
       launcherFailed = false,
-      inLauncher = false;
-    const failsTransfer = ![null, "birth", "token", "ack", "import"].includes(
-      fault,
-    );
+      inLauncher = false,
+      creations = 0,
+      controlCarrier,
+      controlAcknowledged = false,
+      clock = 10;
+    const failsTransfer = ![
+      null,
+      "birth",
+      "token",
+      "ack-D",
+      "ack-T",
+      "ack-U",
+      "import",
+    ].includes(fault);
+    const incompleteObservation = [
+      "diagnostic-output",
+      "diagnostic-form",
+      "diagnostic-private",
+      "control-observation-form",
+      "control-observation-replay",
+      "control-observation-bound",
+      "control-observation-target",
+    ].includes(fault);
     const protocol = {
       iAddressFamily: 2,
       iSocketType: 1,
@@ -7127,7 +7280,29 @@ test("original TCP caller retains source duplication failures and bounded prereq
           } finally {
             inLauncher = false;
           }
+        } else if (line.startsWith(context.SOCKET_CONTROL_PREFIX)) {
+          let input = Buffer.from(line);
+          if (fault === "control-arrival-late") clock = 5000;
+          if (fault === "control-short")
+            input = input.subarray(0, input.length - 2);
+          inLauncher = true;
+          try {
+            nativeCalls.control(input, input.length);
+            if (fault === "control-replay")
+              nativeCalls.control(input, input.length);
+          } catch (error) {
+            if (error.message !== "Native refusal") throw error;
+            launcherFailed = true;
+          } finally {
+            inLauncher = false;
+          }
         } else if (line.startsWith(context.TCP_PREFIX + " transfer=")) {
+          inLauncher = true;
+          try {
+            nativeCalls.refusal(Buffer.from(line), Buffer.byteLength(line));
+          } finally {
+            inLauncher = false;
+          }
           let observed = line;
           if (fault === "diagnostic-output")
             observed = context.TCP_PREFIX + " incomplete\n";
@@ -7142,6 +7317,24 @@ test("original TCP caller retains source duplication failures and bounded prereq
               context.TCP_PREFIX + " transfer=" + JSON.stringify(value) + "\n";
           }
           transport.child.stderr.write(observed);
+        } else if (line.startsWith(context.TCP_PREFIX + " control=")) {
+          let observed = line;
+          if (fault === "control-observation-form")
+            observed = context.TCP_PREFIX + " control=[0]\n";
+          if (fault === "control-observation-bound")
+            observed =
+              context.TCP_PREFIX + " control=" + "x".repeat(2048) + "\n";
+          if (fault === "control-observation-target") {
+            const value = JSON.parse(
+              line.slice((context.TCP_PREFIX + " control=").length),
+            );
+            value[2]++;
+            observed =
+              context.TCP_PREFIX + " control=" + JSON.stringify(value) + "\n";
+          }
+          transport.child.stderr.write(observed);
+          if (fault === "control-observation-replay")
+            transport.child.stderr.write(observed);
         } else transport.child.stderr.write(line);
       }
       return fault === "diagnostic-output" && diagnosticWrite
@@ -7165,6 +7358,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
       wfpTargetReady: { value: 1 },
       wfpTransferReady: { value: 0 },
       wfpDuplicateReleased: { value: 0 },
+      wfpControlSeen: { value: 0 },
+      wfpTransferError: 0,
       wfpPreparedAt: 0,
       wfpSocket: -1,
       wfpEngine: null,
@@ -7177,6 +7372,9 @@ test("original TCP caller retains source duplication failures and bounded prereq
       FALSE: false,
       NULL: null,
       ERROR_SUCCESS: 0,
+      ERROR_NO_TOKEN: 1008,
+      ERROR_INVALID_DATA: 13,
+      ERROR_WRITE_FAULT: 29,
       INVALID_SOCKET: -1,
       SOCKET_ERROR: -1,
       FROM_PROTOCOL_INFO: -1,
@@ -7184,8 +7382,11 @@ test("original TCP caller retains source duplication failures and bounded prereq
       SOCK_STREAM: 1,
       IPPROTO_TCP: 6,
       MAX_PROTOCOL_CHAIN: 7,
+      MAXDWORD: 0xffffffff,
       SOL_SOCKET: 0xffff,
       SO_PROTOCOL_INFOW: 0x2005,
+      SO_EXCLUSIVEADDRUSE: 0xfffffffb,
+      FIONBIO: 0x8004667e,
       WAIT_TIMEOUT: 258,
       WAIT_FAILED: 0xffffffff,
       TOKEN_QUERY: 8,
@@ -7193,12 +7394,14 @@ test("original TCP caller retains source duplication failures and bounded prereq
       TokenIsAppContainer: 29,
       PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
       SOCKET_PREFIX: "native-windows-socket: ",
+      SOCKET_CONTROL_PREFIX: "native-windows-socket-control: ",
       TCP_PREFIX: "native-windows-tcp:",
       stdout: {},
       stderr: {},
       socketVersion: 514,
       socketHighVersion: 514,
       decodeTarget,
+      structuredClone,
       protocolBytes,
       tokenObservation: () => ({
         status: [-1, -1, -1, -1, -1],
@@ -7222,7 +7425,49 @@ test("original TCP caller retains source duplication failures and bounded prereq
         offer.source = decodeProtocol(bytes.subarray(40, 668));
         offer.protocol = decodeProtocol(bytes.subarray(668, 1296));
       },
-      memcmp: (a, b) => (observationDigest(a) === observationDigest(b) ? 0 : 1),
+      controlByte(control, i) {
+        if (!i) {
+          const header = Buffer.alloc(16);
+          header.writeUInt32LE(control.error);
+          assert.equal(control.end, 5000);
+          header.writeBigUInt64LE(
+            BigInt(fault === "control-deadline-extended" ? 50001 : control.end),
+            8,
+          );
+          const destination = Buffer.alloc(40);
+          destination.writeUInt32LE(1);
+          destination.writeUInt32LE(control.offer.target.pid, 4);
+          destination.writeBigUInt64LE(BigInt(control.offer.target.birth), 8);
+          for (const [key, at] of [
+            ["token", 16],
+            ["authentication", 24],
+            ["modified", 32],
+          ])
+            destination.writeUInt32LE(control.offer.target[key].LowPart, at);
+          controlCarrier = Buffer.concat([
+            header,
+            destination,
+            protocolBytes(control.offer.source),
+            protocolBytes(control.offer.protocol),
+          ]);
+        }
+        return controlCarrier[i];
+      },
+      decodeControl(bytes, control) {
+        control.error = bytes.readUInt32LE();
+        control.end = Number(bytes.readBigUInt64LE(8));
+        context.decodeOffer(bytes.subarray(16), control.offer);
+      },
+      memcmp: (a, b, size) =>
+        Buffer.isBuffer(a) && typeof b === "string"
+          ? Buffer.compare(
+              a.subarray(0, size),
+              Buffer.from(b).subarray(0, size),
+            )
+          : observationDigest(a) === observationDigest(b)
+            ? 0
+            : 1,
+      strlen: (value) => value.length,
       wcscmp: (a, b) => (a === b ? 0 : 1),
       wcsspn: (text, allowed) =>
         text.every((c) => allowed.includes(String.fromCharCode(c)))
@@ -7246,11 +7491,20 @@ test("original TCP caller retains source duplication failures and bounded prereq
       }),
       GetCurrentProcess: () => (inLauncher ? 41 : 43),
       GetCurrentProcessId: () => (inLauncher ? 41 : 43),
+      GetCurrentThread: () => 42,
+      OpenThreadToken(thread, access, self) {
+        assert.deepEqual([thread, access, self], [42, 8, true]);
+        lastError = 1008;
+        return false;
+      },
       WaitForSingleObject(process) {
         assert.equal(process, 41);
         return 258;
       },
-      GetTickCount64: () => 10,
+      GetTickCount64: () => {
+        if (fault === "control-budget" && creations) clock = 5000;
+        return clock;
+      },
       SetLastError(value) {
         lastError = value;
       },
@@ -7278,21 +7532,65 @@ test("original TCP caller retains source duplication failures and bounded prereq
       },
       wfp_binding: () => order.push("child-binding"),
       remember(...value) {
+        if (inLauncher && !launcherPrimary.length) launcherPrimary.push(value);
         if (!primary.length) primary.push(value);
       },
       cleanup_error: (...value) => cleanup.push(value),
       failure: () => {
         throw new Error("Native refusal");
       },
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      diagnosticOutputLock: {},
+      transportLock: {},
       getsockopt(socket, level, option, actual, size) {
-        assert.ok([17, 73].includes(socket));
+        assert.ok([17, 73, 81, 83, 91, 93].includes(socket));
         assert.equal(level, 0xffff);
+        if (option === context.SO_EXCLUSIVEADDRUSE) {
+          assert.equal(socket, 93);
+          actual.value = true;
+          return 0;
+        }
         assert.equal(option, 0x2005);
         assert.equal(size.value, 628);
         Object.assign(actual, structuredClone(protocol));
+        if (socket === 81 && fault === "control-provider")
+          actual.dwCatalogEntryId++;
+        return 0;
+      },
+      ioctlsocket(socket, command, value) {
+        assert.ok([81, 91].includes(socket));
+        assert.deepEqual([command, value.value], [context.FIONBIO, 1]);
+        order.push(`nonblocking:${socket}`);
+        return 0;
+      },
+      setsockopt(socket, level, option, exclusive, size) {
+        assert.ok([81, 91].includes(socket));
+        assert.deepEqual(
+          [level, option, exclusive, size],
+          [0xffff, context.SO_EXCLUSIVEADDRUSE, true, 4],
+        );
+        order.push(`exclusive:${socket}`);
         return 0;
       },
       WSADuplicateSocketW(socket, pid, ticket) {
+        if (socket !== 17) {
+          assert.deepEqual([socket, pid], socket === 81 ? [81, 43] : [91, 41]);
+          assert.ok(
+            order.includes(`nonblocking:${socket}`) &&
+              order.includes(`exclusive:${socket}`),
+          );
+          order.push(`control-duplicate:${socket}`);
+          if (
+            fault ===
+            `control-duplicate-${socket === 81 ? "self" : "destination"}`
+          ) {
+            lastError = socket === 81 ? 10045 : 10022;
+            return -1;
+          }
+          Object.assign(ticket, structuredClone(protocol));
+          return 0;
+        }
         assert.deepEqual([socket, pid], [17, 41]);
         assert.ok(saved.has(`${mode}-tcp-transfer`));
         order.push("duplicate");
@@ -7304,8 +7602,28 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return 0;
       },
       WSASocketW(af, type, ip, ticket, group, flags) {
+        if (af === 2) {
+          assert.deepEqual([af, type, ip, group, flags], [2, 1, 6, 0, 0]);
+          assert.equal(ticket.dwCatalogEntryId, 7);
+          const kind = creations++ ? "destination" : "self";
+          order.push(`control-create:${kind}`);
+          if (fault === `control-create-${kind}`) {
+            lastError = 10055;
+            return -1;
+          }
+          return kind === "self" ? 81 : 91;
+        }
         assert.deepEqual([af, type, ip, group, flags], [-1, -1, -1, 0, 0]);
         assert.equal(ticket.dwCatalogEntryId, 7);
+        if (failsTransfer) {
+          const kind = inLauncher ? "destination" : "self";
+          order.push(`control-import:${kind}`);
+          if (fault === `control-import-${kind}`) {
+            lastError = 10045;
+            return -1;
+          }
+          return inLauncher ? 93 : 83;
+        }
         order.push("import");
         if (fault === "import") {
           lastError = 10022;
@@ -7323,14 +7641,16 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return fault === "destination-open" ? null : 61;
       },
       GetProcessTimes(process, born) {
-        assert.equal(process, 61);
+        assert.ok([41, 43, 61].includes(process));
         lastError = 6;
-        born.value = 90;
+        born.value = process === 43 ? 100 : 90;
+        if (process === 41 && creations && fault === "control-target-birth")
+          born.value++;
         return fault !== "destination-time";
       },
       wfp_time: (value) => value.value,
       OpenProcessToken(process, access, token) {
-        assert.ok([43, 61].includes(process));
+        assert.ok([41, 43, 61].includes(process));
         assert.equal(access, 8);
         order.push(`token-open:${process}`);
         lastError = 5;
@@ -7339,7 +7659,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return true;
       },
       GetTokenInformation(token, kind, value, size, used) {
-        assert.ok([143, 161].includes(token));
+        assert.ok([141, 143, 161].includes(token));
+        if (token === 141 && fault === "control-import-late") clock = 5000;
         used.value = size;
         lastError = 5;
         if (fault === "token-read") return false;
@@ -7350,10 +7671,14 @@ test("original TCP caller retains source duplication failures and bounded prereq
             ModifiedId: { HighPart: 0, LowPart: 4 },
             TokenType: 1,
           });
+          if (token === 141 && creations && fault === "control-target-token")
+            value.ModifiedId.LowPart++;
           if (fault === "token-short") used.value = 0;
         } else {
           assert.equal(kind, 29);
-          value.container = token === 143 ? 1 : 0;
+          if (Object.hasOwn(value, "value"))
+            value.value = token === 143 ? 1 : 0;
+          else value.container = token === 143 ? 1 : 0;
         }
         return true;
       },
@@ -7366,16 +7691,33 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return token === 143;
       },
       CloseHandle(handle) {
-        assert.ok([61, 143, 161].includes(handle));
+        assert.ok([61, 141, 143, 161].includes(handle));
         order.push(`handle-close:${handle}`);
         lastError = 6;
         return fault !== "diagnostic-close";
       },
       closesocket(socket) {
-        assert.ok([17, 73].includes(socket));
+        assert.ok([17, 73, 81, 83, 91, 93].includes(socket));
         order.push(`socket-close:${socket}`);
         lastError = 10038;
-        return socket === 17 && fault === "10022-close" ? -1 : 0;
+        return (socket === 17 && fault === "10022-close") ||
+          fault ===
+            {
+              81: "control-close-self",
+              83: "control-close-self-import",
+              91: "control-close-destination",
+              93: "control-close-destination-import",
+            }[socket]
+          ? -1
+          : 0;
+      },
+      WriteFile(pipe, value, length, sent) {
+        assert.equal(value, "V");
+        assert.equal(length, 1);
+        order.push("control-ack-write");
+        sent.value = 1;
+        controlAcknowledged = fault !== "control-ack";
+        return true;
       },
       FwpmEngineClose0: () =>
         assert.fail("No engine acquired in this boundary"),
@@ -7406,6 +7748,18 @@ test("original TCP caller retains source duplication failures and bounded prereq
       },
       tcp_ack: async (expected, deadline, problem) => {
         expected = String.fromCharCode(expected);
+        if (expected === "V") {
+          assert.equal(deadline, 5000);
+          order.push("control-ack-read");
+          const accepted = controlAcknowledged && clock < deadline;
+          if (!accepted)
+            Object.assign(problem, {
+              operation: "tcp-deadline",
+              domain: "invariant",
+              value: 0,
+            });
+          return accepted;
+        }
         assert.equal(deadline, expected === "U" ? 15000 : 5000);
         const accepted = launcherFailed
           ? false
@@ -7485,7 +7839,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
             }
           }
           assert.ok(acknowledgments.has(command), command);
-          acknowledgments.get(command)(!(fault === "ack" && command === "T"));
+          acknowledgments.get(command)(fault !== `ack-${command}`);
         },
       },
     );
@@ -7540,21 +7894,9 @@ test("original TCP caller retains source duplication failures and bounded prereq
             const observation = error.tcpObservation;
             assert.equal(
               observation.status,
-              [
-                "diagnostic-output",
-                "diagnostic-form",
-                "diagnostic-private",
-              ].includes(fault)
-                ? "incomplete"
-                : "complete",
+              incompleteObservation ? "incomplete" : "complete",
             );
-            if (
-              ![
-                "diagnostic-output",
-                "diagnostic-form",
-                "diagnostic-private",
-              ].includes(fault)
-            ) {
+            if (!incompleteObservation) {
               assert.equal(observation.transfer.error, 10022);
               assert.deepEqual(observation.transfer.winsock, [514, 514]);
               assert.equal(observation.transfer.creationFlags, 0);
@@ -7597,7 +7939,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       assert.equal(caller.operations.length, fault ? 0 : 1);
       assert.equal(
         order.filter((value) => value === "duplicate").length,
-        ["birth", "token"].includes(fault) ? 0 : 1,
+        ["birth", "token", "ack-D"].includes(fault) ? 0 : 1,
       );
       assert.equal(
         order.filter((value) => value === "socket-close:17").length,
@@ -7607,6 +7949,135 @@ test("original TCP caller retains source duplication failures and bounded prereq
         assert.equal(order.includes("import"), false);
         assert.equal(context.attempted, false);
         assert.equal(saved.has(`${mode}-tcp-intent`), false);
+        assert.equal(context.wfpPreparedAt, 0);
+        assert.equal(context.wfpSocket, -1);
+        assert.equal(order.includes("T") || order.includes("U"), false);
+        for (const [socket, event, refusal] of [
+          [81, "control-create:self", "control-create-self"],
+          [91, "control-create:destination", "control-create-destination"],
+          [83, "control-import:self", "control-import-self"],
+          [93, "control-import:destination", "control-import-destination"],
+        ])
+          assert.equal(
+            order.filter((value) => value === `socket-close:${socket}`).length,
+            order.includes(event) && fault !== refusal ? 1 : 0,
+            fault,
+          );
+        for (const kind of ["self", "destination"])
+          assert.ok(
+            order.filter((value) => value === `control-import:${kind}`)
+              .length <= 1,
+          );
+        if (!incompleteObservation) {
+          const captured = transport.session.tcpObservation.controls;
+          const sources = captured.filter((row) => row.side === 0);
+          const imported = captured.find((row) => row.side === 1);
+          assert.deepEqual(
+            sources.map((row) => row.kind),
+            [0, 1],
+          );
+          assert.deepEqual(
+            sources.map((row) => row.target.pid),
+            [43, 41],
+          );
+          assert.ok(saved.has(`${mode}-tcp-controls`));
+          assert.equal(saved.get(`${mode}-tcp-controls`).admission, false);
+          if (fault === "10022") {
+            assert.deepEqual(sources[0].status.slice(4, 9), [0, 0, 0, 0, 0]);
+            assert.deepEqual(sources[1].status.slice(4), [
+              0,
+              0,
+              null,
+              null,
+              0,
+              0,
+              0,
+            ]);
+            assert.deepEqual(imported.status.slice(6), [0, 0, null, 0, 0]);
+          }
+          if (fault === "control-duplicate-self") {
+            assert.equal(sources[0].status[5], 10045);
+            assert.equal(sources[1].status[5], 0);
+          }
+          if (fault === "control-duplicate-destination") {
+            assert.equal(sources[0].status[6], 0);
+            assert.equal(sources[1].status[5], 10022);
+          }
+          if (fault === "control-import-self")
+            assert.equal(sources[0].status[6], 10045);
+          if (fault === "control-import-destination")
+            assert.equal(imported.status[6], 10045);
+          if (
+            [
+              "control-import-self",
+              "control-import-destination",
+              "control-target-birth",
+              "control-target-token",
+            ].includes(fault)
+          )
+            assert.ok(
+              cleanup.some((entry) => entry[0] === "observer-control-import"),
+            );
+          if (
+            ["control-target-birth", "control-target-token"].includes(fault)
+          ) {
+            assert.equal(imported.status[0], 13);
+            assert.equal(imported.status[6], null);
+            assert.equal(order.includes("control-import:destination"), false);
+          }
+          if (fault === "control-create-self")
+            assert.equal(sources[0].status[1], 10055);
+          if (fault === "control-create-destination")
+            assert.equal(sources[1].status[1], 10055);
+          if (fault === "control-provider") {
+            assert.equal(sources[0].status[4], 13);
+            assert.equal(sources[0].status[5], null);
+            assert.equal(sources[1].status[5], 0);
+          }
+          if (
+            [
+              "control-ack",
+              "control-short",
+              "control-deadline-extended",
+            ].includes(fault)
+          ) {
+            assert.equal(sources[0].status[6], 0);
+            assert.equal(sources[1].status[9], 1);
+            assert.ok(
+              cleanup.some((entry) => entry[0] === "observer-control-ack"),
+            );
+          }
+          assert.deepEqual(launcherPrimary[0], [
+            "observer-transfer",
+            "win32",
+            10022,
+          ]);
+          if (fault.startsWith("control-close-"))
+            assert.ok(
+              cleanup.some(
+                (entry) =>
+                  entry[0] === "observer-control-close" && entry[2] === 10038,
+              ),
+            );
+          if (fault === "control-budget") {
+            assert.equal(creations, 1);
+            assert.equal(sources[0].status[5], null);
+            assert.equal(sources[1].status[1], null);
+            assert.equal(sources[1].status[10], 258);
+          }
+          if (["control-arrival-late", "control-import-late"].includes(fault)) {
+            assert.equal(imported.status[10], 258);
+            assert.equal(imported.status[6], null);
+            assert.equal(order.includes("control-import:destination"), false);
+            assert.equal(sources[1].status[9], 1);
+            assert.equal(sources[1].status[10], 258);
+          }
+          captured[0].status[0] = 123;
+          assert.notEqual(
+            transport.session.tcpObservation.controls[0].status[0],
+            123,
+          );
+        }
       }
       if (fault === "diagnostic-close") {
         for (const handle of [61, 143, 161])
@@ -7616,6 +8087,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
           [
             "observer-diagnostic-token-close",
             "observer-diagnostic-process-close",
+            "observer-diagnostic-token-close",
             "observer-diagnostic-token-close",
           ],
         );

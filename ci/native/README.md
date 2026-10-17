@@ -885,6 +885,41 @@ permission defect nor a catalog defect is established, and matching flags were
 already zero. The functional handoff repair remains outstanding pending original
 Windows CI evidence under the documented
 [Winsock sharing contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw).
+
+After that original refusal, each read/edit source attempts at most two fresh
+unbound controls within the remaining 5000 ms transaction budget. Both retain
+the original effective AppContainer identity, public provider/catalog/chain,
+zero creation/import flags, nonblocking and exclusive options. Neither binds,
+connects or exchanges payload. The self control runs first, targeting and
+importing once in the source process with its own birth/token binding; an
+unsupported native self transfer remains its actual refusal. The destination
+control uses a different fresh socket and separate protocol information for
+the original birth/token-bound launcher. A distinct bounded carrier is consumed
+at most once beside `wfp_prepare`; it cannot enter original socket preparation.
+Its carried original monotonic deadline is rechecked before destination import;
+late arrival or a slow identity query cannot release a new import after expiry.
+The launcher latches the original refusal before control framing or cleanup
+can fail. It imports once, independently attempts closure, and writes `V` to
+acknowledge completion of the control attempt, including a refused import.
+`V` never acknowledges original `D/T/U`, readiness, attribution or retirement.
+The source closes each created control descriptor independently, including after
+lost acknowledgment; neither protocol information nor an operation is replayed.
+
+Optional `tcpObservation.controls` joins the same unchanged 2 KiB capture.
+Each entry has numeric `kind` (0 self, 1 destination), `side` (0 source,
+1 destination import), target PID/birth and eleven status slots ordered
+identity/create/nonblocking/exclusive/provider/duplicate/import/import-close/
+source-close/ack/budget. Unattempted slots are `null`; API success is zero and
+native creation, duplication and import errors remain exact. Identity/provider
+consistency refusals use `ERROR_INVALID_DATA` 13. The acknowledgment slot is
+zero for observed completion and one for uncertainty; the budget slot is zero
+while available or `WAIT_TIMEOUT` 258 after exhaustion. Import and closure
+uncertainty retain separate cleanup causes until independent original-domain
+retirement. The caller persists captured controls as diagnostic-only evidence;
+missing, malformed, repeated or oversized frames remain incomplete evidence.
+Comparing bound, unbound-destination and unbound-self outcomes neither identifies
+a sole internal `10022` cause nor proves functional repair or native acceptance.
+
 The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native
 image identity. Exclusive binding prevents another socket from sharing its tuple.

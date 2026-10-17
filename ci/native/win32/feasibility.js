@@ -424,6 +424,8 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "tcp-eof": ["invariant"],
   "tcp-progress": ["invariant"],
   "tcp-nonce": ["invariant"],
+  "observer-control-ack": ["win32", "invariant"],
+  "observer-control-import": ["win32", "invariant"],
   ...Object.fromEntries(
     `command-interface command-security-read command-privilege-token
     command-privilege-lookup command-privilege-adjust command-audit-principals
@@ -570,6 +572,7 @@ const NATIVE_OPERATIONS = new Set(
   observer-protocol observer-socket observer-local observer-unconnected observer-token
   observer-engine observer-collection observer-owner observer-transfer observer-socket-close observer-engine-close observer-enum-close observer-token-close
   observer-diagnostic-token-close observer-diagnostic-process-close
+  observer-control-close observer-control-ack observer-control-import
   observer-owner-token observer-owner-close observer-owner-binding observer-owner-once observer-owner-wait
 `
     .trim()
@@ -643,6 +646,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "observer-token-close",
         "observer-diagnostic-token-close",
         "observer-diagnostic-process-close",
+        "observer-control-close",
         "null-close",
         "null-remove",
       ].includes(match[2]) &&
@@ -677,6 +681,9 @@ export function windowsFeasibilityDiagnostics(output) {
         "observer-token-close",
         "observer-diagnostic-token-close",
         "observer-diagnostic-process-close",
+        "observer-control-close",
+        "observer-control-ack",
+        "observer-control-import",
         "command-token-close",
         "command-null-close",
         "command-event-close",
@@ -1389,7 +1396,8 @@ function tcpTransferObservation(value) {
   );
 }
 function tcpCapture() {
-  const calls = [];
+  const calls = [],
+    controls = [];
   let bytes = 0,
     invalid = false,
     ended = false,
@@ -1403,6 +1411,49 @@ function tcpCapture() {
       bytes += line.length;
       if (invalid || bytes > 2048 || ended) return incomplete();
       const text = line.toString("utf8");
+      const control = /^native-windows-tcp: control=(\[[^\r\n]+\])\r?\n$/u.exec(
+        text,
+      );
+      if (control) {
+        try {
+          const value = JSON.parse(control[1]);
+          if (
+            !transfer?.error ||
+            !Array.isArray(value) ||
+            value.length !== 5 ||
+            ![0, 1].includes(value[0]) ||
+            ![0, 1].includes(value[1]) ||
+            (value[0] === 0 && value[1] !== 0) ||
+            !wfpUint(value[2]) ||
+            value[2] === 0 ||
+            value[2] !==
+              (value[0] === 0
+                ? transfer.source.pid
+                : transfer.destination.pid) ||
+            !(value[3] === null || wfpTime(value[3])) ||
+            !Array.isArray(value[4]) ||
+            value[4].length !== 11 ||
+            !value[4].every((status) => status === null || wfpUint(status)) ||
+            (value[4][0] === null && value[4][10] !== 258) ||
+            (value[3] === null && value[4][0] === 0) ||
+            ![null, 0, 1].includes(value[4][9]) ||
+            ![null, 0, 258].includes(value[4][10]) ||
+            controls.some(
+              (row) => row.kind === value[0] && row.side === value[1],
+            )
+          )
+            return incomplete();
+          controls.push({
+            kind: value[0],
+            side: value[1],
+            target: { pid: value[2], creationTime: value[3] },
+            status: [...value[4]],
+          });
+        } catch {
+          incomplete();
+        }
+        return;
+      }
       const observation =
         /^native-windows-tcp: transfer=(\{[^\r\n]+\})\r?\n$/u.exec(text);
       if (observation) {
@@ -1454,6 +1505,7 @@ function tcpCapture() {
             : "unavailable",
       calls: calls.map((call) => ({ ...call })),
       ...(transfer ? { transfer: structuredClone(transfer) } : {}),
+      ...(controls.length ? { controls: structuredClone(controls) } : {}),
     }),
   };
 }
@@ -3430,6 +3482,20 @@ export async function runWindowsFeasibility(
         } catch (error) {
           nativeException("win32/feasibility.js:exception", error);
           if (operation === "tcp") {
+            if (error.tcpObservation?.controls?.length) {
+              try {
+                await persist(`${mode}-tcp-controls`, {
+                  transfer: run.tcpAttribution?.transfer,
+                  observation: error.tcpObservation,
+                  admission: false,
+                });
+              } catch (persistenceError) {
+                nativeException(
+                  "windows-tcp-control-persistence",
+                  persistenceError,
+                );
+              }
+            }
             await observeWindowsFeasibilityWfp(run, persist);
             error.wfpCleanup = run.wfpObservation?.cleanup === "UNCERTAIN";
           }

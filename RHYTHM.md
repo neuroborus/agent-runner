@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-17 — Separate socket-transfer controls from original admission
+
+An original Windows read/edit duplication refusal can observe separate fresh
+unbound self and destination controls under the unchanged AppContainer source.
+Documented one-use imports, original deadline/capture bounds and independent
+closure attempts preserve the failed original transaction. The launcher retains
+its original cause before control framing or acknowledgment can fail. Control
+outcomes and cleanup uncertainty supply diagnostic comparisons only; they never
+advance original observer state or prove native repair. Matching Windows CI and
+independent original-domain retirement remain required.
+
 ## 2026-10-16 — Verify Windows restoration through retained independent custody
 
 Command cleanup admits a separate restoration reader before audit effects. It

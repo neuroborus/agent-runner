@@ -545,6 +545,14 @@ observations enter the existing 2 KiB TCP diagnostic capture. Unavailable reads
 remain explicit, the immediate original error survives and every diagnostic
 handle receives independent checked closure. Diagnostic output failure cannot
 replace that error, and closure failures retain separate cleanup causes.
+The same failed transaction may compare two separate fresh unbound sockets
+created under the unchanged source AppContainer identity. A self import and
+an independently consumed destination control use documented one-use sharing,
+separate state/acknowledgment/cleanup and the existing deadline/capture bounds.
+Controls cannot enter original observer preparation or supply admission;
+uncertain imports and closures require independent original-domain retirement.
+The [native owner](../ci/native/README.md#separate-minimal-feasibility-experiment)
+defines their finite diagnostic status grammar and original-error precedence.
 Original `10022` still fails before connect without admission; its cause and
 functional compatibility remain unproved pending matching Windows CI. The
 launcher checks the imported socket's exclusive local tuple, retains the child

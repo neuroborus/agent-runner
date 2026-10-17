@@ -376,14 +376,29 @@ input/import and destination-binding bodies with injected OS calls. The producti
 operation loop uses the guarded helper session for both original read/edit roles
 and persists the target/provider record before `D`. Original `10022` reaches
 bounded prerequisite collection, checked source closure and the unchanged
-failure transport without import, connect or admission. Query-only destination
+failure transport without importing the original socket, connecting or admitting
+it. Query-only destination
 access failures, failed/short token reads, failed restriction queries,
 diagnostic-output failure and separate diagnostic/source closure failures
 preserve the original cause. The same caller
-coverage protects destination drift, lost acknowledgment and failed import;
+coverage runs every source/destination failure for both read/edit roles and
+protects destination drift, lost `D/T/U` acknowledgments and failed import;
 malformed/PID-only carriers, partial writes and original pipe bounds retain their
 existing regressions. No changed transfer boundary is replaced by an idealized
 success callback.
+
+The same actual-source/caller fixture exercises two separate fresh unbound
+controls after the original refusal, with the original identity, provider,
+zero flags and nonblocking/exclusive options. Self and destination duplication
+and import refusals remain distinct, including unsupported self sharing. It
+protects one-use destination carriers, birth/token drift, replay and short
+carriers, lost control acknowledgment, independently attempted source/import
+closure and shared-budget exhaustion, including delayed carrier arrival or
+identity reads before destination import. The original error is latched before
+control failures; successful controls never advance original `D/T/U`, observer
+state, connect or receipts. Invalid, repeated, oversized and mismatched control
+observations remain incomplete diagnostic data. Import and closure uncertainty
+remain separate from the original refusal and require independent retirement.
 
 The optional prerequisite record retains exact public provider bytes and
 negotiated Winsock versions within the unchanged 2 KiB TCP budget; missing or
