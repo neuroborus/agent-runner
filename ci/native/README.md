@@ -8407,7 +8407,20 @@ settles both synchronous input and pending pipe writes within the existing
 retirement deadline; a late thread exit cannot acknowledge settlement. Reader
 guard failures carry bounded command/source/line diagnostics on the authenticated pipe,
 using a non-JSON record separator so a truncated response cannot turn them into
-a receipt. Trust refusals additionally retain the original WinVerifyTrust LONG
+a receipt. Ordinary guards also carry the unsigned 32-bit `lastError` already
+captured before diagnostic I/O. Only an original creator-census `DuplicateHandle`
+refusal in `verify-transfer` or `verify-compiler-policy` retains optional
+`transfer` context: zero-based snapshot ordinal and total count, object type index,
+granted access, handle attributes and held creator/child slots. Thread-local
+storage excludes unrelated control-worker guards; success clears the context
+before subsequent checks. The original call, enumeration, membership and inherited
+object checks remain unchanged; no retry, skip, filtering or rights change is added.
+The consumer validates closed native ranges and rejects conflicting trust/transfer
+metadata and diagnostics over 1 KiB, including unfinished fragmented frames,
+without truncation or changing ordinary response/transport bounds. These fields
+identify the original refusal without establishing its cause, cure, acceptance
+or original-effect retirement. Legacy failure frames remain valid.
+Trust refusals retain the original WinVerifyTrust LONG
 before state closure, with separate closure status, embedded/catalog mode, held
 file identity and retained entry/content/signature pins when available. Both
 statuses use exact eight-digit hexadecimal 32-bit representations; only zero

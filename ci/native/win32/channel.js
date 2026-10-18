@@ -257,6 +257,9 @@ export function windowsCustodyChannel(
       const diagnostic = buffer.indexOf(0x1e);
       if (diagnostic >= 0) {
         const end = buffer.indexOf(10, diagnostic);
+        requireWindows(
+          (end < 0 ? buffer.length : end + 1) - diagnostic <= 1024,
+        );
         if (end < 0) return;
         const value = JSON.parse(
           new TextDecoder("utf-8", { fatal: true }).decode(
@@ -264,6 +267,43 @@ export function windowsCustodyChannel(
           ),
         );
         const fields = ["phase", "sequence", "command", "source", "line"];
+        const uint32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xffffffff;
+        if (Object.hasOwn(value, "lastError")) {
+          fields.push("lastError");
+          requireWindows(
+            uint32(value.lastError) && !Object.hasOwn(value, "trust"),
+          );
+        }
+        if (Object.hasOwn(value, "transfer")) {
+          fields.push("transfer");
+          const transfer = value.transfer,
+            transferFields = [
+              "ordinal",
+              "count",
+              "type",
+              "access",
+              "attributes",
+              "creator",
+              "child",
+            ];
+          closed(transfer, transferFields);
+          requireWindows(
+            Object.hasOwn(value, "lastError") &&
+              !Object.hasOwn(value, "trust") &&
+              ["verify-transfer", "verify-compiler-policy"].includes(
+                value.command,
+              ) &&
+              transferFields.every((field) => uint32(transfer[field])) &&
+              transfer.ordinal < transfer.count &&
+              // handle_inventory: 32 MiB, 16-byte header, 40-byte x64 entries.
+              transfer.count <= Math.floor((33554432 - 16) / 40) &&
+              transfer.type <= 0xffff &&
+              transfer.creator < 128 &&
+              transfer.child < 128 &&
+              (value.command !== "verify-transfer" ||
+                transfer.creator !== transfer.child),
+          );
+        }
         if (Object.hasOwn(value, "trust")) {
           fields.push("trust");
           const trust = value.trust;

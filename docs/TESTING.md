@@ -886,6 +886,16 @@ positive and signed-negative nonzero results and substituted content/signature
 pins, and exercise original owner settlement without repeating verification.
 Malformed status, identity, slot and pin carriers remain failures without
 diagnostic authority.
+Custody regressions execute the actual guard, failure emitter and both original
+creator-census duplication fragments through the real fragmented channel parser.
+They retain the saved error despite diagnostic I/O changing LastError, require
+one duplication per attempted entry, clear successful context before an unrelated
+refusal and keep refusal fail-closed. The carrier matrix covers maximum native
+metadata, missing/malformed/unknown fields, conflicting trust context, legacy
+frames and complete or unfinished diagnostics exceeding 1 KiB. Existing trust
+and separate original-owner retirement coverage remains intact. These injected
+checks prove the evidence path, not a native cause, cure, acceptance or retirement;
+fresh matching original CI remains separately required.
 The injected WinVerifyTrust boundary requires `INVALID_HANDLE_VALUE` for both
 VERIFY and CLOSE, the original full path and readable held handle, unchanged
 UI/revocation/cache policy, a single VERIFY per held file and closure of that

@@ -163,7 +163,11 @@ export async function compilerTrustFixture({
           'char bytes[1024], index[8] = "null", pin[68] = "null", expected[68] = "null", identity[50]; DWORD written;',
           'let bytes={}, index={text:"null"}, pin={text:"null"}, expected={text:"null"}, identity={}, written;',
         )
-        .replace("char bytes[256]; DWORD written;", "let bytes={}, written;")
+        .replace(
+          'char bytes[1024], transfer[256] = ""; DWORD written;',
+          'let bytes={}, transfer={text:""}, written;',
+        )
+        .replaceAll("sizeof(transfer)", "256")
         .replace("struct held_file *file", "let file")
         .replace(
           "struct entry *entry = &entries[index]",
@@ -179,7 +183,7 @@ export async function compilerTrustFixture({
           /sizeof\((bytes|index|pin|expected|identity|trust|IMAGE_NT_HEADERS64)\)/gu,
           (_, name) =>
             ({
-              bytes: source.includes("char bytes[256]") ? 256 : 1024,
+              bytes: 1024,
               index: 8,
               pin: 68,
               expected: 68,
@@ -222,6 +226,7 @@ export async function compilerTrustFixture({
     count: held.length,
     sequence: 0,
     reader_command: "open",
+    reader_transfer: { active: false },
     reader_diagnostics_ready: false,
     signature_trust,
     errno: 11,
@@ -257,7 +262,7 @@ export async function compilerTrustFixture({
     stderr: null,
     need: (ok) => {
       if (ok) return;
-      program.reader_failure("custody.h", 1);
+      program.reader_failure("custody.h", 1, lastError);
       throw refusal;
     },
     GetEnvironmentVariableW: () =>
@@ -538,7 +543,7 @@ export async function compilerTrustFixture({
     function pin(file,expected) {${translate(body(header, "pin"))}}
     function signature(file,expected,actual) {${translate(body(header, "signature"))}}
     function reader_trust_failure(source,line) {${translate(body(reader, "reader_trust_failure"))}}
-    function reader_failure(file,line) {${translate(body(reader, "reader_failure"))}}
+    function reader_failure(file,line,error) {${translate(body(reader, "reader_failure"))}}
     function open_entry(values) { let n=values.length; ${translate(open)} }
     ({initialize_environment,open_entry,reader_failure});
   `).runInNewContext(api);

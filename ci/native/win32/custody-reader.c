@@ -8,7 +8,7 @@
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include <iphlpapi.h>
-static void reader_failure(const char *file, unsigned line);
+static void reader_failure(const char *file, unsigned line, DWORD error);
 #define NATIVE_CUSTODY_FAILURE reader_failure
 #include "custody.h"
 #include "account.h"
@@ -111,6 +111,11 @@ static unsigned helper_lane;
 static HANDLE control; static char nonce[33], candidate[41];
 static BOOL reader_diagnostics_ready;
 static char reader_command[64] = "setup";
+/* Control worker guards must never inherit the census thread's context. */
+static __declspec(thread) struct {
+  BOOL active; ULONG_PTR ordinal, count; USHORT type;
+  ULONG access, attributes; unsigned creator, child;
+} reader_transfer;
 static void reader_trust_failure(const char *source, unsigned line) {
   char bytes[1024], index[8] = "null", pin[68] = "null", expected[68] = "null", identity[50]; DWORD written;
   struct held_file *file = signature_trust.file;
@@ -129,12 +134,14 @@ static void reader_trust_failure(const char *source, unsigned line) {
     (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected, signature_trust.inputs, provider);
   if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
 }
-static void reader_failure(const char *file, unsigned line) {
+static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
-  char bytes[256]; DWORD written;
-  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u}\n", sequence, reader_command, source, line);
+  char bytes[1024], transfer[256] = ""; DWORD written;
+  if (reader_transfer.active) sprintf_s(transfer, sizeof(transfer), ",\"transfer\":{\"ordinal\":%llu,\"count\":%llu,\"type\":%u,\"access\":%lu,\"attributes\":%lu,\"creator\":%u,\"child\":%u}",
+    reader_transfer.ordinal, reader_transfer.count, reader_transfer.type, reader_transfer.access, reader_transfer.attributes, reader_transfer.creator, reader_transfer.child);
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu%s}\n", sequence, reader_command, source, line, error, transfer);
   if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
 }
 /* The fixed namespace makes possible helper/witness Jobs independently
@@ -611,7 +618,11 @@ static void verifier_transfer(unsigned child, unsigned creator) {
   struct verify_handles *list = handle_inventory(); HANDLE job = NULL, thread = NULL;
   for (ULONG_PTR i = 0; i < list->count; i++) {
     struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source)) continue;
+    reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
+    reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
+    reader_transfer.creator = creator; reader_transfer.child = child; reader_transfer.active = TRUE;
     HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    reader_transfer.active = FALSE;
     if (object_type(duplicate, L"Job")) {
       BOOL belongs = FALSE; if (IsProcessInJob(processes[child], duplicate, &belongs) && belongs) { need(!job); job = duplicate; continue; }
     } else if (object_type(duplicate, L"Thread") && GetProcessIdOfThread(duplicate) == GetProcessId(processes[child])) {
@@ -656,7 +667,11 @@ static void compiler_policy(unsigned index, unsigned creator) {
   source = duplicate_process_owner(creator); list = handle_inventory(); HANDLE compilerJob = NULL;
   for (ULONG_PTR i = 0; i < list->count; i++) {
     struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source)) continue;
+    reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
+    reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
+    reader_transfer.creator = creator; reader_transfer.child = index; reader_transfer.active = TRUE;
     HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
+    reader_transfer.active = FALSE;
     BOOL member = FALSE; JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
     if (object_type(duplicate, L"Job") && IsProcessInJob(processes[index], duplicate, &member) && member &&
         QueryInformationJobObject(duplicate, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) && limits.BasicLimitInformation.ActiveProcessLimit == 31) {

@@ -1843,14 +1843,19 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       command: "open",
       source: "custody.h",
       line: 149,
+      lastError: 5,
     },
     diagnosticProgram = new Script(
-      `(file,line)=>{${body
+      `(file,line,error)=>{${body
         .replace("const char *source", "let source")
         .replace("source+1", "source.slice(1)")
-        .replace("char bytes[256]; DWORD written;", "let bytes={},written;")
+        .replace(
+          'char bytes[1024], transfer[256] = ""; DWORD written;',
+          'let bytes={},transfer={value:""},written;',
+        )
+        .replace("sizeof(transfer)", "256")
         .replace("int size", "let size")
-        .replace("sizeof(bytes)", "256")
+        .replace("sizeof(bytes)", "1024")
         .replace("\\036", "\\x1e")
         .replace("(DWORD)size", "size")
         .replace("&written", "value=>written=value")}}`,
@@ -1864,6 +1869,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
         reader_command: "open",
+        reader_transfer: { active: false },
         sequence: 2,
         control: "authenticated",
         NULL: null,
@@ -1873,7 +1879,10 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
         },
         sprintf_s: (bytes, maximum, format, ...values) => {
           let index = 0;
-          bytes.value = format.replace(/%[su]/gu, () => values[index++]);
+          bytes.value = format.replace(/%(?:lu|[su])/gu, () => {
+            const value = values[index++];
+            return value?.value ?? value;
+          });
           assert.ok(Buffer.byteLength(bytes.value) < maximum);
           return bytes.value.length;
         },
@@ -1884,7 +1893,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
           f.child.stdout.write(bytes.value.slice(25));
           return true;
         },
-      })("C:\\Fixture\\custody.h", 149);
+      })("C:\\Fixture\\custody.h", 149, 5);
       await assert.rejects(response, (error) => {
         assert.deepEqual(error.custodyReaderFailure, value);
         return true;
@@ -1918,6 +1927,323 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
   assert.throws(() => f.channel.settle());
   await assert.rejects(f.channel.receive());
   await assert.rejects(f.channel.completion);
+});
+
+test("original creator-census calls retain guard errors, clear successful context and never retry a refusal", async () => {
+  const [header, reader] = await Promise.all([
+    readFile(new URL("./custody.h", import.meta.url), "utf8"),
+    readFile(new URL("./custody-reader.c", import.meta.url), "utf8"),
+  ]);
+  // Control workers use the same guard hook; their native storage starts empty.
+  assert.match(
+    reader,
+    /static __declspec\(thread\) struct \{[^}]+\} reader_transfer;/u,
+    "Creator-census context must be private to its native thread",
+  );
+  const body = (source, name) =>
+    new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (source) =>
+    source
+      .replace(/#ifdef NATIVE_CUSTODY_FAILURE\n([\s\S]*?)#endif/gu, "$1")
+      .replace("NATIVE_CUSTODY_FAILURE", "reader_failure")
+      .replace("DWORD error", "let error")
+      .replace("const char *source", "let source")
+      .replace("source+1", "source.slice(1)")
+      .replace(
+        'char bytes[1024], transfer[256] = ""; DWORD written;',
+        'let bytes={},transfer={text:""},written;',
+      )
+      .replace("int size", "let size")
+      .replace(
+        "struct verify_handle *entry = &list->entries[i];",
+        "let entry = list.entries[i];",
+      )
+      .replace("HANDLE duplicate;", "let duplicate;")
+      .replaceAll("sizeof(transfer)", "256")
+      .replaceAll("sizeof(bytes)", "1024")
+      .replaceAll("->", ".")
+      .replaceAll("(HANDLE)", "")
+      .replaceAll("(DWORD)size", "size")
+      .replaceAll("&duplicate", "out")
+      .replaceAll("&written", "out")
+      .replaceAll("\\036", "\\x1e");
+  for (const [name, command] of [
+    ["verifier_transfer", "verify-transfer"],
+    ["compiler_policy", "verify-compiler-policy"],
+  ]) {
+    const fragment =
+      /    struct verify_handle \*entry = &list->entries\[i\]; if \(entry->pid != GetProcessId\(source\)\) continue;\n[\s\S]*?    reader_transfer\.active = FALSE;/u.exec(
+        body(reader, name),
+      )[0];
+    const program = new Script(`
+      function reader_failure(file,line,error) {${translate(body(reader, "reader_failure"))}}
+      function need_at(ok,file,line) {${translate(body(header, "need_at"))}}
+      function need(ok) {need_at(!!ok,"custody-reader.c",1);}
+      for (let i=0; i<list.count; i++) {${translate(fragment)} after();}
+      if (unrelated) {SetLastError(31); need(false);}
+    `);
+    for (const fault of [0, 1, 2, -1]) {
+      const calls = [],
+        records = [],
+        errors = [],
+        out = {},
+        refusal = new Error("exit 126");
+      const entry = {
+        pid: 10,
+        type: 0xffff,
+        access: 0xffffffff,
+        flags: 0xffffffff,
+      };
+      let lastError = 0,
+        reads = 0;
+      const context = { active: false },
+        api = {
+          source: 10,
+          creator: 127,
+          child: 126,
+          index: 126,
+          sequence: 270,
+          list: {
+            count: 3,
+            entries: [
+              { pid: 99 },
+              { ...entry, handle: 11 },
+              { ...entry, handle: 12 },
+            ],
+          },
+          reader_transfer: context,
+          reader_command: command,
+          reader_diagnostics_ready: true,
+          signature_trust: { active: false },
+          control: "authenticated",
+          out,
+          TRUE: true,
+          FALSE: false,
+          DUPLICATE_SAME_ACCESS: 2,
+          NULL: null,
+          stderr: null,
+          unrelated: fault === -1,
+          GetProcessId: (source) => source,
+          GetCurrentProcess: () => 20,
+          GetLastError: () => {
+            reads++;
+            return lastError;
+          },
+          SetLastError: (error) => {
+            lastError = error;
+          },
+          DuplicateHandle: (...args) => {
+            assert.deepEqual(args, [
+              10,
+              11 + calls.length,
+              20,
+              out,
+              0,
+              false,
+              2,
+            ]);
+            calls.push(args[1]);
+            lastError = 5;
+            return calls.length !== fault;
+          },
+          after: () => assert.equal(context.active, false),
+          strrchr: (file) => null,
+          sprintf_s: (target, maximum, format, ...values) => {
+            let i = 0;
+            target.text = format.replace(/%(?:llu|lu|[su])/gu, () => {
+              const value = values[i++];
+              return value?.text ?? value;
+            });
+            assert.ok(Buffer.byteLength(target.text) < maximum);
+            lastError = 87;
+            return target.text.length;
+          },
+          WriteFile: (handle, bytes, size) => {
+            assert.equal(handle, "authenticated");
+            records.push(bytes.text.slice(0, size));
+            lastError = 88;
+            return true;
+          },
+          fprintf: (_stream, _format, _file, _line, error) => {
+            errors.push(error);
+            lastError = 89;
+          },
+          fflush: () => {
+            lastError = 90;
+          },
+          ExitProcess: (code) => {
+            assert.equal(code, 126);
+            throw refusal;
+          },
+        };
+      if (fault)
+        assert.throws(
+          () => program.runInNewContext(api),
+          (error) => error === refusal,
+        );
+      else program.runInNewContext(api);
+      assert.deepEqual(calls, fault === 1 ? [11] : [11, 12]);
+      assert.equal(reads, fault ? 1 : 0);
+      assert.deepEqual(errors, fault ? [fault === -1 ? 31 : 5] : []);
+      assert.equal(records.length, fault ? 1 : 0);
+      if (!fault) continue;
+      const f = transport(),
+        response = f.channel.receive();
+      f.child.stdout.write('{"sequence":270,"value":');
+      for (const part of [records[0].slice(0, 25), records[0].slice(25)])
+        f.child.stdout.write(part);
+      await assert.rejects(response, (error) => {
+        const value = error.custodyReaderFailure;
+        assert.equal(value.lastError, fault === -1 ? 31 : 5);
+        if (fault === -1) assert.ok(!Object.hasOwn(value, "transfer"));
+        else
+          assert.deepEqual(value.transfer, {
+            ordinal: fault,
+            count: 3,
+            type: 0xffff,
+            access: 0xffffffff,
+            attributes: 0xffffffff,
+            creator: 127,
+            child: 126,
+          });
+        return true;
+      });
+      await assert.rejects(f.channel.completion);
+      assert.throws(() => f.channel.settle());
+      f.child.emit("close", 126, null);
+    }
+  }
+});
+
+test("Windows failure metadata stays closed and bounded across complete and fragmented frames", async () => {
+  const legacy = {
+    phase: "reader-failure",
+    sequence: 270,
+    command: "verify-transfer",
+    source: "custody-reader.c",
+    line: 1,
+  };
+  const trust = {
+    mode: "embedded",
+    result: "0x00000005",
+    closeResult: "0x00000000",
+    entry: null,
+    identity: id(11),
+    sha256: null,
+    signatureSha256: null,
+  };
+  const value = {
+    ...legacy,
+    lastError: 0xffffffff,
+    transfer: {
+      ordinal: 838859,
+      count: 838860,
+      type: 0xffff,
+      access: 0xffffffff,
+      attributes: 0xffffffff,
+      creator: 127,
+      child: 126,
+    },
+  };
+  const invalid = [
+    ...[null, -1, 0x100000000, 1.5, "5", true, []].map((lastError) => ({
+      ...value,
+      lastError,
+    })),
+    { ...value, lastError: undefined },
+    { ...value, command: "open" },
+    { ...value, trust },
+    { ...legacy, lastError: 5, trust },
+    { ...value, extra: 1 },
+    { ...value, transfer: null },
+    ...[
+      "ordinal",
+      "count",
+      "type",
+      "access",
+      "attributes",
+      "creator",
+      "child",
+    ].flatMap((field) =>
+      [-1, 1.5, "1", null, 0x100000000, undefined].map((entry) => ({
+        ...value,
+        transfer: { ...value.transfer, [field]: entry },
+      })),
+    ),
+    ...[
+      { ordinal: 838860 },
+      { count: 0 },
+      { count: 838861 },
+      { type: 65536 },
+      { creator: 128 },
+      { child: 128 },
+      { child: 127 },
+      { extra: 1 },
+    ].map((damage) => ({
+      ...value,
+      transfer: { ...value.transfer, ...damage },
+    })),
+  ];
+  const valid = [
+    legacy,
+    { ...legacy, trust },
+    { ...legacy, lastError: 0 },
+    value,
+    { ...value, command: "verify-compiler-policy" },
+  ];
+  for (const [expected, packet] of [
+    ...valid.map((p) => [true, p]),
+    ...invalid.map((p) => [false, p]),
+  ]) {
+    const frame = "\x1e" + JSON.stringify(packet) + "\n";
+    for (const split of [false, true]) {
+      const f = transport(),
+        response = f.channel.receive();
+      f.child.stdout.write(frame.slice(0, split ? 25 : frame.length));
+      if (split) f.child.stdout.write(frame.slice(25));
+      await assert.rejects(response, (error) => {
+        assert.equal(Object.hasOwn(error, "custodyReaderFailure"), expected);
+        if (expected) assert.deepEqual(error.custodyReaderFailure, packet);
+        return true;
+      });
+      await assert.rejects(f.channel.completion);
+      assert.throws(() => f.channel.settle());
+      f.child.emit("close", 126, null);
+    }
+  }
+  const json = JSON.stringify(value);
+  for (const [bytes, complete] of [
+    [1024, true],
+    [1025, true],
+    [1025, false],
+  ]) {
+    const frame =
+      "\x1e" +
+      json +
+      " ".repeat(bytes - 1 - json.length - Number(complete)) +
+      (complete ? "\n" : "");
+    for (const split of [false, true]) {
+      const f = transport(),
+        response = f.channel.receive();
+      // A large interrupted ordinary response does not consume the diagnostic budget.
+      f.child.stdout.write('{"value":"' + "x".repeat(2048));
+      f.child.stdout.write(frame.slice(0, split ? 1024 : frame.length));
+      if (split) f.child.stdout.write(frame.slice(1024));
+      await assert.rejects(response, (error) => {
+        assert.equal(
+          Object.hasOwn(error, "custodyReaderFailure"),
+          bytes === 1024,
+        );
+        return true;
+      });
+      await assert.rejects(f.channel.completion);
+      assert.throws(() => f.channel.settle());
+      f.child.emit("close", 126, null);
+    }
+  }
 });
 
 test("Windows trust diagnostics reject malformed status, entry and held-pin context", async () => {
