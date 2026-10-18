@@ -1269,6 +1269,16 @@ loader SDK headers in the compiler dependency inventory and rejects substitution
 on cold load. These cases use existing fast discovery and the selected native
 harness, adding no slow-tier requirement.
 
+The same Darwin build-source suite executes the shared native ancestor predicate
+for both compile purposes. Synthetic installed-cache paths accept hosted parent
+ownership/modes only in experiment builds; private helper/case roots, tools,
+near-miss names, non-directories and reviewed inputs retain their refusals.
+Custody regressions exercise actual held bootstrap reads under hosted ancestry,
+rejecting canonical-path, parent/leaf identity, ownership and content substitution.
+Existing preparation coverage rejoins the same synthetic Preboot cache selection
+on cold loading without acquisition or recompilation. These cases add no native
+tool, framework, slow-tier assignment or native acceptance claim.
+
 Linux interpreter regressions inject source/running-inode and byte-window
 substitution, sealed-image/loader replacement, missing or mismatched original
 owner/intent evidence, interrupted publication and lost replies. Cold rejoin

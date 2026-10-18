@@ -286,7 +286,8 @@ export function darwinPreparationContext(input, options) {
         stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o6022),
       );
       const installed =
-        installedTool && (await protectedInstalledInput(file, stat, fs));
+        installedTool &&
+        (await protectedInstalledInput(file, stat, fs, value.manifest.purpose));
       requireObservation(!installedTool || installed);
       return protectedBytes(
         { path: file, sha256: pin },
@@ -295,6 +296,7 @@ export function darwinPreparationContext(input, options) {
         maximum,
         fs,
         installed,
+        value.manifest.purpose,
       );
     });
   let activeReader;

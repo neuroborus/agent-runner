@@ -110,6 +110,99 @@ test("Darwin protected installed hardlinks require classification, protected anc
   }
 });
 
+test("Darwin experiment cache reads retain canonical parents, held identities and bytes under hosted ancestry", async () => {
+  const cache =
+    "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h";
+  for (const [purpose, file, fault, accepted = false] of [
+    ["experiment", cache, null, true],
+    ["experiment", "/System/Library/dyld/dyld_shared_cache_x86_64", null, true],
+    ["reviewed", cache],
+    [undefined, cache],
+    ["unknown", cache],
+    ["experiment", "/usr/bin/clang"],
+    [
+      "experiment",
+      "/Library/native-poc-" + "a".repeat(64) + "/dyld_shared_cache_x86_64",
+    ],
+    [
+      "experiment",
+      "/private/var/run/native-poc/cases/fixture/dyld_shared_cache_x86_64",
+    ],
+    ...[
+      "parent-kind",
+      "parent-alias",
+      "parent-identity",
+      "file-alias",
+      "file-owner",
+      "file-identity",
+      "content",
+    ].map((fault) => ["experiment", cache, fault]),
+  ]) {
+    const bytes = Buffer.from("installed cache fixture");
+    let readStarted = false,
+      parentSamples = 0,
+      closed = false;
+    const metadata = (name) => {
+      const leaf = name === file;
+      return {
+        dev: 1n,
+        ino: leaf
+          ? readStarted && fault === "file-identity"
+            ? 2n
+            : 1n
+          : fault === "parent-identity"
+            ? BigInt(++parentSamples)
+            : 3n,
+        mode: leaf ? 0o444n : 0o777n,
+        uid: leaf && fault !== "file-owner" ? 0n : 501n,
+        gid: 0n,
+        nlink: 2n,
+        size: leaf ? BigInt(bytes.length) : 0n,
+        mtimeNs: 1n,
+        ctimeNs: 1n,
+        isFile: () => leaf,
+        isDirectory: () => !leaf && fault !== "parent-kind",
+        isSymbolicLink: () => false,
+      };
+    };
+    const fs = {
+      realpath: async (name) =>
+        (name === file && fault === "file-alias") ||
+        (name !== file && fault === "parent-alias")
+          ? "/fixture/alias"
+          : name,
+      lstat: async (name) => metadata(name),
+      open: async () => ({
+        stat: async () => metadata(file),
+        read: async (buffer, offset, length, position) => {
+          readStarted = true;
+          const chunk = (
+            fault === "content" ? Buffer.alloc(bytes.length) : bytes
+          ).subarray(position, position + length);
+          chunk.copy(buffer, offset);
+          return { bytesRead: chunk.length };
+        },
+        close: async () => {
+          closed = true;
+        },
+      }),
+    };
+    const read = () =>
+      protectedBytes(
+        { path: file, sha256: digest(bytes) },
+        0,
+        0o444,
+        1024,
+        fs,
+        true,
+        purpose,
+      );
+    if (accepted) assert.deepEqual(await read(), bytes);
+    else await assert.rejects(read, undefined, `${purpose}/${file}/${fault}`);
+    if (fault !== "file-alias") assert.equal(closed, true);
+  }
+});
+
 const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
   cdhash = "c".repeat(40);

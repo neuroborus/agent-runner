@@ -11,6 +11,77 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+test("Darwin hosted cache ancestry is scoped to installed runtime paths and experiment purpose", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  for (const experiment of [false, true]) {
+    const functions = [
+      "installed_cache_path",
+      "experiment_cache_ancestors",
+      "bootstrap_parent",
+    ].map((name) => {
+      const body = new RegExp(
+        `static bool ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)?.[1];
+      assert.ok(body, name);
+      return `function ${name}(${name === "bootstrap_parent" ? "name, st" : "name"}) {${body
+        .replace(
+          /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/u,
+          (_match, ordinary, reviewed) => (experiment ? ordinary : reviewed),
+        )
+        .replace("(void)name;", "")
+        .replace("const char *base", "const base")
+        .replaceAll("base + 1", "base.slice(1)")
+        .replaceAll("st->", "st.")
+        .replace(/\b022\b/gu, "0o22")}}`;
+    });
+    const accepts = new Script(
+      `${functions.join("\n")} bootstrap_parent`,
+    ).runInNewContext({
+      strrchr: (name, separator) =>
+        name.includes(separator)
+          ? name.slice(name.lastIndexOf(separator))
+          : null,
+      strcmp: (a, b) => Number(a !== b),
+      strncmp: (a, b, size) => Number(a.slice(0, size) !== b.slice(0, size)),
+      S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
+    });
+    for (const file of [
+      "/System/Library/dyld/dyld_shared_cache_x86_64",
+      "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h",
+    ]) {
+      assert.equal(
+        accepts(file, { st_uid: 501, st_mode: 0o40777 }),
+        experiment,
+        file,
+      );
+      assert.equal(
+        accepts(file, { st_uid: 0, st_mode: 0o40775 }),
+        experiment,
+        file,
+      );
+      assert.equal(accepts(file, { st_uid: 0, st_mode: 0o40755 }), true);
+      assert.equal(accepts(file, { st_uid: 0, st_mode: 0o100755 }), false);
+      assert.equal(accepts(file, { st_uid: 0, st_mode: 0o120755 }), false);
+    }
+    for (const file of [
+      "/System/Library/dyld-alias/dyld_shared_cache_x86_64",
+      "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_other",
+      "/Library/native-poc-" + "a".repeat(64) + "/dyld_shared_cache_x86_64",
+      "/private/var/run/native-poc/cases/fixture/dyld_shared_cache_x86_64",
+      "/Library/Developer/Fixture.sdk/SDKSettings.json",
+      "/usr/bin/sudo",
+    ]) {
+      assert.equal(
+        accepts(file, { st_uid: 501, st_mode: 0o40777 }),
+        false,
+        file,
+      );
+      assert.equal(accepts(file, { st_uid: 0, st_mode: 0o40755 }), true, file);
+    }
+  }
+});
+
 test("Darwin SDK guard samples each original predicate once and preserves refusal errno", async () => {
   const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
     start = source.indexOf("  char canonical[PATH_MAX]; struct stat stat;"),

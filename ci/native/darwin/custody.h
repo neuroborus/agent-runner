@@ -91,6 +91,24 @@ done:
   if (hash) hex(sum, sizeof(sum), hash);
 }
 static void no_acl(int fd) { custody_acl(fd, NULL); }
+static bool installed_cache_path(const char *name) {
+  const char *base = strrchr(name, '/');
+  return base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
+    (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24));
+}
+/* Only the installed cache's enclosing hosted directories use ordinary trust.
+ * Generated helpers, private roots, and the cache file itself remain protected. */
+static bool experiment_cache_ancestors(const char *name) {
+#ifdef NATIVE_CI_EXPERIMENT
+  return installed_cache_path(name);
+#else
+  (void)name; return false;
+#endif
+}
+static bool bootstrap_parent(const char *name, const struct stat *st) {
+  return S_ISDIR(st->st_mode) &&
+    (experiment_cache_ancestors(name) || (st->st_uid == 0 && !(st->st_mode & 022)));
+}
 /* A pin or custody kind never makes a generated input an installed input. */
 static int installed_path(const char *name, const struct stat *st) {
   const char *tools[] = {"/usr/bin/clang", "/usr/bin/xcrun", "/usr/bin/codesign", "/usr/bin/env",
@@ -100,13 +118,11 @@ static int installed_path(const char *name, const struct stat *st) {
   for (unsigned i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) if (!strcmp(name, tools[i]))
     return st->st_gid == 0 && (!strcmp(name, "/usr/bin/sudo") ? mode == 04555 || mode == 04755 : mode == 0555 || mode == 0755);
   if (mode & 06022) return 0;
-  const char *base = strrchr(name, '/');
   return !strcmp(name, "/usr/lib/dyld") || !strcmp(name, "/private/etc/security/audit_event") ||
     !strcmp(name, "/private/etc/security/audit_class") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") ||
     !strncmp(name, "/Library/Developer/", 19) || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) ||
     !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) ||
-    (base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
-      (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24)));
+    installed_cache_path(name);
 }
 static int installed_input(const char *name, const struct stat *identity) {
   if (!installed_path(name, identity)) return 0;
@@ -116,9 +132,9 @@ static int installed_input(const char *name, const struct stat *identity) {
   for (;;) {
     int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (leaf ? 0 : O_DIRECTORY));
     struct stat before, after, named;
-    need(fd >= 0 && !fstat(fd, &before) && before.st_uid == 0 && !(before.st_mode & 022) &&
-      (leaf ? file_stat_same(identity, &before) : S_ISDIR(before.st_mode)));
-    no_acl(fd);
+    need(fd >= 0 && !fstat(fd, &before) &&
+      (leaf ? before.st_uid == 0 && !(before.st_mode & 022) && file_stat_same(identity, &before) : bootstrap_parent(name, &before)));
+    if (leaf || !experiment_cache_ancestors(name)) no_acl(fd);
     need(!fstat(fd, &after) && !lstat(parent, &named) && file_stat_same(&before, &after) &&
       file_stat_same(&before, &named) && !close(fd));
     if (!strcmp(parent, "/")) break;

@@ -70,7 +70,7 @@ export async function acquireDarwinExperimentInputs(
           before.uid === 0 &&
           !(before.mode & 0o6022) &&
           (before.nlink === 1 ||
-            (await protectedInstalledInput(file, before, fs))) &&
+            (await protectedInstalledInput(file, before, fs, "experiment"))) &&
           before.size > 0 &&
           before.size <= 536870912,
       );
@@ -90,7 +90,7 @@ export async function acquireDarwinExperimentInputs(
             "ctimeMs",
           ].every((key) => before[key] === after[key]) &&
           (before.nlink === 1 ||
-            (await protectedInstalledInput(file, after, fs))),
+            (await protectedInstalledInput(file, after, fs, "experiment"))),
       );
       return { file, bytes };
     },

@@ -158,6 +158,18 @@ follow publication. The build recipe rejoins the completed record and reads the
 published images and output directory; copied expectations cannot supply those
 observations. Reviewed compiler, publication, signature and source validators,
 and every other recipe's policy requirements remain strict.
+Only ordinary installed dyld-cache ancestry uses the hosted runtime trust
+assumption: the existing x64 cache names under `/System/Library/dyld/` or
+canonical `/System/Volumes/Preboot/` retain canonical directory and stable
+identity checks without imposing root ownership, non-writable modes or empty
+ancestor ACLs. The shared native custody predicates and purpose-aware bootstrap
+file reader apply the same boundary to initial, repeated and cold reads.
+The held cache leaf, hashes, signatures, UUID/mapped-text observations and
+private helper/build/report/case roots keep their existing protections.
+Reviewed ancestry remains strict. Original protocol/source correlation identifies
+the first failed consumer as CoreFoundation's `build-runtime` cache read after
+the first launcher image closes; it does not establish the selected canonical
+cache pathname or failing parent metadata.
 Cold loading verifies existing sources, tools, SDK settings and held outputs
 without discovery, compilation or acquisition. Original native reader births and
 journals remain independently retired before restoration. Interrupted builds or

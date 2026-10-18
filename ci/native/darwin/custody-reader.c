@@ -120,7 +120,7 @@ static void ancestors(const char *path) {
   need(strlen(path) < sizeof(name)); strcpy(name, path);
   char *slash = strrchr(name, '/'); need(slash && slash != name); *slash = 0;
   for (;;) {
-    need(!lstat(name, &st) && S_ISDIR(st.st_mode) && st.st_uid == 0 && !(st.st_mode & 022));
+    need(!lstat(name, &st) && bootstrap_parent(path, &st));
     slash = strrchr(name, '/'); if (slash == name) break; need(slash); *slash = 0;
   }
 }
@@ -1307,16 +1307,15 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
   bool declared = false;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
   bool cache = runtime != NULL;
-  if (cache) {
-    const char *base = strrchr(name, '/'); need(base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
-      (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24)));
-  } else need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
+  if (cache) need(installed_cache_path(name));
+  else need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
     !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || !strcmp(name, "/usr/lib/dyld"));
   ancestors(name);
   char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
   while (slash && slash != parent) {
     *slash = 0; int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
-    need(fd >= 0 && !fstat(fd, &held) && held.st_uid == 0 && !(held.st_mode & 022)); no_acl(fd);
+    need(fd >= 0 && !fstat(fd, &held) && bootstrap_parent(name, &held));
+    if (!experiment_cache_ancestors(name)) no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }
   struct entry sdk = {.fd = -1}, developer = {.fd = -1}; char compiler[PATH_MAX];

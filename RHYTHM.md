@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Scope ordinary Darwin cache ancestry to hosted runtime trust
+
+Original protocol ordering places the ancestor refusal at the first
+CoreFoundation `build-runtime` cache observation, after the first launcher image
+closes. The source filename in the guard did not identify its inspected object;
+the original selected cache pathname and failing parent metadata remain unknown.
+
+Ordinary native custody and bootstrap reads now trust enclosing hosted ancestry
+only for the already admitted installed x64 dyld-cache paths. Canonical directory
+and held identity checks remain; those ancestors no longer require root-owned,
+non-writable, empty-ACL metadata. The cache leaf, byte and signature observations,
+cache/image UUIDs, mapped-text hashes, all private published roots, payload
+isolation, native controls and independent retirement remain protected. Reviewed
+ancestry and other installed inputs keep their strict policy. Initial, repeated,
+cold and runtime observations use the same narrow predicate rather than a global
+experiment bypass or a new preparation root.
+
+Portable predicate, held-read and cold-load regressions establish no native
+acceptance. All 69 records and the separate platform feasibility blockers remain
+required; later cleanup cannot attest an earlier uncertain owner's retirement.
+
 ## 2026-10-18 — Build ordinary Windows helpers with hosted MSVC
 
 Ordinary Windows preparation trusts the declared disposable hosted image and

@@ -35,11 +35,22 @@ const validIdentity = (stat) =>
   );
 const same = (before, after) =>
   STABILITY.every((key) => before[key] === after[key]);
+const installedCache = (file) =>
+  (file.startsWith("/System/Library/dyld/") ||
+    file.startsWith("/System/Volumes/Preboot/")) &&
+  /^dyld_shared_cache_x86_64h?$/u.test(path.basename(file));
 
 /** Bootstrap observations only; native custody independently checks held ACLs.
  * Neither root ownership nor a caller's pin classifies a generated input. */
-export async function protectedInstalledInput(file, stat, fs) {
+export async function protectedInstalledInput(
+  file,
+  stat,
+  fs,
+  purpose = "reviewed",
+) {
   try {
+    if (!["reviewed", "experiment"].includes(purpose)) return false;
+    const hosted = purpose === "experiment" && installedCache(file);
     // Existing Number-stat callers classify scalar eligibility only. The held
     // reader and ancestry snapshots independently acquire exact identities.
     const bounded = (value, maximum) =>
@@ -64,9 +75,7 @@ export async function protectedInstalledInput(file, stat, fs) {
           file.includes("/Contents/Developer/")) ||
         file.startsWith("/usr/include/") ||
         file.startsWith("/usr/lib/clang/") ||
-        ((file.startsWith("/System/Library/dyld/") ||
-          file.startsWith("/System/Volumes/Preboot/")) &&
-          /^dyld_shared_cache_x86_64h?$/u.test(path.basename(file)));
+        installedCache(file);
     if (
       !installed ||
       file.length >= 4096 ||
@@ -91,8 +100,7 @@ export async function protectedInstalledInput(file, stat, fs) {
         !validIdentity(before) ||
         !before.isDirectory() ||
         before.isSymbolicLink() ||
-        before.uid !== 0n ||
-        before.mode & 0o22n ||
+        (!hosted && (before.uid !== 0n || before.mode & 0o22n)) ||
         (await fs.realpath(parent)) !== parent ||
         !same(before, await fs.lstat(parent, { bigint: true }))
       )
@@ -117,6 +125,7 @@ export async function protectedBytes(
   maximum,
   fs = { lstat, open, realpath },
   installed = false,
+  purpose = "reviewed",
 ) {
   requireDarwin((await fs.realpath(entry.path)) === entry.path);
   const handle = await fs.open(
@@ -132,7 +141,12 @@ export async function protectedBytes(
         before.gid === BigInt(gid) &&
         (before.nlink === 1n ||
           (installed &&
-            (await protectedInstalledInput(entry.path, before, fs)))) &&
+            (await protectedInstalledInput(
+              entry.path,
+              before,
+              fs,
+              purpose,
+            )))) &&
         (before.mode & 0o7777n) === BigInt(mode) &&
         before.size > 0n &&
         before.size <= BigInt(maximum),
@@ -170,7 +184,7 @@ export async function protectedBytes(
         ) &&
         (await fs.realpath(entry.path)) === entry.path &&
         (before.nlink === 1n ||
-          (await protectedInstalledInput(entry.path, named, fs))),
+          (await protectedInstalledInput(entry.path, named, fs, purpose))),
     );
     const bytes = buffer.subarray(0, size);
     requireDarwin(digest(bytes) === entry.sha256);

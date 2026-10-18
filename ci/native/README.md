@@ -335,6 +335,25 @@ requirements. Cold loading verifies the existing output, source, tool and SDK
 observations without discovery, acquisition or recompilation. Incompatible, mixed,
 incomplete and substituted records fail.
 
+Ordinary installed dyld-cache reads trust enclosing hosted directories only for
+the existing x64 cache names under `/System/Library/dyld/` and canonical
+`/System/Volumes/Preboot/` paths. Their ancestors must remain canonical
+directories with unchanged inspected identities; ordinary reads do not require
+root ownership, non-writable modes or empty ACLs on those enclosing directories.
+The held cache file retains its ownership/mode/ACL, identity, bounded reads,
+signature and mapped-image/cache UUID and byte checks. Native initial reads,
+subsequent stability checks, hardlink classification, cold loading and runtime
+consumers share that scoped policy. Reviewed ancestry and all private published
+helper, build, report and case roots remain strict.
+
+Original protocol evidence placed the first ancestor refusal after the first
+`launcher` image closed, at the next `build-runtime` consumer for CoreFoundation.
+The inspected object was the selected installed cache, not the compiled source
+filename printed by the guard. The original output did not retain the selected
+canonical cache pathname or the particular failing ancestor; no hosted-home
+path or parent metadata is inferred from that diagnostic. Fresh matching CI
+must establish native results and independent original-owner retirement.
+
 Under the explicit disposable hosted-image/toolchain assumption, ordinary builds
 no longer reconstruct installed compiler/delegated-tool/SDK trust, snapshot
 compiler dependencies, compile seed helpers or invoke the protected compiler

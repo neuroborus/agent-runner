@@ -679,7 +679,12 @@ function experimentBuildFixture(failure = null) {
         unchanged: true,
         nativeEventSha256: hash,
       }),
-      readBuildRuntime: async () => {
+      readBuildRuntime: async (cache, library) => {
+        assert.equal(cache, prepared.cachePath);
+        assert.ok(
+          library.startsWith("/usr/lib/") ||
+            library.startsWith("/System/Library/"),
+        );
         f.events.push("runtime-read");
         return {
           object: { identity: id },
@@ -1040,6 +1045,8 @@ test("Darwin hosted streams retain long diagnostics and enforce the combined byt
 
 test("Darwin versioned build loading retains long diagnostics and rejects substituted evidence without rebuilding", async () => {
   const f = experimentBuildFixture();
+  f.prepared.cachePath =
+    "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h";
   f.prepared.commands[2].stderr = longDiagnostic;
   const built = await prepareDarwinExperimentBuild(
     f.job,
@@ -1061,6 +1068,7 @@ test("Darwin versioned build loading retains long diagnostics and rejects substi
   );
   assert.equal(stored.commands[2].stderr, longDiagnostic);
   assert.deepEqual(loaded.build, built.build);
+  assert.equal(f.events.filter((event) => event === "runtime-read").length, 2);
   assert.equal(loaded.build.commands[2].stderr, longDiagnostic);
   assert.ok(Buffer.byteLength(JSON.stringify(stored)) < 1048576);
   assert.ok(
