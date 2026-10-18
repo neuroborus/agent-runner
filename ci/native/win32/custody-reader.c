@@ -541,6 +541,32 @@ static BOOL object_type(HANDLE handle, const wchar_t *expected) {
     (uintptr_t)type->Buffer <= (uintptr_t)bytes + used && type->Length <= (uintptr_t)bytes + used - (uintptr_t)type->Buffer);
   return type->Length == wcslen(expected)*2 && !wcsncmp(type->Buffer, expected, type->Length/2);
 }
+/* Local anchors prove only type relevance, never foreign ownership or membership. */
+static struct verify_handles *creator_inventory(USHORT types[2], BOOL with_thread) {
+  HANDLE anchors[2] = {CreateJobObjectW(NULL, NULL), NULL};
+  if (with_thread) anchors[1] = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
+  unsigned required = with_thread ? 2 : 1, matches[2] = {0}; BOOL valid = TRUE;
+  types[0] = types[1] = 0;
+  for (unsigned a = 0; a < required; a++) {
+    DWORD flags;
+    if (!anchors[a] || anchors[a] == INVALID_HANDLE_VALUE || !GetHandleInformation(anchors[a], &flags) ||
+        (flags & HANDLE_FLAG_INHERIT) || !object_type(anchors[a], a ? L"Thread" : L"Job")) valid = FALSE;
+  }
+  struct verify_handles *list = valid ? handle_inventory() : NULL;
+  if (list) for (ULONG_PTR i = 0; i < list->count; i++) {
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetCurrentProcessId()) continue;
+    for (unsigned a = 0; a < required; a++) if (entry->handle == (ULONG_PTR)anchors[a]) {
+      matches[a]++; types[a] = entry->type;
+      if (!entry->type || (entry->flags & 2)) valid = FALSE;
+    }
+  }
+  valid = valid && matches[0] == 1 && (!with_thread || (matches[1] == 1 && types[0] != types[1]));
+  for (unsigned a = 0; a < required; a++) if (anchors[a] && anchors[a] != INVALID_HANDLE_VALUE) {
+    BOOL closed = CloseHandle(anchors[a]); valid = closed && valid;
+  }
+  if (!valid) free(list);
+  need(valid); return list;
+}
 /* GetInstances has no include-hidden flag. Enumerate the scheduler's hidden
  * running tasks explicitly and select the exact registered path. */
 static LONG task_instances(ITaskService *service, BSTR name, IRunningTask *owned[32]) {
@@ -615,17 +641,18 @@ static HANDLE duplicate_process_owner(unsigned slot) {
 static void verifier_transfer(unsigned child, unsigned creator) {
   need(child < process_count && creator < process_count && child != creator && !verified_jobs[child]);
   HANDLE source = duplicate_process_owner(creator);
-  struct verify_handles *list = handle_inventory(); HANDLE job = NULL, thread = NULL;
+  USHORT types[2]; struct verify_handles *list = creator_inventory(types, TRUE); HANDLE job = NULL, thread = NULL;
   for (ULONG_PTR i = 0; i < list->count; i++) {
-    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source)) continue;
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || (entry->type != types[0] && entry->type != types[1])) continue;
     reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
     reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
     reader_transfer.creator = creator; reader_transfer.child = child; reader_transfer.active = TRUE;
     HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
     reader_transfer.active = FALSE;
-    if (object_type(duplicate, L"Job")) {
+    need(object_type(duplicate, entry->type == types[0] ? L"Job" : L"Thread"));
+    if (entry->type == types[0]) {
       BOOL belongs = FALSE; if (IsProcessInJob(processes[child], duplicate, &belongs) && belongs) { need(!job); job = duplicate; continue; }
-    } else if (object_type(duplicate, L"Thread") && GetProcessIdOfThread(duplicate) == GetProcessId(processes[child])) {
+    } else if (GetProcessIdOfThread(duplicate) == GetProcessId(processes[child])) {
       need(!thread); thread = duplicate; continue;
     }
     need(CloseHandle(duplicate));
@@ -664,16 +691,17 @@ static void compiler_policy(unsigned index, unsigned creator) {
     need(CloseHandle(duplicate));
   }
   free(list); need(CloseHandle(source) && pipes == 3);
-  source = duplicate_process_owner(creator); list = handle_inventory(); HANDLE compilerJob = NULL;
+  source = duplicate_process_owner(creator); USHORT types[2]; list = creator_inventory(types, FALSE); HANDLE compilerJob = NULL;
   for (ULONG_PTR i = 0; i < list->count; i++) {
-    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source)) continue;
+    struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || entry->type != types[0]) continue;
     reader_transfer.ordinal = i; reader_transfer.count = list->count; reader_transfer.type = entry->type;
     reader_transfer.access = entry->access; reader_transfer.attributes = entry->flags;
     reader_transfer.creator = creator; reader_transfer.child = index; reader_transfer.active = TRUE;
     HANDLE duplicate; need(DuplicateHandle(source, (HANDLE)entry->handle, GetCurrentProcess(), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS));
     reader_transfer.active = FALSE;
+    need(object_type(duplicate, L"Job"));
     BOOL member = FALSE; JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
-    if (object_type(duplicate, L"Job") && IsProcessInJob(processes[index], duplicate, &member) && member &&
+    if (IsProcessInJob(processes[index], duplicate, &member) && member &&
         QueryInformationJobObject(duplicate, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) && limits.BasicLimitInformation.ActiveProcessLimit == 31) {
       need(!compilerJob); compilerJob = duplicate;
     } else need(CloseHandle(duplicate));

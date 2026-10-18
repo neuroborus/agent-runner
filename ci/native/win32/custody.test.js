@@ -1975,7 +1975,7 @@ test("original creator-census calls retain guard errors, clear successful contex
     ["compiler_policy", "verify-compiler-policy"],
   ]) {
     const fragment =
-      /    struct verify_handle \*entry = &list->entries\[i\]; if \(entry->pid != GetProcessId\(source\)\) continue;\n[\s\S]*?    reader_transfer\.active = FALSE;/u.exec(
+      /    struct verify_handle \*entry = &list->entries\[i\]; if \(entry->pid != GetProcessId\(source\) \|\| [^\n]*types\[0\][^\n]*\) continue;\n[\s\S]*?    reader_transfer\.active = FALSE;/u.exec(
         body(reader, name),
       )[0];
     const program = new Script(`
@@ -1990,7 +1990,8 @@ test("original creator-census calls retain guard errors, clear successful contex
         records = [],
         errors = [],
         out = {},
-        refusal = new Error("exit 126");
+        refusal = new Error("exit 126"),
+        nativeError = fault === 2 ? 50 : 5;
       const entry = {
         pid: 10,
         type: 0xffff,
@@ -2006,6 +2007,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           child: 126,
           index: 126,
           sequence: 270,
+          types: [0xffff, 7],
           list: {
             count: 3,
             entries: [
@@ -2046,7 +2048,7 @@ test("original creator-census calls retain guard errors, clear successful contex
               2,
             ]);
             calls.push(args[1]);
-            lastError = 5;
+            lastError = nativeError;
             return calls.length !== fault;
           },
           after: () => assert.equal(context.active, false),
@@ -2087,7 +2089,7 @@ test("original creator-census calls retain guard errors, clear successful contex
       else program.runInNewContext(api);
       assert.deepEqual(calls, fault === 1 ? [11] : [11, 12]);
       assert.equal(reads, fault ? 1 : 0);
-      assert.deepEqual(errors, fault ? [fault === -1 ? 31 : 5] : []);
+      assert.deepEqual(errors, fault ? [fault === -1 ? 31 : nativeError] : []);
       assert.equal(records.length, fault ? 1 : 0);
       if (!fault) continue;
       const f = transport(),
@@ -2097,7 +2099,7 @@ test("original creator-census calls retain guard errors, clear successful contex
         f.child.stdout.write(part);
       await assert.rejects(response, (error) => {
         const value = error.custodyReaderFailure;
-        assert.equal(value.lastError, fault === -1 ? 31 : 5);
+        assert.equal(value.lastError, fault === -1 ? 31 : nativeError);
         if (fault === -1) assert.ok(!Object.hasOwn(value, "transfer"));
         else
           assert.deepEqual(value.transfer, {
@@ -2114,6 +2116,350 @@ test("original creator-census calls retain guard errors, clear successful contex
       await assert.rejects(f.channel.completion);
       assert.throws(() => f.channel.settle());
       f.child.emit("close", 126, null);
+    }
+  }
+});
+
+test("runtime creator types preserve required duplication, membership and complete inherited censuses", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = (name) =>
+      new RegExp(
+        `static [^\\n]+\\b${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (text) =>
+      text
+        .replace(
+          "HANDLE anchors[2] = {CreateJobObjectW(NULL, NULL), NULL};",
+          "let anchors=[CreateJobObjectW(NULL,NULL),NULL];",
+        )
+        .replace(
+          "unsigned required = with_thread ? 2 : 1, matches[2] = {0};",
+          "let required=with_thread?2:1,matches=[0,0];",
+        )
+        .replaceAll("USHORT types[2];", "let types=[];")
+        .replace("char pipe_dacl[2][65]", "let pipe_dacl=[[],[]]")
+        .replace("char dacl[65]", "let dacl=[]")
+        .replace(
+          "JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;",
+          "let limits={BasicLimitInformation:{}};",
+        )
+        .replace("FILE_ID_INFO id;", "let id={FileId:{Identifier:[]}};")
+        .replaceAll("struct verify_handles *list", "let list")
+        .replaceAll(
+          "struct verify_handle *entry = &list->entries[i];",
+          "let entry=list.entries[i];",
+        )
+        .replace("TOKEN_DEFAULT_DACL *creation", "let creation")
+        .replaceAll("(BYTE *)", "")
+        .replaceAll("(HANDLE)", "")
+        .replaceAll("(ULONG_PTR)", "")
+        .replaceAll('L"', '"')
+        .replaceAll("->", ".")
+        .replace(/&(duplicate|flags|belongs|member)\b/gu, "value=>$1=value")
+        .replace(/&(limits|id)\b/gu, "$1")
+        .replace(/sizeof\([^)]*\)/gu, "1")
+        .replace(
+          /\b(?:HANDLE|DWORD|USHORT|ULONG_PTR|BOOL|unsigned)\b/gu,
+          "let",
+        ),
+    program = new Script(`
+      function creator_inventory(types,with_thread){${translate(body("creator_inventory"))}}
+      function verifier_transfer(child,creator){${translate(body("verifier_transfer"))}}
+      function compiler_policy(index,creator){${translate(body("compiler_policy"))}}
+    `);
+  function fixture(name, types, fault) {
+    const anchors = [0x100000011n, 0x200000022n],
+      alive = new Set(),
+      created = [],
+      closed = [],
+      calls = [],
+      security = [],
+      inventories = [],
+      freed = [],
+      refusal = new Error("native guard"),
+      thread = name === "verifier_transfer";
+    const row = (pid, handle, type, flags = 0) => ({
+      pid,
+      handle,
+      type,
+      flags,
+      access: 0x812,
+    });
+    const api = {
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      INVALID_HANDLE_VALUE: -1n,
+      THREAD_QUERY_LIMITED_INFORMATION: 0x800,
+      HANDLE_FLAG_INHERIT: 1,
+      DUPLICATE_SAME_ACCESS: 2,
+      FILE_TYPE_DISK: 1,
+      FILE_TYPE_PIPE: 3,
+      SE_KERNEL_OBJECT: 6,
+      SE_FILE_OBJECT: 1,
+      TokenDefaultDacl: 6,
+      JobObjectExtendedLimitInformation: 9,
+      FileIdInfo: 18,
+      WAIT_TIMEOUT: 258,
+      processes: [10, 30],
+      tokens: [0, 1],
+      process_count: 2,
+      verified_jobs: [],
+      reader_transfer: {},
+      need: (ok) => {
+        if (!ok) throw refusal;
+      },
+      CreateJobObjectW: (attributes, name) => {
+        assert.deepEqual([attributes, name], [null, null]);
+        if (fault === "job-create") return null;
+        if (fault === "invalid-handle") return -1n;
+        created.push(anchors[0]);
+        alive.add(anchors[0]);
+        return anchors[0];
+      },
+      OpenThread: (rights, inherit, id) => {
+        assert.ok(thread);
+        assert.deepEqual([rights, inherit, id], [0x800, false, 77]);
+        if (fault === "thread-create") return null;
+        created.push(anchors[1]);
+        alive.add(anchors[1]);
+        return anchors[1];
+      },
+      GetCurrentThreadId: () => 77,
+      GetCurrentProcessId: () => 20,
+      GetCurrentProcess: () => 20,
+      GetProcessId: (process) => process,
+      GetHandleInformation: (handle, out) => {
+        assert.ok(alive.has(handle));
+        out(fault === "inheritable" ? 1 : 0);
+        return fault !== "anchor-query";
+      },
+      object_type: (handle, expected) => {
+        if (typeof handle === "bigint") {
+          assert.ok(alive.has(handle));
+          return (
+            fault !== "anchor-type" &&
+            expected === (handle === anchors[0] ? "Job" : "Thread")
+          );
+        }
+        assert.equal(api.reader_transfer.active, false);
+        return fault !== "actual-type" && handle.kind === expected;
+      },
+      handle_inventory: () => {
+        let rows;
+        if (alive.size) {
+          assert.equal(alive.size, thread ? 2 : 1);
+          rows = [
+            row(99, anchors[0], types[0]),
+            row(20, 0x11n, types[0]),
+            row(20, anchors[0], types[0]),
+            ...(thread ? [row(20, anchors[1], types[1])] : []),
+            row(10, 99, 500),
+            row(10, 11, types[0]),
+            row(10, 12, types[1]),
+          ];
+          if (fault === "missing-anchor") rows.splice(2, 1);
+          if (fault === "ambiguous-anchor") rows.push({ ...rows[2] });
+          if (fault === "contradictory-anchor")
+            rows.push({ ...rows[2], type: types[1] });
+          if (fault === "zero-index") rows[2].type = 0;
+          if (fault === "inherited-anchor") rows[2].flags = 2;
+          if (fault === "same-index" && thread) rows[3].type = types[0];
+          if (fault === "missing-thread" && thread) rows.splice(3, 1);
+          if (fault === "missing-job")
+            rows = rows.filter((entry) => entry.handle !== 11);
+          if (fault === "duplicate-job") rows.push(row(10, 13, types[0]));
+          if (fault === "duplicate-thread") rows.push(row(10, 14, types[1]));
+        } else {
+          rows = [201, 202, 203].map((handle) => row(30, handle, 500, 2));
+          if (fault === "missing-pipe") rows.shift();
+          if (fault === "extra-pipe") rows.push(row(30, 204, 500, 2));
+          if (fault === "inherited-refusal")
+            rows.push(row(30, 299, types[0], 2));
+          if (fault === "handle-bound")
+            rows = Array.from({ length: 131 }, (_, i) =>
+              row(30, 201 + i, 500, 2),
+            );
+        }
+        const list = { entries: rows, count: rows.length };
+        inventories.push(list);
+        return list;
+      },
+      duplicate_process_owner: (slot) => api.processes[slot],
+      DuplicateHandle: (
+        source,
+        handle,
+        target,
+        out,
+        rights,
+        inherit,
+        options,
+      ) => {
+        assert.deepEqual(
+          [source, target, rights, inherit, options],
+          [handle < 200 ? 10 : 30, 20, 0, false, 2],
+        );
+        calls.push(handle);
+        if (
+          handle === 99 ||
+          (fault === "inherited-refusal" && handle === 299) ||
+          (fault === "required-refusal" && handle === 11)
+        )
+          return false;
+        out({
+          handle,
+          kind: handle === 12 || handle === 14 ? "Thread" : "Job",
+        });
+        return true;
+      },
+      CloseHandle: (handle) => {
+        closed.push(handle);
+        if (typeof handle === "bigint") assert.ok(alive.delete(handle));
+        return fault !== "anchor-close" || handle !== anchors[0];
+      },
+      IsProcessInJob: (child, _job, out) => {
+        assert.equal(child, 30);
+        out(fault !== "job-membership");
+        return true;
+      },
+      GetProcessIdOfThread: () => (fault === "thread-membership" ? 99 : 30),
+      QueryInformationJobObject: (_job, _kind, limits) => {
+        limits.BasicLimitInformation.ActiveProcessLimit =
+          fault === "compiler-limit" ? 32 : 31;
+        return true;
+      },
+      security: (handle, kind, privateDacl) => {
+        assert.equal(privateDacl, true);
+        security.push(handle.handle);
+        if (fault === "dacl" || (fault === "pipe-dacl" && kind === 1))
+          throw refusal;
+      },
+      job_read: () => {
+        security.push("job");
+        if (fault === "job-dacl") throw refusal;
+      },
+      GetFileType: ({ handle }) =>
+        fault === "unknown-inherited" && handle === 202
+          ? 0
+          : thread &&
+              handle >= 203 &&
+              !(fault === "extra-pipe" && handle === 204)
+            ? 1
+            : 3,
+      GetFileInformationByHandleEx: () => fault !== "file-identity",
+      token_info: () => ({
+        DefaultDacl: fault === "default-dacl" ? null : { AclSize: 8 },
+      }),
+      IsValidAcl: () => fault !== "default-dacl",
+      acl_read: (acl) => {
+        if (!acl) throw refusal;
+      },
+      WaitForSingleObject: () => 258,
+      free: (value) => freed.push(value),
+      printf: () => {},
+      putchar: () => {},
+      hex: () => {},
+      sum: () => {},
+    };
+    program.runInNewContext(api);
+    return {
+      api,
+      calls,
+      security,
+      created,
+      closed,
+      inventories,
+      freed,
+      refusal,
+      run: () => api[name](1, 0),
+    };
+  }
+  for (const name of ["verifier_transfer", "compiler_policy"]) {
+    const thread = name === "verifier_transfer";
+    for (const types of [
+      [55, 84],
+      [101, 55],
+      [0xffff, 7],
+    ]) {
+      const f = fixture(name, types);
+      f.run();
+      assert.deepEqual(
+        f.calls,
+        thread ? [11, 12, 201, 202, 203] : [201, 202, 203, 11],
+      );
+      assert.deepEqual(
+        f.closed.filter((handle) => typeof handle === "bigint"),
+        f.created,
+      );
+      assert.equal(f.created.length, thread ? 2 : 1);
+      assert.ok(f.security.includes("job"));
+      if (thread) {
+        assert.deepEqual(f.security, [12, "job", 201, 202]);
+        assert.equal(f.api.verified_jobs[1].handle, 11);
+      }
+      assert.ok(f.inventories.every((list) => f.freed.includes(list)));
+    }
+    for (const fault of [
+      "job-create",
+      "invalid-handle",
+      "anchor-query",
+      "anchor-type",
+      "inheritable",
+      "missing-anchor",
+      "ambiguous-anchor",
+      "contradictory-anchor",
+      "zero-index",
+      "inherited-anchor",
+      "anchor-close",
+      ...(thread ? ["thread-create", "missing-thread", "same-index"] : []),
+    ]) {
+      const f = fixture(name, [55, 84], fault);
+      assert.throws(f.run, (error) => error === f.refusal, `${name}: ${fault}`);
+      assert.deepEqual(
+        f.closed.filter((handle) => typeof handle === "bigint"),
+        f.created,
+        fault,
+      );
+      assert.deepEqual(f.calls, thread ? [] : [201, 202, 203], fault);
+      assert.ok(
+        f.inventories.every((list) => f.freed.includes(list)),
+        fault,
+      );
+    }
+    for (const fault of [
+      "required-refusal",
+      "actual-type",
+      "missing-job",
+      "duplicate-job",
+      "job-membership",
+      "missing-pipe",
+      "extra-pipe",
+      "inherited-refusal",
+      "unknown-inherited",
+      "default-dacl",
+      "job-dacl",
+      ...(thread
+        ? [
+            "duplicate-thread",
+            "thread-membership",
+            "dacl",
+            "pipe-dacl",
+            "file-identity",
+            "handle-bound",
+          ]
+        : ["compiler-limit"]),
+    ]) {
+      const f = fixture(name, [55, 84], fault);
+      assert.throws(f.run, (error) => error === f.refusal, `${name}: ${fault}`);
+      if (fault === "required-refusal")
+        assert.deepEqual(f.calls, thread ? [11] : [201, 202, 203, 11]);
+      if (fault === "inherited-refusal") assert.ok(f.calls.includes(299));
+      if (fault === "handle-bound")
+        assert.equal(f.calls.filter((handle) => handle >= 200).length, 130);
     }
   }
 });

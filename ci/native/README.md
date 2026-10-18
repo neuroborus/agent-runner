@@ -8413,8 +8413,20 @@ refusal in `verify-transfer` or `verify-compiler-policy` retains optional
 `transfer` context: zero-based snapshot ordinal and total count, object type index,
 granted access, handle attributes and held creator/child slots. Thread-local
 storage excludes unrelated control-worker guards; success clears the context
-before subsequent checks. The original call, enumeration, membership and inherited
-object checks remain unchanged; no retry, skip, filtering or rights change is added.
+before subsequent checks. Creator enumeration selects only runtime-proved Job/Thread
+types for transfer, or Job for compiler policy, before duplication. An unnamed local
+Job and, when needed, a real current-Thread handle are retained and checked as
+noninheritable and of the actual expected type before the existing bounded snapshot.
+Each anchor must match exactly once by current-process ID and full-width handle;
+missing, ambiguous, zero, inherited or contradictory type evidence fails closed.
+Required Job/Thread indices must differ. Anchors remain held through type discovery
+and are closed before creator entries are duplicated. They establish relevance only:
+foreign objects still require one original duplication through the held-process
+identity, unchanged rights, actual-type agreement and unique child membership.
+Every required duplication refusal, including `ERROR_NOT_SUPPORTED`, is fatal;
+there is no retry, error-specific skipping, numeric type allowlist or guessed name.
+Both inherited-object censuses remain complete and strict, including all file/pipe,
+count and DACL checks. Compiler limits and retained Job ownership remain required.
 The consumer validates closed native ranges and rejects conflicting trust/transfer
 metadata and diagnostics over 1 KiB, including unfinished fragmented frames,
 without truncation or changing ordinary response/transport bounds. These fields

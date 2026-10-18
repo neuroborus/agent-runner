@@ -886,8 +886,16 @@ positive and signed-negative nonzero results and substituted content/signature
 pins, and exercise original owner settlement without repeating verification.
 Malformed status, identity, slot and pin carriers remain failures without
 diagnostic authority.
-Custody regressions execute the actual guard, failure emitter and both original
-creator-census duplication fragments through the real fragmented channel parser.
+Custody regressions execute the actual runtime type-anchor helper and both creator
+census paths with injected native reads. Varying Job/Thread indices select only
+proved relevant types before duplication; unrelated unsupported objects receive
+no duplication, while a required object's refusal remains fatal. Missing,
+ambiguous, invalid or contradictory anchors, actual-type disagreement and anchor
+cleanup are covered. Unique child membership, compiler limits, DACL proofs and
+both complete inherited-object censuses remain mandatory, including unknown or
+inaccessible inherited objects and incorrect pipe counts.
+The actual guard, failure emitter and both creator-census duplication fragments
+also run through the real fragmented channel parser.
 They retain the saved error despite diagnostic I/O changing LastError, require
 one duplication per attempted entry, clear successful context before an unrelated
 refusal and keep refusal fail-closed. The carrier matrix covers maximum native
