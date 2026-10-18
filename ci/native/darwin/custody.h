@@ -105,7 +105,7 @@ static bool experiment_cache_ancestors(const char *name) {
   (void)name; return false;
 #endif
 }
-static bool bootstrap_parent(const char *name, const struct stat *st) {
+static bool is_bootstrap_parent(const char *name, const struct stat *st) {
   return S_ISDIR(st->st_mode) &&
     (experiment_cache_ancestors(name) || (st->st_uid == 0 && !(st->st_mode & 022)));
 }
@@ -133,7 +133,7 @@ static int installed_input(const char *name, const struct stat *identity) {
     int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (leaf ? 0 : O_DIRECTORY));
     struct stat before, after, named;
     need(fd >= 0 && !fstat(fd, &before) &&
-      (leaf ? before.st_uid == 0 && !(before.st_mode & 022) && file_stat_same(identity, &before) : bootstrap_parent(name, &before)));
+      (leaf ? before.st_uid == 0 && !(before.st_mode & 022) && file_stat_same(identity, &before) : is_bootstrap_parent(name, &before)));
     if (leaf || !experiment_cache_ancestors(name)) no_acl(fd);
     need(!fstat(fd, &after) && !lstat(parent, &named) && file_stat_same(&before, &after) &&
       file_stat_same(&before, &named) && !close(fd));

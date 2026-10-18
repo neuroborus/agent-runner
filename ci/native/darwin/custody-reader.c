@@ -120,7 +120,7 @@ static void ancestors(const char *path) {
   need(strlen(path) < sizeof(name)); strcpy(name, path);
   char *slash = strrchr(name, '/'); need(slash && slash != name); *slash = 0;
   for (;;) {
-    need(!lstat(name, &st) && bootstrap_parent(path, &st));
+    need(!lstat(name, &st) && is_bootstrap_parent(path, &st));
     slash = strrchr(name, '/'); if (slash == name) break; need(slash); *slash = 0;
   }
 }
@@ -1314,7 +1314,7 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
   char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
   while (slash && slash != parent) {
     *slash = 0; int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
-    need(fd >= 0 && !fstat(fd, &held) && bootstrap_parent(name, &held));
+    need(fd >= 0 && !fstat(fd, &held) && is_bootstrap_parent(name, &held));
     if (!experiment_cache_ancestors(name)) no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }

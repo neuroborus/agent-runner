@@ -13,18 +13,21 @@ const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 test("Darwin hosted cache ancestry is scoped to installed runtime paths and experiment purpose", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const reader = await readFile(new URL("custody-reader.c", SOURCE), "utf8");
+  // The SDK's <servers/bootstrap.h> already declares bootstrap_parent.
+  assert.doesNotMatch(`${source}\n${reader}`, /\bbootstrap_parent\b/u);
   for (const experiment of [false, true]) {
     const functions = [
       "installed_cache_path",
       "experiment_cache_ancestors",
-      "bootstrap_parent",
+      "is_bootstrap_parent",
     ].map((name) => {
       const body = new RegExp(
         `static bool ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
         "u",
       ).exec(source)?.[1];
       assert.ok(body, name);
-      return `function ${name}(${name === "bootstrap_parent" ? "name, st" : "name"}) {${body
+      return `function ${name}(${name === "is_bootstrap_parent" ? "name, st" : "name"}) {${body
         .replace(
           /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/u,
           (_match, ordinary, reviewed) => (experiment ? ordinary : reviewed),
@@ -36,7 +39,7 @@ test("Darwin hosted cache ancestry is scoped to installed runtime paths and expe
         .replace(/\b022\b/gu, "0o22")}}`;
     });
     const accepts = new Script(
-      `${functions.join("\n")} bootstrap_parent`,
+      `${functions.join("\n")} is_bootstrap_parent`,
     ).runInNewContext({
       strrchr: (name, separator) =>
         name.includes(separator)
