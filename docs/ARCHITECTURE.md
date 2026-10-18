@@ -35,6 +35,11 @@ strict; their protected collector rejects experiment jobs. The shared held-image
 comparison is reusable observation, not independent-review authority. Platform
 preparation and runtime repair remain platform-owned; ordinary workflow stages
 explicitly select these experiment owners.
+Ordinary preparation explicitly trusts the declared disposable hosted image and
+installed toolchain. This assumption supplies no reviewed provenance or production
+approval. Actual source/tool/SDK/output hashes and versions, exact candidate and
+producing-job bindings, ABI checks, native isolation and independent retirement
+remain mandatory; ordinary per-platform and aggregate summaries state the boundary.
 Linux's indexed ordinary preparer uses its existing compiler controller, sealed
 fixed GCC-13 file build and held readers to bind observed inputs/output, rather
 than manufacture reviewed publication. Its execution owner reuses both fixed
@@ -377,7 +382,12 @@ review repository, provisioned delivery or provider credentials are required.
 The metadata token remains controller-only and is removed before native owners.
 After hosted admission, Linux reuses feasibility's fixed update/install recipe for
 Bubblewrap, strace and GCC 13, with persisted candidate/run intent and actual
-failure status, followed by the existing package and namespace verification.
+failure status. The namespace prerequisite owner observes installed Bubblewrap
+identity, bytes/hash, version and executable protection and retains its fixed
+probes, executable-scoped policy and independent restoration gate. Ordinary setup
+creates no reviewed package receipt and performs no archive-keyring permission
+mutation or duplicate reviewed acquisition; the reviewed installer and its strict
+receipt validators retain their separate callers.
 Always-run cleanup, report and upload retain original preparation/case/recovery/
 first-failure receipts at the artifact root without binaries or input assets.
 Namespace restoration failure reaches reporting separately from the first cause.

@@ -38,7 +38,6 @@ export {
   linuxPreparationVersion,
   prepareLinuxBubblewrap,
 } from "./preparation.js";
-export { hardenLinuxPreparationTrust } from "./preparation-trust.js";
 export {
   linuxNamespaceContext,
   linuxNamespaceProfile,

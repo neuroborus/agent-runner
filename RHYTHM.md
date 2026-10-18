@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Trust hosted packages for ordinary Linux preparation
+
+Ordinary native preparation explicitly trusts the declared disposable hosted
+image and installed toolchain. Linux now runs the existing fixed hosted package
+recipe once, with candidate/run-bound intent, actual command failures and bounded
+execution. Archive-keyring permission hardening and duplicate reviewed package
+acquisition are removed from that path, together with their exclusive trust
+journal and fixtures. The existing namespace owner observes installed Bubblewrap
+identity, bytes/hash and version, retains executable protection and fixed probes,
+and requires independent original-effect retirement before owned policy restoration.
+Reviewed installation and its strict package receipts remain separate and unchanged.
+Actual tool/SDK/source/output observations and exact candidate/runtime/job bindings
+remain required; report summaries and owning documents expose the assumption.
+The ignored recovery archive remains supervisor-owned. Portable coverage supplies
+no native acceptance or production approval; Darwin and Windows adapter blockers
+and uncertain original Windows retirement still require real matching evidence.
+
 ## 2026-10-18 — Separate Windows build controller and compiler Jobs
 
 The sealed build controller alone enables explicit breakaway in its existing

@@ -31,9 +31,6 @@ import {
   recoverLinuxExperimentProofs,
   linuxExperimentProofState,
   linuxExperimentProofSettled,
-  initialLinuxPreparation,
-  hardenLinuxPreparationTrust,
-  prepareLinuxBubblewrap,
   initialLinuxNamespacePreparation,
   prepareLinuxNamespaces,
   verifyLinuxNamespaces,
@@ -392,36 +389,19 @@ export async function runExperimentStage(
             directory,
             "linux-experiment-packages.json",
           ),
-          packageFile = path.join(directory, "linux-preparation.json"),
           namespaceFile = path.join(
             directory,
             "linux-namespace-preparation.json",
           );
-        requireObservation(
-          (await controller.readJSON(packageFile)).status === "NOT_RUN",
-        );
         const bootstrap = await controller.readJSON(bootstrapFile);
         requireObservation(
           bootstrap.purpose === "experiment" &&
             bootstrap.status === "NOT_RUN" &&
             observationDigest(bootstrap.context) === observationDigest(context),
         );
-        const trust = await (
-          options.hardenLinuxTrust ?? hardenLinuxPreparationTrust
-        )(
-          binding,
-          (value) =>
-            persistAuxiliary(
-              path.join(directory, "linux-experiment-trust.json"),
-              { purpose: "experiment", context, ...value },
-              { mode: 0o600 },
-            ),
-          settings,
-        );
-        requireObservation(trust.status === "PASS");
-        assertActive();
-        // Same fixed package recipe as Native feasibility. This bootstrap is
-        // setup only; held build observations and native retirement remain mandatory.
+        // Trust the admitted disposable hosted image and its package configuration,
+        // as Native feasibility does. Installed executable checks and independent
+        // namespace retirement remain owned by the existing prerequisite gate.
         for (const [operation, args, timeout] of [
           ["update", ["update"], 60000],
           [
@@ -474,13 +454,6 @@ export async function runExperimentStage(
             { mode: 0o600 },
           );
         }
-        const prepared = await (options.prepareLinux ?? prepareLinuxBubblewrap)(
-          job.candidateSha,
-          directory,
-          (value) => persistAuxiliary(packageFile, value),
-          settings,
-        );
-        requireObservation(prepared.status === "PASS");
         assertActive();
         const policy = await (
           options.prepareNamespaces ?? prepareLinuxNamespaces
@@ -620,10 +593,6 @@ export async function initializeExperimentCI(job, directory, controller) {
         exitCode: null,
       },
       { mode: 0o600 },
-    );
-    await controller.persistJSON(
-      path.join(directory, "linux-preparation.json"),
-      initialLinuxPreparation(job.candidateSha),
     );
     await controller.persistJSON(
       path.join(directory, "linux-namespace-preparation.json"),

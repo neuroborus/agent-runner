@@ -3,8 +3,10 @@
 This owns the contracts and retained release audit for an isolated proof of
 concept (PoC), plus its newly authorized evidence/reporting and CI boundary.
 It adds no native runtime support and changes no production consumer. Dedicated
-Linux system CI provisions protected bubblewrap and gates namespace preparation
-on verified executable policy and both fixed probes.
+Linux system CI installs Bubblewrap from the trusted disposable hosted image's
+package configuration and gates namespace preparation on verified executable
+policy and both fixed probes. Ordinary preparation explicitly trusts the hosted
+image and installed toolchain; retained reviewed preparation remains strict.
 The existing Linux runner, provider registry, pipelines, state, configuration,
 and canonical skills retain their current contracts.
 
@@ -743,49 +745,41 @@ environment; all casings of `GH_TOKEN` and ambient Git routes are excluded.
 Controller metadata authority remains separate. Injected regressions establish
 this boundary only, without executing Windows tools or supplying native
 acceptance.
+Ordinary version-7 preparation explicitly assumes that the declared disposable
+GitHub-hosted image and installed toolchain are trusted. This is an experiment
+assumption, not reviewed build provenance or production approval. Candidate,
+source, runtime and producing-job bindings, actual tool/SDK versions and hashes,
+output/ABI observations, native isolation and independent cleanup remain required.
+The per-platform and aggregate ordinary report summaries state this assumption.
+
 Linux prerequisite limits retain the full preparation envelope for both package
 installation and namespace preparation. Initialization persists candidate/run-bound
 package and namespace intent before effects. After hosted/candidate admission,
-the Linux stage first hardens trust inputs through the Linux index's
-`hardenLinuxPreparationTrust`, owned by `linux/preparation-trust.js`.
-Only the declared disposable Ubuntu 24.04 x64 GitHub-hosted environment is
-eligible. Fixed canonical root-owned sudo, timeout, chmod and package executables
-must pass the original strict protection guard before use. The preparer snapshots
-root-owned nonsymlink `/usr/share`, `/usr/share/keyrings` and the regular,
-single-link archive keyring; keyring reads use a no-follow held descriptor and
-a 1-MiB bound. Separate candidate/run-bound `linux-experiment-trust.json` intent
-precedes each nonrecursive `chmod go-w`, proceeding from ancestors to keyring.
-After each parent is secured, its next child must still match the original
-identity, ownership, metadata and bytes before mutation. Secured ancestors are
-revalidated before each dependent mutation. Verification permits only
-the exact write-bit removal and resulting ctime changes. The original strict
-guard must pass before any package command and remains enforced later by
-`prepareLinuxBubblewrap`. Command, inspection, persistence or cancellation refusal
-fences package effects and dependent preparation. Commands have a privileged
-five-second timer with two-second escalation and an overall 30-second hardening
-budget. Insecure modes are never restored. This changes only disposable CI setup,
-never the development host or production guard, and supplies no native acceptance.
+the stage runs Native feasibility's fixed `apt-get update` and
+`apt-get install --no-install-recommends -y bubblewrap strace gcc-13` recipe once,
+using the admitted image's package configuration. The private
+`linux-experiment-packages.json` records each actual operation, possible admission,
+completion or failure, and exit status. Intent persistence failure or cancellation
+fences later commands, receipt publication and namespace admission. A failed
+failure-receipt write cannot replace the original package exception.
 
-After successful hardening, the stage runs Native feasibility's fixed `apt-get update` and
-`apt-get install --no-install-recommends -y bubblewrap strace gcc-13` recipe,
-retaining the actual failing operation and exit status. Existing protected
-Bubblewrap installation/verification then uses isolated signed Ubuntu noble,
-noble-updates and noble-security main/universe metadata over official HTTPS
-sources, restricted to amd64 and the protected archive keyring. Its early
-`APT_CONFIG` suppresses image hooks; source and preference parts use existing
-private empty directories, and disabled preference-file input uses `/dev/null`.
-Only `apt-cache show` sets `Dir::State::status=/dev/null`, preventing a newer
-installed-only paragraph from replacing complete authenticated repository
-metadata. Simulation, exact-version acquisition/installation and installed-version
-verification retain real package state. Package name, architecture, version,
-filename, size and SHA-256 checks remain strict; incomplete or ambiguous records
-fail before acquisition, and no downgrade is enabled. Namespace preparation
-retains its independent checks; bootstrap success supplies no native proof.
-Cancellation reaches the retained reference
-runner and its ownership/file owners; aborted stages cannot publish late prerequisite
-success or admit a later group or runtime-audit recipe.
+Ordinary preparation neither changes archive-keyring permissions nor acquires a
+second reviewed package. It creates no `linux-preparation.json` reviewed package
+receipt. The existing namespace prerequisite owner independently reads installed
+Bubblewrap package identity, executable bytes/hash, version, ownership/protection,
+set-ID/capability absence and effective namespace policy. Its fixed ordinary and
+nested probes and executable-scoped policy gate remain mandatory. Independent
+original-effect retirement precedes removal of the owned namespace policy;
+package success cannot attest namespace compatibility or cleanup.
 
-The fixed prerequisite protection loop in `linux/preparation.js` still refuses
+The retained reviewed `linux/preparation.js` installer still authenticates isolated
+Ubuntu metadata, validates exact package/version/archive bytes and observes the
+installed executable. Its strict receipt and consumers remain unchanged. Reviewed
+preparation never accepts an ordinary package journal as reviewed evidence.
+Cancellation also reaches the retained reference runner and its ownership/file
+owners; aborted stages cannot admit a later group or runtime-audit recipe.
+
+The retained reviewed prerequisite protection loop in `linux/preparation.js` refuses
 unverifiable inputs before package storage or installation. On refusal, its
 CI-private `preparation-protection.js` observer sends the fixed input, attempted
 canonical target and bounded ancestor observations to the existing raw diagnostic
@@ -799,7 +793,8 @@ Inspection or diagnostic-output failure cannot replace the original protection
 error or failed preparation receipt, retry installation or authorize execution.
 Protection diagnostics alone remain intermediate observations awaiting fresh
 hosted CI, not a repair or native proof. Injected regressions establish the
-hardening/refusal and diagnostic boundaries without executing privileged effects.
+hosted package, reviewed refusal and diagnostic boundaries without executing
+privileged effects.
 Darwin descendant survival, Windows TCP/audit failures and production/source/
 protected acceptance remain unresolved; hosted CI is the supervisor's later
 evidence rather than a local finalization prerequisite.
@@ -2075,12 +2070,12 @@ Both minimal workflows install `bubblewrap`, `strace` and `gcc-13` with the same
 bounded, status-preserving package preparation body, then run the shared
 CI-private namespace policy gate:
 
-| Workflow                            | Package preparation                                                                                        | Namespace gate                                   | Admission                                                                                            |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
-| `native-feasibility.yml`            | `prepare_linux`                                                                                            | `namespace_linux`                                | `probe`, only after namespace success                                                                |
-| `native-feasibility-acceptance.yml` | `prepare_linux`                                                                                            | `namespace_linux`                                | `probe`, only after namespace success                                                                |
-| `native-poc.yml`                    | Experiment `run.js --purpose experiment --stage prepare-linux`, using the fixed feasibility package recipe | Same stage, after protected package verification | Observed candidate/run/job admission, then fresh namespace verification before preparation and setup |
-| `native-poc-acceptance.yml`         | Reviewed `run.js --stage prepare-linux`                                                                    | Same stage, after package verification           | Independently approved inputs and fresh verification before provider bootstrap                       |
+| Workflow                            | Package preparation                                                                                        | Namespace gate                              | Admission                                                                                            |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `native-feasibility.yml`            | `prepare_linux`                                                                                            | `namespace_linux`                           | `probe`, only after namespace success                                                                |
+| `native-feasibility-acceptance.yml` | `prepare_linux`                                                                                            | `namespace_linux`                           | `probe`, only after namespace success                                                                |
+| `native-poc.yml`                    | Experiment `run.js --purpose experiment --stage prepare-linux`, using the fixed feasibility package recipe | Same stage, inspecting installed Bubblewrap | Observed candidate/run/job admission, then fresh namespace verification before preparation and setup |
+| `native-poc-acceptance.yml`         | Reviewed `run.js --stage prepare-linux`                                                                    | Same stage, after package verification      | Independently approved inputs and fresh verification before provider bootstrap                       |
 
 Package installation success establishes neither UID/GID mapping permission nor
 namespace compatibility. The ordinary vector above and the existing nested
@@ -5522,8 +5517,10 @@ ordinary jobs. Native feasibility retains its separate secret-free, model-free
 provider mediation contract.
 
 Initialization records the candidate/run-bound package and namespace intent before
-effects. Linux prerequisites reuse feasibility's fixed package selection, then the
-existing protected Bubblewrap and namespace owners. Preparation binds the complete
+effects. Linux prerequisites trust the hosted package configuration and reuse
+feasibility's fixed package selection once, then inspect installed Bubblewrap
+through the existing namespace owner. Reviewed installation and its receipt stay
+on the separate reviewed path. Preparation binds the complete
 candidate helper inventory. Setup cold-loads it, and probing runs every recipe in
 order with actual policy/runtime observations, all 23 checks and independent
 retirement. Missing mechanisms and Darwin descendant survival or Windows TCP/audit/
@@ -9652,7 +9649,11 @@ remain strict; no local harness result grants platform GO or provider support.
 
 ### Protected Linux package preparation
 
-After reporting initialization and pinned Node setup, `prepare-linux` invokes
+This section owns retained reviewed/protected preparation. Ordinary version-7
+experiments use the hosted recipe and installed-executable checks described above;
+they do not invoke this installer or create its reviewed package receipt.
+
+After reporting initialization and pinned Node setup, reviewed `prepare-linux` invokes
 `linux/preparation.js` through the Linux index. Preparation requires the actual
 Ubuntu 24.04 x64 image and a matching checkout before installation. A private
 APT source names only the official HTTPS Ubuntu archive's `noble` main/universe

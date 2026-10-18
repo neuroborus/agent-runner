@@ -70,6 +70,8 @@ function compare(left, right) {
 const SYSTEM_CHECK_IDS = CHECK_IDS.filter(
   (id) => !PROVIDER_CHECK_IDS.includes(id),
 );
+const EXPERIMENT_TRUST_ASSUMPTION =
+  "Preparation assumes a trusted disposable hosted image and installed toolchain; native isolation and independent cleanup remain required.";
 
 /** Ordinary CI PASS is complete native observation, never protected acceptance. */
 export function renderNativeExperimentReport(input) {
@@ -101,6 +103,7 @@ export function renderNativeExperimentReport(input) {
     summary: [
       `## Native system experiment (${job.platform}): ${status}`,
       "",
+      EXPERIMENT_TRUST_ASSUMPTION,
       "Experiment evidence establishes no source closure, protected acceptance or production GO.",
       `Original failure: ${job.failure ?? "none"}; independent cleanup: ${cleanupStatus}.`,
       "",
@@ -169,6 +172,7 @@ export function renderNativeExperimentAggregate(context, selection, payloads) {
   const summary = [
     `## Native system experiments: ${inventory.status}`,
     "",
+    EXPERIMENT_TRUST_ASSUMPTION,
     `${inventory.records}/69 system checks passed. Experiment evidence establishes no source closure, protected acceptance or production GO.`,
     ...platforms.map(
       (platform) =>

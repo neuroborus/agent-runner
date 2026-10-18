@@ -367,12 +367,6 @@ function stageFixture(platform = "darwin") {
   };
   const options = {
     host: { platform, arch: "x64", version: "v24.21.0" },
-    hardenLinuxTrust: async (_, persist) => {
-      events.push("harden-trust");
-      const record = { status: "PASS", target: null };
-      await persist(record);
-      return record;
-    },
     owner: {
       prepare: async (_, __, persist) => {
         events.push("prepare");
@@ -844,7 +838,7 @@ test("explicit experimental stages bypass reviewed acquisition and require hoste
   }
 });
 
-test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after hosted admission and retains actual failures", async () => {
+test("ordinary Linux preparation installs the fixed hosted recipe once and retains actual package failures", async () => {
   const feasibility = await readFile(
       new URL(
         "../../.github/workflows/native-feasibility.yml",
@@ -864,7 +858,7 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
       f.directory,
       f.controller,
     );
-    f.controller.command = async (file, args) => {
+    f.controller.command = async (file, args, timeout) => {
       if (file === "git") return { stdout: C };
       assert.equal(file, "/usr/bin/sudo");
       assert.deepEqual(args.slice(0, 3), [
@@ -872,15 +866,12 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
         "--",
         "/usr/bin/apt-get",
       ]);
+      assert.equal(timeout, args[3] === "update" ? 60000 : 90000);
       const receipt = f.files.get(
         "/synthetic/native-system/linux-experiment-packages.json",
       );
-      assert.equal(
-        f.files.get("/synthetic/native-system/linux-experiment-trust.json")
-          .status,
-        "PASS",
-      );
       assert.equal(receipt.status, "POSSIBLE");
+      assert.equal(receipt.operation, args[3]);
       assert.equal(receipt.context.candidateSha, C);
       assert.equal(receipt.context.runId, "1");
       calls.push(args.slice(3));
@@ -888,13 +879,18 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
         throw Object.assign(new Error("Injected package failure"), { code: 7 });
       return { stdout: "" };
     };
-    f.options.prepareLinux = async (_, directory) => {
+    f.options.prepareNamespaces = async (context, directory) => {
       assert.equal(directory, f.directory);
-      f.events.push("verified-packages");
-      return { status: "PASS" };
-    };
-    f.options.prepareNamespaces = async (_, directory) => {
-      assert.equal(directory, f.directory);
+      assert.deepEqual(context, {
+        candidateSha: C,
+        runId: "1",
+        runAttempt: "1",
+      });
+      assert.equal(
+        f.files.get("/synthetic/native-system/linux-experiment-packages.json")
+          .status,
+        "PASS",
+      );
       f.events.push("namespace-policy");
       return { status: "PASS" };
     };
@@ -913,74 +909,117 @@ test("ordinary Linux package bootstrap reuses feasibility's fixed recipe after h
       failedOperation === null,
     );
     assert.equal(
-      f.events.includes("verified-packages"),
-      failedOperation === null,
+      f.files.has("/synthetic/native-system/linux-preparation.json"),
+      false,
+    );
+    assert.equal(
+      f.files.has("/synthetic/native-system/linux-experiment-trust.json"),
+      false,
     );
     if (failedOperation === null) {
-      const prepare = f.options.owner.prepare;
-      f.options.owner.prepare = async (job, directory, ...rest) => {
-        assert.equal(directory, f.directory);
-        return prepare(job, directory, ...rest);
-      };
       assert.equal(await f.stage("prepare"), true);
+    } else {
+      const failure = f.files.get(
+        "/synthetic/native-system/native-first-failure.json",
+      );
+      assert.equal(failure.stage, "prepare-linux");
+      assert.equal(await f.stage("prepare"), false);
+      assert.equal(f.events.includes("prepare"), false);
+      assert.equal(await f.stage("report"), false);
+      assert.deepEqual(f.events.at(-1).report.firstFailures, [failure]);
     }
   }
 });
 
-test("Linux hardening refusal and persistence failure prevent bootstrap packages and dependent preparation", async () => {
-  for (const fault of [
-    "host",
-    "hardening",
-    "persistence",
-    "status",
-    "cancel",
-  ]) {
+test("Linux hosted admission, package intent and cancellation fence package effects and namespace preparation", async () => {
+  for (const fault of ["host", "context", "status", "intent", "cancel"]) {
     const f = stageFixture("linux"),
-      calls = [],
+      effects = [],
       abort = new AbortController();
     await initializeExperimentCI(
       f.files.get("/synthetic/native-system/native-job.json"),
       f.directory,
       f.controller,
     );
-    f.options.hardenLinuxTrust = async (_, persist) => {
-      calls.push("harden");
-      await persist({ status: "POSSIBLE", target: "/usr/share" });
-      if (fault === "hardening") throw new Error("strict protection refusal");
-      if (fault === "cancel") abort.abort();
-      return { status: fault === "cancel" ? "PASS" : "FAIL" };
-    };
-    const persist = f.controller.persistJSON;
-    f.controller.persistJSON = async (file, ...args) => {
-      if (
-        fault === "persistence" &&
-        file.endsWith("linux-experiment-trust.json")
-      )
-        throw new Error("intent refusal");
-      return persist(file, ...args);
+    const packageFile =
+        "/synthetic/native-system/linux-experiment-packages.json",
+      receipt = f.files.get(packageFile),
+      persist = f.controller.persistJSON;
+    if (fault === "context") receipt.context.runId = "2";
+    if (fault === "status") receipt.status = "PASS";
+    f.controller.persistJSON = async (file, value, ...args) => {
+      if (file === packageFile && value.status === "POSSIBLE") {
+        if (fault === "intent") throw new Error("intent refusal");
+        if (fault === "cancel") abort.abort();
+      }
+      return persist(file, value, ...args);
     };
     f.controller.command = async (file) => {
       if (file === "git") return { stdout: C };
-      assert.fail("No package effect after trust refusal");
+      effects.push("package");
+      return { stdout: "" };
     };
-    f.options.prepareLinux = f.options.prepareNamespaces = async () =>
-      assert.fail("No dependent preparation");
+    f.options.prepareNamespaces = async () => {
+      effects.push("namespace");
+      return { status: "PASS" };
+    };
     if (fault === "host") f.env.RUNNER_ENVIRONMENT = "self-hosted";
-    if (fault === "cancel") f.options.bound = (work) => work(abort.signal);
-    assert.equal(await f.stage("prepare-linux"), false);
-    assert.deepEqual(calls, fault === "host" ? [] : ["harden"]);
-    assert.equal(
-      f.files.get("/synthetic/native-system/linux-experiment-packages.json")
-        .status,
-      "NOT_RUN",
-    );
+    f.options.bound = (work) => work(abort.signal);
+    assert.equal(await f.stage("prepare-linux"), false, fault);
+    assert.deepEqual(effects, [], fault);
     assert.equal(
       f.files.get("/synthetic/native-system/experiment-stages.json").stages[
         "prepare-linux"
       ],
       "FAIL",
+      fault,
     );
   }
+});
+
+test("failed Linux package receipt persistence preserves the original command failure", async () => {
+  const f = stageFixture("linux"),
+    original = Object.assign(new Error("package command failed"), { code: 9 });
+  await initializeExperimentCI(
+    f.files.get("/synthetic/native-system/native-job.json"),
+    f.directory,
+    f.controller,
+  );
+  const persist = f.controller.persistJSON;
+  f.controller.persistJSON = async (file, value, ...args) => {
+    if (
+      file.endsWith("linux-experiment-packages.json") &&
+      value.status === "FAIL"
+    )
+      throw new Error("failure receipt unavailable");
+    return persist(file, value, ...args);
+  };
+  f.controller.command = async (file) => {
+    if (file === "git") return { stdout: C };
+    throw original;
+  };
+  f.options.prepareNamespaces = async () =>
+    assert.fail("No namespace admission");
+  let observed;
+  f.options.bound = async (work) => {
+    try {
+      return await work(new AbortController().signal);
+    } catch (error) {
+      observed = error;
+      throw error;
+    }
+  };
+  assert.equal(await f.stage("prepare-linux"), false);
+  assert.equal(observed, original);
+  assert.equal(
+    f.files.get("/synthetic/native-system/linux-experiment-packages.json")
+      .status,
+    "POSSIBLE",
+  );
+  assert.equal(
+    f.files.get("/synthetic/native-system/native-first-failure.json").stage,
+    "prepare-linux",
+  );
 });
 
 test("Linux namespace cleanup failure reaches the experiment report without replacing its first cause", async () => {
@@ -1133,11 +1172,11 @@ test("a Linux prerequisite deadline fences late package receipts and subsequent 
   );
   let pending,
     installations = 0;
-  f.options.prepareLinux = async (_, __, persist) => {
+  f.controller.command = async (file) => {
+    if (file === "git") return { stdout: C };
     entered.resolve();
     await release.promise;
-    await persist({ status: "PASS" });
-    return { status: "PASS" };
+    return { stdout: "" };
   };
   f.options.prepareNamespaces = async () => {
     installations++;
@@ -1153,12 +1192,12 @@ test("a Linux prerequisite deadline fences late package receipts and subsequent 
   };
   assert.equal(await f.stage("prepare-linux"), false);
   const receipt = structuredClone(
-    f.files.get("/synthetic/native-system/linux-preparation.json"),
+    f.files.get("/synthetic/native-system/linux-experiment-packages.json"),
   );
   release.resolve();
   await assert.rejects(pending);
   assert.deepEqual(
-    f.files.get("/synthetic/native-system/linux-preparation.json"),
+    f.files.get("/synthetic/native-system/linux-experiment-packages.json"),
     receipt,
   );
   assert.equal(installations, 0);

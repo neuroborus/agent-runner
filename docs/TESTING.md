@@ -82,6 +82,15 @@ suite; production supervision, containment and timeout changes do.
 
 ## Minimal native feasibility contract
 
+Ordinary version-7 preparation explicitly trusts the declared disposable hosted
+image and installed toolchain. Portable coverage retains exact candidate/source/
+runtime/job bindings and actual tool/SDK/output version/hash observations; the
+assumption supplies no reviewed or production approval. Linux ordinary package
+setup uses the fixed hosted recipe once, without archive-keyring permission
+mutations or a reviewed package receipt. Existing installed-Bubblewrap checks,
+namespace policy/probes and independent restoration remain required. Reviewed
+installation, strict receipt validators and launcher safety retain their coverage.
+
 `test/native-module-loading.test.js` belongs to ordinary fast discovery. Fresh
 Node processes protect index-first catalog initialization and the checked-in
 Linux `proof.js` direct entry with no arguments and hosted context unset. A
@@ -454,10 +463,16 @@ file work and the runtime-audit barrier, preserving the original cancellation an
 refusing later groups. Promise-controlled stage tests fence late Linux prerequisite
 receipts and policy installation after a deadline. Reviewed bounds remain unchanged.
 The same injected stage coverage compares the Linux bootstrap vector with Native
-feasibility's actual fixed update/install recipe, checks write-ahead context and
-original failure status, and prevents namespace admission after a package failure.
-It verifies controller-token exclusion from native owners and retains external
-namespace cleanup failure separately from an earlier cause.
+feasibility's actual fixed update/install recipe and bounded command vectors,
+checks hosted/context admission and write-ahead intent, and retains actual package
+failure status. It fences effects after failed intent persistence or cancellation,
+rejects late package completion and prevents namespace admission after failure.
+Failure-receipt persistence cannot replace the original command exception. Ordinary
+initialization creates no reviewed package receipt or trust-hardening journal.
+The same coverage verifies controller-token exclusion from native owners and retains
+external namespace cleanup failure separately from an earlier cause. Namespace
+observations and independent restoration remain covered by their existing owner;
+portable success never substitutes for fresh hosted native acceptance.
 
 `test/native-poc-workflow.test.js` is a pure fast-tier workflow regression. It
 requires explicit experiment purpose at every ordinary stage, one candidate,
