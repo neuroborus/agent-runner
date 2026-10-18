@@ -4122,7 +4122,7 @@ test("original failed compiler trust observes bounded optional provider data bef
   }
 });
 
-test("actual reader startup installs only the OS-derived environment before trust", async () => {
+test("actual reader and helper startup use fresh OS-derived environments", async () => {
   const f = rawPreparation({ experiment: true }),
     compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
     index = f.prepared.entries.findIndex(
@@ -4150,16 +4150,57 @@ test("actual reader startup installs only the OS-derived environment before trus
       PATH: "C:\\nonexistent",
       SystemRoot: directory,
     });
-    assert.equal(
-      source.environmentBlock.toString("utf16le"),
-      `CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=${directory}\0\0`,
-    );
+    const expected = (root) =>
+      Buffer.from(
+        `CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=${root}\0\0`,
+        "utf16le",
+      );
+    assert.deepEqual(source.environmentBlock, expected(directory));
     assert.deepEqual(source.events, [
       "windows-directory",
       "environment",
       "verify",
       "close",
     ]);
+    assert.deepEqual(source.calls, [1, 2]);
+    for (const kind of [
+      "build",
+      "git",
+      "file",
+      "policy",
+      "observer",
+      "git-policy",
+    ]) {
+      const before = source.events.length,
+        previous = source.helperStarts.at(-1)?.buffer,
+        api =
+          kind === "build" || kind === "git"
+            ? "CreateProcessAsUserW"
+            : "CreateProcessW";
+      source.startHelper(kind);
+      const started = source.helperStarts.at(-1);
+      assert.equal(started.api, api);
+      assert.deepEqual(started.environment, expected(directory));
+      assert.notEqual(started.buffer, previous);
+      assert.equal(started.buffer.length, 4160);
+      assert.equal(started.flags, 0x80404);
+      assert.equal(started.inherit, true);
+      assert.deepEqual(source.events.slice(before), [
+        "windows-directory",
+        ...(kind === "file" ? ["file-sharing"] : []),
+        "launch-setup",
+        api,
+      ]);
+    }
+    environment.directory = "E:\\Fresh OS\\系统 🌿";
+    for (const kind of ["build", "file"]) {
+      source.startHelper(kind);
+      assert.deepEqual(
+        source.helperStarts.at(-1).environment,
+        expected(environment.directory),
+      );
+    }
+    assert.deepEqual(source.environmentBlock, expected(directory));
     assert.deepEqual(source.calls, [1, 2]);
   }
 });

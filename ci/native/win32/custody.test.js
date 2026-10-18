@@ -22,6 +22,7 @@ import {
 import { observationDigest } from "../index.js";
 import { createPrerequisiteTransport } from "../prerequisite-transport.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -1390,6 +1391,24 @@ test("Windows build input bounds refuse invalid environment text before helper-s
     "Individually valid lists must still fit the quoted command",
   );
   assert.equal((await reader.close()).closed, true);
+});
+
+test("actual helper startup refuses invalid OS directories before launch effects", async () => {
+  for (const environment of [
+    { length: 0 },
+    { length: 4096 },
+    { terminated: false },
+    { directory: "C:\\Bad|OS" },
+  ]) {
+    for (const kind of ["build", "file"]) {
+      const source = await compilerTrustFixture({ entries: [], environment });
+      assert.throws(() => source.startHelper(kind), /native guard rejected/u);
+      assert.deepEqual(source.events, ["windows-directory"]);
+      assert.deepEqual(source.helperStarts, []);
+      assert.deepEqual(source.calls, []);
+      assert.deepEqual(source.records, []);
+    }
+  }
 });
 
 test("Windows build quoting preserves UCRT literals and counts the final separator and NUL", () => {

@@ -37,6 +37,7 @@ export async function compilerTrustFixture({
     calls = [],
     records = [],
     events = [],
+    helperStarts = [],
     positions = new Map(),
     seeks = [],
     signature_trust = { inputs: {}, provider: {} },
@@ -193,6 +194,9 @@ export async function compilerTrustFixture({
             })[name],
         )
         .replaceAll("&written", "NULL")
+        .replaceAll("&private", "privateAttributes")
+        .replaceAll("&start.StartupInfo", "start.StartupInfo")
+        .replaceAll("&process", "process")
         .replace(/&(action|trust|info|flags|size|position)\b/gu, "$1")
         .replace(/\(unsigned long\)|\(DWORD\)|\(LONGLONG\)/gu, "")
         .replace(/\b(?:unsigned|DWORD|LONG|BOOL|int|UINT|size_t) /gu, "let ")
@@ -205,6 +209,42 @@ export async function compilerTrustFixture({
   const open = reader
     .split('} else if (!strcmp(values[0], "open")) {')[1]
     .split('} else if (!strcmp(values[0], "inspect"))')[0];
+  const helper = body(reader, "start_helper"),
+    helperStartup = helper
+      .split("argc == first + inheritedCount)));")[1]
+      .split("  HANDLE inherited[130]")[0],
+    helperCreation = helper.slice(
+      helper.indexOf("  if (compiler || git) {"),
+      helper.indexOf("  free(args);"),
+    ),
+    helperBranch = /^  if \(([^)]+)\)/u.exec(helperCreation)[1],
+    [createAsUser, createProcess] = helperCreation.match(
+      /CreateProcess(?:AsUser)?W\([^)]*\)/gu,
+    );
+  const environmentBytes = (buffer) => {
+    const end = buffer.findIndex(
+      (value, i) => value === 0 && buffer[i + 1] === 0,
+    );
+    assert.ok(end >= 0, "environment must end with two NULs");
+    return Buffer.from(
+      String.fromCharCode(...buffer.subarray(0, end + 2)),
+      "utf16le",
+    );
+  };
+  const createHelper =
+    (name, environmentIndex) =>
+    (...args) => {
+      events.push(name);
+      const buffer = args[environmentIndex];
+      helperStarts.push({
+        api: name,
+        buffer,
+        environment: environmentBytes(buffer),
+        flags: args[environmentIndex - 1],
+        inherit: args[environmentIndex - 2],
+      });
+      return true;
+    };
   let program,
     activeTrust,
     initialized = false,
@@ -260,6 +300,21 @@ export async function compilerTrustFixture({
     WRITE_DAC: 32,
     WRITE_OWNER: 64,
     stderr: null,
+    primary: {},
+    image: { path: "C:\\Fixture\\helper.exe" },
+    command: "fixture",
+    privateAttributes: {},
+    directory: "C:\\Fixture",
+    start: { StartupInfo: {} },
+    process: {},
+    CREATE_SUSPENDED: 0x4,
+    CREATE_UNICODE_ENVIRONMENT: 0x400,
+    EXTENDED_STARTUPINFO_PRESENT: 0x80000,
+    slot: (value) => value,
+    file_root_sharing: () => events.push("file-sharing"),
+    launch_setup: () => events.push("launch-setup"),
+    CreateProcessAsUserW: createHelper("CreateProcessAsUserW", 7),
+    CreateProcessW: createHelper("CreateProcessW", 6),
     need: (ok) => {
       if (ok) return;
       program.reader_failure("custody.h", 1, lastError);
@@ -294,12 +349,8 @@ export async function compilerTrustFixture({
     },
     SetEnvironmentStringsW: (buffer) => {
       events.push("environment");
-      const end = buffer.findIndex(
-        (value, i) => value === 0 && buffer[i + 1] === 0,
-      );
-      assert.ok(end >= 0, "environment must end with two NULs");
-      const block = String.fromCharCode(...buffer.subarray(0, end + 2));
-      environmentBlock = Buffer.from(block, "utf16le");
+      environmentBlock = environmentBytes(buffer);
+      const block = environmentBlock.toString("utf16le");
       if (environment.install === false) return false;
       installedEnvironment = Object.fromEntries(
         block
@@ -534,8 +585,17 @@ export async function compilerTrustFixture({
     },
   };
   program = new Script(`
+    function startup_environment(environment) {${translate(body(reader, "startup_environment"))}}
     function reader_environment() {${translate(body(reader, "reader_environment"))}}
     function initialize_environment() {${translate(startup)}}
+    function start_helper(kind) {
+      const compiler=kind==="build", git=kind==="git", file=kind==="file";
+      const values=[], argc=0;
+      ${translate(helperStartup)}
+      launch_setup();
+      if (${helperBranch}) need(${translate(createAsUser)});
+      else need(${translate(createProcess)});
+    }
     function signature_provider_read(source,target,size) {${translate(body(header, "signature_provider_read"))}}
     function signature_provider_observe(trust) {${translate(body(header, "signature_provider_observe"))}}
     function signature_observe(file,trust) {${translate(body(header, "signature_observe"))}}
@@ -545,13 +605,19 @@ export async function compilerTrustFixture({
     function reader_trust_failure(source,line) {${translate(body(reader, "reader_trust_failure"))}}
     function reader_failure(file,line,error) {${translate(body(reader, "reader_failure"))}}
     function open_entry(values) { let n=values.length; ${translate(open)} }
-    ({initialize_environment,open_entry,reader_failure});
+    ({initialize_environment,start_helper,open_entry,reader_failure});
   `).runInNewContext(api);
   return {
     calls,
     events,
+    helperStarts,
     records,
     seeks,
+    // Execute the production post-validation startup and selected creation call;
+    // unrelated pipe/Job/token setup is represented by one effect boundary.
+    startHelper(kind) {
+      program.start_helper(kind);
+    },
     get environment() {
       return { ...installedEnvironment };
     },

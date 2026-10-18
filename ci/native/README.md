@@ -8373,10 +8373,15 @@ Windows directory. It reads no ambient value. Bounded UTF-16 construction checks
 the native length, termination, absolute drive-path form and capacity, preserves
 spaces and Unicode, and requires successful installation of the double-NUL block.
 Failure refuses startup without VERIFY or CLOSE. Early worker/witness/owner
-branches and explicit child environments retain their existing contracts.
-This controlled startup correction establishes neither the cause of observed
-`0x8` nor a native cure; matching Windows CI must establish trust success and
-independent original-effect retirement separately.
+branches retain their existing contracts. The reader and `start_helper` share
+one private constructor; each helper gets a fresh explicit four-entry block
+after argument validation and before file-sharing, pipe, Job or token effects.
+Both `CreateProcessAsUserW` and `CreateProcessW` receive that block without
+ambient inheritance. The compiler helper's later reviewed SDK environment remains
+separate. Its previous startup omission of `SystemRoot` is source-proven, while
+its unique connection to observed trust result `0x8` remains unproven. Fresh
+matching Windows CI must establish trust success and independent original-effect
+retirement separately; the original non-JSON refusal remains a failure.
 
 The bridge retains the original `IRunningTask` GUID, state and engine PID.
 Independent admission enumerates `TASK_ENUM_HIDDEN` by exact registered path and

@@ -362,6 +362,21 @@ static void file_root_sharing(struct entry *root, struct entry *base) {
     !memcmp(&id, &root->file.id, sizeof(id)) && SetHandleInformation(next, HANDLE_FLAG_INHERIT, 0));
   security(next, SE_FILE_OBJECT, TRUE, after); need(!strcmp(rootDacl, after) && CloseHandle(root->file.handle)); root->file.handle = next;
 }
+/* The shared OS directory is native process setup, never caller-selected input. */
+static void startup_environment(wchar_t environment[4160]) {
+  wchar_t windows[4096];
+  UINT length = GetSystemWindowsDirectoryW(windows, 4096);
+  need(length > 3 && length < 4096 && windows[length] == 0 && wcslen(windows) == length &&
+    ((windows[0] >= L'A' && windows[0] <= L'Z') || (windows[0] >= L'a' && windows[0] <= L'z')) &&
+    windows[1] == L':' && windows[2] == L'\\');
+  for (UINT i = 3; i < length; i++) need(windows[i] >= 32 && !wcschr(L"/:\"<>|?*", windows[i]));
+  static const wchar_t fixed[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=";
+  size_t prefix = sizeof(fixed)/sizeof(fixed[0])-1;
+  need(prefix+length+2 <= 4160);
+  memcpy(environment, fixed, prefix*sizeof(wchar_t));
+  memcpy(environment+prefix, windows, (length+1)*sizeof(wchar_t));
+  environment[prefix+length+1] = 0;
+}
 static void start_helper(char **values, unsigned n) {
   need(!helper && n >= 8 && (!strcmp(values[2], "file") || !strcmp(values[2], "policy") || !strcmp(values[2], "observer") ||
     !strcmp(values[2], "build") || !strcmp(values[2], "git") || !strcmp(values[2], "git-policy")));
@@ -380,6 +395,7 @@ static void start_helper(char **values, unsigned n) {
     gitPolicy ? inheritedCount >= 3 && argc == 8 + (inheritedCount-2)*3 && (!wcscmp(args[7], L"install") || !wcscmp(args[7], L"remove")) :
     compiler ? argc == 14 && inheritedCount == 0 : observer ? argc == 2 && inheritedCount == 0 :
     inheritedCount >= 2 && (file ? argc == 5 && inheritedCount == 2 : argc == first + inheritedCount)));
+  wchar_t environment[4160]; startup_environment(environment);
   if (file) file_root_sharing(slot(values[6+argc]), slot(values[7+argc]));
   HANDLE inherited[130]; PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE);
   HANDLE childIn, childOut; need(CreatePipe(&childIn, &helper_in, &sa, 0) && CreatePipe(&helper_out, &childOut, &sa, 0) &&
@@ -410,7 +426,6 @@ static void start_helper(char **values, unsigned n) {
     UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &helper_job, sizeof(HANDLE), NULL, NULL));
   start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = childIn; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = childOut;
   wchar_t command[32767] = L""; quoted(command, 32767, image->path); for (unsigned i = observer ? 1 : 0; i < argc; i++) quoted(command, 32767, args[i]);
-  wchar_t environment[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
   wchar_t directory[4096]; wcscpy_s(directory, 4096, image->path); *wcsrchr(directory, '\\') = 0;
   PROCESS_INFORMATION process; char creatorDacl[65];
   if (compiler || git) {
@@ -3694,21 +3709,8 @@ static void recovery_case(unsigned custody, const char *context, const char *cas
   strcpy_s(nonce,33,savedNonce);
   printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\",\"policyRestored\":true,\"auditDrained\":true,\"readersClosed\":true}",context);
 }
-/* The shared OS directory is native process setup, never caller-selected input. */
 static void reader_environment(void) {
-  wchar_t windows[4096];
-  UINT length = GetSystemWindowsDirectoryW(windows, 4096);
-  need(length > 3 && length < 4096 && windows[length] == 0 && wcslen(windows) == length &&
-    ((windows[0] >= L'A' && windows[0] <= L'Z') || (windows[0] >= L'a' && windows[0] <= L'z')) &&
-    windows[1] == L':' && windows[2] == L'\\');
-  for (UINT i = 3; i < length; i++) need(windows[i] >= 32 && !wcschr(L"/:\"<>|?*", windows[i]));
-  static const wchar_t fixed[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=";
-  wchar_t environment[4160];
-  size_t prefix = sizeof(fixed)/sizeof(fixed[0])-1;
-  need(prefix+length+2 <= 4160);
-  memcpy(environment, fixed, prefix*sizeof(wchar_t));
-  memcpy(environment+prefix, windows, (length+1)*sizeof(wchar_t));
-  environment[prefix+length+1] = 0;
+  wchar_t environment[4160]; startup_environment(environment);
   need(SetEnvironmentStringsW(environment));
 }
 int wmain(int argc, wchar_t **argv) {
