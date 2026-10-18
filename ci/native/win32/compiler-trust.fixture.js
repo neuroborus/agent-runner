@@ -7,8 +7,8 @@ import { Script } from "node:vm";
 import { windowsCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
 
-// Execute the actual open, pin, PE/experiment, trust and diagnostic bodies with
-// injected kernel/SDK reads. No native compiler, process or trust store is used.
+// Execute actual startup, open, pin, PE/experiment, trust and diagnostic bodies
+// with injected kernel/SDK reads. No native compiler, process or trust store is used.
 export async function compilerTrustFixture({
   entries,
   files,
@@ -19,6 +19,7 @@ export async function compilerTrustFixture({
   unavailable = false,
   seekFailure = false,
   provider = {},
+  environment = {},
 }) {
   const header = await readFile(
       new URL("./custody.h", import.meta.url),
@@ -49,12 +50,28 @@ export async function compilerTrustFixture({
   const text = (value) => value?.text ?? value,
     translate = (source) =>
       source
+        .replace("static const wchar_t fixed[]", "const fixed")
+        .replaceAll("sizeof(fixed)/sizeof(fixed[0])-1", "fixed.length")
+        .replaceAll("sizeof(wchar_t)", "2")
+        .replace(
+          /wchar_t (\w+)\[(\d+)\]/gu,
+          "let $1 = new Uint16Array($2).fill(0xffff)",
+        )
+        .replaceAll(
+          "environment+prefix,",
+          "{buffer:environment, offset:prefix},",
+        )
+        .replace(
+          /L'((?:\\.|[^'])*)'/gu,
+          (_, value) =>
+            JSON.stringify(value === "\\\\" ? "\\" : value) + ".charCodeAt(0)",
+        )
+        .replaceAll('L"', '"')
         .replace(
           /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n[\s\S]*?#endif/gu,
           "$1",
         )
         .replace(/#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu, "$1")
-        .replaceAll('L"wintrust.dll"', '"wintrust.dll"')
         .replace(
           "signature_trust.provider[0] = 0;",
           'signature_trust.provider.text = "";',
@@ -174,14 +191,21 @@ export async function compilerTrustFixture({
         .replaceAll("&written", "NULL")
         .replace(/&(action|trust|info|flags|size|position)\b/gu, "$1")
         .replace(/\(unsigned long\)|\(DWORD\)|\(LONGLONG\)/gu, "")
-        .replace(/\b(?:unsigned|DWORD|LONG|BOOL|int) /gu, "let ")
+        .replace(/\b(?:unsigned|DWORD|LONG|BOOL|int|UINT|size_t) /gu, "let ")
         .replaceAll("->", ".")
         .replaceAll("\\036", "\\x1e");
+  const startup = reader
+    .split("int wmain(int argc, wchar_t **argv) {")[1]
+    .split("require_build();")[1]
+    .split("need(CreateThread")[0];
   const open = reader
     .split('} else if (!strcmp(values[0], "open")) {')[1]
     .split('} else if (!strcmp(values[0], "inspect"))')[0];
   let program,
     activeTrust,
+    initialized = false,
+    environmentBlock,
+    installedEnvironment = { ...environment.ambient },
     lastError = 7;
   const errors = provider.errors ?? [0, 5, 0],
     providerData = {
@@ -198,7 +222,7 @@ export async function compilerTrustFixture({
     count: held.length,
     sequence: 0,
     reader_command: "open",
-    reader_diagnostics_ready: true,
+    reader_diagnostics_ready: false,
     signature_trust,
     errno: 11,
     control: "authenticated",
@@ -235,6 +259,53 @@ export async function compilerTrustFixture({
       if (ok) return;
       program.reader_failure("custody.h", 1);
       throw refusal;
+    },
+    GetEnvironmentVariableW: () =>
+      assert.fail("never read ambient environment"),
+    GetSystemWindowsDirectoryW: (buffer, capacity) => {
+      events.push("windows-directory");
+      assert.equal(capacity, 4096);
+      const path = environment.directory ?? "C:\\Windows";
+      buffer.fill(0xffff);
+      for (let i = 0; i < Math.min(path.length, capacity); i++)
+        buffer[i] = path.charCodeAt(i);
+      if (environment.terminated !== false && path.length < capacity)
+        buffer[path.length] = 0;
+      return environment.length ?? path.length;
+    },
+    wcschr: (value, character) =>
+      value.includes(String.fromCharCode(character)),
+    memcpy: (destination, source, bytes) => {
+      const buffer =
+          destination.offset === undefined ? destination : destination.buffer,
+        offset = destination.offset ?? 0;
+      assert.ok(offset + bytes / 2 <= buffer.length);
+      buffer.set(
+        Array.from({ length: bytes / 2 }, (_, i) =>
+          typeof source === "string" ? source.charCodeAt(i) : source[i],
+        ),
+        offset,
+      );
+    },
+    SetEnvironmentStringsW: (buffer) => {
+      events.push("environment");
+      const end = buffer.findIndex(
+        (value, i) => value === 0 && buffer[i + 1] === 0,
+      );
+      assert.ok(end >= 0, "environment must end with two NULs");
+      const block = String.fromCharCode(...buffer.subarray(0, end + 2));
+      environmentBlock = Buffer.from(block, "utf16le");
+      if (environment.install === false) return false;
+      installedEnvironment = Object.fromEntries(
+        block
+          .slice(0, -2)
+          .split("\0")
+          .map((entry) => {
+            const equals = entry.indexOf("=");
+            return [entry.slice(0, equals), entry.slice(equals + 1)];
+          }),
+      );
+      return true;
     },
     GetLastError: () => lastError,
     SetLastError: (value) => {
@@ -307,8 +378,13 @@ export async function compilerTrustFixture({
       position.QuadPart = positions.get(handle);
       return !unavailable;
     },
-    wcslen: (path) => path.length,
+    wcslen: (path) =>
+      typeof path === "string" ? path.length : path.indexOf(0),
     WinVerifyTrust: (window, _, trust) => {
+      assert.ok(
+        initialized && environmentBlock,
+        "initialize environment before trust",
+      );
       assert.equal(window, api.INVALID_HANDLE_VALUE);
       const entry = held[api.openIndex],
         file = entry.file;
@@ -453,6 +529,8 @@ export async function compilerTrustFixture({
     },
   };
   program = new Script(`
+    function reader_environment() {${translate(body(reader, "reader_environment"))}}
+    function initialize_environment() {${translate(startup)}}
     function signature_provider_read(source,target,size) {${translate(body(header, "signature_provider_read"))}}
     function signature_provider_observe(trust) {${translate(body(header, "signature_provider_observe"))}}
     function signature_observe(file,trust) {${translate(body(header, "signature_observe"))}}
@@ -462,13 +540,19 @@ export async function compilerTrustFixture({
     function reader_trust_failure(source,line) {${translate(body(reader, "reader_trust_failure"))}}
     function reader_failure(file,line) {${translate(body(reader, "reader_failure"))}}
     function open_entry(values) { let n=values.length; ${translate(open)} }
-    ({open_entry,reader_failure});
+    ({initialize_environment,open_entry,reader_failure});
   `).runInNewContext(api);
   return {
     calls,
     events,
     records,
     seeks,
+    get environment() {
+      return { ...installedEnvironment };
+    },
+    get environmentBlock() {
+      return environmentBlock;
+    },
     get inputs() {
       return JSON.parse(signature_trust.inputs.text);
     },
@@ -479,6 +563,11 @@ export async function compilerTrustFixture({
         : undefined;
     },
     async open(index, sequence) {
+      if (!initialized) {
+        program.initialize_environment();
+        initialized = true;
+        api.reader_diagnostics_ready = true;
+      }
       api.sequence = sequence;
       api.openIndex = index;
       try {

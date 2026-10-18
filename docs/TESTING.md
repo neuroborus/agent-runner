@@ -872,6 +872,15 @@ cleanup refusal. These cases execute no Windows tools or native probes.
 Compiler-open regressions execute the production open, pin, PE/experiment,
 verification and failure-emission bodies with injected SDK/kernel reads, then
 use the actual fragmented failure parser and experiment preparation owner.
+The same fixture executes the actual shared reader startup and environment
+initializer with injected native directory and environment operations. It checks
+the exact four-entry, double-NUL UTF-16 block before trust despite absent or
+conflicting ambient values, including a nondefault path with spaces and Unicode
+and the supported buffer boundary. Failed/truncated results, missing or premature
+termination, unsupported paths and installation failure reach neither VERIFY nor
+CLOSE. Existing paired-call, pin-substitution and separate failed-owner retirement
+regressions remain required. This controlled startup coverage establishes neither
+the cause of `0x8` nor native trust success or original-effect retirement.
 They retain the original nonzero LONG separately from closure failures, reject
 positive and signed-negative nonzero results and substituted content/signature
 pins, and exercise original owner settlement without repeating verification.

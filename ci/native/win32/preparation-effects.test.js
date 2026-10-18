@@ -4105,12 +4105,97 @@ test("original failed compiler trust observes bounded optional provider data bef
       return true;
     });
     assert.deepEqual(source.calls, [1, 2]);
-    assert.equal(source.events[0], "verify");
-    assert.equal(source.events[1], "provider-module");
+    assert.deepEqual(source.events.slice(0, 4), [
+      "windows-directory",
+      "environment",
+      "verify",
+      "provider-module",
+    ]);
     assert.equal(source.events.at(-1), "close");
     assert.ok(
       source.records.every((record) => Buffer.byteLength(record) < 1024),
     );
+  }
+});
+
+test("actual reader startup installs only the OS-derived environment before trust", async () => {
+  const f = rawPreparation({ experiment: true }),
+    compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
+    index = f.prepared.entries.findIndex(
+      (entry) => entry.path === compiler.path,
+    ),
+    ambient = { SystemRoot: "Z:\\Caller", PATH: "Z:\\Tools", EXTRA: "discard" };
+  for (const environment of [
+    {},
+    { ambient },
+    { ambient, directory: "D:\\Shared OS\\系统 🌿" },
+    { directory: "C:\\" + "a".repeat(4092) },
+  ]) {
+    const directory = environment.directory ?? "C:\\Windows",
+      source = await compilerTrustFixture({
+        entries: f.prepared.entries,
+        files: f.files,
+        identity: f.rawFileId,
+        inspect: f.objectRead,
+        environment,
+      });
+    await source.open(index, 2);
+    assert.deepEqual(source.environment, {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      PATH: "C:\\nonexistent",
+      SystemRoot: directory,
+    });
+    assert.equal(
+      source.environmentBlock.toString("utf16le"),
+      `CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=${directory}\0\0`,
+    );
+    assert.deepEqual(source.events, [
+      "windows-directory",
+      "environment",
+      "verify",
+      "close",
+    ]);
+    assert.deepEqual(source.calls, [1, 2]);
+  }
+});
+
+test("actual reader startup refuses invalid directory or environment installation before trust", async () => {
+  const f = rawPreparation({ experiment: true });
+  for (const environment of [
+    { length: 0 },
+    { length: 4096 },
+    { length: 4097 },
+    { length: 8 },
+    { terminated: false },
+    { directory: "C:\\Win\0Other" },
+    { directory: "Windows" },
+    { directory: "C:Windows" },
+    { directory: "C:\\" },
+    { directory: "\\\\server\\Windows" },
+    { directory: "1:\\Windows" },
+    { directory: "C:/Windows" },
+    { directory: 'C:\\Bad"Windows' },
+    { directory: "C:\\Windows\n" },
+    { install: false },
+  ]) {
+    const source = await compilerTrustFixture({
+      entries: f.prepared.entries,
+      files: f.files,
+      identity: f.rawFileId,
+      inspect: f.objectRead,
+      environment,
+    });
+    await assert.rejects(source.open(0, 1), /native guard rejected/u);
+    assert.deepEqual(
+      source.events,
+      environment.install === false
+        ? ["windows-directory", "environment"]
+        : ["windows-directory"],
+    );
+    assert.deepEqual(source.calls, []);
+    assert.deepEqual(source.seeks, []);
+    assert.deepEqual(source.records, []);
   }
 });
 
@@ -4170,7 +4255,14 @@ test("actual experiment compiler open initializes held input before noninteracti
       native = await opening;
       assert.deepEqual(source.seeks, [inputSize, inputSize]);
       assert.deepEqual(source.calls, [1, 2, 1, 2]);
-      assert.deepEqual(source.events, ["verify", "close", "verify", "close"]);
+      assert.deepEqual(source.events, [
+        "windows-directory",
+        "environment",
+        "verify",
+        "close",
+        "verify",
+        "close",
+      ]);
       assert.equal(source.provider, undefined);
     } else {
       await assert.rejects(opening, (error) => {
@@ -4220,7 +4312,7 @@ test("actual experiment compiler open initializes held input before noninteracti
         ["content", "seek"].includes(fault) ? [] : [1, 2],
       );
       if (fault === "seek") {
-        assert.deepEqual(source.events, []);
+        assert.deepEqual(source.events, ["windows-directory", "environment"]);
         assert.equal(source.provider, undefined);
       }
       // Independent raw observations retire the failed original reader; its

@@ -8352,6 +8352,19 @@ acknowledges setup. An administrator token is insufficient. The task adds no
 daemon, shell, UAC prompt or provider credential inheritance; the reader replaces
 its environment, and helper creation supplies only the fixed CI environment.
 
+The shared `--serve`/`--observe` startup replaces the reader environment before
+COM initialization and trust calls with exactly `CI=true`, `GITHUB_ACTIONS=true`,
+`PATH=C:\nonexistent` and `SystemRoot` derived from
+`GetSystemWindowsDirectoryW`, the shared OS directory rather than a per-user
+Windows directory. It reads no ambient value. Bounded UTF-16 construction checks
+the native length, termination, absolute drive-path form and capacity, preserves
+spaces and Unicode, and requires successful installation of the double-NUL block.
+Failure refuses startup without VERIFY or CLOSE. Early worker/witness/owner
+branches and explicit child environments retain their existing contracts.
+This controlled startup correction establishes neither the cause of observed
+`0x8` nor a native cure; matching Windows CI must establish trust success and
+independent original-effect retirement separately.
+
 The bridge retains the original `IRunningTask` GUID, state and engine PID.
 Independent admission enumerates `TASK_ENUM_HIDDEN` by exact registered path and
 retains the separate `GetInstances(0)` count. One original GUID must join the held

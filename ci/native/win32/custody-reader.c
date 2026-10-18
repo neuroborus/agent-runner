@@ -3650,6 +3650,23 @@ static void recovery_case(unsigned custody, const char *context, const char *cas
   strcpy_s(nonce,33,savedNonce);
   printf("{\"accountAbsent\":true,\"rightsAbsent\":true,\"jobAbsent\":true,\"contextSha256\":\"%s\",\"policyRestored\":true,\"auditDrained\":true,\"readersClosed\":true}",context);
 }
+/* The shared OS directory is native process setup, never caller-selected input. */
+static void reader_environment(void) {
+  wchar_t windows[4096];
+  UINT length = GetSystemWindowsDirectoryW(windows, 4096);
+  need(length > 3 && length < 4096 && windows[length] == 0 && wcslen(windows) == length &&
+    ((windows[0] >= L'A' && windows[0] <= L'Z') || (windows[0] >= L'a' && windows[0] <= L'z')) &&
+    windows[1] == L':' && windows[2] == L'\\');
+  for (UINT i = 3; i < length; i++) need(windows[i] >= 32 && !wcschr(L"/:\"<>|?*", windows[i]));
+  static const wchar_t fixed[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0SystemRoot=";
+  wchar_t environment[4160];
+  size_t prefix = sizeof(fixed)/sizeof(fixed[0])-1;
+  need(prefix+length+2 <= 4160);
+  memcpy(environment, fixed, prefix*sizeof(wchar_t));
+  memcpy(environment+prefix, windows, (length+1)*sizeof(wchar_t));
+  environment[prefix+length+1] = 0;
+  need(SetEnvironmentStringsW(environment));
+}
 int wmain(int argc, wchar_t **argv) {
   if(argc==4 && !wcscmp(argv[1],L"--file-worker")) return file_worker_main(argc,argv);
   if (argc == 3 && !wcscmp(argv[1], L"--ownership-witness")) {
@@ -3665,8 +3682,7 @@ int wmain(int argc, wchar_t **argv) {
   runner_sid = argv[6];
   if (preparation_only) { wcscpy_s(preparation_directory, 4096, argv[8]); wcscpy_s(preparation_output, 4096, argv[9]); wcscpy_s(preparation_plan, 4096, argv[2]); }
   require_build();
-  wchar_t environment[] = L"CI=true\0GITHUB_ACTIONS=true\0PATH=C:\\nonexistent\0\0";
-  need(SetEnvironmentStringsW(environment));
+  reader_environment();
   need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
   need_hr(CoInitializeEx, NULL, COINIT_MULTITHREADED);
   wchar_t *end; errno = 0; DWORD bridge = wcstoul(argv[7], &end, 10);
