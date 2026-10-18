@@ -338,22 +338,28 @@ static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256],
 static struct held_file experiment_import(const wchar_t *name, const wchar_t *image, wchar_t actual[4096]) {
   /* Preparation needs a mapped file identity, not DLL initialization or an
    * executable dependency load. Live payload loader checks keep normal loading. */
-  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 | (preparation_only ? DONT_RESOLVE_DLL_REFERENCES : 0);
+  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 | (preparation_only ? (LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE) : 0);
   reader_loader.image = image; reader_loader.name = name; reader_loader.flags = flags; reader_loader.active = TRUE;
   size_t size = wcslen(name);
   need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
   HMODULE module = LoadLibraryExW(name, NULL, flags);
   need(module);
-  wchar_t system[4096]; DWORD length = GetModuleFileNameW(module, actual, 4096), prefix = GetSystemDirectoryW(system, 4096);
-  need(length && length < 4096 && prefix && prefix < 4096 && !_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
-  HANDLE selected = CreateFileW(actual, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-  wchar_t canonical[4100], mapped[4100], named[4100]; FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
+  /* Resource handles tag the view's low two bits; executable handles are untagged.
+   * Open the observed NT path through GLOBALROOT rather than guessing a DOS alias. */
+  wchar_t canonical[4100], mapped[4100], named[4100], mappedPath[4120], system[4096];
+  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), (void *)((ULONG_PTR)module & ~(ULONG_PTR)3), mapped, 4100);
+  need(mappedSize && mappedSize < 4100);
+  DWORD prefix = GetSystemDirectoryW(system, 4096);
+  need(prefix && prefix < 4096 && swprintf_s(mappedPath, 4120, L"\\\\?\\GLOBALROOT%ls", mapped) > 0);
+  HANDLE selected = CreateFileW(mappedPath, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
   need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
     GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
   DWORD canonicalSize = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-  need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !_wcsicmp(actual, canonical+4)); wcscpy_s(actual, 4096, canonical+4);
-  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), module, mapped, 4100), namedSize = GetFinalPathNameByHandleW(selected, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
-  need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
+  need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4)); wcscpy_s(actual, 4096, canonical+4);
+  need(!_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
+  DWORD namedSize = GetFinalPathNameByHandleW(selected, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  need(namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
   struct held_file file = hold(actual, FALSE, FALSE, GENERIC_READ); char dacl[65]; stock_security(file.handle,dacl);
   need(GetFileInformationByHandleEx(file.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before,&after,sizeof(before)) && CloseHandle(selected) && FreeLibrary(module));
   reader_loader.active = FALSE;

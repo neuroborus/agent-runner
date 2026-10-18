@@ -281,9 +281,13 @@ admission and payload loader/isolation checks stay strict.
 
 Recursive held PE/import discovery remains necessary for individual private
 runtime copies and exact case loader inventories, including transitive and delay
-edges. Ordinary preparation maps installed DLLs with `DONT_RESOLVE_DLL_REFERENCES`
-and frees each mapping after joining its native mapped path to the held file
-identity. Identifying a file does not require initializing its DLL or executing
+edges. Ordinary preparation uses `LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE` with
+`LOAD_LIBRARY_AS_IMAGE_RESOURCE`. It clears both resource-handle tag bits at
+pointer width for `GetMappedFileNameW`, opens the observed NT path through
+`GLOBALROOT`, and rejoins its canonical System32 path and held file identity.
+This also handles an already-loaded executable module without assuming resource
+handles support `GetModuleFileNameW`. `FreeLibrary` receives the original returned
+handle. Identifying a file does not require initializing its DLL or executing
 its dependency loads. Live payload/module checks retain normal loader execution;
 reviewed admission is unchanged. This removes an unnecessary preparation demand,
 not an actual payload dependency or an isolation restriction.

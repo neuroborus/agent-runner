@@ -73,10 +73,10 @@ Owner-loss fixtures acknowledge entry into the pending registration callback
 through IPC, before or after its simulated durable side effect, and compare
 recorded process identity before retirement. Await owned process closure and
 identity-checked supervisor retirement during teardown.
-Synthetic procfs classification fixtures control both parent and embedded
-inspection clocks so scheduler pauses cannot exhaust an unrelated test's budget;
-explicit elapsed-budget regressions and real supervisor retry windows retain
-their own clocks.
+Synthetic procfs classification fixtures control inspection clocks in test
+parents, generated owners and embedded supervisors so scheduler pauses cannot
+exhaust an unrelated test's budget; explicit elapsed-budget regressions and real
+supervisor retry windows retain their own clocks.
 These test-only synchronization changes do not require the slow operator-stop
 suite; production supervision, containment and timeout changes do.
 

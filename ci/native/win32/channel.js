@@ -302,7 +302,7 @@ export function windowsCustodyChannel(
                 Buffer.from(loader.importHex, "hex").toString("utf16le"),
               ) &&
               loader.flags ===
-                (value.command === "prepare-experiment-loader" ? 0x801 : 0x800),
+                (value.command === "prepare-experiment-loader" ? 0x860 : 0x800),
           );
         }
         if (Object.hasOwn(value, "retain")) {

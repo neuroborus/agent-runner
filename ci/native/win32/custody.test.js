@@ -2617,7 +2617,7 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
     importStart = source.indexOf(
       "  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 |",
     ),
-    importEnd = source.indexOf("  wchar_t system[4096];", importStart),
+    importEnd = source.indexOf("  /* Resource handles", importStart),
     retainStart = source.indexOf("  reader_retain.pid = pid;"),
     retainEnd = source.indexOf(
       "  for (unsigned i = 0; i < process_count;",
@@ -2652,7 +2652,8 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
           TRUE: true,
           NULL: null,
           LOAD_LIBRARY_SEARCH_SYSTEM32: 0x800,
-          DONT_RESOLVE_DLL_REFERENCES: 1,
+          LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE: 0x40,
+          LOAD_LIBRARY_AS_IMAGE_RESOURCE: 0x20,
           wcslen: (name) => name.length,
           _wcsicmp: (left, right) =>
             Number(left.toLowerCase() !== right.toLowerCase()),
@@ -2671,12 +2672,181 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
       {
         name: "fixture.dll",
         reserved: null,
-        flags: preparation ? 0x801 : 0x800,
+        flags: preparation ? 0x860 : 0x800,
       },
     ]);
     assert.equal(context.active, true);
     assert.equal(context.image, "C:\\Fixture\\image.dll");
     assert.equal(context.name, "fixture.dll");
+  }
+  const selection = new Script(
+    source
+      .slice(
+        importEnd,
+        source.indexOf("  reader_loader.active = FALSE;", importEnd),
+      )
+      .replace(
+        /wchar_t ([^;]+);/u,
+        (_text, names) => `let ${names.replace(/\[\d+\]/gu, '=""')};`,
+      )
+      .replace(
+        "FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;",
+        "const tag={},before={},after={};",
+      )
+      .replace("struct held_file file", "const file")
+      .replace("char dacl[65]", "const dacl={}")
+      .replace(/\b(?:DWORD|HANDLE)\b/gu, "const")
+      .replace("(ULONG_PTR)3", "3n")
+      .replaceAll("(ULONG_PTR)", "")
+      .replaceAll("(void *)", "")
+      .replaceAll('L"', '"')
+      .replace(/sizeof\([^)]*\)/gu, "1")
+      .replace(/&(tag|before|after)\b/gu, "$1")
+      .replace(", mapped, 4100)", ", value=>(mapped=value), 4100)")
+      .replace(
+        "GetSystemDirectoryW(system,",
+        "GetSystemDirectoryW(value=>(system=value),",
+      )
+      .replace(
+        "swprintf_s(mappedPath,",
+        "swprintf_s(value=>(mappedPath=value),",
+      )
+      .replace(
+        /(GetFinalPathNameByHandleW\(selected, )(canonical|named),/gu,
+        "$1value=>($2=value),",
+      )
+      .replace(
+        "wcscpy_s(actual, 4096, canonical+4)",
+        "actual=canonical.slice(4)",
+      )
+      .replace("actual+prefix+1", "actual.slice(prefix+1)"),
+  );
+  for (const [tag, fault] of [
+    ...[0n, 1n, 2n, 3n].map((tag) => [tag, null]),
+    ...[
+      "mapped-query",
+      "mapped-truncated",
+      "outside",
+      "nested",
+      "reparse",
+      "mapped-identity",
+      "held-identity",
+      "release",
+    ].map((fault) => [1n, fault]),
+  ]) {
+    const base = 0x100000000n,
+      module = base | tag,
+      mapped = "\\Device\\FixtureVolume\\Windows\\System32\\fixture.dll",
+      actual =
+        fault === "outside"
+          ? "C:\\Other\\fixture.dll"
+          : "C:\\Windows\\System32\\" +
+            (fault === "nested" ? "child\\" : "") +
+            "fixture.dll",
+      calls = [],
+      refusal = new Error("Mapping identity refused");
+    const run = () =>
+      selection.runInNewContext({
+        module,
+        actual: "",
+        FALSE: false,
+        NULL: null,
+        GENERIC_READ: 1,
+        READ_CONTROL: 2,
+        FILE_READ_ATTRIBUTES: 4,
+        FILE_SHARE_READ: 1,
+        OPEN_EXISTING: 3,
+        FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+        INVALID_HANDLE_VALUE: -1,
+        FileAttributeTagInfo: 1,
+        FileIdInfo: 2,
+        FILE_ATTRIBUTE_REPARSE_POINT: 0x400,
+        FILE_NAME_NORMALIZED: 0,
+        VOLUME_NAME_DOS: 0,
+        VOLUME_NAME_NT: 2,
+        GetCurrentProcess: () => 77,
+        GetMappedFileNameW: (process, address, out) => {
+          assert.equal(process, 77);
+          assert.equal(address, base);
+          out(mapped);
+          return fault === "mapped-query"
+            ? 0
+            : fault === "mapped-truncated"
+              ? 4100
+              : mapped.length;
+        },
+        GetSystemDirectoryW: (out) => {
+          const system = "C:\\Windows\\System32";
+          out(system);
+          return system.length;
+        },
+        swprintf_s: (out, capacity, format, value) => {
+          const path = format.replace("%ls", value);
+          assert.ok(path.length < capacity);
+          out(path);
+          return path.length;
+        },
+        CreateFileW: (path, ...options) => {
+          assert.equal(path, "\\\\?\\GLOBALROOT" + mapped);
+          assert.deepEqual(options, [7, 1, null, 3, 0x200000, null]);
+          calls.push("open");
+          return 55;
+        },
+        GetFileInformationByHandleEx: (handle, kind, out) => {
+          if (kind === 1) out.FileAttributes = fault === "reparse" ? 0x400 : 0;
+          else out.id = fault === "held-identity" && handle === 56 ? 8 : 7;
+          return true;
+        },
+        GetFinalPathNameByHandleW: (handle, out, _capacity, flags) => {
+          assert.equal(handle, 55);
+          const value =
+            flags === 0
+              ? "\\\\?\\" + actual
+              : fault === "mapped-identity"
+                ? mapped + ".other"
+                : mapped;
+          out(value);
+          return value.length;
+        },
+        wcsncmp: (left, right, count) =>
+          Number(left.slice(0, count) !== right.slice(0, count)),
+        _wcsnicmp: (left, right, count) =>
+          Number(
+            left.slice(0, count).toLowerCase() !==
+              right.slice(0, count).toLowerCase(),
+          ),
+        _wcsicmp: (left, right) =>
+          Number(left.toLowerCase() !== right.toLowerCase()),
+        wcschr: (text, character) => text.includes(character),
+        hold: (path) => {
+          assert.equal(path, actual);
+          calls.push("hold");
+          return { handle: 56 };
+        },
+        stock_security: (handle) => {
+          assert.equal(handle, 56);
+          calls.push("security");
+        },
+        memcmp: (left, right) => Number(left.id !== right.id),
+        CloseHandle: (handle) => {
+          assert.equal(handle, 55);
+          calls.push("close");
+          return true;
+        },
+        FreeLibrary: (handle) => {
+          assert.equal(handle, module);
+          calls.push("free");
+          return fault !== "release";
+        },
+        need: (ok) => {
+          if (!ok) throw refusal;
+        },
+      });
+    if (fault) assert.throws(run, (error) => error === refusal, fault);
+    else run();
+    if (!fault || fault === "release")
+      assert.deepEqual(calls, ["open", "hold", "security", "close", "free"]);
+    else assert.ok(!calls.includes("free"), fault);
   }
   const acquisition = new Script(
     source
@@ -2824,7 +2994,7 @@ test("native loader and retain diagnostics preserve bounded UTF-16 context on th
     const emit = program.runInNewContext({
       reader_loader:
         kind === "loader"
-          ? { active: true, image, name, flags: 0x801 }
+          ? { active: true, image, name, flags: 0x860 }
           : { active: false },
       reader_retain: kind === "retain" ? retain : { active: false },
       reader_command:
@@ -2929,7 +3099,7 @@ test("Windows failure metadata stays closed and bounded across complete and frag
         "hex",
       ),
       importHex: Buffer.from("fixture.dll", "utf16le").toString("hex"),
-      flags: 0x801,
+      flags: 0x860,
     },
   };
   const retain = {
@@ -2949,6 +3119,7 @@ test("Windows failure metadata stays closed and bounded across complete and frag
   const invalid = [
     ...[
       { flags: 0x800 },
+      { flags: 0x801 },
       { imageUnits: 4096 },
       { imageUnits: 0 },
       { imageHex: "aa" },

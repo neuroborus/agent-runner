@@ -49,6 +49,7 @@ async function inspectionSequenceFixture(
 ) {
   // Synthetic classification is independent of host scheduling; elapsed-budget
   // regressions below supply their own clocks. Retry windows still use Date.now.
+  // Generated owners also capture launch ancestry before starting a supervisor.
   t.mock.method(performance, "now", () => 0);
   const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
@@ -56,8 +57,8 @@ async function inspectionSequenceFixture(
   const inspectionPath = record ? join(directory, "inspections.txt") : null;
   await writeFile(
     preloadPath,
-    `if (process.argv[1] === "session") {
-  Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
+    `Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
+if (process.argv[1] === "session") {
   const { createHash } = require("node:crypto");
   const fs = require("node:fs");
   const original = fs.readdirSync;
