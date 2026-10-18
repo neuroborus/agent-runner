@@ -30,6 +30,7 @@ import {
   processObservation,
   jobObservation,
 } from "./custody-protocol.js";
+import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { buildWindowsPolicy, normalizeWindowsPolicy } from "./policy.js";
 import {
   windowsAccessArguments,
@@ -130,13 +131,99 @@ export function createWindowsCaseProvisioning(state, options) {
       );
   };
   return {
-    async observeBuildPolicy(binding, { commands, settlement }, { signal }) {
+    async observeBuildPolicy(
+      binding,
+      { commands, settlement, prepared },
+      { signal },
+    ) {
       state.guard(signal);
       context(binding);
       requireObservation(
         provisioningPin(binding) ===
           windowsCustodyBinding(state.plan.bootstrap),
       );
+      if (binding.purpose === "experiment") {
+        requireObservation(
+          prepared?.schemaVersion === 2 && prepared.purpose === "experiment",
+        );
+        const images = [],
+          reads = [];
+        for (const helper of prepared.helpers) {
+          const read = await options.readExperimentImage(helper.path),
+            image = inspectWindowsExperimentPe(read.bytes);
+          requireObservation(
+            read.independent &&
+              read.held &&
+              read.unchanged &&
+              read.protectedDacl &&
+              read.protectedParents &&
+              read.sha256 === helper.sha256 &&
+              image.sha256 === helper.sha256 &&
+              hash(read.nativeEventSha256),
+          );
+          images.push({
+            name: helper.name,
+            path: helper.path,
+            sha256: image.sha256,
+            sourceSha256: helper.sourceSha256,
+          });
+          reads.push(read.nativeEventSha256);
+        }
+        const output = await options.readBuildDirectory(state.output);
+        requireObservation(
+          output.independent &&
+            output.held &&
+            output.protectedParents &&
+            hash(output.daclSha256),
+        );
+        const policy = normalizeNativePolicyTemplate({
+          ...binding.template,
+          bindings: [],
+          policy: {
+            launch: {
+              buildSha256: observationDigest({
+                commands: prepared.commands,
+                versions: prepared.versions,
+              }),
+            },
+            policy: {
+              images,
+              output: {
+                path: state.output,
+                identitySha256: observationDigest(output.identity),
+                daclSha256: output.daclSha256,
+              },
+            },
+          },
+        }).policy;
+        const provisioning = allocation(
+          binding,
+          {
+            "policy.output.identitySha256": policy.policy.output.identitySha256,
+          },
+          state.plan.bootstrap.reader.sha256,
+          { reads, output },
+        );
+        const requestSha256 = observationDigest(policy.launch);
+        return {
+          provisioning,
+          requestSha256,
+          observed: {
+            schemaVersion: 1,
+            context: structuredClone(binding.context),
+            templateSha256: policyPin(binding),
+            provisioningSha256: observationDigest(provisioning),
+            requestSha256,
+            policySha256: observationDigest(policy),
+            policy,
+            held: true,
+            complete: true,
+            independent: true,
+            verifierSha256: state.plan.bootstrap.reader.sha256,
+            nativeEventSha256: observationDigest({ reads, output }),
+          },
+        };
+      }
       const domains = [];
       for (const command of commands) {
         const policy = command.compilerPolicy;

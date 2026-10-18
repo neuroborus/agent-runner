@@ -1,8 +1,12 @@
+import { createWindowsCaseProvisioning } from "../ci/native/win32/case-provisioning.js";
+import {
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
+} from "../ci/native/win32/experiment-policy.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { Script } from "node:vm";
 import { win32 as path } from "node:path";
 
 import { createWindowsPreparationFiles } from "../ci/native/win32/preparation-files.js";
@@ -17,7 +21,6 @@ import {
   WINDOWS_HELPER_NAMES,
   windowsSystemRecipes,
   windowsExperimentBuildInventory,
-  windowsExperimentDependencies,
   normalizeWindowsExperimentPreparation,
   normalizeWindowsPreparation,
   inspectWindowsExperimentPe,
@@ -28,6 +31,13 @@ import {
   prepareWindowsExperimentCases,
   loadWindowsExperiment,
 } from "../ci/native/win32/index.js";
+
+import {
+  windowsHostedCompilerArguments,
+  runWindowsHostedCommand,
+} from "../ci/native/win32/experiment-native.js";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
 const candidateSha = "a".repeat(40),
   H = "b".repeat(64),
@@ -99,6 +109,7 @@ function fixture() {
     },
     prepared = {
       purpose: "experiment",
+      schemaVersion: 2,
       job,
       directory,
       sourceDirectory,
@@ -119,7 +130,7 @@ function fixture() {
         },
         {
           name: "sdk",
-          path: "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0\\x64\\rc.exe",
+          path: "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.22621.0\\x64\\rc.exe",
           sha256: H,
           signatureSha256: H,
         },
@@ -150,7 +161,15 @@ function fixture() {
         })),
     };
   const binding = {
-      ...job,
+      ...Object.fromEntries(
+        ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+          (key) => [key, job[key]],
+        ),
+      ),
+      image: "windows-2025",
+      architecture: "x64",
+      workflow: "native-poc",
+      jobId: "2",
       checkoutSha: candidateSha,
       osBuild: "10.0.26100",
       nodeVersion: "v24.21.0",
@@ -165,6 +184,67 @@ function fixture() {
       GITHUB_RUN_ID: "1",
       GITHUB_RUN_ATTEMPT: "1",
     };
+  declaration.schemaVersion = 2;
+  declaration.command = { helper: declaration.command.helper };
+  for (const entry of declaration.cases)
+    entry.custody.context.jobBindingSha256 = observationDigest(binding);
+  prepared.binding = binding;
+  prepared.bootstrap.context.jobBindingSha256 = observationDigest(binding);
+  prepared.environment = {
+    INCLUDE: "C:\\Fixture\\include",
+    LIB: "C:\\Fixture\\lib",
+    SystemRoot: "C:\\Windows",
+    PATH: "C:\\Fixture\\tools",
+  };
+  prepared.entries = [];
+  prepared.sdkBuild = "10.0.22621.0";
+  prepared.sdkHeader = {
+    file: "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.22621.0\\um\\Windows.h",
+    sha256: H,
+  };
+  prepared.tools = prepared.tools.map(({ signatureSha256, ...tool }) => tool);
+  prepared.versions = { compiler: "1.2", sdk: "1.2" };
+  const commandEnvironment = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    LANG: "C",
+    ...prepared.environment,
+    TEMP: "C:\\Fixture",
+    TMP: "C:\\Fixture",
+  };
+  const command = (file, args, stdout = "") => ({
+    file,
+    args,
+    cwd: sourceDirectory,
+    env: commandEnvironment,
+    timeout: 60000,
+    maxBuffer: 1048576,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout,
+    stderr: "",
+  });
+  prepared.commands = [
+    command("git", ["rev-parse", "HEAD"], candidateSha),
+    command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
+    ...WINDOWS_HELPER_NAMES.map((name) =>
+      command(
+        prepared.tools[0].path,
+        windowsHostedCompilerArguments(
+          path.join(sourceDirectory, name + ".c"),
+          path.join(sourceDirectory, name + ".exe"),
+        ),
+      ),
+    ),
+    command(prepared.tools[1].path, ["/?"], "Version 1.2"),
+    command(
+      path.join(prepared.environment.SystemRoot, "System32", "whoami.exe"),
+      ["/user", "/fo", "csv", "/nh"],
+      '"fixture","S-1-5-21-1-2-3-1001"',
+    ),
+  ];
   return {
     job,
     prepared,
@@ -175,7 +255,6 @@ function fixture() {
       platform: "win32",
       architecture: "x64",
       nodeVersion: "v24.21.0",
-      persistBootstrap: async () => {},
     },
   };
 }
@@ -212,30 +291,6 @@ test("Windows experiment preparation requires every fixed helper/header/case and
   assert.throws(() =>
     normalizeWindowsExperimentPreparation(promoted, candidateSha),
   );
-});
-
-test("Windows dependency output rejects substituted sources, ambient inputs and omitted includes", () => {
-  const source = "C:\\Fixture\\source\\helper.c",
-    include = "C:\\Fixture\\source\\experiment.h",
-    value = { Version: "1.2", Data: { Source: source, Includes: [include] } },
-    encode = (value) => Buffer.from(JSON.stringify(value));
-  assert.deepEqual(
-    windowsExperimentDependencies(encode(value), source, path.dirname(source)),
-    [include],
-  );
-  for (const data of [
-    { Source: source + ".other", Includes: [include] },
-    { Source: source, Includes: [] },
-    { Source: source, Includes: ["C:\\Other\\header.h"] },
-    { ...value.Data, ImportedModules: ["unbound"] },
-  ])
-    assert.throws(() =>
-      windowsExperimentDependencies(
-        encode({ ...value, Data: data }),
-        source,
-        path.dirname(source),
-      ),
-    );
 });
 
 test("Windows fixed cases retain copy kinds and the complete copied Git loader graph", async () => {
@@ -390,69 +445,6 @@ test("unsigned experiment PE observations cannot be promoted by adding a certifi
   assert.throws(() => inspectWindowsExperimentPe(unsafe));
 });
 
-test("Windows protected compiles continue after retired failures while partial builds remain inadmissible", async () => {
-  for (const uncertain of [false, true]) {
-    const f = fixture(),
-      attempted = [],
-      saved = [],
-      settlement = {
-        status: "RETIRED",
-        independent: true,
-        emergencyCleanup: false,
-        nativeEventSha256: H,
-      };
-    await assert.rejects(
-      prepareWindowsExperiment(
-        f.job,
-        directory,
-        async (job) => saved.push(job),
-        {
-          ...f.settings,
-          bootstrap: async () => f.prepared,
-          open: async () => ({
-            run: async (request, operation) => {
-              if (operation.mode === "compile")
-                attempted.push(operation.helper.name);
-              return {
-                independent: true,
-                requestSha256: observationDigest(request),
-                toolSha256: request.toolSha256,
-                signal: null,
-                timedOut: false,
-                settlement:
-                  uncertain && attempted.length === 2
-                    ? { ...settlement, independent: false }
-                    : settlement,
-                exitCode: operation.mode === "compile" ? 1 : 0,
-                stdout:
-                  operation.mode === "compiler-version"
-                    ? "Compiler Version 1.2 for x64"
-                    : operation.mode === "sdk-version"
-                      ? "Version 1.2"
-                      : "",
-                stderr:
-                  operation.mode === "compile"
-                    ? "compiler failure " + attempted.length
-                    : "",
-              };
-            },
-            write: () =>
-              assert.fail("A failed build cannot publish preparation"),
-            close: async () => settlement,
-          }),
-        },
-      ),
-      (error) => error.cause.stderr === "compiler failure 1",
-    );
-    assert.deepEqual(
-      attempted,
-      uncertain ? WINDOWS_HELPER_NAMES.slice(0, 2) : [...WINDOWS_HELPER_NAMES],
-    );
-    assert.equal(saved.at(-1).failure, "preparation-failed");
-    assert.equal(saved.at(-1).preparation, null);
-  }
-});
-
 test("interrupted Windows startup and unsealed recovery retain uncertainty without retry", async () => {
   const f = fixture(),
     saved = [];
@@ -584,18 +576,9 @@ test("Windows cold loading preserves verification and cleanup failures separatel
     await assert.rejects(
       loadWindowsExperiment(job, directory, {
         ...f.settings,
-        readdir: async (parent) => {
-          assert.equal(parent, path.dirname(directory));
-          return ["native-bootstrap-0.json"];
-        },
         read: async (file) => {
-          assert.equal(
-            file,
-            path.join(path.dirname(directory), "native-bootstrap-0.json"),
-          );
-          return Buffer.from(
-            JSON.stringify({ phase: "bootstrap-seal-possible", ...f.prepared }),
-          );
+          assert.equal(file, directory + "-selector.json");
+          return Buffer.from(JSON.stringify(f.prepared));
         },
         files: {
           readProtected: async () => {
@@ -631,79 +614,6 @@ test("Windows cold loading preserves verification and cleanup failures separatel
           : error === primary,
     );
     assert.equal(closes, 1);
-  }
-});
-
-test("experiment startup retains the original owner across lost open completion and independent cleanup refusal", async () => {
-  const source = await readFile(
-      new URL("../ci/native/win32/experiment-native.js", import.meta.url),
-      "utf8",
-    ),
-    start = source.indexOf("  retain?.(native);"),
-    end = source.indexOf("\n  return {\n    ...native,", start),
-    program = new Script(`(async()=>{${source.slice(start, end)}})()`);
-  assert.ok(start > 0 && end > start);
-  for (const fault of [null, "open", "provision"]) {
-    const primary = new Error("original command completion lost"),
-      cleanup = new Error("independent cleanup unverified"),
-      calls = [];
-    const native = {
-        close: async () => {
-          calls.push("cleanup");
-          throw cleanup;
-        },
-      },
-      reader = {
-        start: async () => calls.push("start"),
-        open: async (index) => {
-          calls.push(index);
-          if (fault === "open" && index === 1) throw primary;
-        },
-      },
-      files = {
-        provisionBuild: async () => {
-          calls.push("provision");
-          if (fault === "provision") throw primary;
-        },
-      };
-    const result = program.runInNewContext({
-      native,
-      reader,
-      files,
-      retain: (owner) => {
-        assert.equal(owner, native);
-        calls.push("retain");
-      },
-      signal: undefined,
-      reopen: false,
-      output: "C:\\Fixture\\build",
-      entries: [
-        { kind: "helper", path: "helper" },
-        { kind: "image", path: "compiler" },
-        { kind: "data", path: "source" },
-      ],
-      helpers: [{ name: "build-helper", path: "helper" }],
-    });
-    if (!fault) {
-      await result;
-      assert.deepEqual(calls, ["retain", "start", 0, 1, 2, "provision"]);
-    } else {
-      await assert.rejects(
-        result,
-        (error) => error === primary && error.experimentNative === native,
-      );
-      await assert.rejects(
-        primary.experimentNative.close(),
-        (error) => error === cleanup,
-      );
-      assert.equal(primary.message, "original command completion lost");
-      assert.deepEqual(
-        calls,
-        fault === "open"
-          ? ["retain", "start", 0, 1, "cleanup"]
-          : ["retain", "start", 0, 1, 2, "provision", "cleanup"],
-      );
-    }
   }
 });
 
@@ -753,5 +663,381 @@ test("experiment registry retains pre-setup dependencies until independent task 
       assert.equal(await files.settleFiles(), null); // No observer was started.
     }
     assert.deepEqual(calls, ["cleanup", "bootstrap"]);
+  }
+});
+
+function hostedFixture() {
+  const f = fixture(),
+    files = new Map(),
+    calls = [],
+    directories = new Set(),
+    image = markedPe(),
+    source = Buffer.from("/* exact candidate */\n");
+  const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+  const compiler = f.prepared.tools[0].path,
+    sdk = f.prepared.tools[1].path;
+  files.set(compiler, source);
+  files.set(sdk, source);
+  files.set(f.prepared.sdkHeader.file, source);
+  const read = async (file) => {
+    if (files.has(file)) return files.get(file);
+    if (/\.(?:c|h)$/u.test(file) && !file.includes("Windows Kits"))
+      return source;
+    throw Object.assign(new Error("Missing output"), { code: "ENOENT" });
+  };
+  const options = {
+    ...f.settings,
+    checkoutRoot: "C:\\Fixture\\checkout",
+    env: {
+      ...f.settings.env,
+      RUNNER_TEMP: "C:\\Fixture",
+      SystemRoot: "C:\\Windows",
+      PATH: "C:\\Fixture\\tools",
+    },
+    readCandidate: async () => source,
+    read: read,
+    readInstalled: read,
+    selectToolchain: async () => ({
+      environment: {
+        ...f.prepared.environment,
+        WindowsSDKVersion: "10.0.22621.0\\",
+        WindowsSdkDir: "C:\\Program Files (x86)\\Windows Kits\\10\\",
+      },
+    }),
+    filesystem: {
+      realpath: async (file) => file,
+      lstat: async (file) => ({
+        isFile: () => true,
+        isSymbolicLink: () => false,
+        nlink: 1,
+        size: (await read(file)).length,
+      }),
+      readFile: read,
+      mkdir: async (file) => {
+        if (directories.has(file))
+          throw Object.assign(new Error("Exists"), { code: "EEXIST" });
+        directories.add(file);
+      },
+      writeFile: async (file, bytes) => {
+        if (files.has(file))
+          throw Object.assign(new Error("Exists"), { code: "EEXIST" });
+        files.set(file, Buffer.from(bytes));
+      },
+      unlink: async (file) => {
+        files.delete(file);
+      },
+    },
+    command: async (file, args, settings) => {
+      calls.push({ file, args, settings });
+      let stdout = "",
+        stderr = "";
+      if (file === "git") stdout = candidateSha + "\n";
+      else if (file === "where.exe") stdout = compiler + "\n";
+      else if (file === compiler) {
+        if (args[0] === "/Bv") stdout = "Compiler Version 1.2 for x64";
+        else
+          files.set(args.find((arg) => arg.startsWith("/Fe")).slice(3), image);
+      } else if (file === sdk) stdout = "Version 1.2";
+      else if (file.endsWith("whoami.exe"))
+        stdout = '"fixture","S-1-5-21-1-2-3-1001"';
+      else if (args[0] === "--experiment-seal")
+        stdout = JSON.stringify({
+          purpose: "experiment",
+          sealed: true,
+          planSha256: args[2],
+        });
+      else assert.fail("Unexpected hosted command: " + file);
+      return { exitCode: 0, signal: null, timedOut: false, stdout, stderr };
+    },
+  };
+  const retired = {
+    status: "RETIRED",
+    independent: true,
+    emergencyCleanup: false,
+    nativeEventSha256: H,
+  };
+  const held = async (file) => {
+    const bytes = await read(file);
+    return {
+      bytes,
+      sha256: sha(bytes),
+      identitySha256: H,
+      nativeEventSha256: H,
+      held: true,
+      independent: true,
+      unchanged: true,
+      protectedDacl: true,
+      protectedParents: true,
+      signatureSha256: sha(bytes),
+      pe: { imports: [] },
+    };
+  };
+  const write = async (name, value) =>
+    files.set(path.join(directory, name), Buffer.from(JSON.stringify(value)));
+  const filesOwner = {
+    readBuildDirectory: async () => ({
+      independent: true,
+      held: true,
+      protectedParents: true,
+      daclSha256: H,
+      identity: "held directory",
+    }),
+    readProtected: async ({ file }) => held(file),
+    readExperimentInput: held,
+    readExperimentImage: held,
+    resolveExperimentImport: () => assert.fail("No synthetic imports"),
+    verify: async () => ({
+      ...retired,
+      noLiveMembers: true,
+      tasksRemoved: true,
+    }),
+    settleFiles: async () => retired,
+  };
+  options.open = async (prepared) => ({
+    files: filesOwner,
+    read: held,
+    readInput: held,
+    readImage: async (file) =>
+      files.has(file)
+        ? held(file)
+        : { ...(await held(prepared.helpers[0].path)), pe: { imports: [] } },
+    prepareVolume: async () => ({ file: "D:\\Fixture\\volume" }),
+    write,
+    writeBytes: async (name, bytes) =>
+      files.set(path.join(directory, name), bytes),
+    close: async () => {
+      const observer = {
+        nonce: "e".repeat(32),
+        helper: { pid: 3 },
+        bridge: { pid: 4 },
+        taskSha256: H,
+      };
+      await write("windows-experiment-close.json", {
+        purpose: "experiment",
+        schemaVersion: 2,
+        observer,
+      });
+      for (const [kind, status] of [
+        ["birth", "POSSIBLE"],
+        ["result", "RETIRED"],
+      ])
+        await write(`windows-files-${observer.nonce}-${kind}.json`, {
+          ...observer,
+          status,
+        });
+      return { ...retired, observer };
+    },
+  });
+  return { ...f, files, calls, options, filesOwner, source, image };
+}
+
+test("Windows hosted preparation builds each exact-candidate helper once and cold-loads held output", async () => {
+  const f = hostedFixture(),
+    saved = [];
+  f.options.env.Path = f.options.env.PATH;
+  delete f.options.env.PATH;
+  const built = await prepareWindowsExperiment(
+    f.job,
+    directory,
+    async (job) => saved.push(job),
+    f.options,
+  );
+  const compiles = f.calls.filter(
+    ({ file, args }) => file === f.prepared.tools[0].path && args[0] !== "/Bv",
+  );
+  assert.equal(f.calls[0].settings.env.PATH, f.options.env.Path);
+  assert.equal(compiles.length, WINDOWS_HELPER_NAMES.length);
+  assert.ok(
+    compiles.every(
+      ({ args }) =>
+        !args.includes("/sourceDependencies") &&
+        args.includes("/DNATIVE_CI_EXPERIMENT=1"),
+    ),
+  );
+  assert.equal(built.preparation.schemaVersion, 2);
+  assert.ok(
+    built.preparation.commands.every(
+      (command) =>
+        command.compilerPolicy === undefined &&
+        command.settlement === undefined,
+    ),
+  );
+  const prepared = built.preparation.prepared,
+    binding = normalizeNativePolicyBinding(
+      built.preparation.system.bindings[0].policyBinding,
+    );
+  const owner = createWindowsCaseProvisioning(
+    {
+      job: built.job,
+      directory,
+      output: prepared.output,
+      plan: { bootstrap: prepared.bootstrap },
+      guard: () => {},
+    },
+    f.filesOwner,
+  );
+  const proof = await owner.observeBuildPolicy(binding, { prepared }, {});
+  assert.equal(
+    verifyNativePolicy(
+      binding.template,
+      null,
+      proof.provisioning,
+      binding.context,
+      proof.requestSha256,
+      proof.observed,
+    ).independent,
+    true,
+  );
+  assert.equal(proof.observed.policy.policy.compiler, undefined);
+  const readImage = f.filesOwner.readExperimentImage;
+  f.filesOwner.readExperimentImage = async (file) => ({
+    ...(await readImage(file)),
+    independent: false,
+  });
+  await assert.rejects(owner.observeBuildPolicy(binding, { prepared }, {}));
+  f.filesOwner.readExperimentImage = readImage;
+  f.options.command = f.options.bootstrap = () =>
+    assert.fail("Cold loading cannot compile or acquire");
+  const loaded = await loadWindowsExperiment(built.job, directory, {
+    ...f.options,
+    files: f.filesOwner,
+  });
+  assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length);
+  for (const fault of [
+    "output",
+    "mixed-close",
+    "candidate",
+    "environment",
+    "legacy",
+    "incomplete",
+  ]) {
+    if (["output", "mixed-close"].includes(fault)) {
+      const file =
+          fault === "output"
+            ? built.preparation.prepared.helpers[0].path
+            : path.join(directory, "windows-experiment-close.json"),
+        original = f.files.get(file);
+      f.files.set(
+        file,
+        fault === "output"
+          ? Buffer.from("substituted output")
+          : Buffer.from(
+              JSON.stringify({
+                ...JSON.parse(original),
+                bootstrapSettlement: {},
+              }),
+            ),
+      );
+      await assert.rejects(
+        loadWindowsExperiment(built.job, directory, {
+          ...f.options,
+          files: f.filesOwner,
+        }),
+      );
+      f.files.set(file, original);
+    } else {
+      const record = structuredClone(built.preparation.prepared);
+      if (fault === "candidate")
+        record.helpers[0].sourceSha256 = "f".repeat(64);
+      if (fault === "environment")
+        record.commands.find(
+          (command) => command.file === record.tools[0].path,
+        ).env.INCLUDE = "C:\\Other";
+      if (fault === "legacy") record.schemaVersion = 1;
+      if (fault === "incomplete") record.commands.pop();
+      assert.throws(() => windowsExperimentBuildInventory(record));
+    }
+  }
+});
+
+test("Windows direct-build failures and cancellation preserve the cause before System publication", async () => {
+  for (const fault of ["compiler", "candidate", "output", "cancel"]) {
+    const f = hostedFixture(),
+      run = f.options.command,
+      controller = new AbortController(),
+      original = Object.assign(new Error("Original MSVC failure"), {
+        exitCode: 2,
+        stderr: "actual compiler diagnostic",
+      }),
+      saved = [];
+    f.options.signal = controller.signal;
+    if (fault === "candidate")
+      f.options.readCandidate = async () => Buffer.from("changed source");
+    f.options.command = async (file, args, settings) => {
+      if (file === f.prepared.tools[0].path && args[0] !== "/Bv") {
+        if (fault === "compiler") throw original;
+        if (fault === "cancel") {
+          controller.abort(original);
+          throw original;
+        }
+        if (fault === "output")
+          return {
+            exitCode: 0,
+            signal: null,
+            timedOut: false,
+            stdout: "",
+            stderr: "",
+          };
+      }
+      return run(file, args, settings);
+    };
+    await assert.rejects(
+      prepareWindowsExperiment(
+        f.job,
+        directory,
+        async (job) => saved.push(job),
+        f.options,
+      ),
+      (error) =>
+        ["compiler", "cancel"].includes(fault)
+          ? error.cause === original
+          : true,
+    );
+    assert.equal(saved.at(-1).preparationEffects.settlement.status, "RETAINED");
+    assert.equal(saved.at(-1).preparation, null);
+    assert.ok(!f.calls.some(({ args }) => args[0] === "--experiment-seal"));
+  }
+});
+
+test("Windows ordinary cancellation owns its child tree, awaits closure and retains cleanup uncertainty", async () => {
+  for (const fault of ["cancel", "stream", "cleanup"]) {
+    const controller = new AbortController(),
+      child = new EventEmitter(),
+      kills = [],
+      original = new Error("Original interruption"),
+      cleanup = new Error("Tree cleanup uncertain");
+    Object.assign(child, {
+      pid: 4321,
+      exitCode: null,
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      kill: () => kills.push("leader"),
+    });
+    const pending = runWindowsHostedCommand("C:\\Fixture\\cl.exe", [], {
+      signal: controller.signal,
+      timeout: 60000,
+      maxBuffer: 65536,
+      spawn: () => child,
+      killTree: async (pid) => {
+        kills.push(pid);
+        if (fault === "cleanup") throw cleanup;
+      },
+    });
+    child.stderr.write("original compiler diagnostic");
+    if (fault === "stream") child.stderr.emit("error", original);
+    else controller.abort(original);
+    await Promise.resolve();
+    child.exitCode = 1;
+    child.stdout.end();
+    child.stderr.end();
+    child.emit("close", 1, null);
+    await assert.rejects(
+      pending,
+      (error) =>
+        error === original &&
+        error.stderr === "original compiler diagnostic" &&
+        (fault !== "cleanup" || error.cleanupCause === cleanup),
+    );
+    assert.ok(kills.includes(child.pid));
   }
 });

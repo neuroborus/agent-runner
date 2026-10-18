@@ -118,7 +118,6 @@ export function runExperimentProofs(job, directory, options = {}) {
     job.platform === "win32"
       ? {
           ...options,
-          bootstrapJournal: path.join(directory, "native"),
           env: windowsFeasibilityToolEnvironment(options.env ?? process.env),
         }
       : options,
@@ -366,16 +365,7 @@ export async function runExperimentStage(
           assertActive();
         };
       }
-      if (job.platform === "win32") {
-        let sequence = 0;
-        settings.bootstrapJournal = path.join(directory, "native");
-        settings.persistBootstrap = (value) =>
-          persistAuxiliary(
-            `${settings.bootstrapJournal}-bootstrap-${sequence++}.json`,
-            value,
-            { mode: 0o400, exclusive: true },
-          );
-      }
+
       assertActive();
       if (stage !== "cleanup") requireObservation(job.failure === null);
       if (stage === "prepare-linux") {

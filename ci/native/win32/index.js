@@ -196,7 +196,6 @@ export {
   recoverWindowsExperimentPreparation,
   recoverWindowsExperimentProofs,
   windowsExperimentBuildInventory,
-  windowsExperimentDependencies,
   windowsExperimentSystemInput,
   verifyWindowsExperimentBuild,
 } from "./experiment-preparation.js";

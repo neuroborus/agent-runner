@@ -1453,10 +1453,18 @@ custody remain dedicated external CI evidence.
 
 `test/native-windows-experiment.test.js` belongs to ordinary fast discovery.
 Pure/injected cases protect the complete helper/header/case inventory, disjoint
-experiment custody, source/dependency substitution, immutable PE purpose and
-rejection of experiment-to-reviewed publication. Interrupted startup and unsealed
-bootstrap recovery retain possible ownership without retry or fabricated retirement.
+experiment custody, exact checkout/Git-blob bytes, one hosted compilation per
+helper, explicit environments, actual command diagnostics and immutable PE purpose.
+Version-2 records reject changed candidate/output, legacy and incomplete evidence;
+cold loading cannot discover or compile. Injected process-tree cancellation and
+uncertain cleanup preserve the original cause. Interrupted System publication
+retains possible ownership without retry or fabricated retirement. The build
+policy reads fresh held output, without System compiler domains or nested Jobs.
 Cold-load failure coverage preserves both verification and cleanup causes.
+Superseded compiler dependency and bootstrap-journal fixtures are removed. The
+retained raw preparation suite still verifies observer coalescing, lost finish
+without replay, original birth/Job/task retirement, cleanup/persistence failures,
+and every distinct native file, Git, access, audit, policy and ownership guard.
 Generated cases preserve native copy kinds, complete copied Git loader graphs
 and valid Git index padding/checksums. The preparation suite keeps immutable Git
 copying in the case custodian without requesting bootstrap read authority.
@@ -1465,7 +1473,9 @@ through raw frames. These checks perform no Windows build, elevation, policy or
 Task Scheduler effect and provide no native CI proof. The existing Windows
 preparation, launch, effective-policy and audit suites remain required for their
 owned contracts; matching Windows CI supplies actual PE/SDK, System DACL/held
-handle, compiler/domain, policy/audit, file and fixed-Git execution evidence.
+handle, ordinary compiler completion, policy/audit, file and fixed-Git execution
+evidence. Reviewed compiler/signature/publication guards retain their distinct
+coverage; portable tests cannot establish native acceptance or production readiness.
 Runner-selected commands execute only in the dedicated FINALIZE gate.
 
 The included `ci/native/win32/custody.test.js` injects sealed-byte reads, private

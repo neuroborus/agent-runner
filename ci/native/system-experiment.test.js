@@ -1,3 +1,4 @@
+import { windowsHostedCompilerArguments } from "./win32/experiment-native.js";
 import assert from "node:assert/strict";
 import path, { win32 as windowsPath } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -443,10 +444,7 @@ test("experiment stages keep private native storage outside public upload traver
     const inspect = (stage, directory, options) => {
       assert.equal(directory, storage);
       assert.ok(directories.has(directory));
-      assert.equal(
-        options.bootstrapJournal,
-        platform === "win32" ? path.join(f.directory, "native") : undefined,
-      );
+      assert.equal(options.bootstrapJournal, undefined);
       calls.push(stage);
     };
     f.options.owner = {
@@ -459,16 +457,7 @@ test("experiment stages keep private native storage outside public upload traver
         assert.deepEqual([...directories], [f.directory]);
         directories.add(directory); // Inject exclusive native allocation only.
         inspect("prepare", directory, options);
-        if (platform === "win32") {
-          await options.persistBootstrap({
-            purpose: "experiment",
-            phase: "original-intent",
-          });
-          await options.persistBootstrap({
-            purpose: "experiment",
-            phase: "original-selector",
-          });
-        } else assert.equal(options.persistBootstrap, undefined);
+        assert.equal(options.persistBootstrap, undefined);
         return original.prepare(job, directory, persist, options);
       },
       load: async (job, directory, options) => {
@@ -496,21 +485,10 @@ test("experiment stages keep private native storage outside public upload traver
       };
       assert.throws(() => visit(storage), { code: "EACCES" });
       visit(directory);
-      if (platform === "win32") {
-        assert.equal(
-          f.files.get(path.join(directory, "native-bootstrap-0.json")).phase,
-          "original-intent",
-        );
-        assert.equal(
-          f.files.get(path.join(directory, "native-bootstrap-1.json")).phase,
-          "original-selector",
-        );
-      } else {
-        assert.equal(
-          f.files.has(path.join(directory, "native-bootstrap-0.json")),
-          false,
-        );
-      }
+      assert.equal(
+        f.files.has(path.join(directory, "native-bootstrap-0.json")),
+        false,
+      );
       return publish(env, directory, rendered);
     };
     await initializeExperimentCI(
@@ -524,26 +502,6 @@ test("experiment stages keep private native storage outside public upload traver
     assert.deepEqual(calls, ["prepare", "load", "probe", "recover"]);
     assert.deepEqual([...directories], [f.directory, storage]);
   }
-});
-
-test("preexisting Windows public bootstrap journals survive failed preparation without native allocation", async () => {
-  const f = stageFixture("win32"),
-    file = path.join(f.directory, "native-bootstrap-0.json"),
-    original = { purpose: "experiment", phase: "original-admission" };
-  f.files.set(file, original);
-  f.options.owner.prepare = async (_, __, ___, options) => {
-    await options.persistBootstrap({
-      purpose: "experiment",
-      phase: "replacement",
-    });
-    assert.fail("An existing journal must stop native allocation");
-  };
-  assert.equal(await f.stage("prepare"), false);
-  assert.deepEqual(f.files.get(file), original);
-  assert.equal(
-    f.files.get(path.join(f.directory, "native-first-failure.json")).stage,
-    "prepare",
-  );
 });
 
 test("preexisting native storage fails preparation and partial recovery rejoins that same path", async () => {
@@ -574,10 +532,7 @@ test("preexisting native storage fails preparation and partial recovery rejoins 
     };
     f.options.owner.recoverPreparation = async (job, directory, _, options) => {
       assert.equal(directory, storage);
-      assert.equal(
-        options.bootstrapJournal,
-        platform === "win32" ? path.join(f.directory, "native") : undefined,
-      );
+      assert.equal(options.bootstrapJournal, undefined);
       assert.deepEqual([...directories], [f.directory, storage]);
       assert.equal(job.preparation, null);
       calls.push("recover-original");
@@ -610,78 +565,6 @@ test("preexisting native storage fails preparation and partial recovery rejoins 
     assert.deepEqual(report.firstFailures, [first]);
     if (cleanupFailure)
       assert.equal(report.cleanupFailures[0].stage, "cleanup");
-  }
-});
-
-test("Windows cold experiment selection reads only the original public bootstrap journals before protected custody", async () => {
-  for (const damage of [null, "directory", "gap"]) {
-    const f = stageFixture("win32"),
-      storage = "C:\\Synthetic\\native-win32-experiment",
-      journal = "C:\\Synthetic\\native-system\\native",
-      boundary = new Error("Protected native receipt boundary"),
-      reads = [];
-    let protectedRead = false;
-    const seal = {
-      purpose: "experiment",
-      phase: "bootstrap-seal-possible",
-      directory: damage === "directory" ? storage + "-other" : storage,
-      output: windowsPath.join(storage, "platform-build"),
-      bootstrap: { context: { candidateSha: C, runId: "1", runAttempt: 1 } },
-      sources: WINDOWS_EXPERIMENT_SOURCES.map((name) => ({ name, sha256: H })),
-      helpers: WINDOWS_HELPER_NAMES.map((name) => ({
-        name,
-        sha256: H,
-        sourceSha256: H,
-      })),
-      tools: [
-        {
-          name: "compiler",
-          path: "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe",
-          sha256: H,
-          signatureSha256: H,
-        },
-        {
-          name: "sdk",
-          path: "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0.26100.0\\x64\\rc.exe",
-          sha256: H,
-          signatureSha256: H,
-        },
-      ],
-    };
-    await assert.rejects(
-      loadWindowsExperiment(f.f.job, storage, {
-        env: { ...f.env, ImageOS: "win25" },
-        platform: "win32",
-        architecture: "x64",
-        nodeVersion: "v24.21.0",
-        bootstrapJournal: journal,
-        readdir: async (root) => {
-          assert.equal(root, windowsPath.dirname(journal));
-          return ["native-bootstrap-" + (damage === "gap" ? 1 : 0) + ".json"];
-        },
-        read: async (file) => {
-          reads.push(file);
-          assert.equal(file, journal + "-bootstrap-0.json");
-          return Buffer.from(JSON.stringify(seal));
-        },
-        files: {
-          readProtected: async ({ file }) => {
-            protectedRead = true;
-            assert.equal(
-              file,
-              windowsPath.join(storage, "windows-experiment-preparation.json"),
-            );
-            throw boundary;
-          },
-          settleFiles: async () => ({ ...retired, nativeEventSha256: H }),
-        },
-      }),
-      damage
-        ? /Unverified native tool observation/u
-        : (error) => error === boundary,
-    );
-    assert.equal(protectedRead, damage === null);
-    assert.equal(reads.length, damage === "gap" ? 0 : 1);
   }
 });
 
@@ -1764,10 +1647,7 @@ test("indexed Darwin/Windows experiment loops persist every recipe including bui
           `native-${platform}-experiment-${observationDigest(Object.fromEntries(["candidateSha", "platform", "repository", "runId", "runAttempt"].map((key) => [key, f.job[key]])))}`,
         ),
       );
-      assert.equal(
-        options.bootstrapJournal,
-        platform === "win32" ? "/synthetic/native-system/native" : undefined,
-      );
+      assert.equal(options.bootstrapJournal, undefined);
       if (platform === "win32") {
         assert.equal(options.env.SystemRoot, "C:\\Windows");
         assert.equal(
@@ -1863,6 +1743,23 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     },
     prepared = {
       purpose: "experiment",
+      schemaVersion: 2,
+      binding: failed.preparation.expected.binding,
+      sourceDirectory: directory + "-bootstrap",
+      entries: [],
+      environment: {
+        INCLUDE: "headers",
+        LIB: "libraries",
+        SystemRoot: "C:\\Windows",
+        PATH: "tools",
+      },
+      sdkBuild: "10.0.26100.0",
+      sdkHeader: {
+        file: "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um\\Windows.h",
+        sha256: H,
+      },
+      versions: { compiler: "1.2", sdk: "1.2" },
+      commands: [],
       job: failed,
       directory,
       output: windowsPath.join(directory, "platform-build"),
@@ -1871,6 +1768,8 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
         name,
         sha256: H,
         sourceSha256: H,
+        signatureSha256: H,
+        path: windowsPath.join(directory + "-bootstrap", name + ".exe"),
       })),
       sources: [
         ...f.inventory.helpers.map((name) => name + ".c"),
@@ -1885,13 +1784,11 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
           name: "compiler",
           path: "C:\\Program Files\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe",
           sha256: H,
-          signatureSha256: H,
         },
         {
           name: "sdk",
           path: "C:\\Program Files (x86)\\Windows Kits\\10\\bin\\10.0\\x64\\rc.exe",
           sha256: H,
-          signatureSha256: H,
         },
       ],
     },
@@ -1904,13 +1801,13 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     records = new Map([
       [
         "windows-experiment-preparation.json",
-        { prepared, observation: failed.preparation },
+        { schemaVersion: 2, prepared, observation: failed.preparation },
       ],
       [
         "windows-experiment-close.json",
         {
           purpose: "experiment",
-          bootstrapSettlement: { ...retired, nativeEventSha256: H },
+          schemaVersion: 2,
           observer,
         },
       ],
@@ -1923,6 +1820,53 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
         { ...observer, status: "RETIRED" },
       ],
     ]);
+  bootstrap.context.jobBindingSha256 = observationDigest(prepared.binding);
+  const environment = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    LANG: "C",
+    ...prepared.environment,
+    TEMP: "C:\\Fixture",
+    TMP: "C:\\Fixture",
+  };
+  const command = (file, args, stdout = "") => ({
+    file,
+    args,
+    cwd: prepared.sourceDirectory,
+    env: environment,
+    timeout: 60000,
+    maxBuffer: 1048576,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout,
+    stderr: "",
+  });
+  prepared.commands = [
+    command("git", ["rev-parse", "HEAD"], C),
+    command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
+    ...WINDOWS_HELPER_NAMES.map((name) =>
+      command(
+        prepared.tools[0].path,
+        windowsHostedCompilerArguments(
+          windowsPath.join(prepared.sourceDirectory, name + ".c"),
+          windowsPath.join(prepared.sourceDirectory, name + ".exe"),
+        ),
+      ),
+    ),
+    command(prepared.tools[1].path, ["/?"], "Version 1.2"),
+    command(
+      windowsPath.join(
+        prepared.environment.SystemRoot,
+        "System32",
+        "whoami.exe",
+      ),
+      ["/user", "/fo", "csv", "/nh"],
+      '"fixture","S-1-5-21-1-2-3-1001"',
+    ),
+  ];
+  bootstrap.runnerSid = "S-1-5-21-1-2-3-1001";
   let saved,
     requests = 0,
     closed = 0;
@@ -1940,19 +1884,9 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
       GITHUB_RUN_ID: failed.runId,
       GITHUB_RUN_ATTEMPT: String(failed.runAttempt),
     },
-    readdir: async (parent) => {
-      assert.equal(parent, windowsPath.dirname(directory));
-      return ["native-bootstrap-0.json"];
-    },
     read: async (file) => {
-      assert.equal(
-        file,
-        windowsPath.join(
-          windowsPath.dirname(directory),
-          "native-bootstrap-0.json",
-        ),
-      );
-      return JSON.stringify({ ...prepared, phase: "bootstrap-seal-possible" });
+      assert.equal(file, directory + "-selector.json");
+      return Buffer.from(JSON.stringify(prepared));
     },
     // Normal loading cannot validate missing final outputs. Recovery must use
     // the protected selector reads below before invoking its native owner.

@@ -71,9 +71,8 @@ import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import { windowsPreparationOptions } from "./preparation.js";
 import {
-  bootstrapWindowsExperiment,
+  windowsHostedCompilerArguments,
   openWindowsExperimentNative,
-  WINDOWS_EXPERIMENT_SOURCES,
 } from "./experiment-native.js";
 import {
   prepareWindowsExperiment,
@@ -1423,114 +1422,6 @@ test("Windows native checkout attributes preserve candidate C and header bytes w
   }
 });
 
-test("Windows experiment bootstrap accepts only exact candidate source buffers before compilation", async () => {
-  const source = Buffer.from("/* synthetic source */\n"),
-    compiler =
-      "C:\\Program Files\\Microsoft Visual Studio\\18\\Enterprise\\VC\\Tools\\MSVC\\14.0\\bin\\Hostx64\\x64\\cl.exe";
-  for (const [candidate, settled, compiled, preexisting] of [
-    [Buffer.from(source), false],
-    [Buffer.from(source), true],
-    [Buffer.from(source), false, true],
-    [Buffer.from("changed source\n"), false],
-    [source.toString(), false],
-    [Buffer.from(source), false, false, true],
-  ]) {
-    const identical = Buffer.isBuffer(candidate) && candidate.equals(source),
-      boundary = Object.assign(
-        new Error("injected compilation boundary"),
-        settled
-          ? { code: 2, signal: null, stderr: "synthetic compiler failure" }
-          : {},
-      ),
-      copied = [],
-      calls = [],
-      tool = publicationBytes().signed;
-    await assert.rejects(
-      bootstrapWindowsExperiment(
-        { candidateSha },
-        directory,
-        { candidateSha },
-        async () => {},
-        {
-          env: { RUNNER_TEMP: "C:\\Fixture", SystemRoot: "C:\\Windows" },
-          selectToolchain: async () => ({
-            environment: {
-              INCLUDE: "C:\\Fixture\\include",
-              LIB: "C:\\Fixture\\lib",
-              PATH: "C:\\Fixture\\tools",
-              WindowsSDKVersion: "10.0.22621.0\\",
-              WindowsSdkDir: "C:\\Program Files (x86)\\Windows Kits\\10\\",
-            },
-          }),
-          filesystem: {
-            lstat: async (file) => ({
-              isFile: () => true,
-              isSymbolicLink: () => false,
-              nlink: 1,
-              size: file.endsWith(".exe") ? tool.length : source.length,
-            }),
-            realpath: async (file) => file,
-            readFile: async (file) => (file.endsWith(".exe") ? tool : source),
-            mkdir: async (file) => {
-              if (preexisting && file === directory)
-                throw Object.assign(new Error("Existing private storage"), {
-                  code: "EEXIST",
-                });
-            },
-            writeFile: async (file, bytes, options) => {
-              assert.deepEqual(bytes, source);
-              assert.equal(options.flag, "wx");
-              copied.push(path.basename(file));
-            },
-          },
-          command: async (file, args, options) => {
-            calls.push(file);
-            if (file === "where.exe") return { stdout: compiler + "\n" };
-            if (file === "git") {
-              if (args[0] === "rev-parse")
-                return { stdout: candidateSha + "\n" };
-              assert.equal(options.encoding, "buffer");
-              assert.equal(
-                args[1],
-                `${candidateSha}:ci/native/win32/${WINDOWS_EXPERIMENT_SOURCES[copied.length]}`,
-              );
-              return { stdout: candidate };
-            }
-            assert.equal(file, compiler);
-            if (compiled) return { stdout: "", stderr: "" };
-            throw boundary;
-          },
-        },
-      ),
-      preexisting
-        ? { code: "EEXIST" }
-        : identical
-          ? (error) =>
-              compiled
-                ? error.code === "ERR_FEASIBILITY_WINDOWS_PE" ||
-                  error.message === "Unverified Windows launch authority"
-                : error === boundary
-          : /Unverified native tool observation/u,
-    );
-    assert.deepEqual(
-      copied,
-      identical && !preexisting ? [...WINDOWS_EXPERIMENT_SOURCES] : [],
-    );
-    assert.equal(
-      calls.filter((file) => file === compiler).length,
-      identical && !preexisting
-        ? settled || compiled
-          ? WINDOWS_HELPER_NAMES.length
-          : 1
-        : 0,
-    );
-    assert.equal(
-      calls.filter((file) => file === "git").length,
-      preexisting ? 1 : identical ? WINDOWS_EXPERIMENT_SOURCES.length + 1 : 2,
-    );
-  }
-});
-
 let rawRun = 0;
 
 function operationCase(f, id) {
@@ -2196,7 +2087,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
   for (const source of plan.sources)
     f.files.set(path.join(sourceDirectory, source.name), bytes);
   const sdkFile =
-    "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\1.0\\um\\fixture.h";
+    "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\1.0\\um\\Windows.h";
   f.files.set(sdkFile, bytes);
   const entries = [
     { kind: "sdk", path: sdkFile, sha256: hash, signatureSha256: null },
@@ -3408,7 +3299,7 @@ function experimentImage() {
   return bytes;
 }
 
-test("Windows experiment close coalesces original reader and observer retirement", async () => {
+test("Windows experiment close coalesces its System publication observer retirement", async () => {
   const f = rawPreparation({ experiment: true }),
     work = new AbortController();
   const native = await openWindowsExperimentNative(f.prepared, {
@@ -3428,7 +3319,6 @@ test("Windows experiment close coalesces original reader and observer retirement
   await entered.promise;
   assert.equal(native.close(), first);
   assert.equal(native.files.admissionClosed, true);
-  await assert.rejects(native.run({}, {}));
   // Work cancellation after handoff cannot cancel the finite cleanup signal.
   work.abort();
   release.resolve();
@@ -3437,37 +3327,8 @@ test("Windows experiment close coalesces original reader and observer retirement
   assert.equal(await native.close(), result);
   assert.equal(
     f.rawEvents.filter((frame) => /^finish /u.test(frame)).length,
-    2,
+    1,
   );
-  assert.equal(f.rawTasks.size, 0);
-  assert.ok([...f.actors.values()].every((actor) => actor.retired));
-});
-
-test("Windows experiment close independently retires rejected parked admission before its observer", async () => {
-  const f = rawPreparation({ experiment: true });
-  f.preSetupRejected = true;
-  let native;
-  await assert.rejects(
-    openWindowsExperimentNative(f.prepared, {
-      ...f.options,
-      reopen: true,
-      retain: (owner) => {
-        native = owner;
-      },
-    }),
-    (error) =>
-      error.admission?.predicates.unique === false &&
-      error.experimentNative === native,
-  );
-  const first = f.rawEvents.length,
-    settlement = await native.close(),
-    events = f.rawEvents.slice(first);
-  assert.equal(settlement.bootstrapSettlement.preSetup, true);
-  const abort = events.indexOf("X"),
-    task = events.indexOf("D"),
-    observer = events.findIndex((frame) => /^finish /u.test(frame));
-  assert.ok(abort >= 0 && task > abort && observer > task);
-  assert.equal(settlement.status, "RETIRED");
   assert.equal(f.rawTasks.size, 0);
   assert.ok([...f.actors.values()].every((actor) => actor.retired));
 });
@@ -3543,9 +3404,9 @@ test("Windows experiment receipt rejection still settles the real file observer"
   let failed;
   await assert.rejects(native.close(), (error) => {
     failed = error;
-    return (
-      error instanceof AggregateError && error.settlement.status === "RETIRED"
-    );
+    assert.ok(error instanceof AggregateError);
+    assert.equal(error.settlement?.status, "RETIRED");
+    return true;
   });
   assert.equal(f.rawTasks.size, 0);
   assert.ok([...f.actors.values()].every((actor) => actor.retired));
@@ -3592,11 +3453,12 @@ test("Windows lost original observer finish waits for bridge exit without replay
     bridge = native.files.verification.bridge,
     beforeClose = f.rawEvents.length,
     closing = native.close(),
-    rejected = assert.rejects(
-      closing,
-      (error) =>
-        error.settlement.status === "RETIRED" && error.errors.includes(primary),
-    );
+    rejected = assert.rejects(closing, (error) => {
+      assert.ok(error.settlement);
+      assert.equal(error.settlement.status, "RETIRED");
+      assert.ok(error.errors.includes(primary));
+      return true;
+    });
   await waiting.promise;
   assert.equal(native.close(), closing);
   assert.equal(f.actors.get(bridge.pid).retired, false);
@@ -3636,444 +3498,6 @@ test("Windows lost original observer finish waits for bridge exit without replay
       .some((frame) => /^(?:open|helper-start) /u.test(frame)),
   );
   assert.equal(f.rawTasks.size, 0);
-});
-
-test("Windows post-startup open rejection retains original owners until fresh complete recovery", async () => {
-  const f = rawPreparation({ experiment: true }),
-    compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
-    index = f.prepared.entries.findIndex(
-      (entry) => entry.path === compiler.path,
-    ),
-    source = await compilerTrustFixture({
-      entries: f.prepared.entries,
-      files: f.files,
-      identity: f.rawFileId,
-      inspect: f.objectRead,
-      result: -2146762496,
-      closed: 5,
-    });
-  let opens = 0,
-    native,
-    primary;
-  f.accessNative = async (operation, args, _, __, sequence) => {
-    if (operation !== "open") return;
-    opens++;
-    try {
-      return await source.open(Number(args[0]), sequence);
-    } catch (error) {
-      primary = error;
-      throw error;
-    }
-  };
-  await assert.rejects(
-    openWindowsExperimentNative(f.prepared, {
-      ...f.options,
-      reopen: true,
-      retain: (owner) => {
-        native = owner;
-      },
-    }),
-    (error) => error === primary && error.experimentNative === native,
-  );
-  assert.deepEqual(primary.custodyReaderFailure, {
-    phase: "reader-failure",
-    sequence: 2,
-    command: "open",
-    source: "custody.h",
-    line: 1,
-    trust: {
-      mode: "embedded",
-      result: "0x800b0100",
-      closeResult: "0x00000005",
-      entry: index,
-      identity: f.rawFileId(compiler.path),
-      sha256: compiler.sha256,
-      signatureSha256: compiler.signatureSha256,
-      inputs: source.inputs,
-      provider: source.provider,
-    },
-  });
-  const original = [...f.files.entries()]
-    .filter(([file]) => /custody-[0-9]+\.json$/u.test(file))
-    .map(([, bytes]) => JSON.parse(bytes))
-    .find((record) => record.phase === "admitted");
-  assert.ok(original);
-  const observer = native.files.verification.identity;
-  let retained;
-  await assert.rejects(native.close(), (error) => {
-    retained = error;
-    return error.settlement.status === "RETAINED";
-  });
-  assert.ok(retained instanceof AggregateError);
-  assert.equal(
-    retained.errors[0].message,
-    "Windows reader cleanup handoff failed",
-  );
-  assert.equal(retained.errors[1].message, "Windows readers remain retained");
-  assert.equal(
-    retained.errors[0].errors[0],
-    retained.errors[1].errors[0].errors[0],
-  );
-  assert.deepEqual(
-    primary.custodyReaderFailure.trust.provider,
-    source.provider,
-  );
-  assert.equal(f.actors.get(observer.pid).retired, false);
-  // The original reader and dependent observer stay registered even if the
-  // task disappears. A failed fresh observer is another retained obligation.
-  f.rawTasks.delete(f.prepared.bootstrap.nonce);
-  assert.throws(() =>
-    native.files.releaseRecoveredReaders({
-      ...retired,
-      noLiveMembers: true,
-      tasksRemoved: true,
-      recordsSha256: hash,
-      observerCustody: {
-        independent: true,
-        identities: [
-          native.files.verification.identity,
-          native.files.verification.bridge,
-        ],
-        nativeEventSha256: hash,
-      },
-      readers: [{ ...native.reader.retirementBinding, helper: identity(999) }],
-    }),
-  );
-  await assert.rejects(native.files.settleFiles());
-  const before = f.rawEvents.length;
-  await assert.rejects(native.close(), (error) => error === retained);
-  assert.equal(f.rawEvents.length, before);
-  for (const actor of f.actors.values())
-    if (
-      ![observer.pid, native.files.verification.bridge.pid].includes(
-        actor.identity.pid,
-      )
-    )
-      actor.retired = true;
-  for (const actor of [
-    native.reader.retirementBinding.helper,
-    native.reader.retirementBinding.bridge,
-  ])
-    f.rawExitCodes.set(actor.pid, 126);
-  const recoveryStart = f.rawEvents.length;
-  const first = native.recover(),
-    second = native.recover();
-  assert.equal(first, second);
-  assert.equal((await first).status, "RETIRED");
-  const recoveredFrames = f.rawEvents.slice(recoveryStart),
-    observerHeld = recoveredFrames.findIndex((frame) =>
-      new RegExp(`^verify-retain [0-9]+ ${observer.pid} `, "u").test(frame),
-    ),
-    observerFinish = recoveredFrames.findIndex((frame) =>
-      /^finish /u.test(frame),
-    );
-  assert.ok(observerHeld >= 0 && observerHeld < observerFinish);
-  assert.equal(opens, 2, "recovery must not repeat native open or compilation");
-  assert.equal(f.rawTasks.size, 0);
-  assert.ok([...f.actors.values()].every((actor) => actor.retired));
-  assert.equal(primary.custodyReaderFailure.trust.result, "0x800b0100");
-  assert.deepEqual(
-    source.calls,
-    [1, 2],
-    "recovery must not repeat verification",
-  );
-});
-
-test("Windows original trust refusal settles reader tasks before observer custody and preserves incomplete recovery", async () => {
-  for (const fault of [
-    null,
-    "reader-missing",
-    "reader-replaced",
-    "task",
-    "observer-missing",
-    "observer-replaced",
-    "observer-recheck",
-    "custody-cancel",
-    "observer-job",
-  ]) {
-    const f = rawPreparation({ experiment: true }),
-      source = await compilerTrustFixture({
-        entries: f.prepared.entries,
-        files: f.files,
-        identity: f.rawFileId,
-        inspect: f.objectRead,
-        result: 8,
-        closed: 0,
-      }),
-      cleanup = new AbortController();
-    let native,
-      primary,
-      original,
-      observer,
-      releaseCalls = 0,
-      observerReads = 0,
-      releasedAt,
-      armed = false;
-    f.accessNative = async (operation, args, scope, _, sequence) => {
-      if (operation === "open") {
-        try {
-          return await source.open(Number(args[0]), sequence);
-        } catch (cause) {
-          primary = cause;
-          throw cause;
-        }
-      }
-      if (!armed) return;
-      if (
-        operation === "verify-retain" &&
-        Number(args[0]) === observer.identity.pid
-      ) {
-        assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), false);
-        assert.deepEqual(native.reader.retirementBinding, original);
-        assert.equal(releaseCalls, 0);
-      }
-      if (
-        operation === "verify-process" &&
-        scope.retained[Number(args[0])].identity.pid ===
-          observer.identity.pid &&
-        releaseCalls === 0
-      ) {
-        observerReads++;
-        if (fault === "observer-recheck" && observerReads === 2) {
-          const value = structuredClone(scope.retained[Number(args[0])]);
-          value.identity.creationTime = "999";
-          return value;
-        }
-        if (fault === "custody-cancel")
-          cleanup.abort(new Error("observer custody cleanup cancelled"));
-      }
-    };
-    await assert.rejects(
-      openWindowsExperimentNative(f.prepared, {
-        ...f.options,
-        reopen: true,
-        retain: (owner) => {
-          native = owner;
-        },
-      }),
-      (cause) => cause === primary,
-    );
-    original = native.reader.retirementBinding;
-    observer = {
-      identity: native.files.verification.identity,
-      bridge: native.files.verification.bridge,
-    };
-    const observerState = f.actors.get(observer.identity.pid);
-    for (const identity of [original.helper, original.bridge]) {
-      f.actors.get(identity.pid).retired = true;
-      f.rawExitCodes.set(identity.pid, 126);
-    }
-    assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), true);
-    const release = native.files.releaseRecoveredReaders;
-    native.files.releaseRecoveredReaders = (proof) => {
-      assert.equal(f.rawTasks.has(f.prepared.bootstrap.nonce), false);
-      assert.equal(observerReads, 2);
-      assert.equal(proof.observerCustody.independent, true);
-      assert.equal(Object.hasOwn(proof.observerCustody, "status"), false);
-      if (fault === null) {
-        for (const incomplete of [
-          { ...proof, noLiveMembers: undefined },
-          { ...proof, noLiveMembers: false },
-        ]) {
-          assert.throws(() => release(incomplete));
-          assert.equal(observerState.retired, false);
-          assert.deepEqual(native.reader.retirementBinding, original);
-        }
-        for (const custody of [
-          undefined,
-          { ...proof.observerCustody, independent: false },
-          { ...proof.observerCustody, identities: [observer.identity] },
-          {
-            ...proof.observerCustody,
-            identities: [
-              observer.identity,
-              { ...observer.bridge, creationTime: "999" },
-            ],
-          },
-        ]) {
-          assert.throws(() => release({ ...proof, observerCustody: custody }));
-          assert.equal(observerState.retired, false);
-          assert.deepEqual(native.reader.retirementBinding, original);
-        }
-      }
-      releasedAt = f.rawEvents.length;
-      releaseCalls++;
-      release(proof);
-      if (fault === "observer-job") f.coldDamage = "surviving-compiler-job";
-    };
-    const damaged = fault?.startsWith("reader-")
-      ? original.helper
-      : observer.identity;
-    if (fault?.endsWith("missing")) f.actors.delete(damaged.pid);
-    if (fault?.endsWith("replaced"))
-      f.actors.get(damaged.pid).identity = { ...damaged, creationTime: "999" };
-    if (fault === "task") f.coldDamage = "task";
-    const before = f.rawEvents.length;
-    armed = true;
-    const recovering = native.recover({ signal: cleanup.signal });
-    if (fault) {
-      await assert.rejects(
-        recovering,
-        (cause) => cause.settlement.status === "RETAINED",
-      );
-      assert.equal(releaseCalls, fault === "observer-job" ? 1 : 0);
-      if (!releaseCalls) {
-        assert.equal(observerState.retired, false);
-        await assert.rejects(native.files.settleFiles());
-      }
-    } else {
-      assert.equal((await recovering).status, "RETIRED");
-      assert.equal(releaseCalls, 1);
-      const frames = f.rawEvents,
-        removedAt = frames.findIndex(
-          (frame, index) =>
-            index >= before && frame.startsWith("verify-task-remove "),
-        ),
-        heldAt = frames.findIndex(
-          (frame, index) =>
-            index >= before &&
-            new RegExp(
-              `^verify-retain [0-9]+ ${observer.identity.pid} `,
-              "u",
-            ).test(frame),
-        ),
-        finishedAt = frames.findIndex(
-          (frame, index) => index >= releasedAt && frame.startsWith("finish "),
-        );
-      assert.ok(
-        removedAt >= before &&
-          heldAt > removedAt &&
-          releasedAt > heldAt &&
-          finishedAt >= releasedAt,
-      );
-      assert.ok(
-        frames
-          .slice(finishedAt)
-          .some((frame) => frame.startsWith("verify-recovery-jobs ")),
-      );
-      assert.equal(f.rawTasks.size, 0);
-      assert.ok([...f.actors.values()].every((actor) => actor.retired));
-    }
-    assert.deepEqual(native.reader.retirementBinding, original);
-    assert.deepEqual(source.calls, [1, 2]);
-    assert.equal(primary.custodyReaderFailure.trust.result, "0x00000008");
-    assert.equal(primary.custodyReaderFailure.trust.closeResult, "0x00000000");
-    assert.ok(
-      !f.rawEvents
-        .slice(before)
-        .some((frame) => /^(?:open|helper-start|publish-build) /u.test(frame)),
-    );
-  }
-});
-
-test("Windows original compiler refusal waits for bridge exit before independent recovery", async () => {
-  for (const fault of [null, "job", "exit"]) {
-    const f = rawPreparation({ experiment: true }),
-      source = await compilerTrustFixture({
-        entries: f.prepared.entries,
-        files: f.files,
-        identity: f.rawFileId,
-        inspect: f.objectRead,
-        result: 8,
-        closed: 0,
-      }),
-      exited = Promise.withResolvers(),
-      waiting = Promise.withResolvers(),
-      cleanup = new AbortController(),
-      open = f.options.readerOptions.open,
-      openObserver = f.options.openPreparation;
-    let native,
-      primary,
-      opens = 0;
-    f.options.openPreparation = async (...args) => {
-      const channel = await openObserver(...args),
-        nonce = args[1][6];
-      let closed = false;
-      return {
-        ...channel,
-        close() {
-          if (closed) return;
-          closed = true;
-          // A failed observer's native EOF exit is only a later
-          // process observation; its original task still needs recovery.
-          for (const pid of [channel.pid, f.rawTasks.get(nonce)?.pid])
-            if (pid) {
-              f.actors.get(pid).retired = true;
-              f.rawExitCodes.set(pid, 126);
-            }
-          channel.close();
-        },
-      };
-    };
-    f.options.readerOptions.open = async (...args) => ({
-      ...(await open(...args)),
-      get exited() {
-        waiting.resolve();
-        return exited.promise;
-      },
-    });
-    f.accessNative = async (operation, args, _, __, sequence) => {
-      if (operation !== "open") return;
-      opens++;
-      try {
-        return await source.open(Number(args[0]), sequence);
-      } catch (cause) {
-        primary = cause;
-        throw cause;
-      }
-    };
-    await assert.rejects(
-      openWindowsExperimentNative(f.prepared, {
-        ...f.options,
-        reopen: true,
-        retain: (owner) => {
-          native = owner;
-        },
-      }),
-      (cause) => cause === primary,
-    );
-    const original = native.reader.retirementBinding,
-      observer = native.files.verification.identity,
-      before = f.rawEvents.length,
-      closing = native.close({ signal: cleanup.signal }),
-      rejected = assert.rejects(
-        closing,
-        (cause) => cause.settlement.status === (fault ? "RETAINED" : "RETIRED"),
-      );
-    await waiting.promise;
-    assert.deepEqual(native.reader.retirementBinding, original);
-    assert.equal(f.actors.get(observer.pid).retired, false);
-    assert.ok(
-      !f.rawEvents
-        .slice(before)
-        .some((frame) => frame.startsWith("verify-recovery-jobs ")),
-    );
-    if (fault === "exit") {
-      cleanup.abort(new Error("original bridge exit remains pending"));
-      await rejected;
-      assert.deepEqual(native.reader.retirementBinding, original);
-      assert.equal(f.actors.get(observer.pid).retired, false);
-    }
-    for (const actor of [original.helper, original.bridge]) {
-      f.actors.get(actor.pid).retired = true;
-      f.rawExitCodes.set(actor.pid, 126);
-    }
-    if (fault === "job") f.coldDamage = "surviving-compiler-job";
-    exited.resolve({ code: 126, signal: null });
-    await rejected;
-    if (fault) {
-      assert.equal(f.actors.get(observer.pid).retired, false);
-      await assert.rejects(native.files.settleFiles());
-      f.coldDamage = null;
-      assert.equal((await native.recover()).status, "RETIRED");
-    }
-    assert.equal(primary.custodyReaderFailure.trust.result, "0x00000008");
-    assert.equal(primary.custodyReaderFailure.trust.closeResult, "0x00000000");
-    assert.deepEqual(source.calls, [1, 2]);
-    assert.equal(opens, 2);
-    assert.equal(f.rawTasks.size, 0);
-    assert.ok([...f.actors.values()].every((actor) => actor.retired));
-  }
 });
 
 test("original failed compiler trust observes bounded optional provider data before CLOSE", async () => {
@@ -4256,154 +3680,6 @@ test("actual reader startup refuses invalid directory or environment installatio
   }
 });
 
-test("actual experiment compiler open initializes held input before noninteractive paired trust and preserves pins", async () => {
-  for (const fault of [
-    "none",
-    "positive",
-    "negative",
-    "close",
-    "negative-close",
-    "unavailable",
-    "seek",
-    "content",
-    "signature",
-  ]) {
-    const f = rawPreparation({ experiment: true }),
-      compiler = f.prepared.tools.find((tool) => tool.name === "compiler"),
-      index = f.prepared.entries.findIndex(
-        (entry) => entry.path === compiler.path,
-      ),
-      entries = structuredClone(f.prepared.entries),
-      files = new Map(f.files),
-      inputSize = files.get(compiler.path).length,
-      verificationResult = ["negative", "negative-close"].includes(fault)
-        ? -2146762496 // Signed LONG for TRUST_E_NOSIGNATURE (0x800b0100).
-        : ["positive", "unavailable"].includes(fault)
-          ? 8
-          : 0,
-      closureResult = ["close", "negative-close"].includes(fault) ? 5 : 0;
-    if (fault === "signature") entries[index].signatureSha256 = "e".repeat(64);
-    if (fault === "content") {
-      const changed = Buffer.from(files.get(compiler.path));
-      changed[changed.length - 1] ^= 1;
-      files.set(compiler.path, changed);
-    }
-    const source = await compilerTrustFixture({
-      entries,
-      files,
-      identity: f.rawFileId,
-      inspect: f.objectRead,
-      result: verificationResult,
-      closed: closureResult,
-      unavailable: fault === "unavailable",
-      seekFailure: fault === "seek",
-    });
-    f.accessNative = (operation, args, _, __, sequence) =>
-      operation === "open" ? source.open(Number(args[0]), sequence) : undefined;
-    let native;
-    const opening = openWindowsExperimentNative(f.prepared, {
-      ...f.options,
-      reopen: true,
-      retain: (owner) => {
-        native = owner;
-      },
-    });
-    if (fault === "none") {
-      native = await opening;
-      assert.deepEqual(source.seeks, [inputSize, inputSize]);
-      assert.deepEqual(source.calls, [1, 2, 1, 2]);
-      assert.deepEqual(source.events, [
-        "windows-directory",
-        "environment",
-        "verify",
-        "close",
-        "verify",
-        "close",
-      ]);
-      assert.equal(source.provider, undefined);
-    } else {
-      await assert.rejects(opening, (error) => {
-        const failure = error.custodyReaderFailure;
-        assert.equal(error.experimentNative, native);
-        assert.equal(failure.sequence, 2);
-        if (
-          [
-            "positive",
-            "negative",
-            "close",
-            "negative-close",
-            "unavailable",
-          ].includes(fault)
-        ) {
-          assert.equal(
-            failure.trust.result,
-            "0x" + (verificationResult >>> 0).toString(16).padStart(8, "0"),
-          );
-          assert.equal(
-            failure.trust.closeResult,
-            "0x" + closureResult.toString(16).padStart(8, "0"),
-          );
-          assert.equal(failure.trust.entry, index);
-          assert.deepEqual(failure.trust.inputs, source.inputs);
-          assert.deepEqual(failure.trust.provider, source.provider);
-          assert.equal(
-            Object.hasOwn(failure.trust, "provider"),
-            verificationResult !== 0,
-          );
-          assert.deepEqual(
-            failure.trust.inputs.slice(2, 14),
-            [1, 1, 1, 0, 2, 0, 1, 0x1010, 0, 0, 0, 0],
-          );
-          assert.deepEqual(
-            failure.trust.inputs.slice(14),
-            fault === "unavailable"
-              ? [7, -1, 7, -1, 7, -1]
-              : [0, 0, 0, inputSize, 0, 0],
-          );
-        } else assert.equal(Object.hasOwn(failure, "trust"), false);
-        return true;
-      });
-      assert.deepEqual(source.seeks, fault === "content" ? [] : [inputSize]);
-      assert.deepEqual(
-        source.calls,
-        ["content", "seek"].includes(fault) ? [] : [1, 2],
-      );
-      if (fault === "seek") {
-        assert.deepEqual(source.events, ["windows-directory", "environment"]);
-        assert.equal(source.provider, undefined);
-      }
-      // Independent raw observations retire the failed original reader; its
-      // dependent file observer remains live until production recovery joins it.
-      const observer = native.files.verification;
-      for (const actor of f.actors.values())
-        if (
-          ![observer.identity.pid, observer.bridge.pid].includes(
-            actor.identity.pid,
-          )
-        )
-          actor.retired = true;
-      for (const actor of [
-        native.reader.retirementBinding.helper,
-        native.reader.retirementBinding.bridge,
-      ])
-        f.rawExitCodes.set(actor.pid, 126);
-    }
-    const calls = [...source.calls],
-      seeks = [...source.seeks],
-      settlement =
-        fault === "none" ? await native.close() : await native.recover();
-    assert.equal(settlement.status, "RETIRED");
-    assert.deepEqual(source.calls, calls, "retirement must not repeat trust");
-    assert.deepEqual(
-      source.seeks,
-      seeks,
-      "retirement must not seek trust input",
-    );
-    assert.equal(f.rawTasks.size, 0);
-    assert.ok([...f.actors.values()].every((actor) => actor.retired));
-  }
-});
-
 test("Windows registry attempts retained and thrown readers without bypassing dependencies", async () => {
   const f = rawPreparation(),
     files = createWindowsPreparationFiles(f, f.options),
@@ -4457,58 +3733,6 @@ test("Windows registry attempts retained and thrown readers without bypassing de
   assert.ok(!f.rawEvents.some((frame) => /^finish /u.test(frame)));
 });
 
-test("Windows experiment attempts fresh settlement after an actual reader close throws", async () => {
-  const f = rawPreparation({ experiment: true }),
-    primary = new Error("open failed"),
-    diagnostic = new Error("cleanup diagnostic unavailable");
-  let native;
-  f.beforeRawCommand = (operation) => {
-    if (operation === "open") throw primary;
-  };
-  await assert.rejects(
-    openWindowsExperimentNative(f.prepared, {
-      ...f.options,
-      reopen: true,
-      retain: (owner) => {
-        native = owner;
-      },
-    }),
-    (error) => error === primary,
-  );
-  const observer = native.files.verification.identity;
-  for (const actor of f.actors.values())
-    if (
-      ![observer.pid, native.files.verification.bridge.pid].includes(
-        actor.identity.pid,
-      )
-    )
-      actor.retired = true;
-  f.accessNative = (operation, args) => {
-    if (
-      operation === "prepare-write" &&
-      /custody-[0-9]+\.json$/u.test(
-        Buffer.from(args[0], "hex").toString("utf16le"),
-      )
-    )
-      return { created: false };
-  };
-  // The real reader's retained-receipt write fails, and its diagnostic sink
-  // throws. Neither failure replaces close or supplies settlement evidence.
-  await assert.rejects(
-    withNativeDiagnostics(
-      () => native.close(),
-      () => {
-        throw diagnostic;
-      },
-    ),
-    (error) =>
-      error.settlement.status === "RETIRED" &&
-      error.errors.some((cause) => cause.errors?.includes(diagnostic)),
-  );
-  assert.equal(f.rawTasks.size, 0);
-  assert.ok([...f.actors.values()].every((actor) => actor.retired));
-});
-
 test("Windows file observer cleanup cancellation ends pending IPC without replaying finish", async () => {
   const f = rawPreparation(),
     open = f.options.openPreparation,
@@ -4557,225 +3781,83 @@ test("Windows file observer cleanup cancellation ends pending IPC without replay
   );
 });
 
-test("Windows cleanup cancellation bounds reader IPC while retaining dependent observer custody", async () => {
-  for (const phase of ["serial", "receipt", "task", "completion"]) {
-    const f = rawPreparation({ experiment: true }),
-      cleanup = new AbortController(),
-      recovery = new AbortController(),
-      expired = new Error("cleanup interval exhausted at " + phase),
-      entered = Promise.withResolvers(),
-      blocked = Promise.withResolvers(),
-      fault = Promise.withResolvers(),
-      openReader = f.options.readerOptions.open,
-      openObserver = f.options.openPreparation,
-      observerCloses = [];
-    fault.promise.catch(() => {});
-    const wait = (value) => Promise.race([value, fault.promise]);
-    let armed = false,
-      readerClosed = 0,
-      originalObserver;
-    f.options.readerOptions.open = async (...args) => {
-      const channel = await openReader(...args);
-      let stalled = false;
-      return {
-        ...channel,
-        wait,
-        send: async (frame) => {
-          await wait(channel.send(frame));
-          if (
-            armed &&
-            ((phase === "serial" && /^inspect /u.test(frame)) ||
-              (phase === "task" && frame === "D"))
-          ) {
-            stalled = true;
-            entered.resolve();
-          }
-        },
-        receive: () => wait(stalled ? blocked.promise : channel.receive()),
-        get completion() {
-          if (armed && phase === "completion") {
-            entered.resolve();
-            return wait(blocked.promise);
-          }
-          return channel.completion;
-        },
-        close: () => {
-          readerClosed++;
-          fault.reject(expired);
-          channel.close();
-        },
-      };
-    };
-    f.options.openPreparation = async (...args) => {
-      const channel = await openObserver(...args),
-        nonce = args[1][6];
-      originalObserver ??= { bridge: channel.pid, nonce };
-      let stalled = false,
-        closed = false;
-      return {
-        ...channel,
-        send: async (frame) => {
-          await channel.send(frame);
-          // Seal has consumed the write and protected the receipt. Losing its
-          // acknowledgement must neither replay it nor destroy reader custody.
-          if (
-            armed &&
-            phase === "receipt" &&
-            channel.pid === originalObserver.bridge &&
-            /^prepare-seal /u.test(frame)
-          ) {
-            stalled = true;
-            entered.resolve();
-          }
-        },
-        receive: () => (stalled ? blocked.promise : channel.receive()),
-        close: () => {
-          if (closed) return;
-          closed = true;
-          if (channel.pid === originalObserver.bridge) {
-            observerCloses.push(f.rawEvents.length);
-            // Raw process observations model eventual non-emergency EOF exit;
-            // production recovery still verifies births, whole Jobs and tasks.
-            for (const pid of [channel.pid, f.rawTasks.get(nonce).pid]) {
-              f.actors.get(pid).retired = true;
-              f.rawExitCodes.set(pid, 126);
-            }
-          }
-          channel.close();
-        },
-      };
-    };
-    const native = await openWindowsExperimentNative(f.prepared, {
-        ...f.options,
-        reopen: true,
-      }),
-      observer = native.files.verification.identity,
-      original = native.reader.retirementBinding;
-    armed = true;
-    let work;
-    if (["serial", "receipt"].includes(phase)) {
-      const helper = f.prepared.helpers.find(
-          (entry) => entry.name === "build-helper",
-        ),
-        index = f.prepared.entries.findIndex(
-          (entry) => entry.path === helper.path,
-        );
-      work = native.reader.inspect(index);
-      work.catch(() => {});
-      await entered.promise;
-    }
-    const attempt = native.close({ signal: cleanup.signal }),
-      rejected = assert.rejects(
-        attempt,
-        (error) => error.settlement.status === "RETAINED",
-      );
-    if (!work) await entered.promise;
-    cleanup.abort(expired);
-    if (work) await assert.rejects(work, (error) => error === expired);
-    await rejected;
-    assert.ok(readerClosed > 0);
-    assert.deepEqual(native.reader.retirementBinding, original);
-    assert.deepEqual(
-      observerCloses,
-      [],
-      "timeout must not close a dependent observer",
-    );
-    assert.equal(f.actors.get(observer.pid).retired, false);
-    await assert.rejects(native.files.settleFiles());
-    // A new interval may recover the original owners, without treating the
-    // cancelled close as proof or replaying its potentially consumed commands.
-    for (const actor of f.actors.values())
-      if (![observer.pid, originalObserver.bridge].includes(actor.identity.pid))
-        actor.retired = true;
-    const before = f.rawEvents.length;
-    assert.equal(
-      (await native.recover({ signal: recovery.signal })).status,
-      "RETIRED",
-    );
-    // Exercise late cleanup after the original task has already been removed.
-    recovery.abort(expired);
-    assert.equal(observerCloses.length, 1);
-    assert.ok(
-      f.rawEvents
-        .slice(before, observerCloses[0])
-        .some((frame) =>
-          new RegExp(`^verify-retain [0-9]+ ${observer.pid} `, "u").test(frame),
-        ),
-    );
-    assert.ok(
-      !f.rawEvents
-        .slice(before)
-        .some((frame) => /^(?:open|inspect|helper-start) /u.test(frame)),
-    );
-    assert.equal(f.rawTasks.size, 0);
-    assert.ok([...f.actors.values()].every((actor) => actor.retired));
-  }
-});
-
-test("Windows interrupted recovery preserves every old observer and rejects emergency retirement", async () => {
-  for (const fault of ["interrupted", "emergency"]) {
-    const f = rawPreparation({ experiment: true });
-    let native,
-      failed = false;
-    f.beforeRawCommand = (operation) => {
-      if (operation === "open") throw new Error("open rejected");
-      if (
-        operation === "verify-recovery-jobs" &&
-        fault === "interrupted" &&
-        !failed
-      ) {
-        failed = true;
-        throw new Error("recovery acknowledgement lost");
-      }
-    };
-    await assert.rejects(
-      openWindowsExperimentNative(f.prepared, {
-        ...f.options,
-        reopen: true,
-        retain: (owner) => {
-          native = owner;
-        },
-      }),
-    );
-    const observer = native.files.verification.identity;
-    for (const actor of f.actors.values())
-      if (
-        ![observer.pid, native.files.verification.bridge.pid].includes(
-          actor.identity.pid,
-        )
-      )
-        actor.retired = true;
-    if (fault === "emergency") f.preSetupExitCode = 124;
-    await assert.rejects(
-      native.close(),
-      (error) => error.settlement.status === "RETAINED",
-    );
-    await assert.rejects(native.files.settleFiles());
-    assert.equal(f.actors.get(observer.pid).retired, false);
-    if (fault === "interrupted") {
-      // Model observed eventual exits of the interrupted recovery owner, not
-      // an EOF acknowledgement or its own later successful replacement.
-      for (const actor of f.actors.values())
-        if (
-          ![observer.pid, native.files.verification.bridge.pid].includes(
-            actor.identity.pid,
-          )
-        )
-          actor.retired = true;
-      assert.equal((await native.recover()).status, "RETIRED");
-      assert.equal(f.rawTasks.size, 0);
-    }
-  }
-});
-
 test("Windows preparation preserves the open failure and separately persists cleanup and receipt failures", async () => {
   const f = rawPreparation({ experiment: true }),
-    primary = new Error("original compiler open"),
+    primary = new Error("original publication write"),
     receipt = new Error("job receipt unavailable"),
-    saved = [],
-    journal = [];
+    saved = [];
+  const prepared = structuredClone(f.prepared);
+  prepared.schemaVersion = 2;
+  prepared.sourceDirectory = directory + "-bootstrap";
+  prepared.helpers = prepared.helpers.map((helper) => ({
+    ...helper,
+    path: path.join(prepared.sourceDirectory, helper.name + ".exe"),
+  }));
+  prepared.binding = {
+    checkoutSha: candidateSha,
+    osBuild: "10.0.26100",
+    nodeVersion: "v24.21.0",
+  };
+  prepared.bootstrap.context.jobBindingSha256 = observationDigest(
+    prepared.binding,
+  );
+  f.manifest.windowsPreparation.bootstrap.context.jobBindingSha256 =
+    observationDigest(prepared.binding);
+  prepared.tools = prepared.tools.map(({ name, path, sha256 }) => ({
+    name,
+    path,
+    sha256,
+  }));
+  prepared.helpers = prepared.helpers.map((helper) => ({
+    ...helper,
+    signatureSha256: helper.sha256,
+  }));
+  prepared.sdkBuild = "10.0.22621.0";
+  prepared.sdkHeader = { file: f.sdkFile, sha256: hash };
+  prepared.versions = { compiler: "1.2", sdk: "1.2" };
+  const environment = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    LANG: "C",
+    ...prepared.environment,
+    TEMP: "C:\\Fixture",
+    TMP: "C:\\Fixture",
+  };
+  const command = (file, args, stdout = "") => ({
+    file,
+    args,
+    cwd: prepared.sourceDirectory,
+    env: environment,
+    timeout: 60000,
+    maxBuffer: 1048576,
+    exitCode: 0,
+    signal: null,
+    timedOut: false,
+    stdout,
+    stderr: "",
+  });
+  prepared.commands = [
+    command("git", ["rev-parse", "HEAD"], candidateSha),
+    command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
+    ...WINDOWS_HELPER_NAMES.map((name) =>
+      command(
+        prepared.tools[0].path,
+        windowsHostedCompilerArguments(
+          path.join(prepared.sourceDirectory, name + ".c"),
+          path.join(prepared.sourceDirectory, name + ".exe"),
+        ),
+      ),
+    ),
+    command(prepared.tools[1].path, ["/?"], "Version 1.2"),
+    command(
+      path.join(prepared.environment.SystemRoot, "System32", "whoami.exe"),
+      ["/user", "/fo", "csv", "/nh"],
+      `"fixture","${prepared.bootstrap.runnerSid}"`,
+    ),
+  ];
   f.beforeRawCommand = (operation) => {
-    if (operation === "open") throw primary;
+    if (operation === "prepare-write") throw primary;
   };
   await assert.rejects(
     prepareWindowsExperiment(
@@ -4803,26 +3885,17 @@ test("Windows preparation preserves the open failure and separately persists cle
           GITHUB_RUN_ID: f.job.runId,
           GITHUB_RUN_ATTEMPT: "1",
         },
-        persistBootstrap: async (record) => journal.push(record),
-        bootstrap: async (_job, _directory, _binding, persist) => {
-          await persist({
-            purpose: "experiment",
-            phase: "bootstrap-seal-possible",
-            ...f.prepared,
-          });
-          return f.prepared;
-        },
+        bootstrap: async () => prepared,
       },
     ),
-    (error) =>
-      error.cause === primary &&
-      error.cleanupFailures.length === 2 &&
-      error.cleanupFailures[1] === receipt &&
-      error.experimentJob.failure === "preparation-failed",
+    (error) => {
+      assert.equal(error.cause, primary);
+      assert.ok(error.cleanupFailures.includes(receipt));
+      assert.equal(error.experimentJob.failure, "preparation-failed");
+      return true;
+    },
   );
   assert.equal(saved.at(-1).preparationEffects.settlement.status, "RETAINED");
-  assert.equal(journal.at(-1).phase, "preparation-cleanup-failed");
-  assert.equal(journal.at(-1).failures[1].message, receipt.message);
   for (const actor of f.actors.values()) actor.retired = true;
   const recovered = await recoverWindowsExperimentPreparation(
     saved.at(-1),
@@ -4841,14 +3914,16 @@ test("Windows preparation preserves the open failure and separately persists cle
         GITHUB_RUN_ID: f.job.runId,
         GITHUB_RUN_ATTEMPT: "1",
       },
-      readdir: async () => [path.basename(directory) + "-bootstrap-0.json"],
-      read: async () => Buffer.from(JSON.stringify(journal[0])),
+      read: async () => Buffer.from(JSON.stringify(prepared)),
     },
   );
   assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
   assert.equal(recovered.failure, "preparation-failed");
   assert.equal(f.rawTasks.size, 0);
-  assert.equal(f.rawEvents.filter((frame) => /^open /u.test(frame)).length, 1);
+  assert.equal(
+    f.rawEvents.filter((frame) => /^helper-start /u.test(frame)).length,
+    0,
+  );
 });
 
 test("fixed provider helper preparation rejoins Windows System custody and helpers without compiling", async () => {

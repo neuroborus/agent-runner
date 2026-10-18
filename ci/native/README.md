@@ -119,18 +119,14 @@ station isolation and Job UI restrictions retain their existing contracts.
 Portable transport regressions establish diagnostic forwarding and failure only;
 actual helper compilation and native behavior remain matching-host CI evidence.
 
-Windows bootstrap compilation covers every fixed helper as build-only
-data before sealing or privileged promotion. A normal completed compiler failure
-retains its original exception and allows later independent recipes; protected
-rebuilds additionally require their existing complete retirement receipts.
-Cancellation, exhausted budgets, changed pinned inputs, missing ownership
-prerequisites and uncertain completion stop continuation. Bounded per-recipe
-output and completion facts identify failures and remaining unattempted recipes.
-Later uncertain compiler completion also withholds cleanup success even when the
-first retained failure was an ordinary compiler exit.
-Any required failure still prevents helper execution and preparation publication;
-successful later builds cannot supply partial admission. Independent feasibility
-build owners and Linux coverage retain their existing separation.
+Ordinary Windows preparation compiles each required helper once with installed
+MSVC/SDK under the declared disposable hosted-image/toolchain assumption. Exact
+candidate source/header bytes, explicit compiler environment, actual command
+results and versions, output hashes and experiment PE/ABI inspection remain
+required. Compiler failure, missing output, cancellation or uncertain child-tree
+cleanup prevents System publication and successful preparation. Original command
+diagnostics remain separate from cleanup failures. Reviewed protected compilation
+retains its own strict command, signing and retirement requirements.
 
 Ordinary Darwin preparation uses one hosted Clang build per helper. The previous
 preliminary compiler/PF-header and elevated-tool bootstrap observers are removed;
@@ -249,49 +245,43 @@ portable observations establish no native acceptance.
 
 The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
-The installed MSVC/SDK selector and fixed recipe build all thirteen helpers and
-five headers from the exact checkout on the matching Windows 2025 CI worker.
-Root `.gitattributes` fixes LF checkout bytes only for `ci/native/win32/*.c`
-and `ci/native/win32/*.h`. These cover experiment bootstrap, feasibility,
-command and custody sources, including `effective-reader.h` (the
-`windows-command-xml` diagnostic component). Exact Git-blob Buffer equality,
-source hashes and file identity checks remain strict; runtime normalization
-never substitutes for candidate bytes. The portable checkout and injected
-bootstrap regressions execute no Windows compiler or native helper.
-The shared `WINDOWS_BUILD_TOOLS` descriptor accepts two-digit Visual Studio
-major directories from `10` through `99`, including the installed `18` form,
-alongside existing four-digit directories such as `2022`. Vendor roots,
-Enterprise/Professional/BuildTools editions, MSVC layout, `Hostx64/x64/cl.exe`
-and Windows SDK restrictions remain fixed. Bootstrap and prepared-input
-validation share that descriptor; build operations still require the exact
-observed or reviewed path, hash and arguments. Native custody retains its vendor
-roots, exact pinned entries, signatures and held identities. These portable
-path/binding regressions establish no Windows compilation or native acceptance.
-Bootstrap intent precedes local seed construction; a native seal intent precedes
-owned ACL changes. Local seeds are data, not publication or custody proof. A
-separate System observer holds the seed/source/tool inventory, verifies actual
-DACLs and parents, and supplies the existing compiler controller and its
-creation-time Job admission, narrow handles and independent retirement.
-Reported builds join actual output PE bytes, MSVC dependency records, SDK/library
-bytes and native PE/API-set/import observations. Changed bytes, missing inventory,
-unsafe custody, unavailable native capabilities and uncertain original admission
-fail preparation; they cannot become an experimental PASS.
+The existing installed MSVC/SDK selector supplies the explicit environment for
+one ordinary bounded build of each of thirteen helpers. Root `.gitattributes`
+keeps candidate C/header bytes exact; Git-blob Buffer comparisons remain strict.
+Actual compiler/SDK versions and hashes, complete command results, immutable
+experiment PE markers and output PE/ABI inspection remain observations of the
+inputs and outputs used. Ordinary builds no longer collect compiler dependency,
+SDK/library or API-set trust closure, invoke System compiler controllers, or
+create compiler Jobs/tasks and their receipts. Shared reviewed validators remain
+strict. The fixed case SDK header and actual runtime PE/API-set/loader reads
+remain native case inputs, separately from compiler preparation.
 
-The generated case declarations cover every existing `windowsSystemRecipes`
-entry and keep expected identity slots separate from actual account, token,
-object, policy and Job reads. The existing provisioning, ownership, access/audit,
-file and fixed-Git owners execute those declarations. Experiment runtime auditing
-joins held builds/imports and actual custodian loader reads without invoking
-reviewed release or provider admission. Each case retains independent recovery
-and settlement; a retired file observer is replaced through the existing indexed
-custody registry before subsequent work. Recovery rejoins original native
-compiler/helper Jobs and owned Task Scheduler entries, fences case admissions,
-and restores only independently retired owned resources. Unsealed bootstrap
-seeds or missing birth acknowledgements remain uncertain; recovery never rebuilds
-or retries a case to obtain success. Evidence directories stay available for
-reporting rather than being deleted on uncertainty.
-Cold loading also requires its fresh observer to retire; verification and
-retirement failures remain separate causes when both fail.
+The once-built images are sealed through the existing bridge. One System file
+observer independently holds their bytes, source inventory, DACLs, parents and
+native PE/import observations. The duplicate compiler bootstrap reader/task is
+removed. Private version-2 preparation records reject legacy, mixed or incomplete
+build evidence. Cold loading verifies the original completed outputs without
+selection, acquisition or recompilation. A private sibling selector identifies
+possible System publication; protected records and original births supply all
+custody/retirement evidence. No public compiler bootstrap journal is required.
+
+Every existing system recipe remains required. The build recipe independently
+reads the completed images and output-directory identity/DACL; it asserts no
+System compiler domain, nested compiler Job or compiler-policy receipt. Other
+recipes keep their native policy requirements, creation-time Jobs, narrow
+handles, held readers, original birth identities, Task Scheduler removal and
+independent whole-domain retirement. The sealed image is the actual build output,
+not a seed for another compilation. Ordinary cancellation owns the compiler child
+tree and awaits closure; uncertain cleanup stays unsuccessful.
+
+Preparation cleanup cannot retire admitted cases. Interrupted compilation or
+publication without complete original evidence remains RETAINED, preserving the
+first failure. Recovery of publication holds original observer births before
+waiting for their real exits and independently verifies their complete Jobs and
+owned tasks. Missing births or uncertain retirement cannot become success. Cold
+verification and cleanup failures remain separate, and uncertainty retains the
+private evidence. Socket duplication, audit-event, policy, ownership, Git controls
+and all 23 system checks still require fresh matching hosted Windows evidence.
 
 Experimental helpers carry an immutable `.nexp` purpose section and use a distinct
 custody-plan header. Their unsigned digest is a local image observation. The
@@ -587,8 +577,8 @@ The ordinary Native PoC workflow consumes this complete experiment path.
 with no check IDs. The private `system-experiment.js` ledger records version-7
 intent before effects, verifies actual purpose-bound policy receipts and joins a
 fresh complete held runtime read for each recipe. Darwin's build policy uses the
-existing compiler-domain/output observer; Windows retains its original build
-observer. Only the native owners' fully asserted `OBSERVED` records can supply
+completed-build/output observers; Windows likewise reads actual completed
+images without compiler-domain claims. Only the native owners' fully asserted `OBSERVED` records can supply
 check observations. All 23 system checks remain required.
 
 Execution, receipt publication and independent settlement have separate bounds.
@@ -685,18 +675,14 @@ layout. Native owners retain all input, identity and exclusive-creation checks;
 recovery never substitutes fresh build
 storage for the originally admitted path.
 
-Bootstrap selectors remain controller-owned `native-bootstrap-*.json` journals
-in the public report root through the explicit journal location and existing
-bootstrap writer with exclusive creation. Cold readers and recovery rejoin those
-original journals; selectors never replace the private native receipt, identity
-or retirement checks.
-Native seed/bootstrap siblings, assets, binaries, transports and recovery receipts
-retain their private permissions and custody. No private payload is copied into
-publication.
-
-Uploads explicitly select controller-root JSON/summary files and public bootstrap
-journals, alongside the existing Linux preparation/build/evidence paths. Asset
-JSON remains explicitly excluded. Uploads never traverse private native storage.
+Compiler bootstrap journals are no longer published. Darwin's retained native
+receipts and Windows's private publication selector and protected observer records
+remain outside public upload traversal. Native assets, binaries, transports and
+recovery receipts keep their private permissions and custody. No private payload
+is copied into publication. Existing upload selections are unchanged; obsolete
+journal patterns cannot supply native evidence or make private storage public.
+Uploads select controller-root JSON/summary files alongside the existing Linux
+preparation/build/evidence paths; asset JSON remains excluded.
 Controller jobs, stage reports and separate first/cleanup failure receipts remain
 publishable after failed preparation even when private traversal is denied.
 Portable injected lifecycle regressions establish this integration only; matching
@@ -6744,8 +6730,9 @@ abandoning an IPC acknowledgement never releases that dependency.
 The 3,540,000-ms preparation and 60-minute workflow bounds are unchanged.
 Watchdog exit 124 remains emergency cleanup; EOF, exit 126 and task absence alone
 establish no retirement. Preparation failure stays primary; cleanup and persistence
-failures are reported separately and recorded in the existing bootstrap journal
-when its writer remains usable. The earlier retention of live observers before
+failures are reported separately through the existing stage/job owners.
+Ordinary compiler bootstrap journals are removed; retained native observer and
+case journals still own original-effect recovery. The earlier retention of live observers before
 task removal conflicts with the native all-retained-process guard in source.
 Whether this ordering explains every observed LONG 8/CLOSE 0 cleanup failure is
 still a causal hypothesis. The original trust refusal remains unchanged and must
@@ -8368,8 +8355,8 @@ data availability adds no acceptance requirement. Carrier size, channel bounds,
 original sequence/entry/pins and cleanup ownership remain unchanged. Provider
 diagnostics establish neither a Windows trust remedy nor original native
 retirement, and cannot become a receipt or acceptance evidence.
-The experiment opens its build helper before the MSVC compiler at sequence 2;
-the compiler's signature pin identifies the PE signature representation, not an inferred
+The removed protected experiment compiler path opened its helper before MSVC at
+sequence 2. Its retained failure record's signature pin identifies the PE signature representation, not an inferred
 signer certificate. The observed original embedded verification returned LONG 8
 with CLOSE 0 at sequence 2/open, entry 14. That status alone establishes neither
 an EOF, UI nor resource cause; later pipe error 109 cannot replace it. The
@@ -8380,9 +8367,11 @@ is no replacement handle/path or verification retry. Microsoft's
 [`WINTRUST_FILE_INFO` contract](https://learn.microsoft.com/en-us/windows/win32/api/wintrust/ns-wintrust-wintrust_file_info)
 documents a readable open handle, not an EOF-specific diagnosis. Deterministic
 embedded-input initialization establishes neither the cause of `0x8` nor native
-trust success. Functional trust success and original failed-owner retirement
-remain separate matching Windows CI requirements; the original LONG 8/CLOSE 0
-failure-settlement coverage remains mandatory even if a later trust call succeeds.
+trust success. Retained native image/launch trust and original failed-owner
+retirement still require separate matching Windows evidence. Installed compiler
+trust is no longer ordinary preparation admission; the historical LONG 8/CLOSE 0
+cause and its uncertain original owners are not retired by this simplification.
+Distinct native image-trust failure and retirement coverage remains mandatory.
 Error 109 does not identify a reader wait/exit cause. Original native
 command acceptance remains unproved until matching hosted execution; preparation
 and workflow deadlines are unchanged.

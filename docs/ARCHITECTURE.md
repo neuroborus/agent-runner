@@ -72,18 +72,30 @@ launches and runtime reads rejoin that inventory rather than adopting setup-node
 again; later owners also join their running kernel image to its original or
 sealed identity and pinned version. This CI-private acquisition boundary leaves
 ordinary protected-file and production launcher admission unchanged.
-Windows's indexed ordinary preparer reuses installed MSVC/SDK discovery, the
-fixed helper inventory, System custody/file readers, compiler controller and
-preparation/recovery factories. Write-ahead bootstrap/seal and native command
-intents precede effects. Independent held PE/import, source, tool, SDK and output
-reads supply observed expectations; every existing Windows system recipe reuses
-its provisioning and policy/native owner. A distinct experimental runtime audit
-records actual build/loader bindings without reviewed source/release admission.
-Experiment images and custody plans retain durable purpose markers; reviewed
-publication, PE and custody owners reject promotion. Original creation identities,
-whole Jobs, owned task removal and independent settlement govern load and partial
-recovery. Unsealed or unobserved bootstrap admissions retain uncertainty without
-recompilation or resource release. Ordinary CI consumes this experiment preparer.
+Windows's indexed ordinary preparer uses installed MSVC/SDK and a closed explicit
+compiler environment to build each exact-candidate helper once. Bounded ordinary
+child-tree execution retains actual command diagnostics, versions, tool hashes,
+marked PE output and ABI observations. The private version-2 record migrates
+preparation, loading, build policy and recovery together. Cold loading verifies
+completed outputs without acquisition or recompilation; mixed, legacy and missing
+records fail. Compiler dependency/SDK/library trust reconstruction, System
+compiler controllers, compiler Jobs/tasks and their bootstrap journals are removed.
+
+Existing bridge sealing and one System file observer protect the actual generated
+images and sources. A private sibling selector identifies possible publication;
+protected native records, held identities and original births supply evidence.
+No duplicate bootstrap compiler reader is started. The build policy re-reads
+completed images and the output directory's actual identity/DACL without claiming
+compiler domains or receipts. Retained case readers, creation-time Jobs, narrow
+handles, native runtime PE/API-set/loader observations, the fixed case SDK input,
+policy/audit restrictions, positive controls and independent original retirement
+remain mandatory. Reviewed signing/import/publication validators remain strict.
+Preparation cleanup is distinct from admitted-case cleanup. Interrupted or
+unobserved work stays unsuccessful with its first cause preserved. Recovery holds
+original observer identities before waiting for actual exit, then independently
+verifies whole-domain and owned-task retirement; no empty compiler proof is
+invented. No cleanup can attest retirement of earlier uncertain Windows owners.
+
 Windows custody passes the documented noninteractive `INVALID_HANDLE_VALUE`
 to the original WinVerifyTrust VERIFY and separate CLOSE, retaining the original
 held file/path, strict pins and cache-only policy. It retains each original LONG
@@ -97,9 +109,10 @@ Wintrust module, with size-checked bounded current-process reads, explicit
 unavailability/completeness and restored native error state. The strict failure
 carrier retains its existing bounds and original identity/pin joins. This optional
 observation changes no trust acceptance or original cleanup ownership and proves
-neither a trust remedy nor original retirement. The compiler opens after the build
-helper at sequence 2. Its original trust cause and functional compatibility remain
-pending matching Windows evidence; pipe error 109 supplies no trust diagnosis.
+neither a trust remedy nor original retirement. The removed experiment compiler
+admission's earlier sequence-2 failure remains historical evidence; pipe error
+109 supplies no trust diagnosis or original-owner retirement. Retained native
+image/launch trust guards still require matching Windows evidence.
 Windows experiment closure fences admission and coalesces original reader and
 file-observer settlement. Its separate 30-second cleanup signal interrupts IPC
 through queued reader work, task acknowledgement and bridge completion without

@@ -63,7 +63,7 @@ function normalizePreparation(value, candidateSha, experiment) {
     "cases",
   ]);
   requireObservation(
-    value.schemaVersion === 1 &&
+    (value.schemaVersion === 1 || (experiment && value.schemaVersion === 2)) &&
       (!experiment || value.purpose === "experiment") &&
       location(value.sourceDirectory),
   );
@@ -76,12 +76,12 @@ function normalizePreparation(value, candidateSha, experiment) {
       bootstrap.context.executionId === "build" &&
       bootstrap.context.tier === "system",
   );
-  observationObject(value.command, [
-    "helper",
-    "toolSignatures",
-    "unsignedHelpers",
-    "helperSignatures",
-  ]);
+  observationObject(
+    value.command,
+    value.schemaVersion === 2
+      ? ["helper"]
+      : ["helper", "toolSignatures", "unsignedHelpers", "helperSignatures"],
+  );
   observationObject(value.command.helper, [
     "path",
     "sha256",
@@ -95,16 +95,20 @@ function normalizePreparation(value, candidateSha, experiment) {
       hash(value.command.helper.sha256) &&
       hash(value.command.helper.signatureSha256),
   );
-  observationObject(value.command.toolSignatures, ["compiler", "sdk"]);
-  requireObservation(Object.values(value.command.toolSignatures).every(hash));
-  observationObject(value.command.unsignedHelpers, WINDOWS_HELPER_NAMES);
-  requireObservation(Object.values(value.command.unsignedHelpers).every(hash));
-  observationObject(value.command.helperSignatures, WINDOWS_HELPER_NAMES);
-  requireObservation(
-    Object.values(value.command.helperSignatures).every(hash) &&
-      value.command.helperSignatures["build-helper"] ===
-        value.command.helper.signatureSha256,
-  );
+  if (value.schemaVersion === 1) {
+    observationObject(value.command.toolSignatures, ["compiler", "sdk"]);
+    requireObservation(Object.values(value.command.toolSignatures).every(hash));
+    observationObject(value.command.unsignedHelpers, WINDOWS_HELPER_NAMES);
+    requireObservation(
+      Object.values(value.command.unsignedHelpers).every(hash),
+    );
+    observationObject(value.command.helperSignatures, WINDOWS_HELPER_NAMES);
+    requireObservation(
+      Object.values(value.command.helperSignatures).every(hash) &&
+        value.command.helperSignatures["build-helper"] ===
+          value.command.helper.signatureSha256,
+    );
+  }
   const sourceNames = [
     ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),
     "custody.h",
@@ -990,7 +994,9 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             Number(left.name.split("-")[2]) - Number(right.name.split("-")[2]),
         );
       requireObservation(
-        boots.length > 0 &&
+        (plan.purpose === "experiment" && plan.schemaVersion === 2
+          ? boots.length === 0
+          : boots.length > 0) &&
           boots.length <= 128 &&
           boots.every(
             ({ name }, index) =>
@@ -1094,7 +1100,11 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       const intents = records.filter(({ name }) =>
         /^windows-command-[a-f0-9]{64}-intent\.json$/u.test(name),
       );
-      requireObservation(intents.length <= 2 + WINDOWS_HELPER_NAMES.length);
+      requireObservation(
+        plan.purpose === "experiment" && plan.schemaVersion === 2
+          ? intents.length === 0
+          : intents.length <= 2 + WINDOWS_HELPER_NAMES.length,
+      );
       requireObservation(
         records
           .filter(({ name }) => name.startsWith("windows-command-"))
@@ -1184,7 +1194,28 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       };
       let readerProof,
         tasks = [];
-      if (onReadersRetired) {
+      if (onReadersRetired && subjects.length === 0) {
+        requireObservation(
+          plan.purpose === "experiment" && plan.schemaVersion === 2,
+        );
+        const held = await files.verify(
+          "retainObservers",
+          plan.bootstrap,
+          observerSubjects,
+        );
+        requireObservation(
+          held.independent === true &&
+            hash(held.nativeEventSha256) &&
+            held.identities.length === observerSubjects.length &&
+            held.identities.every((identity, index) =>
+              sameWindowsIdentity(identity, observerSubjects[index]),
+            ),
+        );
+        // No compiler reader was admitted. Hold original observer births before
+        // waiting for their real exits; final whole-domain retirement follows.
+        await onReadersRetired(null);
+      }
+      if (onReadersRetired && subjects.length > 0) {
         const identities = [
           ...new Map(
             subjects.map((identity) => [observationDigest(identity), identity]),

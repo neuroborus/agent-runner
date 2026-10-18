@@ -1,35 +1,138 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import { win32 as path } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import {
-  attemptNativeBuilds,
-  diagnosticCommand,
-  nativeException,
-} from "../diagnostics.js";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import { selectInstalledWindowsToolchain } from "../feasibility/windows-toolchain.js";
-import { observationDigest, requireObservation } from "../index.js";
-import { digest, inspectWindowsPe } from "./protocol.js";
+import {
+  nativeCandidateReader,
+  observationDigest,
+  requireObservation,
+} from "../index.js";
+import { digest } from "./protocol.js";
 import {
   WINDOWS_HELPER_NAMES,
   WINDOWS_BUILD_TOOLS,
-  WINDOWS_BUILD_LIBRARIES,
   windowsCompilerArguments,
-  runWindowsBuildCommand,
 } from "./build.js";
 import { encodeWindowsCustodyPlan, location } from "./custody-protocol.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
-import { createWindowsCustodyReader } from "./custody.js";
 import {
   recoverWindowsPreparationOwners,
   windowsRetired,
 } from "./preparation.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 
-const execute = diagnosticCommand("windows-experiment", promisify(execFile)),
+// Ordinary compilers own a bounded child tree; privileged case processes retain
+// their separate creation-time Jobs and native retirement owners.
+export function runWindowsHostedCommand(file, args, settings) {
+  return new Promise((resolve, reject) => {
+    settings.signal?.throwIfAborted();
+    requireObservation(settings.spawn || process.platform === "win32");
+    const child = (settings.spawn ?? spawn)(file, args, {
+      cwd: settings.cwd,
+      env: settings.env,
+      windowsHide: true,
+      windowsVerbatimArguments: settings.windowsVerbatimArguments,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout = [],
+      stderr = [];
+    let size = 0,
+      failure,
+      cleanup,
+      cleanupCause;
+    const stop = (cause) => {
+      failure ??=
+        cause instanceof Error
+          ? cause
+          : new Error("Windows hosted command cancelled", { cause });
+      if (cleanup) return;
+      cleanup = (async () => {
+        // Never signal a recycled PID after the owned leader has exited.
+        requireObservation(child.pid && child.exitCode === null);
+        if (settings.killTree) await settings.killTree(child.pid);
+        else
+          await promisify(execFile)(
+            path.join(settings.env.SystemRoot, "System32", "taskkill.exe"),
+            ["/PID", String(child.pid), "/T", "/F"],
+            {
+              windowsHide: true,
+              timeout: 5000,
+              maxBuffer: 65536,
+              env: settings.env,
+            },
+          );
+      })().catch((error) => {
+        cleanupCause = error;
+        if (child.exitCode === null) child.kill();
+        child.stdout.destroy();
+        child.stderr.destroy();
+      });
+    };
+    const abort = () => stop(settings.signal.reason);
+    const deadline = setTimeout(
+      () =>
+        stop(
+          Object.assign(new Error("Windows hosted command timed out"), {
+            timedOut: true,
+          }),
+        ),
+      settings.timeout,
+    );
+    settings.signal?.addEventListener("abort", abort, { once: true });
+    if (settings.signal?.aborted) abort();
+    for (const [stream, chunks] of [
+      [child.stdout, stdout],
+      [child.stderr, stderr],
+    ]) {
+      stream.on("error", stop);
+      stream.on("data", (bytes) => {
+        size += bytes.length;
+        if (size > settings.maxBuffer)
+          stop(new Error("Windows hosted command output exceeded its bound"));
+        else chunks.push(bytes);
+      });
+    }
+    child.once("error", (cause) => {
+      failure ??= cause;
+    });
+    child.once("close", async (exitCode, signal) => {
+      clearTimeout(deadline);
+      settings.signal?.removeEventListener("abort", abort);
+      await cleanup;
+      const result = {
+        exitCode,
+        signal,
+        timedOut: failure?.timedOut ?? false,
+        stdout: Buffer.concat(stdout).toString("utf8"),
+        stderr: Buffer.concat(stderr).toString("utf8"),
+      };
+      if (failure || signal !== null || !Number.isInteger(exitCode))
+        reject(
+          Object.assign(
+            failure ?? new Error("Windows hosted command failed"),
+            result,
+            { cleanupCause },
+          ),
+        );
+      else resolve(result);
+    });
+  });
+}
+const execute = diagnosticCommand(
+    "windows-experiment",
+    runWindowsHostedCommand,
+  ),
   ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+
+export function windowsHostedCompilerArguments(source, target) {
+  const args = windowsCompilerArguments(source, target, "experiment");
+  args.splice(args.indexOf("/sourceDependencies"), 2);
+  return args;
+}
 export const WINDOWS_EXPERIMENT_SOURCES = Object.freeze([
   ...WINDOWS_HELPER_NAMES.map((name) => name + ".c"),
   "custody.h",
@@ -38,29 +141,20 @@ export const WINDOWS_EXPERIMENT_SOURCES = Object.freeze([
   "audit-policy-remove.h",
   "experiment.h",
 ]);
-const verifierMethods = [
-  "verifyBootstrap",
-  "verifyAdmission",
-  "verifyTransfer",
-  "verifyHelperRetirement",
-  "verifyRetirement",
-  "verifyTaskRemoval",
-  "verifyPublication",
-];
-
-/** The initial local compilation creates bootstrap data only. A separate
- * System custodian subsequently holds/rechecks it and owns all reported builds. */
+/** Compile exact-candidate helpers once with the hosted toolchain, then seal
+ * the actual outputs for the existing System publication and case owners. */
 export async function bootstrapWindowsExperiment(
   job,
   directory,
   binding,
-  persist,
   {
     env = process.env,
     signal,
     command = execute,
     filesystem = fs,
     selectToolchain = selectInstalledWindowsToolchain,
+    readCandidate: optionsReadCandidate,
+    checkoutRoot = ROOT,
   } = {},
 ) {
   const sourceDirectory = directory + "-bootstrap",
@@ -71,17 +165,45 @@ export async function bootstrapWindowsExperiment(
       directory.startsWith(env.RUNNER_TEMP + "\\") &&
       location(env.RUNNER_TEMP),
   );
-  const run = (file, args, settings = {}) => {
+  const commands = [],
+    versions = {};
+  const run = async (
+    file,
+    args,
+    settings = {},
+    accepted = [0],
+    record = true,
+  ) => {
     signal?.throwIfAborted();
-    return command(file, args, {
-      env,
-      signal,
-      windowsHide: true,
-      encoding: "utf8",
+    const request = {
+      file,
+      args,
+      cwd: checkoutRoot,
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        SystemRoot: env.SystemRoot,
+        PATH: env.PATH ?? env.Path,
+      },
       timeout: 60000,
       maxBuffer: 1048576,
       ...settings,
-    });
+    };
+    const result = await command(file, args, { ...request, signal });
+    signal?.throwIfAborted();
+    requireObservation(
+      result.signal === null &&
+        result.timedOut === false &&
+        [result.stdout, result.stderr].every(
+          (value) =>
+            typeof value === "string" &&
+            Buffer.byteLength(value) <= request.maxBuffer,
+        ),
+    );
+    if (!accepted.includes(result.exitCode))
+      throw Object.assign(new Error("Windows hosted command failed"), result);
+    if (record) commands.push({ ...request, ...result });
+    return result;
   };
   const read = async (file) => {
     const stat = await filesystem.lstat(file);
@@ -96,14 +218,32 @@ export async function bootstrapWindowsExperiment(
     return filesystem.readFile(file);
   };
   requireObservation(
-    (await run("git", ["rev-parse", "HEAD"], { cwd: ROOT })).stdout.trim() ===
-      job.candidateSha,
+    (
+      await run("git", ["rev-parse", "HEAD"], { cwd: checkoutRoot })
+    ).stdout.trim() === job.candidateSha,
   );
   const selected = await selectToolchain(
     { environment: env, temporaryRoot: env.RUNNER_TEMP },
     {
-      capture: async (event) =>
-        persist({ purpose: "experiment", phase: "toolchain", ...event }),
+      execute: async (file, args, settings) => {
+        try {
+          const result = await runWindowsHostedCommand(file, args, {
+            ...settings,
+            signal,
+          });
+          if (result.exitCode !== 0)
+            throw Object.assign(
+              new Error("Windows toolchain setup failed"),
+              result,
+            );
+          return result;
+        } catch (error) {
+          // Setup stdout is an environment enumeration, never diagnostics.
+          if (path.basename(file).toLowerCase() === "cmd.exe")
+            error.stdout = undefined;
+          throw error;
+        }
+      },
     },
   );
   requireObservation(!selected.cause && !selected.cleanupCause);
@@ -140,83 +280,65 @@ export async function bootstrapWindowsExperiment(
     requireObservation(
       WINDOWS_BUILD_TOOLS.find((tool) => tool.name === name).path.test(file),
     );
-    const bytes = await read(file),
-      image = inspectWindowsPe(bytes);
+    const bytes = await read(file);
     tools.push({
       name,
       path: file,
       sha256: digest(bytes),
-      signatureSha256: image.signatureSha256,
     });
   }
-  await persist({
-    purpose: "experiment",
-    phase: "bootstrap-possible",
-    candidateSha: job.candidateSha,
-    directory,
-    sourceDirectory,
-    output,
-    bindingSha256: observationDigest(binding),
-  });
   await filesystem.mkdir(sourceDirectory);
   await filesystem.mkdir(directory);
-  const sources = [];
+  const sources = [],
+    readCandidate =
+      optionsReadCandidate ??
+      nativeCandidateReader(job.candidateSha, checkoutRoot, { env });
   for (const name of WINDOWS_EXPERIMENT_SOURCES) {
-    const source = fileURLToPath(new URL(name, import.meta.url)),
+    const source = path.join(checkoutRoot, "ci", "native", "win32", name),
       bytes = await read(source),
-      candidate = await run(
-        "git",
-        ["show", `${job.candidateSha}:ci/native/win32/${name}`],
-        { cwd: ROOT, encoding: "buffer" },
-      );
-    requireObservation(
-      Buffer.isBuffer(candidate.stdout) && bytes.equals(candidate.stdout),
-    );
+      candidate = await readCandidate("ci/native/win32/" + name, 1048576);
+    requireObservation(Buffer.isBuffer(candidate) && bytes.equals(candidate));
     await filesystem.writeFile(path.join(sourceDirectory, name), bytes, {
       flag: "wx",
     });
     sources.push({ name, sha256: digest(bytes) });
   }
   const helpers = [];
-  const build = async (name) => {
-    const source = path.join(sourceDirectory, name + ".c"),
-      target = path.join(sourceDirectory, name + ".exe"),
-      args = windowsCompilerArguments(source, target, "experiment");
-    await persist({
-      purpose: "experiment",
-      phase: "bootstrap-compile-possible",
-      name,
-      requestSha256: observationDigest({ file: compiler, args, environment }),
-    });
-    return run(compiler, args, {
-      cwd: sourceDirectory,
-      env: {
-        CI: "true",
-        GITHUB_ACTIONS: "true",
-        ...environment,
-        TEMP: env.RUNNER_TEMP,
-        TMP: env.RUNNER_TEMP,
-      },
-    });
+  const compilerEnvironment = {
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    LANG: "C",
+    ...environment,
+    TEMP: env.RUNNER_TEMP,
+    TMP: env.RUNNER_TEMP,
   };
-  await attemptNativeBuilds(
-    "windows-bootstrap-builds",
-    WINDOWS_HELPER_NAMES.map((name) => ({ name, run: () => build(name) })),
-    {
-      signal,
-      verify: async () => {
-        for (const source of sources)
-          requireObservation(
-            digest(await read(path.join(sourceDirectory, source.name))) ===
-              source.sha256,
-          );
-        for (const tool of tools)
-          requireObservation(digest(await read(tool.path)) === tool.sha256);
-      },
-    },
-  );
+  for (const tool of tools) {
+    const recipe = WINDOWS_BUILD_TOOLS.find(
+      (entry) => entry.name === tool.name,
+    );
+    const result = await run(
+      tool.path,
+      recipe.args,
+      { env: compilerEnvironment },
+      [0, ...recipe.versionExitCodes],
+    );
+    const text = result.stdout + "\n" + result.stderr;
+    versions[tool.name] =
+      tool.name === "compiler"
+        ? /Compiler Version ([0-9.]+) for x64/u.exec(text)?.[1]
+        : /Version ([0-9.]+)/u.exec(text)?.[1];
+    requireObservation(versions[tool.name]);
+  }
   for (const name of WINDOWS_HELPER_NAMES) {
     const target = path.join(sourceDirectory, name + ".exe");
+    await run(
+      compiler,
+      windowsHostedCompilerArguments(
+        path.join(sourceDirectory, name + ".c"),
+        target,
+      ),
+      { cwd: sourceDirectory, env: compilerEnvironment },
+    );
     const bytes = await read(target),
       image = inspectWindowsExperimentPe(bytes);
     helpers.push({
@@ -228,7 +350,6 @@ export async function bootstrapWindowsExperiment(
         .sha256,
     });
     await filesystem.unlink(target + ".obj");
-    await filesystem.unlink(target + ".deps.json");
   }
   const who = await run(path.join(env.SystemRoot, "System32", "whoami.exe"), [
       "/user",
@@ -246,8 +367,8 @@ export async function bootstrapWindowsExperiment(
       tier: "system",
       runId: job.runId,
       runAttempt: job.runAttempt,
-      executionId: "build",
       jobBindingSha256: observationDigest(binding),
+      executionId: "build",
       closureSha256: observationDigest({ sources, tools }),
       selectedSystemSha256: null,
     },
@@ -260,12 +381,6 @@ export async function bootstrapWindowsExperiment(
         signatureSha256: image.sha256,
       })),
       { kind: "directory", path: output, sha256: null, signatureSha256: null },
-      ...tools.map((tool) => ({
-        kind: "image",
-        path: tool.path,
-        sha256: tool.sha256,
-        signatureSha256: tool.signatureSha256,
-      })),
       ...sources.map((source) => ({
         kind: "data",
         path: path.join(sourceDirectory, source.name),
@@ -316,18 +431,49 @@ export async function bootstrapWindowsExperiment(
       buildSha256: observationDigest({ helpers, sources, tools, environment }),
     };
   await filesystem.writeFile(plan.path, bytes, { flag: "wx" });
-  await persist({
+  const sdkHeader = {
+    file: path.join(
+      selected.environment.WindowsSdkDir,
+      "Include",
+      sdkBuild,
+      "um",
+      "Windows.h",
+    ),
+  };
+  sdkHeader.sha256 = digest(await read(sdkHeader.file));
+  for (const source of sources)
+    requireObservation(
+      digest(await read(path.join(sourceDirectory, source.name))) ===
+        source.sha256,
+    );
+  for (const tool of tools)
+    requireObservation(digest(await read(tool.path)) === tool.sha256);
+  const prepared = {
     purpose: "experiment",
-    phase: "bootstrap-seal-possible",
-    bootstrap,
-    sources,
-    helpers,
-    tools,
-    environment,
-    sdkBuild,
+    schemaVersion: 2,
+    job,
+    binding,
     directory,
     output,
-  });
+    sourceDirectory,
+    bootstrap,
+    sources,
+    tools,
+    helpers,
+    entries,
+    environment,
+    sdkBuild,
+    sdkHeader,
+    commands,
+    versions,
+  };
+  // This private selector identifies possible System publication; only the
+  // protected native records can later attest custody or retirement.
+  await filesystem.writeFile(
+    directory + "-selector.json",
+    JSON.stringify(prepared) + "\n",
+    { flag: "wx" },
+  );
   const sealed = JSON.parse(
     (
       await run(
@@ -339,7 +485,15 @@ export async function bootstrapWindowsExperiment(
           runnerSid,
           job.candidateSha,
         ],
-        { env: { CI: "true", GITHUB_ACTIONS: "true" } },
+        {
+          env: {
+            CI: "true",
+            GITHUB_ACTIONS: "true",
+            SystemRoot: env.SystemRoot,
+          },
+        },
+        [0],
+        false,
       )
     ).stdout,
   );
@@ -348,135 +502,47 @@ export async function bootstrapWindowsExperiment(
       sealed.sealed === true &&
       sealed.planSha256 === plan.sha256,
   );
-  return {
-    purpose: "experiment",
+  return prepared;
+}
+
+/** One System file observer owns publication reads. Case readers keep their
+ * own creation-time Jobs and independent original-owner retirement. */
+export async function openWindowsExperimentNative(prepared, options = {}) {
+  const { job, directory, output, bootstrap } = prepared;
+  const input = {
     job,
     directory,
     output,
-    sourceDirectory,
-    bootstrap,
-    sources,
-    tools,
-    helpers,
-    entries,
-    environment,
-    sdkBuild,
-  };
-}
-
-/** Reuse the live System observer, held-file readers and compiler controller.
- * Local expectations have no source, release, template or custody approvals. */
-export async function openWindowsExperimentNative(prepared, options = {}) {
-  const { signal, reopen = false, retain, files: suppliedFiles } = options;
-  const { bootstrap, job, directory, output, helpers, entries } = prepared,
-    input = {
-      job,
-      directory,
-      output,
-      signal,
-      manifest: {
+    signal: options.signal,
+    manifest: {
+      purpose: "experiment",
+      candidateSha: job.candidateSha,
+      platform: "win32",
+      helpers: prepared.helpers,
+      tools: prepared.tools,
+      environment: prepared.environment,
+      windowsPreparation: {
         purpose: "experiment",
-        candidateSha: job.candidateSha,
-        platform: "win32",
-        helpers,
-        tools: prepared.tools,
-        environment: prepared.environment,
-        windowsPreparation: {
-          purpose: "experiment",
-          bootstrap,
-          sourceDirectory: prepared.sourceDirectory,
-          sources: prepared.sources,
-        },
+        schemaVersion: 2,
+        bootstrap,
+        sourceDirectory: prepared.sourceDirectory,
+        sources: prepared.sources,
       },
     },
-    files = suppliedFiles ?? createWindowsPreparationFiles(input, options),
-    write = async (name, record) =>
-      files.writeProtected({
-        file: path.join(directory, name),
-        bytes: Buffer.from(JSON.stringify(record) + "\n"),
-        exclusive: true,
-      });
-  retain?.({
-    files,
-    close: async ({ signal = AbortSignal.timeout(30000) } = {}) => {
-      files.fenceAdmission();
-      await files.beginCleanup(signal);
-      return files.settleFiles();
-    },
-  });
-  await files.verifyDirectory({ directory, context: bootstrap.context });
-  const names = await files.readdir(directory),
-    sequence = names.filter((name) =>
-      /^windows-bootstrap-[0-9]+-intent\.json$/u.test(name),
-    ).length;
-  requireObservation(sequence <= 65535);
-  await write(`windows-bootstrap-${sequence}-intent.json`, {
-    purpose: "experiment",
-    prepared,
-    candidateSha: job.candidateSha,
-    context: bootstrap.context,
-    preparationSha256: observationDigest(bootstrap),
-    status: "POSSIBLE",
-  });
-  const reader = createWindowsCustodyReader(bootstrap, {
-    ...options.readerOptions,
-    admissionClosed: () => files.admissionClosed,
-    preSetupVerifier: () => files.preSetupVerifier(),
-    ...Object.fromEntries(
-      verifierMethods.map((name) => [
-        name,
-        (...args) => files.verify(name, ...args),
-      ]),
-    ),
-    read: async (file) =>
-      (
-        await files.readProtected({
-          file,
-          sha256: [
-            bootstrap.reader,
-            bootstrap.bridge,
-            bootstrap.plan,
-            ...bootstrap.sources,
-          ].find((pin) => pin.path === file)?.sha256,
-        })
-      ).bytes,
-    persist: (() => {
-      let index = 0;
-      return (record) =>
-        write(`windows-bootstrap-${sequence}-custody-${index++}.json`, record);
-    })(),
-  });
-  files.retainReader(reader, signal);
+  };
+  const files = options.files ?? createWindowsPreparationFiles(input, options);
+  const write = (name, record) =>
+    files.writeProtected({
+      file: path.join(directory, name),
+      bytes: Buffer.from(JSON.stringify(record) + "\n"),
+      exclusive: true,
+    });
   let closing,
     finished = false,
     complete = false;
-  const recover = (signal, failures, explicit) =>
-    recoverWindowsPreparationOwners(input, options, {
-      signal,
-      onReadersRetired: async (proof) => {
-        files.releaseRecoveredReaders(proof);
-        try {
-          await files.settleFiles();
-        } catch (cause) {
-          if (!explicit) failures.push(cause);
-          else {
-            try {
-              nativeException("windows-experiment-recovery-observer", cause);
-            } catch {
-              /* Fresh whole-owner proof remains mandatory below. */
-            }
-          }
-        }
-        // The fresh observer removed the reader tasks before retaining and
-        // rechecking the old births. Keep those references through bridge exit
-        // before its second pass independently retires the original observers.
-        await files.waitForExit(signal);
-      },
-    });
   const native = {
     prepared,
     files,
-    reader,
     write,
     writeBytes: (name, bytes) =>
       files.writeProtected({
@@ -490,98 +556,73 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
       files.readExperimentImage(file, installed),
     resolveImport: (name) => files.resolveExperimentImport(name),
     prepareVolume: () => files.prepareExperimentVolume(),
-    close({ signal: suppliedSignal, recovery = false } = {}) {
+    close({ signal: supplied, recovery = false } = {}) {
       if (closing && (!recovery || !finished || complete)) return closing;
       files.fenceAdmission();
-      const signal = suppliedSignal
-        ? AbortSignal.any([suppliedSignal, AbortSignal.timeout(30000)])
+      const signal = supplied
+        ? AbortSignal.any([supplied, AbortSignal.timeout(30000)])
         : AbortSignal.timeout(30000);
       finished = false;
       closing = (async () => {
+        let primary, settlement, observer;
         const failures = [];
-        let settlement, custody, observer, recovered;
-        if (recovery) {
+        try {
+          await files.beginCleanup(signal);
+          const verification = files.verification;
+          observer = {
+            nonce: verification.input.nonce,
+            helper: verification.identity,
+            bridge: verification.bridge,
+            taskSha256: verification.taskSha256,
+          };
+          if (!recovery)
+            await write("windows-experiment-close.json", {
+              purpose: "experiment",
+              schemaVersion: 2,
+              observer,
+            });
+        } catch (error) {
+          if (!recovery) primary = error;
+        }
+        try {
+          settlement = await files.settleFiles();
+        } catch (error) {
+          if (!recovery) primary ??= error;
+        }
+        if (!windowsRetired(settlement)) {
           try {
-            await files.beginCleanup(signal);
-          } catch (cause) {
-            // A cached reader handoff failure is not replayed. Fresh protected
-            // recovery must still prove it retired before observer closure.
-            try {
-              nativeException("windows-experiment-recovery-handoff", cause);
-            } catch {
-              /* Keep recovery and the original failure independent. */
-            }
+            settlement = await recoverWindowsPreparationOwners(input, options, {
+              signal,
+              onReadersRetired: async (proof) => {
+                if (proof) files.releaseRecoveredReaders(proof);
+                try {
+                  await files.settleFiles();
+                } catch (error) {
+                  nativeException(
+                    "windows-experiment-original-observer",
+                    error,
+                  );
+                }
+                await files.waitForExit(signal);
+              },
+            });
+          } catch (error) {
+            if (!primary) primary = error;
+            else failures.push(error);
           }
         }
-        if (!recovery) {
-          try {
-            await files.beginCleanup(signal);
-          } catch (cause) {
-            failures.push(cause);
-          }
-          try {
-            [settlement] = await files.retireReaders();
-          } catch (cause) {
-            failures.push(cause);
-          }
-          try {
-            observer = {
-              nonce: files.verification.input.nonce,
-              helper: files.verification.identity,
-              bridge: files.verification.bridge,
-              taskSha256: files.verification.taskSha256,
-            };
-            if (settlement)
-              await write("windows-experiment-close.json", {
-                purpose: "experiment",
-                bootstrapSettlement: settlement,
-                observer,
-              });
-          } catch (cause) {
-            failures.push(cause);
-          }
-          // A failed receipt cannot suppress independent observer settlement.
-          // The registry itself still rejects closure with a retained reader.
-          try {
-            custody = await files.settleFiles();
-          } catch (cause) {
-            failures.push(cause);
-          }
-        }
-        if (!windowsRetired(custody)) {
-          try {
-            recovered = await recover(signal, failures, recovery);
-          } catch (cause) {
-            failures.push(cause);
-          }
-        }
-        const result =
-          recovered ??
-          (windowsRetired(settlement) && windowsRetired(custody)
-            ? {
-                status: "RETIRED",
-                independent: true,
-                emergencyCleanup: false,
-                bootstrapSettlement: settlement,
-                observer,
-                observerSettlement: custody,
-                nativeEventSha256: observationDigest({ settlement, custody }),
-              }
-            : {
-                status: "RETAINED",
-                independent: false,
-                emergencyCleanup: false,
-              });
-        if (failures.length)
+        if (primary)
           throw Object.assign(
-            new AggregateError(failures, "Windows experiment cleanup failed", {
-              cause: failures[0],
-            }),
-            { settlement: result },
+            new AggregateError(
+              [primary, ...failures],
+              "Windows experiment cleanup failed",
+              { cause: primary },
+            ),
+            { settlement },
           );
-        requireObservation(windowsRetired(result));
+        requireObservation(windowsRetired(settlement));
         complete = true;
-        return result;
+        return { ...settlement, observer };
       })().finally(() => {
         finished = true;
       });
@@ -591,86 +632,18 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
       return native.close({ ...settings, recovery: true });
     },
   };
-  // The owner is retained before startup can release a process or lose its
-  // acknowledgement. An opening exception cannot erase this cleanup obligation.
-  retain?.(native);
-  let helper;
+  // Retain the owner before its first System startup can lose an acknowledgement.
+  options.retain?.(native);
   try {
-    await reader.start({ signal });
-    helper = entries.findIndex(
-      (entry) =>
-        entry.path ===
-        helpers.find((helper) => helper.name === "build-helper").path,
-    );
-    await reader.open(helper);
-    for (let i = 0; i < entries.length; i++)
-      if (["data", "image"].includes(entries[i].kind)) await reader.open(i);
-    if (!reopen) await files.provisionBuild({ output });
+    await files.verifyDirectory({ directory, context: bootstrap.context });
+    await write("windows-experiment-selector.json", {
+      purpose: "experiment",
+      schemaVersion: 2,
+      prepared,
+    });
+    if (!options.reopen) await files.provisionBuild({ output });
   } catch (error) {
     throw Object.assign(error, { experimentNative: native });
   }
-  return {
-    ...native,
-    async findLibrary(name, roots) {
-      requireObservation(WINDOWS_BUILD_LIBRARIES.includes(name));
-      for (const root of roots) {
-        const file = path.join(root, name);
-        requireObservation(location(file));
-        try {
-          await fs.lstat(file);
-          return file;
-        } catch (error) {
-          if (error?.code !== "ENOENT") throw error;
-        }
-      }
-      return null;
-    },
-    async run(request, operation) {
-      requireObservation(!files.admissionClosed);
-      const tool = entries.findIndex((entry) => entry.path === request.file),
-        pin = prepared.tools.find((entry) => entry.path === request.file);
-      let index = 0;
-      await write(`windows-command-${observationDigest(request)}-intent.json`, {
-        purpose: "experiment",
-        request,
-        requestSha256: observationDigest(request),
-        candidateSha: job.candidateSha,
-        status: "POSSIBLE",
-      });
-      const result = await runWindowsBuildCommand(
-        request,
-        operation,
-        { helper, tool, toolSignatureSha256: pin.signatureSha256 },
-        reader,
-        async (record) => {
-          const proof =
-            record.phase === "worker-admitted"
-              ? (
-                  await files.verify(
-                    "verifyBuildWorker",
-                    record,
-                    operation.tool,
-                    pin.signatureSha256,
-                  )
-                ).compilerPolicy
-              : null;
-          await write(
-            `windows-command-${observationDigest(request)}-${index++}.json`,
-            {
-              purpose: "experiment",
-              ...record,
-              ...(proof ? { compilerPolicy: proof } : {}),
-            },
-          );
-          return proof;
-        },
-        { signal },
-      );
-      await write(`windows-command-${observationDigest(request)}-result.json`, {
-        purpose: "experiment",
-        result,
-      });
-      return result;
-    },
-  };
+  return native;
 }

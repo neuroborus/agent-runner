@@ -5,6 +5,34 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Build ordinary Windows helpers with hosted MSVC
+
+Ordinary Windows preparation trusts the declared disposable hosted image and
+installed MSVC/SDK, builds each exact-candidate helper once, and records the real
+commands, versions, hashes and marked PE/ABI output. A private version-2 record
+migrates preparation, cold loading, build-policy observations and recovery
+atomically. Cold loading verifies existing output without acquisition or a build.
+Compiler dependency/SDK/library trust reconstruction, protected System compilers,
+compiler Jobs/tasks, duplicate compiler readers and bootstrap journals are removed.
+The completed-build policy independently reads actual images and directory custody;
+no old compiler receipt or empty-domain retirement evidence is manufactured.
+
+Existing bridge sealing, System publication, native held image/loader reads and
+all case readers retain creation-time Jobs, narrow handles, original identities,
+owned-task removal and independent whole-domain retirement. Observer recovery
+holds original births before waiting for actual exit and then proves retirement.
+Timeout/cancellation owns the ordinary compiler child tree; uncertain cleanup and
+interrupted publication remain unsuccessful, preserving the first cause. Reviewed
+signature/import/publication validators and all native recipes/69 checks remain
+required. The atomic change predominantly removes the obsolete compiler chain
+and its exclusive fixtures while retaining distinct case-safety coverage.
+
+Portable regressions establish no hosted native acceptance. Darwin task-access/
+model-free-route and Windows socket/audit/retirement blockers remain failures
+until real evidence resolves them. New cleanup cannot retire cycle91's uncertain
+owners. The supervisor owns publication, both fresh original workflows and the
+ignored reversible recovery archive; this change claims no production readiness.
+
 ## 2026-10-18 — Build ordinary Darwin helpers with hosted Clang
 
 Ordinary Darwin preparation now trusts the disposable hosted image and installed

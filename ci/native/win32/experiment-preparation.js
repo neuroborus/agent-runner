@@ -1,6 +1,6 @@
 import { win32 as path } from "node:path";
-import { attemptNativeBuilds, nativeException } from "../diagnostics.js";
-import { writeFile, readFile, readdir } from "node:fs/promises";
+import { nativeException } from "../diagnostics.js";
+import { readFile } from "node:fs/promises";
 import {
   normalizeExperimentJob,
   normalizeExperimentPreparation,
@@ -8,21 +8,18 @@ import {
   recordExperimentPreparation,
   recordExperimentRecovery,
   observationDigest,
+  observationObject,
   requireObservation,
 } from "../index.js";
 import { digest, hash } from "./protocol.js";
-import {
-  WINDOWS_BUILD_TOOLS,
-  WINDOWS_BUILD_LIBRARIES,
-  WINDOWS_HELPER_NAMES,
-  windowsCompilerArguments,
-  windowsBuildOperation,
-} from "./build.js";
+import { location } from "./custody-protocol.js";
+import { WINDOWS_BUILD_TOOLS, WINDOWS_HELPER_NAMES } from "./build.js";
 import { windowsSystemRecipes } from "./system.js";
 import {
   bootstrapWindowsExperiment,
   openWindowsExperimentNative,
   WINDOWS_EXPERIMENT_SOURCES,
+  windowsHostedCompilerArguments,
 } from "./experiment-native.js";
 import { prepareWindowsExperimentCases } from "./experiment-cases.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
@@ -33,7 +30,6 @@ import {
 } from "./preparation.js";
 import { normalizeNativePolicyBinding } from "./experiment-policy.js";
 import { createWindowsSystemEffects } from "./effects.js";
-import { createWindowsCaseProvisioning } from "./case-provisioning.js";
 
 const retired = (value) =>
   value?.status === "RETIRED" &&
@@ -76,90 +72,281 @@ function worker(
 }
 
 export function windowsExperimentBuildInventory(prepared) {
+  observationObject(prepared, [
+    "purpose",
+    "schemaVersion",
+    "job",
+    "binding",
+    "directory",
+    "output",
+    "sourceDirectory",
+    "bootstrap",
+    "sources",
+    "tools",
+    "helpers",
+    "entries",
+    "environment",
+    "sdkBuild",
+    "sdkHeader",
+    "commands",
+    "versions",
+  ]);
   requireObservation(
-    prepared?.purpose === "experiment" &&
+    prepared.schemaVersion === 2 &&
+      prepared.purpose === "experiment" &&
       prepared.job.platform === "win32" &&
-      Array.isArray(prepared.helpers) &&
-      prepared.helpers.length === WINDOWS_HELPER_NAMES.length &&
-      new Set(prepared.helpers.map(({ name }) => name)).size ===
-        WINDOWS_HELPER_NAMES.length &&
-      Array.isArray(prepared.sources) &&
-      prepared.sources.length === WINDOWS_EXPERIMENT_SOURCES.length &&
-      new Set(prepared.sources.map(({ name }) => name)).size ===
-        WINDOWS_EXPERIMENT_SOURCES.length &&
-      prepared.tools.length === WINDOWS_BUILD_TOOLS.length,
+      prepared.output === path.join(prepared.directory, "platform-build") &&
+      prepared.sourceDirectory === prepared.directory + "-bootstrap" &&
+      prepared.bootstrap.context.jobBindingSha256 ===
+        observationDigest(prepared.binding),
   );
-  for (const name of WINDOWS_EXPERIMENT_SOURCES)
+  for (const [entries, names] of [
+    [prepared.sources, WINDOWS_EXPERIMENT_SOURCES],
+    [prepared.helpers, WINDOWS_HELPER_NAMES],
+  ])
     requireObservation(
-      prepared.sources.some(
-        (source) => source.name === name && hash(source.sha256),
-      ),
+      Array.isArray(entries) &&
+        entries.length === names.length &&
+        new Set(entries.map(({ name }) => name)).size === names.length &&
+        entries.every(
+          ({ name, sha256 }) => names.includes(name) && hash(sha256),
+        ),
     );
-  for (const name of WINDOWS_HELPER_NAMES) {
-    const helper = prepared.helpers.find((helper) => helper.name === name);
+  for (const helper of prepared.helpers) {
+    observationObject(helper, [
+      "name",
+      "path",
+      "sha256",
+      "signatureSha256",
+      "sourceSha256",
+    ]);
     requireObservation(
-      helper &&
-        hash(helper.sha256) &&
+      helper.path ===
+        path.join(prepared.sourceDirectory, helper.name + ".exe") &&
+        helper.signatureSha256 === helper.sha256 &&
         helper.sourceSha256 ===
-          prepared.sources.find((source) => source.name === name + ".c").sha256,
+          prepared.sources.find((source) => source.name === helper.name + ".c")
+            .sha256,
     );
   }
+  requireObservation(prepared.tools.length === WINDOWS_BUILD_TOOLS.length);
   for (const [index, recipe] of WINDOWS_BUILD_TOOLS.entries()) {
     const tool = prepared.tools[index];
+    observationObject(tool, ["name", "path", "sha256"]);
     requireObservation(
-      tool &&
-        tool.name === recipe.name &&
+      tool.name === recipe.name &&
         recipe.path.test(tool.path) &&
-        hash(tool.sha256) &&
-        hash(tool.signatureSha256),
+        hash(tool.sha256),
+    );
+  }
+  observationObject(prepared.environment, [
+    "INCLUDE",
+    "LIB",
+    "SystemRoot",
+    "PATH",
+  ]);
+  requireObservation(
+    Object.values(prepared.environment).every(
+      (value) =>
+        typeof value === "string" &&
+        value.length > 0 &&
+        !/[\0\r\n]/u.test(value),
+    ) && /^[0-9]+(?:\.[0-9]+){3}$/u.test(prepared.sdkBuild),
+  );
+  observationObject(prepared.sdkHeader, ["file", "sha256"]);
+  requireObservation(
+    location(prepared.sdkHeader.file) &&
+      /\\Windows Kits\\10\\Include\\[0-9.]+\\um\\Windows\.h$/u.test(
+        prepared.sdkHeader.file,
+      ) &&
+      hash(prepared.sdkHeader.sha256),
+  );
+  observationObject(prepared.versions, ["compiler", "sdk"]);
+  requireObservation(
+    Object.values(prepared.versions).every((value) =>
+      /^[0-9.]+$/u.test(value),
+    ) &&
+      Array.isArray(prepared.commands) &&
+      prepared.commands.length === WINDOWS_HELPER_NAMES.length + 5,
+  );
+  for (const command of prepared.commands) {
+    observationObject(command, [
+      "file",
+      "args",
+      "cwd",
+      "env",
+      "timeout",
+      "maxBuffer",
+      "exitCode",
+      "signal",
+      "timedOut",
+      "stdout",
+      "stderr",
+    ]);
+    requireObservation(
+      typeof command.file === "string" &&
+        Array.isArray(command.args) &&
+        command.args.every(
+          (arg) => typeof arg === "string" && !arg.includes("\0"),
+        ) &&
+        location(command.cwd) &&
+        command.env &&
+        typeof command.env === "object" &&
+        command.timeout === 60000 &&
+        command.maxBuffer === 1048576 &&
+        Number.isInteger(command.exitCode) &&
+        command.signal === null &&
+        command.timedOut === false &&
+        [command.stdout, command.stderr].every(
+          (value) =>
+            typeof value === "string" && Buffer.byteLength(value) <= 1048576,
+        ),
+    );
+  }
+  const [git, where] = prepared.commands,
+    who = prepared.commands.at(-1);
+  requireObservation(
+    git.file === "git" &&
+      observationDigest(git.args) ===
+        observationDigest(["rev-parse", "HEAD"]) &&
+      git.stdout.trim() === prepared.job.candidateSha &&
+      git.exitCode === 0 &&
+      where.file === "where.exe" &&
+      observationDigest(where.args) === observationDigest(["cl.exe"]) &&
+      where.stdout.trim().split(/\r?\n/u)[0] === prepared.tools[0].path &&
+      where.exitCode === 0 &&
+      who.file ===
+        path.join(prepared.environment.SystemRoot, "System32", "whoami.exe") &&
+      observationDigest(who.args) ===
+        observationDigest(["/user", "/fo", "csv", "/nh"]) &&
+      who.exitCode === 0 &&
+      /"(S-1-5-21-(?:[0-9]+-){3}[0-9]+)"\s*$/u.exec(who.stdout.trim())?.[1] ===
+        prepared.bootstrap.runnerSid,
+  );
+  const compiler = prepared.commands.filter(
+      (command) => command.file === prepared.tools[0].path,
+    ),
+    compilerEnvironment = {
+      CI: "true",
+      GITHUB_ACTIONS: "true",
+      LANG: "C",
+      ...prepared.environment,
+      TEMP: path.dirname(prepared.directory),
+      TMP: path.dirname(prepared.directory),
+    };
+  requireObservation(compiler.length === WINDOWS_HELPER_NAMES.length + 1);
+  for (const [index, name] of WINDOWS_HELPER_NAMES.entries()) {
+    const command = compiler[index + 1];
+    requireObservation(
+      command.exitCode === 0 &&
+        command.cwd === prepared.sourceDirectory &&
+        observationDigest(command.args) ===
+          observationDigest(
+            windowsHostedCompilerArguments(
+              path.join(prepared.sourceDirectory, name + ".c"),
+              path.join(prepared.sourceDirectory, name + ".exe"),
+            ),
+          ),
+    );
+  }
+  // TEMP/TMP are the actual hosted temporary root, which may contain the private
+  // report through multiple parent directories. Preserve it explicitly.
+  for (const command of prepared.commands.filter((command) =>
+    prepared.tools.some((tool) => tool.path === command.file),
+  )) {
+    observationObject(command.env, Object.keys(compilerEnvironment));
+    requireObservation(
+      location(command.env.TEMP) &&
+        command.env.TEMP === command.env.TMP &&
+        prepared.directory.startsWith(command.env.TEMP + "\\") &&
+        Object.entries(compilerEnvironment).every(
+          ([key, value]) =>
+            ["TEMP", "TMP"].includes(key) || command.env[key] === value,
+        ),
+    );
+  }
+  for (const [index, tool] of prepared.tools.entries()) {
+    const commands = prepared.commands.filter(
+      (command) =>
+        command.file === tool.path &&
+        observationDigest(command.args) ===
+          observationDigest(WINDOWS_BUILD_TOOLS[index].args),
+    );
+    requireObservation(
+      commands.length === 1 &&
+        [0, ...WINDOWS_BUILD_TOOLS[index].versionExitCodes].includes(
+          commands[0].exitCode,
+        ),
+    );
+    const text = commands[0].stdout + "\n" + commands[0].stderr;
+    requireObservation(
+      (index === 0
+        ? /Compiler Version ([0-9.]+) for x64/u.exec(text)?.[1]
+        : /Version ([0-9.]+)/u.exec(text)?.[1]) ===
+        prepared.versions[tool.name],
     );
   }
   return windowsSystemRecipes();
 }
 
-/** Typed MSVC dependency output is private data. Reject missing sources,
- * modules, foreign paths and unbounded lists rather than guessing SDK closure. */
-export function windowsExperimentDependencies(bytes, source, directory) {
-  requireObservation(
-    Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 1048576,
-  );
-  const value = JSON.parse(
-    new TextDecoder("utf-8", { fatal: true })
-      .decode(bytes)
-      .replace(/^\uFEFF/u, ""),
-  );
-  requireObservation(
-    value.Version === "1.2" &&
-      value.Data?.Source === source &&
-      Array.isArray(value.Data.Includes) &&
-      value.Data.Includes.length > 0 &&
-      value.Data.Includes.length <= 2048 &&
-      (!value.Data.ImportedModules ||
-        value.Data.ImportedModules.length === 0) &&
-      (!value.Data.ImportedHeaderUnits ||
-        value.Data.ImportedHeaderUnits.length === 0),
-  );
-  const files = [...new Set(value.Data.Includes)];
-  requireObservation(
-    files.every(
-      (file) =>
-        typeof file === "string" &&
-        path.isAbsolute(file) &&
-        path.normalize(file) === file &&
-        !/[\0\r\n]/u.test(file) &&
-        (path.dirname(file) === directory ||
-          /^[A-Z]:\\Program Files(?: \(x86\))?\\(?:Microsoft Visual Studio|Windows Kits)\\/u.test(
-            file,
-          )),
-    ),
-  );
-  return files.sort();
+function windowsExperimentBuildBinding(prepared, outputDaclSha256) {
+  requireObservation(hash(outputDaclSha256));
+  return {
+    purpose: "experiment",
+    context: prepared.bootstrap.context,
+    template: {
+      purpose: "experiment",
+      schemaVersion: 1,
+      candidateSha: prepared.job.candidateSha,
+      platform: "win32",
+      sourceSha256: observationDigest(prepared.sources),
+      provisioningSha256: prepared.bootstrap.bindingSha256,
+      policy: {
+        launch: {
+          buildSha256: observationDigest({
+            commands: prepared.commands,
+            versions: prepared.versions,
+          }),
+        },
+        policy: {
+          images: prepared.helpers.map(
+            ({ name, path, sha256, sourceSha256 }) => ({
+              name,
+              path,
+              sha256,
+              sourceSha256,
+            }),
+          ),
+          output: {
+            path: prepared.output,
+            identitySha256: { binding: "output" },
+            daclSha256: outputDaclSha256,
+          },
+        },
+      },
+      bindings: [
+        {
+          id: "output",
+          kind: "custody",
+          paths: [["policy", "output", "identitySha256"]],
+          minimum: null,
+          maximum: null,
+        },
+      ],
+    },
+  };
 }
 
-async function observeBuild(prepared, binding, native, commands, versions) {
+async function observeBuild(
+  prepared,
+  binding,
+  native,
+  commands,
+  versions,
+  readInstalled = readFile,
+) {
   windowsExperimentBuildInventory(prepared);
   const proofs = [],
-    sdkInputs = new Map(),
     actualHelpers = new Map(),
     runtime = [],
     helperLoaders = {};
@@ -183,10 +370,15 @@ async function observeBuild(prepared, binding, native, commands, versions) {
   };
   for (const source of prepared.sources)
     await held(path.join(prepared.sourceDirectory, source.name), source.sha256);
-  for (const tool of prepared.tools) await held(tool.path, tool.sha256);
+  for (const tool of prepared.tools)
+    requireObservation(digest(await readInstalled(tool.path)) === tool.sha256);
+  const sdkInput = await held(
+    prepared.sdkHeader.file,
+    prepared.sdkHeader.sha256,
+    true,
+  );
   for (const helper of prepared.helpers) {
-    const target = path.join(prepared.output, helper.name + ".exe"),
-      read = await native.readImage(target);
+    const read = await native.readImage(helper.path);
     requireObservation(
       read.independent &&
         read.held &&
@@ -197,53 +389,17 @@ async function observeBuild(prepared, binding, native, commands, versions) {
     );
     proofs.push(read.nativeEventSha256);
     const image = inspectWindowsExperimentPe(read.bytes);
-    await held(helper.path, helper.sha256);
     actualHelpers.set(helper.name, { read, image });
-    const dependencies = await held(target + ".deps.json");
-    for (const file of windowsExperimentDependencies(
-      dependencies.bytes,
-      path.join(prepared.sourceDirectory, helper.name + ".c"),
-      prepared.sourceDirectory,
-    )) {
-      if (path.dirname(file) === prepared.sourceDirectory) {
-        const source = prepared.sources.find(
-          (source) => source.name === path.basename(file),
-        );
-        requireObservation(source);
-        await held(file, source.sha256);
-      } else if (!sdkInputs.has(file))
-        sdkInputs.set(file, await held(file, null, true));
-    }
   }
-  // Fixed link libraries, linker and compiler implementation are observed data;
-  // nothing here asserts authenticated source or release closure.
-  for (const name of ["link.exe", "c1.dll", "c1xx.dll", "c2.dll"]) {
-    const file = path.join(path.dirname(prepared.tools[0].path), name);
-    sdkInputs.set(file, await held(file, null, true));
-  }
-  for (const name of WINDOWS_BUILD_LIBRARIES) {
-    let selected;
-    const file = await native.findLibrary(
-      name,
-      prepared.environment.LIB.split(";").filter(Boolean),
-    );
-    if (file) selected = { file, read: await held(file, null, true) };
-    requireObservation(selected);
-    sdkInputs.set(selected.file, selected.read);
-  }
-  requireObservation(
-    commands.length === WINDOWS_HELPER_NAMES.length + 2 &&
-      commands.every((command) => retired(command.settlement)),
-  );
   const sdk = {
       build: prepared.sdkBuild,
-      sha256: observationDigest(
-        [...sdkInputs].map(([file, read]) => ({
-          file,
-          sha256: digest(read.bytes),
-          identitySha256: read.identitySha256,
-        })),
-      ),
+      sha256: observationDigest({
+        build: prepared.sdkBuild,
+        header: {
+          file: prepared.sdkHeader.file,
+          sha256: digest(sdkInput.bytes),
+        },
+      }),
     },
     tools = prepared.tools.map((tool) => ({
       id: tool.name,
@@ -360,7 +516,11 @@ async function observeBuild(prepared, binding, native, commands, versions) {
           readSha256: observationDigest(proofs),
         },
       },
-      prepared.job,
+      Object.fromEntries(
+        ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+          (key) => [key, prepared.job[key]],
+        ),
+      ),
     );
   for (const helper of prepared.helpers) {
     const reached = new Set([helper.path]);
@@ -378,10 +538,9 @@ async function observeBuild(prepared, binding, native, commands, versions) {
     observation,
     runtime,
     helperLoaders,
-    sdkInputs: [...sdkInputs].map(([file, read]) => ({
-      file,
-      sha256: digest(read.bytes),
-    })),
+    sdkInputs: [
+      { file: prepared.sdkHeader.file, sha256: digest(sdkInput.bytes) },
+    ],
   };
 }
 
@@ -419,26 +578,11 @@ export async function prepareWindowsExperiment(
       receiptSha256: null,
     }),
   );
-  let bootstrapSequence = 0,
-    bootstrapRecorded = false;
-  const writeBootstrap =
-    options.persistBootstrap ??
-    (async (record) =>
-      writeFile(
-        `${options.bootstrapJournal ?? directory}-bootstrap-${bootstrapSequence++}.json`,
-        JSON.stringify(record) + "\n",
-        { flag: "wx" },
-      ));
-  const persistBootstrap = async (record) => {
-    await writeBootstrap(record);
-    bootstrapRecorded = true;
-  };
   try {
     prepared = await (options.bootstrap ?? bootstrapWindowsExperiment)(
       job,
       directory,
       binding,
-      persistBootstrap,
       options,
     );
     windowsExperimentBuildInventory(prepared);
@@ -448,113 +592,14 @@ export async function prepareWindowsExperiment(
         native = owner;
       },
     });
-    const commands = [],
-      settledFailures = new WeakSet(),
-      versions = {};
-    const run = async (tool, args, operation, deadlineMs) => {
-      const request = {
-          candidateSha: job.candidateSha,
-          platform: "win32",
-          file: tool.path,
-          toolSha256: tool.sha256,
-          args,
-          cwd: prepared.output,
-          env: {
-            CI: "true",
-            GITHUB_ACTIONS: "true",
-            LANG: "C",
-            ...prepared.environment,
-          },
-          deadlineMs,
-        },
-        result = await native.run(request, operation);
-      requireObservation(
-        result.independent &&
-          result.requestSha256 === observationDigest(request) &&
-          result.toolSha256 === tool.sha256 &&
-          result.signal === null &&
-          result.timedOut === false &&
-          retired(result.settlement),
-      );
-      const accepted =
-        operation.mode === "compile"
-          ? [0]
-          : [
-              0,
-              ...WINDOWS_BUILD_TOOLS.find((entry) => entry.name === tool.name)
-                .versionExitCodes,
-            ];
-      const { stdout, stderr, ...receipt } = result;
-      commands.push({
-        ...receipt,
-        stdoutSha256: digest(stdout),
-        stderrSha256: digest(stderr),
-      });
-      if (!accepted.includes(result.exitCode)) {
-        requireObservation(
-          Number.isInteger(result.exitCode) &&
-            result.exitCode > 0 &&
-            result.exitCode <= 255,
-        );
-        const error = Object.assign(
-          new Error("Windows compiler recipe failed"),
-          result,
-        );
-        settledFailures.add(error);
-        throw error;
-      }
-      return stdout + "\n" + stderr;
-    };
-    for (const tool of prepared.tools) {
-      const recipe = WINDOWS_BUILD_TOOLS.find(
-          (entry) => entry.name === tool.name,
-        ),
-        text = await run(
-          tool,
-          recipe.args,
-          {
-            mode: tool.name === "compiler" ? "compiler-version" : "sdk-version",
-            tool,
-          },
-          30000,
-        );
-      versions[tool.name] =
-        tool.name === "compiler"
-          ? /Compiler Version ([0-9.]+) for x64/u.exec(text)?.[1]
-          : /Version ([0-9.]+)/u.exec(text)?.[1];
-      requireObservation(versions[tool.name]);
-    }
-    const build = async (helper) => {
-      const source = {
-          path: path.join(prepared.sourceDirectory, helper.name + ".c"),
-          sha256: helper.sourceSha256,
-        },
-        target = path.join(prepared.output, helper.name + ".exe"),
-        tool = prepared.tools.find((tool) => tool.name === "compiler");
-      await run(
-        tool,
-        windowsCompilerArguments(source.path, target, "experiment"),
-        { mode: "compile", tool, helper, source, target },
-        60000,
-      );
-    };
-    await attemptNativeBuilds(
-      "windows-protected-builds",
-      prepared.helpers.map((helper) => ({
-        name: helper.name,
-        run: () => build(helper),
-      })),
-      {
-        signal: options.signal,
-        settled: (error) => settledFailures.has(error),
-      },
-    );
+    const { commands, versions } = prepared;
     const observed = await observeBuild(
       prepared,
       binding,
       native,
       commands,
       versions,
+      options.readInstalled ?? options.filesystem?.readFile,
     );
     const system = await prepareWindowsExperimentCases(
       prepared,
@@ -562,53 +607,21 @@ export async function prepareWindowsExperiment(
       native,
       options,
     );
-    const buildBinding = {
-      purpose: "experiment",
-      context: prepared.bootstrap.context,
-      template: {
-        purpose: "experiment",
-        schemaVersion: 1,
-        candidateSha: job.candidateSha,
-        platform: "win32",
-        sourceSha256: observationDigest(prepared.sources),
-        provisioningSha256: prepared.bootstrap.bindingSha256,
-        policy: {
-          launch: {},
-          policy: { output: { identitySha256: { binding: "output" } } },
-        },
-        bindings: [
-          {
-            id: "output",
-            kind: "custody",
-            paths: [["policy", "output", "identitySha256"]],
-            minimum: null,
-            maximum: null,
-          },
-        ],
-      },
-    };
-    const buildProof = await createWindowsCaseProvisioning(
-      {
-        job,
-        directory: prepared.directory,
-        output: prepared.output,
-        plan: { bootstrap: prepared.bootstrap },
-        fs: { readdir: native.files.readdir },
-        guard: () => requireObservation(!options.signal?.aborted),
-        receipt: async (file) => (await native.read(file)).bytes,
-      },
-      native.files,
-    ).observeBuildPolicy(
-      buildBinding,
-      { commands, settlement: commands.map(({ settlement }) => settlement) },
-      { signal: options.signal },
+    const output = await native.files.readBuildDirectory(prepared.output);
+    requireObservation(
+      output.independent &&
+        output.held &&
+        output.protectedParents &&
+        hash(output.daclSha256),
     );
-    const buildPolicy = structuredClone(buildProof.observed.policy);
-    buildPolicy.policy.output.identitySha256 = { binding: "output" };
-    buildBinding.template.policy = buildPolicy;
+    const buildBinding = windowsExperimentBuildBinding(
+      prepared,
+      output.daclSha256,
+    );
     system.bindings.unshift({ id: "build", policyBinding: buildBinding });
     await native.write("windows-experiment-preparation.json", {
       purpose: "experiment",
+      schemaVersion: 2,
       prepared,
       commands,
       versions,
@@ -643,6 +656,7 @@ export async function prepareWindowsExperiment(
       job,
       preparation: {
         purpose: "experiment",
+        schemaVersion: 2,
         prepared,
         commands,
         versions,
@@ -697,26 +711,12 @@ export async function prepareWindowsExperiment(
         reportCleanup(cleanup);
       }
     }
-    const failedJob = { ...job, failure: "preparation-failed" };
+    const failedJob = { ...job, failure: job.failure ?? "preparation-failed" };
     try {
       await save(failedJob);
     } catch (cleanup) {
       reportCleanup(cleanup);
     }
-    if (bootstrapRecorded && cleanupFailures.length)
-      try {
-        await persistBootstrap({
-          purpose: "experiment",
-          phase: "preparation-cleanup-failed",
-          candidateSha: job.candidateSha,
-          failures: cleanupFailures.map((cause) => ({
-            name: String(cause?.name ?? "Error").slice(0, 128),
-            message: String(cause?.message ?? cause).slice(0, 4096),
-          })),
-        });
-      } catch (cleanup) {
-        reportCleanup(cleanup);
-      }
     throw Object.assign(
       new Error("Windows experiment preparation failed", { cause: primary }),
       { experimentJob: failedJob, cleanupFailures },
@@ -730,6 +730,7 @@ export function windowsExperimentSystemInput(job, preparation) {
   requireObservation(
     job.purpose === "experiment" &&
       preparation.purpose === "experiment" &&
+      preparation.schemaVersion === 2 &&
       retired(preparation.settlement),
   );
   const { prepared, system } = preparation;
@@ -760,7 +761,7 @@ export function windowsExperimentSystemInput(job, preparation) {
   const plan = normalizeWindowsExperimentPreparation(
     {
       purpose: "experiment",
-      schemaVersion: 1,
+      schemaVersion: 2,
       sourceDirectory: prepared.sourceDirectory,
       sources: prepared.sources,
       bootstrap: prepared.bootstrap,
@@ -770,21 +771,6 @@ export function windowsExperimentSystemInput(job, preparation) {
           sha256,
           signatureSha256,
         }))(prepared.helpers.find(({ name }) => name === "build-helper")),
-        toolSignatures: Object.fromEntries(
-          prepared.tools.map(({ name, signatureSha256 }) => [
-            name,
-            signatureSha256,
-          ]),
-        ),
-        unsignedHelpers: Object.fromEntries(
-          prepared.helpers.map(({ name, sha256 }) => [name, sha256]),
-        ),
-        helperSignatures: Object.fromEntries(
-          prepared.helpers.map(({ name, signatureSha256 }) => [
-            name,
-            signatureSha256,
-          ]),
-        ),
       },
       cases: system.cases,
     },
@@ -807,101 +793,24 @@ export function windowsExperimentSystemInput(job, preparation) {
   };
 }
 
-/** Fresh verification rejoins held bytes and every original compiler receipt;
- * it never recompiles or substitutes the current observer for an original owner. */
+/** Cold verification reads existing outputs and original case-custody births;
+ * ordinary compiler commands have no System worker or retirement receipts. */
 export async function verifyWindowsExperimentBuild(
   input,
-  { files, signal } = {},
+  { files, signal, readInstalled } = {},
 ) {
-  const { job, preparation, manifest, directory } = input,
+  const { job, preparation } = input,
     { prepared, commands, versions, settlement } = preparation;
   windowsExperimentSystemInput(job, preparation);
+  requireObservation(files && retired(settlement));
+  const actual = [];
   requireObservation(
-    files &&
-      commands.length === WINDOWS_HELPER_NAMES.length + 2 &&
-      retired(settlement),
+    settlement.observer?.helper && settlement.observer?.bridge,
   );
-  const actual = [],
-    identities = [],
-    originals = [];
-  for (const receipt of commands) {
-    const prefix = `windows-command-${receipt.requestSha256}`,
-      intent = JSON.parse(
-        (
-          await files.readProtected({
-            file: path.join(directory, prefix + "-intent.json"),
-            receipt: true,
-          })
-        ).bytes,
-      ),
-      record = JSON.parse(
-        (
-          await files.readProtected({
-            file: path.join(directory, prefix + "-result.json"),
-            receipt: true,
-          })
-        ).bytes,
-      );
-    requireObservation(
-      intent.purpose === "experiment" &&
-        record.purpose === "experiment" &&
-        observationDigest(intent.request) === receipt.requestSha256 &&
-        record.result.requestSha256 === receipt.requestSha256,
-    );
-    windowsBuildOperation(intent.request, manifest, prepared.output);
-    const { stdout, stderr, ...saved } = record.result;
-    requireObservation(
-      observationDigest({
-        ...saved,
-        stdoutSha256: digest(stdout),
-        stderrSha256: digest(stderr),
-      }) === observationDigest(receipt) &&
-        retired(record.result.settlement) &&
-        record.result.independent,
-    );
-    const workerNames = (await files.readdir(directory)).filter((name) =>
-      new RegExp(`^${prefix}-[0-9]+\\.json$`, "u").test(name),
-    );
-    const workers = [];
-    for (const name of workerNames) {
-      const record = JSON.parse(
-        (
-          await files.readProtected({
-            file: path.join(directory, name),
-            receipt: true,
-          })
-        ).bytes,
-      );
-      if (record.phase === "worker-admitted") workers.push(record);
-    }
-    requireObservation(
-      workers.length === 1 &&
-        observationDigest(workers[0].compilerPolicy) ===
-          observationDigest(receipt.compilerPolicy),
-    );
-    identities.push(receipt.identity, receipt.helperIdentity);
-    originals.push(record.result);
-  }
-  const owner = settlement.bootstrapSettlement;
-  requireObservation(
-    retired(owner) && owner.taskRemoved && owner.helper && owner.bridge,
-  );
-  identities.push(owner.helper, owner.bridge);
   const retiredDomains = await files.verify(
     "verifyPreparation",
     prepared.bootstrap,
     [
-      {
-        nonce: prepared.bootstrap.nonce,
-        identities: [
-          ...new Map(
-            identities.map((identity) => [
-              observationDigest(identity),
-              identity,
-            ]),
-          ).values(),
-        ],
-      },
       {
         nonce: settlement.observer.nonce,
         identities: [settlement.observer.helper, settlement.observer.bridge],
@@ -918,10 +827,6 @@ export async function verifyWindowsExperimentBuild(
     readInput: (file) => files.readExperimentInput(file),
     readImage: (file, installed) => files.readExperimentImage(file, installed),
     resolveImport: (name) => files.resolveExperimentImport(name),
-    findLibrary: async (name) =>
-      preparation.sdkInputs.find(
-        ({ file }) => path.basename(file).toLowerCase() === name.toLowerCase(),
-      )?.file,
   };
   const observed = await observeBuild(
     prepared,
@@ -929,6 +834,7 @@ export async function verifyWindowsExperimentBuild(
     native,
     commands,
     versions,
+    readInstalled,
   );
   requireObservation(
     observationDigest(observed.observation.expected) ===
@@ -942,7 +848,8 @@ export async function verifyWindowsExperimentBuild(
     purpose: "experiment",
     status: "OBSERVED",
     independent: true,
-    commands: originals,
+    prepared,
+    commands,
     settlement: retiredDomains,
     components: observed.observation.observed.components,
     nativeEventSha256: observationDigest(actual),
@@ -971,7 +878,12 @@ export function createWindowsExperimentSystemEffects(
       {
         ...options,
         verifyExperimentBuild: (state, settings) =>
-          verifyWindowsExperimentBuild(state, { files, ...settings }),
+          verifyWindowsExperimentBuild(state, {
+            files,
+            readInstalled:
+              options.readInstalled ?? options.filesystem?.readFile,
+            ...settings,
+          }),
       },
       owners,
     );
@@ -1036,54 +948,24 @@ export function createWindowsExperimentSystemEffects(
   };
 }
 
-async function bootstrapSelector(job, directory, options) {
-  const journal = options.bootstrapJournal ?? directory,
-    names = await (options.readdir ?? readdir)(path.dirname(journal)),
-    prefix = path.basename(journal) + "-bootstrap-",
-    journals = names
-      .filter(
-        (name) =>
-          name.startsWith(prefix) &&
-          /^[0-9]+\.json$/u.test(name.slice(prefix.length)),
-      )
-      .sort(
-        (a, b) =>
-          Number(a.slice(prefix.length, -5)) -
-          Number(b.slice(prefix.length, -5)),
-      );
-  requireObservation(journals.length > 0 && journals.length <= 128);
-  let selected;
-  for (const [index, name] of journals.entries()) {
-    requireObservation(name === prefix + index + ".json");
-    const record = JSON.parse(
-      await (options.read ?? readFile)(path.join(path.dirname(journal), name)),
-    );
-    requireObservation(record.purpose === "experiment");
-    if (record.phase === "bootstrap-seal-possible") {
-      requireObservation(!selected);
-      selected = record;
-    }
-  }
-  requireObservation(
-    selected &&
-      selected.directory === directory &&
-      selected.bootstrap.context.candidateSha === job.candidateSha &&
-      selected.bootstrap.context.runId === job.runId &&
-      selected.bootstrap.context.runAttempt === job.runAttempt,
-  );
-  const prepared = {
-    purpose: "experiment",
-    job,
-    ...selected,
-    sourceDirectory: directory + "-bootstrap",
-  };
+async function publicationSelector(job, directory, options) {
+  const bytes = await (options.read ?? readFile)(directory + "-selector.json");
+  requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
+  const prepared = JSON.parse(bytes);
   windowsExperimentBuildInventory(prepared);
+  requireObservation(
+    prepared.directory === directory &&
+      prepared.job.candidateSha === job.candidateSha &&
+      prepared.job.repository === job.repository &&
+      prepared.job.runId === job.runId &&
+      prepared.job.runAttempt === job.runAttempt,
+  );
   return prepared;
 }
 
 /** Reuse native whole-Job and owned-task recovery even before case construction
- * finishes. Unsealed seeds or missing original birth acknowledgements retain
- * uncertainty; recovery never recompiles, reseals, or retries a native case. */
+ * finishes. Incomplete publication or missing original birth acknowledgements
+ * retain uncertainty; recovery never rebuilds, reseals, or retries a case. */
 export async function recoverWindowsExperimentPreparation(
   input,
   directory,
@@ -1107,8 +989,12 @@ export async function recoverWindowsExperimentPreparation(
     return job;
   let result;
   try {
-    const prepared = await bootstrapSelector(job, directory, options),
-      plan = { purpose: "experiment", bootstrap: prepared.bootstrap },
+    const prepared = await publicationSelector(job, directory, options),
+      plan = {
+        purpose: "experiment",
+        schemaVersion: 2,
+        bootstrap: prepared.bootstrap,
+      },
       input = {
         job,
         directory,
@@ -1154,8 +1040,8 @@ export async function recoverWindowsExperimentPreparation(
   return settled;
 }
 
-/** Bootstrap journals are selectors only. Protected contents and original
- * admission receipts are re-read by a fresh System owner before use. */
+/** The private publication selector supplies expectations only. Protected
+ * contents and original observer births are re-read by a fresh System owner. */
 async function withWindowsExperimentPreparation(
   input,
   directory,
@@ -1175,7 +1061,7 @@ async function withWindowsExperimentPreparation(
   requireObservation(
     job.preparation && job.preparationEffects.settlement.status === "RETIRED",
   );
-  const prepared = await bootstrapSelector(job, directory, options);
+  const prepared = await publicationSelector(job, directory, options);
   const files =
     options.files ??
     createWindowsPreparationFiles(
@@ -1212,8 +1098,9 @@ async function withWindowsExperimentPreparation(
         })
       ).bytes,
     );
+    observationObject(close, ["purpose", "schemaVersion", "observer"]);
     requireObservation(
-      close.purpose === "experiment" && retired(close.bootstrapSettlement),
+      close.purpose === "experiment" && close.schemaVersion === 2,
     );
     const birth = JSON.parse(
         (
@@ -1254,13 +1141,14 @@ async function withWindowsExperimentPreparation(
     // observe original complete Jobs and task absence before using retirement.
     preparation.settlement = {
       ...job.preparationEffects.settlement,
-      bootstrapSettlement: close.bootstrapSettlement,
       observer: close.observer,
       nativeEventSha256: observationDigest({ close, birth, result }),
     };
     requireObservation(
-      observationDigest(record.prepared.bootstrap) ===
-        observationDigest(prepared.bootstrap),
+      record.schemaVersion === 2 &&
+        observationDigest(record.prepared) === observationDigest(prepared) &&
+        observationDigest(record.prepared.bootstrap) ===
+          observationDigest(prepared.bootstrap),
     );
     return await read(job, preparation, files);
   } catch (error) {
@@ -1290,7 +1178,11 @@ export function loadWindowsExperiment(input, directory, options = {}) {
     async (job, preparation, files) => {
       const verified = await verifyWindowsExperimentBuild(
         windowsExperimentSystemInput(job, preparation),
-        { files, signal: options.signal },
+        {
+          files,
+          signal: options.signal,
+          readInstalled: options.readInstalled ?? options.filesystem?.readFile,
+        },
       );
       return { job, preparation, runtime: verified.components };
     },

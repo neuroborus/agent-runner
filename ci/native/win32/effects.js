@@ -172,11 +172,12 @@ export function createWindowsSystemEffects(
         const binding = normalizeNativePolicyBinding(policyBinding);
         requireObservation(
           binding.purpose === "experiment" &&
-            typeof recordPolicy === "function",
+            typeof recordPolicy === "function" &&
+            same(binding.context, state.plan.bootstrap.context),
         );
         const policyProof = await provisioning.observeBuildPolicy(
           binding,
-          { commands: proof.commands, settlement: proof.settlement },
+          { prepared: proof.prepared },
           { signal },
         );
         verifyNativePolicy(
