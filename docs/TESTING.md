@@ -901,6 +901,17 @@ ambiguous, invalid or contradictory anchors, actual-type disagreement and anchor
 cleanup are covered. Unique child membership, compiler limits, DACL proofs and
 both complete inherited-object censuses remain mandatory, including unknown or
 inaccessible inherited objects and incorrect pipe counts.
+The same custody suite checks actual build-only creation flags, disjoint controller
+and compiler admission, exact `0x2808/32/255` and `0x2008/31/255` policies, rejected
+compiler breakaway/silent-breakaway and closed policy shapes. Retirement checks
+the original worker and named compiler Job independently of the held controller
+Job, including surviving descendants, changed births and missing observations.
+Existing preparation coverage models separate original Job ownership and joins
+protected pre-release worker records to settled results and approved policy;
+normal, partial and owner-loss recovery remain covered by the existing native
+harness. No slow-tier assignment or native acceptance follows from these portable
+fixtures; fresh matching native CI and separate original-effect retirement remain
+mandatory.
 The actual guard, failure emitter and both creator-census duplication fragments
 also run through the real fragmented channel parser.
 They retain the saved error despite diagnostic I/O changing LastError, require

@@ -5,6 +5,22 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Separate Windows build controller and compiler Jobs
+
+The sealed build controller alone enables explicit breakaway in its existing
+32-process, kill-on-last-close, UI255 Job. Its fixed suspended compiler creation
+uses the creation-time Job list to enter a separate 31-process, kill-on-last-close,
+UI255 Job without compiler or descendant breakaway. This removes unsupported
+UI-restricted nesting while preserving atomic containment and all other helper
+policies. Strict independent admission requires sole, disjoint memberships and
+joins both births to protected worker and settled result records. The controller
+retains the compiler Job's controlling handle; temporary inspection duplicates
+close. Completion checks the original worker, held controller Job and original
+named compiler Job. Cold recovery permits the new controller policy only under
+verified original build-reader ownership. Missing evidence or surviving effects
+retain custody and the first failure. Portable regressions establish no Windows
+cure; fresh matching original CI and independent original retirement remain required.
+
 ## 2026-10-17 — Collect existing logs for the original Darwin signature failure
 
 Original build-admission failure diagnostics retain the native caller birth,

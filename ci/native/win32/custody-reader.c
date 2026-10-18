@@ -417,6 +417,9 @@ static void start_helper(char **values, unsigned n) {
   }
   SECURITY_ATTRIBUTES private = attributes(sd, FALSE); helper_job = recovery_job(&private);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+  /* Only the sealed compiler controller may leave this Job at child creation.
+   * Its compiler is assigned atomically to a separate no-breakaway Job. */
+  if (compiler) limits.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_BREAKAWAY_OK;
   limits.BasicLimitInformation.ActiveProcessLimit = compiler || git ? 32 : 1; JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
   need(SetInformationJobObject(helper_job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)) && SetInformationJobObject(helper_job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
   SIZE_T size = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &size); need(size > 0 && size <= 65536);
@@ -706,6 +709,10 @@ static void compiler_policy(unsigned index, unsigned creator) {
     need(CloseHandle(duplicate));
   }
   free(list); need(CloseHandle(source) && pipes == 3);
+  BOOL belongs; need(creator < process_count && creator != index && verified_jobs[creator] &&
+    WaitForSingleObject(processes[creator], 0) == WAIT_TIMEOUT &&
+    IsProcessInJob(processes[index], verified_jobs[creator], &belongs) && !belongs &&
+    IsProcessInJob(processes[creator], verified_jobs[creator], &belongs) && belongs);
   source = duplicate_process_owner(creator); USHORT types[2]; list = creator_inventory(types, FALSE); HANDLE compilerJob = NULL;
   for (ULONG_PTR i = 0; i < list->count; i++) {
     struct verify_handle *entry = &list->entries[i]; if (entry->pid != GetProcessId(source) || entry->type != types[0]) continue;
@@ -717,11 +724,13 @@ static void compiler_policy(unsigned index, unsigned creator) {
     need(object_type(duplicate, L"Job"));
     BOOL member = FALSE; JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits;
     if (IsProcessInJob(processes[index], duplicate, &member) && member &&
-        QueryInformationJobObject(duplicate, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) && limits.BasicLimitInformation.ActiveProcessLimit == 31) {
+        QueryInformationJobObject(duplicate, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL) &&
+        limits.BasicLimitInformation.LimitFlags == 0x2008 && limits.BasicLimitInformation.ActiveProcessLimit == 31) {
       need(!compilerJob); compilerJob = duplicate;
     } else need(CloseHandle(duplicate));
   }
   free(list); need(CloseHandle(source) && compilerJob);
+  need(IsProcessInJob(processes[creator], compilerJob, &belongs) && !belongs);
   printf(",\"inheritedHandles\":[\"pipe\",\"pipe\",\"pipe\"],\"compilerJob\":"); job_read(compilerJob);
   need(CloseHandle(compilerJob)); putchar('}');
 }

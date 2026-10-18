@@ -271,7 +271,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         (!privateCreator || hash(actual.creatorDefaultDaclSha256)) &&
         (kind !== "file" || actual.fileRootDeleteSharing === true) &&
         actual.inheritedHandleCount === slots.length + 2 &&
-        job.limitFlags === 0x2008 &&
+        job.limitFlags === (kind === "build" ? 0x2808 : 0x2008) &&
         job.processLimit === (["build", "git"].includes(kind) ? 32 : 1) &&
         job.uiRestrictions === 255 &&
         job.members.length === 1 &&

@@ -88,7 +88,7 @@ int wmain(int argc, wchar_t **argv) {
     UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, sizeof(handles), NULL, NULL) &&
     UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL));
   start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = childIn; start.StartupInfo.hStdOutput = childOut; start.StartupInfo.hStdError = childError;
-  PROCESS_INFORMATION worker; need(CreateProcessW(tool.path, command, &private, &private, TRUE, CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, NULL, directory.path, &start.StartupInfo, &worker));
+  PROCESS_INFORMATION worker; need(CreateProcessW(tool.path, command, &private, &private, TRUE, CREATE_BREAKAWAY_FROM_JOB | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, NULL, directory.path, &start.StartupInfo, &worker));
   DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
   need(CloseHandle(childIn) && CloseHandle(childOut) && CloseHandle(childError) && CloseHandle(parentIn));
   BOOL belongs; need(system_process(worker.hProcess) && IsProcessInJob(worker.hProcess, job, &belongs) && belongs);

@@ -524,7 +524,8 @@ export function createWindowsBuildEffects(
           requestSha256: id,
           status: "POSSIBLE",
         });
-        let sequence = 0;
+        let sequence = 0,
+          workerAdmission;
         const persist = async (record) => {
           let policy;
           if (!options.runCommand && record.phase === "worker-admitted") {
@@ -534,6 +535,8 @@ export function createWindowsBuildEffects(
             record = { ...record, compilerPolicy: policy };
           }
           await state.write(`windows-command-${id}-${sequence++}.json`, record);
+          if (record.phase === "worker-admitted")
+            workerAdmission = structuredClone(record);
           return policy;
         };
         state.guard(signal);
@@ -588,6 +591,17 @@ export function createWindowsBuildEffects(
             hash(result.nativeEventSha256) &&
             windowsRetired(result.settlement),
         );
+        if (!options.runCommand)
+          requireObservation(
+            workerAdmission &&
+              sameWindowsIdentity(result.identity, workerAdmission.worker) &&
+              sameWindowsIdentity(
+                result.helperIdentity,
+                workerAdmission.helper,
+              ) &&
+              observationDigest(result.compilerPolicy) ===
+                observationDigest(workerAdmission.compilerPolicy),
+          );
         if (operation.mode === "compile") {
           const unsignedSha256 =
             state.plan.command.unsignedHelpers[operation.helper.name];
@@ -1183,6 +1197,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           [],
           [],
           preSetup,
+          readers.map(({ helper }) => helper),
         );
         requireObservation(
           windowsRetired(result) && result.noLiveMembers === true,
@@ -1244,6 +1259,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             }));
           }),
         preSetup,
+        readers.map(({ helper }) => helper),
       );
       requireObservation(
         windowsRetired(result) && result.noLiveMembers === true,

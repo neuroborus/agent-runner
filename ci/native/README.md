@@ -6626,6 +6626,13 @@ Prepared verification explicitly adopts its fresh phase signal after all build
 readers close; the original observer deadline and latched failure remain intact.
 Build-case settlement uses the verified command retirement and closes any
 remaining file observer; it never starts another bootstrap to replace that proof.
+Build-helper completion independently rereads its original worker birth, held
+controller Job and creation-bound named compiler Job before retirement or
+publication. Only the original controller retains the compiler Job's controlling
+handle; inspection duplicates close before release. Recovery permits the changed
+controller policy only for original build readers with freshly joined births and
+sealed images. Missing evidence, surviving compiler descendants and observer
+replacement retain custody and the original failure.
 
 Explicit bootstrap verifies sealed assets and persists task intent. Build `run`
 admits only MSVC `/Bv`, SDK `rc /?` and the fixed x64 C17/reproducible compile/link
@@ -6634,8 +6641,17 @@ inspection, WFP, XmlLite and Security-event libraries. The compiler reads sealed
 copies matching the reviewed checkout sources. `provisionBuild` prepares only the
 owned build directory after command intent. The signed one-shot build entry
 creates System-only output/object DACLs, an explicit private pipe handle list
-and a suspended System worker in a private Job. The outer helper Job permits
-at most 32 processes; the inner tool Job permits 31. No breakaway is enabled.
+and a suspended System worker in a private Job. The build controller's Job has
+exact policy `0x2808/32/255`: explicit breakaway, kill-on-last-close, a 32-process
+limit and all UI restrictions. Only its fixed compiler creation requests
+`CREATE_BREAKAWAY_FROM_JOB`, together with suspended creation and the creation-time
+Job and exact three-pipe handle lists. This avoids unsupported UI-restricted Job
+nesting. The separate compiler Job retains exact `0x2008/31/255`, with no breakaway
+or silent-breakaway authority for the compiler or descendants. Other helper roles
+retain their existing policies. Independent admission requires the controller
+alone in its Job and the parked compiler alone in the other, with neither in the
+other domain. The closed `compilerPolicy.outerJob` field names the distinct
+controller domain; protected worker and final result records join both births.
 Build and fixed Git helpers are born with a separate System primary token whose
 default DACL grants only System generic-all access. Before release, native reads
 of `creatorDefaultDaclSha256` must match the independent `verifyTransfer` proof;

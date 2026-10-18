@@ -417,6 +417,7 @@ function fixture({
           sdkRootHex: hex("C:\\SDK\\"),
         };
       if (op === "helper-start") {
+        job.limitFlags = a === "build" ? 0x2808 : 0x2008;
         job.processLimit = ["git", "build"].includes(a) ? 32 : 1;
         const actor = a === "observer" ? identity(31) : fileHelper;
         job.members = [actor];
@@ -1327,6 +1328,106 @@ test("Windows fixed Git release requires independently joined creator default DA
   }
 });
 
+test("Windows build controller admission rejects stale policy, extra flags and members before release", async () => {
+  for (const damage of ["nested", "silent", "member", "proof"]) {
+    const f = fixture({ build: true }),
+      reader = f.reader();
+    await reader.start();
+    for (const index of [f.buildEntry.helper, f.buildEntry.tool])
+      await reader.open(index);
+    f.options.damage = (op, frame) => {
+      if (op === "helper-start") {
+        if (damage === "nested") frame.value.job.limitFlags = 0x2008;
+        if (damage === "silent") frame.value.job.limitFlags |= 0x1000;
+        if (damage === "member") frame.value.job.members.push(identity(41));
+      }
+      return frame;
+    };
+    if (damage === "proof") {
+      const verify = f.options.verifyTransfer;
+      f.options.verifyTransfer = async (...args) => ({
+        ...(await verify(...args)),
+        jobSha256: "f".repeat(64),
+      });
+    }
+    await assert.rejects(
+      reader.openBuild(
+        f.buildRequest,
+        { mode: "compiler-version" },
+        f.buildEntry,
+      ),
+    );
+    assert.ok(!f.events.some((event) => event.startsWith("helper-release ")));
+    assert.equal((await reader.close()).status, "RETAINED");
+  }
+});
+
+test("actual build-only creation separates UI-restricted Jobs without compiler breakaway authority", async () => {
+  const [reader, helper] = await Promise.all(
+    ["custody-reader.c", "build-helper.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const controller = reader.slice(
+      reader.indexOf("static void start_helper("),
+      reader.indexOf("static void build(void)"),
+    ),
+    policy = controller.slice(
+      controller.indexOf("limits.BasicLimitInformation.LimitFlags ="),
+      controller.indexOf("JOBOBJECT_BASIC_UI_RESTRICTIONS ui"),
+    );
+  for (const kind of [
+    "build",
+    "git",
+    "file",
+    "observer",
+    "policy",
+    "git-policy",
+  ]) {
+    const limits = { BasicLimitInformation: {} };
+    new Script(policy.replace(/\/\*[\s\S]*?\*\//gu, "")).runInNewContext({
+      limits,
+      compiler: kind === "build",
+      git: kind === "git",
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: 0x2000,
+      JOB_OBJECT_LIMIT_ACTIVE_PROCESS: 8,
+      JOB_OBJECT_LIMIT_BREAKAWAY_OK: 0x800,
+    });
+    assert.equal(
+      limits.BasicLimitInformation.LimitFlags,
+      kind === "build" ? 0x2808 : 0x2008,
+    );
+    assert.equal(
+      limits.BasicLimitInformation.ActiveProcessLimit,
+      ["build", "git"].includes(kind) ? 32 : 1,
+    );
+  }
+  const flags =
+    /CreateProcessW\(tool\.path, command, &private, &private, TRUE, ([^,]+), NULL/u.exec(
+      helper,
+    )[1];
+  assert.equal(
+    new Script(flags).runInNewContext({
+      CREATE_BREAKAWAY_FROM_JOB: 0x1000000,
+      CREATE_SUSPENDED: 4,
+      CREATE_UNICODE_ENVIRONMENT: 0x400,
+      EXTENDED_STARTUPINFO_PRESENT: 0x80000,
+    }),
+    0x1080404,
+  );
+  assert.equal(helper.match(/CREATE_BREAKAWAY_FROM_JOB/gu).length, 1);
+  assert.ok(!controller.includes("CREATE_BREAKAWAY_FROM_JOB"));
+  assert.match(
+    helper,
+    /LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE \| JOB_OBJECT_LIMIT_ACTIVE_PROCESS; limits.BasicLimitInformation.ActiveProcessLimit = 31;/u,
+  );
+  assert.match(
+    helper,
+    /HANDLE handles\[\] = \{childIn, childOut, childError\}/u,
+  );
+  assert.match(helper, /PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof\(job\)/u);
+});
+
 test("Windows build input bounds refuse invalid environment text before helper-start", async () => {
   const f = fixture({ build: true }),
     reader = f.reader(),
@@ -2227,7 +2328,7 @@ test("runtime creator types preserve required duplication, membership and comple
       processes: [10, 30],
       tokens: [0, 1],
       process_count: 2,
-      verified_jobs: [],
+      verified_jobs: [{ outer: true }],
       reader_transfer: {},
       need: (ok) => {
         if (!ok) throw refusal;
@@ -2340,13 +2441,24 @@ test("runtime creator types preserve required duplication, membership and comple
         if (typeof handle === "bigint") assert.ok(alive.delete(handle));
         return fault !== "anchor-close" || handle !== anchors[0];
       },
-      IsProcessInJob: (child, _job, out) => {
-        assert.equal(child, 30);
-        out(fault !== "job-membership");
+      IsProcessInJob: (child, job, out) => {
+        out(
+          job.outer
+            ? child === 10 || fault === "nested-compiler"
+            : child === 30
+              ? fault !== "job-membership"
+              : fault === "nested-controller",
+        );
         return true;
       },
       GetProcessIdOfThread: () => (fault === "thread-membership" ? 99 : 30),
       QueryInformationJobObject: (_job, _kind, limits) => {
+        limits.BasicLimitInformation.LimitFlags =
+          fault === "compiler-breakaway"
+            ? 0x2808
+            : fault === "compiler-silent-breakaway"
+              ? 0x3008
+              : 0x2008;
         limits.BasicLimitInformation.ActiveProcessLimit =
           fault === "compiler-limit" ? 32 : 31;
         return true;
@@ -2419,6 +2531,12 @@ test("runtime creator types preserve required duplication, membership and comple
       if (thread) {
         assert.deepEqual(f.security, [12, "job", 201, 202]);
         assert.equal(f.api.verified_jobs[1].handle, 11);
+      } else {
+        assert.equal(f.api.verified_jobs[1], undefined);
+        assert.ok(
+          f.closed.some((handle) => handle?.handle === 11),
+          "Compiler inspection must close its duplicate",
+        );
       }
       assert.ok(f.inventories.every((list) => f.freed.includes(list)));
     }
@@ -2470,7 +2588,13 @@ test("runtime creator types preserve required duplication, membership and comple
             "file-identity",
             "handle-bound",
           ]
-        : ["compiler-limit"]),
+        : [
+            "compiler-limit",
+            "compiler-breakaway",
+            "compiler-silent-breakaway",
+            "nested-compiler",
+            "nested-controller",
+          ]),
     ]) {
       const f = fixture(name, [55, 84], fault);
       assert.throws(f.run, (error) => error === f.refusal, `${name}: ${fault}`);
@@ -3145,7 +3269,8 @@ test("Windows guard and scheduler HRESULT diagnostics retain independent origina
 // Only raw native frames are replaced. These tests supply no approval,
 // transfer, retirement or completed-custody callback implementation.
 function verificationFixture(f = fixture()) {
-  const transferred = new Set(),
+  const build = Boolean(f.buildEntry),
+    transferred = new Set(),
     events = [],
     subjects = [],
     files = [],
@@ -3194,6 +3319,21 @@ function verificationFixture(f = fixture()) {
     jobDacl: hash,
     unknownHandle: false,
     removedTasks: new Set(),
+    worker: identity(41),
+    jobFlags: build ? 0x2808 : 0x2008,
+    jobLimit: build ? 32 : 1,
+  };
+  if (build)
+    states.set(state.worker.pid, {
+      ...structuredClone(f.process),
+      identity: state.worker,
+    });
+  state.compilerJob = {
+    daclSha256: hash,
+    limitFlags: 0x2008,
+    processLimit: 31,
+    uiRestrictions: 255,
+    members: [state.worker],
   };
   const exchange = async (bytes) => {
     assert.ok(Buffer.isBuffer(bytes));
@@ -3244,7 +3384,13 @@ function verificationFixture(f = fixture()) {
             ? f.input.reader
             : pid === 10
               ? f.input.bridge
-              : f.entries[0];
+              : build
+                ? f.entries[
+                    pid === state.worker.pid
+                      ? f.buildEntry.tool
+                      : f.buildEntry.helper
+                  ]
+                : f.entries[0];
       value = {
         sha256: pin.sha256,
         signatureSha256: pin.signatureSha256,
@@ -3280,14 +3426,17 @@ function verificationFixture(f = fixture()) {
           i === 0 && state.recoveryMembers
             ? {
                 daclSha256: hash,
-                limitFlags: 0x2008,
+                limitFlags: state.recoveryFlags ?? 0x2008,
                 processLimit: 32,
                 uiRestrictions: 255,
                 members: state.recoveryMembers,
               }
             : { absent: true },
         ),
-        compilerJob: { absent: true },
+        compilerJob:
+          build && subjects[Number(args[0])].identity.pid === f.fileHelper.pid
+            ? state.compilerJob
+            : { absent: true },
       };
     else if (name === "transfer") {
       transferred.add(Number(args[0]));
@@ -3295,29 +3444,34 @@ function verificationFixture(f = fixture()) {
         threadDaclSha256: hash,
         job: {
           daclSha256: hash,
-          limitFlags: 0x2008,
-          processLimit: 1,
+          limitFlags: state.jobFlags,
+          processLimit: state.jobLimit,
           uiRestrictions: 255,
           members: state.jobMembers,
         },
         objects: [
           null,
           null,
-          id(2),
-          id(3),
+          ...(build ? [] : [id(2), id(3)]),
           ...(state.unknownHandle ? [id(9)] : []),
         ],
-        inheritedHandleCount: state.unknownHandle ? 5 : 4,
+        inheritedHandleCount: (build ? 2 : 4) + (state.unknownHandle ? 1 : 0),
         pipeDaclSha256: [hash, hash],
         creatorDefaultDaclSha256: hash,
       };
-    } else if (name === "sharing") value = { identity: id(2) };
+    } else if (name === "compiler-policy")
+      value = {
+        defaultDacl: [{ type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" }],
+        inheritedHandles: ["pipe", "pipe", "pipe"],
+        compilerJob: state.compilerJob,
+      };
+    else if (name === "sharing") value = { identity: id(2) };
     else if (name === "job")
       value = transferred.has(Number(args[0]))
         ? {
             daclSha256: hash,
-            limitFlags: 0x2008,
-            processLimit: 1,
+            limitFlags: state.jobFlags,
+            processLimit: state.jobLimit,
             uiRestrictions: 255,
             members: state.jobMembers,
           }
@@ -3364,11 +3518,11 @@ function verificationFixture(f = fixture()) {
     instance: { ...instance, enginePid: f.helper.pid },
   };
   const transfer = {
-    kind: "file",
+    kind: build ? "build" : "file",
     args: [],
-    request: f.file.request,
-    image: f.entries[0],
-    objects: [f.object(1), f.object(2)],
+    request: build ? f.buildRequest : f.file.request,
+    image: f.entries[build ? f.buildEntry.helper : 0],
+    objects: build ? [] : [f.object(1), f.object(2)],
   };
   const helperTransfer = {
     input: f.input,
@@ -3381,8 +3535,8 @@ function verificationFixture(f = fixture()) {
       threadDaclSha256: hash,
       job: {
         daclSha256: hash,
-        limitFlags: 0x2008,
-        processLimit: 1,
+        limitFlags: state.jobFlags,
+        processLimit: state.jobLimit,
         uiRestrictions: 255,
         members: [f.fileHelper],
       },
@@ -3818,6 +3972,107 @@ test("actual task removal refuses any live retained process or surviving held Jo
     if (fault) assert.throws(run);
     else run();
     assert.equal(removed, fault === null);
+  }
+});
+
+test("independent build admission and retirement bind separate original controller and compiler domains", async () => {
+  for (const fault of [
+    null,
+    "controller-policy",
+    "controller-member",
+    "compiler-breakaway",
+    "compiler-silent",
+    "compiler-member",
+    "unknown-policy",
+    "worker-birth",
+    "worker-live",
+    "compiler-survivor",
+    "missing-retirement",
+    "unbound-recovery-policy",
+  ]) {
+    const k = verificationFixture(fixture({ build: true }));
+    await k.verifier.verifyBootstrap(k.f.input);
+    await k.verifier.verifyAdmission(k.admission);
+    if (fault === "controller-policy") {
+      k.state.jobFlags = k.helperTransfer.actual.job.limitFlags = 0x2008;
+      await assert.rejects(k.verifier.verifyTransfer(k.helperTransfer));
+      continue;
+    }
+    await k.verifier.verifyTransfer(k.helperTransfer);
+    const record = {
+        phase: "worker-admitted",
+        requestSha256: hash,
+        helper: k.f.fileHelper,
+        worker: k.state.worker,
+      },
+      admissionFault = [
+        "controller-member",
+        "compiler-breakaway",
+        "compiler-silent",
+        "compiler-member",
+        "unknown-policy",
+      ].includes(fault);
+    if (fault === "controller-member") k.state.jobMembers.push(k.state.worker);
+    if (fault === "compiler-breakaway") k.state.compilerJob.limitFlags |= 0x800;
+    if (fault === "compiler-silent") k.state.compilerJob.limitFlags |= 0x1000;
+    if (fault === "compiler-member")
+      k.state.compilerJob.members.push(k.f.fileHelper);
+    if (fault === "unknown-policy")
+      k.state.damage = (operation, frame) => {
+        if (operation === "verify-compiler-policy") frame.value.extra = true;
+        return Buffer.from(JSON.stringify(frame) + "\n");
+      };
+    const admit = () =>
+      k.verifier.verifyBuildWorker(
+        record,
+        k.f.entries[k.f.buildEntry.tool],
+        hash,
+      );
+    if (admissionFault) {
+      await assert.rejects(admit);
+      continue;
+    }
+    const proof = await admit();
+    assert.deepEqual(proof.compilerPolicy.outerJob.members, [k.f.fileHelper]);
+    assert.deepEqual(proof.compilerPolicy.compilerJob.members, [
+      k.state.worker,
+    ]);
+    k.states.get(k.f.fileHelper.pid).retired = true;
+    k.states.get(k.state.worker.pid).retired = fault !== "worker-live";
+    k.state.jobMembers = [];
+    k.state.compilerJob.members =
+      fault === "compiler-survivor" ? [identity(99)] : [];
+    if (fault === "worker-birth")
+      k.states.get(k.state.worker.pid).identity.creationTime = "999";
+    if (fault === "missing-retirement")
+      k.state.damage = (operation, frame) => {
+        if (operation === "verify-recovery-jobs")
+          throw new Error("Original named Job inaccessible");
+        return Buffer.from(JSON.stringify(frame) + "\n");
+      };
+    if (fault === "unbound-recovery-policy") {
+      k.state.recoveryMembers = [];
+      k.state.recoveryFlags = 0x2808;
+    }
+    const finish = () => k.verifier.verifyHelperRetirement(k.f.fileHelper);
+    if (fault) await assert.rejects(finish);
+    else {
+      assert.equal((await finish()).status, "RETIRED");
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-recovery-jobs")
+          .length,
+        2,
+      );
+      const before = k.events.length;
+      await assert.rejects(
+        k.verifier.recoverOwnedTask(nonce, hash, k.admission.bridge),
+      );
+      assert.equal(
+        k.events.length,
+        before,
+        "One compiler's settlement must not authorize whole-run task removal",
+      );
+    }
   }
 });
 

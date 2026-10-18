@@ -2080,6 +2080,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     exitCodes = new Map(),
     images = new Map(),
     jobs = new Map(),
+    compilerJobs = new Map(),
     jobNonces = new Map(),
     jobCreators = new Map(),
     tasks = new Map(),
@@ -2122,7 +2123,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     },
     job = (helper) => ({
       daclSha256: hash,
-      limitFlags: 0x2008,
+      limitFlags: compilerJobs.has(helper.pid) ? 0x2808 : 0x2008,
       processLimit: 32,
       uiRestrictions: 255,
       members: (jobs.get(helper.pid) ?? []).filter(
@@ -2411,7 +2412,17 @@ function rawPreparation({ experiment = false, environment } = {}) {
             ? job(actors.get(owned[index][0]).identity)
             : { absent: true },
         ),
-        compilerJob: { absent: true },
+        compilerJob: compilerJobs.has(creator.pid)
+          ? {
+              daclSha256: hash,
+              limitFlags: 0x2008,
+              processLimit: 31,
+              uiRestrictions: 255,
+              members: compilerJobs
+                .get(creator.pid)
+                .filter((worker) => !actors.get(worker.pid).retired),
+            }
+          : { absent: true },
       };
       if (f.coldDamage === "surviving-helper-job")
         observed.jobs[127] = {
@@ -3217,6 +3228,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
             child = actor();
             worker = actor();
             jobs.set(child.pid, [child]);
+            compilerJobs.set(child.pid, [worker]);
             jobNonces.set(child.pid, declaration.nonce);
             jobCreators.set(child.pid, helper.pid);
             images.set(child.pid, plan.command.helper.path);
@@ -3254,7 +3266,6 @@ function rawPreparation({ experiment = false, environment } = {}) {
             };
           } else if (operation === "helper-release") value = { released: true };
           else if (operation === "helper-read") {
-            jobs.set(child.pid, [child, worker]);
             value = {
               hex: Buffer.from(JSON.stringify(frames.shift())).toString("hex"),
             };
@@ -3379,6 +3390,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     rawActor: actor,
     rawFileId: fileId,
     rawJobs: jobs,
+    rawCompilerJobs: compilerJobs,
     rawImages: images,
   });
 }
@@ -5507,7 +5519,47 @@ test("Windows fixed entry supplies build/file/verifier defaults through raw IPC 
     verificationWork = new AbortController();
   f.signal = preparationWork.signal;
   assert.equal(f.rawEvents.length, 0);
+  const admissions = [];
+  f.beforeRawCommand = (operation) => {
+    if (operation !== "helper-send") return;
+    for (const [file, bytes] of f.files) {
+      if (!/windows-command-.*-[0-9]+\.json$/u.test(path.basename(file)))
+        continue;
+      const record = JSON.parse(bytes);
+      if (
+        record.phase !== "worker-admitted" ||
+        f.actors.get(record.worker.pid).retired
+      )
+        continue;
+      assert.deepEqual(record.compilerPolicy.outerJob.members, [record.helper]);
+      assert.deepEqual(record.compilerPolicy.compilerJob.members, [
+        record.worker,
+      ]);
+      assert.deepEqual(f.rawCompilerJobs.get(record.helper.pid), [
+        record.worker,
+      ]);
+      assert.equal(record.compilerPolicy.outerJob.limitFlags, 0x2808);
+      assert.equal(record.compilerPolicy.compilerJob.limitFlags, 0x2008);
+      admissions.push(record);
+    }
+  };
   await buildRawPreparation(f);
+  assert.equal(admissions.length, 15);
+  for (const record of admissions) {
+    const result = JSON.parse(
+      f.files.get(
+        path.join(
+          directory,
+          `windows-command-${record.requestSha256}-result.json`,
+        ),
+      ),
+    );
+    assert.deepEqual(result.identity, record.worker);
+    assert.deepEqual(result.helperIdentity, record.helper);
+    assert.deepEqual(result.compilerPolicy, record.compilerPolicy);
+    assert.equal(result.settlement.status, "RETIRED");
+    assert.equal(result.settlement.independent, true);
+  }
   preparationWork.abort();
   const compilerCount = f.rawEvents.filter((event) =>
       event.startsWith("helper-start "),
@@ -5793,10 +5845,15 @@ test("Windows fixed-entry partial recovery uses protected build records and fres
     "bootstrap-journal-gap",
     "bootstrap-intent",
     "surviving-worker",
+    "surviving-compiler-job",
   ]) {
     const f = rawPreparation(),
       build = await createBuildEffects(f, f.options);
     await build.run(f.requests[2]);
+    if (damage === "surviving-compiler-job") {
+      const members = [...f.rawCompilerJobs.values()][0];
+      members.push(f.rawActor());
+    }
     for (const helper of f.manifest.helpers)
       f.files.delete(path.join(output, helper.name + ".exe"));
     for (const [file, bytes] of f.files)
@@ -6192,7 +6249,7 @@ function buildPolicy(f) {
     privileges: [],
     defaultDacl: [{ type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" }],
     inheritedHandles: ["pipe", "pipe", "pipe"],
-    outerJob: { limitFlags: 0x2008, processLimit: 32, uiRestrictions: 255 },
+    outerJob: { limitFlags: 0x2808, processLimit: 32, uiRestrictions: 255 },
     compilerJob: { limitFlags: 0x2008, processLimit: 31, uiRestrictions: 255 },
   };
   const template = {
@@ -6245,6 +6302,13 @@ test("Windows fixed build entry requires independent compiler policy joined to p
     "missing-policy",
     "extra-authority",
     "wrong-attempt",
+    "stale-template",
+    "stale-nested",
+    "compiler-breakaway",
+    "controller-member",
+    "result-helper",
+    "record-helper",
+    "extra-policy",
   ]) {
     const f = rawPreparation();
     await buildRawPreparation(f);
@@ -6254,18 +6318,50 @@ test("Windows fixed build entry requires independent compiler policy joined to p
         { sid: "S-1-5-32-544", attributes: 4 },
       ];
     if (damage === "wrong-attempt") binding.context.runAttempt++;
+    if (damage === "stale-template")
+      binding.template.policy.policy.compiler.outerJob.limitFlags = 0x2008;
     // Reapprove only a deliberately different expected policy, never an observed pin.
     binding.approval.manifestSha256 = nativePolicyTemplateDigest(
       binding.template,
     );
-    if (damage === "missing-policy") {
+    if (
+      [
+        "missing-policy",
+        "stale-nested",
+        "compiler-breakaway",
+        "controller-member",
+        "result-helper",
+        "record-helper",
+        "extra-policy",
+      ].includes(damage)
+    ) {
       const command = f.preparation.commands[0],
         file = path.join(
           directory,
           `windows-command-${command.requestSha256}-result.json`,
         ),
         record = JSON.parse(f.files.get(file));
-      delete record.compilerPolicy;
+      if (damage === "missing-policy") delete record.compilerPolicy;
+      if (damage === "stale-nested") {
+        record.compilerPolicy.outerJob.limitFlags = 0x2008;
+        record.compilerPolicy.outerJob.members.push(record.identity);
+      }
+      if (damage === "compiler-breakaway")
+        record.compilerPolicy.compilerJob.limitFlags |= 0x800;
+      if (damage === "controller-member")
+        record.compilerPolicy.outerJob.members.push(record.identity);
+      if (damage === "result-helper")
+        record.helperIdentity.creationTime = "999";
+      if (damage === "extra-policy") record.compilerPolicy.extra = true;
+      if (damage === "record-helper")
+        for (const [name, bytes] of f.files) {
+          if (!name.includes(`windows-command-${command.requestSha256}-`))
+            continue;
+          const worker = JSON.parse(bytes);
+          if (worker.phase !== "worker-admitted") continue;
+          worker.helper.creationTime = "999";
+          f.files.set(name, Buffer.from(JSON.stringify(worker)));
+        }
       f.files.set(file, Buffer.from(JSON.stringify(record)));
       command.receiptSha256 = observationDigest(record);
     }

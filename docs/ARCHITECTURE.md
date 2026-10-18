@@ -1634,9 +1634,20 @@ surviving effects; observer/task closure remains independently observed. This
 adds build defaults, not complete system cases or native acceptance, and does
 not change the thirteen-helper inventory or historical injected semantics.
 Windows system defaults now add private case provisioning and mandatory build
-policy observation. A protected worker record joins independently read token,
-inner/outer Job limits, creator DACL and inherited pipes to the final compiler
-receipt. The approved template describes that actual authority and held output;
+policy observation. The sealed build controller alone receives explicit breakaway
+in its `0x2808/32/255` Job. Its fixed compiler creation combines explicit breakaway,
+suspension and creation-time assignment to a separate `0x2008/31/255` Job, avoiding
+UI-restricted nesting without granting compiler/descendant breakaway. Independent
+reads require sole, disjoint memberships and the unchanged System-only creator
+DACL and exact pipes before release. The closed `compilerPolicy.outerJob` remains
+the controller Job. A protected worker record joins both births and independently
+read policy before `R`; the settled command result must match that record before
+publication. The original controller owns the compiler Job's controlling handle;
+inspection duplicates close. Completion verifies the original worker, held
+controller Job and creation-bound named compiler Job independently. Cold recovery
+joins original build-reader births to their sealed images before accepting the
+build-only controller policy; other helper policies remain strict. The approved
+template describes that actual authority and held output;
 materialized expectations cannot provide observations. Case roots derive from the
 complete candidate/job/run/attempt/execution context. Native System custody
 creates private roots, copies reviewed images, allocates fresh accounts and

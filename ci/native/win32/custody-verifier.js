@@ -1,3 +1,5 @@
+import { win32 as path } from "node:path";
+
 import { observationDigest } from "../index.js";
 import {
   closed,
@@ -77,6 +79,8 @@ export function createWindowsCustodyVerifier(
     pending = Promise.resolve();
   const subjects = new Map(),
     transfers = new Map(),
+    buildWorkers = new Map(),
+    buildCreators = new Map(),
     files = new Map(),
     recoveredJobNonces = new Set();
   const verifier = () => systemIdentity(native.identity);
@@ -198,9 +202,9 @@ export function createWindowsCustodyVerifier(
         same(retained.jobs, jobSlots),
     );
   };
-  const recoveryJobs = async (owners) => {
+  const recoveryJobs = async (owners, acknowledge = true) => {
     const observations = [];
-    const settled = (value, compiler = false) => {
+    const settled = (value, compiler = false, buildCreator = false) => {
       if (value.absent === true) {
         closed(value, ["absent"]);
         return;
@@ -208,7 +212,13 @@ export function createWindowsCustodyVerifier(
       const job = jobObservation(value);
       requireWindows(
         job.members.length === 0 &&
-          job.limitFlags === 0x2008 &&
+          job.limitFlags ===
+            (!compiler &&
+            buildCreator &&
+            job.processLimit === 32 &&
+            job.uiRestrictions === 255
+              ? 0x2808
+              : 0x2008) &&
           (compiler
             ? job.processLimit === 31 && job.uiRestrictions === 255
             : [1, 32].includes(job.processLimit) &&
@@ -234,11 +244,17 @@ export function createWindowsCustodyVerifier(
             sameWindowsIdentity(actual.identity, held.identity) &&
             dense(actual.jobs, 128).length === 128,
         );
-        actual.jobs.forEach((job) => settled(job));
+        actual.jobs.forEach((job) =>
+          settled(
+            job,
+            false,
+            buildCreators.get(observationDigest(held.identity)) === nonce,
+          ),
+        );
         settled(actual.compilerJob, true);
         observations.push(actual);
       }
-      recoveredJobNonces.add(nonce);
+      if (acknowledge) recoveredJobNonces.add(nonce);
     }
     return observations;
   };
@@ -976,17 +992,27 @@ export function createWindowsCustodyVerifier(
       };
     },
     async verifyBuildWorker(record, tool, signatureSha256) {
+      closed(record, ["phase", "requestSha256", "helper", "worker"]);
       requireWindows(input && hash(record.requestSha256));
       const worker = systemIdentity(record.worker),
         creator = systemIdentity(record.helper);
       const actual = await observe(worker),
         parent = await retain(creator),
-        job = jobObservation(await call("job", [parent.slot]));
+        job = jobObservation(await call("job", [parent.slot])),
+        transfer = transfers.get(parent.slot);
       requireWindows(
-        !actual.retired &&
+        record.phase === "worker-admitted" &&
+          worker.pid !== creator.pid &&
+          !buildWorkers.has(parent.slot) &&
+          !actual.retired &&
           !(await observe(creator)).retired &&
-          transfers.has(parent.slot) &&
-          job.members.some((member) => sameWindowsIdentity(member, worker)),
+          transfer?.kind === "build" &&
+          same(job, transfer.job) &&
+          job.limitFlags === 0x2808 &&
+          job.processLimit === 32 &&
+          job.uiRestrictions === 255 &&
+          job.members.length === 1 &&
+          sameWindowsIdentity(job.members[0], creator),
       );
       await image(worker, {
         path: tool.path,
@@ -996,12 +1022,22 @@ export function createWindowsCustodyVerifier(
       const held = await retain(worker),
         authority = await call("compiler-policy", [held.slot, parent.slot]);
       closed(authority, ["defaultDacl", "inheritedHandles", "compilerJob"]);
+      const compiler = jobObservation(authority.compilerJob);
       requireWindows(Array.isArray(authority.defaultDacl));
       requireWindows(
         same(authority.defaultDacl, [
           { type: 0, flags: 0, mask: 0x10000000, sid: "S-1-5-18" },
-        ]) && same(authority.inheritedHandles, ["pipe", "pipe", "pipe"]),
+        ]) &&
+          same(authority.inheritedHandles, ["pipe", "pipe", "pipe"]) &&
+          compiler.limitFlags === 0x2008 &&
+          compiler.processLimit === 31 &&
+          compiler.uiRestrictions === 255 &&
+          compiler.members.length === 1 &&
+          sameWindowsIdentity(compiler.members[0], worker) &&
+          same(job, jobObservation(await call("job", [parent.slot]))) &&
+          !(await observe(creator)).retired,
       );
+      buildWorkers.set(parent.slot, worker);
       return {
         independent: true,
         worker,
@@ -1238,6 +1274,7 @@ export function createWindowsCustodyVerifier(
         "creatorDefaultDaclSha256",
       ]);
       const job = jobObservation(transfer.job),
+        build = value.transfer.kind === "build",
         objects = dense(transfer.objects, 130),
         expected = value.transfer.objects.map((entry) =>
           normalizeWindowsFileIdentity(entry.identity),
@@ -1256,12 +1293,22 @@ export function createWindowsCustodyVerifier(
           transfer.threadDaclSha256 === value.actual.threadDaclSha256 &&
           hash(transfer.creatorDefaultDaclSha256) &&
           same(job, value.actual.job) &&
-          job.members.some((member) =>
-            sameWindowsIdentity(member, value.child),
-          ),
+          job.limitFlags === (build ? 0x2808 : 0x2008) &&
+          job.processLimit ===
+            (["build", "git"].includes(value.transfer.kind) ? 32 : 1) &&
+          job.uiRestrictions === 255 &&
+          job.members.length === 1 &&
+          sameWindowsIdentity(job.members[0], value.child),
       );
-      transfers.set(child.slot, transfer);
       const executable = await image(value.child, value.transfer.image);
+      requireWindows(
+        !build ||
+          path.basename(value.transfer.image.path).toLowerCase() ===
+            "build-helper.exe",
+      );
+      transfers.set(child.slot, { ...transfer, kind: value.transfer.kind });
+      if (build)
+        buildCreators.set(observationDigest(creator.identity), input.nonce);
       const sharing =
         value.transfer.kind === "file"
           ? await call("sharing", [value.transfer.objects[0].pathHex])
@@ -1300,8 +1347,20 @@ export function createWindowsCustodyVerifier(
       };
     },
     async verifyHelperRetirement(identity) {
-      requireWindows(transfers.has((await retain(identity)).slot));
+      const held = await retain(identity),
+        transfer = transfers.get(held.slot);
+      requireWindows(transfer);
       const observations = [await empty(identity), await empty(identity)];
+      if (transfer.kind === "build") {
+        const worker = buildWorkers.get(held.slot);
+        requireWindows(worker);
+        // This one controller's settlement cannot authorize whole-run task removal.
+        observations.push(
+          await empty(worker),
+          await empty(worker),
+          ...(await recoveryJobs([{ identity, nonce: input.nonce }], false)),
+        );
+      }
       return {
         ...retired(observations),
         helper: identity,
@@ -1437,10 +1496,26 @@ export function createWindowsCustodyVerifier(
       nonces = [],
       observerOwners = [],
       preSetup = [],
+      buildOwners = [],
     ) {
       bind(declaration);
       requireWindows(dense(identities, maximumSubjects).length > 0);
       for (const identity of identities) await retain(identity);
+      // Protected original reader births select the build-only policy. A fresh
+      // kernel image join precedes accepting that creator's controller Jobs.
+      for (const identity of dense(buildOwners, maximumSubjects)) {
+        requireWindows(
+          input.context.executionId === "build" &&
+            identities.some((original) =>
+              sameWindowsIdentity(original, identity),
+            ),
+        );
+        await image(identity, input.reader);
+        buildCreators.set(
+          observationDigest(normalizeWindowsIdentity(identity)),
+          input.nonce,
+        );
+      }
       const owners = new Map(
         dense(observerOwners, maximumSubjects).map((owner) => {
           closed(owner, ["identity", "nonce"]);

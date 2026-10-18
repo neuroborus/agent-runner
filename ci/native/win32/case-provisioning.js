@@ -156,14 +156,15 @@ export function createWindowsCaseProvisioning(state, options) {
             systemIdentity(process.identity) &&
             process.integritySid === "S-1-16-16384" &&
             !process.restricting.length &&
-            [outer, inner].every(
-              (job) =>
-                job.limitFlags === 0x2008 &&
-                job.uiRestrictions === 255 &&
-                job.members.some((member) =>
-                  sameWindowsIdentity(member, process.identity),
-                ),
-            ) &&
+            outer.limitFlags === 0x2808 &&
+            outer.uiRestrictions === 255 &&
+            outer.members.length === 1 &&
+            sameWindowsIdentity(outer.members[0], command.helperIdentity) &&
+            command.helperIdentity.pid !== process.identity.pid &&
+            inner.limitFlags === 0x2008 &&
+            inner.uiRestrictions === 255 &&
+            inner.members.length === 1 &&
+            sameWindowsIdentity(inner.members[0], process.identity) &&
             outer.processLimit === 32 &&
             inner.processLimit === 31 &&
             same(policy.defaultDacl, [
@@ -189,6 +190,7 @@ export function createWindowsCaseProvisioning(state, options) {
           workers.length === 1 &&
             workers[0].requestSha256 === command.requestSha256 &&
             same(workers[0].compilerPolicy, policy) &&
+            sameWindowsIdentity(workers[0].helper, command.helperIdentity) &&
             sameWindowsIdentity(workers[0].worker, process.identity),
         );
         domains.push({
