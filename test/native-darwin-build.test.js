@@ -3017,7 +3017,7 @@ test("Darwin cache image reads reject wrapped slides and ranges while retaining 
   assert.match(image, /stable\(entry\)/u);
 });
 
-test("Darwin bootstrap reads bind only fixed protected tools before experiment custody", async () => {
+test("Darwin privileged launches recheck only their fixed protected tools", async () => {
   const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
     guard = source.match(/\(index == 0 \? ([^\n]+)\)\);/u)?.[1];
   assert.ok(guard);
@@ -3044,32 +3044,6 @@ test("Darwin bootstrap reads bind only fixed protected tools before experiment c
   assert.match(
     source,
     /bootstrap_tool\(0, argv\[2\]\); bootstrap_tool\(1, argv\[3\]\)/u,
-  );
-  const operation = source.slice(
-    source.indexOf("static void bootstrap_tools("),
-    source.indexOf("int main("),
-  );
-  assert.ok(
-    operation.indexOf('openat(base, "bootstrap-owner"') <
-      operation.indexOf("line(0, release"),
-  );
-  assert.ok(
-    operation.indexOf("line(0, release") <
-      operation.indexOf("bootstrap_tool(0, NULL)"),
-  );
-  assert.match(
-    operation,
-    /proc_pidinfo\(original\.token\.val\[5\][\s\S]*n == 0 && errno == ESRCH/u,
-  );
-  assert.doesNotMatch(operation, /kill\(|exec[lv]|posix_spawn/u);
-  const verifiers = source.slice(
-    source.indexOf("static void bootstrap_verifier("),
-    source.indexOf("static void bootstrap_tools("),
-  );
-  assert.match(verifiers, /openat\(base, name, O_WRONLY \| O_CREAT \| O_EXCL/u);
-  assert.match(
-    verifiers,
-    /need\(fd >= 0 && !fstat\(fd, &before\)[\s\S]*n == 0 && errno == ESRCH/u,
   );
 });
 

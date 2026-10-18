@@ -125,29 +125,23 @@ Synthetic signed Mach-O bytes protect the durable read-only purpose section and
 reviewed inspection refusal. These tests use no Darwin tool or compiler and add
 no slow-suite assignment; the explicit native harness registers them.
 
-The same Darwin `preparation-effects.test.js` injects exact candidate acquisition,
-installed Clang/delegated-tool selection, SDK input substitution and write-ahead
-seed/protection admissions. It exercises complete private experiment builds,
-unavailable runtime reads, original command retirement, cold-loading without
-compilation, receipt substitution and interrupted-build recovery. Recovery fences
-further admission and retains missing birth evidence and the original failure.
-The same injected suite covers execute-only bootstrap tool acquisition, sealed
-source/inode and result substitution, lost replies and interrupted publication.
-Cold recovery rejoins the original acquisition without replay or a build selector,
-retaining uncertainty for missing births or possible build admission. Source-driven
-coverage in `test/native-darwin-build.test.js` protects the fixed privileged tool
-set, mode bounds and birth-before-release ordering. These supply no native proof.
-It also executes the actual build-directory admission body with inherited parent
-GID, exclusive-creation races, unsafe existing ownership, held/name/parent
-substitutions, ACL refusal and failed or ineffective descriptor normalization.
-The raw preparation transport covers the original directory refusal before any
-compiler entry, work cancellation, missing refusal/birth evidence, surviving
-original domains, expired recovery authority, unavailable independent proof and
-failed recovery close. The actual build settlement caller forwards its separate
-cleanup signal after work cancellation. A lost `finish` reply is never replayed.
-The experiment build caller retains the original error separately from close
-failure and records cleanup success only after fresh original-owner and domain
-proof; successful cleanup never publishes preparation.
+Darwin's ordinary preparation coverage injects installed Clang/SDK discovery,
+exact Git-blob and checkout bytes, one compile per helper, ad-hoc signing and
+root publication. It verifies actual command diagnostics, cancellation, missing
+output and changed candidate/source/tool/output observations. Version-2 records
+reject legacy, mixed and incomplete command/environment inventories; cold loading
+compares binding values independently of key order and cannot acquire or recompile.
+A deterministic process-group fixture verifies cancellation, stream-read failure,
+reaped closure and unsuccessful completion when descendants remain. Interrupted builds
+cannot reconstruct missing compiler receipts or erase the original failure.
+The indexed preparation fixture retains the complete inventory and independently
+read build policy, then exercises interrupted case custody and lost native-reader
+closure. A completed build cannot retire admitted cases. Compiler-only bootstrap,
+SDK reconstruction and acquisition-observer matrices have been removed with their
+obsolete owners. Fixed native launch guards and distinct reviewed compiler,
+source, signature and recovery coverage remain strict. Native file/Git/access,
+PF/audit exclusion, original-owner retirement and all 23 checks remain required.
+These portable injected tests run no Darwin tool and supply no hosted acceptance.
 One compact actual-body census fixture injects all four BSD/audit sampling
 points. It proves whole-view discard, fresh complete enumeration/storage,
 zombie visibility, success on the third attempt and deterministic exhaustion
@@ -194,81 +188,15 @@ proof before observer finish and full independent revalidation afterward.
 Missing/replaced births, surviving descendants, incomplete census and cancelled
 cleanup retain exclusion; existing lost-finish coverage prohibits replay.
 No fixture supplies a safe replacement SDK, native build or retirement proof.
-The same acquisition fixture covers rejected or unavailable defaults followed by
-the one documented CLT candidate, a safe default without alternative discovery,
-canonical CLT aliases, duplicate candidates, unavailable/escaping/unsafe
-alternatives, unstable ancestry and refused settings. Closed-command regressions
-reject unqualified or substituted SDK queries and changed arguments/declarations
-before effects. Dependency parsing and acquisition reject other installed SDKs
-and aliases into them before installed-byte reads, while accepting compiler
-resource headers. The actual native SDK-admission body runs with injected
-directory, ACL, identity and settings reads; its original mode gate precedes both
-experiment SDK queries and compilation. The custody adapter requires the native SDK directory
-snapshot for settings, and cold-read fixtures reject changed directory/settings
-identities or pins without rediscovery or compilation. Original SDK-refusal
-retirement and lost-finish cases remain required. These cases use the existing
-fast gate and explicit native harness, adding no slow-tier assignment. Actual CLT
-metadata, SDK compilation and independent retirement require fresh matching macOS.
-The same acquisition fixture now covers coherent CLT/Xcode developer pairing,
-explicit closed `DEVELOPER_DIR`/`SDKROOT` propagation despite ambient overrides,
-unpaired installations, substituted compilers and foreign delegated tools.
-An available PF header also exercises the original preliminary dependency query
-under that same explicit binding, retaining its separate diagnostic status and bounds.
-Declaration and cold-load cases reject developer, compiler-path, held-identity
-and signature drift while retaining the original SDK-refusal and lost-finish
-settlement coverage. Successful selected-SDK build metadata remains required;
-failed queries and absent or malformed results cannot publish preparation.
-Actual-body regressions execute the native developer-layout, held-toolchain and
-closed-environment bodies with injected filesystem/signature operations, including
-unsafe metadata, ACLs, pin refusal and substitutions during pin/signature reads
-or after command execution. The existing custody
-reader cases validate fresh developer metadata and real-tool signature responses.
-The same actual-body fixtures execute the protected-input wrapper and selected
-toolchain admission/rereads with synthetic sizes. Compiler and delegated inputs
-accept 128 MiB + 1 byte through exactly 512 MiB and reject 512 MiB + 1 byte;
-every initial and repeated read must receive the selected-class ceiling. The
-complete protected-file body checks those boundaries with synthetic allocation,
-read and hash counts while keeping its payload storage at four bytes. Existing
-pin/signature/identity/stability cases remain shared. Non-toolchain caller limits,
-bootstrap and generated-image native guards retain their 128 MiB boundary.
-Injected custody responses separately enforce 512 MiB installed-tool metadata
-and reject oversized generated images in reviewed and experiment modes before
-reading bytes. These regressions add no harness or slow-tier assignment.
-These portable cases execute no platform compiler or probe and do not establish
-the unique cause of ProductBuildVersion failure, a native SDK/PF remedy or original
-independent retirement.
-
-The same acquisition and build fixtures use exact BigInt/decimal identities
-above `2^53` and at the unsigned-64-bit boundary. Stable snapshots, persisted
-selectors, native joins and cold loading preserve those values. Adjacent identities
-that collapse to one Number are rejected during acquisition, installed ancestry,
-later revalidation, build snapshots and native/persisted joins despite unchanged
-bytes; nanosecond-only changes and missing/negative/out-of-range identities also
-refuse. Actual native SDK/toolchain bodies use exact injected integer parsers,
-without repeating the existing ownership, ACL, signature or selection matrices.
-Default preparation-reader cases retain full-width installed-input eligibility
-from existing Number-stat callers in reviewed and experiment modes, while held
-reads and ancestry retain exact BigInt identities.
-Focused pre-seal cases cover recovery before directory creation and after seed
-staging/command intents, plus missing, torn, gapped and contradictory journals.
-They require fencing, unchanged first cause and emergency history, RETAINED
-unproved effects, absent receipts, strict normal loading and no acquisition,
-compilation or replacement reader. Original-owner and lost-reply cases remain.
-These portable regressions add no harness or slow-tier assignment and prove no
-native success or unique precision diagnosis for the `/usr/lib/dyld` refusal.
-
-The existing custody-channel fixture carries those numeric diagnostics, malformed
-metadata and the original guard through failed completion; output supplies no
-receipt, new compiler attempt or retirement evidence.
-The fixture retains native ABI journal entries and the read-only root lifetime;
-cold output reads require recovery's observer to retire first. Interrupted cold
-readers and admission before report-directory creation remain fenced and uncertain
-despite prior build retirement, with emergency-cleanup history preserved.
-Fresh job bindings compare field values independently of object key order;
-candidate, run and producing-job substitutions still fail before native admission.
-All filesystem and command effects in these cases are injected; they execute no
-Darwin compiler or native probe and establish no native PASS. The private build
-lifecycle alone cannot establish complete case preparation.
+Retained shared native compiler/source fixtures still protect exact SDK/toolchain
+identities, installed-input size ceilings, signatures, protected publication and
+original-owner retirement for their protected consumers. Ordinary experiment
+preparation uses the hosted toolchain assumption and its completed-build record;
+these protected compiler matrices do not supply ordinary compiler receipts.
+Native case reader, file identity and custody guards remain independently tested.
+Successful selected-SDK metadata and real native compilation, TASK_ACCESS_PORT,
+model-free routes and independent case retirement require matching hosted Darwin.
+Portable tests cannot establish production or reviewed readiness.
 
 Darwin preparation regressions also execute the fixed ownership/access inventory
 with explicit experiment bindings through the retained injected native transports.
@@ -433,8 +361,9 @@ native failure and uncertain/emergency retirement stop later cases. Controlled
 deadline acknowledgements fence late completion; retirement-only recovery preserves
 FAIL and cannot restart the loop. Delayed policy publication cannot overwrite the
 terminal failure after cleanup. Retained platform proof/preparation suites own
-the actual assertion coverage; Darwin preparation also rejoins original compiler
-policy receipts through the indexed build path. These regressions establish no
+the actual assertion coverage; Darwin's indexed build recipe independently reads
+published output and its completed hosted-build observation, without compiler
+policy receipts. These regressions establish no
 native PASS and add no durable slow-tier assignment. Version-6 composition
 coverage remains retained.
 
@@ -1603,8 +1532,8 @@ it executes no native build, installation, system case or provider turn.
 `ci/native/darwin/preparation-effects.test.js` retains historical injected
 composition coverage and exercises build defaults through `native-effects.mjs`
 with raw held filesystem, private IPC and kernel zero-signal read transcripts.
-The actual repository owners verify and persist all 22 fixed Clang/SDK/signing
-commands, snapshot unsigned inputs and rejoin final pins and original receipts
+For reviewed preparation, the repository owners verify and persist all 22 fixed
+Clang/SDK/signing commands, snapshot unsigned inputs and rejoin final pins and original receipts
 without recompilation. Regressions cover missing source approvals, intermediate
 substitution, native directory identity substitution, foreign receipt ACLs, the
 pending prerequisite snapshot, the held compiler-directory release barrier,

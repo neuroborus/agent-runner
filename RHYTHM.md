@@ -5,6 +5,30 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Build ordinary Darwin helpers with hosted Clang
+
+Ordinary Darwin preparation now trusts the disposable hosted image and installed
+Clang/SDK, compiles each exact-candidate helper once and retains ad-hoc signing.
+A private version-2 build and preparation declaration binds actual commands,
+source/tool/SDK hashes and versions, held published outputs and Mach-O/ABI checks.
+Cold loading verifies existing outputs without acquisition or recompilation.
+Seed then protected recompilation, compiler signature/delegated-tool/SDK trust
+reconstruction, dependency snapshots and extra bootstrap acquisition observers
+and journals are removed from this path. The build policy inspects the completed
+output; no privileged compiler domain or compiler-policy receipt is invented.
+
+Existing root publication and sealed native case readers retain their launch
+pins, held images/loaders, private UID/audit ownership, filesystem/network/IPC/Git
+restrictions, PF/audit exclusion, positive controls and independent original
+retirement. Interrupted commands or publication without complete evidence stay
+unsuccessful and RETAINED; cleanup preserves the original cause. Reviewed
+validators and distinct case-safety coverage remain strict. The atomic migration
+includes preparation, build-policy joins and recovery, with several thousand
+lines removed because an intermediate private record would not be consumable.
+TASK_ACCESS_PORT, model-free routes and existing Darwin/Windows native blockers
+remain failures pending real hosted evidence. The supervisor owns the ignored
+restoration archive; portable tests establish no native or production readiness.
+
 ## 2026-10-18 — Build ordinary Linux helpers with hosted GCC
 
 Ordinary Linux preparation now trusts installed GCC-13 and compiles the exact

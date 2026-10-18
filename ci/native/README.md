@@ -119,7 +119,7 @@ station isolation and Job UI restrictions retain their existing contracts.
 Portable transport regressions establish diagnostic forwarding and failure only;
 actual helper compilation and native behavior remain matching-host CI evidence.
 
-Bootstrap compilation now covers every fixed Darwin/Windows helper as build-only
+Windows bootstrap compilation covers every fixed helper as build-only
 data before sealing or privileged promotion. A normal completed compiler failure
 retains its original exception and allows later independent recipes; protected
 rebuilds additionally require their existing complete retirement receipts.
@@ -132,32 +132,10 @@ Any required failure still prevents helper execution and preparation publication
 successful later builds cannot supply partial admission. Independent feasibility
 build owners and Linux coverage retain their existing separation.
 
-Before Darwin seed compilation, diagnostic-only observations inspect the selected
-installed SDK's `net/pfvar.h` and its actual compiler dependency query, plus the
-installed `/sbin/pfctl` identity, version request and read-only info/rules/anchor
-queries. The same gated, persisted command owner also observes installed sudo/id
-identities and runs only `/usr/bin/sudo -n -- /usr/bin/id -u` and
-`/usr/bin/sudo -n -- /sbin/pfctl -s info`, `-s rules`, `-s Anchors`. These diagnostic
-queries precede compilation and are distinct from later sealing/promotion.
-For these fixed sudo/id/PF paths, protected executable observations separately
-check canonical regular-file identity, root ownership, executable permissions,
-protected ancestors and stable metadata. Diagnostic queries recheck those same
-identities before and after execution. A permission-denied image read retains its
-original exception, a failed image observation and a null digest; it does not
-withhold the four fixed sudo diagnostics when executable observations succeed.
-Missing or unsafe identities still withhold execution. Diagnostic observations
-relax neither the shared data/native-input reader nor privileged helper admission;
-the fixed experiment acquisition below supplies actual digests independently.
-Diagnostic execution does not establish image custody or PF policy/readback support.
-Facts bind the candidate/run/job, observed OS/kernel, selected SDK/settings and
-compiler identities. Each query has a three-second timeout and 64 KiB capture
-bound per stream within a forty-second overall observation budget. Absent, failed
-and unattempted observations remain distinct, including unsupported `-V`, denied
-elevation or reads, and partial/truncated capture. Settled command failures allow
-remaining observations; cancellation, timeout or uncertain capture stops further
-commands and preserves the original exception. The SDK dependency query retains
-its missing-header failure even when the experiment builds with its separately
-bound adapter. These observations select no policy mutation or PF readback migration.
+Ordinary Darwin preparation uses one hosted Clang build per helper. The previous
+preliminary compiler/PF-header and elevated-tool bootstrap observers are removed;
+actual PF readback, audit capture and model-free controls remain owned by native
+cases and cannot be replaced by successful compiler diagnostics.
 Underlying Windows command/audit errors remain visible before strict projection;
 diagnostic output grants no authority and leaves cleanup failures independent.
 
@@ -334,41 +312,38 @@ Fixed compilation force-includes candidate `experiment.h`, embedding read-only
 `__TEXT,__nexp` and the distinct `native-experiment-custody-v1` plan header.
 The compiled reader accepts only its purpose header; reviewed image/signature
 readers reject marked images despite native signing. Signature/CDHash, independent
-identities/held files, both installed-policy barriers, compiler-policy reads and
-original retirement remain mandatory.
+identities/held files, both installed-policy barriers and original case retirement
+remain mandatory. Reviewed compiler-policy reads retain their separate contract.
 
-Private Darwin `experiment-build-inputs.js` and `experiment-build.js` now supply
-the build-only preparation lifecycle. Admission is persisted before bootstrap
-creation, root protection and compiler release. Exact candidate sources include
-every fixed helper and its headers. Installed selection collects actual Clang,
-delegated tools, SDK settings and signer pins; data-only seed helpers confer no
-independent evidence. The existing fixed build owner independently observes and
-retires every version query, compilation and signing command. Final held reads
-verify all ten marked/signed images, compiler-generated dependency files, protected
-SDK inputs, loader bytes, shared-cache runtime identities and native ABI/build.
-These observed hashes populate no approval field.
+Private Darwin `experiment-build-inputs.js` discovers installed Clang and its SDK,
+compares every source/header with the exact Git blob and compiles each of the ten
+helpers once. Explicit SDKROOT/DEVELOPER_DIR and ordinary bounded argument vectors
+retain command results and real compiler/SDK versions and tool/settings hashes.
+Each helper is ad-hoc signed, inspected for the experiment marker and Mach-O/ABI,
+then published using existing root custody. A timeout or cancellation owns the
+ordinary process group and awaits leader reaping; uncertain completion cannot
+publish a successful build. Original diagnostics survive cleanup failure.
 
-Experiment seed sealing precedes construction of the digest-bearing bootstrap
-tuple. A candidate-pinned `bootstrap-seed` inventory and sealing intent cover only
-the fixed private bundle. The sealed reader independently verifies its source
-inventory and signatures, durably records its original birth before the release
-barrier, then hashes only `/usr/bin/sudo` and `/usr/bin/env` under privilege.
-Held canonical files, root-owned ancestors, ACLs, signatures, bounded bytes and
-stable metadata remain mandatory, including for execute-only sudo installations.
-Protected original-owner and result receipts survive lost replies. A fresh reader
-must prove the original worker absent and rejoin the same tool identities/bytes;
-cold recovery never reruns acquisition or adopts newly observed digests.
-Each independent reader has a prior controller intent and protected birth record;
-fresh reconciliation requires every earlier reader absent, retaining missing births.
-Only independently retired acquisition with actual digests completes the tuple.
-Every subsequent experiment custody entry verifies those fixed pins under privilege
-before its admission frame. Reviewed admission and ordinary protected-byte reads
-remain strict. Original unprivileged diagnostic failures retain their null digests;
-missing birth evidence or incomplete sealing retain uncertainty. An independently
-absent acquisition worker can retire without a published digest, but cannot supply
-the final tuple or authorize build admission. Matching macOS must
-prove actual-byte acquisition, independent retirement and ordinary bootstrap
-admission; portable regressions provide no native acceptance.
+`experiment-build.js` uses private version-2 records and declarations. Sealed
+native readers independently inspect published helper/source bytes, signatures,
+loader/shared-cache closure and ABI. The build recipe inspects this completed
+build and fresh output identities, without parked compiler domains or compiler
+policy receipts. Every other recipe retains its native policy and retirement
+requirements. Cold loading verifies the existing output, source, tool and SDK
+observations without discovery, acquisition or recompilation. Incompatible, mixed,
+incomplete and substituted records fail.
+
+Under the explicit disposable hosted-image/toolchain assumption, ordinary builds
+no longer reconstruct installed compiler/delegated-tool/SDK trust, snapshot
+compiler dependencies, compile seed helpers or invoke the protected compiler
+entry. The extra bootstrap-tool acquisition observer, seed inventory and its
+recovery journals are removed. The sealed case reader and fixed sudo/env launch
+pins remain, as do root publication, held native images, private UIDs/audit
+sessions, payload restrictions, positive controls and independent retirement.
+Interrupted preparation without completed evidence stays RETAINED with its
+original failure. Case custody recovery remains separate; a build cannot attest
+an original payload or audit domain's retirement. Reviewed source/build/signature
+validators and experiment-to-reviewed rejection remain strict.
 
 Experiment PF observations carry explicit purpose and a bounded recursive graph
 across all six source rulesets, including dummynet. Dotted stock anchor names are
@@ -405,10 +380,10 @@ Both effective graph and access-counter reads share the state/counter normalizer
 experiment rule numbers and authority fields remain part of the ordered policy
 evidence. This source repair establishes no running-kernel ABI compatibility.
 
-The adapter is an exact candidate source in acquisition, bootstrap custody and
-protected rebuilds. Held reads, cold loading and recovery recheck its bytes;
-the reader's compiler dependency record must name that sealed adapter, rejecting
-a missing or substituted header. Build observations record `pfAbi.reference`
+The adapter is an exact candidate source in hosted compilation and case custody.
+Its forced experiment header and compiler includes retain the ABI assertions;
+held source reads, cold loading and recovery recheck its bytes. Ordinary builds
+retain no compiler dependency snapshot. Build observations record `pfAbi.reference`
 separately from the pinned adapter and the observed kernel/build, SDK and compiler
 identities. The base tag establishes no exact `.711.44` kernel source match.
 `runtimeCompatibility` remains `UNPROVED`: the six reference rulesets, stock
@@ -522,121 +497,28 @@ ownership at UID501/GID20/mode040755; writability was unsampled. Discovery alrea
 canonicalizes `xcrun --show-sdk-path`, so canonicalization is not a supported
 remedy for that refusal. No independently safe alternative SDK is established.
 
-Experiment acquisition now filters that canonical default, then only the
-documented standalone CLT candidate
-`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk` if the default is unavailable,
-unsafe or unverifiable. Canonical candidates are deduplicated; the alternative
-must remain inside the canonical CLT SDK installation. Bounded ancestry and
-settings checks precede seed staging/compilation, while read-only discovery
-retains its existing command-intent journal. There is no search, version guessing,
-changed `xcode-select`, installation, copying or installed-input ownership or
-permission change. Missing or unsafe candidates remain blocked. The matching
-image inventory documents a candidate package, not its safe installed metadata.
+Ordinary Darwin preparation now accepts the installed SDK selected by xcrun
+under the hosted trust assumption. Its canonical path determines the explicit
+DEVELOPER_DIR and SDKROOT; compiler discovery and the successful selected-SDK
+build query remain recorded observations. Compiler/SDK ownership, signatures,
+delegated-tool pins and bootstrap dependency reconstruction are no longer
+ordinary admission requirements. The retained reviewed/native compiler guards
+above describe their separate protected consumers. No global selection or
+installed-input permission changes are introduced.
 
-The persisted command owner binds the selected canonical SDK directory's device
-and inode and the `SDKSettings.json` digest. Explicit `--sdk` arguments bind
-compiler discovery and the experiment SDK build-version query; seed dependency
-queries and both compiler paths retain the same `-isysroot`. The build owner
-rejects dependencies from other installed SDKs, including canonical aliases,
-before reading their bytes; existing compiler resource-header locations remain
-eligible. Before the native experiment version query or compilation, the sealed
-entry applies the original SDK predicates, held/named identity joins, inspected
-ACL absence, settings pin and protected ancestors. It holds and rechecks that
-SDK through completion.
-The existing independent build-input reader returns the checked SDK directory
-alongside held settings. Build evidence retains both native identities, and cold
-loading rejoins them and all existing pins without rediscovery or compilation.
-Native refusal never causes reselection or consumed-effect replay. The 22 fixed
-protected commands, deadlines, output limits and original command/helper/custody
-retirement remain unchanged; first failure and settlement failures stay separate.
-Reviewed version-6 vectors and compile-only SDK admission remain unchanged.
-
-The experiment additionally binds that SDK to its documented canonical developer
-installation: standalone CLT SDKs belong to `/Library/Developer/CommandLineTools`,
-while Xcode SDKs must use the installation's macOS platform layout. An ambiguous
-or unverifiable pairing is terminal after selection; it adds no candidate or
-search. Compiler discovery, dependency discovery and seed compilation explicitly
-construct both `DEVELOPER_DIR` and `SDKROOT` in the closed per-command environment.
-Ambient toolchain overrides and global `xcode-select` changes are never used.
-The discovered canonical compiler must rejoin that installation's named Clang;
-its digest/signature and the bounded delegated-tool pins remain separate from
-the stock Clang/xcrun/codesign shim pins.
-
-Sealed experiment declarations carry the developer directory identity and those
-tool pins through request validation and native execution. Native admission
-independently derives the installation/compiler relationship, checks protected
-ancestry and ACL absence, and holds/rechecks the developer and actual tool
-identities and pins through command completion. Independent build-input reads
-observe the same developer directory with SDK settings and freshly verify the
-actual tool signatures. Selectors, closure hashes and build evidence retain
-these joins; cold loading rechecks them without discovery, compilation or replay.
-Compiler resource dependencies must remain within the selected installation.
-Reviewed version-6 behavior and the 22 protected commands remain unchanged.
-The actual successful selected-SDK `--show-sdk-build-version` output
-remains mandatory; a missing build result cannot be replaced with an SDK version
-label. This binding does not uniquely explain the earlier ProductBuildVersion
-failure and supplies no native success or resolution of preliminary PF facts.
-
-Only the experiment selected compiler/delegated-tool input class uses an explicit
-512 MiB limit in the sealed entry, during initial admission and every toolchain
-stability reread. This matches the existing acquisition/revalidation, independent
-installed build reads, custody response bounds and cold verification. The larger
-limit changes no membership, canonical installation relationship, hash/signature
-or exact device/inode pin, ownership, ancestry, ACL or held/named stability guard.
-Stock shims, SDK settings and sealed sources/headers retain the entry's 128 MiB
-limit. Bootstrap/compiler-entry images, generated images, signing and publication
-retain their existing limits; installed selected-toolchain data is a separate
-class. Deadlines, capture bounds, first-cause preservation and independent original
-retirement remain unchanged. Portable boundary coverage supplies no actual compiler
-admission, successful selected-SDK query or native readiness.
-
-Acquisition now requests BigInt filesystem statistics for input, SDK/developer
-and stability snapshots; installed ancestry and build snapshots retain exact
-identities and nanosecond modification/change times. Device/inode values must
-remain within the unsigned-64-bit contract and never pass through Number for
-acquisition or authoritative comparisons. Existing Number-stat eligibility samples
-remain compatible; independent held reads and ancestry acquire exact identities.
-Selected SDK, developer, real compiler and delegated tools retain their existing
-canonical decimal fields; other acquisition identities stay transient. Bounded
-stat diagnostics encode BigInt values as decimal strings while preserving the
-original refusal if diagnostic construction or publication fails.
-
-The observed new identity predicate failed at `/usr/lib/dyld` before the protected
-SDK query; actual device/inode values were not emitted and no unique precision
-cause was observed. Seed staging and command intents can precede that failure.
-After fencing, recovery recognizes validated contiguous pre-seal journals as
-incomplete acquisition, without inventing a sealed declaration or opening another
-proof reader. Possible effects stay RETAINED, independently unproved, with no
-retirement receipt; cleanup remains unsuccessful and original failure/emergency
-history survives. Missing, torn, gapped or contradictory journals remain uncertain.
-Normal loading requires complete preparation; sealed recovery still rejoins
-original births and independent receipts without replay or uncertain release.
-The successful `--sdk <selected-sdk> --show-sdk-build-version` query, all 22
-protected commands, reviewed version-6 behavior and native limits remain mandatory.
-Windows VERIFY8/CLOSE0 trust and failed-owner retirement, socket10022 and missing4663,
-and Darwin task-access/PF obligations remain explicitly unresolved.
-
-These observations and portable regressions establish no installed-tool native
-acceptance. Actual selected CLT ownership, ancestry, ACLs, pins, successful native
-building and independent non-emergency retirement remain unresolved until fresh
-matching CI. Darwin live task-access authority and Windows 10022 transfer,
-LONG8/CLOSE0 trust, failed-reader retirement and missing audit4663 remain
-unresolved. Previously accepted original-failure settlement repairs are preserved.
-Matching-host execution and both fresh same-SHA native workflows
-remain necessary; diagnostics, injected regressions and setup success establish
-no native acceptance or production GO.
-
-Cold-loading rechecks exact candidate sources and fresh held inputs, anchored to
-the original build receipt and independently retired original births. Its original
-retirement observer closes before a fresh held-output session; ABI queries remain
-in the purpose-bound journal. Recovery records a durable fence even when the private
-report directory or selector was never created. It rejoins later cold-reader
-admissions despite a previously retired build, preserving uncertainty, original
-failures and emergency-cleanup history. It never compiles or fills missing build
-evidence. Missing selectors, unobserved births, surviving domains or unreadable
-receipts retain uncertainty and the first failure. The private build result alone
-leaves the complete version-7 preparation slot empty; the indexed preparation owner
-now joins it to every fixed case declaration. Portable regressions prove no native PASS.
+Cold loading rejoins the exact candidate, completed build and fresh held output
+observations, with separately retired native reader sessions and ABI journals.
+It does not discover tools, compile or reconstruct missing completion. Interrupted
+compiler/publication work without a complete record remains uncertain and
+unsuccessful. Existing case journals still fence later admission and require the
+original native births/domains to retire independently before restoration;
+failed cleanup cannot replace the original error or erase emergency history.
+The private build alone cannot establish the complete version-7 preparation slot.
+Matching hosted execution and both fresh same-SHA original workflows still own
+native acceptance. Darwin TASK_ACCESS_PORT and model-free/PF failures, and the
+existing Windows trust/socket/audit and original-owner retirement failures,
+remain failures until real evidence resolves them. Portable regressions establish
+no native acceptance or production readiness.
 
 Private ownership/access declarations now derive their exact inventory from
 `darwinSystemRecipes`. Existing case provisioning, ownership, access, launch,
@@ -3104,11 +2986,11 @@ suppression. Build evidence records the binding header digest alongside the
 helper source digest and exact existing build vector.
 Custody readers reject unavailable exports before native operations and validate
 every active/path result as zero or one; query errors cannot become sandboxed
-authority. The header is mandatory in exact candidate acquisition, prerequisite
-publication, seed/bootstrap custody, protected rebuild, cold-load and recovery
-inventories. Experiment compiler dependencies must contain its one sealed path;
-missing, substituted or shadow header paths fail admission. Reviewed version-6
-source and approval validation remains strict and purpose-specific.
+authority. The header is mandatory in exact candidate acquisition, prerequisite publication,
+hosted compilation, sealed case custody, cold-load and recovery inventories.
+Ordinary builds compare and copy its exact candidate bytes with the other sources;
+retained protected compiler consumers keep their separate dependency checks.
+Reviewed version-6 source and approval validation remains strict and purpose-specific.
 
 Missing exports refuse prerequisite admission with exit 78 before the
 audit-token signal control or payload release. The observed prerequisite receipt
@@ -7721,10 +7603,10 @@ input and verifier callbacks. Native effects remain dedicated CI work.
 
 The shared `custody.h` census uses `proc_listpids(PROC_ALL_PIDS)` with a fixed
 4096-PID host buffer and a separate 32-member domain bound. Launcher, case and
-compiler-domain consumers share those exact native reads. Exact acquisition,
-bootstrap, protected rebuild, dependency, custody and recovery inventories bind
-the header bytes; experiment compiler dependencies must include it uniquely for
-both launcher and custody reader. The inspected libproc wrapper returns zero on both empty
+compiler-domain consumers share those exact native reads. Exact candidate source,
+publication, custody and recovery inventories bind the header bytes for ordinary
+hosted builds. Retained protected compiler consumers keep their separate
+rebuild/dependency checks. The inspected libproc wrapper returns zero on both empty
 success and syscall failure; the helper clears and checks errno. Full buffers,
 misaligned sizes, duplicate PIDs, missing task rights or unstable native reads
 fail. Every live process joins `TASK_AUDIT_TOKEN` with BSD saved IDs/start identity

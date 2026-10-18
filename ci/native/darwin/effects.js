@@ -110,7 +110,7 @@ const ownerNames = (recipe) => {
 };
 
 /** Construction has no effects. Build joins use repository custody defaults;
- * case setup and compiler policy reads use the sealed native owner. Expected
+ * case setup and published-image reads use the sealed native owner. Expected
  * manifests never become observed evidence. */
 export function createDarwinSystemEffects(input, options = {}) {
   const state = darwinPreparationContext(input, options),
@@ -192,19 +192,24 @@ export function createDarwinSystemEffects(input, options = {}) {
           const binding = normalizePolicyBinding(policyBinding);
           requireObservation(
             binding.purpose === "experiment" &&
-              typeof recordPolicy === "function",
+              typeof recordPolicy === "function" &&
+              observationDigest(binding.context) ===
+                observationDigest(state.plan.bootstrap.context),
           );
           const { reader } = await state.bootstrap(signal);
           policyProof = await provisioning.observeBuildPolicy(
             binding,
             {
-              commands: fresh.build.commands,
+              build: fresh.build,
               reader,
-              settlement: fresh.build.commands.map(
-                ({ settlement }) => settlement,
-              ),
             },
             { signal },
+          );
+          verifyPolicyBinding(
+            binding,
+            policyProof.provisioning,
+            policyProof.requestSha256,
+            policyProof.observed,
           );
           await recordPolicy(policyProof);
         }

@@ -121,9 +121,7 @@ export function runExperimentProofs(job, directory, options = {}) {
           bootstrapJournal: path.join(directory, "native"),
           env: windowsFeasibilityToolEnvironment(options.env ?? process.env),
         }
-      : job.platform === "darwin"
-        ? { ...options, bootstrapJournal: path.join(directory, "native") }
-        : options,
+      : options,
   );
 }
 
@@ -368,7 +366,7 @@ export async function runExperimentStage(
           assertActive();
         };
       }
-      if (job.platform !== "linux") {
+      if (job.platform === "win32") {
         let sequence = 0;
         settings.bootstrapJournal = path.join(directory, "native");
         settings.persistBootstrap = (value) =>

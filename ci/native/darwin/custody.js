@@ -191,9 +191,6 @@ export function encodeDarwinCustodyPlan(input) {
 }
 
 export function darwinCustodyTransport(input, args) {
-  const bootstrap =
-    input.purpose === "experiment" &&
-    ["--bootstrap-tools", "--bootstrap-tools-read"].includes(args[0]);
   requireDarwin(
     process.platform === "darwin" &&
       process.arch === "x64" &&
@@ -203,16 +200,16 @@ export function darwinCustodyTransport(input, args) {
   );
   return darwinCustodyChannel(
     spawn(
-      bootstrap ? "/usr/bin/sudo" : input.tools.elevation.path,
+      input.tools.elevation.path,
       [
         "-n",
         "--",
-        bootstrap ? "/usr/bin/env" : input.tools.environment.path,
+        input.tools.environment.path,
         "-i",
         "CI=true",
         "GITHUB_ACTIONS=true",
         input.reader.path,
-        ...(input.purpose === "experiment" && !bootstrap
+        ...(input.purpose === "experiment"
           ? [
               "--bootstrap-pins",
               input.tools.elevation.sha256,

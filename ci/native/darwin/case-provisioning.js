@@ -22,6 +22,7 @@ import {
 } from "./custody.js";
 import {
   digest,
+  inspectDarwinMachO,
   DARWIN_LITERAL_ARGUMENTS,
   sameDarwinIdentity,
   normalizeDarwinLaunch,
@@ -244,7 +245,7 @@ export function createDarwinCaseProvisioning(state, options) {
   return {
     async observeBuildPolicy(
       binding,
-      { commands, reader, settlement },
+      { commands, reader, settlement, build },
       { signal },
     ) {
       state.guard(signal);
@@ -255,6 +256,95 @@ export function createDarwinCaseProvisioning(state, options) {
           : binding.template.provisioningReviewSha256 ===
               state.plan.bootstrap.reviewSha256,
       );
+      if (binding.purpose === "experiment") {
+        requireObservation(
+          build?.schemaVersion === 2 && build.purpose === "experiment",
+        );
+        const images = [],
+          reads = [];
+        for (const expected of build.helpers) {
+          const image = await reader.readBuildImage(
+            path.join(state.output, expected.name),
+            expected.sha256,
+          );
+          const actual = inspectDarwinMachO(
+            image.bytes,
+            134217728,
+            "experiment",
+          );
+          requireObservation(
+            image.independent === true &&
+              image.held === true &&
+              image.unchanged === true &&
+              actual.sha256 === image.sha256 &&
+              image.sha256 === expected.sha256 &&
+              image.signature?.valid === true &&
+              image.signature.cdhash === expected.cdhash &&
+              hash(image.nativeEventSha256),
+          );
+          images.push({
+            name: expected.name,
+            sha256: image.sha256,
+            sourceSha256: expected.sourceSha256,
+            machoSha256: observationDigest(image.macho),
+          });
+          reads.push(image.nativeEventSha256);
+        }
+        const output = await reader.readBuildDirectory(state.output);
+        requireObservation(
+          output.independent === true &&
+            output.mode === 0o555 &&
+            output.uid === 0 &&
+            output.gid === 0,
+        );
+        const policy = normalizePolicyTemplate({
+          ...binding.template,
+          bindings: [],
+          policy: {
+            launch: {
+              buildSha256: observationDigest(build),
+              commandsSha256: observationDigest(build.commands),
+            },
+            policy: {
+              images,
+              output: {
+                path: state.output,
+                identitySha256: digest(Buffer.from(output.identity)),
+                uid: output.uid,
+                gid: output.gid,
+                mode: output.mode,
+              },
+            },
+          },
+        }).policy;
+        const allocation = provisioning(
+          binding,
+          {
+            "policy.output.identitySha256": policy.policy.output.identitySha256,
+          },
+          state.plan.bootstrap.reader.sha256,
+          { reads, output },
+        );
+        const requestSha256 = observationDigest(policy.launch);
+        return {
+          provisioning: allocation,
+          requestSha256,
+          observed: {
+            schemaVersion: 1,
+            context: structuredClone(binding.context),
+            templateSha256: policyPin(binding),
+            provisioningSha256: observationDigest(allocation),
+            requestSha256,
+            policySha256: observationDigest(policy),
+            policy,
+            held: true,
+            complete: true,
+            independent: true,
+            verifierSha256: state.plan.bootstrap.reader.sha256,
+            nativeEventSha256: observationDigest({ reads, output }),
+          },
+        };
+      }
       const domains = [];
       for (const command of commands) {
         const policy = command.compilerPolicy;

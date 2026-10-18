@@ -110,7 +110,9 @@ export function normalizeDarwinPreparation(
     "cases",
   ]);
   requireObservation(
-    value.schemaVersion === 1 && absolute(value.sourceDirectory),
+    (value.schemaVersion === 1 ||
+      (purpose === "experiment" && value.schemaVersion === 2)) &&
+      absolute(value.sourceDirectory),
   );
   const bootstrap = normalizeDarwinCustodyInput(value.bootstrap, purpose);
   requireObservation(
@@ -118,12 +120,17 @@ export function normalizeDarwinPreparation(
       bootstrap.context.executionId === "build" &&
       bootstrap.context.tier === "system",
   );
-  observationObject(value.command, [
-    "helper",
-    "toolCdhashes",
-    ...(purpose === "experiment" ? ["sdk", "toolchain"] : []),
-  ]);
-  if (purpose === "experiment") {
+  observationObject(
+    value.command,
+    value.schemaVersion === 2
+      ? ["helper"]
+      : [
+          "helper",
+          "toolCdhashes",
+          ...(purpose === "experiment" ? ["sdk", "toolchain"] : []),
+        ],
+  );
+  if (value.schemaVersion === 1 && purpose === "experiment") {
     darwinBuildSdk(value.command.sdk, value.command.sdk?.path);
     darwinBuildToolchain(
       value.command.toolchain,
@@ -135,18 +142,22 @@ export function normalizeDarwinPreparation(
   requireObservation(
     absolute(value.command.helper.path) &&
       hash(value.command.helper.sha256) &&
-      /^[a-f0-9]{40}$/u.test(value.command.helper.cdhash),
+      /^[a-f0-9]{40}$/u.test(value.command.helper.cdhash) &&
+      path.dirname(value.command.helper.path) ===
+        path.dirname(bootstrap.reader.path),
   );
-  requireObservation(
-    path.dirname(value.command.helper.path) ===
-      path.dirname(bootstrap.reader.path),
-  );
-  observationObject(value.command.toolCdhashes, ["compiler", "sdk", "signer"]);
-  requireObservation(
-    Object.values(value.command.toolCdhashes).every((pin) =>
-      /^[a-f0-9]{40}$/u.test(pin),
-    ),
-  );
+  if (value.schemaVersion === 1) {
+    observationObject(value.command.toolCdhashes, [
+      "compiler",
+      "sdk",
+      "signer",
+    ]);
+    requireObservation(
+      Object.values(value.command.toolCdhashes).every((pin) =>
+        /^[a-f0-9]{40}$/u.test(pin),
+      ),
+    );
+  }
   const sourceNames = [
     ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
     "custody.h",

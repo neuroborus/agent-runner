@@ -30,9 +30,12 @@ const retired = (value) =>
   value.independent === true &&
   value.emergencyCleanup === false;
 
-// Commands are fixed original build receipts. Only the independently held
-// output identity is materialized by the existing compiler-policy observer.
+// Completed hosted commands are observations, not protected compiler receipts.
+// The native reader independently re-reads the published images and directory.
 export function darwinExperimentBuildBinding({ prepared, build }) {
+  requireObservation(
+    build.schemaVersion === 2 && build.purpose === "experiment",
+  );
   return {
     purpose: "experiment",
     context: prepared.bootstrap.context,
@@ -45,24 +48,18 @@ export function darwinExperimentBuildBinding({ prepared, build }) {
       provisioningSha256: prepared.bootstrap.bindingSha256,
       policy: {
         launch: {
-          commands: build.commands.map(({ requestSha256, toolSha256 }) => ({
-            requestSha256,
-            toolSha256,
-          })),
+          buildSha256: observationDigest(build),
+          commandsSha256: observationDigest(build.commands),
         },
         policy: {
-          compilerDomains: build.commands.map(() => ({
-            uid: 0,
-            gid: 0,
-            ruid: 0,
-            rgid: 0,
-            sandboxed: false,
-            descriptors: [
-              { fd: 0, type: "vnode" },
-              { fd: 1, type: "pipe" },
-              { fd: 2, type: "pipe" },
-            ],
-          })),
+          images: build.helpers.map(
+            ({ name, sha256, sourceSha256, macho }) => ({
+              name,
+              sha256,
+              sourceSha256,
+              machoSha256: observationDigest(macho),
+            }),
+          ),
           output: {
             path: prepared.output,
             identitySha256: { binding: "output" },
@@ -192,7 +189,7 @@ function observation(prepared, build, inputs, readSha256) {
         sha256,
         version:
           name === "compiler"
-            ? build.commands[0].stdout.split("\n")[0]
+            ? build.compilerVersion.split("\n")[0]
             : name === "sdk"
               ? build.sdk.build
               : prepared.binding.osBuild + ":" + sha256,

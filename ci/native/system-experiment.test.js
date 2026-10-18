@@ -180,7 +180,20 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       sources: [],
       output: "/synthetic/build",
     },
-    build: { commands: [] },
+    build:
+      platform === "darwin"
+        ? {
+            schemaVersion: 2,
+            purpose: "experiment",
+            commands: [],
+            helpers: inventory.helpers.map((name) => ({
+              name,
+              sha256: H,
+              sourceSha256: H,
+              macho: { dependencies: [] },
+            })),
+          }
+        : { commands: [] },
     system: {
       policyBindings: bindings,
       bindings: bindings.map((policyBinding) => ({
@@ -430,7 +443,10 @@ test("experiment stages keep private native storage outside public upload traver
     const inspect = (stage, directory, options) => {
       assert.equal(directory, storage);
       assert.ok(directories.has(directory));
-      assert.equal(options.bootstrapJournal, path.join(f.directory, "native"));
+      assert.equal(
+        options.bootstrapJournal,
+        platform === "win32" ? path.join(f.directory, "native") : undefined,
+      );
       calls.push(stage);
     };
     f.options.owner = {
@@ -443,14 +459,16 @@ test("experiment stages keep private native storage outside public upload traver
         assert.deepEqual([...directories], [f.directory]);
         directories.add(directory); // Inject exclusive native allocation only.
         inspect("prepare", directory, options);
-        await options.persistBootstrap({
-          purpose: "experiment",
-          phase: "original-intent",
-        });
-        await options.persistBootstrap({
-          purpose: "experiment",
-          phase: "original-selector",
-        });
+        if (platform === "win32") {
+          await options.persistBootstrap({
+            purpose: "experiment",
+            phase: "original-intent",
+          });
+          await options.persistBootstrap({
+            purpose: "experiment",
+            phase: "original-selector",
+          });
+        } else assert.equal(options.persistBootstrap, undefined);
         return original.prepare(job, directory, persist, options);
       },
       load: async (job, directory, options) => {
@@ -478,14 +496,21 @@ test("experiment stages keep private native storage outside public upload traver
       };
       assert.throws(() => visit(storage), { code: "EACCES" });
       visit(directory);
-      assert.equal(
-        f.files.get(path.join(directory, "native-bootstrap-0.json")).phase,
-        "original-intent",
-      );
-      assert.equal(
-        f.files.get(path.join(directory, "native-bootstrap-1.json")).phase,
-        "original-selector",
-      );
+      if (platform === "win32") {
+        assert.equal(
+          f.files.get(path.join(directory, "native-bootstrap-0.json")).phase,
+          "original-intent",
+        );
+        assert.equal(
+          f.files.get(path.join(directory, "native-bootstrap-1.json")).phase,
+          "original-selector",
+        );
+      } else {
+        assert.equal(
+          f.files.has(path.join(directory, "native-bootstrap-0.json")),
+          false,
+        );
+      }
       return publish(env, directory, rendered);
     };
     await initializeExperimentCI(
@@ -501,26 +526,24 @@ test("experiment stages keep private native storage outside public upload traver
   }
 });
 
-test("preexisting public bootstrap journals survive failed preparation without native allocation", async () => {
-  for (const platform of ["darwin", "win32"]) {
-    const f = stageFixture(platform),
-      file = path.join(f.directory, "native-bootstrap-0.json"),
-      original = { purpose: "experiment", phase: "original-admission" };
-    f.files.set(file, original);
-    f.options.owner.prepare = async (_, __, ___, options) => {
-      await options.persistBootstrap({
-        purpose: "experiment",
-        phase: "replacement",
-      });
-      assert.fail("An existing journal must stop native allocation");
-    };
-    assert.equal(await f.stage("prepare"), false);
-    assert.deepEqual(f.files.get(file), original);
-    assert.equal(
-      f.files.get(path.join(f.directory, "native-first-failure.json")).stage,
-      "prepare",
-    );
-  }
+test("preexisting Windows public bootstrap journals survive failed preparation without native allocation", async () => {
+  const f = stageFixture("win32"),
+    file = path.join(f.directory, "native-bootstrap-0.json"),
+    original = { purpose: "experiment", phase: "original-admission" };
+  f.files.set(file, original);
+  f.options.owner.prepare = async (_, __, ___, options) => {
+    await options.persistBootstrap({
+      purpose: "experiment",
+      phase: "replacement",
+    });
+    assert.fail("An existing journal must stop native allocation");
+  };
+  assert.equal(await f.stage("prepare"), false);
+  assert.deepEqual(f.files.get(file), original);
+  assert.equal(
+    f.files.get(path.join(f.directory, "native-first-failure.json")).stage,
+    "prepare",
+  );
 });
 
 test("preexisting native storage fails preparation and partial recovery rejoins that same path", async () => {
@@ -551,7 +574,10 @@ test("preexisting native storage fails preparation and partial recovery rejoins 
     };
     f.options.owner.recoverPreparation = async (job, directory, _, options) => {
       assert.equal(directory, storage);
-      assert.equal(options.bootstrapJournal, path.join(f.directory, "native"));
+      assert.equal(
+        options.bootstrapJournal,
+        platform === "win32" ? path.join(f.directory, "native") : undefined,
+      );
       assert.deepEqual([...directories], [f.directory, storage]);
       assert.equal(job.preparation, null);
       calls.push("recover-original");
@@ -1738,7 +1764,10 @@ test("indexed Darwin/Windows experiment loops persist every recipe including bui
           `native-${platform}-experiment-${observationDigest(Object.fromEntries(["candidateSha", "platform", "repository", "runId", "runAttempt"].map((key) => [key, f.job[key]])))}`,
         ),
       );
-      assert.equal(options.bootstrapJournal, "/synthetic/native-system/native");
+      assert.equal(
+        options.bootstrapJournal,
+        platform === "win32" ? "/synthetic/native-system/native" : undefined,
+      );
       if (platform === "win32") {
         assert.equal(options.env.SystemRoot, "C:\\Windows");
         assert.equal(
