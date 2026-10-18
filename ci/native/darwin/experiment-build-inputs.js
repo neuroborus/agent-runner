@@ -18,6 +18,7 @@ import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+export const DARWIN_HOSTED_OUTPUT_BYTES = 256 * 1024;
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
   ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
   "custody.h",
@@ -239,7 +240,7 @@ export async function acquireDarwinExperimentBuild(
         ...extra,
       },
       timeout: 60000,
-      maxBuffer: 65536,
+      maxBuffer: DARWIN_HOSTED_OUTPUT_BYTES,
     };
     const result = await (options.command ?? execute)(file, args, {
       ...request,
@@ -257,9 +258,10 @@ export async function acquireDarwinExperimentBuild(
         result.signal === null &&
         result.timedOut === false &&
         [result.stdout, result.stderr].every(
-          (value) =>
-            typeof value === "string" && Buffer.byteLength(value) <= 65536,
-        ),
+          (value) => typeof value === "string",
+        ) &&
+        Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <=
+          DARWIN_HOSTED_OUTPUT_BYTES,
     );
     commands.push({ ...request, ...result });
     return result;

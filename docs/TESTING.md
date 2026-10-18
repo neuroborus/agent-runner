@@ -132,7 +132,11 @@ output and changed candidate/source/tool/output observations. Version-2 records
 reject legacy, mixed and incomplete command/environment inventories; cold loading
 compares binding values independently of key order and cannot acquire or recompile.
 A deterministic process-group fixture verifies cancellation, stream-read failure,
-reaped closure and unsuccessful completion when descendants remain. Interrupted builds
+reaped closure and unsuccessful completion when descendants remain. Injected streams
+retain successful diagnostics above 64 KiB, including split multibyte chunks, and
+cover the combined 256 KiB boundary and overflow. Long diagnostics survive receipt
+persistence and cold loading under the existing receipt-size limits; persisted
+validation also rejects combined-output overflow. Interrupted builds
 cannot reconstruct missing compiler receipts or erase the original failure.
 The indexed preparation fixture retains the complete inventory and independently
 read build policy, then exercises interrupted case custody and lost native-reader
@@ -1465,6 +1469,9 @@ Superseded compiler dependency and bootstrap-journal fixtures are removed. The
 retained raw preparation suite still verifies observer coalescing, lost finish
 without replay, original birth/Job/task retirement, cleanup/persistence failures,
 and every distinct native file, Git, access, audit, policy and ownership guard.
+Its real JS protocol regression requires the recorded helper SHA-256 in
+`prepare-read`, rejects changed hashes, unlisted paths and helper/installed-image
+substitutions, and retains the distinct installed-input request.
 Generated cases preserve native copy kinds, complete copied Git loader graphs
 and valid Git index padding/checksums. The preparation suite keeps immutable Git
 copying in the case custodian without requesting bootstrap read authority.
@@ -1689,6 +1696,10 @@ composition fixture exercises all 23 checks with an explicit experiment referenc
 and build observation, without compiler admission or a review manifest. Reviewed
 consumers reject that private reference; reviewed compiler receipts, audit
 missing-input refusal and independent payload retirement remain strict.
+Direct production receipt-admission coverage injects protected reads and fresh
+verifiers for the complete ownership/access and 21-file-session inventory, with
+both compiler receipts required only for reviewed compilation. Missing, duplicate,
+unexpected, substituted and unretired receipts are rejected.
 These injected regressions invoke no GCC, bubblewrap or privileged native effect;
 they add no durable slow-tier guarantee. Existing harness and first-failure
 requirements remain unchanged and run only through Runner FINALIZE when selected.

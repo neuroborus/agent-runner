@@ -80,6 +80,9 @@ import {
 import { acquireLinuxExperimentInterpreter } from "./confinement.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
 import { runLinuxCommandController } from "./command-controller.js";
+import { verifyLinuxCompletedReceipts } from "./system.js";
+import { LINUX_OWNERSHIP_CASES } from "./protocol.js";
+import { ACCESS_PROFILES } from "./profiles.js";
 
 function protectionInspection(
   mountinfo = "1 0 0:1 / / rw - rootfs rootfs rw\n",
@@ -372,6 +375,132 @@ const retired = {
 };
 const output = "/fixture/report/platform-build",
   directory = path.dirname(output);
+
+function completedReceiptFixture(purpose) {
+  const fixture = { directory: "/fixture/native", interpreter: { held: true } },
+    bindings = [],
+    receipts = new Map(),
+    reads = [],
+    verifications = [];
+  const add = (file, caseId, nonce) => {
+    bindings.push({ file, sha256: hash });
+    receipts.set(file, { candidateSha, caseId, nonce });
+  };
+  for (const id of [...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES])
+    add(path.join(fixture.directory, "evidence", `${id}.json`), id);
+  for (let index = 0; index < 21; index++) {
+    const nonce = `00000000-0000-0000-0000-${String(index).padStart(12, "0")}`;
+    add(
+      path.join(fixture.directory, "evidence", `file-helper-${nonce}.json`),
+      "file-helper",
+      nonce,
+    );
+  }
+  if (purpose === "reviewed")
+    for (const index of [0, 1])
+      add(path.join(directory, "build", `command-${index}.json`), "argv");
+  const verify = () =>
+    verifyLinuxCompletedReceipts(
+      { candidateSha },
+      directory,
+      fixture,
+      bindings,
+      purpose,
+      {
+        readReceipt: async (file, pin) => {
+          assert.equal(pin, hash);
+          reads.push({ file, sha256: pin });
+          return receipts.get(file);
+        },
+        verifyReceipt: async (file, pin, options) => {
+          assert.equal(options.interpreter, fixture.interpreter);
+          verifications.push({ file, sha256: pin });
+          return f.settlement;
+        },
+      },
+    );
+  const f = {
+    fixture,
+    bindings,
+    receipts,
+    reads,
+    verifications,
+    verify,
+    settlement: retired,
+  };
+  return f;
+}
+
+test("Linux release admission freshly verifies the complete purpose-specific receipt inventory", async () => {
+  for (const purpose of ["experiment", "reviewed"]) {
+    const f = completedReceiptFixture(purpose);
+    assert.deepEqual(await f.verify(), retired);
+    assert.deepEqual(f.reads, f.bindings);
+    assert.deepEqual(f.verifications, f.bindings);
+    assert.equal(f.bindings.length, purpose === "reviewed" ? 32 : 30);
+  }
+});
+
+test("Linux release admission rejects incomplete, substituted and unretired receipts", async () => {
+  for (const purpose of ["experiment", "reviewed"])
+    for (const fault of [
+      "ownership",
+      "access",
+      "file",
+      "duplicate",
+      "unexpected",
+      "compiler-0",
+      "compiler-1",
+      "candidate",
+      "case",
+      "nonce",
+      "pin",
+      "retirement",
+    ]) {
+      const f = completedReceiptFixture(purpose),
+        fileIndex = LINUX_OWNERSHIP_CASES.length + ACCESS_PROFILES.length,
+        selected = f.bindings[fileIndex];
+      if (["ownership", "access"].includes(fault)) {
+        const nonce = "00000000-0000-0000-0000-999999999999",
+          file = path.join(
+            f.fixture.directory,
+            "evidence",
+            `file-helper-${nonce}.json`,
+          );
+        f.bindings[fault === "ownership" ? 0 : LINUX_OWNERSHIP_CASES.length] = {
+          file,
+          sha256: hash,
+        };
+        f.receipts.set(file, { candidateSha, caseId: "file-helper", nonce });
+      } else if (fault === "file") f.bindings.splice(fileIndex, 1);
+      else if (fault === "duplicate") f.bindings[fileIndex] = f.bindings[0];
+      else if (fault === "unexpected") selected.file += ".extra";
+      else if (fault.startsWith("compiler-")) {
+        const file = path.join(
+          directory,
+          "build",
+          `${fault.replace("compiler", "command")}.json`,
+        );
+        if (purpose === "reviewed")
+          f.bindings.splice(
+            f.bindings.findIndex((binding) => binding.file === file),
+            1,
+          );
+        else {
+          selected.file = file;
+          f.receipts.set(file, { candidateSha, caseId: "argv" });
+        }
+      } else if (fault === "candidate")
+        f.receipts.get(selected.file).candidateSha = "c".repeat(40);
+      else if (fault === "case") f.receipts.get(selected.file).caseId = "argv";
+      else if (fault === "nonce")
+        f.receipts.get(selected.file).nonce =
+          "00000000-0000-0000-0000-999999999999";
+      else if (fault === "pin") selected.sha256 = "c".repeat(64);
+      else f.settlement = { ...retired, independent: false };
+      await assert.rejects(f.verify());
+    }
+});
 
 // Raw held files, native receipt transcripts and procfs only. The fixed entry,
 // bootstrap reader, command owner and independent verifier do their own work.

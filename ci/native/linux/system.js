@@ -148,7 +148,7 @@ export async function runLinuxSystemProofs(
     build = buildWithReceipts,
     files = runLinuxFileProofs,
     observeRelease = observeLinuxRelease,
-    verifyReceipts = verifyCompletedReceipts,
+    verifyReceipts = verifyLinuxCompletedReceipts,
     loadInputs = () =>
       loadPreparedLinuxReviewedInputs(
         env.NATIVE_REVIEWED_INPUT_DIRECTORY,
@@ -409,6 +409,7 @@ export async function runLinuxSystemProofs(
         directory,
         fixture,
         receiptBindings,
+        purpose,
       );
       requireValue(retired(settlement));
       const policy = {
@@ -496,20 +497,40 @@ export async function runLinuxSystemProofs(
   return job;
 }
 
-async function verifyCompletedReceipts(job, directory, fixture, bindings) {
+/** Every admitted receipt retains its protected read and original fresh verifier. */
+export async function verifyLinuxCompletedReceipts(
+  job,
+  directory,
+  fixture,
+  bindings,
+  purpose,
+  { readReceipt = protectedReceipt, verifyReceipt = freshVerifier } = {},
+) {
+  requireValue(["reviewed", "experiment"].includes(purpose));
+  const required = [
+    ...[...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES].map((id) =>
+      path.join(fixture.directory, "evidence", `${id}.json`),
+    ),
+    ...(purpose === "reviewed"
+      ? [0, 1].map((index) =>
+          path.join(directory, "build", `command-${index}.json`),
+        )
+      : []),
+  ];
+  const files = new Set(bindings.map(({ file }) => file));
   requireValue(
-    bindings.length ===
-      LINUX_OWNERSHIP_CASES.length + ACCESS_PROFILES.length + FILE_SESSIONS + 2,
-  );
-  requireValue(
-    new Set(bindings.map(({ file }) => file)).size === bindings.length,
+    bindings.length === required.length + FILE_SESSIONS &&
+      files.size === bindings.length &&
+      required.every((file) => files.has(file)),
   );
   for (const { file, sha256 } of bindings) {
     const directoryName = path.dirname(file),
       name = path.basename(file);
     requireValue(
       file === path.resolve(file) &&
-        ((directoryName === path.join(directory, "build") &&
+        /^[a-f0-9]{64}$/u.test(sha256) &&
+        ((purpose === "reviewed" &&
+          directoryName === path.join(directory, "build") &&
           /^command-[01]\.json$/u.test(name)) ||
           (directoryName === path.join(fixture.directory, "evidence") &&
             ([...LINUX_OWNERSHIP_CASES, ...ACCESS_PROFILES].some(
@@ -519,7 +540,7 @@ async function verifyCompletedReceipts(job, directory, fixture, bindings) {
                 name,
               )))),
     );
-    const receipt = await protectedReceipt(file, sha256);
+    const receipt = await readReceipt(file, sha256);
     requireValue(
       receipt.candidateSha === job.candidateSha &&
         (directoryName === path.join(directory, "build")
@@ -529,7 +550,7 @@ async function verifyCompletedReceipts(job, directory, fixture, bindings) {
               name === `file-helper-${receipt.nonce}.json`
             : name === `${receipt.caseId}.json`) &&
         retired(
-          await freshVerifier(file, sha256, {
+          await verifyReceipt(file, sha256, {
             interpreter: fixture.interpreter,
           }),
         ),

@@ -1,5 +1,5 @@
-import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { win32 as path } from "node:path";
 import { hasNativeDiagnostics } from "../diagnostics.js";
 import { observationDigest, requireObservation } from "../index.js";
@@ -41,6 +41,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
       input.manifest.windowsPreparation.bootstrap,
     ),
     receiptPrefix = options.receiptPrefix ?? "windows",
+    helpers = structuredClone(input.manifest.helpers ?? []),
     directory = input.directory ?? path.dirname(input.output ?? input.helpers),
     output = input.output ?? input.helpers,
     clock = options.clock ?? Date.now,
@@ -423,9 +424,22 @@ export function createWindowsPreparationFiles(input, options = {}) {
       return fileOperation(() => readFile({ file, experimentInput: true }));
     },
     readExperimentImage(file, installed = false) {
-      requireObservation(bootstrap.purpose === "experiment");
+      requireObservation(
+        bootstrap.purpose === "experiment" && typeof installed === "boolean",
+      );
+      const listed = helpers.filter((helper) => helper.path === file);
+      requireObservation(
+        installed
+          ? listed.length === 0
+          : listed.length === 1 && hash(listed[0].sha256),
+      );
       return fileOperation(() =>
-        readFile({ file, experimentInput: installed, imageSignature: true }),
+        readFile({
+          file,
+          sha256: installed ? undefined : listed[0].sha256,
+          experimentInput: installed,
+          imageSignature: true,
+        }),
       );
     },
     readProtected,

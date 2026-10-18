@@ -15,6 +15,7 @@ import {
   darwinExperimentWorker,
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
+  DARWIN_HOSTED_OUTPUT_BYTES,
   darwinHostedCompilerArguments,
 } from "./experiment-build-inputs.js";
 import { DARWIN_HELPER_NAMES, darwinDeveloperDirectory } from "./build.js";
@@ -179,12 +180,13 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
         command.signal === null &&
         command.timedOut === false &&
         command.timeout === 60000 &&
-        command.maxBuffer === 65536 &&
+        command.maxBuffer === DARWIN_HOSTED_OUTPUT_BYTES &&
         command.cwd === directory &&
         [command.stdout, command.stderr].every(
-          (value) =>
-            typeof value === "string" && Buffer.byteLength(value) <= 65536,
-        ),
+          (value) => typeof value === "string",
+        ) &&
+        Buffer.byteLength(command.stdout) + Buffer.byteLength(command.stderr) <=
+          DARWIN_HOSTED_OUTPUT_BYTES,
     );
   }
   const compilerCommands = prepared.commands.filter(

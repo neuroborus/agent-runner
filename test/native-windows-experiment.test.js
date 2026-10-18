@@ -1,15 +1,11 @@
-import { createWindowsCaseProvisioning } from "../ci/native/win32/case-provisioning.js";
-import {
-  normalizeNativePolicyBinding,
-  verifyNativePolicy,
-} from "../ci/native/win32/experiment-policy.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { win32 as path } from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 
-import { createWindowsPreparationFiles } from "../ci/native/win32/preparation-files.js";
 import {
   initializeNativeJob,
   observationDigest,
@@ -30,14 +26,13 @@ import {
   recoverWindowsExperimentPreparation,
   prepareWindowsExperimentCases,
   loadWindowsExperiment,
-} from "../ci/native/win32/index.js";
-
-import {
+  createWindowsPreparationFiles,
+  createWindowsCaseProvisioning,
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
   windowsHostedCompilerArguments,
   runWindowsHostedCommand,
-} from "../ci/native/win32/experiment-native.js";
-import { EventEmitter } from "node:events";
-import { PassThrough } from "node:stream";
+} from "../ci/native/win32/index.js";
 
 const candidateSha = "a".repeat(40),
   H = "b".repeat(64),

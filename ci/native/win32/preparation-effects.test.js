@@ -2174,9 +2174,14 @@ function rawPreparation({ experiment = false, environment } = {}) {
         daclSha256: hash,
         protectedParents: true,
       };
-    if (operation === "prepare-read") {
+    if (["prepare-read", "prepare-experiment-input"].includes(operation)) {
       assert.ok(!scope.readBytes && !scope.upload);
       const file = decode(args[0]);
+      if (operation === "prepare-experiment-input") {
+        assert.equal(experiment, true);
+        assert.equal(args[1], "-");
+        assert.ok(f.manifest.tools.some((tool) => tool.path === file));
+      }
       assert.notEqual(file, f.forbiddenPreparationRead);
       scope.readBytes = f.files.get(file);
       assert.ok(scope.readBytes, file);
@@ -2199,6 +2204,21 @@ function rawPreparation({ experiment = false, environment } = {}) {
     if (operation === "prepare-release") {
       scope.readBytes = null;
       return { closed: true };
+    }
+    if (operation === "prepare-experiment-signature") {
+      assert.ok(experiment && scope.readBytes);
+      return { signatureSha256: digest(scope.readBytes) };
+    }
+    if (operation === "prepare-experiment-pe") {
+      assert.ok(experiment && scope.readBytes);
+      return {
+        dll: false,
+        linkerMajor: 1,
+        linkerMinor: 0,
+        timestamp: 0,
+        imports: [],
+        complete: true,
+      };
     }
     if (operation === "prepare-write") {
       assert.ok(!scope.readBytes && !scope.upload);
@@ -3298,6 +3318,61 @@ function experimentImage() {
   bytes.write("native-ci-experiment-v1\0", 512);
   return bytes;
 }
+
+test("Windows experiment held-image protocol pins exact helpers and keeps installed reads separate", async () => {
+  const f = rawPreparation({ experiment: true }),
+    helper = f.prepared.helpers.find(({ name }) => name === "launcher"),
+    installed = f.prepared.tools[0].path,
+    requests = [];
+  let changed = false;
+  f.accessNative = async (operation, args) => {
+    if (!["prepare-read", "prepare-experiment-input"].includes(operation))
+      return;
+    if (operation === "prepare-read" && args[0] !== encode(helper.path)) return;
+    requests.push({ operation, args });
+    if (operation === "prepare-read") {
+      assert.deepEqual(args, [
+        encode(helper.path),
+        helper.sha256,
+        "134217728",
+        "0",
+      ]);
+      if (changed)
+        return {
+          identity: f.rawFileId(helper.path),
+          daclSha256: hash,
+          protectedParents: true,
+          sha256: digest(Buffer.from("changed image")),
+          bytes: 13,
+          slot: 0,
+        };
+    } else assert.deepEqual(args, [encode(installed), "-", "134217728", "0"]);
+  };
+  const native = await openWindowsExperimentNative(f.prepared, {
+    ...f.options,
+    reopen: true,
+  });
+  try {
+    const held = await native.readImage(helper.path);
+    assert.equal(held.sha256, helper.sha256);
+    assert.deepEqual(held.bytes, f.files.get(helper.path));
+    const stock = await native.readImage(installed, true);
+    assert.deepEqual(stock.bytes, f.files.get(installed));
+    assert.equal(requests.length, 2);
+    for (const [file, isInstalled] of [
+      [path.join(sourceDirectory, "unlisted.exe"), false],
+      [installed, false],
+      [helper.path, true],
+    ])
+      await assert.rejects(async () => native.readImage(file, isInstalled));
+    assert.equal(requests.length, 2);
+    changed = true;
+    await assert.rejects(native.readImage(helper.path));
+    assert.equal(requests.length, 3);
+  } finally {
+    assert.equal((await native.close()).status, "RETIRED");
+  }
+});
 
 test("Windows experiment close coalesces its System publication observer retirement", async () => {
   const f = rawPreparation({ experiment: true }),

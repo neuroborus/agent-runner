@@ -1,8 +1,4 @@
 import assert from "node:assert/strict";
-import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
-import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
-import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
-import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import test from "node:test";
 import path from "node:path";
 import { constants } from "node:fs";
@@ -11,6 +7,10 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
+import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
+import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
+import { providerPreparationFixture } from "../providers/preparation.fixture.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -75,6 +75,7 @@ import {
   acquireDarwinExperimentBuild,
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
+  DARWIN_HOSTED_OUTPUT_BYTES,
   darwinHostedCompilerArguments,
   runDarwinHostedCommand,
 } from "./experiment-build-inputs.js";
@@ -86,6 +87,7 @@ const candidateSha = "a".repeat(40),
   output = "/fixture/report/platform-build",
   directory = path.dirname(output),
   sourceDirectory = "/fixture/sealed/darwin";
+const longDiagnostic = "compiler warning\n".repeat(5000);
 const retired = {
   status: "RETIRED",
   independent: true,
@@ -527,7 +529,7 @@ function experimentBuildFixture(failure = null) {
         : {}),
     },
     timeout: 60000,
-    maxBuffer: 65536,
+    maxBuffer: DARWIN_HOSTED_OUTPUT_BYTES,
     exitCode: 0,
     signal: null,
     timedOut: false,
@@ -765,7 +767,7 @@ const jobContextForTest = (job) =>
     ),
   );
 
-function hostedAcquisitionFixture() {
+function hostedAcquisitionFixture(diagnostic = "") {
   const f = experimentBuildFixture(),
     files = new Map(),
     calls = [],
@@ -802,7 +804,15 @@ function hostedAcquisitionFixture() {
               : environment.SDKROOT) + "\n";
       if (file === f.prepared.tools[0].path) {
         if (args[0] === "--version") stdout = "Apple clang version 17.0\n";
-        else files.set(args[args.indexOf("-o") + 1], f.image);
+        else {
+          files.set(args[args.indexOf("-o") + 1], f.image);
+          if (
+            args.includes(
+              path.join(directory, "hosted-build", "custody-reader.c"),
+            )
+          )
+            stderr = diagnostic;
+        }
       }
       if (file === "/usr/bin/codesign" && args[0] === "-d")
         stderr = `CDHash=${cdhash}\n`;
@@ -826,7 +836,7 @@ function hostedAcquisitionFixture() {
 }
 
 test("Darwin hosted preparation compiles each helper once and publishes only observed signed output", async () => {
-  const f = hostedAcquisitionFixture();
+  const f = hostedAcquisitionFixture(longDiagnostic);
   const prepared = await acquireDarwinExperimentBuild(
     f.job,
     directory,
@@ -836,6 +846,12 @@ test("Darwin hosted preparation compiles each helper once and publishes only obs
   assert.equal(prepared.schemaVersion, 2);
   assert.equal(prepared.command.toolchain, undefined);
   assert.equal(prepared.bootstrapSeed, undefined);
+  assert.equal(
+    prepared.commands.find(({ args }) =>
+      args.includes(path.join(directory, "hosted-build", "custody-reader.c")),
+    ).stderr,
+    longDiagnostic,
+  );
   const compiled = f.calls.filter(
     ({ file, args }) =>
       file === prepared.tools[0].path && args[0] !== "--version",
@@ -977,14 +993,60 @@ test("Darwin hosted command failures own the process group and reap closure", as
   }
 });
 
-test("Darwin versioned build loading rejects substituted or incomplete evidence without rebuilding", async () => {
-  const f = experimentBuildFixture(),
-    built = await prepareDarwinExperimentBuild(
-      f.job,
-      directory,
-      f.persist,
-      f.options,
-    );
+test("Darwin hosted streams retain long diagnostics and enforce the combined byte boundary", async () => {
+  for (const outcome of ["long", "boundary", "overflow"]) {
+    const child = new EventEmitter(),
+      kills = [],
+      stdout = Buffer.from("é".repeat(17000)),
+      stderr =
+        outcome === "long"
+          ? Buffer.from(longDiagnostic)
+          : Buffer.alloc(DARWIN_HOSTED_OUTPUT_BYTES - stdout.length, "w");
+    child.pid = 4321;
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    const completion = runDarwinHostedCommand("/synthetic/compiler", [], {
+      timeout: 60000,
+      maxBuffer: DARWIN_HOSTED_OUTPUT_BYTES,
+      spawn: () => child,
+      kill: (pid, signal) => {
+        kills.push([pid, signal]);
+        if (signal === 0)
+          throw Object.assign(new Error("Absent"), { code: "ESRCH" });
+      },
+    });
+    child.stdout.write(stdout.subarray(0, 1));
+    child.stdout.end(stdout.subarray(1));
+    child.stderr.write(stderr);
+    if (outcome === "overflow") child.stderr.write(Buffer.from("!"));
+    child.stderr.end();
+    child.emit("close", 0, null);
+    if (outcome === "overflow") {
+      await assert.rejects(completion, /output exceeded its bound/u);
+      assert.ok(
+        kills.some(
+          ([pid, signal]) => pid === -child.pid && signal === "SIGTERM",
+        ),
+      );
+    } else {
+      const result = await completion;
+      assert.equal(result.stdout, stdout.toString());
+      assert.equal(result.stderr, stderr.toString());
+      assert.ok(stdout.length + stderr.length > 65536);
+      assert.ok(kills.every(([, signal]) => signal === 0));
+    }
+  }
+});
+
+test("Darwin versioned build loading retains long diagnostics and rejects substituted evidence without rebuilding", async () => {
+  const f = experimentBuildFixture();
+  f.prepared.commands[2].stderr = longDiagnostic;
+  const built = await prepareDarwinExperimentBuild(
+    f.job,
+    directory,
+    f.persist,
+    f.options,
+  );
   f.options.acquire = f.options.command = () =>
     assert.fail("Cold loading cannot rebuild or rediscover");
   const loaded = await loadDarwinExperimentBuild(
@@ -992,7 +1054,15 @@ test("Darwin versioned build loading rejects substituted or incomplete evidence 
     directory,
     f.options,
   );
+  const stored = JSON.parse(
+    await f.options.readSelector(
+      path.join(directory, "darwin-experiment-build-selector.json"),
+    ),
+  );
+  assert.equal(stored.commands[2].stderr, longDiagnostic);
   assert.deepEqual(loaded.build, built.build);
+  assert.equal(loaded.build.commands[2].stderr, longDiagnostic);
+  assert.ok(Buffer.byteLength(JSON.stringify(stored)) < 1048576);
   assert.ok(
     built.build.commands.every(
       (command) =>
@@ -1018,6 +1088,10 @@ test("Darwin versioned build loading rejects substituted or incomplete evidence 
     },
     (record) => {
       record.commands[0].env.SDKROOT = "/synthetic/other-sdk";
+    },
+    (record) => {
+      record.commands[2].stdout = "é".repeat(DARWIN_HOSTED_OUTPUT_BYTES / 2);
+      record.commands[2].stderr = "!";
     },
   ]) {
     const changed = structuredClone(built.prepared);

@@ -29,7 +29,7 @@ and its exclusive fixtures while retaining distinct case-safety coverage.
 
 Portable regressions establish no hosted native acceptance. Darwin task-access/
 model-free-route and Windows socket/audit/retirement blockers remain failures
-until real evidence resolves them. New cleanup cannot retire cycle91's uncertain
+until real evidence resolves them. New cleanup cannot retire earlier uncertain
 owners. The supervisor owns publication, both fresh original workflows and the
 ignored reversible recovery archive; this change claims no production readiness.
 

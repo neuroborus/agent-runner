@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { diagnosticCommand, nativeException } from "../diagnostics.js";
-import { selectInstalledWindowsToolchain } from "../feasibility/windows-toolchain.js";
+import { selectInstalledWindowsToolchain } from "../feasibility/index.js";
 import {
   nativeCandidateReader,
   observationDigest,

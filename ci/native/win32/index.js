@@ -201,6 +201,16 @@ export {
 } from "./experiment-preparation.js";
 export { inspectWindowsExperimentPe } from "./experiment-image.js";
 export { prepareWindowsExperimentCases } from "./experiment-cases.js";
+export {
+  WINDOWS_EXPERIMENT_SOURCES,
+  windowsHostedCompilerArguments,
+  runWindowsHostedCommand,
+} from "./experiment-native.js";
+export { createWindowsCaseProvisioning } from "./case-provisioning.js";
+export {
+  normalizeNativePolicyBinding,
+  verifyNativePolicy,
+} from "./experiment-policy.js";
 export { normalizeWindowsExperimentCustody } from "./custody-protocol.js";
 export { normalizeWindowsExperimentPreparation } from "./preparation.js";
 import { createWindowsExperimentSystemEffects as experimentEffects } from "./experiment-preparation.js";

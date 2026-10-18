@@ -1,4 +1,3 @@
-import { windowsHostedCompilerArguments } from "./win32/experiment-native.js";
 import assert from "node:assert/strict";
 import path, { win32 as windowsPath } from "node:path";
 import { readFile } from "node:fs/promises";
@@ -41,8 +40,9 @@ import {
   recoverWindowsExperimentProofs,
   loadWindowsExperiment,
   WINDOWS_HELPER_NAMES,
+  WINDOWS_EXPERIMENT_SOURCES,
+  windowsHostedCompilerArguments,
 } from "./win32/index.js";
-import { WINDOWS_EXPERIMENT_SOURCES } from "./win32/experiment-native.js";
 
 const H = "a".repeat(64),
   C = "b".repeat(40);

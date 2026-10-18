@@ -193,7 +193,12 @@ Reviewed consumers reject this shape and retain strict pinned build/release inpu
 
 Execution runs both existing fixed recipes with all 23 system checks, parked
 effective-policy observation, real positive/negative controls and fresh receipt
-settlement before release-audit admission. The audit reads actual runtime/tool/
+settlement before release-audit admission. Release admission requires every
+ownership/access receipt and all 21 file-session receipts. Reviewed compilation
+additionally requires exactly `command-0.json` and `command-1.json`; ordinary
+experiments admit no compiler receipts. Missing, duplicate, unexpected or
+mismatched bindings fail, and every actual receipt retains its protected read
+and original fresh retirement verifier. The audit reads actual runtime/tool/
 build/loader bindings through held observations; unavailable reads fail
 without pathname fallback. Its purpose remains experimental and source
 assumptions remain open. The private reference and its envelope retain experiment
@@ -258,7 +263,11 @@ remain native case inputs, separately from compiler preparation.
 
 The once-built images are sealed through the existing bridge. One System file
 observer independently holds their bytes, source inventory, DACLs, parents and
-native PE/import observations. The duplicate compiler bootstrap reader/task is
+native PE/import observations. Initial, cold and completed-build image reads use
+the same held boundary: each helper must match its exact listed path and SHA-256
+in `prepare-read`. Unlisted helpers, changed hashes and helper/installed-image
+substitutions fail; installed inputs retain their separate native path restrictions.
+The duplicate compiler bootstrap reader/task is
 removed. Private version-2 preparation records reject legacy, mixed or incomplete
 build evidence. Cold loading verifies the original completed outputs without
 selection, acquisition or recompilation. A private sibling selector identifies
@@ -309,6 +318,9 @@ Private Darwin `experiment-build-inputs.js` discovers installed Clang and its SD
 compares every source/header with the exact Git blob and compiles each of the ten
 helpers once. Explicit SDKROOT/DEVELOPER_DIR and ordinary bounded argument vectors
 retain command results and real compiler/SDK versions and tool/settings hashes.
+One named 256 KiB combined stdout/stderr byte limit governs hosted execution and
+persisted command validation, including cold reads. Successful output remains
+complete; overflow fails without relaxing the existing finite receipt-size limits.
 Each helper is ad-hoc signed, inspected for the experiment marker and Mach-O/ABI,
 then published using existing root custody. A timeout or cancellation owns the
 ordinary process group and awaits leader reaping; uncertain completion cannot
