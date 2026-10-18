@@ -1738,12 +1738,18 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
-Its Linux preparation suite also rejects incomplete ordinary build inventories,
-substituted source/output/fixed compiler commands, unstable held identities and
-unsettled original controllers. Interrupted ordinary recovery cannot invent birth
-receipts, retire a live or unobserved preparer, or erase the first failure. The system composition fixture exercises all
-23 checks without a review manifest only for experiment purpose, retaining the
-reviewed audit's missing-input refusal and retirement before audit admission.
+Its Linux preparation suite injects one hosted GCC compilation and verifies actual
+host paths, fixed static options, command diagnostics and cold loading without
+execution. Legacy/mixed or incomplete records and changed candidate/source/tool/
+output/ABI observations are rejected. Compilation, missing output, cancellation
+and interrupted publication retain the original failure; recovery requires a
+completed build record, the original preparer's absence and its sealed interpreter.
+A rejoined interpreter alone cannot settle a missing command completion. Existing
+held-image, file/Git/access and ownership regressions remain distinct. The system
+composition fixture exercises all 23 checks with an explicit experiment reference
+and build observation, without compiler admission or a review manifest. Reviewed
+consumers reject that private reference; reviewed compiler receipts, audit
+missing-input refusal and independent payload retirement remain strict.
 These injected regressions invoke no GCC, bubblewrap or privileged native effect;
 they add no durable slow-tier guarantee. Existing harness and first-failure
 requirements remain unchanged and run only through Runner FINALIZE when selected.

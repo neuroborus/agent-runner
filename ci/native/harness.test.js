@@ -16,6 +16,7 @@ import {
   nativeCleanupFailure,
   captureNativeFirstFailure,
   normalizeNativeJob,
+  observationDigest,
   normalizeNativeResult,
   PLATFORMS,
   PROVIDER_CHECK_IDS,
@@ -4248,19 +4249,36 @@ function pendingNativeJob() {
   };
 }
 
-function versionFiveJob() {
+function versionFiveJob(purpose = "reviewed") {
   const { unrecordedAdmission, ...pending } = pendingNativeJob();
   const { workflowSha, ...context } = ciContext();
   const initial = initializeNativeJob(
     { ...context, platform: "linux" },
     { schemaVersion: 5 },
   );
-  return normalizeNativeJob({
+  const job = normalizeNativeJob({
     ...pending,
     schemaVersion: 5,
     admissions: initial.admissions,
     supportingEvidence: [],
   });
+  return purpose === "experiment"
+    ? {
+        ...job,
+        purpose,
+        buildObservationSha256: observationDigest(experimentReferenceBuild()),
+      }
+    : job;
+}
+
+function experimentReferenceBuild() {
+  return {
+    schemaVersion: 2,
+    purpose: "experiment",
+    candidateSha: CANDIDATE,
+    sha256: DIGEST,
+    executable: "/synthetic/helper",
+  };
 }
 
 const retiredEffect = () => ({
@@ -4404,22 +4422,27 @@ function injectedLinuxSystem(overrides = {}) {
       assert.equal(persisted.at(-1).results.length, 16);
       assert.equal(
         persisted.at(-1).admissions["file-build"].admission,
-        "possible",
+        overrides.purpose === "experiment" ? "not-started" : "possible",
       );
       return {
-        build: {
-          candidateSha: CANDIDATE,
-          sha256: DIGEST,
-          executable: "/synthetic/helper",
-        },
-        settlement: retiredEffect(),
+        ...(overrides.purpose === "experiment"
+          ? { purpose: "experiment" }
+          : { settlement: retiredEffect() }),
+        build:
+          overrides.purpose === "experiment"
+            ? experimentReferenceBuild()
+            : {
+                candidateSha: CANDIDATE,
+                sha256: DIGEST,
+                executable: "/synthetic/helper",
+              },
       };
     },
     files: async (job) => {
       calls.push("files");
       assert.equal(
         persisted.at(-1).admissions["file-build"].settlement.status,
-        "RETIRED",
+        overrides.purpose === "experiment" ? "RETAINED" : "RETIRED",
       );
       assert.equal(
         persisted.at(-1).admissions["file-helper"].admission,
@@ -4473,12 +4496,17 @@ test("ordinary Linux runtime audit needs no review manifest and retains every re
       },
     });
     const job = await runLinuxSystemProofs(
-      versionFiveJob(),
+      versionFiveJob(purpose),
       "/synthetic",
       injected.effects,
     );
     assert.equal(job.results.length, 23);
     if (purpose === "experiment") {
+      assert.equal(job.admissions["file-build"].admission, "not-started");
+      assert.throws(() => normalizeNativeJob(job));
+      assert.throws(() =>
+        recordNativeAdmission(job, "file-build", { purpose: "experiment" }),
+      );
       assert.equal(admitted, true);
       assert.ok(job.results.every(({ status }) => status === "PASS"));
       assert.equal(injected.releaseRecords[0].purpose, "experiment");
@@ -4519,7 +4547,11 @@ test("Linux reference cancellation fences later groups and reaches existing nati
       return result;
     };
     await assert.rejects(
-      runLinuxSystemProofs(versionFiveJob(), "/synthetic", injected.effects),
+      runLinuxSystemProofs(
+        versionFiveJob("experiment"),
+        "/synthetic",
+        injected.effects,
+      ),
       (error) => error === reason,
     );
     if (phase !== "beforeRelease")

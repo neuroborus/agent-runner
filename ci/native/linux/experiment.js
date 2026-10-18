@@ -17,7 +17,7 @@ import {
 import { linuxSystemRecipes } from "./composition.js";
 import { loadLinuxExperiment } from "./experiment-preparation.js";
 import { runLinuxSystemProofs } from "./system.js";
-import { observeLinuxRelease } from "./release.js";
+import { observeLinuxExperimentRelease } from "./release.js";
 import { readLinuxObservedFile } from "./inspect.js";
 import {
   readLinuxNamespaceEvidence,
@@ -407,6 +407,11 @@ export async function runLinuxExperimentProofs(
         ],
       },
     );
+    reference = {
+      ...reference,
+      purpose: "experiment",
+      buildObservationSha256: observationDigest(bundle.record),
+    };
     signal?.throwIfAborted();
     await persistReference(reference);
     proof = { ...proof, releasePossible: true };
@@ -420,10 +425,10 @@ export async function runLinuxExperimentProofs(
       purpose: "experiment",
       interpreter: bundle.interpreter,
       build: bundle.build,
-      loadInputs: async () => ({ build: bundle.record.pins }),
+      loadInputs: async () => ({ build: bundle.record }),
       observeRelease: async (...args) => {
         await bundle.observeRuntime();
-        const observed = await observeLinuxRelease(...args, {
+        const observed = await observeLinuxExperimentRelease(...args, {
           readObserved: read,
         });
         await bundle.observeRuntime();

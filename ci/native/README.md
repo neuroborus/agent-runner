@@ -194,51 +194,41 @@ still requires all five approved bindings and both provider closures.
 
 The Linux index exposes `prepareLinuxExperiment`, `loadLinuxExperiment`,
 `recoverLinuxExperimentPreparation` and `runLinuxExperimentProofs` for matching
-Ubuntu 24.04 x64 hosted CI only. Preparation first persists possible admission,
-verifies live namespace preparation and exact candidate helper source, then uses
-the existing compiler controller for bounded GCC-13/header/linker discovery.
-Its closed input inventory includes the actual compiler, frontend, assembler,
-linker, headers, static startup objects, libraries and their loader dependencies.
-GCC 13's canonical `/usr/libexec/gcc/x86_64-linux-gnu/13/cc1` and `collect2`
-are admitted only with identical source/target bindings. The sole plugin exception
-admits canonical `/usr/libexec/gcc/x86_64-linux-gnu/13/liblto_plugin.so` as the
-source for exactly `/usr/lib/gcc/x86_64-linux-gnu/13/liblto_plugin.so`, the legacy
-symlink path returned by the fixed plugin query. The builder reads and hashes
-the canonical file and binds its immutable snapshot at that legacy path. Fixed
-discovery and build arguments retain the exact search prefixes; independent receipt
-readers reconstruct the same snapshot bindings and arguments. Other libexec names,
-versions, aliases and remappings remain rejected. Rejected input bindings emit a
-bounded source/target diagnostic through the existing ordinary CI diagnostic owner;
-sink failures cannot replace the original rejection or grant admission.
-The fixed `-B/usr/bin/x86_64-linux-gnu-` prefix alone did not satisfy native
-GCC 13.3 collect2's short-name `ld` search. Discovery requires the exact triplet assembler
-and linker targets, with the linker resolving to canonical
-`/usr/bin/x86_64-linux-gnu-ld.bfd`. The builder derives an additional read-only
-`/usr/bin/ld` exposure from the same immutable snapshot as the triplet linker;
-it never reads the ambient short-name linker or accepts independently supplied
-alias inputs. Execution and independent receipt reconstruction use identical
-bindings. Canonical-source, snapshot-byte or target substitutions fail the
-independent build rejoin. Existing search prefixes and interpreter/plugin
-mappings remain unchanged. Portable regressions establish binding consistency;
-only matching Ubuntu CI can establish actual GCC/collect2 behavior.
-The existing empty-root builder exposes only immutable snapshots and runs its
-fixed static helper recipe. Fresh held reads and independent original
-command retirement bind source, tools, SDK, arguments, output and ELF ABI. The
-complete input tuple and namespace receipt are digest-bound in preparation;
-individual inputs remain in its private build record and actual runtime audit.
-No Linux review manifest or approval field is synthesized.
+Ubuntu 24.04 x64 hosted CI only. Preparation persists possible admission and the
+original preparer's birth, verifies live namespace preparation, seals the running
+interpreter, and compares the helper source with the exact candidate Git blob.
+Under the disposable hosted-image/toolchain assumption, installed GCC-13 compiles
+that source once. The fixed static ELF recipe retains its options and search
+prefixes, translating only private source/output and prefix-map paths to actual
+hosted paths. Ordinary argument-vector execution uses GNU timeout's process group,
+a 20-second command deadline and two-second TERM-to-KILL escalation. Cancellation
+forwards TERM and awaits command closure; failed or interrupted execution cannot
+publish a successful build record. Actual stdout, stderr and native exit errors
+remain available through existing diagnostics.
+
+The private version-2 build record contains actual compiler/linker hashes and
+versions, three completed commands (two version observations and one compilation),
+source/output hashes, exact arguments and static ELF/ABI observations. It contains
+no protected compiler pins, copied headers/libraries, compiler-controller receipts
+or reconstructed settlement. Held reads recheck the source copy, installed tools
+and helper; cold loading never runs a tool or rebuilds. Incomplete, legacy, mixed
+or substituted records fail. The reference engine's injected build hook rejoins
+that same output. Its private reference explicitly carries experiment purpose and
+the completed build observation digest; compiler admission stays not-started.
+Reviewed consumers reject this shape and retain strict pinned build/release inputs.
 
 Execution runs both existing fixed recipes with all 23 system checks, parked
 effective-policy observation, real positive/negative controls and fresh receipt
-settlement before release-audit admission. The audit reads the actual copied
-runtime/build/loader bindings through held observations; unavailable reads fail
+settlement before release-audit admission. The audit reads actual runtime/tool/
+build/loader bindings through held observations; unavailable reads fail
 without pathname fallback. Its purpose remains experimental and source
-assumptions remain open. The private historical-engine progress record is wrapped
-with experiment purpose, rather than published as reviewed admission. Recovery
-first verifies the original preparer's recorded birth identity is absent, closing
-further admissions, then rejoins original compiler receipts without rebuilding.
-Missing owner/birth receipts or incomplete retirement retain uncertainty and owned evidence. Recovery
-never erases the preparation/probe failure. These implementation paths require
+assumptions remain open. The private reference and its envelope retain experiment
+purpose. Recovery verifies the original preparer's recorded birth identity is absent under
+complete procfs visibility, then rejoins the sealed interpreter and completed build
+observations without rebuilding. A missing completed build record leaves command
+ownership uncertain, including interruption before that record was published.
+Missing owners, changed bytes or incomplete native retirement retain owned
+evidence. Recovery never erases the preparation/probe failure. These paths require
 fresh matching CI proof; portable regressions establish no native PASS.
 
 Linux initialization creates the private stage journal before native work. Proof
@@ -250,8 +240,9 @@ Startup remains charged to the first recipe's original deadline. Diagnostic-writ
 failures cannot replace the original startup rejection.
 Cleanup reconciles every started proof, including completed or zero-case proofs,
 after fencing admissions and independently establishing original owner absence.
-It rechecks the complete original prerequisite command inventory and its receipt
-digest even after preparation retirement. A validated unreleased journal, or a
+It rechecks the completed hosted build observation and its preparation-bound digest
+even after preparation retirement, then independently verifies original native
+ownership, access and file-session receipts. A validated unreleased journal, or a
 bound reference whose native admissions never started, can establish no release;
 missing references alone cannot. Missing journals, births, receipts or inconsistent
 evidence retain uncertainty; proof records require independently retired
@@ -272,11 +263,11 @@ or sealed image and require its pinned running version. They never recopy the
 ambient interpreter. Interpreter mounts expose the sealed image and its protected
 loader files. The ordinary protected-file
 reader and production launcher protection retain their existing admission rules.
-Cold recovery requires the original inventory and owner evidence; a lost reply
-after publication can settle without compiler admission, while missing or
-substituted acquisition evidence retains uncertainty. Original build receipts,
-23 Linux checks and independent namespace restoration still require fresh Ubuntu
-CI; a sealed interpreter digest alone establishes no native acceptance.
+Cold recovery requires the original inventory, owner evidence and completed build
+record. A rejoined interpreter alone cannot settle an interrupted preparation;
+missing or substituted acquisition evidence retains uncertainty. All 23 Linux
+checks and independent namespace restoration still require fresh Ubuntu CI;
+portable observations establish no native acceptance.
 
 The Windows index exposes `prepareWindowsExperiment`, `loadWindowsExperiment`,
 `recoverWindowsExperimentPreparation` and `createWindowsExperimentSystemEffects`.
@@ -9565,6 +9556,11 @@ all 87 mandatory records and the four unresolved source findings remain intact.
 
 ### Complete Linux system composition and release audit
 
+The pinned compiler and publication requirements in this section apply to the
+reviewed reference path. [Ordinary system experiments](#ordinary-system-experiment-evidence)
+reuse its native cases with a purpose-tagged hosted build observation and no
+compiler admission; their runtime audit cannot supply reviewed release authority.
+
 The indexed `linux/system.js` owner composes ownership, access, the pinned
 compiler build, all six file cases, and `audit.release` through
 `node ci/native/run.js --tier system`. It persists each group's possible
@@ -9584,9 +9580,8 @@ Each read is limited to one MiB, including
 rejection of growth, file/parent substitution, ownership or mode changes. No
 input is downloaded, inferred from the host, or generated from observations.
 The indexed Linux preparation owner supplies both files from an independently
-approved manifest as described below. The ordinary credential-free/model-free
-PR workflow reserves the output directory but supplies no manifest or approval;
-its dependent checks remain BLOCKED. Supplying review authority is separate
+approved manifest as described below. A reviewed invocation without that manifest
+or approval leaves dependent checks BLOCKED. Supplying review authority is separate
 operator work in approved external CI, not provider or publication authority.
 
 `linux/build-bounds.js` owns the dependency-free 70-second build bound,

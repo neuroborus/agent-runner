@@ -51,12 +51,17 @@ import {
 } from "./inspect.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
+  linuxHostedFileBuildArguments,
   buildLinuxFileHelper,
   normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
   linuxFileBuildInvocation,
 } from "./file-build.js";
-import { linuxReleaseComponentId } from "./release.js";
+import {
+  linuxReleaseComponentId,
+  observeLinuxExperimentRelease,
+  observeLinuxRelease,
+} from "./release.js";
 import {
   linuxReviewedManifestDigest,
   normalizeLinuxReviewedManifest,
@@ -64,16 +69,13 @@ import {
 import {
   runLinuxBuildCommand,
   createLinuxBuildCommandRunner,
-  linuxExperimentQueryArguments,
-  LINUX_EXPERIMENT_QUERIES,
 } from "./proof.js";
 import {
-  linuxExperimentHeaders,
-  linuxExperimentProgram,
   verifyLinuxExperimentBuild,
   recoverLinuxExperimentPreparation,
   prepareLinuxExperiment,
   rejoinLinuxExperimentInterpreter,
+  loadLinuxExperiment,
 } from "./experiment-preparation.js";
 import { acquireLinuxExperimentInterpreter } from "./confinement.js";
 import { linuxControllerFailure, linuxDiagnosticError } from "./index.js";
@@ -2483,71 +2485,18 @@ test("Linux package observations bind both actual inventories and their external
   assert.equal((await effects.verifyClosed()).closed, true);
 });
 
-test("Linux ordinary discovery admits only the fixed GCC recipe and remains matching-CI only", async () => {
-  const source = "/fixture/preparation/file-helper.c";
-  const args = linuxExperimentQueryArguments(source, "headers");
-  const search = [
-    "-B/usr/lib/gcc/x86_64-linux-gnu/13/",
-    "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
-    "-B/usr/bin/x86_64-linux-gnu-",
-    "-B/usr/bin/",
-    "--sysroot=/",
-  ];
-  assert.deepEqual(args.slice(0, search.length), search);
-  for (const query of LINUX_EXPERIMENT_QUERIES.filter(
-    (name) => name !== "headers",
-  ))
-    assert.deepEqual(linuxExperimentQueryArguments(source, query), [
-      ...search,
-      query,
-    ]);
-  assert.ok(args.includes("-M"));
-  assert.ok(args.includes("-std=c11"));
-  assert.ok(!args.includes("-o"));
-  assert.deepEqual(LINUX_FILE_BUILD_ARGUMENTS.slice(0, search.length), search);
-  for (const [program, source, target] of [
-    ["cc1", "/usr/libexec/gcc/x86_64-linux-gnu/13/cc1"],
-    ["collect2", "/usr/libexec/gcc/x86_64-linux-gnu/13/collect2"],
-    ["as", "/usr/bin/x86_64-linux-gnu-as"],
-    ["ld", "/usr/bin/x86_64-linux-gnu-ld.bfd", "/usr/bin/x86_64-linux-gnu-ld"],
-  ]) {
-    const exposed = target ?? source,
-      resolutions = [],
-      resolve = async (file) => {
-        resolutions.push(file);
-        return source;
-      };
-    assert.deepEqual(
-      await linuxExperimentProgram(program, exposed, { resolve }),
-      { source, target: exposed },
-    );
-    assert.deepEqual(resolutions, [exposed]);
-    for (const reported of [program, "/usr/bin/" + program, source + ".alias"])
-      await assert.rejects(
-        linuxExperimentProgram(program, reported, {
-          resolve: () => assert.fail("Reject unbound targets before discovery"),
-        }),
-      );
-    await assert.rejects(
-      linuxExperimentProgram(program, exposed, {
-        resolve: async () => "/usr/bin/substituted-tool",
-      }),
-    );
-  }
-  assert.deepEqual(
-    linuxExperimentHeaders(
-      `file-helper: ${source} /usr/include/stdio.h \\
- /usr/include/stdio.h\n`,
-      source,
-    ),
-    ["/usr/include/stdio.h"],
-  );
-  assert.throws(() =>
-    linuxExperimentHeaders(`file-helper: ${source} /tmp/header.h`, source),
-  );
-  assert.throws(() =>
-    linuxExperimentQueryArguments(source, "-fplugin=/fixture/plugin.so"),
-  );
+function hostedExperimentFixture() {
+  const directory = "/fixture/native",
+    source = Buffer.from("candidate helper source"),
+    tool = Buffer.from("hosted tool"),
+    image = elf();
+  image.writeUInt16LE(2, 56);
+  image.writeBigUInt64LE(0x400080n, 24);
+  image.writeUInt32LE(5, 68);
+  image.writeBigUInt64LE(0x400000n, 80);
+  image.writeBigUInt64LE(512n, 104);
+  image.writeUInt32LE(0x6474e551, 120);
+  image.writeUInt32LE(6, 124);
   const job = initializeNativeJob(
     {
       candidateSha,
@@ -2558,15 +2507,6 @@ test("Linux ordinary discovery admits only the fixed GCC recipe and remains matc
     },
     { schemaVersion: 7, purpose: "experiment" },
   );
-  await assert.rejects(
-    prepareLinuxExperiment(
-      job,
-      {},
-      "/fixture",
-      () => assert.fail("No native intent on another platform"),
-      { platform: "darwin", env: {} },
-    ),
-  );
   const env = {
     CI: "true",
     GITHUB_ACTIONS: "true",
@@ -2574,35 +2514,449 @@ test("Linux ordinary discovery admits only the fixed GCC recipe and remains matc
     RUNNER_ENVIRONMENT: "github-hosted",
     RUNNER_OS: "Linux",
     GITHUB_REPOSITORY: job.repository,
-    GITHUB_RUN_ID: "2",
+    GITHUB_RUN_ID: "1",
     GITHUB_RUN_ATTEMPT: "1",
+    ImageVersion: "synthetic",
   };
-  await assert.rejects(
-    prepareLinuxExperiment(
-      job,
-      {},
-      "/fixture",
-      () => assert.fail("No native intent for another run"),
-      { platform: "linux", architecture: "x64", env },
+  const binding = {
+    ...Object.fromEntries(
+      ["candidateSha", "platform", "repository", "runId", "runAttempt"].map(
+        (key) => [key, job[key]],
+      ),
     ),
+    checkoutSha: candidateSha,
+    image: "ubuntu-24.04",
+    osBuild: "synthetic",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    workflow: "native-poc",
+    jobId: "2",
+  };
+  const files = new Map(),
+    commands = [],
+    failures = [],
+    writes = [];
+  const compiler = "/usr/bin/x86_64-linux-gnu-gcc-13",
+    sdk = "/usr/bin/x86_64-linux-gnu-ld.bfd";
+  files.set(compiler, tool);
+  files.set(sdk, tool);
+  const interpreter = {
+    candidateSha,
+    source: { sha256: hash },
+    executable: directory + "/preparation/executables/node",
+  };
+  const read = async (file) => {
+    if (!files.has(file))
+      throw Object.assign(new Error("Missing output"), { code: "ENOENT" });
+    const bytes = files.get(file);
+    return { bytes, sha256: digest(bytes), identitySha256: hash };
+  };
+  const command = async (file, args, settings) => {
+    commands.push({
+      file,
+      args: [...args],
+      cwd: settings.cwd,
+      deadlineMs: settings.deadlineMs,
+    });
+    if (args[0] !== "--version")
+      files.set(directory + "/build/output/file-helper", image);
+    return {
+      exitCode: 0,
+      signal: null,
+      stdout:
+        args[0] === "--version"
+          ? file === compiler
+            ? "gcc (Ubuntu) 13.3.0\n"
+            : "GNU ld 2.42\n"
+          : "",
+      stderr: "",
+    };
+  };
+  const options = {
+    env,
+    platform: "linux",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    now: () => 0,
+    read,
+    command,
+    identity: async () => ({
+      bootId: "a1234567-1234-1234-1234-123456789012",
+      startTicks: "10",
+    }),
+    acquireInterpreter: async () => interpreter,
+    readNamespace: async () => ({ status: "PASS" }),
+    namespaces: async () => {},
+    checkout: async () => candidateSha,
+    sourceBytes: async () => source,
+    onFailure: async (_, error) => failures.push(error),
+    fs: {
+      mkdir: async () => {},
+      chmod: async () => {},
+      copyFile: async (_, target) => files.set(target, source),
+      readFile: async () => source,
+      writeFile: async (file, bytes) => {
+        files.set(file, Buffer.from(bytes));
+        writes.push(file);
+      },
+    },
+  };
+  const prepare = (overrides = {}, persist = async () => {}) =>
+    prepareLinuxExperiment(job, binding, directory, persist, {
+      ...options,
+      ...overrides,
+    });
+  return {
+    directory,
+    source,
+    tool,
+    image,
+    compiler,
+    sdk,
+    job,
+    binding,
+    files,
+    commands,
+    failures,
+    writes,
+    options,
+    prepare,
+    interpreter,
+  };
+}
+
+test("Linux hosted experiment compiles once with real host paths and cold loading never rebuilds", async () => {
+  const f = hostedExperimentFixture();
+  await assert.rejects(
+    f.prepare({ env: { ...f.options.env, GITHUB_RUN_ID: "2" } }),
+  );
+  assert.equal(f.writes.length, 0);
+  assert.equal(f.commands.length, 0);
+  const job = await f.prepare();
+  assert.equal(job.failure, null);
+  assert.equal(f.failures.length, 0);
+  assert.equal(f.commands.length, 3);
+  assert.deepEqual(f.commands[2], {
+    file: f.compiler,
+    args: linuxHostedFileBuildArguments(f.directory + "/build"),
+    cwd: f.directory + "/build",
+    deadlineMs: 20000,
+  });
+  assert.ok(f.commands[2].args.includes("-static"));
+  assert.ok(f.commands[2].args.includes("-std=c11"));
+  assert.ok(!f.commands[2].args.includes("/build/file-helper.c"));
+  const record = JSON.parse(
+    f.files.get(f.directory + "/preparation/build-record.json"),
+  );
+  assert.equal(record.schemaVersion, 2);
+  assert.equal(job.preparationEffects.receiptSha256, observationDigest(record));
+  const cold = {
+    ...f.options,
+    readIntent: async (file) => f.files.get(file),
+    rejoinInterpreter: async () => f.interpreter,
+    write: async (file, bytes) => f.files.set(file, Buffer.from(bytes)),
+    command: () => assert.fail("Cold loading cannot execute tools"),
+  };
+  const bundle = await loadLinuxExperiment(job, f.directory, cold);
+  assert.equal((await bundle.observeRuntime()).sha256, digest(f.image));
+  await assert.rejects(
+    bundle.build(
+      { candidateSha },
+      f.directory,
+      { directory: "/fixture/case" },
+      bundle.record,
+    ),
+  );
+  const built = await bundle.build(
+    {
+      candidateSha,
+      purpose: "experiment",
+      buildObservationSha256: observationDigest(bundle.record),
+    },
+    f.directory,
+    { directory: "/fixture/case" },
+    bundle.record,
+  );
+  assert.equal(built.purpose, "experiment");
+  assert.equal(built.settlement, undefined);
+  assert.equal(built.receipts, undefined);
+  assert.equal(f.commands.length, 3);
+});
+
+test("Linux hosted experiment refuses mixed records and source, compiler, output or ABI substitution", async () => {
+  const f = hostedExperimentFixture(),
+    job = await f.prepare();
+  const original = JSON.parse(
+    f.files.get(f.directory + "/preparation/build-record.json"),
+  );
+  for (const change of [
+    (record) => {
+      record.schemaVersion = 1;
+    },
+    (record) => {
+      record.pins = {};
+    },
+    (record) => {
+      record.commands.pop();
+    },
+    (record) => {
+      record.commands[2].exitCode = 1;
+    },
+    (record) => {
+      record.commands[2].args = ["-o", "/tmp/substitute"];
+    },
+    (record) => {
+      record.compiler.version = "14.1.0";
+    },
+    (record) => {
+      record.candidateSha = "b".repeat(40);
+    },
+    (record) => {
+      record.abi = {};
+    },
+  ]) {
+    const record = structuredClone(original);
+    change(record);
+    await assert.rejects(
+      verifyLinuxExperimentBuild(job, f.directory, record, f.options),
+    );
+  }
+  for (const file of [
+    f.directory + "/build/file-helper.c",
+    f.compiler,
+    f.sdk,
+    original.executable,
+  ]) {
+    const before = f.files.get(file);
+    f.files.set(file, Buffer.from("substitute"));
+    await assert.rejects(
+      verifyLinuxExperimentBuild(job, f.directory, original, f.options),
+    );
+    f.files.set(file, before);
+  }
+});
+
+test("Linux hosted experiment retains original compilation, missing output and cancellation failures", async () => {
+  for (const fault of ["compile", "output", "abi", "candidate", "cancel"]) {
+    const f = hostedExperimentFixture(),
+      abort = new AbortController(),
+      original = Object.assign(new Error("compiler refused"), { code: 7 });
+    const build = async (...args) => {
+      if (fault === "compile") throw original;
+      const result = await f.options.command(...args);
+      if (fault === "output")
+        f.files.delete(f.directory + "/build/output/file-helper");
+      if (fault === "abi")
+        f.files.set(
+          f.directory + "/build/output/file-helper",
+          Buffer.from("not ELF"),
+        );
+      if (fault === "cancel") abort.abort(original);
+      return result;
+    };
+    const job = await f.prepare({
+      build,
+      signal: abort.signal,
+      ...(fault === "candidate"
+        ? { sourceBytes: async () => Buffer.from("different candidate") }
+        : {}),
+    });
+    assert.equal(job.failure, "preparation-failed", fault);
+    assert.equal(job.preparation, null, fault);
+    assert.equal(job.preparationEffects.settlement.status, "RETAINED", fault);
+    assert.equal(
+      f.files.has(f.directory + "/preparation/build-record.json"),
+      false,
+      fault,
+    );
+    assert.equal(f.failures.length, 1, fault);
+    if (["compile", "cancel"].includes(fault))
+      assert.equal(f.failures[0], original);
+  }
+  const f = hostedExperimentFixture(),
+    original = new Error("Original build error");
+  let failureWrite = false;
+  await assert.rejects(
+    f.prepare(
+      {
+        build: async () => {
+          throw original;
+        },
+        onFailure: async () => {
+          throw new Error("Diagnostic sink unavailable");
+        },
+      },
+      async (job) => {
+        if (job.failure === null) return;
+        failureWrite = true;
+        assert.equal(job.preparationEffects.settlement.status, "RETAINED");
+        throw new Error("Failed preparation persistence unavailable");
+      },
+    ),
+    (error) => error === original,
+  );
+  assert.equal(failureWrite, true);
+});
+
+test("Linux hosted experiment runtime audit holds real runtime and tool bytes without reviewed build pins", async () => {
+  const f = hostedExperimentFixture(),
+    prepared = await f.prepare();
+  const record = JSON.parse(
+    f.files.get(f.directory + "/preparation/build-record.json"),
+  );
+  const fixture = {
+    directory: "/fixture/case",
+    executable: f.interpreter.executable,
+    launcher: "/usr/bin/bwrap",
+    version: {
+      name: "bubblewrap",
+      version: "bubblewrap 1.0.0",
+      sha256: digest(f.tool),
+    },
+    policy: {
+      libraries: [
+        {
+          source: "/usr/lib/fixture.so",
+          target: "/lib/fixture.so",
+          sha256: digest(f.tool),
+        },
+      ],
+    },
+  };
+  for (const file of [
+    fixture.executable,
+    fixture.launcher,
+    fixture.directory + "/executables/git",
+    "/usr/lib/fixture.so",
+  ])
+    f.files.set(file, f.tool);
+  const job = {
+    candidateSha,
+    purpose: "experiment",
+    buildObservationSha256: observationDigest(record),
+    versions: [{ name: "node", version: "v24.21.0", sha256: digest(f.tool) }],
+    results: [
+      {
+        policy: null,
+        versions: [
+          { name: "git", version: "git version 2.0.0", sha256: digest(f.tool) },
+        ],
+      },
+    ],
+  };
+  const metadata = (file) => ({
+    uid: 1000,
+    gid: 1000,
+    mode: file.startsWith("/fixture/") ? 0o500 : 0o555,
+  });
+  const options = {
+    ownerUid: () => 1000,
+    protect: () => {},
+    fs: {
+      realpath: async (file) => file,
+      lstat: async (file) => ({
+        ...metadata(file),
+        isFile: () => true,
+        nlink: 1,
+        size: f.files.get(file).length,
+      }),
+      readFile: async (file) =>
+        file === "/proc/self/status"
+          ? "CapEff:\t0000000000000000\nNoNewPrivs:\t0\n"
+          : f.files.get(file),
+    },
+    readObserved: async (file) => ({
+      ...(await f.options.read(file)),
+      metadata: metadata(file),
+    }),
+  };
+  const observed = await observeLinuxExperimentRelease(
+    job,
+    fixture,
+    record,
+    record,
+    options,
+  );
+  assert.equal(observed.purpose, "experiment");
+  assert.equal(
+    observed.buildObservationSha256,
+    prepared.preparationEffects.receiptSha256,
+  );
+  assert.equal(observed.buildPinsSha256, undefined);
+  assert.deepEqual(
+    observed.components
+      .filter(({ name }) => ["compiler", "build.sdk"].includes(name))
+      .map(({ sha256 }) => sha256),
+    [digest(f.tool), digest(f.tool)],
+  );
+  await assert.rejects(
+    observeLinuxRelease(job, fixture, record, record, options),
+  );
+  f.files.set(f.sdk, Buffer.from("substituted SDK"));
+  await assert.rejects(
+    observeLinuxExperimentRelease(job, fixture, record, record, options),
   );
 });
 
-function experimentBuildFixture() {
-  const directory = "/fixture/native",
-    source = Buffer.from("candidate helper source"),
+test("Linux hosted experiment recovery retains uncertain commands and requires the original preparer absent", async () => {
+  for (const fault of [null, "missing", "owner", "visibility", "interpreter"]) {
+    const f = hostedExperimentFixture(),
+      completed = await f.prepare();
+    const job = {
+      ...completed,
+      failure: "preparation-failed",
+      preparationEffects: {
+        admission: "possible",
+        settlement: {
+          status: "RETAINED",
+          independent: false,
+          emergencyCleanup: false,
+        },
+        receiptSha256: null,
+      },
+    };
+    if (fault === "missing")
+      f.files.delete(f.directory + "/preparation/build-record.json");
+    const recovered = await recoverLinuxExperimentPreparation(
+      job,
+      f.directory,
+      async () => {},
+      {
+        ...f.options,
+        read: async (file) => f.files.get(file),
+        readObserved: f.options.read,
+        identity: async () =>
+          fault === "owner" ? { bootId: "live", startTicks: "10" } : null,
+        visible: async () => {
+          if (fault === "visibility") throw new Error("Procfs unavailable");
+        },
+        fs: {
+          lstat: async () => {
+            throw Object.assign(new Error("Absent preparer"), {
+              code: "ENOENT",
+            });
+          },
+        },
+        rejoinInterpreter: async () =>
+          fault === "interpreter" ? null : f.interpreter,
+      },
+    );
+    assert.equal(recovered.failure, "preparation-failed");
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      fault ? "UNVERIFIABLE" : "RETIRED",
+      fault,
+    );
+    assert.equal(f.commands.length, 3);
+  }
+});
+
+function reviewedBuildPinsFixture() {
+  const source = Buffer.from("candidate helper source"),
     tool = Buffer.from("fixed native tool"),
-    image = elf();
-  image.writeUInt16LE(2, 56);
-  image.writeBigUInt64LE(0x400080n, 24);
-  image.writeUInt32LE(5, 68);
-  image.writeBigUInt64LE(0x400000n, 80);
-  image.writeBigUInt64LE(512n, 104);
-  image.writeUInt32LE(0x6474e551, 120);
-  image.writeUInt32LE(6, 124);
-  const compiler = "/usr/bin/x86_64-linux-gnu-gcc-13",
+    compiler = "/usr/bin/x86_64-linux-gnu-gcc-13",
     sdk = "/usr/bin/x86_64-linux-gnu-ld.bfd";
-  const pins = {
+  return {
     schemaVersion: 1,
     candidateSha,
     sourceSha256: digest(source),
@@ -2635,118 +2989,10 @@ function experimentBuildFixture() {
       },
     ],
   };
-  const intents = new Map(),
-    receipts = new Map();
-  const commands = [
-    [compiler, ["--version"]],
-    [sdk, ["--version"]],
-    ...LINUX_EXPERIMENT_QUERIES.map((query) => [
-      compiler,
-      linuxExperimentQueryArguments(
-        directory + "/preparation/file-helper.c",
-        query,
-      ),
-    ]),
-  ].map(([file, args], index) => {
-    const request = {
-      candidateSha,
-      platform: "linux",
-      file,
-      args,
-      cwd: directory + "/preparation",
-      env: { PATH: "/usr/bin:/bin", LANG: "C" },
-      deadlineMs: 20000,
-      toolSha256: digest(tool),
-    };
-    intents.set(directory + `/preparation/intent-${index}.json`, {
-      purpose: "experiment",
-      request,
-    });
-    const member = {
-      file:
-        request.cwd + `/command-${observationDigest(request)}/command-0.json`,
-      sha256: hash,
-    };
-    receipts.set(member.file, {
-      candidateSha,
-      caseId: "argv",
-      policyDigest: observationDigest(request),
-      executableDigest: digest(tool),
-    });
-    return member;
-  });
-  const built = {
-    build: {
-      candidateSha,
-      executable: directory + "/build/output/file-helper",
-      sourceSha256: pins.sourceSha256,
-      compiler: {
-        file: compiler,
-        version: pins.compilerVersion,
-        sha256: digest(tool),
-      },
-      inputs: pins.inputs,
-      arguments: [...LINUX_FILE_BUILD_ARGUMENTS],
-      sha256: digest(image),
-      abi: verifyLinuxFileElf(image),
-    },
-    settlement: retired,
-    receipts: [0, 1].map((index) => {
-      const policyDigest = digest(
-        JSON.stringify(
-          linuxFileBuildInvocation(
-            directory + "/build",
-            pins,
-            index === 0
-              ? ["-dumpfullversion", "-dumpversion"]
-              : LINUX_FILE_BUILD_ARGUMENTS,
-          ),
-        ),
-      );
-      const member = {
-        file: directory + `/build/command-${index}.json`,
-        sha256: hash,
-      };
-      intents.set(directory + `/build/command-${index}-possible.json`, {
-        candidateSha,
-        nonce: "original-command",
-        policyDigest,
-      });
-      receipts.set(member.file, {
-        candidateSha,
-        caseId: "argv",
-        nonce: "original-command",
-        policyDigest,
-        executableDigest: digest(tool),
-      });
-      return member;
-    }),
-  };
-  const options = {
-    read: async (file) => {
-      const bytes = file.endsWith("file-helper.c")
-        ? source
-        : file.endsWith("/file-helper")
-          ? image
-          : tool;
-      return { bytes, sha256: digest(bytes), identitySha256: hash };
-    },
-    readIntent: async (file) => Buffer.from(JSON.stringify(intents.get(file))),
-    receipt: async (file) => receipts.get(file),
-    verify: async () => retired,
-  };
-  return {
-    directory,
-    record: { purpose: "experiment", candidateSha, pins, built, commands },
-    options,
-    receipts,
-    intents,
-  };
 }
 
 test("Linux rejected build bindings retain bounded diagnostics despite sink failure", () => {
-  const f = experimentBuildFixture(),
-    pins = structuredClone(f.record.pins),
+  const pins = reviewedBuildPinsFixture(),
     source = "/usr/libexec/" + "x".repeat(70000),
     target = pins.inputs.at(-1).target,
     diagnosticError = new Error("unavailable diagnostic sink");
@@ -2779,452 +3025,6 @@ test("Linux rejected build bindings retain bounded diagnostics despite sink fail
     assert.equal(facts.sourceLength, source.length);
     assert.equal(facts.target, target);
     assert.ok(Buffer.byteLength(JSON.stringify(output)) < 4096);
-  }
-});
-
-test("Linux ordinary preparation rejoins actual fixed commands, source, output and fresh retirement", async () => {
-  const f = experimentBuildFixture(),
-    job = { candidateSha };
-  assert.equal(
-    (await verifyLinuxExperimentBuild(job, f.directory, f.record, f.options))
-      .sha256,
-    f.record.built.build.sha256,
-  );
-  const invocation = linuxFileBuildInvocation(
-    f.directory + "/build",
-    f.record.pins,
-    LINUX_FILE_BUILD_ARGUMENTS,
-  );
-  assert.deepEqual(
-    invocation.slice(invocation.indexOf("--") + 2),
-    LINUX_FILE_BUILD_ARGUMENTS,
-  );
-  const linker = f.record.pins.inputs.find(
-      ({ target }) => target === "/usr/bin/x86_64-linux-gnu-ld",
-    ),
-    snapshot = `${f.directory}/build/inputs/${f.record.pins.inputs.indexOf(linker)}`,
-    executions = [];
-  for (const target of ["/usr/bin/x86_64-linux-gnu-ld", "/usr/bin/ld"]) {
-    const at = invocation.indexOf(target);
-    assert.deepEqual(invocation.slice(at - 2, at + 1), [
-      "--ro-bind",
-      snapshot,
-      target,
-    ]);
-    assert.equal(invocation.filter((value) => value === target).length, 1);
-  }
-  for (const input of [
-    { ...linker, target: "/usr/bin/ld" },
-    { ...linker, source: "/usr/bin/substituted-tool", target: "/usr/bin/ld" },
-    { ...linker, source: "/usr/bin/ld", target: "/usr/bin/alternate-ld" },
-  ])
-    assert.throws(() =>
-      normalizeLinuxFileBuildPins(
-        {
-          ...f.record.pins,
-          inputs: [...f.record.pins.inputs, input],
-        },
-        candidateSha,
-      ),
-    );
-  await buildLinuxFileHelper(
-    candidateSha,
-    f.directory + "/build",
-    "/usr/bin/bwrap",
-    f.record.pins,
-    {
-      platform: "linux",
-      architecture: "x64",
-      env: { CI: "true", GITHUB_ACTIONS: "true", ImageOS: "ubuntu24" },
-      protect: () => {},
-      fs: {
-        mkdir: async () => {},
-        realpath: async (file) => file,
-        readFile: async (file) =>
-          file === "/etc/os-release"
-            ? 'ID=ubuntu\nVERSION_ID="24.04"\n'
-            : (await f.options.read(file)).bytes,
-        lstat: async (file) => ({
-          isFile: () => true,
-          nlink: 1,
-          mode: 0o500,
-          size: (await f.options.read(file)).bytes.length,
-        }),
-        writeFile: async () => {},
-        chmod: async () => {},
-      },
-      run: async (file, args) => {
-        assert.equal(file, "/usr/bin/bwrap");
-        executions.push(args);
-        return { stdout: f.record.pins.compilerVersion };
-      },
-    },
-  );
-  assert.equal(executions.length, 2);
-  assert.deepEqual(executions[1], invocation);
-  for (const [index, args] of executions.entries()) {
-    const receipt = f.receipts.get(f.record.built.receipts[index].file),
-      marker = f.intents.get(
-        f.directory + `/build/command-${index}-possible.json`,
-      ),
-      original = receipt.policyDigest,
-      at = args.indexOf("/usr/bin/ld");
-    assert.equal(original, digest(JSON.stringify(args)));
-    for (const replacement of [
-      [],
-      ["--ro-bind", "/usr/bin/ld", "/usr/bin/ld"],
-      ["--bind", snapshot, "/usr/bin/ld"],
-    ]) {
-      const changed = [...args];
-      changed.splice(at - 2, 3, ...replacement);
-      receipt.policyDigest = marker.policyDigest = digest(
-        JSON.stringify(changed),
-      );
-      await assert.rejects(
-        verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
-      );
-    }
-    receipt.policyDigest = marker.policyDigest = original;
-  }
-  assert.equal(invocation.includes("/usr/bin/as"), false);
-  for (const { source, target } of f.record.pins.inputs.slice(2)) {
-    const index = f.record.pins.inputs.findIndex(
-        (input) => input.target === target,
-      ),
-      at = invocation.indexOf(target);
-    assert.ok(index >= 0);
-    assert.deepEqual(invocation.slice(at - 2, at + 1), [
-      "--ro-bind",
-      `${f.directory}/build/inputs/${index}`,
-      target,
-    ]);
-    for (const file of [source, `${f.directory}/build/inputs/${index}`])
-      await assert.rejects(
-        verifyLinuxExperimentBuild(job, f.directory, f.record, {
-          ...f.options,
-          read: async (name, ...args) => ({
-            ...(await f.options.read(name, ...args)),
-            ...(name === file ? { sha256: hash } : {}),
-          }),
-        }),
-      );
-  }
-  for (const target of [
-    "/usr/bin/x86_64-linux-gnu-as",
-    "/usr/bin/x86_64-linux-gnu-ld",
-  ]) {
-    for (const field of ["source", "target"]) {
-      const value = structuredClone(f.record),
-        input = value.pins.inputs.find((member) => member.target === target);
-      input[field] = "/usr/bin/substituted-tool";
-      await assert.rejects(
-        verifyLinuxExperimentBuild(job, f.directory, value, f.options),
-      );
-    }
-    const value = structuredClone(f.record);
-    value.pins.inputs = value.pins.inputs.filter(
-      (input) => input.target !== target,
-    );
-    value.built.build.inputs = value.pins.inputs;
-    await assert.rejects(
-      verifyLinuxExperimentBuild(job, f.directory, value, f.options),
-    );
-  }
-  const missing = structuredClone(f.record);
-  missing.commands.pop();
-  await assert.rejects(
-    verifyLinuxExperimentBuild(job, f.directory, missing, f.options),
-  );
-  for (const change of [
-    (value) => {
-      value.built.build.sha256 = hash;
-    },
-    (value) => {
-      value.pins.sourceSha256 = hash;
-    },
-    (value) => {
-      value.built.build.arguments.push("-shared");
-    },
-    (value) => {
-      value.built.build.arguments = value.built.build.arguments.filter(
-        (argument) => argument !== "-B/usr/bin/x86_64-linux-gnu-",
-      );
-    },
-    (value) => {
-      value.pins.inputs[2].source = "/usr/lib/gcc/x86_64-linux-gnu/13/cc1";
-    },
-    (value) => {
-      value.pins.inputs[2].target = value.pins.inputs[3].target;
-    },
-    (value) => {
-      value.pins.inputs.at(-1).source = value.pins.inputs.at(-1).target;
-    },
-    (value) => {
-      value.pins.inputs.at(-1).target = value.pins.inputs.at(-1).source;
-    },
-  ]) {
-    const value = structuredClone(f.record);
-    change(value);
-    await assert.rejects(
-      verifyLinuxExperimentBuild(job, f.directory, value, f.options),
-    );
-  }
-  const last = f.receipts.get(f.record.built.receipts[1].file);
-  const marker = f.intents.get(f.directory + "/build/command-1-possible.json"),
-    originalPolicy = last.policyDigest;
-  last.policyDigest = marker.policyDigest = digest(
-    JSON.stringify(
-      linuxFileBuildInvocation(
-        f.directory + "/build",
-        f.record.pins,
-        LINUX_FILE_BUILD_ARGUMENTS.filter(
-          (argument) => argument !== "-B/usr/bin/x86_64-linux-gnu-",
-        ),
-      ),
-    ),
-  );
-  await assert.rejects(
-    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
-  );
-  last.policyDigest = marker.policyDigest = originalPolicy;
-  last.policyDigest = hash;
-  await assert.rejects(
-    verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
-  );
-  last.policyDigest = f.intents.get(
-    f.directory + "/build/command-1-possible.json",
-  ).policyDigest;
-  const discovery = f.intents.get(f.directory + "/preparation/intent-3.json");
-  for (const prefix of [
-    "-B/usr/libexec/gcc/x86_64-linux-gnu/13/",
-    "-B/usr/bin/x86_64-linux-gnu-",
-  ]) {
-    const original = discovery.request.args;
-    discovery.request.args = original.filter((argument) => argument !== prefix);
-    await assert.rejects(
-      verifyLinuxExperimentBuild(job, f.directory, f.record, f.options),
-    );
-    discovery.request.args = original;
-  }
-  discovery.request.args = linuxExperimentQueryArguments(
-    f.directory + "/preparation/file-helper.c",
-    "-print-prog-name=cc1",
-  );
-  await assert.rejects(
-    verifyLinuxExperimentBuild(job, f.directory, f.record, {
-      ...f.options,
-      verify: async () => ({ ...retired, independent: false }),
-    }),
-  );
-});
-
-test("Linux ordinary interrupted preparation retains missing receipts and never erases the first failure", async () => {
-  const f = experimentBuildFixture();
-  let job = initializeNativeJob(
-    {
-      candidateSha,
-      platform: "linux",
-      repository: "example/native",
-      runId: "1",
-      runAttempt: 1,
-    },
-    { schemaVersion: 7, purpose: "experiment" },
-  );
-  job = recordExperimentPreparationEffect(job, {
-    admission: "possible",
-    settlement: {
-      status: "RETAINED",
-      independent: false,
-      emergencyCleanup: false,
-    },
-    receiptSha256: null,
-  });
-  job = { ...job, failure: "preparation-failed" };
-  const env = {
-    CI: "true",
-    GITHUB_ACTIONS: "true",
-    ImageOS: "ubuntu24",
-    RUNNER_ENVIRONMENT: "github-hosted",
-    RUNNER_OS: "Linux",
-    GITHUB_REPOSITORY: job.repository,
-    GITHUB_RUN_ID: job.runId,
-    GITHUB_RUN_ATTEMPT: String(job.runAttempt),
-  };
-  const owner = {
-    purpose: "experiment",
-    candidateSha,
-    contextSha256: observationDigest({
-      repository: job.repository,
-      runId: job.runId,
-      runAttempt: job.runAttempt,
-    }),
-    pid: 123,
-    identity: {
-      bootId: "a1234567-1234-1234-1234-123456789012",
-      startTicks: "10",
-    },
-  };
-  const read = async (file) => {
-    if (file.endsWith("experiment-preparation-owner.json"))
-      return Buffer.from(JSON.stringify(owner));
-    if (file.endsWith("intent-0.json")) return f.options.readIntent(file);
-    if (f.receipts.has(file)) return Buffer.from("original protected receipt");
-    throw new Error("Interrupted admission has no birth receipt");
-  };
-  for (const complete of [false, true]) {
-    const recovered = await recoverLinuxExperimentPreparation(
-      job,
-      f.directory,
-      async () => {},
-      {
-        env,
-        platform: "linux",
-        architecture: "x64",
-        fs: {
-          readdir: async () => [
-            "intent-0.json",
-            ...(complete ? [] : ["build-intent.json"]),
-          ],
-          lstat: async () => {
-            throw Object.assign(new Error("Absent original preparer"), {
-              code: "ENOENT",
-            });
-          },
-        },
-        read,
-        receipt: f.options.receipt,
-        verify: f.options.verify,
-        rejoinInterpreter: async () => null,
-        identity: async () => null,
-        visible: async () => {},
-      },
-    );
-    assert.equal(recovered.failure, "preparation-failed");
-    assert.equal(recovered.preparationEffects.admission, "possible");
-    assert.equal(
-      recovered.preparationEffects.settlement.status,
-      complete ? "RETIRED" : "UNVERIFIABLE",
-    );
-    assert.equal(recovered.preparation, null);
-  }
-  for (const identity of [
-    async () => owner.identity,
-    async () => {
-      throw new Error("Observer lacks procfs authority");
-    },
-  ]) {
-    const recovered = await recoverLinuxExperimentPreparation(
-      job,
-      f.directory,
-      async () => {},
-      {
-        env,
-        platform: "linux",
-        architecture: "x64",
-        read,
-        receipt: f.options.receipt,
-        verify: f.options.verify,
-        rejoinInterpreter: async () => null,
-        identity,
-        visible: async () => {},
-        fs: {
-          readdir: () =>
-            assert.fail("Live or uncertain preparers keep admissions open"),
-        },
-      },
-    );
-    assert.equal(
-      recovered.preparationEffects.settlement.status,
-      "UNVERIFIABLE",
-    );
-  }
-  const inaccessible = await recoverLinuxExperimentPreparation(
-    job,
-    f.directory,
-    async () => {},
-    {
-      env,
-      platform: "linux",
-      architecture: "x64",
-      read,
-      rejoinInterpreter: async () => null,
-      identity: async () => null,
-      visible: async () => {},
-      fs: {
-        lstat: async () => {
-          throw Object.assign(new Error("Inaccessible preparer"), {
-            code: "EACCES",
-          });
-        },
-        readdir: () => assert.fail("Inaccessibility proves no absence"),
-      },
-    },
-  );
-  assert.equal(
-    inaccessible.preparationEffects.settlement.status,
-    "UNVERIFIABLE",
-  );
-  const bytes = Buffer.from("original protected receipt"),
-    members = (values) =>
-      values.map((value) => ({ ...value, sha256: digest(bytes) })),
-    settled = recordExperimentPreparationEffect(job, {
-      admission: "possible",
-      settlement: retired,
-      receiptSha256: observationDigest({
-        commands: members(f.record.commands),
-        receipts: members(f.record.built.receipts),
-      }),
-    });
-  for (const unavailable of [false, true]) {
-    const rejoin = () =>
-      recoverLinuxExperimentPreparation(
-        settled,
-        f.directory,
-        () => assert.fail("A settled preparation is not rewritten"),
-        {
-          env,
-          platform: "linux",
-          architecture: "x64",
-          reconcile: true,
-          rejoinInterpreter: async () => null,
-          identity: async () => null,
-          visible: async () => {},
-          fs: {
-            readdir: async () => [
-              ...f.record.commands.map((_, index) => `intent-${index}.json`),
-              "build-intent.json",
-            ],
-            lstat: async () => {
-              throw Object.assign(new Error("Absent preparer"), {
-                code: "ENOENT",
-              });
-            },
-          },
-          read: async (file) =>
-            file.endsWith("experiment-preparation-owner.json")
-              ? JSON.stringify(owner)
-              : file.endsWith("build-intent.json")
-                ? JSON.stringify({
-                    purpose: "experiment",
-                    candidateSha,
-                    pins: f.record.pins,
-                  })
-                : f.receipts.has(file)
-                  ? bytes
-                  : f.options.readIntent(file),
-          receipt: f.options.receipt,
-          verify: async () =>
-            unavailable
-              ? {
-                  status: "RETAINED",
-                  independent: false,
-                  emergencyCleanup: false,
-                }
-              : retired,
-        },
-      );
-    if (unavailable) await assert.rejects(rejoin());
-    else assert.deepEqual(await rejoin(), settled);
   }
 });
 
@@ -3560,14 +3360,7 @@ test("Linux sealed interpreter cold rejoin rejects substitutions and never repea
             }),
           identity: async () => null,
           visible: async () => {},
-          verify: () =>
-            assert.fail("No original compiler operation was released"),
           fs: {
-            readdir: async () => [
-              "executables",
-              "interpreter-intent.json",
-              ...(files.has(recordFile) ? ["interpreter.json"] : []),
-            ],
             lstat: async () => {
               throw Object.assign(new Error("Absent original owner"), {
                 code: "ENOENT",
@@ -3579,7 +3372,7 @@ test("Linux sealed interpreter cold rejoin rejects substitutions and never repea
       assert.equal(recovered.failure, "preparation-failed");
       assert.equal(
         recovered.preparationEffects.settlement.status,
-        fault === "lost-reply" ? "RETIRED" : "UNVERIFIABLE",
+        "UNVERIFIABLE",
       );
     }
   }

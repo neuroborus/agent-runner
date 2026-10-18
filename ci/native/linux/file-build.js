@@ -65,6 +65,19 @@ export const LINUX_FILE_BUILD_ARGUMENTS = Object.freeze([
   "/build/file-helper.c",
 ]);
 
+/** The same static ABI recipe, with build-only namespace paths on the host. */
+export function linuxHostedFileBuildArguments(directory) {
+  return LINUX_FILE_BUILD_ARGUMENTS.map((argument) =>
+    argument === "/output/file-helper"
+      ? path.join(directory, "output", "file-helper")
+      : argument === "/build/file-helper.c"
+        ? path.join(directory, "file-helper.c")
+        : argument === "-ffile-prefix-map=/build=."
+          ? `-ffile-prefix-map=${directory}=.`
+          : argument,
+  );
+}
+
 function requireValue(condition, binding) {
   if (!condition) {
     const error = new Error("Missing or mismatched Linux helper build inputs");

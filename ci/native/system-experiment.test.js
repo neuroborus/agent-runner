@@ -1229,6 +1229,8 @@ test("Linux startup intent precedes validation, reference publication and native
         before: { executable: { sha256: H, version: "synthetic" } },
       };
     const job = structuredClone(f.job);
+    const buildRecord = { schemaVersion: 2, purpose: "experiment" };
+    job.preparationEffects.receiptSha256 = observationDigest(buildRecord);
     for (const preparation of [
       job.preparation.expected,
       job.preparation.observed,
@@ -1289,7 +1291,7 @@ test("Linux startup intent precedes validation, reference publication and native
         assert.equal(events[0], "startup-intent");
         time = 7;
         if (["preflight", "diagnostic"].includes(fault)) throw failure;
-        return { record: { pins: {} }, interpreter: { source: { sha256: H } } };
+        return { record: buildRecord, interpreter: { source: { sha256: H } } };
       },
       read: async () => ({ sha256: H }),
       namespaces: async () => namespace,
@@ -1303,7 +1305,9 @@ test("Linux startup intent precedes validation, reference publication and native
         time = 11;
         assert.equal(fault, "native");
         assert.ok(events.includes("case-admission"));
-        await settings.persist(recordNativeAdmission(value, "ownership"));
+        await settings.persist(
+          recordNativeAdmission(value, "ownership", { purpose: "experiment" }),
+        );
         throw failure;
       },
     }).catch((error) => {
@@ -1492,10 +1496,16 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       versions: [{ name: "node", version: "v24.21.0", sha256: H }],
     },
   );
+  reference = {
+    ...reference,
+    purpose: "experiment",
+    buildObservationSha256: f.job.preparationEffects.receiptSha256,
+  };
   reference = recordNativeSettlement(
-    recordNativeAdmission(reference, "ownership"),
+    recordNativeAdmission(reference, "ownership", { purpose: "experiment" }),
     "ownership",
     retired,
+    { purpose: "experiment" },
   );
   const envelope = {
       purpose: "experiment",
@@ -1604,27 +1614,7 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
         result: session,
       },
     },
-    buildRecord = {
-      purpose: "experiment",
-      candidateSha: C,
-      commands: [],
-      built: {
-        receipts: [0, 1].map((index) => ({
-          file: `/synthetic/build/command-${index}.json`,
-          sha256: observationDigest({ native: "synthetic" }),
-        })),
-      },
-    },
-    fileJob = normalizeExperimentJob({
-      ...failed,
-      preparationEffects: {
-        ...failed.preparationEffects,
-        receiptSha256: observationDigest({
-          commands: buildRecord.commands,
-          receipts: buildRecord.built.receipts,
-        }),
-      },
-    }),
+    fileJob = failed,
     fileOptions = {
       ...base,
       fs: {
@@ -1640,22 +1630,15 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
         file.endsWith("experiment-reference.json")
           ? JSON.stringify({
               ...envelope,
-              job: recordNativeAdmission(
-                recordNativeSettlement(
-                  recordNativeAdmission(reference, "file-build"),
-                  "file-build",
-                  retired,
-                ),
-                "file-helper",
-              ),
+              job: recordNativeAdmission(reference, "file-helper", {
+                purpose: "experiment",
+              }),
             })
-          : file.endsWith("build-record.json")
-            ? JSON.stringify(buildRecord)
-            : file.endsWith(".sentinel")
-              ? "dddddddd-dddd-dddd-dddd-dddddddddddd"
-              : JSON.stringify(
-                  records[file.split("/").at(-1)] ?? { native: "synthetic" },
-                ),
+          : file.endsWith(".sentinel")
+            ? "dddddddd-dddd-dddd-dddd-dddddddddddd"
+            : JSON.stringify(
+                records[file.split("/").at(-1)] ?? { native: "synthetic" },
+              ),
       receipt: async (file) => ({
         candidateSha: C,
         nonce: file.includes(helper)
@@ -1663,9 +1646,7 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
           : "dddddddd-dddd-dddd-dddd-dddddddddddd",
         caseId: file.includes(helper)
           ? "file-helper"
-          : file.includes("/build/")
-            ? "argv"
-            : file.split("/").at(-1).slice(0, -5),
+          : file.split("/").at(-1).slice(0, -5),
       }),
     };
   assert.equal(
@@ -1708,6 +1689,19 @@ test("Linux proof recovery binds the original purpose, writer and native receipt
       },
     },
     { read: async () => JSON.stringify({ ...envelope, purpose: "reviewed" }) },
+    {
+      read: async () =>
+        JSON.stringify({
+          ...envelope,
+          job: {
+            ...reference,
+            admissions: {
+              ...reference.admissions,
+              "file-build": { admission: "possible", settlement: retired },
+            },
+          },
+        }),
+    },
   ]) {
     const uncertain = await recoverLinuxExperimentProofs(
       failed,

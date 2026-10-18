@@ -5,8 +5,6 @@ import {
   lstat,
   mkdir,
   readFile,
-  readdir,
-  realpath,
   writeFile,
 } from "node:fs/promises";
 import path from "node:path";
@@ -23,7 +21,6 @@ import {
   requireObservation,
 } from "../index.js";
 import {
-  protectedLibraries,
   acquireLinuxExperimentInterpreter,
   verifyLinuxExperimentInterpreter,
 } from "./confinement.js";
@@ -31,24 +28,13 @@ import {
   readLinuxObservedFile,
   readLinuxRunningInterpreterIdentity,
   digest,
-  protectedReceipt,
   readProtectedEvidence,
   assertLinuxProcVisibility,
 } from "./inspect.js";
 import {
-  normalizeLinuxFileBuildPins,
   verifyLinuxFileElf,
-  LINUX_FILE_BUILD_ARGUMENTS,
-  LINUX_FILE_BUILD_PROGRAMS,
-  linuxFileBuildInvocation,
+  linuxHostedFileBuildArguments,
 } from "./file-build.js";
-import {
-  buildWithReceipts,
-  freshVerifier,
-  runLinuxBuildCommand,
-  linuxExperimentQueryArguments,
-  LINUX_EXPERIMENT_QUERIES,
-} from "./proof.js";
 import {
   readLinuxNamespaceEvidence,
   verifyLinuxNamespaces,
@@ -61,8 +47,8 @@ const execute = diagnosticCommand(
 );
 const SOURCE = fileURLToPath(new URL("./file-helper.c", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13",
-  SDK = "/usr/bin/x86_64-linux-gnu-ld.bfd";
+const COMPILER = "/usr/bin/x86_64-linux-gnu-gcc-13";
+const SDK = "/usr/bin/x86_64-linux-gnu-ld.bfd";
 const ENV = Object.freeze({ PATH: "/usr/bin:/bin", LANG: "C" });
 const retired = (value) =>
   value?.status === "RETIRED" &&
@@ -78,6 +64,47 @@ const retained = () => ({
   independent: false,
   emergencyCleanup: false,
 });
+
+// GNU timeout owns the ordinary compiler's process group and forwards TERM,
+// escalating after two seconds. Await execFile closure before accepting output.
+// A lost/interrupted command has no completed build record and cannot cold-settle.
+const hostedCommand = diagnosticCommand(
+  "linux-hosted-build",
+  (file, args, { cwd, signal, deadlineMs }) =>
+    new Promise((resolve, reject) => {
+      signal?.throwIfAborted();
+      const child = execFile(
+        "/usr/bin/timeout",
+        [
+          "--signal=TERM",
+          "--kill-after=2s",
+          `${Math.floor(deadlineMs / 1000)}s`,
+          file,
+          ...args,
+        ],
+        {
+          cwd,
+          env: ENV,
+          timeout: deadlineMs + 5000,
+          maxBuffer: 65536,
+          killSignal: "SIGTERM",
+        },
+        (error, stdout, stderr) => {
+          signal?.removeEventListener("abort", stop);
+          if (error) return reject(error);
+          try {
+            signal?.throwIfAborted();
+            resolve({ stdout, stderr, exitCode: 0, signal: null });
+          } catch (cause) {
+            reject(cause);
+          }
+        },
+      );
+      const stop = () => child.kill("SIGTERM");
+      signal?.addEventListener("abort", stop, { once: true });
+      if (signal?.aborted) stop();
+    }),
+);
 
 function worker(job, env, platform, architecture) {
   requireObservation(
@@ -124,160 +151,6 @@ function preparationOwner(job, value) {
       /^(?:0|[1-9][0-9]{0,31})$/u.test(value.identity.startTicks),
   );
   return value;
-}
-
-/** Paths are private discovery data, never approval or public diagnostics. */
-export function linuxExperimentHeaders(output, source) {
-  requireObservation(
-    typeof output === "string" &&
-      Buffer.byteLength(output) <= 65536 &&
-      output.startsWith("file-helper:") &&
-      !/[\u0000\r]/u.test(output),
-  );
-  const members = output
-    .slice("file-helper:".length)
-    .replace(/\\\n/gu, " ")
-    .trim()
-    .split(/\s+/u);
-  requireObservation(
-    members.includes(source) &&
-      members.length <= 512 &&
-      members.every(
-        (member) =>
-          member === source ||
-          /^\/usr\/(?:include|lib\/gcc)\/[A-Za-z0-9_.+/-]+$/u.test(member),
-      ),
-  );
-  return [...new Set(members.filter((member) => member !== source))].sort();
-}
-
-/** Fixed discovery paths must resolve to the canonical tools later snapshotted. */
-export async function linuxExperimentProgram(
-  program,
-  reported,
-  { resolve = realpath } = {},
-) {
-  const binding = LINUX_FILE_BUILD_PROGRAMS[program];
-  requireObservation(
-    typeof reported === "string" && binding && reported === binding.target,
-  );
-  requireObservation((await resolve(binding.target)) === binding.source);
-  return binding;
-}
-
-async function inputsFor(
-  job,
-  directory,
-  source,
-  commands,
-  { read, command, libraries, remaining },
-) {
-  const sourceRead = await read(source, 65536, { protectedInput: false });
-  const request = async (file, args, extra = {}) => {
-    const image = await read(file);
-    requireObservation(remaining() >= 25000);
-    const intent = {
-      candidateSha: job.candidateSha,
-      platform: "linux",
-      file,
-      args,
-      cwd: directory,
-      env: ENV,
-      deadlineMs: 20000,
-      toolSha256: image.sha256,
-    };
-    const index = commands.length;
-    await writeFile(
-      path.join(directory, `intent-${index}.json`),
-      JSON.stringify({ purpose: "experiment", request: intent }) + "\n",
-      { flag: "wx", mode: 0o400 },
-    );
-    const result = await command(intent, extra);
-    requireObservation(
-      result.exitCode === 0 &&
-        result.independent === true &&
-        retired(result.settlement) &&
-        result.toolSha256 === image.sha256 &&
-        (await read(file)).sha256 === image.sha256,
-    );
-    commands.push(result.receipt);
-    return result.stdout;
-  };
-  const compilerVersion = /\b(13\.[0-9]+\.[0-9]+)\s*$/u.exec(
-    (await request(COMPILER, ["--version"])).split("\n")[0],
-  )?.[1];
-  requireObservation(compilerVersion);
-  const sdkVersion = (await request(SDK, ["--version"])).split("\n")[0];
-  const query = (name) =>
-    request(COMPILER, linuxExperimentQueryArguments(source, name), {
-      experimentSource: { path: source, sha256: sourceRead.sha256 },
-      experimentQuery: name,
-    });
-  const paths = new Map([[COMPILER, COMPILER]]);
-  for (const member of linuxExperimentHeaders(await query("headers"), source))
-    paths.set(member, await realpath(member));
-  for (const program of Object.keys(LINUX_FILE_BUILD_PROGRAMS)) {
-    const { source: canonical, target } = await linuxExperimentProgram(
-      program,
-      (await query(`-print-prog-name=${program}`)).trim(),
-    );
-    paths.set(target, canonical);
-    for (const member of await libraries(canonical))
-      paths.set(member.target, member.source);
-  }
-  for (const file of [
-    "libgcc.a",
-    "libgcc_eh.a",
-    "liblto_plugin.so",
-    "crtbeginT.o",
-    "crtend.o",
-    "libc.a",
-    "libc_nonshared.a",
-    "crt1.o",
-    "crti.o",
-    "crtn.o",
-  ]) {
-    const target = path.normalize(
-      (await query(`-print-file-name=${file}`)).trim(),
-    );
-    requireObservation(path.isAbsolute(target));
-    paths.set(target, await realpath(target));
-    if (file === "liblto_plugin.so")
-      for (const member of await libraries(await realpath(target)))
-        paths.set(member.target, member.source);
-  }
-  for (const member of await libraries(COMPILER))
-    paths.set(member.target, member.source);
-  const inputs = [],
-    identities = [];
-  let total = 0;
-  for (const [target, canonical] of [...paths].sort(([a], [b]) =>
-    a.localeCompare(b),
-  )) {
-    const actual = await read(canonical, 67108864);
-    total += actual.bytes.length;
-    requireObservation(total <= 67108864);
-    inputs.push({ source: canonical, target, sha256: actual.sha256 });
-    identities.push(actual.identitySha256);
-  }
-  requireObservation(
-    (await read(source, 65536, { protectedInput: false })).sha256 ===
-      sourceRead.sha256,
-  );
-  return {
-    pins: normalizeLinuxFileBuildPins(
-      {
-        schemaVersion: 1,
-        candidateSha: job.candidateSha,
-        sourceSha256: sourceRead.sha256,
-        compilerVersion,
-        inputs,
-      },
-      job.candidateSha,
-    ),
-    sdkVersion,
-    identities,
-  };
 }
 
 /** The original acquisition record is immutable and preparation-bound. Cold
@@ -332,190 +205,120 @@ export async function rejoinLinuxExperimentInterpreter(
   return interpreter;
 }
 
-/** Rejoin original compiler receipts and bytes; verification never recompiles. */
+function buildRecord(job, directory, record) {
+  observationObject(record, [
+    "schemaVersion",
+    "purpose",
+    "candidateSha",
+    "sourceSha256",
+    "compiler",
+    "sdk",
+    "arguments",
+    "commands",
+    "executable",
+    "sha256",
+    "abi",
+  ]);
+  const build = path.join(directory, "build");
+  requireObservation(
+    record.schemaVersion === 2 &&
+      record.purpose === "experiment" &&
+      record.candidateSha === job.candidateSha &&
+      record.executable === path.join(build, "output", "file-helper") &&
+      /^[a-f0-9]{64}$/u.test(record.sourceSha256) &&
+      /^[a-f0-9]{64}$/u.test(record.sha256),
+  );
+  for (const [name, file] of [
+    ["compiler", COMPILER],
+    ["sdk", SDK],
+  ]) {
+    observationObject(record[name], ["file", "sha256", "version"]);
+    requireObservation(
+      record[name].file === file &&
+        /^[a-f0-9]{64}$/u.test(record[name].sha256) &&
+        /^[\x20-\x7e]{1,256}$/u.test(record[name].version),
+    );
+  }
+  requireObservation(
+    /^13\.[0-9]+\.[0-9]+$/u.test(record.compiler.version) &&
+      observationDigest(record.arguments) ===
+        observationDigest(linuxHostedFileBuildArguments(build)) &&
+      Array.isArray(record.commands) &&
+      record.commands.length === 3,
+  );
+  for (const [index, command] of record.commands.entries()) {
+    observationObject(command, [
+      "file",
+      "args",
+      "cwd",
+      "env",
+      "deadlineMs",
+      "exitCode",
+      "signal",
+      "stdout",
+      "stderr",
+    ]);
+    requireObservation(
+      command.file === (index === 1 ? SDK : COMPILER) &&
+        command.cwd === build &&
+        observationDigest(command.env) === observationDigest(ENV) &&
+        command.deadlineMs === 20000 &&
+        command.exitCode === 0 &&
+        command.signal === null &&
+        observationDigest(command.args) ===
+          observationDigest(index < 2 ? ["--version"] : record.arguments) &&
+        [command.stdout, command.stderr].every(
+          (text) =>
+            typeof text === "string" && Buffer.byteLength(text) <= 65536,
+        ),
+    );
+  }
+  requireObservation(
+    /\b(13\.[0-9]+\.[0-9]+)\s*$/u.exec(
+      record.commands[0].stdout.split("\n")[0],
+    )?.[1] === record.compiler.version &&
+      record.commands[1].stdout.split("\n")[0] === record.sdk.version,
+  );
+  return record;
+}
+
+/** Actual source, command, tool and output observations; no compiler receipts. */
 export async function verifyLinuxExperimentBuild(
   job,
   directory,
-  record,
-  {
-    read = readLinuxObservedFile,
-    interpreter,
-    verify = (file, sha256) => freshVerifier(file, sha256, { interpreter }),
-    receipt = protectedReceipt,
-    readIntent = readProtectedEvidence,
-  } = {},
+  value,
+  { read = readLinuxObservedFile } = {},
 ) {
-  observationObject(record, [
-    "purpose",
-    "candidateSha",
-    "pins",
-    "built",
-    "commands",
-  ]);
+  const record = buildRecord(job, directory, value);
   requireObservation(
-    record.purpose === "experiment" && record.candidateSha === job.candidateSha,
+    (
+      await read(path.join(directory, "build", "file-helper.c"), 65536, {
+        protectedInput: false,
+      })
+    ).sha256 === record.sourceSha256,
   );
-  const pins = normalizeLinuxFileBuildPins(record.pins, job.candidateSha),
-    built = record.built;
-  requireObservation(
-    Object.values(LINUX_FILE_BUILD_PROGRAMS).every(({ source, target }) =>
-      pins.inputs.some(
-        (input) => input.source === source && input.target === target,
-      ),
-    ),
-  );
-  requireObservation(
-    built.build.candidateSha === job.candidateSha &&
-      built.build.executable ===
-        path.join(directory, "build", "output", "file-helper") &&
-      built.build.sourceSha256 === pins.sourceSha256 &&
-      built.build.compiler.file === COMPILER &&
-      built.build.compiler.version === pins.compilerVersion &&
-      built.build.compiler.sha256 ===
-        pins.inputs.find(({ target }) => target === COMPILER)?.sha256 &&
-      observationDigest(built.build.inputs) ===
-        observationDigest(pins.inputs) &&
-      observationDigest(built.build.arguments) ===
-        observationDigest(LINUX_FILE_BUILD_ARGUMENTS) &&
-      retired(built.settlement) &&
-      built.receipts.length === 2 &&
-      record.commands.length === 2 + LINUX_EXPERIMENT_QUERIES.length,
-  );
-  for (const [index, member] of [
-    ...record.commands,
-    ...built.receipts,
-  ].entries()) {
-    let expected, request;
-    if (index < record.commands.length) {
-      const intent = JSON.parse(
-        (
-          await readIntent(
-            path.join(directory, "preparation", `intent-${index}.json`),
-          )
-        ).toString(),
-      );
-      observationObject(intent, ["purpose", "request"]);
-      request = intent.request;
-      observationObject(request, [
-        "candidateSha",
-        "platform",
-        "file",
-        "args",
-        "cwd",
-        "env",
-        "deadlineMs",
-        "toolSha256",
-      ]);
-      requireObservation(
-        intent.purpose === "experiment" &&
-          request.candidateSha === job.candidateSha &&
-          request.platform === "linux" &&
-          request.file === (index === 1 ? SDK : COMPILER) &&
-          request.cwd === path.join(directory, "preparation") &&
-          request.deadlineMs === 20000 &&
-          observationDigest(request.env) === observationDigest(ENV) &&
-          observationDigest(request.args) ===
-            observationDigest(
-              index < 2
-                ? ["--version"]
-                : linuxExperimentQueryArguments(
-                    path.join(directory, "preparation", "file-helper.c"),
-                    LINUX_EXPERIMENT_QUERIES[index - 2],
-                  ),
-            ) &&
-          request.toolSha256 === (await read(request.file)).sha256,
-      );
-      expected = path.join(
-        request.cwd,
-        `command-${observationDigest(request)}`,
-        "command-0.json",
-      );
-    } else
-      expected = path.join(
-        directory,
-        "build",
-        `command-${index - record.commands.length}.json`,
-      );
-    requireObservation(member.file === expected);
-    const actual = await receipt(member.file, member.sha256);
+  for (const tool of [record.compiler, record.sdk])
     requireObservation(
-      actual.candidateSha === job.candidateSha &&
-        actual.caseId === "argv" &&
-        retired(await verify(member.file, member.sha256)),
+      (await read(tool.file, 67108864)).sha256 === tool.sha256,
     );
-    if (request)
-      requireObservation(
-        actual.policyDigest === observationDigest(request) &&
-          actual.executableDigest === request.toolSha256,
-      );
-    else {
-      const commandIndex = index - record.commands.length;
-      const intent = JSON.parse(
-        (
-          await readIntent(
-            path.join(
-              directory,
-              "build",
-              `command-${commandIndex}-possible.json`,
-            ),
-          )
-        ).toString(),
-      );
-      observationObject(intent, ["candidateSha", "nonce", "policyDigest"]);
-      requireObservation(
-        intent.candidateSha === actual.candidateSha &&
-          intent.nonce === actual.nonce &&
-          intent.policyDigest === actual.policyDigest &&
-          actual.executableDigest === (await read("/usr/bin/bwrap")).sha256 &&
-          actual.policyDigest ===
-            digest(
-              JSON.stringify(
-                linuxFileBuildInvocation(
-                  path.join(directory, "build"),
-                  pins,
-                  commandIndex === 0
-                    ? ["-dumpfullversion", "-dumpversion"]
-                    : LINUX_FILE_BUILD_ARGUMENTS,
-                ),
-              ),
-            ),
-      );
-    }
-  }
-  for (const file of [
-    path.join(directory, "preparation", "file-helper.c"),
-    path.join(directory, "build", "file-helper.c"),
-  ])
+  if (job.preparation)
     requireObservation(
-      (await read(file, 65536, { protectedInput: false })).sha256 ===
-        pins.sourceSha256,
+      job.preparation.expected.components[0].bindings.build ===
+        observationDigest(record) &&
+        (job.preparationEffects.receiptSha256 === null ||
+          job.preparationEffects.receiptSha256 === observationDigest(record)),
     );
-  for (const [index, input] of pins.inputs.entries()) {
-    requireObservation(
-      (await read(input.source, 67108864)).sha256 === input.sha256,
-    );
-    requireObservation(
-      (
-        await read(
-          path.join(directory, "build", "inputs", String(index)),
-          67108864,
-          { protectedInput: false },
-        )
-      ).sha256 === input.sha256,
-    );
-  }
   return readHelper(record, read);
 }
 
 async function readHelper(record, read) {
-  const built = record.built.build;
-  const native = await read(built.executable, 4194304, {
+  const native = await read(record.executable, 4194304, {
     protectedInput: false,
   });
   requireObservation(
-    native.sha256 === built.sha256 &&
+    native.sha256 === record.sha256 &&
       observationDigest(verifyLinuxFileElf(native.bytes)) ===
-        observationDigest(built.abi),
+        observationDigest(record.abi),
   );
   return {
     id: "file-helper",
@@ -523,9 +326,9 @@ async function readHelper(record, read) {
     format: "elf-x64",
     loader: [],
     bindings: {
-      source: record.pins.sourceSha256,
-      build: observationDigest(built),
-      abi: observationDigest(built.abi),
+      source: record.sourceSha256,
+      build: observationDigest(record),
+      abi: observationDigest(record.abi),
     },
     identityBefore: native.identitySha256,
     identityAfter: native.identitySha256,
@@ -534,8 +337,7 @@ async function readHelper(record, read) {
   };
 }
 
-/** Ordinary preparation captures local observations only. Reviewed preparers
- * and publication/custody admission retain their independent strict validators. */
+/** Ordinary hosted preparation builds once. Held runtime custody remains separate. */
 export async function prepareLinuxExperiment(
   input,
   binding,
@@ -546,11 +348,14 @@ export async function prepareLinuxExperiment(
     platform = process.platform,
     architecture = process.arch,
     read = readLinuxObservedFile,
-    command = runLinuxBuildCommand,
-    libraries = protectedLibraries,
-    build = buildWithReceipts,
+    command = hostedCommand,
+    build = command,
+    fs = { chmod, copyFile, mkdir, readFile, writeFile },
+    identity = readProcessIdentity,
     namespaces = verifyLinuxNamespaces,
+    readNamespace = readLinuxNamespaceEvidence,
     now = () => performance.now(),
+    signal,
     onFailure = (job, error) =>
       persistLinuxExperimentFailure(job, directory, "preparation", error),
     nodeVersion = process.version,
@@ -590,12 +395,16 @@ export async function prepareLinuxExperiment(
       job.preparationEffects.admission === "not-started" &&
       typeof persist === "function",
   );
-  const start = now(),
-    deadline = start + 240000,
-    commands = [];
+  const deadline = now() + 240000;
+  const active = () => {
+    signal?.throwIfAborted();
+    requireObservation(now() < deadline);
+  };
   const save = async (next) => {
+    active();
     job = normalizeExperimentJob(next);
     await persist(job);
+    active();
   };
   await save(recordExperimentPreparationEffect(job, effect(retained())));
   try {
@@ -608,9 +417,9 @@ export async function prepareLinuxExperiment(
         runAttempt: job.runAttempt,
       }),
       pid: process.pid,
-      identity: await readProcessIdentity(process.pid),
+      identity: await identity(process.pid),
     });
-    await writeFile(
+    await fs.writeFile(
       path.join(directory, "experiment-preparation-owner.json"),
       JSON.stringify(owner) + "\n",
       { flag: "wx", mode: 0o400 },
@@ -619,96 +428,110 @@ export async function prepareLinuxExperiment(
       binding.nodeVersion === nodeVersion &&
         binding.osBuild === env.ImageVersion,
     );
-    const namespaceContext = {
-      candidateSha: job.candidateSha,
-      runId: job.runId,
-      runAttempt: String(job.runAttempt),
-    };
-    const namespace = await readLinuxNamespaceEvidence(
+    const namespace = await readNamespace(
       path.join(directory, "linux-namespace-preparation.json"),
     );
-    await namespaces(namespace, namespaceContext, directory);
+    await namespaces(
+      namespace,
+      {
+        candidateSha: job.candidateSha,
+        runId: job.runId,
+        runAttempt: String(job.runAttempt),
+      },
+      directory,
+      { signal },
+    );
     requireObservation(
       (await checkout()) === job.candidateSha &&
         binding.checkoutSha === job.candidateSha,
     );
-    const preparation = path.join(directory, "preparation");
-    await mkdir(preparation, { mode: 0o700 });
-    await mkdir(path.join(preparation, "evidence"), { mode: 0o700 });
+    const preparation = path.join(directory, "preparation"),
+      output = path.join(directory, "build");
+    await fs.mkdir(preparation, { mode: 0o700 });
     const interpreter = await acquireInterpreter(job, owner, directory, {
       version: nodeVersion,
     });
-    const source = path.join(preparation, "file-helper.c");
-    const original = await readFile(SOURCE);
+    await fs.mkdir(output, { mode: 0o700 });
+    await fs.mkdir(path.join(output, "output"), { mode: 0o700 });
+    const source = path.join(output, "file-helper.c"),
+      original = await fs.readFile(SOURCE);
     requireObservation(
       digest(original) === digest(await sourceBytes(job.candidateSha)),
     );
-    await copyFile(SOURCE, source);
-    await chmod(source, 0o400);
+    await fs.copyFile(SOURCE, source);
+    await fs.chmod(source, 0o400);
+    const sourceSha256 = digest(original);
     requireObservation(
       (await read(source, 65536, { protectedInput: false })).sha256 ===
-        digest(original),
+        sourceSha256,
     );
-    const discovered = await inputsFor(job, preparation, source, commands, {
-      read,
-      command: (request, options) =>
-        command(request, { ...options, interpreter }),
-      libraries,
-      remaining: () => deadline - now(),
-    });
-    requireObservation(now() + 60000 < deadline);
-    await writeFile(
-      path.join(preparation, "build-intent.json"),
-      JSON.stringify({
-        purpose: "experiment",
-        candidateSha: job.candidateSha,
-        pins: discovered.pins,
-      }) + "\n",
-      { flag: "wx", mode: 0o400 },
-    );
-    const built = await build(
-      job,
-      directory,
-      { directory: preparation, launcher: "/usr/bin/bwrap", interpreter },
-      discovered.pins,
-    );
-    const record = {
+    const commands = [];
+    const run = async (file, args, invoke = command) => {
+      active();
+      requireObservation(now() + 25000 < deadline);
+      const request = { file, args, cwd: output, env: ENV, deadlineMs: 20000 };
+      const result = await invoke(file, args, { ...request, signal });
+      active();
+      requireObservation(
+        result.exitCode === 0 &&
+          result.signal === null &&
+          [result.stdout, result.stderr].every(
+            (text) =>
+              typeof text === "string" && Buffer.byteLength(text) <= 65536,
+          ),
+      );
+      commands.push({
+        ...request,
+        exitCode: result.exitCode,
+        signal: result.signal,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      });
+      return result.stdout.split("\n")[0];
+    };
+    const compilerRead = await read(COMPILER, 67108864),
+      sdkRead = await read(SDK, 67108864);
+    const compilerVersion = /\b(13\.[0-9]+\.[0-9]+)\s*$/u.exec(
+      await run(COMPILER, ["--version"]),
+    )?.[1];
+    const sdkVersion = await run(SDK, ["--version"]);
+    requireObservation(compilerVersion);
+    const argumentsList = linuxHostedFileBuildArguments(output);
+    await run(COMPILER, argumentsList, build);
+    const executable = path.join(output, "output", "file-helper");
+    await fs.chmod(executable, 0o500);
+    const native = await read(executable, 4194304, { protectedInput: false });
+    const record = buildRecord(job, directory, {
+      schemaVersion: 2,
       purpose: "experiment",
       candidateSha: job.candidateSha,
-      pins: discovered.pins,
-      built,
+      sourceSha256,
+      compiler: {
+        file: COMPILER,
+        sha256: compilerRead.sha256,
+        version: compilerVersion,
+      },
+      sdk: { file: SDK, sha256: sdkRead.sha256, version: sdkVersion },
+      arguments: argumentsList,
       commands,
-    };
+      executable,
+      sha256: native.sha256,
+      abi: verifyLinuxFileElf(native.bytes),
+    });
     const components = [
-      await verifyLinuxExperimentBuild(job, directory, record, {
-        read,
-        interpreter,
-      }),
+      await verifyLinuxExperimentBuild(job, directory, record, { read }),
     ];
-    const tools = [];
-    for (const [id, file, version] of [
-      ["compiler", COMPILER, discovered.pins.compilerVersion],
-      ["sdk", SDK, discovered.sdkVersion],
-    ])
-      tools.push({ id, sha256: (await read(file)).sha256, version });
-    requireObservation(
-      tools[0].sha256 ===
-        discovered.pins.inputs.find(({ target }) => target === COMPILER)
-          ?.sha256 &&
-        discovered.pins.inputs.some(
-          ({ source, sha256 }) => source === SDK && sha256 === tools[1].sha256,
-        ),
-    );
     const sources = [
-      { id: "file-helper", sha256: discovered.pins.sourceSha256 },
-      { id: "build-inputs", sha256: observationDigest(discovered.pins.inputs) },
+      { id: "file-helper", sha256: sourceSha256 },
+      { id: "build-command", sha256: observationDigest(commands) },
       { id: "namespace-binding", sha256: observationDigest(namespace) },
       { id: "node-interpreter", sha256: observationDigest(interpreter) },
     ];
-    const sdk = {
-      build: discovered.sdkVersion,
-      sha256: tools.find(({ id }) => id === "sdk").sha256,
-    };
+    const tools = [
+      ["compiler", record.compiler],
+      ["sdk", record.sdk],
+    ].map(([id, tool]) => ({ id, sha256: tool.sha256, version: tool.version }));
+    const sdk = { build: sdkVersion, sha256: sdkRead.sha256 };
     const expected = {
       binding,
       sources,
@@ -723,36 +546,33 @@ export async function prepareLinuxExperiment(
     };
     requireObservation(
       (await checkout()) === job.candidateSha &&
-        digest(await readFile(SOURCE)) === discovered.pins.sourceSha256 &&
-        now() < deadline,
+        digest(await fs.readFile(SOURCE)) === sourceSha256,
     );
-    const observed = {
-      binding: { ...binding, checkoutSha: await checkout() },
-      sources,
-      tools,
-      sdk,
-      components,
-      independent: true,
-      readSha256: observationDigest({
-        components,
-        identities: discovered.identities,
-        commands,
-        receipts: built.receipts,
-        interpreter,
-      }),
-    };
-    await writeFile(
+    active();
+    const recordBytes = JSON.stringify(record) + "\n";
+    requireObservation(Buffer.byteLength(recordBytes) <= 1048576);
+    await fs.writeFile(
       path.join(preparation, "build-record.json"),
-      JSON.stringify(record) + "\n",
+      recordBytes,
       { flag: "wx", mode: 0o400 },
     );
-    await save(recordExperimentPreparation(job, expected, observed));
+    await save(
+      recordExperimentPreparation(job, expected, {
+        binding,
+        sources,
+        tools,
+        sdk,
+        components,
+        independent: true,
+        readSha256: observationDigest({ components, commands, interpreter }),
+      }),
+    );
     await save(
       recordExperimentPreparationEffect(
         job,
         effect(
           { status: "RETIRED", independent: true, emergencyCleanup: false },
-          observationDigest({ commands, receipts: built.receipts }),
+          observationDigest(record),
         ),
       ),
     );
@@ -760,8 +580,23 @@ export async function prepareLinuxExperiment(
     nativeException("linux-experiment-preparation", error);
     try {
       await onFailure(job, error);
+    } catch (diagnosticError) {
+      nativeException(
+        "linux-experiment-preparation-diagnostics",
+        diagnosticError,
+      );
+      throw error;
     } finally {
-      await save({ ...job, failure: "preparation-failed" });
+      job = normalizeExperimentJob({ ...job, failure: "preparation-failed" });
+      try {
+        await persist(job);
+      } catch (persistenceError) {
+        nativeException(
+          "linux-experiment-preparation-persistence",
+          persistenceError,
+        );
+        throw error;
+      }
     }
   }
   return job;
@@ -778,22 +613,19 @@ export async function loadLinuxExperiment(input, directory, options = {}) {
   requireObservation(
     job.preparation !== null && retired(job.preparationEffects.settlement),
   );
-  const interpreter = await rejoinLinuxExperimentInterpreter(
+  const rejoin = options.rejoinInterpreter ?? rejoinLinuxExperimentInterpreter;
+  const interpreter = await rejoin(job, directory, options);
+  const record = JSON.parse(
+    await (options.readIntent ?? readProtectedEvidence)(
+      path.join(directory, "preparation", "build-record.json"),
+    ),
+  );
+  const observed = await verifyLinuxExperimentBuild(
     job,
     directory,
+    record,
     options,
   );
-  const record = JSON.parse(
-    (
-      await readProtectedEvidence(
-        path.join(directory, "preparation", "build-record.json"),
-      )
-    ).toString(),
-  );
-  const observed = await verifyLinuxExperimentBuild(job, directory, record, {
-    ...options,
-    interpreter,
-  });
   normalizeExperimentJob({
     ...job,
     preparation: {
@@ -806,32 +638,30 @@ export async function loadLinuxExperiment(input, directory, options = {}) {
     record,
     interpreter,
     observeRuntime: async () => {
-      await rejoinLinuxExperimentInterpreter(job, directory, options);
-      return readHelper(record, options.read ?? readLinuxObservedFile);
+      await rejoin(job, directory, options);
+      return verifyLinuxExperimentBuild(job, directory, record, options);
     },
-    build: async (reference, _directory, fixture, pins) => {
+    build: async (reference, _directory, fixture, supplied) => {
       requireObservation(
         reference.candidateSha === job.candidateSha &&
-          observationDigest(pins) === observationDigest(record.pins),
+          reference.purpose === "experiment" &&
+          reference.buildObservationSha256 === observationDigest(record) &&
+          observationDigest(supplied) === observationDigest(record),
       );
-      await verifyLinuxExperimentBuild(job, directory, record, {
-        ...options,
-        interpreter,
-      });
-      const { executable, ...buildRecord } = record.built.build;
-      await writeFile(
+      await verifyLinuxExperimentBuild(job, directory, record, options);
+      const { executable, ...evidence } = record;
+      await (options.write ?? writeFile)(
         path.join(fixture.directory, "evidence", "helper-build.json"),
-        JSON.stringify(buildRecord) + "\n",
+        JSON.stringify(evidence) + "\n",
         { flag: "wx", mode: 0o400 },
       );
-      return record.built;
+      return { purpose: "experiment", build: record };
     },
   };
 }
 
-/** Recovery only rejoins original admissions. Missing birth/command receipts
- * retain uncertain ownership; neither recompilation nor child exit repairs it.
- * Evidence files are retained for reporting rather than released on uncertainty. */
+/** Only a completed ordinary command record can settle preparation after owner
+ * loss. An interrupted compiler has no such record and retains uncertainty. */
 export async function recoverLinuxExperimentPreparation(
   input,
   directory,
@@ -840,14 +670,13 @@ export async function recoverLinuxExperimentPreparation(
     env = process.env,
     platform = process.platform,
     architecture = process.arch,
-    fs = { readdir, lstat },
+    fs = { lstat },
     read = readProtectedEvidence,
-    receipt = protectedReceipt,
-    verify: verifyInput,
     identity = readProcessIdentity,
     visible = assertLinuxProcVisibility,
     reconcile = false,
     rejoinInterpreter = rejoinLinuxExperimentInterpreter,
+    readObserved = readLinuxObservedFile,
   } = {},
 ) {
   const job = normalizeExperimentJob(input);
@@ -864,26 +693,14 @@ export async function recoverLinuxExperimentPreparation(
     },
     receiptSha256 = null;
   try {
-    const interpreter = await rejoinInterpreter(job, directory, {
-      readIntent: read,
-    });
-    const verify =
-      verifyInput ??
-      ((file, sha256) => freshVerifier(file, sha256, { interpreter }));
     const owner = preparationOwner(
       job,
       JSON.parse(
-        (
-          await read(path.join(directory, "experiment-preparation-owner.json"))
-        ).toString(),
+        await read(path.join(directory, "experiment-preparation-owner.json")),
       ),
     );
-    // A receipt prefix cannot close admissions while its original preparer lives.
-    // A null identity can mean inaccessible. Require separate directory absence
-    // under the existing full-procfs visibility check before closing admissions.
     await visible();
-    const currentOwner = await identity(owner.pid);
-    requireObservation(currentOwner === null);
+    requireObservation((await identity(owner.pid)) === null);
     try {
       await fs.lstat(`/proc/${owner.pid}`);
       throw new Error("Preparer remains present");
@@ -891,142 +708,24 @@ export async function recoverLinuxExperimentPreparation(
       requireObservation(["ENOENT", "ESRCH"].includes(error.code));
     }
     await visible();
-    const preparation = path.join(directory, "preparation"),
-      names = await fs.readdir(preparation),
-      bindings = [];
-    const intents = names
-      .filter((name) => /^intent-[0-9]+\.json$/u.test(name))
-      .sort((a, b) => Number(a.slice(7, -5)) - Number(b.slice(7, -5)));
-    // A rejoined acquisition precedes every command intent. After original-owner
-    // absence it can close an empty prefix; any intent still needs its native receipt.
-    requireObservation(
-      intents.length <= 2 + LINUX_EXPERIMENT_QUERIES.length &&
-        (intents.length > 0 ||
-          (interpreter && !names.includes("build-intent.json"))),
+    const interpreter = await rejoinInterpreter(job, directory, {
+      readIntent: read,
+    });
+    const record = JSON.parse(
+      await read(path.join(directory, "preparation", "build-record.json")),
     );
-    if (reconcile)
-      requireObservation(
-        intents.length === 2 + LINUX_EXPERIMENT_QUERIES.length &&
-          names.includes("build-intent.json"),
-      );
-    for (const [index, name] of intents.entries()) {
-      requireObservation(name === `intent-${index}.json`);
-      const intent = JSON.parse(
-        (await read(path.join(preparation, name))).toString(),
-      );
-      observationObject(intent, ["purpose", "request"]);
-      const request = intent.request;
-      observationObject(request, [
-        "candidateSha",
-        "platform",
-        "file",
-        "args",
-        "cwd",
-        "env",
-        "deadlineMs",
-        "toolSha256",
-      ]);
-      requireObservation(
-        intent.purpose === "experiment" &&
-          request.candidateSha === job.candidateSha &&
-          request.platform === "linux" &&
-          request.cwd === preparation &&
-          request.file === (index === 1 ? SDK : COMPILER) &&
-          request.deadlineMs === 20000 &&
-          observationDigest(request.env) === observationDigest(ENV) &&
-          observationDigest(request.args) ===
-            observationDigest(
-              index < 2
-                ? ["--version"]
-                : linuxExperimentQueryArguments(
-                    path.join(preparation, "file-helper.c"),
-                    LINUX_EXPERIMENT_QUERIES[index - 2],
-                  ),
-            ),
-      );
-      const file = path.join(
-        preparation,
-        `command-${observationDigest(request)}`,
-        "command-0.json",
-      );
-      const sha256 = digest(await read(file)),
-        native = await receipt(file, sha256);
-      requireObservation(
-        native.candidateSha === job.candidateSha &&
-          native.caseId === "argv" &&
-          native.policyDigest === observationDigest(request) &&
-          native.executableDigest === request.toolSha256 &&
-          retired(await verify(file, sha256)),
-      );
-      bindings.push({ file, sha256 });
-    }
-    if (names.includes("build-intent.json")) {
-      const intent = JSON.parse(
-        (await read(path.join(preparation, "build-intent.json"))).toString(),
-      );
-      observationObject(intent, ["purpose", "candidateSha", "pins"]);
-      requireObservation(
-        intent.purpose === "experiment" &&
-          intent.candidateSha === job.candidateSha,
-      );
-      const pins = normalizeLinuxFileBuildPins(intent.pins, job.candidateSha);
-      for (const index of [0, 1]) {
-        const file = path.join(directory, "build", `command-${index}.json`),
-          sha256 = digest(await read(file)),
-          native = await receipt(file, sha256);
-        const marker = JSON.parse(
-          (
-            await read(
-              path.join(directory, "build", `command-${index}-possible.json`),
-            )
-          ).toString(),
-        );
-        observationObject(marker, ["candidateSha", "nonce", "policyDigest"]);
-        requireObservation(
-          native.candidateSha === job.candidateSha &&
-            native.caseId === "argv" &&
-            marker.candidateSha === native.candidateSha &&
-            marker.nonce === native.nonce &&
-            marker.policyDigest === native.policyDigest &&
-            native.policyDigest ===
-              digest(
-                JSON.stringify(
-                  linuxFileBuildInvocation(
-                    path.join(directory, "build"),
-                    pins,
-                    index === 0
-                      ? ["-dumpfullversion", "-dumpversion"]
-                      : LINUX_FILE_BUILD_ARGUMENTS,
-                  ),
-                ),
-              ) &&
-            retired(await verify(file, sha256)),
-        );
-        bindings.push({ file, sha256 });
-      }
-    }
-    if (reconcile)
-      requireObservation(
-        observationDigest({
-          commands: bindings.slice(0, intents.length),
-          receipts: bindings.slice(intents.length),
-        }) === job.preparationEffects.receiptSha256,
-      );
-    requireObservation(!settlement.emergencyCleanup);
+    await verifyLinuxExperimentBuild(job, directory, record, {
+      read: readObserved,
+    });
+    requireObservation(interpreter && !settlement.emergencyCleanup);
     settlement = {
       status: "RETIRED",
       independent: true,
       emergencyCleanup: false,
     };
-    receiptSha256 = observationDigest({
-      owner,
-      currentOwner,
-      bindings,
-      interpreter: observationDigest(interpreter),
-    });
+    receiptSha256 = observationDigest(record);
   } catch (error) {
     nativeException("linux-experiment-retirement", error);
-    /* Retain uncertainty and the original preparation failure. */
   }
   if (retired(job.preparationEffects.settlement)) {
     requireObservation(retired(settlement));

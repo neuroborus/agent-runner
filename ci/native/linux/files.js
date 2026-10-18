@@ -37,6 +37,7 @@ import { freshVerifier } from "./proof.js";
 import { verifyLinuxExperimentInterpreter } from "./confinement.js";
 import {
   LINUX_FILE_BUILD_ARGUMENTS,
+  linuxHostedFileBuildArguments,
   verifyLinuxFileElf,
 } from "./file-build.js";
 import {
@@ -681,6 +682,7 @@ export async function runLinuxFileSession(
   normalizeLinuxFileControl(control);
   if (recovery !== null && control !== null)
     throw new Error("Recovery cannot inherit fault authority");
+  const hosted = build.purpose === "experiment";
   if (
     process.platform !== "linux" ||
     process.arch !== "x64" ||
@@ -690,8 +692,20 @@ export async function runLinuxFileSession(
     job.platform !== "linux" ||
     job.stages.setup.status !== "PASS" ||
     build.candidateSha !== job.candidateSha ||
+    (hosted
+      ? job.purpose !== "experiment" ||
+        build.schemaVersion !== 2 ||
+        !fixture.interpreter ||
+        job.buildObservationSha256 !== digest(JSON.stringify(build))
+      : job.purpose === "experiment") ||
     JSON.stringify(build.arguments) !==
-      JSON.stringify(LINUX_FILE_BUILD_ARGUMENTS)
+      JSON.stringify(
+        hosted
+          ? linuxHostedFileBuildArguments(
+              path.dirname(path.dirname(build.executable)),
+            )
+          : LINUX_FILE_BUILD_ARGUMENTS,
+      )
   )
     throw new Error("Linux file session requires bound system CI inputs");
   job = Object.freeze({ ...job });

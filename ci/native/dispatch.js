@@ -437,7 +437,16 @@ function nativeResults(job) {
   );
 }
 
-export function normalizeNativeJob(value) {
+// Only the private Linux reference owner opts into hosted build observations.
+// Default normalization and reviewed consumers reject this private shape.
+export function normalizeNativeJob(value, { purpose = "reviewed" } = {}) {
+  requireValue(["reviewed", "experiment"].includes(purpose));
+  const experimentReference = purpose === "experiment";
+  if (experimentReference)
+    requireValue(
+      Object.getOwnPropertyDescriptor(value ?? {}, "schemaVersion")?.value ===
+        5,
+    );
   if (
     Object.getOwnPropertyDescriptor(value ?? {}, "schemaVersion")?.value === 7
   )
@@ -464,8 +473,15 @@ export function normalizeNativeJob(value) {
     ...(version >= 3 ? ["linuxPrerequisites"] : []),
     ...(version === 4 ? ["unrecordedAdmission"] : []),
     ...(version === 5 ? ["admissions", "supportingEvidence"] : []),
+    ...(experimentReference ? ["purpose", "buildObservationSha256"] : []),
   ]);
   closed(value.stages, STAGES);
+  if (experimentReference)
+    requireValue(
+      value.purpose === "experiment" &&
+        typeof value.buildObservationSha256 === "string" &&
+        /^[a-f0-9]{64}$/u.test(value.buildObservationSha256),
+    );
   requireValue(
     [1, 2, 3, 4, 5].includes(value.schemaVersion) &&
       PLATFORMS.some(
@@ -494,7 +510,12 @@ export function normalizeNativeJob(value) {
         EFFECT_IDS.every((id) => admissions[id].admission === "not-started") &&
           supportingEvidence.length === 0,
       );
-    if (admissions["file-helper"].admission === "possible")
+    if (experimentReference)
+      requireValue(
+        value.platform === "linux" &&
+          admissions["file-build"].admission === "not-started",
+      );
+    else if (admissions["file-helper"].admission === "possible")
       requireValue(
         admissions["file-build"].admission === "possible" &&
           admissions["file-build"].settlement.status === "RETIRED" &&
@@ -502,7 +523,10 @@ export function normalizeNativeJob(value) {
       );
     for (const record of supportingEvidence) {
       const group = LINUX_NATIVE_GROUPS[linuxNativeGroup(record.checkId)];
-      const effect = record.kind === "build" ? "file-build" : group.admission;
+      const effect =
+        record.kind === "build" && !experimentReference
+          ? "file-build"
+          : group.admission;
       requireValue(admissions[effect].admission === "possible");
     }
     value = { ...value, admissions };
@@ -650,6 +674,12 @@ export function normalizeNativeJob(value) {
     );
   return {
     schemaVersion: version >= 4 ? version : 3,
+    ...(experimentReference
+      ? {
+          purpose: "experiment",
+          buildObservationSha256: value.buildObservationSha256,
+        }
+      : {}),
     ...(version === 4
       ? { unrecordedAdmission: value.unrecordedAdmission }
       : {}),
@@ -667,8 +697,13 @@ export function normalizeNativeJob(value) {
   };
 }
 
-export function recordNativeResults(input, results, linuxPrerequisites = null) {
-  const job = normalizeNativeJob(input);
+export function recordNativeResults(
+  input,
+  results,
+  linuxPrerequisites = null,
+  options = {},
+) {
+  const job = normalizeNativeJob(input, options);
   requireValue(
     (job.schemaVersion === 5 || job.results.length === 0) &&
       job.stages.setup.status === "PASS" &&
@@ -679,19 +714,22 @@ export function recordNativeResults(input, results, linuxPrerequisites = null) {
       job.stages.cleanup.status === "NOT_RUN" &&
         job.linuxPrerequisites === null,
     );
-  return normalizeNativeJob({
-    ...job,
-    results:
-      job.schemaVersion === 5
-        ? [...job.results, ...list(results, SYSTEM_CHECK_IDS.length)]
-        : results,
-    linuxPrerequisites,
-  });
+  return normalizeNativeJob(
+    {
+      ...job,
+      results:
+        job.schemaVersion === 5
+          ? [...job.results, ...list(results, SYSTEM_CHECK_IDS.length)]
+          : results,
+      linuxPrerequisites,
+    },
+    options,
+  );
 }
 
 /** Persist before the producer can start a controller, even without a receipt. */
-export function recordNativeAdmission(input, effectId) {
-  const job = normalizeNativeJob(input);
+export function recordNativeAdmission(input, effectId, options = {}) {
+  const job = normalizeNativeJob(input, options);
   if (job.schemaVersion === 5) {
     requireValue(
       EFFECT_IDS.includes(effectId) &&
@@ -701,13 +739,19 @@ export function recordNativeAdmission(input, effectId) {
         job.stages.cleanup.status === "NOT_RUN" &&
         job.admissions[effectId].admission === "not-started",
     );
-    return normalizeNativeJob({
-      ...job,
-      admissions: {
-        ...job.admissions,
-        [effectId]: { admission: "possible", settlement: retainedSettlement() },
+    return normalizeNativeJob(
+      {
+        ...job,
+        admissions: {
+          ...job.admissions,
+          [effectId]: {
+            admission: "possible",
+            settlement: retainedSettlement(),
+          },
+        },
       },
-    });
+      options,
+    );
   }
   requireValue(
     effectId === undefined &&
@@ -722,8 +766,13 @@ export function recordNativeAdmission(input, effectId) {
 }
 
 /** Only independently supplied effect retirement can settle an admitted group. */
-export function recordNativeSettlement(input, effectId, settlement) {
-  const job = normalizeNativeJob(input);
+export function recordNativeSettlement(
+  input,
+  effectId,
+  settlement,
+  options = {},
+) {
+  const job = normalizeNativeJob(input, options);
   requireValue(
     job.schemaVersion === 5 &&
       EFFECT_IDS.includes(effectId) &&
@@ -738,27 +787,33 @@ export function recordNativeSettlement(input, effectId, settlement) {
       current.settlement.status === "RETAINED" &&
       !current.settlement.emergencyCleanup,
   );
-  return normalizeNativeJob({
-    ...job,
-    admissions: {
-      ...job.admissions,
-      [effectId]: { admission: "possible", settlement },
+  return normalizeNativeJob(
+    {
+      ...job,
+      admissions: {
+        ...job.admissions,
+        [effectId]: { admission: "possible", settlement },
+      },
     },
-  });
+    options,
+  );
 }
 
-export function recordNativeSupportingEvidence(input, records) {
-  const job = normalizeNativeJob(input);
+export function recordNativeSupportingEvidence(input, records, options = {}) {
+  const job = normalizeNativeJob(input, options);
   requireValue(
     job.schemaVersion === 5 &&
       job.stages.setup.status === "PASS" &&
       job.stages.probe.status === "NOT_RUN" &&
       job.stages.cleanup.status === "NOT_RUN",
   );
-  return normalizeNativeJob({
-    ...job,
-    supportingEvidence: [...job.supportingEvidence, ...list(records, 32)],
-  });
+  return normalizeNativeJob(
+    {
+      ...job,
+      supportingEvidence: [...job.supportingEvidence, ...list(records, 32)],
+    },
+    options,
+  );
 }
 
 /** Reporting cleanup cannot repair attempted or unrecorded possible effects. */

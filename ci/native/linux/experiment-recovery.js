@@ -178,12 +178,16 @@ export async function recoverLinuxExperimentProofs(
         envelope.preparationSha256 === proof.preparationSha256 &&
         observationDigest(envelope.owner) === observationDigest(proof.owner),
     );
-    const reference = normalizeNativeJob(envelope.job),
+    const reference = normalizeNativeJob(envelope.job, {
+        purpose: "experiment",
+      }),
       binding = job.preparation.expected.binding;
     requireObservation(
       reference.schemaVersion === 5 &&
         reference.platform === "linux" &&
         reference.candidateSha === job.candidateSha &&
+        reference.buildObservationSha256 ===
+          job.preparationEffects.receiptSha256 &&
         reference.checkoutSha === job.candidateSha &&
         reference.provenance.repository === job.repository &&
         reference.provenance.runId === job.runId &&
@@ -258,26 +262,6 @@ export async function recoverLinuxExperimentProofs(
           ).toString();
           await inspect(path.join(evidence, `${id}.json`), id, null, nonce);
         }
-    if (reference.admissions["file-build"].admission === "possible") {
-      const record = JSON.parse(
-        await read(path.join(directory, "preparation", "build-record.json")),
-      );
-      requireObservation(
-        record.purpose === "experiment" &&
-          record.candidateSha === job.candidateSha &&
-          observationDigest({
-            commands: record.commands,
-            receipts: record.built.receipts,
-          }) === job.preparationEffects.receiptSha256 &&
-          record.built.receipts.length === 2,
-      );
-      // The experiment reuses preparation's two digest-bound original births.
-      for (const index of [0, 1]) {
-        const file = path.join(directory, "build", `command-${index}.json`);
-        requireObservation(record.built.receipts[index].file === file);
-        await inspect(file, "argv", record.built.receipts[index].sha256);
-      }
-    }
     const helpers = names.filter((name) =>
       /^file-helper-[a-f0-9-]{36}\.json$/u.test(name),
     );

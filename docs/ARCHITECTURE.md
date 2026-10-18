@@ -40,15 +40,22 @@ installed toolchain. This assumption supplies no reviewed provenance or producti
 approval. Actual source/tool/SDK/output hashes and versions, exact candidate and
 producing-job bindings, ABI checks, native isolation and independent retirement
 remain mandatory; ordinary per-platform and aggregate summaries state the boundary.
-Linux's indexed ordinary preparer uses its existing compiler controller, sealed
-fixed GCC-13 file build and held readers to bind observed inputs/output, rather
-than manufacture reviewed publication. Its execution owner reuses both fixed
-system recipes and all 23 checks, preserving parked native policy reads and
-independent receipt settlement before runtime-audit admission. The experimental
-audit records actual build/loader observations; reviewed release validation stays
-strict. Interrupted preparation first fences its recorded preparer's birth identity;
-live or unobserved owners and missing birth/retirement evidence remain uncertain.
-Recovery preserves the first failure without recompilation or resource release.
+Linux's indexed ordinary preparer compiles the exact-candidate static helper once
+with installed GCC-13 under the hosted toolchain assumption. Bounded ordinary
+argument-vector execution owns the command group, forwards cancellation and waits
+for closure. Its private version-2 record binds actual source, command results,
+compiler/linker hashes and versions, output and ELF ABI; protected compiler
+execution, toolchain snapshots and compiler receipt reconstruction are absent.
+Cold loading verifies those bytes without rebuilding. The private reference opts
+explicitly into experiment purpose and the completed build digest, leaving
+compiler admission not-started; ordinary reporting and reviewed consumers reject
+that shape. Both fixed system recipes and all 23 checks retain parked native
+policy reads, payload receipts and independent settlement before runtime audit.
+The experimental audit records actual build/runtime/loader observations while
+reviewed release validation stays strict. Interrupted preparation fences the
+original preparer's birth under complete procfs visibility and rejoins its sealed
+interpreter and completed build. Missing records, live or unobserved owners and
+uncertain original retirement remain unsuccessful and preserve the first failure.
 The private Linux stage journal covers proof invocation and startup owner birth
 before validation, independently of case admission. Initial held interpreter,
 build and namespace observations and reference publication precede possible native

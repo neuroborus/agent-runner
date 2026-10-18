@@ -1317,18 +1317,15 @@ async function executeBuild(input, receipts, observations) {
   if (input.command) {
     const provider = input.providerSource;
     const feasibility = input.feasibilitySource;
-    const experiment = input.experimentSource;
     requireBuildEvidence(
-      [provider, feasibility, experiment].filter(Boolean).length <= 1,
+      [provider, feasibility].filter(Boolean).length <= 1,
       "source-binding",
     );
-    const source = provider ?? feasibility ?? experiment;
+    const source = provider ?? feasibility;
     const vector = provider
       ? linuxProviderBuildArguments(provider.path, input.command.cwd)
-      : feasibility
-        ? linuxFeasibilityBuildArguments(feasibility.path, input.command.cwd)
-        : experiment &&
-          linuxExperimentQueryArguments(experiment.path, input.experimentQuery);
+      : feasibility &&
+        linuxFeasibilityBuildArguments(feasibility.path, input.command.cwd);
     requireBuildEvidence(
       [
         "/usr/bin/x86_64-linux-gnu-gcc-13",
@@ -1372,23 +1369,21 @@ async function executeBuild(input, receipts, observations) {
         input.command.toolSha256,
         "tool-hash",
       );
-      if (!experiment) {
-        const output = path.join(
-            input.command.cwd,
-            provider ? "provider-gate" : "file-helper",
-          ),
-          stat = await buildOperation("output-metadata", () => lstat(output));
-        requireBuildEvidence(
-          stat.isFile() &&
-            !stat.isSymbolicLink() &&
-            stat.nlink === 1 &&
-            stat.size > 0,
-          "output-metadata",
-        );
-        await buildOperation("output-metadata", () =>
-          chmod(output, provider ? 0o555 : 0o500),
-        );
-      }
+      const output = path.join(
+          input.command.cwd,
+          provider ? "provider-gate" : "file-helper",
+        ),
+        stat = await buildOperation("output-metadata", () => lstat(output));
+      requireBuildEvidence(
+        stat.isFile() &&
+          !stat.isSymbolicLink() &&
+          stat.nlink === 1 &&
+          stat.size > 0,
+        "output-metadata",
+      );
+      await buildOperation("output-metadata", () =>
+        chmod(output, provider ? 0o555 : 0o500),
+      );
     }
   } else {
     await buildLinuxFileHelper(
@@ -1482,58 +1477,6 @@ export function linuxProviderBuildArguments(source, output) {
   ];
 }
 
-/** Read-only discovery for the fixed GCC-13 recipe, through the existing
- * creation-bound compiler controller. No arbitrary compiler option is admitted. */
-export const LINUX_EXPERIMENT_QUERIES = Object.freeze([
-  "headers",
-  ...["cc1", "collect2", "as", "ld"].map(
-    (program) => `-print-prog-name=${program}`,
-  ),
-  ...[
-    "libgcc.a",
-    "libgcc_eh.a",
-    "liblto_plugin.so",
-    "crtbeginT.o",
-    "crtend.o",
-    "libc.a",
-    "libc_nonshared.a",
-    "crt1.o",
-    "crti.o",
-    "crtn.o",
-  ].map((file) => `-print-file-name=${file}`),
-]);
-export function linuxExperimentQueryArguments(source, query) {
-  requireBuildEvidence(
-    path.isAbsolute(source) &&
-      path.normalize(source) === source &&
-      path.basename(source) === "file-helper.c" &&
-      !/[\u0000-\u001f\u007f]/u.test(source),
-  );
-  if (query === "headers")
-    return [
-      ...LINUX_FILE_BUILD_ARGUMENTS.slice(
-        0,
-        LINUX_FILE_BUILD_ARGUMENTS.indexOf("-o"),
-      ).filter(
-        (argument) =>
-          !argument.startsWith("-Wl,") &&
-          !["-static", "-no-pie"].includes(argument),
-      ),
-      "-M",
-      "-MT",
-      "file-helper",
-      source,
-    ];
-  requireBuildEvidence(LINUX_EXPERIMENT_QUERIES.includes(query));
-  return [
-    ...LINUX_FILE_BUILD_ARGUMENTS.slice(
-      0,
-      LINUX_FILE_BUILD_ARGUMENTS.indexOf("-std=c11"),
-    ),
-    query,
-  ];
-}
-
 /** Explicit external-CI version inspection using the compiler's existing
  * owned controller and fresh verifier. A child exit never supplies retirement. */
 export async function runLinuxBuildCommand(
@@ -1548,8 +1491,6 @@ export async function runLinuxBuildCommand(
     verifierOptions,
     providerSource,
     feasibilitySource,
-    experimentSource,
-    experimentQuery,
     interpreter,
     readReceipt = (file, sha256) =>
       protectedReceipt(file, sha256, receiptOptions),
@@ -1585,7 +1526,6 @@ export async function runLinuxBuildCommand(
       command: request,
       ...(providerSource ? { providerSource } : {}),
       ...(feasibilitySource ? { feasibilitySource } : {}),
-      ...(experimentSource ? { experimentSource, experimentQuery } : {}),
     }),
     { flag: "wx", mode: 0o400 },
   );

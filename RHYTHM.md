@@ -5,6 +5,29 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Build ordinary Linux helpers with hosted GCC
+
+Ordinary Linux preparation now trusts installed GCC-13 and compiles the exact
+candidate helper once through bounded argument-vector execution. The static ELF
+recipe retains its flags and ABI checks with actual hosted paths. Compiler/header/
+linker discovery, immutable toolchain copies, protected compiler execution and
+compiler receipt/intent reconstruction are removed from this path. A private
+version-2 record retains actual commands/results, source, compiler/linker versions
+and hashes, output and ABI. Cold loading and the existing injected build hook
+verify the completed output without recompilation or fabricated receipts.
+The private reference explicitly binds that observed build, leaves compiler
+admission not-started and remains rejected by reviewed consumers. Reviewed
+installation/build/release validators and shared controller consumers stay strict.
+Sealed interpreter and runtime loader custody, held helper reads, native policies,
+positive controls, original births and independent namespace retirement remain.
+Interrupted preparation without a completed build record stays uncertain, even
+when interpreter acquisition completed; recovery preserves the original failure.
+The atomic prepare/load/build-hook/runtime/recovery migration is predominantly
+removal because splitting it would leave incompatible private records between
+commits. Portable injected coverage supplies no hosted acceptance or production
+approval, and existing Darwin/Windows blockers and original retirement obligations
+remain open. The ignored recovery archive remains supervisor-owned.
+
 ## 2026-10-18 — Trust hosted packages for ordinary Linux preparation
 
 Ordinary native preparation explicitly trusts the declared disposable hosted

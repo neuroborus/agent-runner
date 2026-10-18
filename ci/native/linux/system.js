@@ -9,6 +9,7 @@ import {
   recordNativeResults,
   recordNativeSupportingEvidence,
   hasNativeProcessEffects,
+  observationDigest,
 } from "../index.js";
 import { LINUX_OWNERSHIP_CASES } from "./protocol.js";
 import { ACCESS_PROFILES } from "./profiles.js";
@@ -170,7 +171,8 @@ export async function runLinuxSystemProofs(
     beforeRelease = async () => {},
   } = {},
 ) {
-  let job = normalizeNativeJob(input);
+  const context = { purpose };
+  let job = normalizeNativeJob(input, context);
   requireValue(
     ["reviewed", "experiment"].includes(purpose) &&
       (!interpreter ||
@@ -189,12 +191,12 @@ export async function runLinuxSystemProofs(
       typeof persist === "function",
   );
   const save = async (value) => {
-    job = normalizeNativeJob(value);
+    job = normalizeNativeJob(value, context);
     await persist(job);
   };
   const admit = async (id) => {
     signal?.throwIfAborted();
-    await save(recordNativeAdmission(job, id));
+    await save(recordNativeAdmission(job, id, context));
     signal?.throwIfAborted();
     diagnostic(id, "admitted");
   };
@@ -213,12 +215,17 @@ export async function runLinuxSystemProofs(
         ),
     );
     let next = supporting.length
-      ? recordNativeSupportingEvidence(job, supporting)
+      ? recordNativeSupportingEvidence(job, supporting, context)
       : job;
-    next = recordNativeResults(next, results, prerequisites);
+    next = recordNativeResults(next, results, prerequisites, context);
     const effect = LINUX_NATIVE_GROUPS[group].admission;
     if (next.admissions[effect].admission === "possible")
-      next = recordNativeSettlement(next, effect, summarySettlement(results));
+      next = recordNativeSettlement(
+        next,
+        effect,
+        summarySettlement(results),
+        context,
+      );
     await save(next);
     for (const result of results)
       for (const phase of ["setup", "probe", "cleanup"])
@@ -258,7 +265,9 @@ export async function runLinuxSystemProofs(
         signal,
         onOwnership: async (results, fixture, prerequisites) => {
           if (prerequisites) {
-            await save(recordNativeResults(job, results, prerequisites));
+            await save(
+              recordNativeResults(job, results, prerequisites, context),
+            );
             return;
           }
           await record("ownership", results);
@@ -288,15 +297,25 @@ export async function runLinuxSystemProofs(
     await record("release", blockedLinuxSystemResults(job, "release"));
     return job;
   }
-  await admit("file-build");
+  if (purpose === "reviewed") await admit("file-build");
   const built = await bounded("build", () =>
     build(job, directory, fixture, reviewed.build),
   );
   requireValue(
-    built.build.candidateSha === job.candidateSha && retired(built.settlement),
+    built.build.candidateSha === job.candidateSha &&
+      (purpose === "experiment"
+        ? built.purpose === "experiment" &&
+          built.build.purpose === "experiment" &&
+          built.build.schemaVersion === 2 &&
+          observationDigest(built.build) === job.buildObservationSha256
+        : built.purpose !== "experiment" &&
+          built.build.purpose !== "experiment" &&
+          retired(built.settlement)),
   );
-  await save(recordNativeSettlement(job, "file-build", built.settlement));
+  if (purpose === "reviewed")
+    await save(recordNativeSettlement(job, "file-build", built.settlement));
   const { executable, ...buildRecord } = built.build;
+  if (purpose === "experiment") await admit("file-helper");
   await save(
     recordNativeSupportingEvidence(
       job,
@@ -306,9 +325,10 @@ export async function runLinuxSystemProofs(
         id: "helper-build",
         sha256: digest(JSON.stringify(buildRecord) + "\n"),
       })),
+      context,
     ),
   );
-  await admit("file-helper");
+  if (purpose === "reviewed") await admit("file-helper");
   const proved = await bounded("files", () =>
     files(job, fixture, built.build, { signal }),
   );

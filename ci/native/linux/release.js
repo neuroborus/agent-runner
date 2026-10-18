@@ -6,6 +6,7 @@ import {
   CHECK_IDS,
   SOURCE_FINDING_IDS,
   LINUX_RELEASE_POLICY_ID,
+  observationDigest,
 } from "../index.js";
 import { digest } from "./inspect.js";
 import {
@@ -355,8 +356,6 @@ export async function observeLinuxRelease(
   requireValue(
     readObserved === undefined || typeof readObserved === "function",
   );
-  const uid = ownerUid();
-  requireValue(Number.isSafeInteger(uid) && uid >= 0);
   requireValue(
     build.candidateSha === job.candidateSha &&
       build.sourceSha256 === pins.sourceSha256 &&
@@ -368,6 +367,55 @@ export async function observeLinuxRelease(
       JSON.stringify(build.arguments) ===
         JSON.stringify(LINUX_FILE_BUILD_ARGUMENTS),
   );
+  return observeRuntime(job, fixture, build, pins, {
+    fs,
+    protect,
+    ownerUid,
+    readObserved,
+  });
+}
+
+/** Hosted command observations are experimental evidence, never reviewed pins. */
+export async function observeLinuxExperimentRelease(
+  job,
+  fixture,
+  build,
+  record,
+  {
+    fs = { readFile, lstat, realpath },
+    protect = assertOwnedProcessLauncherProtected,
+    ownerUid = () => process.getuid(),
+    readObserved,
+  } = {},
+) {
+  requireValue(
+    build.purpose === "experiment" &&
+      build.schemaVersion === 2 &&
+      job.purpose === "experiment" &&
+      job.buildObservationSha256 === observationDigest(build) &&
+      observationDigest(build) === observationDigest(record) &&
+      build.candidateSha === job.candidateSha,
+  );
+  return observeRuntime(job, fixture, build, null, {
+    fs,
+    protect,
+    ownerUid,
+    readObserved,
+  });
+}
+
+async function observeRuntime(
+  job,
+  fixture,
+  build,
+  pins,
+  { fs, protect, ownerUid, readObserved },
+) {
+  requireValue(
+    readObserved === undefined || typeof readObserved === "function",
+  );
+  const uid = ownerUid();
+  requireValue(Number.isSafeInteger(uid) && uid >= 0);
   const executablePrivileges = [];
   const read = async (
     file,
@@ -445,12 +493,12 @@ export async function observeLinuxRelease(
   const components = [...versions];
   await read(
     path.join(path.dirname(path.dirname(build.executable)), "file-helper.c"),
-    pins.sourceSha256,
+    pins ? pins.sourceSha256 : build.sourceSha256,
     65536,
     null,
     true,
   );
-  for (let i = 0; i < pins.inputs.length; i++) {
+  for (let i = 0; i < (pins?.inputs.length ?? 0); i++) {
     const input = pins.inputs[i];
     await read(
       path.join(
@@ -468,6 +516,16 @@ export async function observeLinuxRelease(
       version: "unversioned",
       sha256: input.sha256,
     });
+  }
+  if (!pins) {
+    for (const [name, tool] of [
+      ["compiler", build.compiler],
+      ["build.sdk", build.sdk],
+    ]) {
+      await read(tool.file, tool.sha256, 67108864, name);
+      if (name !== "compiler")
+        components.push({ name, version: tool.version, sha256: tool.sha256 });
+    }
   }
   const libraries = new Map(
     fixture.policy.libraries.map((entry) => [entry.target, entry]),
@@ -508,7 +566,12 @@ export async function observeLinuxRelease(
   requireValue(capabilities && noNewPrivileges !== undefined);
   return {
     candidateSha: job.candidateSha,
-    buildPinsSha256: digest(JSON.stringify(pins)),
+    ...(pins
+      ? { buildPinsSha256: digest(JSON.stringify(pins)) }
+      : {
+          purpose: "experiment",
+          buildObservationSha256: observationDigest(build),
+        }),
     components,
     helperAbi: abi,
     privileges: {

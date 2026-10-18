@@ -862,7 +862,9 @@ export async function runLinuxFileCase(checkId, effects) {
 /** Complete fixed file inventory; system composition remains a separate owner. */
 export async function runLinuxFileProofs(job, fixture, build, { signal } = {}) {
   signal?.throwIfAborted();
-  job = normalizeNativeJob(job);
+  job = normalizeNativeJob(job, {
+    purpose: build.purpose === "experiment" ? "experiment" : "reviewed",
+  });
   requireValue(
     process.platform === "linux" &&
       process.arch === "x64" &&
