@@ -9,6 +9,8 @@ import { CODEX_RELEASE_REFERENCE } from "../index.js";
 export const WINDOWS_PROCESS_LIMIT = 32;
 export const WINDOWS_SYSTEM_SID = "S-1-5-18";
 export const WINDOWS_ARGUMENT_PARSER = "msvc-ucrt-wmain-v1";
+// UTF-16 code units, excluding the terminator; custody.h uses the same bound.
+export const WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS = 16384;
 export const WINDOWS_LITERAL_ARGUMENTS = Object.freeze([
   "",
   "space value",
@@ -91,6 +93,9 @@ export function normalizeWindowsArguments(values) {
  * quotes and the closing quote. No cmd.exe, shell or CommandLineToArgvW claim. */
 export function quoteWindowsArgument(value) {
   requireWindows(text(value));
+  return quoteWindowsText(value);
+}
+function quoteWindowsText(value) {
   return (
     '"' +
     value
@@ -98,6 +103,29 @@ export function quoteWindowsArgument(value) {
       .replace(/(\\+)$/u, "$1$1") +
     '"'
   );
+}
+/** Only the sealed build helper's INCLUDE/LIB/PATH positions admit list text. */
+export function windowsBuildHelperCommandLine(application, values) {
+  const args = dense(values, 14);
+  requireWindows(args.length === 14);
+  const command = [application, ...args]
+    .map((value, index) => {
+      const maximum = [11, 12, 14].includes(index)
+        ? WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS
+        : 4095;
+      requireWindows(
+        typeof value === "string" &&
+          value.length > 0 &&
+          value.length <= maximum &&
+          value.isWellFormed() &&
+          !/[\u0000-\u001f\u007f]/u.test(value),
+      );
+      return quoteWindowsText(value) + " ";
+    })
+    .join("");
+  // Native quoted() appends a separator after every argument, including argv[0].
+  requireWindows(command.length + 1 <= 32767);
+  return command;
 }
 export function windowsCommandLine(application, args) {
   application = windowsPrivatePath(application);

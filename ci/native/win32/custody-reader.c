@@ -363,8 +363,9 @@ static void start_helper(char **values, unsigned n) {
   need(!strcmp(image->kind, "helper") && !_wcsicmp(wcsrchr(image->path, '\\')+1, file ? L"file-helper.exe" : observer ? L"observer-helper.exe" :
     compiler ? L"build-helper.exe" : git ? L"git-fixture.exe" : gitPolicy ? L"git-policy.exe" : L"policy-helper.exe"));
   unsigned argc = bounded_number(values[4], gitPolicy ? 386 : 55); need(argc >= (observer ? 2U : 5U) && n > 5 + argc);
-  wchar_t (*args)[16385] = calloc(argc, sizeof(*args)); need(args);
-  for (unsigned i = 0; i < argc; i++) decode_bounded(values[5+i], args[i], observer && i == 1 ? 16385 : 4096);
+  wchar_t (*args)[WINDOWS_BUILD_ENVIRONMENT_CAPACITY] = calloc(argc, sizeof(*args)); need(args);
+  for (unsigned i = 0; i < argc; i++) decode_bounded(values[5+i], args[i], observer && i == 1 ? 16385 :
+    compiler && (i == 10 || i == 11 || i == 13) ? WINDOWS_BUILD_ENVIRONMENT_CAPACITY : 4096);
   need(wcslen(args[0]) == 32); for (unsigned i = 0; i < 32; i++) need(args[0][i] == nonce[i]);
   unsigned inheritedCount = bounded_number(values[5+argc], gitPolicy ? 128 : 44), first = file ? 1 : observer || compiler || git || gitPolicy ? 0 :
     (!wcscmp(args[4], L"install-provider") || !wcscmp(args[4], L"remove-provider") ? 6 : 13);

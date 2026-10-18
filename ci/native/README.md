@@ -6643,6 +6643,19 @@ private process/thread DACLs alone cannot supply this creator guarantee.
 Independent held process/image/signature checks precede worker release. The
 cleared environment contains only fixed CI values and reviewed INCLUDE, LIB,
 SystemRoot and PATH; TEMP/TMP resolve to the protected build directory.
+INCLUDE, LIB and PATH preserve their exact reviewed strings and admit at most
+16,384 UTF-16 code units each, excluding the terminator, in 16,385-unit native
+storage. This exception applies only to build argument positions 10/11/13
+(zero-based), which become child argv 11/12/14. SystemRoot remains at build
+position 12 / child argv 13 and, like ordinary paths, must be below 4,096 units.
+The observer-query exception and generic argument defaults remain unchanged.
+JS prelaunch validation and both native consumers reject empty, malformed UTF-16,
+NUL/control or oversized text. The complete quoted helper command retains its
+32,767-unit buffer bound, including native trailing separators and the terminator;
+the private framing limit remains 262,144 bytes. Invalid build input cannot send
+`helper-start` or reach compiler/output effects. Portable boundary regressions
+establish no native progress: fresh original same-revision CI and separate
+original-effect retirement evidence remain necessary.
 Output frames are bounded to 1,024 bytes and 64 KiB combined. Invalid UTF-8,
 malformed frames, timeout or remaining Job members cannot acknowledge completion.
 MSVC's documented `/Bv` exit code 2 is accepted only for that version query.

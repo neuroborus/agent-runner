@@ -13,7 +13,12 @@ import {
   WINDOWS_CUSTODY_DEADLINE_MS,
 } from "./index.js";
 import { windowsCustodyChannel } from "./channel.js";
-import { digest } from "./protocol.js";
+import {
+  digest,
+  quoteWindowsArgument,
+  windowsBuildHelperCommandLine,
+  WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS,
+} from "./protocol.js";
 import { observationDigest } from "../index.js";
 import { createPrerequisiteTransport } from "../prerequisite-transport.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -58,7 +63,12 @@ function executable() {
   bytes.writeUInt16LE(2, cert + 6);
   return bytes;
 }
-function fixture({ policy = false, git = false, observer = false } = {}) {
+function fixture({
+  policy = false,
+  git = false,
+  observer = false,
+  build = false,
+} = {}) {
   const events = [],
     records = [],
     frames = [],
@@ -221,6 +231,37 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
   if (observer) {
     observerSlot = entries.length;
     entries.push({ kind: "helper", ...image("observer-helper.exe") });
+  }
+  let buildRequest, buildEntry;
+  if (build) {
+    const tool = image("cl.exe");
+    buildEntry = {
+      helper: entries.length,
+      tool: entries.length + 1,
+      toolSignatureSha256: hash,
+    };
+    entries.push(
+      { kind: "helper", ...image("build-helper.exe") },
+      { kind: "image", ...tool },
+    );
+    buildRequest = {
+      candidateSha,
+      platform: "win32",
+      file: tool.path,
+      toolSha256: tool.sha256,
+      args: ["/Bv"],
+      cwd: entries[1].path,
+      env: {
+        CI: "true",
+        GITHUB_ACTIONS: "true",
+        LANG: "C",
+        INCLUDE: "include",
+        LIB: "lib",
+        SystemRoot: "C:\\Windows",
+        PATH: "tools",
+      },
+      deadlineMs: 30000,
+    };
   }
   const planPath = "C:\\Fixture\\Sealed\\plan",
     planBytes = encodeWindowsCustodyPlan({ candidateSha, nonce, entries });
@@ -522,6 +563,8 @@ function fixture({ policy = false, git = false, observer = false } = {}) {
     gitPolicyTransfer,
     policyObjects,
     observerSlot,
+    buildRequest,
+    buildEntry,
     reader: () => createWindowsCustodyReader(input, options),
     transfer: { helper: 0, root: 1, base: 2 },
   };
@@ -1281,6 +1324,249 @@ test("Windows fixed Git release requires independently joined creator default DA
     assert.ok(!f.events.some((event) => event.startsWith("helper-release ")));
     assert.equal((await reader.close()).status, "RETAINED");
   }
+});
+
+test("Windows build input bounds refuse invalid environment text before helper-start", async () => {
+  const f = fixture({ build: true }),
+    reader = f.reader(),
+    request = f.buildRequest,
+    baseline = { ...request.env },
+    starts = () =>
+      f.events.filter((event) => event.startsWith("helper-start "));
+  await reader.start();
+  for (const index of [f.buildEntry.helper, f.buildEntry.tool])
+    await reader.open(index);
+  for (const name of ["INCLUDE", "LIB", "SystemRoot", "PATH"]) {
+    const maximum = name === "SystemRoot" ? 4095 : 16384;
+    for (const value of [
+      "x".repeat(maximum),
+      "x".repeat(maximum + 1),
+      "",
+      "x\0y",
+      "\n",
+      "\u001f",
+      "\u007f",
+      "\ud800",
+      "\udc00",
+    ]) {
+      Object.assign(request.env, baseline, { [name]: value });
+      const before = starts().length,
+        pending = reader.openBuild(
+          request,
+          { mode: "compiler-version" },
+          f.buildEntry,
+        );
+      if (value.length === maximum) {
+        const channel = await pending,
+          args = starts()
+            .at(-1)
+            .split(" ")
+            .slice(5, 19)
+            .map((part) => Buffer.from(part, "hex").toString("utf16le"));
+        assert.deepEqual(
+          args.slice(10),
+          ["INCLUDE", "LIB", "SystemRoot", "PATH"].map(
+            (key) => request.env[key],
+          ),
+        );
+        await channel.close();
+      } else {
+        await assert.rejects(pending);
+        assert.equal(starts().length, before);
+      }
+    }
+  }
+  Object.assign(request.env, baseline, {
+    INCLUDE: "i".repeat(16384),
+    PATH: "p".repeat(16384),
+  });
+  const before = starts().length;
+  await assert.rejects(
+    reader.openBuild(request, { mode: "compiler-version" }, f.buildEntry),
+  );
+  assert.equal(
+    starts().length,
+    before,
+    "Individually valid lists must still fit the quoted command",
+  );
+  assert.equal((await reader.close()).closed, true);
+});
+
+test("Windows build quoting preserves UCRT literals and counts the final separator and NUL", () => {
+  const image = "C:\\Fixture\\build-helper.exe",
+    args = Array(14).fill("x");
+  for (const value of ["λ雪😀", 'a"b', "tail\\", 'slash\\"quote']) {
+    args[10] = value;
+    assert.equal(
+      windowsBuildHelperCommandLine(image, args),
+      [image, ...args].map(quoteWindowsArgument).join(" ") + " ",
+    );
+  }
+  for (const index of [2, 8, 12]) {
+    args[index] = "x".repeat(4095);
+    assert.doesNotThrow(() => windowsBuildHelperCommandLine(image, args));
+    args[index] += "x";
+    assert.throws(() => windowsBuildHelperCommandLine(image, args));
+    args[index] = "x";
+  }
+  args[10] = "i".repeat(16384);
+  assert.throws(
+    () => quoteWindowsArgument(args[10]),
+    "Generic quoting retains its original bound",
+  );
+  const remaining = 32766 - windowsBuildHelperCommandLine(image, args).length;
+  args[13] += "p".repeat(remaining);
+  assert.equal(windowsBuildHelperCommandLine(image, args).length, 32766);
+  args[13] += "p";
+  assert.throws(() => windowsBuildHelperCommandLine(image, args));
+});
+
+test("actual Windows decoder and child argument guards share only the build list capacity", async () => {
+  const [header, reader, helper] = await Promise.all(
+    ["custody.h", "custody-reader.c", "build-helper.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const definitions = [
+      ...header.matchAll(/^#define (WINDOWS_BUILD_ENVIRONMENT_\w+) (.+)$/gmu),
+    ]
+      .map(([, name, value]) => `const ${name} = ${value};`)
+      .join("\n"),
+    body = header
+      .slice(
+        header.indexOf("static unsigned nibble("),
+        header.indexOf("static void decode("),
+      )
+      .replace("static unsigned nibble(char value)", "function nibble(value)")
+      .replace(
+        /static void bounded_text\([^)]*\)/u,
+        "function bounded_text(value, size, maximum)",
+      )
+      .replace(
+        /static void decode_bounded\([^)]*\)/u,
+        "function decode_bounded(bytes, out, maximum)",
+      )
+      .replaceAll("size_t ", "let ")
+      .replace(
+        "BYTE *target = (BYTE *)out;",
+        "const target = new Uint8Array(out.buffer);",
+      )
+      .replaceAll("(BYTE)", "")
+      .replace(/'([0-9a-f])'/gu, (_, value) => String(value.charCodeAt(0))),
+    readerLoop =
+      /  for \(unsigned i = 0; i < argc; i\+\+\) decode_bounded\([\s\S]*?(?=\n  need\(wcslen\(args\[0\]\))/u.exec(
+        reader,
+      )?.[0],
+    helperLoop =
+      /  for \(unsigned i = 3; i < 15; i\+\+\)[\s\S]*?(?=\n  wchar_t \*end;)/u.exec(
+        helper,
+      )?.[0];
+  assert.ok(body && definitions && readerLoop && helperLoop);
+  const length = (value) =>
+      value.includes(0) ? value.indexOf(0) : value.length,
+    native = new Script(`${definitions}\n${body}
+      function decodeArguments(values, args, compiler, observer) {
+        const argc = args.length; ${readerLoop.replace("unsigned i", "let i")}
+      }
+      function validateArguments(argv) { ${helperLoop.replace("unsigned i", "let i")} }
+      ({decode_bounded, decodeArguments, validateArguments,
+        maximum: WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS,
+        capacity: WINDOWS_BUILD_ENVIRONMENT_CAPACITY});`).runInNewContext({
+      need: assert.ok,
+      strlen: length,
+      wcslen: length,
+    }),
+    wide = (value) =>
+      Uint16Array.from(
+        value
+          .split("")
+          .map((unit) => unit.charCodeAt(0))
+          .concat(0),
+      ),
+    inspect = (args, compiler = true, observer = false) => {
+      const decoded = args.map(() => new Uint16Array(native.capacity));
+      native.decodeArguments(
+        [...Array(5), ...args.map((value) => Buffer.from(hex(value), "ascii"))],
+        decoded,
+        compiler,
+        observer,
+      );
+      return decoded;
+    };
+  assert.equal(native.maximum, WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS);
+  assert.equal(native.capacity, 16385);
+  const observed = [
+      [10, 663],
+      [11, 376],
+      [12, 10],
+      [13, 4516],
+    ],
+    args = Array(14).fill("x");
+  for (const [index, size] of observed)
+    args[index] =
+      index === 12 ? "C:\\Windows" : 'λ雪😀"'.padEnd(size - 1, "x") + "\\";
+  const decoded = inspect(args);
+  native.validateArguments([wide("helper"), ...decoded]);
+  for (const [index, size] of observed)
+    assert.deepEqual(
+      Buffer.from(decoded[index].buffer).subarray(0, size * 2),
+      Buffer.from(args[index], "utf16le"),
+    );
+  for (const [index, maximum] of [
+    [10, 16384],
+    [11, 16384],
+    [13, 16384],
+    [12, 4095],
+    [2, 4095],
+  ]) {
+    for (const value of [
+      "x".repeat(maximum),
+      "x".repeat(maximum + 1),
+      "",
+      "\0",
+      "\n",
+      "\u001f",
+      "\u007f",
+      "\ud800",
+      "\udc00",
+      "\ud800x",
+    ]) {
+      const args = Array(14).fill("x");
+      args[index] = value;
+      if (value.length === maximum) {
+        const decoded = inspect(args);
+        assert.deepEqual(
+          Buffer.from(decoded[index].buffer).subarray(0, value.length * 2),
+          Buffer.from(value, "utf16le"),
+        );
+        native.validateArguments([wide("helper"), ...decoded]);
+      } else {
+        assert.throws(() => inspect(args));
+        assert.throws(() =>
+          native.validateArguments([wide("helper"), ...args.map(wide)]),
+        );
+      }
+    }
+    if (maximum === 16384) {
+      const args = Array(14).fill("x");
+      args[index] = "x".repeat(maximum);
+      assert.throws(
+        () => inspect(args, false),
+        "Other helper kinds retain ordinary bounds",
+      );
+    }
+  }
+  const query = ["x", "x".repeat(16384)];
+  assert.doesNotThrow(() => inspect(query, false, true));
+  assert.throws(() => inspect(query, false, false));
+  for (const encoded of ["", "123", "zzzz", hex("x\0y")])
+    assert.throws(() =>
+      native.decode_bounded(
+        Buffer.from(encoded, "ascii"),
+        new Uint16Array(16385),
+        16385,
+      ),
+    );
 });
 
 test("Windows build publication joins held output and reviewed certificate image to independent closed-writer proof", async () => {

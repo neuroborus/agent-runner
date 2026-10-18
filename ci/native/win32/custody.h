@@ -7,6 +7,9 @@
 /* Longest fixed file recipe plus bounded settlement and entry margin. */
 #define CUSTODY_LIFETIME_MS 1170000
 #define PREPARATION_LIFETIME_MS (2*30000+13*60000+120000)
+/* UTF-16 code units excluding NUL; protocol.js uses the same list-text bound. */
+#define WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS 16384
+#define WINDOWS_BUILD_ENVIRONMENT_CAPACITY (WINDOWS_BUILD_ENVIRONMENT_MAX_UNITS+1)
 #include <windows.h>
 #include <sddl.h>
 #include <aclapi.h>
@@ -350,16 +353,19 @@ static unsigned nibble(char value) {
   need(value >= '0' && value <= '9' || value >= 'a' && value <= 'f');
   return value <= '9' ? value - '0' : value - 'a' + 10;
 }
+static void bounded_text(const wchar_t *value, size_t size, size_t maximum) {
+  need(size && size < maximum && wcslen(value) == size);
+  for (size_t i = 0; i < size; i++) {
+    need(value[i] >= 32 && value[i] != 127);
+    if (value[i] >= 0xd800 && value[i] <= 0xdbff) { need(i+1 < size && value[i+1] >= 0xdc00 && value[i+1] <= 0xdfff); i++; }
+    else need(value[i] < 0xdc00 || value[i] > 0xdfff);
+  }
+}
 static void decode_bounded(const char *bytes, wchar_t *out, size_t maximum) {
   size_t size = strlen(bytes); need(size && size % 4 == 0 && size / 4 < maximum);
   BYTE *target = (BYTE *)out;
   for (size_t i = 0; i < size / 2; i++) target[i] = (BYTE)(nibble(bytes[i*2])*16 + nibble(bytes[i*2+1]));
-  out[size / 4] = 0; need(wcslen(out) == size / 4);
-  for (size_t i = 0; i < size/4; i++) {
-    need(out[i] >= 32 && out[i] != 127);
-    if (out[i] >= 0xd800 && out[i] <= 0xdbff) { need(i+1 < size/4 && out[i+1] >= 0xdc00 && out[i+1] <= 0xdfff); i++; }
-    else need(out[i] < 0xdc00 || out[i] > 0xdfff);
-  }
+  out[size / 4] = 0; bounded_text(out, size / 4, maximum);
 }
 static void decode(const char *bytes, wchar_t out[4096]) { decode_bounded(bytes, out, 4096); }
 static void line(HANDLE input, char *value, unsigned maximum) {

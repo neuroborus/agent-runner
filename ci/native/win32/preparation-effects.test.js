@@ -2066,7 +2066,7 @@ test("Windows interrupted publication retires held workers and retains objects w
   assert.ok(!f.rawEvents.some((event) => event.startsWith("case-retire ")));
 });
 
-function rawPreparation({ experiment = false } = {}) {
+function rawPreparation({ experiment = false, environment } = {}) {
   const f = wiring(),
     { unsigned, signed } = publicationBytes(),
     helperBytes = experiment ? experimentImage() : signed,
@@ -2085,6 +2085,10 @@ function rawPreparation({ experiment = false } = {}) {
     tasks = new Map(),
     events = [],
     fileIds = new Map();
+  if (environment) {
+    Object.assign(f.manifest.environment, environment);
+    for (const request of f.requests) Object.assign(request.env, environment);
+  }
   let nextPid = 100;
   const encode = (text) => Buffer.from(text, "utf16le").toString("hex"),
     decode = (text) => Buffer.from(text, "hex").toString("utf16le"),
@@ -5451,7 +5455,13 @@ test("Windows preparation preserves its observer through rejected admission and 
 });
 
 test("Windows fixed entry supplies build/file/verifier defaults through raw IPC and rereads preparation without another compiler", async () => {
-  const f = rawPreparation(),
+  const environment = {
+      INCLUDE: "C:\\Fixture\\include;".padEnd(663, "i"),
+      LIB: "C:\\Fixture\\lib;".padEnd(376, "l"),
+      SystemRoot: "C:\\Windows",
+      PATH: 'C:\\Fixture\\λ雪😀\\"quoted";'.padEnd(4515, "p") + "\\",
+    },
+    f = rawPreparation({ environment }),
     preparationWork = new AbortController(),
     verificationWork = new AbortController();
   f.signal = preparationWork.signal;
@@ -5463,6 +5473,19 @@ test("Windows fixed entry supplies build/file/verifier defaults through raw IPC 
     ).length,
     actorCount = f.actors.size;
   assert.equal(compilerCount, 15);
+  for (const frame of f.rawEvents.filter((event) =>
+    event.startsWith("helper-start "),
+  )) {
+    const args = frame
+      .split(" ")
+      .slice(15, 19)
+      .map((value) => Buffer.from(value, "hex").toString("utf16le"));
+    assert.deepEqual(args, Object.values(environment));
+    assert.deepEqual(
+      args.map((value) => value.length),
+      [663, 376, 10, 4516],
+    );
+  }
   const system = await createSystemEffects(
       { ...f, signal: verificationWork.signal },
       f.options,

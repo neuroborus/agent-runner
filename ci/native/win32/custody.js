@@ -15,6 +15,7 @@ import {
   normalizeWindowsIdentity,
   sameWindowsIdentity,
   inspectWindowsPe,
+  windowsBuildHelperCommandLine,
 } from "./protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
 import {
@@ -2045,27 +2046,23 @@ export function createWindowsCustodyReader(value, options = {}) {
             path.dirname(operation.target) === request.cwd,
         );
       }
-      return openHelper(
-        "build",
-        entry.helper,
-        [
-          input.nonce,
-          operation.mode,
-          request.file,
-          request.toolSha256,
-          entry.toolSignatureSha256,
-          operation.source?.path ?? "-",
-          operation.source?.sha256 ?? "-",
-          operation.target ?? "-",
-          request.cwd,
-          String(request.deadlineMs),
-          ...["INCLUDE", "LIB", "SystemRoot", "PATH"].map(
-            (name) => request.env[name],
-          ),
-        ],
-        [],
-        request,
-      );
+      const args = [
+        input.nonce,
+        operation.mode,
+        request.file,
+        request.toolSha256,
+        entry.toolSignatureSha256,
+        operation.source?.path ?? "-",
+        operation.source?.sha256 ?? "-",
+        operation.target ?? "-",
+        request.cwd,
+        String(request.deadlineMs),
+        ...["INCLUDE", "LIB", "SystemRoot", "PATH"].map(
+          (name) => request.env[name],
+        ),
+      ];
+      windowsBuildHelperCommandLine(plan[entry.helper].path, args);
+      return openHelper("build", entry.helper, args, [], request);
     },
     async publishBuild(request, operation, unsignedSha256, transfer) {
       guard();
