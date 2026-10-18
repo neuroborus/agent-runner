@@ -74,7 +74,7 @@ export async function windowsExperimentGitRuntime(
         target = local;
       } catch (error) {
         requireObservation(error.code === "ENOENT");
-        const resolved = await native.resolveImport(name),
+        const resolved = await native.resolveImport(name, file),
           previous = resolutions.get(resolved.file.toLowerCase());
         requireObservation(
           !previous ||

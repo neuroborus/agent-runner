@@ -428,13 +428,17 @@ export function createWindowsPreparationFiles(input, options = {}) {
         nativeEventSha256: observationDigest(actual),
       };
     },
-    async resolveExperimentImport(name) {
+    async resolveExperimentImport(name, image) {
       requireObservation(
         bootstrap.purpose === "experiment" &&
           typeof name === "string" &&
-          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name),
+          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name) &&
+          location(image),
       );
-      const actual = await command("prepare-experiment-loader", [encode(name)]);
+      const actual = await command("prepare-experiment-loader", [
+        encode(name),
+        encode(image),
+      ]);
       closed(actual, ["pathHex", "identity", "sha256"]);
       const file = decode(actual.pathHex);
       normalizeWindowsFileIdentity(actual.identity);

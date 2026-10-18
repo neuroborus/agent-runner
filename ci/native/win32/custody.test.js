@@ -1988,6 +1988,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
+        reader_context_failure: () => false,
         reader_command: "open",
         reader_transfer: { active: false },
         sequence: 2,
@@ -2140,6 +2141,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
+          reader_context_failure: () => false,
           control: "authenticated",
           out,
           TRUE: true,
@@ -2607,6 +2609,286 @@ test("runtime creator types preserve required duplication, membership and comple
   }
 });
 
+test("ordinary DLL inspection avoids initialization while retain failures describe only evaluated calls", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    importStart = source.indexOf(
+      "  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 |",
+    ),
+    importEnd = source.indexOf("  wchar_t system[4096];", importStart),
+    retainStart = source.indexOf("  reader_retain.pid = pid;"),
+    retainEnd = source.indexOf(
+      "  for (unsigned i = 0; i < process_count;",
+      retainStart,
+    );
+  assert.ok(
+    importStart > 0 &&
+      importEnd > importStart &&
+      retainStart > 0 &&
+      retainEnd > retainStart,
+  );
+  const mapping = new Script(
+    source
+      .slice(importStart, importEnd)
+      .replace("DWORD flags", "const flags")
+      .replace("size_t size", "const size")
+      .replace("HMODULE module", "const module")
+      .replaceAll('L"', '"')
+      .replace("name+size-4", "name.slice(size-4)"),
+  );
+  for (const preparation of [false, true]) {
+    const context = {},
+      calls = [],
+      refusal = new Error("Original mapping failure");
+    assert.throws(
+      () =>
+        mapping.runInNewContext({
+          preparation_only: preparation,
+          reader_loader: context,
+          image: "C:\\Fixture\\image.dll",
+          name: "fixture.dll",
+          TRUE: true,
+          NULL: null,
+          LOAD_LIBRARY_SEARCH_SYSTEM32: 0x800,
+          DONT_RESOLVE_DLL_REFERENCES: 1,
+          wcslen: (name) => name.length,
+          _wcsicmp: (left, right) =>
+            Number(left.toLowerCase() !== right.toLowerCase()),
+          wcsspn: (name) => name.length,
+          LoadLibraryExW: (name, reserved, flags) => {
+            calls.push({ name, reserved, flags });
+            return null;
+          },
+          need: (ok) => {
+            if (!ok) throw refusal;
+          },
+        }),
+      (error) => error === refusal,
+    );
+    assert.deepEqual(calls, [
+      {
+        name: "fixture.dll",
+        reserved: null,
+        flags: preparation ? 0x801 : 0x800,
+      },
+    ]);
+    assert.equal(context.active, true);
+    assert.equal(context.image, "C:\\Fixture\\image.dll");
+    assert.equal(context.name, "fixture.dll");
+  }
+  const acquisition = new Script(
+    source
+      .slice(retainStart, retainEnd)
+      .replace("HANDLE process", "let process")
+      .replace("DWORD error", "let error")
+      .replace(
+        "reader_retain.observedPid == pid",
+        "Number(reader_retain.observedPid === pid)",
+      )
+      .replace(
+        "!!OpenProcessToken(process, reader_retain.tokenAccess, &token)",
+        "Number(!!OpenProcessToken(process, reader_retain.tokenAccess, outToken))",
+      ),
+  );
+  for (const fault of ["process", "identity", "token", null]) {
+    const context = {},
+      calls = [],
+      refusal = new Error("Original acquisition failure");
+    let lastError = 0,
+      captured;
+    const run = () =>
+      acquisition.runInNewContext({
+        reader_retain: context,
+        pid: 33,
+        TRUE: true,
+        FALSE: false,
+        NULL: null,
+        PROCESS_QUERY_INFORMATION: 0x400,
+        PROCESS_VM_READ: 0x10,
+        READ_CONTROL: 0x20000,
+        SYNCHRONIZE: 0x100000,
+        TOKEN_QUERY: 8,
+        TOKEN_DUPLICATE: 2,
+        OpenProcess: (access, inherit, pid) => {
+          assert.deepEqual([access, inherit, pid], [0x120410, false, 33]);
+          calls.push("process");
+          lastError = 87;
+          return fault === "process" ? null : 1;
+        },
+        GetProcessId: () => {
+          calls.push("identity");
+          lastError = 5;
+          return fault === "identity" ? 34 : 33;
+        },
+        OpenProcessToken: (_process, access, out) => {
+          assert.equal(access, 10);
+          calls.push("token");
+          lastError = 10022;
+          out(2);
+          return fault !== "token";
+        },
+        outToken: () => {},
+        GetLastError: () => lastError,
+        SetLastError: (error) => {
+          lastError = error;
+        },
+        need: (ok) => {
+          if (ok) return;
+          captured = { error: lastError, context: { ...context } };
+          lastError = 999; // Diagnostic effects cannot replace the sampled error.
+          throw refusal;
+        },
+      });
+    if (fault) assert.throws(run, (error) => error === refusal);
+    else {
+      run();
+      assert.equal(context.active, false);
+    }
+    assert.deepEqual(
+      calls,
+      fault === "process"
+        ? ["process"]
+        : fault === "identity"
+          ? ["process", "identity"]
+          : ["process", "identity", "token"],
+    );
+    if (!fault) continue;
+    assert.equal(
+      captured.error,
+      { process: 87, identity: 5, token: 10022 }[fault],
+    );
+    assert.equal(
+      captured.context.matched,
+      fault === "process" ? -1 : fault === "identity" ? 0 : 1,
+    );
+    assert.equal(captured.context.tokenResult, fault === "token" ? 0 : -1);
+  }
+});
+
+test("native loader and retain diagnostics preserve bounded UTF-16 context on the authenticated channel", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body =
+      /static BOOL reader_context_failure\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )[1],
+    program = new Script(
+      `(source,line,error)=>{${body
+        .replace(
+          "char bytes[2048], context[1400]; DWORD written;",
+          "const bytes={},context={};let written;",
+        )
+        .replace(
+          "char image[513] = {0}, name[513] = {0};",
+          'const image={value:""},name={value:""};',
+        )
+        .replace("size_t units", "const units")
+        .replace(
+          "const BYTE *imageBytes = (const BYTE *)reader_loader.image, *nameBytes = (const BYTE *)reader_loader.name;",
+          'const imageBytes=Buffer.from(reader_loader.image,"utf16le"),nameBytes=Buffer.from(reader_loader.name,"utf16le");',
+        )
+        .replaceAll("size_t i", "let i")
+        .replace("image+i*2", "pointer(image,i*2)")
+        .replace("name+i*2", "pointer(name,i*2)")
+        .replaceAll("sizeof(image)", "513")
+        .replaceAll("sizeof(name)", "513")
+        .replaceAll("sizeof(context)", "1400")
+        .replaceAll("sizeof(bytes)", "2048")
+        .replace("int size", "const size")
+        .replace("(DWORD)size", "size")
+        .replace("&written", "out")
+        .replace("\\036", "\\x1e")}}`,
+    );
+  const image = "C:\\Fixture\\" + "λ".repeat(4084),
+    name = "x".repeat(124) + ".dll";
+  assert.equal(image.length, 4095);
+  for (const kind of ["loader", "retain"]) {
+    const f = transport(),
+      response = f.channel.receive(),
+      frames = [],
+      retain = {
+        active: true,
+        pid: 33,
+        processAccess: 0x120410,
+        tokenAccess: 10,
+        process: false,
+        observedPid: 0,
+        matched: -1,
+        tokenResult: -1,
+      };
+    let lastError = 126;
+    const emit = program.runInNewContext({
+      reader_loader:
+        kind === "loader"
+          ? { active: true, image, name, flags: 0x801 }
+          : { active: false },
+      reader_retain: kind === "retain" ? retain : { active: false },
+      reader_command:
+        kind === "loader" ? "prepare-experiment-loader" : "verify-retain",
+      sequence: 1378,
+      control: "authenticated",
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      Buffer,
+      wcsnlen_s: (text, maximum) => Math.min(text.length, maximum),
+      pointer: (parent, at) => ({ parent, at }),
+      out: () => {},
+      sprintf_s: (target, maximum, format, ...values) => {
+        let at = 0;
+        const value = format.replace(/%(?:02x|zu|lu|[sud])/gu, (specifier) => {
+          const value = values[at++];
+          return specifier === "%02x"
+            ? value.toString(16).padStart(2, "0")
+            : (value?.value ?? value);
+        });
+        assert.ok(Buffer.byteLength(value) < maximum);
+        if (target.parent)
+          target.parent.value = target.parent.value.slice(0, target.at) + value;
+        else target.value = value;
+        lastError = 999;
+        return value.length;
+      },
+      WriteFile: (handle, bytes, size) => {
+        assert.equal(handle, "authenticated");
+        frames.push(bytes.value.slice(0, size));
+        return true;
+      },
+    });
+    assert.equal(emit("custody-reader.c", 307, lastError), true);
+    assert.equal(frames.length, 1);
+    assert.ok(Buffer.byteLength(frames[0]) <= 2048);
+    f.child.stdout.write(frames[0].slice(0, 25));
+    f.child.stdout.write(frames[0].slice(25));
+    await assert.rejects(response, (error) => {
+      const value = error.custodyReaderFailure;
+      assert.equal(value.lastError, 126);
+      assert.equal(value.sequence, 1378);
+      if (kind === "loader") {
+        assert.equal(value.loader.imageUnits, image.length);
+        assert.equal(
+          Buffer.from(value.loader.imageHex, "hex").toString("utf16le"),
+          image.slice(0, 128),
+        );
+        assert.equal(
+          Buffer.from(value.loader.importHex, "hex").toString("utf16le"),
+          name,
+        );
+      } else {
+        const { active: _active, ...expected } = retain;
+        assert.deepEqual(value.retain, expected);
+      }
+      return true;
+    });
+    await assert.rejects(f.channel.completion);
+    f.child.emit("close", 126, null);
+  }
+});
+
 test("Windows failure metadata stays closed and bounded across complete and fragmented frames", async () => {
   const legacy = {
     phase: "reader-failure",
@@ -2637,7 +2919,61 @@ test("Windows failure metadata stays closed and bounded across complete and frag
       child: 126,
     },
   };
+  const loader = {
+    ...legacy,
+    command: "prepare-experiment-loader",
+    lastError: 126,
+    loader: {
+      imageUnits: 4095,
+      imageHex: Buffer.from("C:\\" + "x".repeat(125), "utf16le").toString(
+        "hex",
+      ),
+      importHex: Buffer.from("fixture.dll", "utf16le").toString("hex"),
+      flags: 0x801,
+    },
+  };
+  const retain = {
+    ...legacy,
+    command: "verify-retain",
+    lastError: 87,
+    retain: {
+      pid: 33,
+      processAccess: 0x120410,
+      tokenAccess: 10,
+      process: false,
+      observedPid: 0,
+      matched: -1,
+      tokenResult: -1,
+    },
+  };
   const invalid = [
+    ...[
+      { flags: 0x800 },
+      { imageUnits: 4096 },
+      { imageUnits: 0 },
+      { imageHex: "aa" },
+      { importHex: "bad" },
+      { importHex: "" },
+      { importHex: Buffer.from("../fixture.dll", "utf16le").toString("hex") },
+      { extra: true },
+    ].map((damage) => ({ ...loader, loader: { ...loader.loader, ...damage } })),
+    { ...loader, command: "open" },
+    { ...loader, retain: retain.retain },
+    { ...loader, trust },
+    { ...loader, lastError: undefined },
+    ...[
+      { pid: 0 },
+      { processAccess: 0 },
+      { tokenAccess: 0 },
+      { process: 0 },
+      { observedPid: 33 },
+      { matched: 0 },
+      { tokenResult: 0 },
+      { process: true, observedPid: 33, matched: 1, tokenResult: 1 },
+      { extra: true },
+    ].map((damage) => ({ ...retain, retain: { ...retain.retain, ...damage } })),
+    { ...retain, transfer: value.transfer },
+    { ...retain, lastError: undefined },
     ...[null, -1, 0x100000000, 1.5, "5", true, []].map((lastError) => ({
       ...value,
       lastError,
@@ -2677,6 +3013,27 @@ test("Windows failure metadata stays closed and bounded across complete and frag
     })),
   ];
   const valid = [
+    loader,
+    {
+      ...loader,
+      command: "release-import",
+      loader: { ...loader.loader, flags: 0x800 },
+    },
+    retain,
+    {
+      ...retain,
+      retain: { ...retain.retain, process: true, observedPid: 34, matched: 0 },
+    },
+    {
+      ...retain,
+      retain: {
+        ...retain.retain,
+        process: true,
+        observedPid: 33,
+        matched: 1,
+        tokenResult: 0,
+      },
+    },
     legacy,
     { ...legacy, trust },
     { ...legacy, lastError: 0 },
@@ -2705,9 +3062,9 @@ test("Windows failure metadata stays closed and bounded across complete and frag
   }
   const json = JSON.stringify(value);
   for (const [bytes, complete] of [
-    [1024, true],
-    [1025, true],
-    [1025, false],
+    [2048, true],
+    [2049, true],
+    [2049, false],
   ]) {
     const frame =
       "\x1e" +
@@ -2719,12 +3076,12 @@ test("Windows failure metadata stays closed and bounded across complete and frag
         response = f.channel.receive();
       // A large interrupted ordinary response does not consume the diagnostic budget.
       f.child.stdout.write('{"value":"' + "x".repeat(2048));
-      f.child.stdout.write(frame.slice(0, split ? 1024 : frame.length));
-      if (split) f.child.stdout.write(frame.slice(1024));
+      f.child.stdout.write(frame.slice(0, split ? 2048 : frame.length));
+      if (split) f.child.stdout.write(frame.slice(2048));
       await assert.rejects(response, (error) => {
         assert.equal(
           Object.hasOwn(error, "custodyReaderFailure"),
-          bytes === 1024,
+          bytes === 2048,
         );
         return true;
       });
@@ -4245,6 +4602,15 @@ test("Windows original-owner recovery retains a failed process hold despite late
         command: "verify-retain",
         line: 213,
         lastError: 87,
+        retain: {
+          pid: 33,
+          processAccess: 0x120410,
+          tokenAccess: 10,
+          process: false,
+          observedPid: 0,
+          matched: -1,
+          tokenResult: -1,
+        },
       },
     });
   k.state.instances = 0;

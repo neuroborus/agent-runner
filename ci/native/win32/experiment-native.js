@@ -554,7 +554,7 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
     readInput: (file) => files.readExperimentInput(file),
     readImage: (file, installed = false) =>
       files.readExperimentImage(file, installed),
-    resolveImport: (name) => files.resolveExperimentImport(name),
+    resolveImport: (name, image) => files.resolveExperimentImport(name, image),
     prepareVolume: () => files.prepareExperimentVolume(),
     close({ signal: supplied, recovery = false } = {}) {
       if (closing && (!recovery || !finished || complete)) return closing;

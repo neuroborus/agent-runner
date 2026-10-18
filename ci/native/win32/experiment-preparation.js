@@ -461,7 +461,7 @@ async function observeBuild(
       );
       let resolved;
       try {
-        resolved = await native.resolveImport(name);
+        resolved = await native.resolveImport(name, item.imagePath);
       } catch (cause) {
         try {
           Object.assign(cause, {
@@ -851,7 +851,7 @@ export async function verifyWindowsExperimentBuild(
     read: (file, sha256) => files.readProtected({ file, sha256 }),
     readInput: (file) => files.readExperimentInput(file),
     readImage: (file, installed) => files.readExperimentImage(file, installed),
-    resolveImport: (name) => files.resolveExperimentImport(name),
+    resolveImport: (name, image) => files.resolveExperimentImport(name, image),
   };
   const observed = await observeBuild(
     prepared,

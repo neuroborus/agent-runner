@@ -108,6 +108,7 @@ export function createWindowsOperationReaders(
           const resolved = await reader.operation(
             "release-import",
             imported.name,
+            component.index,
           );
           observationObject(resolved, ["pathHex", "identity", "sha256"]);
           requireObservation(

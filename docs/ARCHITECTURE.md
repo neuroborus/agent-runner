@@ -87,6 +87,9 @@ cold reads rejoin them. Physical forwarding DLLs require no identical API-set
 namespace entry. Case graph and live mapped-module observations retain physical
 dependencies and resolve aliases against actual held modules. Unresolved imports
 and substituted images fail; reviewed namespace admission remains strict.
+The recursive graph is retained for exact private runtime copying and case
+inventories. Ordinary preparation maps installed DLLs without initialization or
+dependency execution; actual payload loader observations retain normal loading.
 
 Existing bridge sealing and one System file observer protect the actual generated
 images and sources. A private sibling selector identifies possible publication;
@@ -104,7 +107,9 @@ verifies whole-domain and owned-task retirement; no empty compiler proof is
 invented. No cleanup can attest retirement of earlier uncertain Windows owners.
 Original sequence 263 identifies an API-set entry match-count failure after
 signature observation 262, without a captured image/import or zero/duplicate
-distinction. Bounded owner diagnostics retain those selectors for fresh CI.
+distinction. Subsequent loader error 126 supplies no missing DLL or API-set cause.
+Bounded authenticated reader-failure frames carry image/import mapping context
+and evaluated process/token acquisition details before diagnostic effects.
 The separate original `verify-retain:213/87` process/token-acquisition blocker
 remains unresolved; later observer completion cannot replace its missing proof.
 

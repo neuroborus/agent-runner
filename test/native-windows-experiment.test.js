@@ -568,7 +568,14 @@ test("Windows cold loading preserves verification and cleanup failures separatel
     },
     receiptSha256: H,
   });
-  const primary = new Error("substituted preparation binding"),
+  const primary = Object.assign(new Error("original preparation read failed"), {
+      custodyReaderFailure: {
+        phase: "reader-failure",
+        command: "prepare-experiment-loader",
+        sequence: 17,
+        lastError: 126,
+      },
+    }),
     cleanup = new Error("unsettled observer");
   for (const failure of [null, cleanup, primary, "retained"]) {
     let closes = 0;
@@ -968,7 +975,10 @@ test("Windows ordinary imports rejoin observed namespace and physical modules on
   f.options.open = async (prepared) => {
     const native = await open(prepared),
       read = native.readImage,
-      image = prepared.helpers[0].path;
+      image = prepared.helpers[0].path,
+      payload = prepared.helpers.find(
+        ({ name }) => name === "access-fixture",
+      ).path;
     native.readImage = f.filesOwner.readExperimentImage = async (
       file,
       installed,
@@ -981,14 +991,23 @@ test("Windows ordinary imports rejoin observed namespace and physical modules on
             { name: physical, delay: true },
           ],
         };
+      if (file === payload || file === forward)
+        held.pe = { imports: [{ name: contract, delay: false }] };
+      if (file === host)
+        held.pe = { imports: [{ name: physical, delay: true }] };
       if (fault === "held-image" && file === host)
         held.bytes = Buffer.from("changed held image");
       return held;
     };
     native.resolveImport = f.filesOwner.resolveExperimentImport = async (
       name,
+      image,
     ) => {
       names.push(name);
+      assert.ok(
+        f.files.has(image),
+        "Import context must identify its held source image",
+      );
       assert.ok(resolutions.has(name));
       if (fault === "unresolved") throw unresolved;
       if (fault === "immutable-error") throw immutable;
@@ -1023,12 +1042,29 @@ test("Windows ordinary imports rejoin observed namespace and physical modules on
     recorded = JSON.parse(
       f.files.get(path.join(directory, "windows-experiment-preparation.json")),
     );
-  assert.deepEqual(names.slice(beforeCold), [contract, physical]);
+  assert.deepEqual(names.slice(beforeCold), [
+    contract,
+    physical,
+    contract,
+    physical,
+    contract,
+  ]);
   assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length + 2);
   assert.deepEqual(recorded.runtime[0].imports, [
     { name: contract, path: host, delay: false },
     { name: physical, path: forward, delay: true },
   ]);
+  assert.deepEqual(recorded.helperLoaders["access-fixture"], [host, forward]);
+  const access = built.preparation.system.cases.find(
+    ({ bindings }) => bindings.access,
+  ).bindings;
+  assert.equal(access.access.runtimeAssets.length, 2);
+  assert.ok(
+    access.access.runtimeAssets.every(
+      ({ source, target }) => source !== target,
+    ),
+  );
+  assert.equal(access.input.runtime.length, 3);
   for (fault of ["unresolved", "identity", "bytes", "held-image"])
     await assert.rejects(
       load,

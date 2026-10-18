@@ -258,7 +258,7 @@ export function windowsCustodyChannel(
       if (diagnostic >= 0) {
         const end = buffer.indexOf(10, diagnostic);
         requireWindows(
-          (end < 0 ? buffer.length : end + 1) - diagnostic <= 1024,
+          (end < 0 ? buffer.length : end + 1) - diagnostic <= 2048,
         );
         if (end < 0) return;
         const value = JSON.parse(
@@ -272,6 +272,72 @@ export function windowsCustodyChannel(
           fields.push("lastError");
           requireWindows(
             uint32(value.lastError) && !Object.hasOwn(value, "trust"),
+          );
+        }
+        if (Object.hasOwn(value, "loader")) {
+          fields.push("loader");
+          const loader = value.loader;
+          closed(loader, ["imageUnits", "imageHex", "importHex", "flags"]);
+          requireWindows(
+            Object.hasOwn(value, "lastError") &&
+              !["trust", "transfer", "retain"].some((field) =>
+                Object.hasOwn(value, field),
+              ) &&
+              [
+                "prepare-experiment-loader",
+                "release-import",
+                "loader",
+              ].includes(value.command) &&
+              uint32(loader.imageUnits) &&
+              loader.imageUnits > 0 &&
+              loader.imageUnits < 4096 &&
+              typeof loader.imageHex === "string" &&
+              loader.imageHex.length === Math.min(loader.imageUnits, 128) * 4 &&
+              /^[a-f0-9]+$/u.test(loader.imageHex) &&
+              typeof loader.importHex === "string" &&
+              loader.importHex.length <= 512 &&
+              loader.importHex.length % 4 === 0 &&
+              /^[a-f0-9]+$/u.test(loader.importHex) &&
+              /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(
+                Buffer.from(loader.importHex, "hex").toString("utf16le"),
+              ) &&
+              loader.flags ===
+                (value.command === "prepare-experiment-loader" ? 0x801 : 0x800),
+          );
+        }
+        if (Object.hasOwn(value, "retain")) {
+          fields.push("retain");
+          const retain = value.retain;
+          closed(retain, [
+            "pid",
+            "processAccess",
+            "tokenAccess",
+            "process",
+            "observedPid",
+            "matched",
+            "tokenResult",
+          ]);
+          requireWindows(
+            Object.hasOwn(value, "lastError") &&
+              !["trust", "transfer", "loader"].some((field) =>
+                Object.hasOwn(value, field),
+              ) &&
+              uint32(retain.pid) &&
+              retain.pid > 0 &&
+              uint32(retain.observedPid) &&
+              retain.processAccess === 0x120410 &&
+              retain.tokenAccess === 10 &&
+              typeof retain.process === "boolean" &&
+              (retain.process
+                ? (retain.matched === 0 &&
+                    retain.observedPid !== retain.pid &&
+                    retain.tokenResult === -1) ||
+                  (retain.matched === 1 &&
+                    retain.observedPid === retain.pid &&
+                    retain.tokenResult === 0)
+                : retain.observedPid === 0 &&
+                  retain.matched === -1 &&
+                  retain.tokenResult === -1),
           );
         }
         if (Object.hasOwn(value, "transfer")) {

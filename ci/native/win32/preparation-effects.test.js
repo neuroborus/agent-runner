@@ -1927,9 +1927,10 @@ test("Windows loader reads reject repeated imports replacing a required API-set 
   ];
   let fault;
   const original = reader.operation;
-  reader.operation = async (name, index) => {
+  reader.operation = async (name, index, image) => {
     if (name === "release-import") {
       assert.equal(index, "api-first.dll");
+      assert.equal(image, 0);
       if (fault === "unresolved")
         throw new Error("Unresolved installed import");
       return {
@@ -2279,6 +2280,8 @@ function rawPreparation({ experiment = false, environment } = {}) {
     }
     if (operation === "prepare-experiment-loader") {
       assert.ok(experiment && !scope.readBytes);
+      assert.equal(args.length, 2);
+      assert.ok(f.files.has(decode(args[1])));
       const file = f.importResolutions?.get(decode(args[0]));
       assert.ok(file, "Unresolved installed import");
       return {
@@ -3437,7 +3440,7 @@ test("Windows experiment held-image protocol pins exact helpers and keeps instal
     assert.deepEqual(held.bytes, f.files.get(helper.path));
     assert.deepEqual(held.pe.imports, f.experimentImports);
     for (const name of [contract, physical])
-      assert.deepEqual(await native.resolveImport(name), {
+      assert.deepEqual(await native.resolveImport(name, helper.path), {
         file: target,
         sha256: digest(f.signed),
         identitySha256: observationDigest(f.rawFileId(target)),
@@ -3717,6 +3720,30 @@ test("original failed compiler trust observes bounded optional provider data bef
       source.records.every((record) => Buffer.byteLength(record) < 1024),
     );
   }
+});
+
+test("ordinary pin failures retain guard diagnostics before compiler trust", async () => {
+  const f = rawPreparation({ experiment: true }),
+    entries = structuredClone(f.prepared.entries),
+    index = entries.findIndex(
+      (entry) => entry.path === f.prepared.tools[0].path,
+    );
+  entries[index].sha256 = "f".repeat(64);
+  const source = await compilerTrustFixture({
+    entries,
+    files: f.files,
+    identity: f.rawFileId,
+    inspect: f.objectRead,
+  });
+  await assert.rejects(source.open(index, 2), (error) => {
+    const failure = error.custodyReaderFailure;
+    assert.equal(failure.sequence, 2);
+    assert.equal(failure.command, "open");
+    assert.equal(typeof failure.lastError, "number");
+    assert.ok(!Object.hasOwn(failure, "trust"));
+    return true;
+  });
+  assert.deepEqual(source.calls, []);
 });
 
 test("actual reader and helper startup use fresh OS-derived environments", async () => {

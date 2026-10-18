@@ -269,7 +269,7 @@ in `prepare-read`. Unlisted helpers, changed hashes and helper/installed-image
 substitutions fail; installed inputs retain their separate native path restrictions.
 Ordinary PE enumeration preserves each declared DLL name and delay flag without
 requiring an API-set namespace host. The existing constrained System32 loader
-operation resolves those names and returns the canonical module actually loaded,
+operation resolves those names and returns the canonical module actually mapped,
 its held file identity and byte hash. Fresh installed-image reads must match all
 three, including repeated observations and cold loading. A physical forwarding
 DLL need not appear identically in the API-set namespace. Missing imports fail;
@@ -279,16 +279,32 @@ retain delay edges and rejoin loader aliases to the held target; live module
 reads bind actual mapped files and identities. Reviewed namespace/import
 admission and payload loader/isolation checks stay strict.
 
+Recursive held PE/import discovery remains necessary for individual private
+runtime copies and exact case loader inventories, including transitive and delay
+edges. Ordinary preparation maps installed DLLs with `DONT_RESOLVE_DLL_REFERENCES`
+and frees each mapping after joining its native mapped path to the held file
+identity. Identifying a file does not require initializing its DLL or executing
+its dependency loads. Live payload/module checks retain normal loader execution;
+reviewed admission is unchanged. This removes an unnecessary preparation demand,
+not an actual payload dependency or an isolation restriction.
+
 The original `prepare-experiment-pe` sequence 263 followed signature observation
 262 and failed at the API-set entry match count (`found == 1`, old line 290),
 not the earlier per-entry value count. The retained original excerpt does not
 identify the held pathname, import or whether zero or multiple entries matched;
 the trailing byte window alone supplies none of those facts. Existing owners now
-retain bounded held-image/import and match-count diagnostics rather than guessing
-an installed host. The separate `verify-retain:213/87` occurred in original
+retain declared names without guessing an installed host. A subsequent original
+`prepare-experiment-loader` failure at sequence 1378 reported error 126 after
+import enumeration and held-entry closure; it identifies no missing DLL, delay
+cause or API-set host. Authenticated `reader-failure` frames now carry the import,
+mapping flags and the first 128 UTF-16 image units with the full image length.
+Their closed parser permits at most 2048 bytes, including fragmented frames.
+The separate `verify-retain:213/87` occurred in original
 process/token acquisition during cleanup and again during recovery. Its combined
-guard did not identify which acquisition failed. Evaluated process/token samples
-now preserve the error for fresh CI; no causal repair or original-owner retirement
+guard did not identify which acquisition failed. The same authenticated channel
+now carries requested process/token access, evaluated handle/PID matching and
+token-open results; uncalled predicates retain explicit sentinels. Sequence,
+command and original native error precede diagnostic effects. No process cause or original-owner retirement
 is claimed. Recovery still retains that blocker even when a later observer exits.
 
 The duplicate compiler bootstrap reader/task is

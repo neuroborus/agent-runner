@@ -2239,9 +2239,12 @@ export function createWindowsCustodyReader(value, options = {}) {
       if (name === "release-import")
         requireWindows(
           input.purpose === "experiment" &&
-            args.length === 1 &&
+            args.length === 2 &&
             typeof args[0] === "string" &&
-            /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(args[0]),
+            /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(args[0]) &&
+            Number.isSafeInteger(args[1]) &&
+            held.has(args[1]) &&
+            ["image", "helper"].includes(plan[args[1]]?.kind),
         );
       requireWindows(
         [
