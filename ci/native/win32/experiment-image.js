@@ -8,7 +8,8 @@ export const WINDOWS_EXPERIMENT_MARKER = Buffer.from(
 /** Actual unsigned PE/import bytes. This supplies no Authenticode approval. */
 export function inspectWindowsExperimentPe(bytes, helper = true) {
   // Helpers require the durable marker. Unsigned installed runtime images are
-  // separately observed by the native PE/API-set reader; they acquire no trust.
+  // separately observed by native PE enumeration and installed-loader reads;
+  // they acquire no reviewed trust.
   const imports = helper ? windowsFeasibilityImports(bytes) : null;
   requireWindows(
     Buffer.isBuffer(bytes) &&

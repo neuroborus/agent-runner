@@ -5,6 +5,26 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-18 — Observe ordinary Windows installed-loader resolution
+
+Ordinary PE reads now enumerate declared imports and delay flags separately from
+the existing constrained System32 loader operation. Canonical observed modules,
+held identities and byte hashes rejoin initial, completed-build, cold and case
+observations. Physical forwarding DLLs need no identical API-set namespace entry;
+no host is invented from a name and unresolved imports remain failures. Reviewed
+namespace admission, source/helper binding and payload isolation remain strict.
+
+The original sequence 263 match-count guard was distinct from its earlier
+per-entry value-count guard. The retained excerpt lacks the exact held image,
+import and zero/duplicate distinction. Failure diagnostics identify held
+images/imports and distinguish match counts in the strict namespace owner;
+they do not reconstruct the omitted historical facts.
+Original `verify-retain:213/87` process/token acquisition
+remains a separate retirement blocker with no established integration cause.
+Later observer completion never substitutes for original-owner proof.
+Portable regressions establish no native acceptance. All 69 records and the
+separate Windows socket/audit and Darwin authority/model-free blockers remain.
+
 ## 2026-10-18 — Scope ordinary Darwin cache ancestry to hosted runtime trust
 
 Original protocol ordering places the ancestor refusal at the first

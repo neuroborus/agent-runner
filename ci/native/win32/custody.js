@@ -2236,6 +2236,13 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(result.bound === true);
     },
     async operation(name, ...args) {
+      if (name === "release-import")
+        requireWindows(
+          input.purpose === "experiment" &&
+            args.length === 1 &&
+            typeof args[0] === "string" &&
+            /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(args[0]),
+        );
       requireWindows(
         [
           "operation-authority",
@@ -2263,6 +2270,7 @@ export function createWindowsCustodyReader(value, options = {}) {
           "git-policy-restore",
           "git-audit-install",
           "release-pe",
+          "release-import",
           "release-build",
           "release-close",
         ].includes(name) && args.length <= 128,

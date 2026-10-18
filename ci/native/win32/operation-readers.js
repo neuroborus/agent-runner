@@ -8,7 +8,15 @@ import { decode } from "./custody-protocol.js";
 
 /** Complete held image/API-set and SDK inventories. Approved paths identify
  * inputs; fresh native reads supply their bytes and actual dependency edges. */
-export function createWindowsOperationReaders(reader, specification) {
+export function createWindowsOperationReaders(
+  reader,
+  specification,
+  purpose = "reviewed",
+) {
+  requireObservation(["reviewed", "experiment"].includes(purpose));
+  const experiment = purpose === "experiment",
+    importKey = ({ name, delay }) =>
+      name.toLowerCase() + (experiment ? `:${delay}` : "");
   const read = async (index, maximum = 536870912) => {
     const entry = specification.entries[index],
       before = await reader.inspect(index),
@@ -56,16 +64,20 @@ export function createWindowsOperationReaders(reader, specification) {
           component.imports.length <= 256,
       );
       for (const target of component.imports) {
-        observationObject(target, ["name", "index"]);
+        observationObject(
+          target,
+          experiment ? ["name", "index", "delay"] : ["name", "index"],
+        );
         requireObservation(
           typeof target.name === "string" &&
             /^[A-Za-z0-9_.-]+\.dll$/iu.test(target.name) &&
+            (!experiment || typeof target.delay === "boolean") &&
             components.some(({ index }) => index === target.index),
         );
       }
       requireObservation(
-        new Set(component.imports.map(({ name }) => name.toLowerCase()))
-          .size === component.imports.length,
+        new Set(component.imports.map(importKey)).size ===
+          component.imports.length,
       );
       await read(component.index);
       await reader.signature(component.index);
@@ -77,23 +89,39 @@ export function createWindowsOperationReaders(reader, specification) {
           pe.imports.length === component.imports.length,
       );
       requireObservation(
-        new Set(pe.imports.map(({ name }) => name.toLowerCase())).size ===
-          pe.imports.length,
+        new Set(pe.imports.map(importKey)).size === pe.imports.length,
       );
       for (const imported of pe.imports) {
-        observationObject(imported, ["name", "host", "delay"]);
+        observationObject(
+          imported,
+          experiment ? ["name", "delay"] : ["name", "host", "delay"],
+        );
         const target = component.imports.find(
-          ({ name }) => name.toLowerCase() === imported.name.toLowerCase(),
+          (value) => importKey(value) === importKey(imported),
         );
-        requireObservation(
-          target &&
-            typeof imported.delay === "boolean" &&
-            imported.host.toLowerCase() ===
-              specification.entries[target.index].path
-                .split("\\")
-                .at(-1)
-                .toLowerCase(),
-        );
+        requireObservation(target && typeof imported.delay === "boolean");
+        const entry = specification.entries[target.index],
+          basename = entry.path.split("\\").at(-1).toLowerCase();
+        // Direct edges name held physical modules, including copied Git DLLs.
+        // Aliases must rejoin an independently observed System32 target.
+        if (experiment && imported.name.toLowerCase() !== basename) {
+          const resolved = await reader.operation(
+            "release-import",
+            imported.name,
+          );
+          observationObject(resolved, ["pathHex", "identity", "sha256"]);
+          requireObservation(
+            decode(resolved.pathHex).toLowerCase() ===
+              entry.path.toLowerCase() &&
+              resolved.sha256 === entry.sha256 &&
+              resolved.identity ===
+                (await reader.inspect(target.index)).identity,
+          );
+        } else
+          requireObservation(
+            (experiment ? imported.name : imported.host).toLowerCase() ===
+              basename,
+          );
       }
       observations.push({
         index: component.index,
@@ -162,14 +190,14 @@ export function createWindowsOperationReaders(reader, specification) {
     const edges = new Set();
     for (const edge of actual.imports) {
       const name = Buffer.from(edge.importHex, "hex").toString("ascii");
-      const key = `${edge.source}:${name.toLowerCase()}`;
+      const key = `${edge.source}:${importKey({ name, delay: edge.delay })}`;
       requireObservation(!edges.has(key));
       edges.add(key);
       const component = components.find(
         ({ index }) => index === indices[edge.source],
       );
       const target = component?.imports.find(
-        (value) => value.name.toLowerCase() === name.toLowerCase(),
+        (value) => importKey(value) === importKey({ name, delay: edge.delay }),
       );
       requireObservation(target?.index === indices[edge.resolved]);
     }

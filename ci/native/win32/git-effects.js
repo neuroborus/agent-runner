@@ -66,7 +66,11 @@ export function createWindowsGitEffects(core) {
       current.binding.context,
       current.admission.verifier,
     );
-  const loaded = createWindowsOperationReaders(reader, specification);
+  const loaded = createWindowsOperationReaders(
+    reader,
+    specification,
+    current.binding.purpose,
+  );
   let outside,
     channel,
     policyWriter,

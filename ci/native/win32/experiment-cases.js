@@ -38,15 +38,35 @@ export async function windowsExperimentGitRuntime(
   const directory =
     path.parse(systemRoot).root + "Program Files\\Git\\mingw64\\bin";
   const pending = [path.join(directory, "git.exe")],
+    resolutions = new Map(),
+    identities = new Map(),
     images = new Map();
   for (let i = 0; i < pending.length; i++) {
     requireObservation(pending.length <= 64);
     const file = pending[i],
       read = await native.readImage(file, true);
-    requireObservation(read.held && read.independent && read.unchanged);
+    requireObservation(
+      read.held &&
+        read.independent &&
+        read.unchanged &&
+        read.sha256 === digest(read.bytes),
+    );
+    identities.set(file.toLowerCase(), read.identitySha256);
+    const resolved = resolutions.get(file.toLowerCase());
+    requireObservation(
+      !resolved ||
+        (read.sha256 === resolved.sha256 &&
+          digest(read.bytes) === resolved.sha256 &&
+          read.identitySha256 === resolved.identitySha256),
+    );
     const imports = [];
     for (const imported of read.pe.imports) {
       const name = imported.name;
+      requireObservation(
+        typeof name === "string" &&
+          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name) &&
+          typeof imported.delay === "boolean",
+      );
       const local = path.join(directory, name);
       let target;
       try {
@@ -54,9 +74,24 @@ export async function windowsExperimentGitRuntime(
         target = local;
       } catch (error) {
         requireObservation(error.code === "ENOENT");
-        target = await native.resolveImport(imported.host);
+        const resolved = await native.resolveImport(name),
+          previous = resolutions.get(resolved.file.toLowerCase());
+        requireObservation(
+          !previous ||
+            observationDigest(previous) === observationDigest(resolved),
+        );
+        target = resolved.file;
+        resolutions.set(target.toLowerCase(), resolved);
+        const held =
+          images.get(target.toLowerCase()) ??
+          (target.toLowerCase() === file.toLowerCase() ? read : null);
+        requireObservation(
+          !held ||
+            (held.sha256 === resolved.sha256 &&
+              identities.get(target.toLowerCase()) === resolved.identitySha256),
+        );
       }
-      imports.push({ name, path: target });
+      imports.push({ name, path: target, delay: imported.delay });
       if (!pending.some((file) => file.toLowerCase() === target.toLowerCase()))
         pending.push(target);
     }
@@ -621,7 +656,11 @@ export async function prepareWindowsExperimentCases(
           }
           if (!loader.some((component) => component.index === index))
             loader.push({ index, imports: [] });
-          loader[i].imports.push({ name: imported.name, index });
+          loader[i].imports.push({
+            name: imported.name,
+            index,
+            delay: imported.delay,
+          });
         }
       }
       slots.loader = loader;

@@ -267,6 +267,30 @@ native PE/import observations. Initial, cold and completed-build image reads use
 the same held boundary: each helper must match its exact listed path and SHA-256
 in `prepare-read`. Unlisted helpers, changed hashes and helper/installed-image
 substitutions fail; installed inputs retain their separate native path restrictions.
+Ordinary PE enumeration preserves each declared DLL name and delay flag without
+requiring an API-set namespace host. The existing constrained System32 loader
+operation resolves those names and returns the canonical module actually loaded,
+its held file identity and byte hash. Fresh installed-image reads must match all
+three, including repeated observations and cold loading. A physical forwarding
+DLL need not appear identically in the API-set namespace. Missing imports fail;
+neither filenames nor copied expectations invent a host. Copied Git dependencies
+retain their existing local held-image path and byte bindings. Case graph reads
+retain delay edges and rejoin loader aliases to the held target; live module
+reads bind actual mapped files and identities. Reviewed namespace/import
+admission and payload loader/isolation checks stay strict.
+
+The original `prepare-experiment-pe` sequence 263 followed signature observation
+262 and failed at the API-set entry match count (`found == 1`, old line 290),
+not the earlier per-entry value count. The retained original excerpt does not
+identify the held pathname, import or whether zero or multiple entries matched;
+the trailing byte window alone supplies none of those facts. Existing owners now
+retain bounded held-image/import and match-count diagnostics rather than guessing
+an installed host. The separate `verify-retain:213/87` occurred in original
+process/token acquisition during cleanup and again during recovery. Its combined
+guard did not identify which acquisition failed. Evaluated process/token samples
+now preserve the error for fresh CI; no causal repair or original-owner retirement
+is claimed. Recovery still retains that blocker even when a later observer exits.
+
 The duplicate compiler bootstrap reader/task is
 removed. Private version-2 preparation records reject legacy, mixed or incomplete
 build evidence. Cold loading verifies the original completed outputs without
@@ -8436,10 +8460,13 @@ come from the held kernel objects, including the matched SDK session-information
 class. Actual DACL bytes and complete Job membership/limits are read separately.
 Native WinVerifyTrust uses cache-only embedded or catalog verification; signature
 and catalog bytes, loaded files and parent/volume handles remain held until closure.
-PE imports and delay imports of the observed loaded modules resolve against
+Reviewed PE imports and delay imports of the observed loaded modules resolve against
 their actual module paths and the subject's bounded version-six API-set namespace.
-Unloaded delay imports, ambiguous module/API-set hosts or unsupported layouts
-withhold complete evidence. Linker/PE metadata and actual OS/SDK registry reads
+Ordinary observations use the installed-loader/held-module boundary above instead
+of requiring a physical forwarding DLL to have a matching namespace entry.
+Unloaded delay imports, ambiguous physical module matches or unsupported layouts
+withhold complete evidence; reviewed namespace ambiguity remains a refusal.
+Linker/PE metadata and actual OS/SDK registry reads
 remain observations, distinct from independently reviewed build/SDK digests.
 
 `openFile` joins the existing file input to the held root/base identities and

@@ -1249,6 +1249,17 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
+Windows experiment regressions inject namespace aliases and physical forwarding
+DLLs through the existing installed-loader operation, retaining declared names
+and delay flags. Held-image protocol tests join actual canonical paths, file
+identities and hashes; build/cold-load coverage rejects unresolved imports and
+identity/byte substitution without recompilation. Case graph readers retain
+reviewed rejection and require matching ordinary delay edges and alias targets.
+Custody recovery retains original process-hold failure even after a later
+observer completes. These neutral injections use existing fast discovery and
+the selected native harness; they invoke no Windows tool, add no slow tier and
+establish no native acceptance or original-owner retirement.
+
 Darwin injected/source regressions protect shared sandbox function/data bindings,
 unavailable exports, all custody query consumers, path-filter results and PF
 counter normalization without losing experiment rule authority/order. Existing

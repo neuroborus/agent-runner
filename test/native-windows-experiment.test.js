@@ -293,6 +293,7 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     records = new Map(),
     system = "C:\\Windows\\System32\\KERNEL32.dll",
     git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+    bytes = Buffer.from("held Git fixture"),
     dependency = path.join(path.dirname(git), "runtime.dll"),
     image = (file, imports) => ({
       path: file,
@@ -302,7 +303,9 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     }),
     runtime = [
       ...prepared.helpers.map((helper) =>
-        image(helper.path, [{ name: "KERNEL32.dll", path: system }]),
+        image(helper.path, [
+          { name: "KERNEL32.dll", path: system, delay: false },
+        ]),
       ),
       image(system, []),
     ],
@@ -324,11 +327,12 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
         held: true,
         independent: true,
         unchanged: true,
-        sha256: H,
+        bytes,
+        sha256: createHash("sha256").update(bytes).digest("hex"),
+        identitySha256: H,
         signatureSha256: H,
         pe: {
-          imports:
-            file === git ? [{ name: "runtime.dll", host: "runtime.dll" }] : [],
+          imports: file === git ? [{ name: "runtime.dll", delay: false }] : [],
         },
       }),
       prepareVolume: async () => ({ file: "D:\\Fixture\\foreign" }),
@@ -943,6 +947,100 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
       assert.throws(() => windowsExperimentBuildInventory(record));
     }
   }
+});
+
+test("Windows ordinary imports rejoin observed namespace and physical modules on cold load", async () => {
+  const f = hostedFixture(),
+    contract = "api-fixture-runtime-l1-1-0.dll",
+    physical = "api-fixture-forward-l1-1-0.dll",
+    host = "C:\\Windows\\System32\\fixture-runtime.dll",
+    forward = "C:\\Windows\\System32\\" + physical,
+    resolutions = new Map([
+      [contract, host],
+      [physical, forward],
+    ]),
+    names = [],
+    unresolved = new Error("Unresolved installed import"),
+    immutable = Object.freeze(new Error("Immutable loader failure"));
+  for (const file of resolutions.values()) f.files.set(file, f.image);
+  let fault;
+  const open = f.options.open;
+  f.options.open = async (prepared) => {
+    const native = await open(prepared),
+      read = native.readImage,
+      image = prepared.helpers[0].path;
+    native.readImage = f.filesOwner.readExperimentImage = async (
+      file,
+      installed,
+    ) => {
+      const held = await read(file, installed);
+      if (file === image)
+        held.pe = {
+          imports: [
+            { name: contract, delay: false },
+            { name: physical, delay: true },
+          ],
+        };
+      if (fault === "held-image" && file === host)
+        held.bytes = Buffer.from("changed held image");
+      return held;
+    };
+    native.resolveImport = f.filesOwner.resolveExperimentImport = async (
+      name,
+    ) => {
+      names.push(name);
+      assert.ok(resolutions.has(name));
+      if (fault === "unresolved") throw unresolved;
+      if (fault === "immutable-error") throw immutable;
+      return {
+        file: resolutions.get(name),
+        sha256:
+          fault === "bytes"
+            ? "f".repeat(64)
+            : createHash("sha256").update(f.image).digest("hex"),
+        identitySha256: fault === "identity" ? "f".repeat(64) : H,
+      };
+    };
+    return native;
+  };
+  const built = await prepareWindowsExperiment(
+      f.job,
+      directory,
+      async () => {},
+      f.options,
+    ),
+    compiles = f.calls.length;
+  assert.ok(names.includes(contract) && names.includes(physical));
+  f.options.command = () =>
+    assert.fail("Cold loading cannot compile or acquire");
+  const load = () =>
+    loadWindowsExperiment(built.job, directory, {
+      ...f.options,
+      files: f.filesOwner,
+    });
+  const beforeCold = names.length,
+    loaded = await load(),
+    recorded = JSON.parse(
+      f.files.get(path.join(directory, "windows-experiment-preparation.json")),
+    );
+  assert.deepEqual(names.slice(beforeCold), [contract, physical]);
+  assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length + 2);
+  assert.deepEqual(recorded.runtime[0].imports, [
+    { name: contract, path: host, delay: false },
+    { name: physical, path: forward, delay: true },
+  ]);
+  for (fault of ["unresolved", "identity", "bytes", "held-image"])
+    await assert.rejects(
+      load,
+      (error) =>
+        fault !== "unresolved" ||
+        (error === unresolved &&
+          error.importName === contract &&
+          error.image === recorded.runtime[0].path),
+    );
+  fault = "immutable-error";
+  await assert.rejects(load, (error) => error === immutable);
+  assert.equal(f.calls.length, compiles);
 });
 
 test("Windows direct-build failures and cancellation preserve the cause before System publication", async () => {

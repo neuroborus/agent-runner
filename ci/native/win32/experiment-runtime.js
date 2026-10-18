@@ -6,7 +6,11 @@ import { createWindowsOperationReaders } from "./operation-readers.js";
  * remains owned by createWindowsReleaseEffects/observeWindowsRelease. */
 export function createWindowsExperimentRuntimeEffects(core) {
   const { current, reader, specification, witness, latch, persist } = core,
-    reads = createWindowsOperationReaders(reader, specification);
+    reads = createWindowsOperationReaders(
+      reader,
+      specification,
+      current.binding.purpose,
+    );
   requireObservation(
     current.binding.purpose === "experiment" &&
       specification.slots.components.length === 13,

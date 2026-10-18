@@ -209,8 +209,11 @@ static void plan(const wchar_t *name, const char *expected) {
 }
 static unsigned retain_process(DWORD pid) {
   need(pid > 0 && pid != GetCurrentProcessId() && process_count < (preparation_only ? 128u : 32u));
-  HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL | SYNCHRONIZE, FALSE, pid), token;
-  need(process && GetProcessId(process) == pid && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
+  HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | READ_CONTROL | SYNCHRONIZE, FALSE, pid), token = NULL;
+  int token_result = -1; /* Uncalled when the process handle/identity was unavailable. */
+  BOOL matched = process && GetProcessId(process) == pid, opened = matched && (token_result = OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
+  if (!opened) { DWORD error = GetLastError(); fprintf(stderr,"native-windows-retain: pid=%lu process=%u matched=%u token-result=%d error=%lu\n",pid,(unsigned)!!process,(unsigned)matched,token_result,error); fflush(stderr); SetLastError(error); }
+  need(opened);
   for (unsigned i = 0; i < process_count; i++) need(GetProcessId(processes[i]) != pid);
   processes[process_count] = process; tokens[process_count] = token; sessions[process_count] = process_session(process); return process_count++;
 }
@@ -269,10 +272,11 @@ static void job_read(HANDLE job) {
   printf("]}");
 }
 static void remote(HANDLE process, const void *address, void *bytes, SIZE_T size) { SIZE_T read; need(ReadProcessMemory(process, address, bytes, size, &read) && read == size); }
+#ifndef NATIVE_CI_EXPERIMENT
 struct api_header { ULONG version, size, flags, count, entry, hash, factor; };
 struct api_entry { ULONG flags, name, length, hashed, values, count; };
 struct api_value { ULONG flags, name, length, host, size; };
-static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256]) {
+static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256], const wchar_t *image, const wchar_t *imported) {
   typedef NTSTATUS (NTAPI *query)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG);
   query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"); PROCESS_BASIC_INFORMATION info;
   need(get && !get(process, ProcessBasicInformation, &info, sizeof(info), NULL)); void *map;
@@ -287,8 +291,41 @@ static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256])
     struct api_value *value = (void *)(bytes + entry->values); need(value->length == 0 && value->size && value->size <= 510 && !(value->size % 2) &&
       value->host <= header.size && value->size <= header.size - value->host); memcpy(host, bytes + value->host, value->size); host[value->size/2] = 0; found++;
   }
-  free(bytes); need(found == 1); /* Ambiguous importer-specific API sets stay unsupported. */
+  free(bytes);
+  if (found != 1) { DWORD error = GetLastError(); fprintf(stderr, "native-windows-api-set: image=%ls import=%ls contract=%ls matches=%u\n", image, imported, contract, found); fflush(stderr); SetLastError(error); }
+  need(found == 1); /* Ambiguous importer-specific API sets stay unsupported. */
 }
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+/* Observe the installed loader; an API-set spelling need not have a namespace
+ * entry when the image supplies a physical forwarding DLL of that name. */
+static struct held_file experiment_import(const wchar_t *name, wchar_t actual[4096]) {
+  size_t size = wcslen(name);
+  need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
+  HMODULE module = LoadLibraryExW(name, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
+  if (!module) { DWORD error = GetLastError(); fprintf(stderr, "native-windows-import: name=%ls error=%lu\n", name, error); fflush(stderr); SetLastError(error); }
+  need(module);
+  wchar_t system[4096]; DWORD length = GetModuleFileNameW(module, actual, 4096), prefix = GetSystemDirectoryW(system, 4096);
+  need(length && length < 4096 && prefix && prefix < 4096 && !_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
+  HANDLE selected = CreateFileW(actual, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  wchar_t canonical[4100], mapped[4100], named[4100]; FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
+  need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
+    GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
+  DWORD canonicalSize = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !_wcsicmp(actual, canonical+4)); wcscpy_s(actual, 4096, canonical+4);
+  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), module, mapped, 4100), namedSize = GetFinalPathNameByHandleW(selected, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
+  need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
+  struct held_file file = hold(actual, FALSE, FALSE, GENERIC_READ); char dacl[65]; stock_security(file.handle,dacl);
+  need(GetFileInformationByHandleEx(file.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before,&after,sizeof(before)) && CloseHandle(selected) && FreeLibrary(module));
+  return file;
+}
+static void experiment_loader(const wchar_t *name) {
+  wchar_t actual[4096]; struct held_file file = experiment_import(name, actual);
+  DWORD size; BYTE *bytes = read_file(&file, 536870912, &size); char hash[65]; sum(bytes, size, hash); free(bytes);
+  printf("{\"pathHex\":\""); hex((BYTE *)actual, wcslen(actual)*2); printf("\",\"identity\":\""); file_id(&file);
+  printf("\",\"sha256\":\"%s\"}", hash); close_file(&file);
+}
+#endif
 static DWORD rva(BYTE *bytes, DWORD size, IMAGE_NT_HEADERS64 *pe, DWORD address, DWORD needed) {
   need(needed <= size); if (address < pe->OptionalHeader.SizeOfHeaders) { need(address <= size-needed); return address; }
   IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe); need((BYTE *)sections >= bytes && (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size && pe->FileHeader.NumberOfSections <= 96);
@@ -325,8 +362,19 @@ static void loader(unsigned subject, struct entry *image) {
       if (!nameRva) { terminated = TRUE; break; } if (directory) need(entry[0] == 1); DWORD nameAt = rva(bytes, size, pe, nameRva, 1), length = 0;
       while (length < 255 && nameAt + length < size && bytes[nameAt+length]) length++; need(length && length < 255 && nameAt+length < size);
       wchar_t name[256] = {0}, host[256] = {0}; for (unsigned j = 0; j < length; j++) { need(bytes[nameAt+j] >= 32 && bytes[nameAt+j] < 127 && bytes[nameAt+j] != '/' && bytes[nameAt+j] != '\\'); name[j] = bytes[nameAt+j]; }
-      wcscpy_s(host, 256, name); if (!_wcsnicmp(name, L"api-", 4) || !_wcsnicmp(name, L"ext-", 4)) { wchar_t *dot = wcsrchr(name, '.'); if (dot) *dot = 0; api_host(process, name, host); }
-      unsigned match = n; for (unsigned j = 0; j < n; j++) if (!_wcsicmp(wcsrchr(paths[j], '\\')+1, host)) { need(match == n); match = j; } need(match < n);
+      wcscpy_s(host, 256, name);
+#ifndef NATIVE_CI_EXPERIMENT
+      if (!_wcsnicmp(name, L"api-", 4) || !_wcsnicmp(name, L"ext-", 4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot = wcsrchr(contract, '.'); if (dot) *dot = 0; api_host(process, contract, host, paths[source], name); }
+#endif
+      unsigned match = n; for (unsigned j = 0; j < n; j++) if (!_wcsicmp(wcsrchr(paths[j], '\\')+1, host)) { need(match == n); match = j; }
+#ifdef NATIVE_CI_EXPERIMENT
+      if (match == n) {
+        wchar_t actual[4096]; struct held_file resolved = experiment_import(name, actual);
+        for (unsigned j = 0; j < n; j++) if (!_wcsicmp(paths[j], actual) && !memcmp(&files[j].id, &resolved.id, sizeof(resolved.id))) { need(match == n); match = j; }
+        close_file(&resolved);
+      }
+#endif
+      need(match < n);
       need(emitted < 2048); printf("%s{\"source\":%u,\"importHex\":\"", emitted++ ? "," : "", source); hex(bytes+nameAt, length); printf("\",\"resolved\":%u,\"delay\":%s}", match, directory ? "true" : "false");
     } need(terminated);
   }
@@ -2234,20 +2282,7 @@ static void preparation_command(char **v, unsigned n) {
     close_file(&other); close_file(&local); return;
   }
   if (!strcmp(v[0], "prepare-experiment-loader")) {
-    need(n == 3); wchar_t name[4096]; decode(v[2], name); size_t size = wcslen(name);
-    need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
-    HMODULE module = LoadLibraryExW(name, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32); need(module);
-    wchar_t actual[4096], system[4096]; DWORD length = GetModuleFileNameW(module, actual, 4096), prefix = GetSystemDirectoryW(system, 4096);
-    need(length && length < 4096 && prefix && prefix < 4096 && !_wcsnicmp(actual, system, prefix) && actual[prefix] == '\\' && !wcschr(actual+prefix+1, '\\'));
-    HANDLE selected = CreateFileW(actual, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-    wchar_t canonical[4100]; FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after;
-    need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) && !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) &&
-      GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
-    DWORD canonicalSize = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
-    need(canonicalSize > 4 && canonicalSize < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !_wcsicmp(actual, canonical+4)); wcscpy_s(actual, 4096, canonical+4);
-    struct held_file file = hold(actual, FALSE, FALSE, GENERIC_READ); char dacl[65]; stock_security(file.handle,dacl);
-    need(GetFileInformationByHandleEx(file.handle, FileIdInfo, &after, sizeof(after)) && !memcmp(&before,&after,sizeof(before)) && CloseHandle(selected));
-    printf("{\"pathHex\":\""); hex((BYTE *)actual, wcslen(actual)*2); printf("\"}"); close_file(&file); need(FreeLibrary(module)); return;
+    need(n == 3); wchar_t name[4096]; decode(v[2], name); experiment_loader(name); return;
   }
 #endif
   if (!strcmp(v[0], "prepare-package-bind")) {
@@ -2820,9 +2855,15 @@ static void release_pe_file(struct held_file *file) {
     for(unsigned i=0;(i+1)*width<=table.Size;i++) { DWORD *item=(void *)(bytes+at+i*width),nameRva=directory ? item[1] : item[3];
       if(!nameRva) { terminated=TRUE; break; } if(directory) need(item[0]==1); DWORD nameAt=rva(bytes,size,pe,nameRva,1),length=0;
       while(length<255 && nameAt+length<size && bytes[nameAt+length]) length++; need(length && length<255 && nameAt+length<size);
-      wchar_t name[256]={0},host[256]={0}; for(unsigned j=0;j<length;j++) { need((bytes[nameAt+j]>='a' && bytes[nameAt+j]<='z') || (bytes[nameAt+j]>='A' && bytes[nameAt+j]<='Z') || (bytes[nameAt+j]>='0' && bytes[nameAt+j]<='9') || strchr("_.-",bytes[nameAt+j])); name[j]=bytes[nameAt+j]; }
-      wcscpy_s(host,256,name); if(!_wcsnicmp(name,L"api-",4) || !_wcsnicmp(name,L"ext-",4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot=wcsrchr(contract,'.'); if(dot) *dot=0; api_host(GetCurrentProcess(),contract,host); }
-      need(emitted<256); printf("%s{\"name\":\"%ls\",\"host\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,host,directory ? "true" : "false");
+      wchar_t name[256]={0}; for(unsigned j=0;j<length;j++) { need((bytes[nameAt+j]>='a' && bytes[nameAt+j]<='z') || (bytes[nameAt+j]>='A' && bytes[nameAt+j]<='Z') || (bytes[nameAt+j]>='0' && bytes[nameAt+j]<='9') || strchr("_.-",bytes[nameAt+j])); name[j]=bytes[nameAt+j]; }
+      need(emitted<256);
+#ifdef NATIVE_CI_EXPERIMENT
+      printf("%s{\"name\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,directory ? "true" : "false");
+#else
+      wchar_t host[256]={0};
+      wcscpy_s(host,256,name); if(!_wcsnicmp(name,L"api-",4) || !_wcsnicmp(name,L"ext-",4)) { wchar_t contract[256]; wcscpy_s(contract,256,name); wchar_t *dot=wcsrchr(contract,'.'); if(dot) *dot=0; api_host(GetCurrentProcess(),contract,host,file->path,name); }
+      printf("%s{\"name\":\"%ls\",\"host\":\"%ls\",\"delay\":%s}",emitted++ ? "," : "",name,host,directory ? "true" : "false");
+#endif
     } need(terminated);
   }
   printf("],\"complete\":true}"); free(bytes);
@@ -3526,6 +3567,9 @@ static BOOL operation_dispatch(char **v,unsigned n) {
   else if(!strcmp(v[0],"git-ordinary")) git_ordinary(v,n);
   else if(!strcmp(v[0],"git-child") || !strcmp(v[0],"git-child-retired")) { need(n==4); wchar_t birth[32]; decode_bounded(v[3],birth,32); need(wcsspn(birth,L"0123456789")==wcslen(birth)); git_child(bounded_number(v[2],MAXDWORD),_wcstoui64(birth,NULL,10),!strcmp(v[0],"git-child-retired")); }
   else if(!strcmp(v[0],"operation-retirement")) { need(n==2 && !helpers[0].process); operation_empty(case_job); printf("{\"noLiveMembers\":true,\"helpersSettled\":true,\"admissionsClosed\":true}"); }
+#ifdef NATIVE_CI_EXPERIMENT
+  else if(!strcmp(v[0],"release-import")) { need(n==3 && *operation_id && !operation_fenced); wchar_t name[4096]; decode(v[2],name); experiment_loader(name); }
+#endif
   else if(!strcmp(v[0],"release-pe")) { need(n==3); release_pe(bounded_number(v[2],count-1)); }
   else if(!strcmp(v[0],"release-build")) { need(n==3); unsigned index=bounded_number(v[2],count-1); LARGE_INTEGER size; need(entries[index].file.handle && GetFileSizeEx(entries[index].file.handle,&size) && size.QuadPart>0 && size.QuadPart<=536870912); printf("{\"bytes\":%llu}",(ULONGLONG)size.QuadPart); }
   else if(!strcmp(v[0],"release-close")) { need(n==3); unsigned index=bounded_number(v[2],count-1); need(!operation_closed[index] && entries[index].file.handle); close_file(&entries[index].file); memset(&entries[index].file,0,sizeof(entries[index].file)); operation_closed[index]=TRUE; printf("{\"index\":%u,\"closed\":true}",index); }

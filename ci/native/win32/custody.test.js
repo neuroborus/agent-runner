@@ -4236,6 +4236,38 @@ test("Windows recovery removes original tasks before admitting live dependent ob
   assert.equal(premature.state.removedTasks.size, 0);
 });
 
+test("Windows original-owner recovery retains a failed process hold despite later observer completion", async () => {
+  const k = verificationFixture(),
+    original = [k.f.helper, identity(10, runnerSid)],
+    cause = Object.assign(new Error("Original process hold unavailable"), {
+      nativeFailure: {
+        phase: "reader-failure",
+        command: "verify-retain",
+        line: 213,
+        lastError: 87,
+      },
+    });
+  k.state.instances = 0;
+  k.state.jobMembers = [];
+  for (const birth of original) k.states.get(birth.pid).retired = true;
+  k.state.damage = (operation, frame) => {
+    if (operation === "verify-retain") throw cause;
+    return Buffer.from(JSON.stringify(frame) + "\n");
+  };
+  await assert.rejects(
+    k.verifier.recoverCompleted(k.f.input, original),
+    (error) => error === cause,
+  );
+  k.state.damage = null;
+  // Completing an observer supplies no held original process/token proof.
+  k.states.get(k.f.fileHelper.pid).retired = true;
+  await assert.rejects(
+    k.verifier.recoverCompleted(k.f.input, original),
+    (error) => error === cause,
+  );
+  assert.equal(k.state.removedTasks.size, 0);
+});
+
 test("Windows observer custody rejects missing, substituted or changed births and incomplete inventories", async () => {
   for (const fault of [
     "missing",

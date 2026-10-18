@@ -53,7 +53,11 @@ export function createWindowsFileEffects(core) {
     sessions = [],
     helperSlots = new Map();
   const requestSha256 = digest(JSON.stringify(input));
-  const loaded = createWindowsOperationReaders(reader, specification);
+  const loaded = createWindowsOperationReaders(
+    reader,
+    specification,
+    current.binding.purpose,
+  );
   const foreign = async () => {
     const value = await reader.tree(slots.outside);
     requireObservation(value.length > 0);

@@ -80,6 +80,13 @@ preparation, loading, build policy and recovery together. Cold loading verifies
 completed outputs without acquisition or recompilation; mixed, legacy and missing
 records fail. Compiler dependency/SDK/library trust reconstruction, System
 compiler controllers, compiler Jobs/tasks and their bootstrap journals are removed.
+Ordinary PE enumeration retains declared names and delay flags separately from
+installed-loader resolution. The constrained System32 operation returns the
+canonical observed module and held identity/hash; initial, completed-build and
+cold reads rejoin them. Physical forwarding DLLs require no identical API-set
+namespace entry. Case graph and live mapped-module observations retain physical
+dependencies and resolve aliases against actual held modules. Unresolved imports
+and substituted images fail; reviewed namespace admission remains strict.
 
 Existing bridge sealing and one System file observer protect the actual generated
 images and sources. A private sibling selector identifies possible publication;
@@ -95,6 +102,11 @@ unobserved work stays unsuccessful with its first cause preserved. Recovery hold
 original observer identities before waiting for actual exit, then independently
 verifies whole-domain and owned-task retirement; no empty compiler proof is
 invented. No cleanup can attest retirement of earlier uncertain Windows owners.
+Original sequence 263 identifies an API-set entry match-count failure after
+signature observation 262, without a captured image/import or zero/duplicate
+distinction. Bounded owner diagnostics retain those selectors for fresh CI.
+The separate original `verify-retain:213/87` process/token-acquisition blocker
+remains unresolved; later observer completion cannot replace its missing proof.
 
 Windows custody passes the documented noninteractive `INVALID_HANDLE_VALUE`
 to the original WinVerifyTrust VERIFY and separate CLOSE, retaining the original
@@ -1261,7 +1273,8 @@ malformed SID input cannot fall back to name lookup. Private IPC joins
 both process creation identities; separate native verification precedes setup.
 The bounded reader retains process/token and Job handles, no-follow files and
 volume handles, DACLs and signed loader inputs through retirement. PE imports,
-delay imports and actual API-set mappings resolve against observed loaded modules;
+delay imports and reviewed API-set mappings resolve against observed loaded modules;
+ordinary alias resolution uses the constrained installed loader and held identities;
 SDK/build observations remain separate from reviewed pins. Existing file/policy
 helpers receive explicit creation-time handle lists and private control pipes,
 start suspended in a private restricted Job, and require independent transfer

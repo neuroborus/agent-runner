@@ -453,8 +453,28 @@ async function observeBuild(
     requireObservation(pending.length <= 128);
     const item = pending[index];
     for (const imported of item.imports) {
-      const name = imported.name,
-        file = await native.resolveImport(imported.host);
+      const name = imported.name;
+      requireObservation(
+        typeof name === "string" &&
+          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name) &&
+          typeof imported.delay === "boolean",
+      );
+      let resolved;
+      try {
+        resolved = await native.resolveImport(name);
+      } catch (cause) {
+        try {
+          Object.assign(cause, {
+            image: item.imagePath,
+            importName: name,
+            delay: imported.delay,
+          });
+        } catch {
+          // Diagnostic context cannot replace the original loader failure.
+        }
+        throw cause;
+      }
+      const { file } = resolved;
       let dependency = paths.get(file.toLowerCase());
       if (!dependency) {
         const read = await native.readImage(file, true),
@@ -487,9 +507,14 @@ async function observeBuild(
         paths.set(file.toLowerCase(), dependency);
         pending.push(dependency);
       }
+      requireObservation(
+        dependency.read.sha256 === resolved.sha256 &&
+          digest(dependency.read.bytes) === resolved.sha256 &&
+          dependency.read.identitySha256 === resolved.identitySha256,
+      );
       runtime
         .find((image) => image.path === item.imagePath)
-        .imports.push({ name, path: file });
+        .imports.push({ name, path: file, delay: imported.delay });
       if (!item.component.loader.includes(dependency.component.id))
         item.component.loader.push(dependency.component.id);
     }

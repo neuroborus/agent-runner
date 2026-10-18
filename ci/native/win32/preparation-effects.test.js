@@ -1919,6 +1919,63 @@ test("Windows loader reads reject repeated imports replacing a required API-set 
   duplicate = true;
   await assert.rejects(reads.loader(components, [0]));
   await assert.rejects(reads.runtime(0, 0, components));
+  duplicate = false;
+  const ordinary = structuredClone(components);
+  ordinary[0].imports = [
+    { name: "api-first.dll", index: 1, delay: false },
+    { name: "shared.dll", index: 1, delay: true },
+  ];
+  let fault;
+  const original = reader.operation;
+  reader.operation = async (name, index) => {
+    if (name === "release-import") {
+      assert.equal(index, "api-first.dll");
+      if (fault === "unresolved")
+        throw new Error("Unresolved installed import");
+      return {
+        pathHex: Buffer.from(entries[1].path, "utf16le").toString("hex"),
+        identity: fault === "identity" ? "changed" : "object-1",
+        sha256: fault === "bytes" ? "f".repeat(64) : entries[1].sha256,
+      };
+    }
+    const value = await original(name, index);
+    if (name === "release-pe")
+      value.imports = index
+        ? []
+        : ordinary[0].imports.map(({ name, delay }) => ({ name, delay }));
+    return value;
+  };
+  const experiment = createWindowsOperationReaders(
+    reader,
+    { entries },
+    "experiment",
+  );
+  const mappedImports = structuredClone(ordinary[0].imports),
+    loaded = reader.loader;
+  reader.loader = async () => ({
+    ...(await loaded()),
+    imports: mappedImports.map(({ name, delay }) => ({
+      source: 0,
+      resolved: 1,
+      delay,
+      importHex: Buffer.from(name).toString("hex"),
+    })),
+  });
+  await experiment.loader(ordinary, [0]);
+  await experiment.runtime(0, 0, ordinary);
+  for (fault of ["unresolved", "identity", "bytes"])
+    await assert.rejects(experiment.loader(ordinary, [0]));
+  fault = null;
+  ordinary[0].imports[1].delay = false;
+  // A declaration cannot substitute a delay edge for the held PE observation.
+  const observe = reader.operation;
+  reader.operation = async (name, index) => {
+    const value = await observe(name, index);
+    if (name === "release-pe" && index === 0) value.imports[1].delay = true;
+    return value;
+  };
+  await assert.rejects(experiment.loader(ordinary, [0]));
+  await assert.rejects(experiment.runtime(0, 0, ordinary));
 });
 
 test("Windows interrupted publication retires held workers and retains objects without matched final state", async () => {
@@ -2216,8 +2273,18 @@ function rawPreparation({ experiment = false, environment } = {}) {
         linkerMajor: 1,
         linkerMinor: 0,
         timestamp: 0,
-        imports: [],
+        imports: f.experimentImports ?? [],
         complete: true,
+      };
+    }
+    if (operation === "prepare-experiment-loader") {
+      assert.ok(experiment && !scope.readBytes);
+      const file = f.importResolutions?.get(decode(args[0]));
+      assert.ok(file, "Unresolved installed import");
+      return {
+        pathHex: encode(file),
+        identity: fileId(file),
+        sha256: digest(f.files.get(file)),
       };
     }
     if (operation === "prepare-write") {
@@ -3353,9 +3420,28 @@ test("Windows experiment held-image protocol pins exact helpers and keeps instal
     reopen: true,
   });
   try {
+    const contract = "api-fixture-runtime-l1-1-0.dll",
+      physical = "api-fixture-forward-l1-1-0.dll",
+      target = "C:\\Windows\\System32\\fixture-runtime.dll";
+    f.files.set(target, f.signed);
+    f.importResolutions = new Map([
+      [contract, target],
+      [physical, target],
+    ]);
+    f.experimentImports = [
+      { name: contract, delay: false },
+      { name: physical, delay: true },
+    ];
     const held = await native.readImage(helper.path);
     assert.equal(held.sha256, helper.sha256);
     assert.deepEqual(held.bytes, f.files.get(helper.path));
+    assert.deepEqual(held.pe.imports, f.experimentImports);
+    for (const name of [contract, physical])
+      assert.deepEqual(await native.resolveImport(name), {
+        file: target,
+        sha256: digest(f.signed),
+        identitySha256: observationDigest(f.rawFileId(target)),
+      });
     const stock = await native.readImage(installed, true);
     assert.deepEqual(stock.bytes, f.files.get(installed));
     assert.equal(requests.length, 2);

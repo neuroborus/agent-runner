@@ -362,7 +362,20 @@ export function createWindowsPreparationFiles(input, options = {}) {
         closed(signature, ["signatureSha256"]);
         requireObservation(hash(signature.signatureSha256));
         signatureSha256 = signature.signatureSha256;
-        pe = await command("prepare-experiment-pe");
+        try {
+          pe = await command("prepare-experiment-pe");
+        } catch (cause) {
+          try {
+            Object.assign(cause, {
+              image: file,
+              imageSha256: actual.sha256,
+              imageIdentity: actual.identity,
+            });
+          } catch {
+            // Diagnostic context cannot replace the original reader failure.
+          }
+          throw cause;
+        }
         closed(pe, [
           "dll",
           "linkerMajor",
@@ -374,6 +387,14 @@ export function createWindowsPreparationFiles(input, options = {}) {
         requireObservation(
           pe.complete && Array.isArray(pe.imports) && pe.imports.length <= 256,
         );
+        for (const imported of pe.imports) {
+          closed(imported, ["name", "delay"]);
+          requireObservation(
+            typeof imported.name === "string" &&
+              /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(imported.name) &&
+              typeof imported.delay === "boolean",
+          );
+        }
       }
     } finally {
       const released = await command("prepare-release", [actual.slot]);
@@ -414,10 +435,15 @@ export function createWindowsPreparationFiles(input, options = {}) {
           /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name),
       );
       const actual = await command("prepare-experiment-loader", [encode(name)]);
-      closed(actual, ["pathHex"]);
+      closed(actual, ["pathHex", "identity", "sha256"]);
       const file = decode(actual.pathHex);
-      requireObservation(location(file));
-      return file;
+      normalizeWindowsFileIdentity(actual.identity);
+      requireObservation(location(file) && hash(actual.sha256));
+      return {
+        file,
+        sha256: actual.sha256,
+        identitySha256: observationDigest(actual.identity),
+      };
     },
     readExperimentInput(file) {
       requireObservation(bootstrap.purpose === "experiment");
