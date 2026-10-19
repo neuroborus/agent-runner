@@ -428,6 +428,27 @@ test("effective reads reject truncated graphs, substituted bytes and changed sub
       object,
     ),
   );
+  const hosted = { ...object, uid: 501, mode: 0o777 },
+    installed = {
+      ...authority,
+      object: hosted,
+      path: Buffer.from("/usr/lib/dyld").toString("hex"),
+    };
+  assert.deepEqual(
+    normalizeDarwinAuthorityRead(installed, identity, hosted, "experiment"),
+    installed,
+  );
+  assert.throws(() =>
+    normalizeDarwinAuthorityRead(installed, identity, hosted),
+  );
+  assert.throws(() =>
+    normalizeDarwinAuthorityRead(
+      { ...installed, path: authority.path },
+      identity,
+      hosted,
+      "experiment",
+    ),
+  );
 });
 
 test("Git snapshots rejoin held bytes and reject mixed metadata generations", async () => {

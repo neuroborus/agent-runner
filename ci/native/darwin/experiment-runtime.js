@@ -72,9 +72,7 @@ export function createDarwinExperimentRuntimeEffects(core) {
           digest(loader) === specification.entries[slots.loader].sha256 &&
             digest(loader) === inputs.loader.sha256 &&
             loaderBefore.identity === inputs.loader.identity &&
-            loaderBefore.uid === 0 &&
             !loaderBefore.directory &&
-            !(loaderBefore.mode & 0o22) &&
             observationDigest(loaderBefore) ===
               observationDigest(loaderAfter) &&
             observationDigest(loaderMacho) ===

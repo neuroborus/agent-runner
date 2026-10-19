@@ -9,7 +9,7 @@ import {
   observationDigest,
   normalizeNativePolicyContext,
 } from "../index.js";
-import { protectedBytes } from "./private-files.js";
+import { protectedBytes, isDarwinInstalledPath } from "./private-files.js";
 import { darwinCustodyChannel } from "./channel.js";
 import {
   digest,
@@ -269,7 +269,9 @@ async function verifyAssets(input, fs) {
   for (const tool of Object.values(input.tools)) {
     const stat = await fs.lstat(tool.path);
     requireDarwin(
-      stat.isFile() && stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o22),
+      stat.isFile() &&
+        ((input.purpose === "experiment" && isDarwinInstalledPath(tool.path)) ||
+          (stat.uid === 0 && stat.gid === 0 && !(stat.mode & 0o22))),
     );
     // Experiment entry checks both fixed actual-byte pins under privilege before
     // emitting any admission frame. Reviewed assets retain the ordinary reader.
@@ -277,7 +279,7 @@ async function verifyAssets(input, fs) {
       await protectedBytes(tool, 0, stat.mode & 0o7777, 134217728, fs, true);
   }
 }
-function snapshot(value, domain = { uid: 0, gid: 0 }, maximum = 536870912) {
+function snapshot(value, domain = { uid: 0, gid: 0 }, hosted = false) {
   observationObject(value, [
     "identity",
     "bytes",
@@ -288,12 +290,15 @@ function snapshot(value, domain = { uid: 0, gid: 0 }, maximum = 536870912) {
   ]);
   normalizeDarwinFileIdentity(value.identity);
   requireDarwin(
-    integer(value.bytes, maximum) &&
-      [0, domain.uid].includes(value.uid) &&
-      [0, domain.gid].includes(value.gid) &&
+    typeof hosted === "boolean" &&
+      integer(value.bytes, 536870912) &&
+      integer(value.uid, 0xffffffff) &&
+      integer(value.gid, 0xffffffff) &&
+      (hosted || [0, domain.uid].includes(value.uid)) &&
+      (hosted || [0, domain.gid].includes(value.gid)) &&
       integer(value.mode, 0o7777) &&
       typeof value.directory === "boolean" &&
-      !(value.mode & 0o22),
+      (hosted || !(value.mode & 0o22)),
   );
   return structuredClone(value);
 }
@@ -397,6 +402,17 @@ export function createDarwinCustodyReader(value, options = {}) {
     fileActive = false;
   let domain, reservationNonce, reservationIndex;
   const held = new Map();
+  // These paths come from the exact plan bytes checked by case provisioning;
+  // native admission independently classifies the sealed plan's actual paths.
+  const hostedSlots = new Set(
+    (options.entries ?? []).flatMap((entry, index) =>
+      input.purpose === "experiment" &&
+      !["directory", "authority"].includes(entry.kind) &&
+      isDarwinInstalledPath(entry.path)
+        ? [index]
+        : [],
+    ),
+  );
   const ownershipSessions = new Map();
   const pendingReceipts = [];
   const verifyReceipt = async (pin) => {
@@ -666,7 +682,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     requireDarwin(before);
     const message = await command("inspect", index);
     return observed(() => {
-      const actual = snapshot(message, domain);
+      const actual = snapshot(message, domain, hostedSlots.has(index));
       requireDarwin(JSON.stringify(actual) === JSON.stringify(before));
       return actual;
     });
@@ -1014,23 +1030,16 @@ export function createDarwinCustodyReader(value, options = {}) {
         ...(Object.hasOwn(actual, "macho") ? ["macho"] : []),
       ]);
       if (actual.macho) actual.macho = macho(actual.macho);
-      const object = snapshot(actual.object, {
-        uid: 0,
-        gid: actual.object.gid,
-      });
+      const hosted = isDarwinInstalledPath(file),
+        readSnapshot = (value) =>
+          snapshot(value, { uid: 0, gid: value.gid }, hosted),
+        object = readSnapshot(actual.object);
       if (path.basename(file) === "SDKSettings.json") {
-        actual.sdk = snapshot(actual.sdk, { uid: 0, gid: actual.sdk.gid });
-        actual.developer = snapshot(actual.developer, {
-          uid: 0,
-          gid: actual.developer.gid,
-        });
+        actual.sdk = readSnapshot(actual.sdk);
+        actual.developer = readSnapshot(actual.developer);
         requireDarwin(
           actual.sdk.directory &&
-            actual.sdk.uid === 0 &&
-            !(actual.sdk.mode & 0o22) &&
             actual.developer.directory &&
-            actual.developer.uid === 0 &&
-            !(actual.developer.mode & 0o22) &&
             typeof actual.compilerPathHex === "string" &&
             /^(?:[a-f0-9]{2}){1,4095}$/u.test(actual.compilerPathHex),
         );
@@ -1038,9 +1047,9 @@ export function createDarwinCustodyReader(value, options = {}) {
       if (cdhash) requireDarwin(actual.cdhash === cdhash);
       requireDarwin(
         !object.directory &&
-          object.uid === 0 &&
+          (hosted || object.uid === 0) &&
           object.bytes > 0 &&
-          !(object.mode & 0o6022) &&
+          (hosted || !(object.mode & 0o6022)) &&
           actual.sha256 === pin,
       );
       return {
@@ -1646,7 +1655,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     async open(index) {
       requireDarwin(integer(index, 127) && !held.has(index));
       const message = await command("open", index),
-        actual = observed(() => snapshot(message, domain));
+        actual = observed(() =>
+          snapshot(message, domain, hostedSlots.has(index)),
+        );
       held.set(index, actual);
       return structuredClone(actual);
     },
@@ -1733,7 +1744,12 @@ export function createDarwinCustodyReader(value, options = {}) {
       await recheck(index);
       const actual = await command("authority", subject.pid, index);
       return observed(() =>
-        normalizeDarwinAuthorityRead(actual, subject, held.get(index)),
+        normalizeDarwinAuthorityRead(
+          actual,
+          subject,
+          held.get(index),
+          hostedSlots.has(index) ? "experiment" : "reviewed",
+        ),
       );
     },
     async socket(subjectValue, descriptor) {

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { EventEmitter } from "node:events";
 import { constants } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import { PassThrough, Writable } from "node:stream";
 import {
   createDarwinCustodyReader,
@@ -10,7 +12,7 @@ import {
 } from "./index.js";
 import { darwinCustodyChannel } from "./channel.js";
 import { digest } from "./protocol.js";
-import { protectedBytes } from "./private-files.js";
+import { protectedBytes, isDarwinInstalledPath } from "./private-files.js";
 import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
@@ -110,7 +112,7 @@ test("Darwin protected installed hardlinks require classification, protected anc
   }
 });
 
-test("Darwin experiment cache reads retain canonical parents, held identities and bytes under hosted ancestry", async () => {
+test("Darwin experiment installed reads retain canonical parents, held identities and bytes under hosted trust", async () => {
   const cache =
     "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h";
   for (const [purpose, file, fault, accepted = false] of [
@@ -119,7 +121,16 @@ test("Darwin experiment cache reads retain canonical parents, held identities an
     ["reviewed", cache],
     [undefined, cache],
     ["unknown", cache],
-    ["experiment", "/usr/bin/clang"],
+    ...[
+      "/usr/bin/clang",
+      "/sbin/pfctl",
+      "/usr/bin/hdiutil",
+      "/usr/lib/dyld",
+      "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+      "/private/etc/security/audit_event",
+      "/Library/Developer/Fixture.sdk/usr/include/bsm/audit_kevents.h",
+    ].map((file) => ["experiment", file, null, true]),
+    ["experiment", cache, "file-owner", true],
     [
       "experiment",
       "/Library/native-poc-" + "a".repeat(64) + "/dyld_shared_cache_x86_64",
@@ -133,7 +144,6 @@ test("Darwin experiment cache reads retain canonical parents, held identities an
       "parent-alias",
       "parent-identity",
       "file-alias",
-      "file-owner",
       "file-identity",
       "content",
     ].map((fault) => ["experiment", cache, fault]),
@@ -153,7 +163,7 @@ test("Darwin experiment cache reads retain canonical parents, held identities an
           : fault === "parent-identity"
             ? BigInt(++parentSamples)
             : 3n,
-        mode: leaf ? 0o444n : 0o777n,
+        mode: leaf ? 0o666n : 0o777n,
         uid: leaf && fault !== "file-owner" ? 0n : 501n,
         gid: 0n,
         nlink: 2n,
@@ -206,6 +216,128 @@ test("Darwin experiment cache reads retain canonical parents, held identities an
 const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
   cdhash = "c".repeat(40);
+
+test("Darwin native installed, build and helper-slot guards distinguish hosted files from private inputs", async () => {
+  const reader = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    header = await readFile(new URL("custody.h", import.meta.url), "utf8");
+  for (const lane of ["installed", "build", "slot"]) {
+    const source = lane === "installed" ? header : reader,
+      start = source.indexOf(
+        lane === "slot"
+          ? "      bool hosted = !authority"
+          : "  bool sampled = false;",
+      ),
+      end = source.indexOf(
+        lane === "installed"
+          ? "    need(!fstat(fd, &after)"
+          : lane === "build"
+            ? "  printf("
+            : "      if (!dir && !authority)",
+        start,
+      ),
+      body = source
+        .slice(start, end)
+        .replaceAll(/\bbool\b/gu, "let")
+        .replaceAll("const char *predicate", "let predicate")
+        .replaceAll("->", ".")
+        .replaceAll(/&(value\.stat|entry\.stat|before)/gu, "$1")
+        .replaceAll("(uint64_t)", "")
+        .replaceAll(/\b(\d+)ULL\b/gu, "$1")
+        .replaceAll(/\b0([0-7]{2,})\b/gu, "0o$1");
+    assert.ok(start > 0 && end > start);
+    for (const [file, experiment, fault, accepted] of [
+      ["/usr/bin/hdiutil", true, null, true],
+      [
+        "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+        true,
+        null,
+        true,
+      ],
+      ["/usr/bin/hdiutil", false, null, false],
+      ["/fixture/private/helper", true, null, false],
+      ["/unrelated/git", true, null, false],
+      ...["open", "stat", "kind", "links", "size"]
+        .filter((fault) => lane !== "installed" || fault !== "size")
+        .map((fault) => ["/usr/bin/hdiutil", true, fault, false]),
+    ]) {
+      const refusals = [],
+        calls = [],
+        stat = {
+          st_uid: 501,
+          st_gid: 20,
+          st_mode: 0o100777,
+          st_nlink: fault === "links" ? 0 : 3,
+          st_size: fault === "size" ? 536870913 : 4,
+        },
+        entry = {
+          path: file,
+          kind: "helper",
+          fd: fault === "open" ? -1 : 3,
+          stat: {},
+        },
+        hosted = experiment && isDarwinInstalledPath(file),
+        context = {
+          value: entry,
+          entry,
+          name: file,
+          hosted,
+          authority: false,
+          dir: false,
+          fd: entry.fd,
+          before: {},
+          identity: stat,
+          parent: file,
+          leaf: true,
+          file_stat_same: () => true,
+          subject_uid: 1001,
+          subject_gid: 1002,
+          fstat(fd, target) {
+            calls.push("stat");
+            Object.assign(target, stat);
+            return fault === "stat" ? -1 : 0;
+          },
+          S_ISREG: () => fault !== "kind",
+          S_ISDIR: () => false,
+          experiment_installed_path: () => hosted,
+          installed_input() {
+            calls.push("held");
+            return 1;
+          },
+          no_acl() {
+            calls.push("acl");
+          },
+          strcmp: (a, b) => Number(a !== b),
+          NULL: null,
+          input_refusal(name, predicate, metadata) {
+            refusals.push({ name, predicate, metadata });
+          },
+          need(ok) {
+            if (!ok) throw new Error("Original native refusal");
+          },
+        },
+        run = () => new Script(body).runInNewContext(context);
+      if (accepted) {
+        run();
+        assert.deepEqual(
+          calls,
+          lane === "installed" ? ["stat"] : ["stat", "held"],
+        );
+      } else {
+        assert.throws(run, /Original native refusal/);
+        assert.equal(refusals[0].name, file);
+        assert.equal(refusals[0].predicate, fault ?? "eligibility");
+        assert.equal(
+          refusals[0].metadata === null,
+          ["open", "stat"].includes(fault),
+        );
+        assert.ok(!calls.includes("held") && !calls.includes("acl"));
+      }
+    }
+  }
+});
 const identity = (pid) => ({
   pid,
   pidVersion: 1,
@@ -256,13 +388,16 @@ const input = {
   sdkSha256: hash,
   buildSha256: hash,
 };
-function fixture({
+export function fixture({
   failure,
   onPersist,
   purpose = "reviewed",
   build = false,
   inputBytes = 4,
   buildBytes = 4,
+  hosted = false,
+  inputData,
+  entries = [],
 } = {}) {
   const selectedInput = structuredClone(input);
   if (build) selectedInput.context.executionId = "build";
@@ -292,6 +427,7 @@ function fixture({
     mode:
       index === 4 ? 0o555 : index === 0 ? 0o550 : index === 3 ? 0o400 : 0o700,
     directory: ![0, 3, 4].includes(index),
+    ...(hosted && index === 0 ? { uid: 501, gid: 20, mode: 0o777 } : {}),
   });
   const transport = async (_, args) => {
     events.push(args[0]);
@@ -372,6 +508,15 @@ function fixture({
           };
         if (op === "signature")
           value = { cdhash, entitlementsSha256: hash, valid: true };
+        if (op === "authority")
+          value = {
+            subject: identity(Number(a)),
+            sandboxed: true,
+            path: Buffer.from(entries[Number(b)].path).toString("hex"),
+            object: object(Number(b)),
+            aclSha256: hash,
+            decisions: [0, 1, 1, 1, 0],
+          };
         const metadata = {
           headerSha256: hash,
           dependencies: [
@@ -391,10 +536,25 @@ function fixture({
             root: { ...object(1), mode: 0o555 },
             sha256: digest(Buffer.from("data")),
           };
-        if (op === "build-input")
+        if (op === "build-input") {
+          const file = Buffer.from(a, "hex").toString(),
+            data = await inputData?.(file),
+            installed = hosted && isDarwinInstalledPath(file);
           value = {
-            object: { ...object(4), mode: 0o444, gid: 80, bytes: inputBytes },
-            sha256: failure === "build-input" ? "e".repeat(64) : b,
+            object: {
+              ...object(4),
+              mode: installed ? 0o666 : 0o444,
+              uid: installed ? 501 : 0,
+              gid: 80,
+              bytes: data?.length ?? inputBytes,
+            },
+            sha256:
+              failure === "build-input"
+                ? "e".repeat(64)
+                : data
+                  ? digest(data)
+                  : b,
+            ...(inputData ? { macho: metadata } : {}),
             ...(c
               ? { cdhash: failure === "build-signature" ? "e".repeat(40) : c }
               : {}),
@@ -405,7 +565,9 @@ function fixture({
                   sdk: {
                     ...object(2),
                     gid: 20,
-                    mode: failure === "sdk-writable" ? 0o775 : 0o755,
+                    uid: installed ? 501 : 0,
+                    mode:
+                      failure === "sdk-writable" || installed ? 0o775 : 0o755,
                     directory: failure !== "sdk-file",
                   },
                   ...(failure === "developer-missing"
@@ -413,9 +575,12 @@ function fixture({
                     : {
                         developer: {
                           ...object(2),
+                          uid: installed ? 501 : 0,
                           gid: 20,
                           mode:
-                            failure === "developer-writable" ? 0o775 : 0o755,
+                            failure === "developer-writable" || installed
+                              ? 0o775
+                              : 0o755,
                           directory: failure !== "developer-file",
                         },
                       }),
@@ -428,6 +593,7 @@ function fixture({
                 }
               : {}),
           };
+        }
         if (op === "build")
           value = {
             osBuild: Buffer.from("fixture-build").toString("hex"),
@@ -489,6 +655,7 @@ function fixture({
     };
   };
   const reader = createDarwinCustodyReader(selectedInput, {
+    entries,
     runtime: {
       platform: "darwin",
       arch: "x64",
@@ -564,10 +731,8 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
   await substituted.reader.close();
   for (const failure of [
     "sdk-missing",
-    "sdk-writable",
     "sdk-file",
     "developer-missing",
-    "developer-writable",
     "developer-file",
     "compiler-path",
   ]) {
@@ -600,6 +765,43 @@ test("Darwin experiment build reads keep installed pins and held signatures sepa
     reviewed.reader.readBuildInput("/Library/Developer/input.h", hash),
   );
   assert.deepEqual(reviewed.events, []);
+});
+test("Darwin custody relaxes only experiment installed slots and preserves repeated observations", async () => {
+  const installed = "/Applications/Fixture.app/Contents/Developer/usr/bin/git";
+  for (const [purpose, file, accepted] of [
+    ["experiment", installed, true],
+    ["reviewed", installed, false],
+    ["experiment", "/fixture/private/helper", false],
+    ["experiment", "/unrelated/git", false],
+  ]) {
+    const f = fixture({
+      purpose,
+      hosted: true,
+      entries: [{ kind: "helper", path: file }],
+    });
+    await f.reader.start();
+    if (accepted) {
+      assert.equal((await f.reader.open(0)).uid, 501);
+      for (let i = 0; i < 2; i++) {
+        assert.equal((await f.reader.inspect(0)).mode, 0o777);
+        assert.equal((await f.reader.read(0)).toString(), "data");
+        assert.equal(
+          (await f.reader.authority(identity(30), 0)).aclSha256,
+          hash,
+        );
+      }
+    } else await assert.rejects(f.reader.open(0));
+    await f.reader.close();
+  }
+  const f = fixture({ purpose: "experiment", build: true, hosted: true });
+  await f.reader.start();
+  const settings = await f.reader.readBuildInput(
+    "/Library/Developer/Fixture.sdk/SDKSettings.json",
+    hash,
+  );
+  assert.equal(settings.object.uid, 501);
+  assert.equal(settings.developer.uid, 501);
+  await f.reader.close();
 });
 test("Darwin selected toolchain response sizes retain the installed-data bound and generated-image limit", async () => {
   for (const bytes of [134217729, 536870912, 536870913]) {

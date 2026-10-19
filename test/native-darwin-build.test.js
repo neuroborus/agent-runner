@@ -11,7 +11,7 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-test("Darwin hosted cache ancestry is scoped to installed runtime paths and experiment purpose", async () => {
+test("Darwin hosted ancestry is scoped to installed paths and experiment purpose", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8");
   const reader = await readFile(new URL("custody-reader.c", SOURCE), "utf8");
   // The SDK's <servers/bootstrap.h> already declares bootstrap_parent.
@@ -19,7 +19,8 @@ test("Darwin hosted cache ancestry is scoped to installed runtime paths and expe
   for (const experiment of [false, true]) {
     const functions = [
       "installed_cache_path",
-      "experiment_cache_ancestors",
+      "installed_input_path",
+      "experiment_installed_path",
       "is_bootstrap_parent",
     ].map((name) => {
       const body = new RegExp(
@@ -45,6 +46,7 @@ test("Darwin hosted cache ancestry is scoped to installed runtime paths and expe
         name.includes(separator)
           ? name.slice(name.lastIndexOf(separator))
           : null,
+      strstr: (name, part) => name.includes(part),
       strcmp: (a, b) => Number(a !== b),
       strncmp: (a, b, size) => Number(a.slice(0, size) !== b.slice(0, size)),
       S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
@@ -52,6 +54,9 @@ test("Darwin hosted cache ancestry is scoped to installed runtime paths and expe
     for (const file of [
       "/System/Library/dyld/dyld_shared_cache_x86_64",
       "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h",
+      "/Library/Developer/Fixture.sdk/SDKSettings.json",
+      "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+      "/usr/bin/sudo",
     ]) {
       assert.equal(
         accepts(file, { st_uid: 501, st_mode: 0o40777 }),
@@ -72,8 +77,6 @@ test("Darwin hosted cache ancestry is scoped to installed runtime paths and expe
       "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_other",
       "/Library/native-poc-" + "a".repeat(64) + "/dyld_shared_cache_x86_64",
       "/private/var/run/native-poc/cases/fixture/dyld_shared_cache_x86_64",
-      "/Library/Developer/Fixture.sdk/SDKSettings.json",
-      "/usr/bin/sudo",
     ]) {
       assert.equal(
         accepts(file, { st_uid: 501, st_mode: 0o40777 }),
@@ -3091,25 +3094,40 @@ test("Darwin cache image reads reject wrapped slides and ranges while retaining 
   assert.match(image, /stable\(entry\)/u);
 });
 
-test("Darwin privileged launches recheck only their fixed protected tools", async () => {
+test("Darwin privileged launches recheck their fixed hosted tool identities and bounds", async () => {
   const source = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
-    guard = source.match(/\(index == 0 \? ([^\n]+)\)\);/u)?.[1];
+    start = source.indexOf("static void bootstrap_tool("),
+    body = source.slice(start, source.indexOf("\n}", start)),
+    guard = /need\((S_ISREG\(st.st_mode\)[^\n]+)\);/u.exec(body)?.[1];
   assert.ok(guard);
+  let checks = 0;
   const accepts = new Script(
-    `(index, mode) => !!(index == 0 ? ${guard.replaceAll(/\b0([0-7]+)\b/gu, "0o$1")})`,
-  ).runInNewContext();
-  for (const [index, mode, expected] of [
-    [0, 0o4111, true],
-    [0, 0o4755, true],
-    [0, 0o4555, true],
-    [0, 0o4777, false],
-    [0, 0o6755, false],
-    [0, 0o4510, false],
-    [0, 0o755, false],
-    [1, 0o755, true],
-    [1, 0o4111, false],
+    `st => !!(${guard.replaceAll("&st", "st")})`,
+  ).runInNewContext({
+    S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+    value: { path: "/usr/bin/sudo" },
+    installed_input(name) {
+      assert.equal(name, "/usr/bin/sudo");
+      checks++;
+      return true;
+    },
+  });
+  const observed = {
+    st_mode: 0o100777,
+    st_uid: 501,
+    st_gid: 20,
+    st_nlink: 3,
+    st_size: 4,
+  };
+  assert.equal(accepts(observed), true);
+  for (const changed of [
+    { st_nlink: 0 },
+    { st_mode: 0o40777 },
+    { st_size: 0 },
+    { st_size: 134217729 },
   ])
-    assert.equal(accepts(index, mode), expected);
+    assert.equal(accepts({ ...observed, ...changed }), false);
+  assert.equal(checks, 1);
   assert.match(
     source,
     /const char \*paths\[\] = \{"\/usr\/bin\/sudo", "\/usr\/bin\/env"\}/u,
@@ -3394,7 +3412,7 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
     ].map((name) => readFile(new URL(name, SOURCE), "utf8")),
   );
   const body =
-    /static void custody_acl\(int fd, char hash\[65\]\) \{([\s\S]*?)\n\}/u.exec(
+    /static void custody_acl\(int fd, char hash\[65\], bool require_empty\) \{([\s\S]*?)\n\}/u.exec(
       shared,
     )?.[1];
   const same = /static int file_stat_same\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
@@ -3405,7 +3423,7 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
   // inspection, absence, validation, serialization and refusal branches are C source.
   const script = new Script(`
     function file_stat_same(a, b) {${same.replaceAll("->", ".")}}
-    (fd, hash) => {${body
+    (fd, hash, require_empty = true) => {${body
       .replace(
         "struct stat before, inspected, after;",
         "const before = {}, inspected = {}, after = {};",
@@ -3470,6 +3488,7 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
       ["read-and-release", "acl-read", 2],
       ...(hashing
         ? [
+            ["hosted-entry", null],
             ["text", "acl-text", 5],
             ["text-size", "acl-text-size"],
             ["text-negative", "acl-text-size"],
@@ -3486,7 +3505,11 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
         released = [];
       const security = {},
         acl = {},
-        text = Buffer.from("!#acl 1\n");
+        text = Buffer.from(
+          fault === "hosted-entry"
+            ? "!#acl 1\nuser:501:allow read\n"
+            : "!#acl 1\n",
+        );
       const metadata = {
         st_dev: 1,
         st_ino: 42,
@@ -3656,7 +3679,7 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
         );
         assert.equal(output.value, null);
       } else {
-        inspect(7, hashing ? output : null);
+        inspect(7, hashing ? output : null, fault !== "hosted-entry");
         assert.equal(
           output.value,
           hashing ? digest(fault === "absent" ? "" : text) : null,
@@ -3695,11 +3718,13 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
       if (fault === "inspect-change")
         assert.equal(calls.includes("query"), false);
       if (fault === "query") assert.equal(calls.includes("read"), false);
+      if (fault === "hosted-entry")
+        assert.equal(calls.includes("entry"), false);
     }
   }
   assert.match(
     shared,
-    /static void no_acl\(int fd\) \{ custody_acl\(fd, NULL\); \}/u,
+    /static void no_acl\(int fd\) \{ custody_acl\(fd, NULL, true\); \}/u,
   );
   assert.match(
     shared.slice(
@@ -3710,10 +3735,27 @@ test("Darwin custody distinguishes inspected ACL absence and releases held inspe
   );
   for (const owner of [reader, builder, effective])
     assert.doesNotMatch(owner, /acl_get_fd_np\(|static void no_acl\(/u);
-  assert.match(
-    effective,
-    /stable\(entry\); char hash\[65\]; custody_acl\(entry->fd, hash\)/u,
-  );
+  assert.match(effective, /custody_acl\(entry->fd, hash, !hosted\)/u);
+  const hostedGuard = /bool hosted = ([^;]+);/u.exec(effective)[1],
+    guard = new Script(hostedGuard.replaceAll("->", "."));
+  for (const [installed, kind, regular, expected] of [
+    [true, "helper", true, true],
+    [true, "data", true, true],
+    [false, "helper", true, false],
+    [true, "authority", true, false],
+    [true, "directory", false, false],
+  ])
+    assert.equal(
+      Boolean(
+        guard.runInNewContext({
+          entry: { path: "/fixture/input", kind, stat: { st_mode: 0 } },
+          experiment_installed_path: () => installed,
+          S_ISREG: () => regular,
+          strcmp: (a, b) => Number(a !== b),
+        }),
+      ),
+      expected,
+    );
 });
 
 test("experiment PF writes preserve foreign policy and journal each conditional effect", async () => {

@@ -621,6 +621,7 @@ export function createDarwinCaseProvisioning(state, options) {
         : [];
       const reader = state.createReader(declared.custody, {
         ...options.readerOptions,
+        entries,
         caseContextSha256: observationDigest(binding.context),
         persist: (record) => persist({ phase: "custody", record }),
       });

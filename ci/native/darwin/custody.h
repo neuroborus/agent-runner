@@ -37,8 +37,9 @@ static int file_stat_same(const struct stat *a, const struct stat *b) {
 }
 /* A null acl_get_fd_np result cannot distinguish absence from a failed read.
  * Inspect FILESEC_ACL on the held object. A hash request serializes actual ACL
- * text, or zero bytes for inspected absence; both paths require no entries. */
-static void custody_acl(int fd, char hash[65]) {
+ * text, or zero bytes for inspected absence. Private/reviewed reads also
+ * require no entries; hosted installed authority reads observe the actual ACL. */
+static void custody_acl(int fd, char hash[65], bool require_empty) {
   struct stat before, inspected, after;
   filesec_t security = NULL; acl_t acl = NULL; char *bytes = NULL; ssize_t length = 0;
   const char *operation = NULL, *domain = "errno";
@@ -59,11 +60,13 @@ static void custody_acl(int fd, char hash[65]) {
     if (result || !acl) { operation = "acl-read"; domain = result ? "errno" : "invariant"; if (!result) error = 0; goto done; }
     errno = 0; result = acl_valid(acl); error = errno;
     if (result) { operation = "acl-valid"; goto done; }
-    acl_entry_t entry;
-    errno = 0; result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
-    /* Darwin returns zero for an entry and -1/EINVAL after a valid empty ACL. */
-    if (!(result == -1 && error == EINVAL)) {
-      operation = "acl-empty"; domain = result == -1 ? "errno" : "invariant"; if (result != -1) error = 0; goto done;
+    if (require_empty) {
+      acl_entry_t entry;
+      errno = 0; result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry); error = errno;
+      /* Darwin returns zero for an entry and -1/EINVAL after a valid empty ACL. */
+      if (!(result == -1 && error == EINVAL)) {
+        operation = "acl-empty"; domain = result == -1 ? "errno" : "invariant"; if (result != -1) error = 0; goto done;
+      }
     }
     if (hash) {
       errno = 0; bytes = acl_to_text(acl, &length); error = errno;
@@ -90,24 +93,34 @@ done:
   }
   if (hash) hex(sum, sizeof(sum), hash);
 }
-static void no_acl(int fd) { custody_acl(fd, NULL); }
+static void no_acl(int fd) { custody_acl(fd, NULL, true); }
 static bool installed_cache_path(const char *name) {
   const char *base = strrchr(name, '/');
   return base && (!strcmp(base + 1, "dyld_shared_cache_x86_64") || !strcmp(base + 1, "dyld_shared_cache_x86_64h")) &&
     (!strncmp(name, "/System/Library/dyld/", 21) || !strncmp(name, "/System/Volumes/Preboot/", 24));
 }
-/* Only the installed cache's enclosing hosted directories use ordinary trust.
- * Generated helpers, private roots, and the cache file itself remain protected. */
-static bool experiment_cache_ancestors(const char *name) {
+/* Classification is independent of reviewed file eligibility and custody kind. */
+static bool installed_input_path(const char *name) {
+  return !strcmp(name, "/usr/bin/clang") || !strcmp(name, "/usr/bin/xcrun") ||
+    !strcmp(name, "/usr/bin/codesign") || !strcmp(name, "/usr/bin/env") ||
+    !strcmp(name, "/usr/bin/sudo") || !strcmp(name, "/usr/bin/git") ||
+    !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/sbin/pfctl") ||
+    !strcmp(name, "/usr/lib/dyld") || !strcmp(name, "/private/etc/security/audit_event") ||
+    !strcmp(name, "/private/etc/security/audit_class") || !strcmp(name, "/etc/security/audit_event") ||
+    !strcmp(name, "/etc/security/audit_class") || !strncmp(name, "/Library/Developer/", 19) ||
+    (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) ||
+    !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || installed_cache_path(name);
+}
+static bool experiment_installed_path(const char *name) {
 #ifdef NATIVE_CI_EXPERIMENT
-  return installed_cache_path(name);
+  return installed_input_path(name);
 #else
   (void)name; return false;
 #endif
 }
 static bool is_bootstrap_parent(const char *name, const struct stat *st) {
   return S_ISDIR(st->st_mode) &&
-    (experiment_cache_ancestors(name) || (st->st_uid == 0 && !(st->st_mode & 022)));
+    (experiment_installed_path(name) || (st->st_uid == 0 && !(st->st_mode & 022)));
 }
 /* A pin or custody kind never makes a generated input an installed input. */
 static int installed_path(const char *name, const struct stat *st) {
@@ -118,23 +131,38 @@ static int installed_path(const char *name, const struct stat *st) {
   for (unsigned i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) if (!strcmp(name, tools[i]))
     return st->st_gid == 0 && (!strcmp(name, "/usr/bin/sudo") ? mode == 04555 || mode == 04755 : mode == 0555 || mode == 0755);
   if (mode & 06022) return 0;
-  return !strcmp(name, "/usr/lib/dyld") || !strcmp(name, "/private/etc/security/audit_event") ||
-    !strcmp(name, "/private/etc/security/audit_class") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") ||
-    !strncmp(name, "/Library/Developer/", 19) || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) ||
-    !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) ||
-    installed_cache_path(name);
+  return installed_input_path(name);
+}
+/* Diagnostic samples never acquire metadata or replace the guard's errno. */
+static void input_refusal(const char *name, const char *predicate, const struct stat *st) {
+  int error = errno; size_t size = strlen(name); char encoded[PATH_MAX*2+1] = {0};
+  if (size < PATH_MAX) {
+    hex((const unsigned char *)name, size, encoded);
+    fprintf(stderr, "native-darwin-input: predicate=%s path-length=%zu path-hex=%s errno=%d\n", predicate, size, encoded, error);
+    if (st) fprintf(stderr, "native-darwin-input-stat: dev=%jd inode=%ju uid=%ju gid=%ju mode=%#jo links=%ju size=%jd\n",
+      (intmax_t)st->st_dev, (uintmax_t)st->st_ino, (uintmax_t)st->st_uid, (uintmax_t)st->st_gid,
+      (uintmax_t)st->st_mode, (uintmax_t)st->st_nlink, (intmax_t)st->st_size);
+  }
+  fflush(stderr); errno = error;
 }
 static int installed_input(const char *name, const struct stat *identity) {
-  if (!installed_path(name, identity)) return 0;
+  bool hosted = experiment_installed_path(name);
+  if (!(hosted ? S_ISREG(identity->st_mode) && identity->st_nlink > 0 : installed_path(name, identity))) return 0;
   char canonical[PATH_MAX], parent[PATH_MAX];
   need(realpath(name, canonical) && !strcmp(name, canonical) && strlen(name) < sizeof(parent));
   strcpy(parent, name); int leaf = 1;
   for (;;) {
     int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (leaf ? 0 : O_DIRECTORY));
     struct stat before, after, named;
-    need(fd >= 0 && !fstat(fd, &before) &&
-      (leaf ? before.st_uid == 0 && !(before.st_mode & 022) && file_stat_same(identity, &before) : is_bootstrap_parent(name, &before)));
-    if (leaf || !experiment_cache_ancestors(name)) no_acl(fd);
+    bool sampled = false; const char *predicate = "open";
+    bool ok = fd >= 0 && (predicate = "stat", sampled = fstat(fd, &before) == 0) &&
+      (predicate = "kind", leaf ? S_ISREG(before.st_mode) : S_ISDIR(before.st_mode)) &&
+      (predicate = "links", !leaf || before.st_nlink > 0) &&
+      (predicate = "eligibility", hosted || (before.st_uid == 0 && !(before.st_mode & 022))) &&
+      (predicate = "identity", !leaf || file_stat_same(identity, &before));
+    if (!ok) input_refusal(parent, predicate, sampled ? &before : NULL);
+    need(ok);
+    if (!hosted) no_acl(fd);
     need(!fstat(fd, &after) && !lstat(parent, &named) && file_stat_same(&before, &after) &&
       file_stat_same(&before, &named) && !close(fd));
     if (!strcmp(parent, "/")) break;

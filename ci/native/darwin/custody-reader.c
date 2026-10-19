@@ -124,7 +124,7 @@ static void ancestors(const char *path) {
     slash = strrchr(name, '/'); if (slash == name) break; need(slash); *slash = 0;
   }
 }
-static void stable(struct entry *value) {
+static void stable_identity(struct entry *value) {
   struct stat current, named; need(value->fd >= 0 && !fstat(value->fd, &current) && !lstat(value->path, &named));
   if (S_ISDIR(value->stat.st_mode)) {
     struct stat before = value->stat;
@@ -132,6 +132,9 @@ static void stable(struct entry *value) {
       named.st_dev == before.st_dev && named.st_ino == before.st_ino && named.st_mode == before.st_mode && named.st_uid == before.st_uid && named.st_gid == before.st_gid &&
       current.st_birthtimespec.tv_sec == before.st_birthtimespec.tv_sec && current.st_birthtimespec.tv_nsec == before.st_birthtimespec.tv_nsec);
   } else { same_stat(value->stat, current); same_stat(value->stat, named); }
+}
+static void stable(struct entry *value) {
+  stable_identity(value);
   if (!strcmp(value->kind, "build")) {
     struct stat root, parent, named; char canonical[PATH_MAX];
     need(realpath(report_path, canonical) && !strcmp(report_path, canonical) &&
@@ -153,7 +156,8 @@ static void stable(struct entry *value) {
         held.st_uid == entries[i].stat.st_uid && held.st_gid == entries[i].stat.st_gid && held.st_mode == entries[i].stat.st_mode);
       same_stat(held, named); no_acl(entries[i].fd);
     }
-  } else ancestors(value->path);
+  } else if (experiment_installed_path(value->path) && S_ISREG(value->stat.st_mode)) need(installed_input(value->path, &value->stat));
+  else ancestors(value->path);
 }
 static void read_at(int fd, void *out, size_t n, uint64_t offset) {
   need(offset <= INT64_MAX && bytes_read + n <= 2147483648ULL); bytes_read += n;
@@ -268,7 +272,7 @@ static void probe(pid_t pid, int asid) {
   if (n == 0 && error == ESRCH) { need(asid < 0); puts("{\"status\":\"absent\"}}"); return; }
   need(n == sizeof(b) && b.pbi_status != SZOMB); struct identity before = inspect(pid);
   char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0); ancestors(path);
-  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat st, after; need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && st.st_uid == 0 && !(st.st_mode & 022) && (st.st_nlink == 1 || installed_input(path, &st)));
+  int fd = open(path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat st, after; need(fd >= 0 && !fstat(fd, &st) && S_ISREG(st.st_mode) && (experiment_installed_path(path) ? installed_input(path, &st) : st.st_uid == 0 && !(st.st_mode & 022) && (st.st_nlink == 1 || installed_input(path, &st))));
   char hash[65]; sha_range(fd, 0, (uint64_t)st.st_size, hash);
   printf("{\"status\":\"live\",\"identity\":"); emit(before); printf(",\"sha256\":\"%s\",\"signature\":", hash); signing(path);
   printf(",\"directories\":["); unsigned dirs = 0;
@@ -529,7 +533,7 @@ static void case_directory(struct entry *entry) {
   need(!close(base)); if (root) case_started = true; stable(entry); identity(entry);
 }
 static void case_copy(struct entry *target, struct entry *source) {
-  need(case_mode && case_started); reservation_guard(); no_subjects(); stable(source); no_acl(source->fd); file_capabilities(source->fd);
+  need(case_mode && case_started); reservation_guard(); no_subjects(); stable(source); if (!experiment_installed_path(source->path)) no_acl(source->fd); file_capabilities(source->fd);
   const char *suffix = target->path + strlen(case_path);
   need(!strncmp(target->path, case_path, strlen(case_path)));
   bool policy = !strcmp(suffix, "/custody/policy") || (count > 12 &&
@@ -538,8 +542,7 @@ static void case_copy(struct entry *target, struct entry *source) {
   need(((policy || git_data) && !strcmp(target->kind, "data") && !strcmp(source->kind, "data")) ||
     (executable && (!strcmp(target->kind, "image") || !strcmp(target->kind, "helper")) && (!strcmp(source->kind, "image") || !strcmp(source->kind, "helper"))));
   need(strcmp(source->path, target->path) && !strncmp(source->pin, target->pin, 65) &&
-    source->stat.st_uid == 0 && source->stat.st_gid == 0 && S_ISREG(source->stat.st_mode) &&
-    !(source->stat.st_mode & 022) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
+    (experiment_installed_path(source->path) || (source->stat.st_uid == 0 && source->stat.st_gid == 0 && !(source->stat.st_mode & 022))) && S_ISREG(source->stat.st_mode) && source->stat.st_size > 0 && source->stat.st_size <= 134217728);
   char parent[PATH_MAX]; strcpy(parent, target->path); char *leaf = strrchr(parent, '/'); need(leaf); *leaf++ = 0;
   struct entry *base = NULL; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strcmp(entries[i].path, parent)) base = &entries[i];
   need(base); stable(base); int writer = openat(base->fd, leaf, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600); need(writer >= 0);
@@ -1306,14 +1309,14 @@ static void build_input(const char *encoded, const char *pin, const char *cdhash
   char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode);
   bool declared = false;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
-  need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
-    !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || !strcmp(name, "/usr/lib/dyld"));
+  bool hosted = experiment_installed_path(name);
+  need(declared || hosted || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')));
   ancestors(name);
   char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
   while (slash && slash != parent) {
     *slash = 0; int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
     need(fd >= 0 && !fstat(fd, &held) && is_bootstrap_parent(name, &held));
-    no_acl(fd);
+    if (!hosted) no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }
   struct entry sdk = {.fd = -1}, developer = {.fd = -1}; char compiler[PATH_MAX];
@@ -1323,29 +1326,34 @@ static void build_input(const char *encoded, const char *pin, const char *cdhash
     memcpy(sdk.path, name, length); sdk.path[length] = 0;
     sdk.fd = open(sdk.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     need(sdk.fd >= 0 && !fstat(sdk.fd, &sdk.stat) && S_ISDIR(sdk.stat.st_mode) &&
-      sdk.stat.st_uid == 0 && !(sdk.stat.st_mode & 022)); no_acl(sdk.fd); stable(&sdk);
+      (hosted || (sdk.stat.st_uid == 0 && !(sdk.stat.st_mode & 022)))); if (!hosted) no_acl(sdk.fd); stable_identity(&sdk);
     developer_paths(sdk.path, developer.path, compiler);
     developer.fd = open(developer.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     need(developer.fd >= 0 && !fstat(developer.fd, &developer.stat) && S_ISDIR(developer.stat.st_mode) &&
-      developer.stat.st_uid == 0 && !(developer.stat.st_mode & 022)); no_acl(developer.fd); stable(&developer);
+      (hosted || (developer.stat.st_uid == 0 && !(developer.stat.st_mode & 022)))); if (!hosted) no_acl(developer.fd); stable_identity(&developer);
   }
   struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
   strcpy(value.kind, "data"); strcpy(value.path, name);
-  need(value.fd >= 0 && !fstat(value.fd, &value.stat) && S_ISREG(value.stat.st_mode) && value.stat.st_uid == 0 &&
-    (value.stat.st_nlink == 1 || installed_input(name, &value.stat)) && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= 536870912ULL); no_acl(value.fd);
+  bool sampled = false; const char *predicate = "open";
+  bool ok = value.fd >= 0 && (predicate = "stat", sampled = fstat(value.fd, &value.stat) == 0) &&
+    (predicate = "kind", S_ISREG(value.stat.st_mode)) && (predicate = "links", value.stat.st_nlink > 0) &&
+    (predicate = "eligibility", hosted || (value.stat.st_uid == 0 && !(value.stat.st_mode & 06022) && value.stat.st_nlink == 1)) &&
+    (predicate = "size", value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= 536870912ULL);
+  if (!ok) input_refusal(name, predicate, sampled ? &value.stat : NULL);
+  need(ok); if (hosted) need(installed_input(name, &value.stat)); else no_acl(value.fd);
   printf("{\"object\":"); identity(&value);
   char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); }
-  stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat));
+  stable(&value); if (hosted) need(installed_input(name, &value.stat)); else no_acl(value.fd);
   if (cdhash) {
     need(strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40);
     signature(name, cdhash); stable(&value); printf(",\"cdhash\":\"%s\"", cdhash);
   }
   if (sdk.fd >= 0) {
-    stable(&sdk); no_acl(sdk.fd); fputs(",\"sdk\":", stdout); identity(&sdk); need(!close(sdk.fd));
+    stable_identity(&sdk); if (!hosted) no_acl(sdk.fd); fputs(",\"sdk\":", stdout); identity(&sdk); need(!close(sdk.fd));
     char current_developer[PATH_MAX], current_compiler[PATH_MAX], encoded_compiler[PATH_MAX*2+1];
     developer_paths(sdk.path, current_developer, current_compiler);
     need(!strcmp(developer.path, current_developer) && !strcmp(compiler, current_compiler));
-    stable(&developer); no_acl(developer.fd); fputs(",\"developer\":", stdout); identity(&developer);
+    stable_identity(&developer); if (!hosted) no_acl(developer.fd); fputs(",\"developer\":", stdout); identity(&developer);
     hex((const unsigned char *)compiler, strlen(compiler), encoded_compiler);
     printf(",\"compilerPathHex\":\"%s\"", encoded_compiler); need(!close(developer.fd));
   }
@@ -2183,18 +2191,7 @@ static void bootstrap_tool(unsigned index, const char *pin) {
   struct entry value = {0}; strcpy(value.path, paths[index]);
   value.fd = open(value.path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   need(value.fd >= 0 && !fstat(value.fd, &value.stat)); struct stat st = value.stat;
-  mode_t mode = st.st_mode & 07777;
-  need(S_ISREG(st.st_mode) && st.st_uid == 0 && st.st_gid == 0 && st.st_nlink > 0 && st.st_size > 0 && st.st_size <= 134217728 &&
-    (index == 0 ? (mode & 04000) && (mode & 0111) == 0111 && !(mode & 03022) : mode == 0555 || mode == 0755));
-  char canonical[PATH_MAX], parent[PATH_MAX]; need(realpath(value.path, canonical) && !strcmp(canonical, value.path));
-  strcpy(parent, value.path);
-  bool leaf = true;
-  for (;;) {
-    int fd = open(parent, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); struct stat before, after, named;
-    need(fd >= 0 && !fstat(fd, &before) && before.st_uid == 0 && !(before.st_mode & 022) && (leaf ? file_stat_same(&st, &before) : S_ISDIR(before.st_mode))); no_acl(fd);
-    need(!fstat(fd, &after) && !lstat(parent, &named)); same_stat(before, after); same_stat(before, named); need(!close(fd));
-    if (!strcmp(parent, "/")) break; char *slash = strrchr(parent, '/'); need(slash); if (slash == parent) parent[1] = 0; else *slash = 0; leaf = false;
-  }
+  need(S_ISREG(st.st_mode) && st.st_nlink > 0 && st.st_size > 0 && st.st_size <= 134217728 && installed_input(value.path, &st));
   char hash[65]; sha_range(value.fd, 0, st.st_size, hash); need(!strcmp(hash, pin));
   signing_check(value.path, false);
   struct stat after, named; need(!fstat(value.fd, &after) && !lstat(value.path, &named)); same_stat(st, after); same_stat(st, named); need(!close(value.fd));
@@ -2323,8 +2320,16 @@ int main(int argc, char **argv) {
       need(n == 3); unsigned index = number(tokens[2]); need(index < count); struct entry *entry = &entries[index]; need(entry->fd < 0);
       bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); ancestors(entry->path);
       entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
-      need(entry->fd >= 0 && !fstat(entry->fd, &entry->stat) && (entry->stat.st_uid == 0 || (authority && entry->stat.st_uid == subject_uid)) && (entry->stat.st_gid == 0 || (authority && entry->stat.st_gid == subject_gid)) && !(entry->stat.st_mode & 022) &&
-        (dir || (authority && S_ISDIR(entry->stat.st_mode)) ? S_ISDIR(entry->stat.st_mode) && ((entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) : S_ISREG(entry->stat.st_mode) && (entry->stat.st_nlink == 1 || (!authority && strcmp(entry->kind, "helper") && installed_input(entry->path, &entry->stat))) && entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
+      bool hosted = !authority && !dir && experiment_installed_path(entry->path), sampled = false, directory_entry = false;
+      const char *predicate = "open";
+      bool ok = entry->fd >= 0 && (predicate = "stat", sampled = fstat(entry->fd, &entry->stat) == 0) &&
+        (predicate = "eligibility", hosted || ((entry->stat.st_uid == 0 || (authority && entry->stat.st_uid == subject_uid)) && (entry->stat.st_gid == 0 || (authority && entry->stat.st_gid == subject_gid)) && !(entry->stat.st_mode & 022))) &&
+        (predicate = "kind", (directory_entry = dir || (authority && S_ISDIR(entry->stat.st_mode))) ? S_ISDIR(entry->stat.st_mode) : S_ISREG(entry->stat.st_mode)) &&
+        (predicate = "directory-mode", !directory_entry || (entry->stat.st_mode & 07777) == 0700 || (authority && (entry->stat.st_mode & 07777) == 0710)) &&
+        (predicate = "links", directory_entry || (entry->stat.st_nlink > 0 && (hosted || entry->stat.st_nlink == 1 || (!authority && strcmp(entry->kind, "helper") && installed_input(entry->path, &entry->stat))))) &&
+        (predicate = "size", directory_entry || (entry->stat.st_size >= 0 && entry->stat.st_size <= 536870912));
+      if (!ok) input_refusal(entry->path, predicate, sampled ? &entry->stat : NULL);
+      need(ok); if (hosted) need(installed_input(entry->path, &entry->stat));
       if (!dir && !authority) { need(entry->stat.st_size > 0); char hash[65]; sha_range(entry->fd, 0, (uint64_t)entry->stat.st_size, hash); need(!strcmp(hash, entry->pin)); }
       stable(entry); need(S_ISDIR(entry->stat.st_mode) || entry->stat.st_nlink == 1 || installed_input(entry->path, &entry->stat)); identity(entry);
     } else if (!strcmp(tokens[0], "case-directory")) { need(n == 3); case_directory(unopened(tokens[2]));

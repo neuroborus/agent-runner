@@ -1,9 +1,10 @@
 import { execFile } from "node:child_process";
+import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { diagnosticCommand } from "../diagnostics.js";
+import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { digest } from "./protocol.js";
 import { darwinExperimentWorker } from "./experiment-build-inputs.js";
@@ -62,37 +63,114 @@ export async function acquireDarwinExperimentInputs(
       });
     },
     read = async (file) => {
-      file = await fs.realpath(file);
-      const before = await fs.lstat(file);
-      requireObservation(
-        before.isFile() &&
-          !before.isSymbolicLink() &&
-          before.uid === 0 &&
-          !(before.mode & 0o6022) &&
-          (before.nlink === 1 ||
-            (await protectedInstalledInput(file, before, fs, "experiment"))) &&
-          before.size > 0 &&
-          before.size <= 536870912,
-      );
-      const bytes = await fs.readFile(file),
-        after = await fs.lstat(file);
-      requireObservation(
-        bytes.length === before.size &&
-          [
-            "dev",
-            "ino",
-            "mode",
-            "uid",
-            "gid",
-            "nlink",
-            "size",
-            "mtimeMs",
-            "ctimeMs",
-          ].every((key) => before[key] === after[key]) &&
-          (before.nlink === 1 ||
-            (await protectedInstalledInput(file, after, fs, "experiment"))),
-      );
-      return { file, bytes };
+      const requested = file,
+        sampled = {
+          regular: null,
+          nonsymlink: null,
+          installed: null,
+          positive: null,
+          bounded: null,
+          complete: null,
+          stable: null,
+          recheck: null,
+        };
+      let before, handle, primary;
+      try {
+        file = await fs.realpath(file);
+        before = await fs.lstat(file);
+        requireObservation(
+          (sampled.regular = before.isFile()) &&
+            (sampled.nonsymlink = !before.isSymbolicLink()) &&
+            (sampled.installed = await protectedInstalledInput(
+              file,
+              before,
+              fs,
+              "experiment",
+            )) &&
+            (sampled.positive = before.size > 0) &&
+            (sampled.bounded = before.size <= 536870912),
+        );
+        handle = await fs.open(
+          file,
+          constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+        );
+        const buffer = Buffer.alloc(before.size + 1);
+        let size = 0;
+        while (size < buffer.length) {
+          const { bytesRead } = await handle.read(
+            buffer,
+            size,
+            buffer.length - size,
+            size,
+          );
+          if (!bytesRead) break;
+          size += bytesRead;
+        }
+        const bytes = buffer.subarray(0, size),
+          after = await fs.lstat(file),
+          held = await handle.stat();
+        requireObservation(
+          (sampled.complete = bytes.length === before.size) &&
+            (sampled.stable = [
+              "dev",
+              "ino",
+              "mode",
+              "uid",
+              "gid",
+              "nlink",
+              "size",
+              "mtimeMs",
+              "ctimeMs",
+            ].every(
+              (key) => before[key] === after[key] && before[key] === held[key],
+            )) &&
+            (sampled.recheck = await protectedInstalledInput(
+              file,
+              after,
+              fs,
+              "experiment",
+            )),
+        );
+        return { file, bytes };
+      } catch (cause) {
+        primary = cause;
+        try {
+          nativeException("darwin-experiment-input", {
+            requested,
+            canonical: file,
+            sampled,
+            stat:
+              before &&
+              Object.fromEntries(
+                [
+                  "dev",
+                  "ino",
+                  "uid",
+                  "gid",
+                  "mode",
+                  "nlink",
+                  "size",
+                  "mtimeMs",
+                  "ctimeMs",
+                ].map((key) => [key, before[key]]),
+              ),
+          });
+        } catch {
+          /* Diagnostics cannot replace the original refusal. */
+        }
+        throw cause;
+      } finally {
+        try {
+          await handle?.close();
+        } catch (cause) {
+          if (!primary) throw cause;
+          try {
+            nativeException("darwin-experiment-input-cleanup", cause);
+          } catch {
+            /* Keep the primary input failure. */
+          }
+        }
+      }
     },
     image = async (file) => {
       const actual = await read(file),

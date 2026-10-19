@@ -83,7 +83,9 @@ static void effective_authority(pid_t pid, struct entry *entry) {
   const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "process-exec"};
   char path_hex[PATH_MAX * 2]; hex((unsigned char *)entry->path, strlen(entry->path), path_hex);
   printf("{\"subject\":"); emit(before); printf(",\"sandboxed\":true,\"path\":\"%s\",\"object\":", path_hex); identity(entry);
-  stable(entry); char hash[65]; custody_acl(entry->fd, hash);
+  stable(entry); char hash[65];
+  bool hosted = experiment_installed_path(entry->path) && S_ISREG(entry->stat.st_mode) && strcmp(entry->kind, "authority");
+  custody_acl(entry->fd, hash, !hosted);
   printf(",\"aclSha256\":\"%s\",\"decisions\":[", hash);
   for (unsigned i = 0; i < 5; i++) {
     int result = feasibility_sandbox_path(sandbox_binding, pid, operations[i], entry->path);

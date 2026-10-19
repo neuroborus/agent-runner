@@ -117,15 +117,21 @@ function selectors(preparation, options) {
       );
       if (!asset) {
         if (read) return read(file, pin, maximum);
-        const { protectedBytes } = await import("./private-files.js"),
+        const { protectedBytes, isDarwinInstalledPath } =
+            await import("./private-files.js"),
           fs = options.fs ?? filesystem,
           stat = await fs.lstat(file);
+        requireObservation(
+          isDarwinInstalledPath(file) || !(stat.mode & 0o6022),
+        );
         return protectedBytes(
           { path: file, sha256: pin },
           0,
           stat.mode & 0o7777,
           maximum,
           fs,
+          true,
+          "experiment",
         );
       }
       // These bytes select expected data. The sealed custodian independently
@@ -368,8 +374,12 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
       preparation.inputs.loader,
       preparation.inputs.volume,
     ]) {
-      const actual = await reader.readBuildInput(value.path, value.sha256);
-      if (value === preparation.inputs.loader) {
+      const actual = await reader.readBuildInput(
+        value.path,
+        value.sha256,
+        value.cdhash,
+      );
+      if (value === preparation.inputs.loader || value.identity) {
         requireObservation(
           actual.object.identity === value.identity &&
             actual.sha256 === value.sha256 &&

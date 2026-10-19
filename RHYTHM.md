@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-19 — Trust hosted Darwin installed case inputs consistently
+
+Ordinary Darwin case-input acquisition, native custody, cold loading and actual
+case/runtime consumers now apply the disposable hosted-image/toolchain assumption
+to classified installed tools, dyld, audit files and SDK declarations. Installed
+paths are recognized independently of reviewed ownership, modes, links and ACL
+eligibility, including tools carried in helper slots. Canonical nonsymlink reads,
+stable held identities/metadata, positive links, hashes and image observations
+remain required. Generated/private sources, helpers, receipts, plans and copied
+case destinations stay protected; reviewed admission and native isolation,
+controls and independent cleanup retain their contracts.
+
+Sampled refusal diagnostics preserve exact paths, available metadata, unknown
+later predicates and original errors. The original Git refusal establishes no
+particular failed scalar predicate. Portable coverage supplies no native PASS;
+fresh matching CI and the separate ownership, prerequisite, socket, audit and
+original-retirement blockers remain supervisor-owned evidence.
+
 ## 2026-10-19 — Limit ordinary Windows library admission to private consumers
 
 Ordinary Windows preparation binds thirteen exact-candidate marked helpers without

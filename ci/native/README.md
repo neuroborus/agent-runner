@@ -79,7 +79,7 @@ these observations without changing census scope or retirement requirements.
 Late custody stderr and exit status survive earlier channel errors. Missing facts
 remain failures with possible/unsettled effects; diagnostics alone identify no
 new native first cause and grant no native PASS.
-Darwin custody, compiler preparation and installed-input checks share held ACL
+Reviewed Darwin custody, compiler preparation and installed-input checks share held ACL
 inspection in `custody.h`. Successful `fstatx_np` and `filesec_query_property`
 reads must establish `FILESEC_ACL` presence: zero establishes absence; a nonzero
 validity mask requires an independently retrieved, non-null valid ACL with the
@@ -414,6 +414,33 @@ equality with the original complete build, including its native ABI. Incompatibl
 mixed, incomplete and substituted records fail.
 
 Ordinary Darwin preparation explicitly trusts the disposable hosted system runtime.
+Installed experiment case inputs use that same assumption through acquisition,
+native build-input reads, custody slots, cold loading, case copying and runtime
+observation. The existing path classifier recognizes stock tools, selected Xcode
+and SDK inputs, dyld and audit declarations independently of reviewed eligibility.
+Those installed files and their ancestry need no root owner, protected mode,
+single-link count or empty ACL. Custody kind alone grants no exception: an
+installed disk tool may occupy a helper slot, while generated helpers, private
+directories, sources, receipts, plans and copied case destinations remain strict.
+Canonical nonsymlink regular files and directory ancestry, stable metadata,
+positive links, bounded complete reads, held/native identities, byte hashes and
+Mach-O/signature observations remain required. Cold readers rejoin existing
+bindings without reacquisition or compilation. Reviewed/protected admission,
+native isolation, positive controls, sentinels and independent cleanup remain
+unchanged; there is no global experiment exemption or policy setting.
+Effective-policy observations retain the actual installed ACL hash, including
+entries when present, without treating emptiness or protected modes as installed
+eligibility. ACL validity, stable held metadata, policy decisions and independent
+object/subject joins remain required; private/reviewed ACLs must remain empty.
+
+Acquisition refusals publish the exact requested/canonical path, sampled predicates
+and available original stat tuple through ordinary diagnostics. Later predicates
+remain unknown when short-circuited. Native installed/build/slot guards identify
+the last evaluated failing predicate, complete path hex and available original
+metadata; diagnostic work restores errno. Diagnostic failure cannot replace the
+original JavaScript exception. These observations supply no historical failed
+scalar predicate for the original Git refusal and no native acceptance.
+
 Initial preparation, cold loading, recovery and runtime observation do not discover
 or enumerate a dyld cache or reconstruct installed-library admission. Preparation
 components bind the ten actual helpers; their original Mach-O load commands remain

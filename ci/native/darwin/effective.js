@@ -13,6 +13,7 @@ import {
 import { purposeData, bindingKey } from "./experiment-policy.js";
 import { normalizeDarwinFileIdentity } from "./files-protocol.js";
 import { buildDarwinPolicy } from "./policy.js";
+import { isDarwinInstalledPath } from "./private-files.js";
 import { normalizeDarwinGitInput } from "./git.js";
 import { bindDarwinAuditEvent } from "./audit.js";
 import {
@@ -32,7 +33,7 @@ const integer = (value, bound = 0xffffffff) =>
   Number.isSafeInteger(value) && value >= 0 && value <= bound;
 const plainText = (bytes) =>
   new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-function object(value) {
+function object(value, hosted = false) {
   observationObject(value, [
     "identity",
     "bytes",
@@ -48,7 +49,7 @@ function object(value) {
       integer(value.gid) &&
       integer(value.mode, 0o7777) &&
       typeof value.directory === "boolean" &&
-      !(value.mode & 0o22),
+      (hosted || !(value.mode & 0o22)),
   );
   return structuredClone(value);
 }
@@ -67,7 +68,12 @@ export function normalizeDarwinBarrierRead(value, contents = true) {
   }
   return structuredClone(value);
 }
-export function normalizeDarwinAuthorityRead(value, subject, held) {
+export function normalizeDarwinAuthorityRead(
+  value,
+  subject,
+  held,
+  purpose = "reviewed",
+) {
   observationObject(value, [
     "subject",
     "sandboxed",
@@ -77,18 +83,22 @@ export function normalizeDarwinAuthorityRead(value, subject, held) {
     "decisions",
   ]);
   requireDarwin(
+    ["reviewed", "experiment"].includes(purpose) &&
+      typeof value.path === "string" &&
+      /^(?:[a-f0-9]{2}){1,4095}$/u.test(value.path),
+  );
+  const hosted =
+    purpose === "experiment" &&
+    isDarwinInstalledPath(plainText(Buffer.from(value.path, "hex")));
+  requireDarwin(
     sameDarwinIdentity(normalizeDarwinIdentity(value.subject), subject) &&
       value.sandboxed === true &&
-      JSON.stringify(object(value.object)) === JSON.stringify(held) &&
+      JSON.stringify(object(value.object, hosted)) === JSON.stringify(held) &&
       hash(value.aclSha256),
   );
   requireDarwin(
     observationList(value.decisions, 5).length === 5 &&
       value.decisions.every((decision) => [0, 1].includes(decision)),
-  );
-  requireDarwin(
-    typeof value.path === "string" &&
-      /^(?:[a-f0-9]{2}){1,4095}$/u.test(value.path),
   );
   return structuredClone(value);
 }

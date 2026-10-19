@@ -66,6 +66,7 @@ import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
+import { fixture as darwinCustodyFixture } from "./custody.test.js";
 import {
   prepareDarwinExperimentBuild,
   loadDarwinExperimentBuild,
@@ -8876,6 +8877,34 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     observationDigest(loaded.preparation),
     observationDigest(result.preparation),
   );
+  const preparationPath = path.join(
+      directory,
+      "darwin-experiment-preparation.json",
+    ),
+    original = f.files.get(preparationPath);
+  for (const identity of [undefined, "substituted-loader"]) {
+    const preparation = structuredClone(original);
+    if (identity === undefined) delete preparation.inputs.loader.identity;
+    else preparation.inputs.loader.identity = identity;
+    f.files.set(preparationPath, preparation);
+    await assert.rejects(
+      loadDarwinExperiment(
+        {
+          ...result.job,
+          preparationEffects: {
+            ...result.job.preparationEffects,
+            receiptSha256: observationDigest({
+              preparation,
+              close: result.preparation.close,
+            }),
+          },
+        },
+        directory,
+        f.options,
+      ),
+    );
+  }
+  f.files.set(preparationPath, original);
   const before = [...f.events];
   const owner = createDarwinExperimentSystemEffects(
     loaded.job,
@@ -9049,8 +9078,8 @@ test("Darwin experiment runtime requires every held helper and original loader/A
         inspect: async (index) => ({
           identity:
             index === 10 ? "held-loader" : built.build.helpers[index].identity,
-          uid: 0,
-          mode: 0o555,
+          uid: index === 10 ? 501 : 0,
+          mode: index === 10 ? 0o777 : 0o555,
           directory: false,
         }),
         read: async (index) => (index === 10 ? bytes : f.image),
@@ -9148,7 +9177,10 @@ test("Darwin preparation recovery preserves failure and cannot settle admitted c
   }
 });
 
-test("Darwin case input acquisition joins installed audit declarations before private publication", async () => {
+test("Darwin case input acquisition crosses custody and rechecks hosted inputs before private publication", async () => {
+  let selectedGit = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+    changedIdentity = false,
+    changeOnRead = false;
   const f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
       f.job,
@@ -9216,16 +9248,48 @@ test("Darwin case input acquisition joins installed audit declarations before pr
         readdir: async () => [],
         mkdir: async () => {},
         realpath: async (file) => file,
-        lstat: async (file) => ({
-          isFile: () => true,
-          isSymbolicLink: () => false,
-          uid: 0,
-          gid: 0,
-          mode: 0o444,
-          nlink: 1,
-          size: (await read(file)).length,
-        }),
+        lstat: async (file, options) => {
+          const leaf =
+              records.has(file) ||
+              [
+                selectedGit,
+                "/sbin/pfctl",
+                "/usr/bin/hdiutil",
+                "/usr/lib/dyld",
+              ].includes(file),
+            number = (value) => (options?.bigint ? BigInt(value) : value);
+          return {
+            isFile: () => leaf,
+            isDirectory: () => !leaf,
+            isSymbolicLink: () => false,
+            dev: number(1),
+            ino: number(changedIdentity && leaf ? 2 : 1),
+            uid: number(501),
+            gid: number(20),
+            mode: number(leaf ? 0o666 : 0o777),
+            nlink: number(3),
+            size: number(leaf ? (await read(file)).length : 0),
+            mtimeMs: number(1),
+            ctimeMs: number(1),
+            mtimeNs: number(1),
+            ctimeNs: number(1),
+          };
+        },
         readFile: read,
+        open: async (file, flags) => {
+          assert.ok(flags & constants.O_NOFOLLOW);
+          return {
+            stat: () => options.fs.lstat(file),
+            read: async (buffer, offset, length, position) => {
+              const data = await read(file),
+                chunk = data.subarray(position, position + Math.min(length, 7));
+              chunk.copy(buffer, offset);
+              if (changeOnRead) changedIdentity = true;
+              return { bytesRead: chunk.length };
+            },
+            close: async () => {},
+          };
+        },
         writeFile: async (file, value) => records.set(file, Buffer.from(value)),
       },
       networkInterfaces: () => ({
@@ -9238,19 +9302,26 @@ test("Darwin case input acquisition joins installed audit declarations before pr
         assert.equal(journal.at(-1).phase, "case-input-command-possible");
         commands.push([file, args]);
         return {
-          stdout: file === "/usr/bin/xcrun" ? "/usr/bin/git\n" : "",
+          stdout: file === "/usr/bin/xcrun" ? selectedGit + "\n" : "",
           stderr: file === "/usr/bin/codesign" ? `CDHash=${cdhash}\n` : "",
         };
       },
     },
+    custody = darwinCustodyFixture({
+      purpose: "experiment",
+      build: true,
+      hosted: true,
+      inputData: read,
+    }),
     reader = {
       readBuildInput: async (file, sha256) => {
         pins.push([file, sha256]);
-        return { object: { identity: "held" }, macho: { dependencies: [] } };
+        return custody.reader.readBuildInput(file, sha256);
       },
       pf: async () => kernelPfFixture(experimentInputs(f, built.build).pf),
     },
     persist = async (value) => journal.push(value);
+  await custody.reader.start();
   const acquired = await acquireDarwinExperimentInputs(
     built.prepared,
     built.build,
@@ -9265,7 +9336,17 @@ test("Darwin case input acquisition joins installed audit declarations before pr
     ),
   );
   assert.equal(acquired.inputs.classes, 1);
-  assert.equal(acquired.inputs.loader.identity, "held");
+  assert.equal(acquired.inputs.git.path, selectedGit);
+  assert.ok(acquired.inputs.loader.identity);
+  const originalPins = [...pins];
+  for (let i = 0; i < 2; i++)
+    for (const [file, pin] of originalPins)
+      assert.equal((await reader.readBuildInput(file, pin)).sha256, pin);
+  records.set(selectedGit, Buffer.alloc(bytes.length));
+  await assert.rejects(
+    reader.readBuildInput(selectedGit, acquired.inputs.git.sha256),
+  );
+  records.delete(selectedGit);
   const asset = {
     path: path.join(built.prepared.sourceDirectory, "experiment-asset-1"),
     bytes,
@@ -9294,4 +9375,56 @@ test("Darwin case input acquisition joins installed audit declarations before pr
       .slice(before)
       .every(([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file)),
   );
+  selectedGit = "/unrelated/git";
+  await assert.rejects(
+    acquireDarwinExperimentInputs(
+      built.prepared,
+      built.build,
+      reader,
+      persist,
+      options,
+    ),
+  );
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        acquireDarwinExperimentInputs(
+          built.prepared,
+          built.build,
+          reader,
+          persist,
+          options,
+        ),
+        (cause) => cause.message !== "Diagnostic sink failure",
+      ),
+    () => {
+      throw new Error("Diagnostic sink failure");
+    },
+  );
+  selectedGit = acquired.inputs.git.path;
+  changeOnRead = true;
+  const diagnostics = [];
+  await withNativeDiagnostics(
+    () =>
+      assert.rejects(
+        acquireDarwinExperimentInputs(
+          built.prepared,
+          built.build,
+          reader,
+          persist,
+          options,
+        ),
+      ),
+    (owner, value) => {
+      if (owner === "darwin-experiment-input")
+        diagnostics.push(value.exception);
+    },
+  );
+  assert.equal(diagnostics[0].canonical, selectedGit);
+  assert.equal(diagnostics[0].sampled.stable, false);
+  assert.equal(diagnostics[0].sampled.recheck, null);
+  assert.equal(diagnostics[0].stat.uid, 501);
+  changeOnRead = false;
+  changedIdentity = false;
+  await custody.reader.close();
 });
