@@ -836,6 +836,7 @@ test("experiment registry retains pre-setup dependencies until independent task 
 function hostedFixture(layout = "mingw64") {
   const f = fixture(layout),
     files = new Map(),
+    identities = new Map(),
     calls = [],
     directories = new Set(),
     image = markedPe(),
@@ -863,6 +864,21 @@ function hostedFixture(layout = "mingw64") {
       return source;
     throw Object.assign(new Error("Missing output"), { code: "ENOENT" });
   };
+  const stat = async (file) => {
+    const bytes = await read(file);
+    if (!identities.has(file)) identities.set(file, identities.size + 1);
+    return {
+      dev: 1,
+      ino: identities.get(file),
+      mode: 0o100644,
+      nlink: 1,
+      size: bytes.length,
+      mtimeMs: 1,
+      ctimeMs: 1,
+      isFile: () => true,
+      isSymbolicLink: () => false,
+    };
+  };
   const options = {
     ...f.settings,
     checkoutRoot: "C:\\Fixture\\checkout",
@@ -884,12 +900,17 @@ function hostedFixture(layout = "mingw64") {
     }),
     filesystem: {
       realpath: async (file) => file,
-      lstat: async (file) => ({
-        isFile: () => true,
-        isSymbolicLink: () => false,
-        nlink: 1,
-        size: (await read(file)).length,
-      }),
+      lstat: stat,
+      open: async (file) => {
+        const bytes = await read(file);
+        return {
+          stat: () => stat(file),
+          read: async (buffer, offset, length, position) => ({
+            bytesRead: bytes.copy(buffer, offset, position, position + length),
+          }),
+          close: async () => {},
+        };
+      },
       readFile: read,
       mkdir: async (file) => {
         if (directories.has(file))

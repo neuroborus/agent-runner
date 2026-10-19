@@ -384,8 +384,16 @@ possible System publication; protected records and original births supply all
 custody/retirement evidence. No public compiler bootstrap journal is required.
 
 Ordinary Windows bootstrap reuses feasibility's bounded `where.exe git.exe` and
-`--exec-path` discovery before opening the System reader. Its private selector
-pins the resolved runtime `git.exe` and bin directory for installed UCRT and
+`--exec-path` discovery before opening the System reader. Selected installed
+MSVC/SDK inputs and Git launcher/runtime reads accept stable link counts from
+1 through 128, matching native non-private custody. Checkout sources and
+generated/private files still require one link; caller-supplied Git roots gain
+no installed status. Reads retain bounded canonical nonsymlink file paths,
+exact realpath agreement, complete bytes and stable held/path identities.
+Refusals report the input, evaluated predicate and available finite metadata
+without replacing filesystem errors or cleanup outcomes. The historical failed
+conjunct remains unknown. The private bootstrap selector pins the resolved
+runtime `git.exe` and bin directory for installed UCRT and
 MinGW layouts. Cold loading requires that recorded selection and its command,
 image and dependency joins, without discovery or fallback. Native installed
 admission accepts only direct EXE/DLL files in those two Program Files Git bin

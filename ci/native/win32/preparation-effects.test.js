@@ -71,6 +71,7 @@ import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import { windowsPreparationOptions } from "./preparation.js";
 import {
+  WINDOWS_EXPERIMENT_SOURCES,
   windowsHostedCompilerArguments,
   openWindowsExperimentNative,
 } from "./experiment-native.js";
@@ -78,6 +79,7 @@ import {
   prepareWindowsExperiment,
   recoverWindowsExperimentPreparation,
 } from "./experiment-preparation.js";
+import { windowsExperimentGitRuntime } from "./experiment-cases.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
 import { inspectWindowsPe } from "./protocol.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
@@ -2375,7 +2377,10 @@ function rawPreparation({ experiment = false, environment } = {}) {
       if (operation === "prepare-experiment-input") {
         assert.equal(experiment, true);
         assert.equal(args[1], "-");
-        assert.ok(f.manifest.tools.some((tool) => tool.path === file));
+        assert.ok(
+          f.manifest.tools.some((tool) => tool.path === file) ||
+            file === f.prepared?.gitRuntime?.path,
+        );
       }
       assert.notEqual(file, f.forbiddenPreparationRead);
       scope.readBytes = f.files.get(file);
@@ -3525,6 +3530,472 @@ function experimentImage() {
   bytes.write("native-ci-experiment-v1\0", 512);
   return bytes;
 }
+
+function experimentBootstrapFixture() {
+  const f = rawPreparation({ experiment: true }),
+    checkoutRoot = "C:\\Fixture\\checkout",
+    privateRoot = directory + "-bootstrap",
+    sdkBuild = "10.0.22621.0",
+    sdkRoot = "C:\\Program Files (x86)\\Windows Kits\\10\\",
+    compiler = f.manifest.tools[0].path,
+    sdk = path.join(sdkRoot, "bin", sdkBuild, "x64", "rc.exe"),
+    header = path.join(sdkRoot, "Include", sdkBuild, "um", "Windows.h"),
+    launcher = "C:\\Program Files\\Git\\cmd\\git.exe",
+    runtime = "C:\\Program Files\\Git\\ucrt64\\bin\\git.exe",
+    installed = new Set([compiler, sdk, header, launcher, runtime]),
+    stats = new Map(),
+    closed = [],
+    commands = [],
+    saved = [],
+    diagnostics = [],
+    reached = new Error("bootstrap consumer reached");
+  for (const file of installed) f.files.set(file, f.signed);
+  for (const name of WINDOWS_EXPERIMENT_SOURCES)
+    f.files.set(path.join(checkoutRoot, "ci", "native", "win32", name), bytes);
+  const stat = (file) => {
+    if (!f.files.has(file))
+      throw Object.assign(new Error("Fixture input missing"), {
+        code: "ENOENT",
+        path: file,
+      });
+    if (!stats.has(file))
+      stats.set(file, {
+        dev: 1,
+        ino: stats.size + 1,
+        mode: 0o100644,
+        nlink: installed.has(file) ? 4 : 1,
+        size: f.files.get(file).length,
+        mtimeMs: 1,
+        ctimeMs: 1,
+        isFile: () => true,
+        isSymbolicLink: () => false,
+      });
+    return { ...stats.get(file) };
+  };
+  const filesystem = {
+    lstat: async (file) => stat(file),
+    realpath: async (file) => file,
+    open: async (file) => {
+      const content = f.files.get(file);
+      return {
+        stat: async () => stat(file),
+        read: async (buffer, offset, length, position) => ({
+          bytesRead: content.copy(
+            buffer,
+            offset,
+            position,
+            position + Math.min(length, 37),
+          ),
+        }),
+        close: async () => closed.push(file),
+      };
+    },
+    mkdir: async () => {},
+    writeFile: async (file, content, settings) => {
+      assert.equal(settings.flag, "wx");
+      assert.ok(!f.files.has(file), file);
+      f.files.set(file, Buffer.from(content));
+    },
+    unlink: async (file) => assert.ok(f.files.delete(file)),
+  };
+  const binding = {
+      checkoutSha: candidateSha,
+      osBuild: "10.0.26100",
+      nodeVersion: "v24.21.0",
+    },
+    options = {
+      platform: "win32",
+      architecture: "x64",
+      nodeVersion: binding.nodeVersion,
+      binding,
+      checkoutRoot,
+      filesystem,
+      env: {
+        ...f.options.env,
+        SystemRoot: "C:\\Windows",
+        PATH: "C:\\Fixture\\tools",
+        RUNNER_ENVIRONMENT: "github-hosted",
+        RUNNER_OS: "Windows",
+        GITHUB_REPOSITORY: f.job.repository,
+        GITHUB_RUN_ID: f.job.runId,
+        GITHUB_RUN_ATTEMPT: "1",
+      },
+      selectToolchain: async () => ({
+        environment: {
+          ...f.manifest.environment,
+          WindowsSDKVersion: sdkBuild + "\\",
+          WindowsSdkDir: sdkRoot,
+        },
+      }),
+      readCandidate: async () => bytes,
+      command: async (file, args) => {
+        commands.push({ file, args });
+        let stdout = "";
+        if (file === "git") stdout = candidateSha;
+        else if (file === "where.exe")
+          stdout = args[0] === "cl.exe" ? compiler : launcher;
+        else if (file === launcher)
+          stdout = "C:\\Program Files\\Git\\ucrt64\\libexec\\git-core";
+        else if (file === compiler && args[0] === "/Bv")
+          stdout = "Compiler Version 1.2 for x64";
+        else if (file === sdk) stdout = "Version 1.2";
+        else if (file === compiler) {
+          const target = args.find((arg) => arg.startsWith("/Fe")).slice(3);
+          f.files.set(target, experimentImage());
+          f.files.set(target + ".obj", bytes);
+        } else if (path.basename(file) === "whoami.exe")
+          stdout = '"fixture","S-1-5-21-1-2-3-1001"';
+        else {
+          assert.equal(args[0], "--experiment-seal");
+          stdout = JSON.stringify({
+            purpose: "experiment",
+            sealed: true,
+            planSha256: args[2],
+          });
+        }
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout,
+          stderr: "",
+        };
+      },
+      open: async (prepared) => {
+        f.bootstrap = prepared;
+        throw reached;
+      },
+    };
+  return Object.assign(f, {
+    checkoutRoot,
+    privateRoot,
+    compiler,
+    sdk,
+    header,
+    launcher,
+    runtime,
+    stats,
+    stat,
+    closed,
+    commands,
+    saved,
+    diagnostics,
+    reached,
+    filesystem,
+    bootstrapOptions: options,
+    runBootstrap: () =>
+      withNativeDiagnostics(
+        () =>
+          prepareWindowsExperiment(
+            f.job,
+            directory,
+            async (job) => saved.push(job),
+            options,
+          ),
+        (owner, value) => diagnostics.push({ owner, value }),
+      ),
+  });
+}
+
+test("Windows default experiment bootstrap admits installed links and binds private consumer bytes", async () => {
+  const f = experimentBootstrapFixture();
+  f.stat(f.runtime);
+  f.stats.get(f.runtime).nlink = 128;
+  await assert.rejects(f.runBootstrap(), (error) => {
+    assert.equal(error.cause, f.reached);
+    return true;
+  });
+  const prepared = f.bootstrap;
+  assert.equal(prepared.gitRuntime.path, f.runtime);
+  assert.equal(prepared.gitRuntime.sha256, digest(f.signed));
+  assert.ok(f.closed.includes(f.launcher) && f.closed.includes(f.header));
+  assert.equal(prepared.helpers.length, WINDOWS_HELPER_NAMES.length);
+  f.prepared = prepared;
+  f.manifest.windowsPreparation.bootstrap = prepared.bootstrap;
+  const native = await openWindowsExperimentNative(prepared, {
+    ...f.options,
+    reopen: true,
+  });
+  try {
+    for (const source of prepared.sources) {
+      const file = path.join(prepared.sourceDirectory, source.name);
+      assert.deepEqual((await native.read(file, source.sha256)).bytes, bytes);
+    }
+    const helper = prepared.helpers[0];
+    assert.deepEqual(
+      (await native.readImage(helper.path)).bytes,
+      experimentImage(),
+    );
+    assert.deepEqual(
+      (await native.readImage(f.compiler, true)).bytes,
+      f.signed,
+    );
+    const runtime = await windowsExperimentGitRuntime(
+      native,
+      prepared.gitRuntime,
+    );
+    assert.equal(runtime[0].sha256, prepared.gitRuntime.sha256);
+    f.files.set(f.runtime, Buffer.from("substituted runtime"));
+    await assert.rejects(
+      windowsExperimentGitRuntime(native, prepared.gitRuntime),
+    );
+    f.files.set(f.runtime, f.signed);
+    // Inject substituted observations so the real consumer must reject its
+    // unchanged source/helper pins without requiring a broken IPC peer.
+    f.accessNative = async (operation, args) => {
+      if (operation !== "prepare-read") return;
+      const file = Buffer.from(args[0], "hex").toString("utf16le"),
+        content = f.files.get(file);
+      if (digest(content) === args[1]) return;
+      return {
+        identity: f.rawFileId(file),
+        daclSha256: hash,
+        protectedParents: true,
+        sha256: digest(content),
+        bytes: content.length,
+        slot: 0,
+      };
+    };
+    f.files.set(helper.path, Buffer.from("substituted helper"));
+    await assert.rejects(native.readImage(helper.path));
+    f.files.set(helper.path, experimentImage());
+    const source = prepared.sources[0],
+      file = path.join(prepared.sourceDirectory, source.name);
+    f.files.set(file, Buffer.from("substituted source copy"));
+    await assert.rejects(native.read(file, source.sha256));
+    f.files.set(file, bytes);
+  } finally {
+    assert.equal((await native.close()).status, "RETIRED");
+  }
+});
+
+test("Windows default experiment bootstrap diagnoses strict input predicates without reselection", async () => {
+  for (const [damage, rule] of [
+    ["missing", "lstat"],
+    ["directory", "regular-file"],
+    ["reparse", "nonsymlink"],
+    ["empty", "positive-size"],
+    ["oversize", "bounded-size"],
+    ["canonical", "exact-realpath"],
+    ["zero-links", "link-count"],
+    ["too-many-links", "link-count"],
+    ["source-links", "link-count"],
+    ["helper-links", "link-count"],
+    ["substitution", "opened-identity-and-metadata"],
+    ["changed-links", "held-stability"],
+    ["short-read", "complete-read"],
+    ["path-substitution", "path-stability"],
+  ]) {
+    const f = experimentBootstrapFixture(),
+      file =
+        damage === "source-links"
+          ? path.join(
+              f.checkoutRoot,
+              "ci",
+              "native",
+              "win32",
+              WINDOWS_EXPERIMENT_SOURCES[0],
+            )
+          : damage === "helper-links"
+            ? path.join(f.privateRoot, WINDOWS_HELPER_NAMES[0] + ".exe")
+            : f.launcher;
+    if (damage === "helper-links") {
+      const lstat = f.filesystem.lstat;
+      f.filesystem.lstat = async (name) => ({
+        ...(await lstat(name)),
+        ...(name === file ? { nlink: 2 } : {}),
+      });
+    } else {
+      f.stat(file);
+      const stat = f.stats.get(file);
+      if (damage === "missing") f.files.delete(file);
+      if (damage === "directory") stat.isFile = () => false;
+      if (damage === "reparse") stat.isSymbolicLink = () => true;
+      if (damage === "empty") stat.size = 0;
+      if (damage === "oversize") stat.size = 134217729;
+      if (damage === "zero-links") stat.nlink = 0;
+      if (damage === "too-many-links") stat.nlink = 129;
+      if (damage === "source-links") stat.nlink = 2;
+      if (damage === "canonical")
+        f.filesystem.realpath = async (name) =>
+          name === file ? name.toLowerCase() : name;
+      if (
+        [
+          "substitution",
+          "changed-links",
+          "short-read",
+          "path-substitution",
+        ].includes(damage)
+      ) {
+        const open = f.filesystem.open;
+        f.filesystem.open = async (name) => {
+          const handle = await open(name),
+            held = await handle.stat();
+          if (name !== file) return handle;
+          if (damage === "substitution") stat.ino++;
+          return {
+            ...handle,
+            read: async (...args) => {
+              if (damage === "changed-links") stat.nlink++;
+              if (damage === "path-substitution") stat.ino++;
+              if (damage === "short-read") return { bytesRead: 0 };
+              return handle.read(...args);
+            },
+            stat: async () =>
+              damage === "path-substitution" ? held : handle.stat(),
+          };
+        };
+      }
+    }
+    await assert.rejects(
+      f.runBootstrap(),
+      (error) => error.cause !== f.reached,
+    );
+    const diagnostic = f.diagnostics.find(
+      ({ owner }) => owner === "windows-experiment-input",
+    ).value.exception;
+    assert.equal(diagnostic.file, file, damage);
+    assert.equal(diagnostic.rule, rule, damage);
+    assert.equal(diagnostic.maximumLinks, file === f.launcher ? 128 : 1);
+    if (damage !== "missing")
+      assert.equal(typeof diagnostic.before.nlink, "number");
+    assert.equal(
+      f.commands.filter(
+        ({ file: command, args }) =>
+          command === "where.exe" && args[0] === "git.exe",
+      ).length,
+      1,
+    );
+    if (file === f.launcher)
+      assert.ok(
+        !f.commands.some(({ file: command }) => command === f.launcher),
+        damage,
+      );
+    assert.equal(
+      f.saved.at(-1).preparationEffects.settlement.status,
+      "RETAINED",
+    );
+  }
+});
+
+test("Windows default experiment bootstrap keeps arbitrary Git roots and source bindings strict", async () => {
+  {
+    const f = experimentBootstrapFixture(),
+      arbitrary = "C:\\Fixture\\caller\\git.exe",
+      command = f.bootstrapOptions.command;
+    f.files.set(arbitrary, f.signed);
+    f.stat(arbitrary);
+    f.stats.get(arbitrary).nlink = 2;
+    f.bootstrapOptions.command = async (file, args) => {
+      const result = await command(file, args);
+      return file === "where.exe" && args[0] === "git.exe"
+        ? { ...result, stdout: arbitrary }
+        : result;
+    };
+    await assert.rejects(f.runBootstrap());
+    const diagnostic = f.diagnostics.find(
+      ({ owner }) => owner === "windows-experiment-input",
+    ).value.exception;
+    assert.equal(diagnostic.file, arbitrary);
+    assert.equal(diagnostic.installed, false);
+    assert.equal(diagnostic.rule, "link-count");
+  }
+  for (const copied of [false, true]) {
+    const f = experimentBootstrapFixture();
+    if (copied) {
+      const write = f.filesystem.writeFile;
+      f.filesystem.writeFile = (file, content, settings) =>
+        write(
+          file,
+          file === path.join(f.privateRoot, WINDOWS_EXPERIMENT_SOURCES[0])
+            ? Buffer.from("changed copy")
+            : content,
+          settings,
+        );
+    } else
+      f.bootstrapOptions.readCandidate = async () =>
+        Buffer.from("changed candidate");
+    await assert.rejects(
+      f.runBootstrap(),
+      (error) => error.cause !== f.reached,
+    );
+    assert.ok(!f.commands.some(({ args }) => args[0] === "--experiment-seal"));
+    assert.equal(f.bootstrap, undefined);
+  }
+});
+
+test("Windows default experiment bootstrap preserves filesystem and close failures when diagnostics fail", async () => {
+  for (const [readFails, brokenDiagnostics] of [
+    [true, false],
+    [true, true],
+    [false, true],
+  ]) {
+    const f = experimentBootstrapFixture(),
+      primary = Object.assign(new Error("Fixture read failed"), {
+        code: "EIO",
+        errno: -5,
+      }),
+      cleanup = new Error("Fixture close failed"),
+      open = f.filesystem.open;
+    f.filesystem.open = async (file) => {
+      const handle = await open(file);
+      return file === f.launcher
+        ? {
+            ...handle,
+            read: readFails
+              ? async () => {
+                  throw primary;
+                }
+              : handle.read,
+            close: async () => {
+              await handle.close();
+              throw cleanup;
+            },
+          }
+        : handle;
+    };
+    await assert.rejects(
+      withNativeDiagnostics(
+        () =>
+          prepareWindowsExperiment(
+            f.job,
+            directory,
+            async (job) => f.saved.push(job),
+            f.bootstrapOptions,
+          ),
+        (owner, value) => {
+          f.diagnostics.push({ owner, value });
+          if (brokenDiagnostics)
+            throw new Error("Fixture diagnostic sink failed");
+        },
+      ),
+      (error) => {
+        if (readFails) {
+          assert.equal(error.cause.cause, primary);
+          assert.deepEqual(error.cause.errors, [primary, cleanup]);
+        } else assert.equal(error.cause, cleanup);
+        assert.deepEqual(error.cleanupFailures, []);
+        return true;
+      },
+    );
+    const failure = f.diagnostics.find(
+        ({ owner }) => owner === "windows-experiment-input",
+      )?.value.exception,
+      closed = f.diagnostics.find(
+        ({ owner }) => owner === "windows-experiment-input-cleanup",
+      ).value.exception;
+    if (readFails) {
+      assert.equal(failure.rule, "read");
+      assert.equal(failure.cause, primary);
+    } else assert.equal(failure, undefined);
+    assert.equal(closed.cause, cleanup);
+    assert.ok(f.closed.includes(f.launcher));
+    assert.equal(
+      f.saved.at(-1).preparationEffects.settlement.status,
+      "RETAINED",
+    );
+  }
+});
 
 test("Windows experiment held-image protocol pins exact helpers and keeps installed reads separate", async () => {
   const f = rawPreparation({ experiment: true }),

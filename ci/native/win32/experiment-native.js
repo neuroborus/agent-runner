@@ -206,17 +206,116 @@ export async function bootstrapWindowsExperiment(
     if (record) commands.push({ ...request, ...result });
     return result;
   };
-  const read = async (file) => {
-    const stat = await filesystem.lstat(file);
-    requireObservation(
-      stat.isFile() &&
-        !stat.isSymbolicLink() &&
-        stat.nlink === 1 &&
-        stat.size > 0 &&
-        stat.size <= 134217728 &&
-        (await filesystem.realpath(file)) === file,
-    );
-    return filesystem.readFile(file);
+  const read = async (file, installed = false) => {
+    const maximum = 134217728,
+      maximumLinks = installed ? 128 : 1,
+      keys = ["dev", "ino", "mode", "nlink", "size", "mtimeMs", "ctimeMs"],
+      metadata = (stat) =>
+        stat &&
+        Object.fromEntries(
+          keys
+            .filter((key) => Number.isFinite(stat[key]))
+            .map((key) => [key, stat[key]]),
+        );
+    let before, opened, held, after, handle, primary, rule, canonical, size;
+    const check = (name, value) => {
+      rule = name;
+      requireObservation(value);
+    };
+    const stable = (stat) => keys.every((key) => before[key] === stat[key]);
+    try {
+      check("bounded-canonical-path", location(file));
+      rule = "lstat";
+      before = await filesystem.lstat(file);
+      check("nonsymlink", !before.isSymbolicLink());
+      check("regular-file", before.isFile());
+      check(
+        "finite-metadata",
+        keys.every((key) => Number.isFinite(before[key])),
+      );
+      check(
+        "link-count",
+        Number.isInteger(before.nlink) &&
+          before.nlink > 0 &&
+          before.nlink <= maximumLinks,
+      );
+      check(
+        "positive-size",
+        Number.isSafeInteger(before.size) && before.size > 0,
+      );
+      check("bounded-size", before.size <= maximum);
+      rule = "realpath";
+      canonical = await filesystem.realpath(file);
+      check("exact-realpath", canonical === file);
+      rule = "open";
+      handle = await filesystem.open(file, "r");
+      rule = "opened-stat";
+      opened = await handle.stat();
+      check("opened-identity-and-metadata", stable(opened));
+      const buffer = Buffer.alloc(before.size + 1);
+      size = 0;
+      rule = "read";
+      while (size < buffer.length) {
+        const { bytesRead } = await handle.read(
+          buffer,
+          size,
+          buffer.length - size,
+          size,
+        );
+        if (!bytesRead) break;
+        size += bytesRead;
+      }
+      check("complete-read", size === before.size);
+      rule = "held-stat";
+      held = await handle.stat();
+      check("held-stability", stable(held));
+      rule = "final-lstat";
+      after = await filesystem.lstat(file);
+      check("final-nonsymlink", !after.isSymbolicLink());
+      check("path-stability", stable(after));
+      rule = "final-realpath";
+      canonical = await filesystem.realpath(file);
+      check("final-exact-realpath", canonical === file);
+      return buffer.subarray(0, size);
+    } catch (cause) {
+      primary = cause;
+      try {
+        nativeException("windows-experiment-input", {
+          file,
+          installed,
+          rule,
+          maximum,
+          maximumLinks,
+          canonical,
+          bytesRead: size,
+          before: metadata(before),
+          opened: metadata(opened),
+          held: metadata(held),
+          after: metadata(after),
+          cause,
+        });
+      } catch {
+        /* Diagnostics cannot replace the original read failure. */
+      }
+      throw cause;
+    } finally {
+      try {
+        await handle?.close();
+      } catch (cause) {
+        try {
+          nativeException("windows-experiment-input-cleanup", { file, cause });
+        } catch {
+          /* Keep the primary read failure and actual cleanup outcome. */
+        }
+        if (primary)
+          throw new AggregateError(
+            [primary, cause],
+            "Windows bootstrap input read and close failed",
+            { cause: primary },
+          );
+        throw cause;
+      }
+    }
   };
   requireObservation(
     (
@@ -281,7 +380,7 @@ export async function bootstrapWindowsExperiment(
     requireObservation(
       WINDOWS_BUILD_TOOLS.find((tool) => tool.name === name).path.test(file),
     );
-    const bytes = await read(file);
+    const bytes = await read(file, true);
     tools.push({
       name,
       path: file,
@@ -290,8 +389,15 @@ export async function bootstrapWindowsExperiment(
   }
   // The OS loads the discovered launcher. The System reader later owns the
   // installed runtime's x64 PE, signature and held-file checks, including DLLs.
-  const gitRuntime = await discoverWindowsGitRuntime(run, read);
-  const gitBytes = await read(gitRuntime.path);
+  const readGit = (file) =>
+    read(
+      file,
+      /^[A-Z]:\\Program Files\\Git\\(?:cmd|bin|(?:mingw64|ucrt64)\\bin)\\git\.exe$/u.test(
+        file,
+      ),
+    );
+  const gitRuntime = await discoverWindowsGitRuntime(run, readGit);
+  const gitBytes = await readGit(gitRuntime.path);
   gitRuntime.sha256 = digest(gitBytes);
   await filesystem.mkdir(sourceDirectory);
   await filesystem.mkdir(directory);
@@ -446,14 +552,14 @@ export async function bootstrapWindowsExperiment(
       "Windows.h",
     ),
   };
-  sdkHeader.sha256 = digest(await read(sdkHeader.file));
+  sdkHeader.sha256 = digest(await read(sdkHeader.file, true));
   for (const source of sources)
     requireObservation(
       digest(await read(path.join(sourceDirectory, source.name))) ===
         source.sha256,
     );
   for (const tool of tools)
-    requireObservation(digest(await read(tool.path)) === tool.sha256);
+    requireObservation(digest(await read(tool.path, true)) === tool.sha256);
   const prepared = {
     purpose: "experiment",
     schemaVersion: 4,
