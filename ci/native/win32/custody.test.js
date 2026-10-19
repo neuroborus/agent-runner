@@ -792,6 +792,12 @@ test("Windows callback and returned identity snapshots cannot rewrite admitted c
 test("Windows held files, volumes, process creation identities and loader edges reject substitution", async () => {
   for (const [operation, damage] of [
     [
+      "loader",
+      (value) => {
+        value.importScope = "private-runtime";
+      },
+    ],
+    [
       "inspect",
       (value) => {
         value.identity = id(99);
@@ -2617,7 +2623,7 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
     importStart = source.indexOf(
       "  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 |",
     ),
-    importEnd = source.indexOf("  /* Resource handles", importStart),
+    importEnd = source.indexOf("  /* Open the observed NT path", importStart),
     retainStart = source.indexOf("  reader_retain.pid = pid;"),
     retainEnd = source.indexOf(
       "  for (unsigned i = 0; i < process_count;",
@@ -2634,47 +2640,59 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
       .slice(importStart, importEnd)
       .replace("DWORD flags", "const flags")
       .replace("size_t size", "const size")
-      .replace("HMODULE module", "const module")
+      .replace("HMODULE module", "let module")
+      .replace(
+        "GetModuleHandleExW(0, name, &module)",
+        "GetModuleHandleExW(0, name, value=>(module=value))",
+      )
       .replaceAll('L"', '"')
       .replace("name+size-4", "name.slice(size-4)"),
   );
-  for (const preparation of [false, true]) {
+  for (const outcome of ["loaded", "mapped", "missing"]) {
     const context = {},
       calls = [],
       refusal = new Error("Original mapping failure");
-    assert.throws(
-      () =>
-        mapping.runInNewContext({
-          preparation_only: preparation,
-          reader_loader: context,
-          image: "C:\\Fixture\\image.dll",
-          name: "fixture.dll",
-          TRUE: true,
-          NULL: null,
-          LOAD_LIBRARY_SEARCH_SYSTEM32: 0x800,
-          LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE: 0x40,
-          LOAD_LIBRARY_AS_IMAGE_RESOURCE: 0x20,
-          wcslen: (name) => name.length,
-          _wcsicmp: (left, right) =>
-            Number(left.toLowerCase() !== right.toLowerCase()),
-          wcsspn: (name) => name.length,
-          LoadLibraryExW: (name, reserved, flags) => {
-            calls.push({ name, reserved, flags });
-            return null;
-          },
-          need: (ok) => {
-            if (!ok) throw refusal;
-          },
-        }),
-      (error) => error === refusal,
-    );
-    assert.deepEqual(calls, [
-      {
+    const run = () =>
+      mapping.runInNewContext({
+        reader_loader: context,
+        image: "C:\\Fixture\\image.dll",
         name: "fixture.dll",
-        reserved: null,
-        flags: preparation ? 0x860 : 0x800,
-      },
-    ]);
+        TRUE: true,
+        NULL: null,
+        LOAD_LIBRARY_SEARCH_SYSTEM32: 0x800,
+        DONT_RESOLVE_DLL_REFERENCES: 1,
+        wcslen: (name) => name.length,
+        _wcsicmp: (left, right) =>
+          Number(left.toLowerCase() !== right.toLowerCase()),
+        wcsspn: (name) => name.length,
+        GetModuleHandleExW: (flags, name, set) => {
+          assert.equal(flags, 0);
+          assert.equal(name, "fixture.dll");
+          if (outcome === "loaded") set(77);
+          return outcome === "loaded";
+        },
+        LoadLibraryExW: (name, reserved, flags) => {
+          calls.push({ name, reserved, flags });
+          return outcome === "mapped" ? 77 : null;
+        },
+        need: (ok) => {
+          if (!ok) throw refusal;
+        },
+      });
+    if (outcome === "missing") assert.throws(run, (error) => error === refusal);
+    else run();
+    assert.deepEqual(
+      calls,
+      outcome === "loaded"
+        ? []
+        : [
+            {
+              name: "fixture.dll",
+              reserved: null,
+              flags: 0x801,
+            },
+          ],
+    );
     assert.equal(context.active, true);
     assert.equal(context.image, "C:\\Fixture\\image.dll");
     assert.equal(context.name, "fixture.dll");
@@ -2696,9 +2714,6 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
       .replace("struct held_file file", "const file")
       .replace("char dacl[65]", "const dacl={}")
       .replace(/\b(?:DWORD|HANDLE)\b/gu, "const")
-      .replace("(ULONG_PTR)3", "3n")
-      .replaceAll("(ULONG_PTR)", "")
-      .replaceAll("(void *)", "")
       .replaceAll('L"', '"')
       .replace(/sizeof\([^)]*\)/gu, "1")
       .replace(/&(tag|before|after)\b/gu, "$1")
@@ -2721,21 +2736,18 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
       )
       .replace("actual+prefix+1", "actual.slice(prefix+1)"),
   );
-  for (const [tag, fault] of [
-    ...[0n, 1n, 2n, 3n].map((tag) => [tag, null]),
-    ...[
-      "mapped-query",
-      "mapped-truncated",
-      "outside",
-      "nested",
-      "reparse",
-      "mapped-identity",
-      "held-identity",
-      "release",
-    ].map((fault) => [1n, fault]),
+  for (const fault of [
+    null,
+    "mapped-query",
+    "mapped-truncated",
+    "outside",
+    "nested",
+    "reparse",
+    "mapped-identity",
+    "held-identity",
+    "release",
   ]) {
-    const base = 0x100000000n,
-      module = base | tag,
+    const module = 0x100000000n,
       mapped = "\\Device\\FixtureVolume\\Windows\\System32\\fixture.dll",
       actual =
         fault === "outside"
@@ -2767,7 +2779,7 @@ test("ordinary DLL inspection avoids initialization while retain failures descri
         GetCurrentProcess: () => 77,
         GetMappedFileNameW: (process, address, out) => {
           assert.equal(process, 77);
-          assert.equal(address, base);
+          assert.equal(address, module);
           out(mapped);
           return fault === "mapped-query"
             ? 0
@@ -5320,6 +5332,24 @@ test("Windows experiment custody retains native Job and handle protection requir
     return Buffer.from(JSON.stringify(frame) + "\n");
   };
   await assert.rejects(k.verifier.verifyTransfer(k.helperTransfer));
+  const bootstrap = f.options.verifyBootstrap;
+  f.options.verifyBootstrap = async (...args) => {
+    const { reviewSha256, ...seal } = await bootstrap(...args);
+    return { ...seal, purpose: "experiment", bindingSha256: reviewSha256 };
+  };
+  const reader = f.reader();
+  await reader.start();
+  await reader.open(0);
+  await reader.retainProcess(f.process.identity);
+  let missing = false;
+  f.options.damage = (op, frame) => {
+    if (op === "loader" && !missing)
+      frame.value.importScope = "private-runtime";
+    return frame;
+  };
+  assert.equal((await reader.loader(0, 0)).importScope, "private-runtime");
+  missing = true;
+  await assert.rejects(reader.loader(0, 0));
 });
 
 test("cold account recovery cannot signal a Job reopened by name or remove a surviving principal", async () => {

@@ -787,6 +787,9 @@ export function installOperationNativeFixture(f, input, specification) {
     if (command === "loader") {
       const entry = entries[Number(args[1])];
       return {
+        ...(f.manifest.purpose === "experiment"
+          ? { importScope: "private-runtime" }
+          : {}),
         loaded: [
           {
             pathHex: encode(

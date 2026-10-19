@@ -6,7 +6,7 @@ import {
 import { digest } from "./protocol.js";
 import { decode } from "./custody-protocol.js";
 
-/** Complete held image/API-set and SDK inventories. Approved paths identify
+/** Held image, private-import and SDK inventories. Approved paths identify
  * inputs; fresh native reads supply their bytes and actual dependency edges. */
 export function createWindowsOperationReaders(
   reader,
@@ -17,6 +17,13 @@ export function createWindowsOperationReaders(
   const experiment = purpose === "experiment",
     importKey = ({ name, delay }) =>
       name.toLowerCase() + (experiment ? `:${delay}` : "");
+  const hosted = (file) =>
+    /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(file);
+  const omitted = ({ index, imports }) =>
+    experiment &&
+    imports === null &&
+    (specification.entries[index]?.kind === "helper" ||
+      hosted(specification.entries[index]?.path));
   const read = async (index, maximum = 536870912) => {
     const entry = specification.entries[index],
       before = await reader.inspect(index),
@@ -52,7 +59,9 @@ export function createWindowsOperationReaders(
     const observations = [],
       reached = new Set(roots),
       dlls = new Set(
-        components.flatMap(({ imports }) => imports.map(({ index }) => index)),
+        components.flatMap(({ imports }) =>
+          (imports ?? []).map(({ index }) => index),
+        ),
       );
     for (const component of components) {
       observationObject(component, ["index", "imports"]);
@@ -60,10 +69,11 @@ export function createWindowsOperationReaders(
         ["image", "helper"].includes(
           specification.entries[component.index]?.kind,
         ) &&
-          Array.isArray(component.imports) &&
-          component.imports.length <= 256,
+          (Array.isArray(component.imports)
+            ? component.imports.length <= 256
+            : omitted(component)),
       );
-      for (const target of component.imports) {
+      for (const target of component.imports ?? []) {
         observationObject(
           target,
           experiment ? ["name", "index", "delay"] : ["name", "index"],
@@ -76,8 +86,8 @@ export function createWindowsOperationReaders(
         );
       }
       requireObservation(
-        new Set(component.imports.map(importKey)).size ===
-          component.imports.length,
+        new Set((component.imports ?? []).map(importKey)).size ===
+          (component.imports ?? []).length,
       );
       await read(component.index);
       await reader.signature(component.index);
@@ -86,7 +96,8 @@ export function createWindowsOperationReaders(
         pe.complete &&
           (!dlls.has(component.index) || pe.dll) &&
           Array.isArray(pe.imports) &&
-          pe.imports.length === component.imports.length,
+          (component.imports === null ||
+            pe.imports.length === component.imports.length),
       );
       requireObservation(
         new Set(pe.imports.map(importKey)).size === pe.imports.length,
@@ -96,10 +107,16 @@ export function createWindowsOperationReaders(
           imported,
           experiment ? ["name", "delay"] : ["name", "host", "delay"],
         );
+        requireObservation(
+          typeof imported.name === "string" &&
+            /^[A-Za-z0-9_.-]+\.dll$/iu.test(imported.name) &&
+            typeof imported.delay === "boolean",
+        );
+        if (component.imports === null) continue;
         const target = component.imports.find(
           (value) => importKey(value) === importKey(imported),
         );
-        requireObservation(target && typeof imported.delay === "boolean");
+        requireObservation(target);
         const entry = specification.entries[target.index],
           basename = entry.path.split("\\").at(-1).toLowerCase();
         // Direct edges name held physical modules, including copied Git DLLs.
@@ -134,7 +151,8 @@ export function createWindowsOperationReaders(
       size = reached.size;
       for (const component of components)
         if (reached.has(component.index))
-          for (const target of component.imports) reached.add(target.index);
+          for (const target of component.imports ?? [])
+            reached.add(target.index);
     }
     requireObservation(reached.size === components.length);
     const build = await reader.buildBindings(),
@@ -154,21 +172,42 @@ export function createWindowsOperationReaders(
     requireObservation(sdk.length > 0);
     return { images: observations, build, sdk };
   };
-  const runtime = async (subject, image, components) => {
+  const runtime = async (
+    subject,
+    image,
+    components = specification.slots.loader,
+  ) => {
+    requireObservation(
+      Array.isArray(components) &&
+        components.some(({ index }) => index === image) &&
+        components.every(
+          (component) => Array.isArray(component.imports) || omitted(component),
+        ),
+    );
     const actual = await reader.loader(subject, image),
       reached = new Set([image]);
+    requireObservation(!experiment || actual.importScope === "private-runtime");
     for (let size = -1; size !== reached.size;) {
       size = reached.size;
       for (const component of components)
         if (reached.has(component.index))
-          for (const target of component.imports) reached.add(target.index);
+          for (const target of component.imports ?? [])
+            reached.add(target.index);
     }
-    const indices = [];
+    const indices = [],
+      paths = new Set();
     for (const file of actual.loaded) {
+      const path = decode(file.pathHex).toLowerCase();
+      requireObservation(!paths.has(path));
+      paths.add(path);
       const index = specification.entries.findIndex(
         (entry) =>
           entry.path.toLowerCase() === decode(file.pathHex).toLowerCase(),
       );
+      if (experiment && !reached.has(index) && hosted(path)) {
+        indices.push(-1);
+        continue;
+      }
       requireObservation(reached.has(index) && !indices.includes(index));
       const entry = specification.entries[index],
         held = await reader.inspect(index);
@@ -181,12 +220,18 @@ export function createWindowsOperationReaders(
       );
       indices.push(index);
     }
-    requireObservation(indices.length === reached.size);
+    requireObservation(
+      [...reached].every((index) => indices.includes(index)) &&
+        (experiment || indices.length === reached.size),
+    );
     requireObservation(
       actual.imports.length ===
         components
           .filter(({ index }) => reached.has(index))
-          .reduce((sum, component) => sum + component.imports.length, 0),
+          .reduce(
+            (sum, component) => sum + (component.imports ?? []).length,
+            0,
+          ),
     );
     const edges = new Set();
     for (const edge of actual.imports) {
@@ -197,7 +242,7 @@ export function createWindowsOperationReaders(
       const component = components.find(
         ({ index }) => index === indices[edge.source],
       );
-      const target = component?.imports.find(
+      const target = component?.imports?.find(
         (value) => importKey(value) === importKey({ name, delay: edge.delay }),
       );
       requireObservation(target?.index === indices[edge.resolved]);

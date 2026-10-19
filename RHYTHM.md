@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-19 — Limit ordinary Windows library admission to private consumers
+
+Ordinary Windows preparation binds thirteen exact-candidate marked helpers without
+reconstructing their transitive installed-system admission. The disposable hosted
+system runtime is trusted. Dependency discovery remains only for actual private
+access-payload and Git copies, preserving individual source/copy custody, delay
+edges, native isolation and original-owner retirement. API-set resolution uses
+documented module/loader observations without DLL initialization, joined to held
+physical System32 targets. Omitted admission is explicit; it is never fabricated
+dependency evidence. Version-3 private preparation and version-2 operation records
+reject incompatible or mixed evidence during loading and recovery without rebuilding.
+Reviewed imports, protected package readers and production/provider contracts stay strict.
+
+The original resource-mapping API-set refusal and independent `verify-retain`
+uncertainty confer no retirement or native acceptance. Windows observer-transfer
+10022, missing 4663 audit and Darwin inherited-authority/model-free prerequisites
+remain required. Portable regressions do not replace fresh original native workflows.
+
 ## 2026-10-19 — Trust the hosted Darwin system runtime for ordinary experiments
 
 Ordinary Darwin preparation no longer discovers or recursively admits dyld-cache

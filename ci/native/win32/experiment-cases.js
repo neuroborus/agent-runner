@@ -7,7 +7,7 @@ import {
   nativePolicyLaunchData,
   requireObservation,
 } from "../index.js";
-import { digest, WINDOWS_LITERAL_ARGUMENTS } from "./protocol.js";
+import { digest, hash, WINDOWS_LITERAL_ARGUMENTS } from "./protocol.js";
 import { encodeWindowsCustodyPlan } from "./custody-protocol.js";
 import { buildWindowsPolicy } from "./policy.js";
 import {
@@ -28,27 +28,68 @@ const rule = (id, kind, paths) => ({
   maximum: null,
 });
 
-/** Discover the installed Git and its actual imports. All bytes/signatures are
+/** Discover private Git dependencies and direct system targets. Bytes/signatures are
  * independently held by the System reader, including unsigned runtime bytes. */
 export async function windowsExperimentGitRuntime(
   native,
   systemRoot,
-  { exists = lstat } = {},
+  options = {},
 ) {
   const directory =
     path.parse(systemRoot).root + "Program Files\\Git\\mingw64\\bin";
-  const pending = [path.join(directory, "git.exe")],
+  return discoverRuntime(native, path.join(directory, "git.exe"), {
+    ...options,
+    directory,
+  });
+}
+
+/** Only private payload copies and Git need dependency discovery. Helper
+ * admission deliberately supplies no transitive installed-system evidence. */
+export async function windowsExperimentDependencies(
+  prepared,
+  native,
+  options = {},
+) {
+  const helper = prepared.helpers.find(({ name }) => name === "access-fixture"),
+    payload = await discoverRuntime(native, helper.path, {
+      ...options,
+      helper: true,
+    });
+  requireObservation(
+    payload[0].sha256 === helper.sha256 &&
+      payload[0].signatureSha256 === helper.signatureSha256,
+  );
+  return {
+    payload,
+    git: await windowsExperimentGitRuntime(
+      native,
+      prepared.environment.SystemRoot,
+      options,
+    ),
+  };
+}
+
+async function discoverRuntime(
+  native,
+  root,
+  { exists = lstat, directory, helper = false } = {},
+) {
+  const pending = [root],
     resolutions = new Map(),
     identities = new Map(),
     images = new Map();
   for (let i = 0; i < pending.length; i++) {
-    requireObservation(pending.length <= 64);
+    requireObservation(pending.length <= (helper ? 128 : 64));
     const file = pending[i],
-      read = await native.readImage(file, true);
+      read = await native.readImage(file, !(helper && file === root));
     requireObservation(
       read.held &&
         read.independent &&
         read.unchanged &&
+        read.protectedDacl &&
+        read.protectedParents &&
+        hash(read.identitySha256) &&
+        hash(read.signatureSha256) &&
         read.sha256 === digest(read.bytes),
     );
     identities.set(file.toLowerCase(), read.identitySha256);
@@ -60,22 +101,43 @@ export async function windowsExperimentGitRuntime(
           read.identitySha256 === resolved.identitySha256),
     );
     const imports = [];
-    for (const imported of read.pe.imports) {
+    // Git uses the hosted system runtime, but every DLL copied beside Git and
+    // every dependency copied into the access payload's private root is retained.
+    const system = /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(file);
+    for (const imported of directory && system ? [] : read.pe.imports) {
       const name = imported.name;
       requireObservation(
         typeof name === "string" &&
           /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name) &&
           typeof imported.delay === "boolean",
       );
-      const local = path.join(directory, name);
+      const local = directory ? path.join(directory, name) : null;
       let target;
-      try {
-        await exists(local);
-        target = local;
-      } catch (error) {
-        requireObservation(error.code === "ENOENT");
-        const resolved = await native.resolveImport(name, file),
-          previous = resolutions.get(resolved.file.toLowerCase());
+      if (local) {
+        try {
+          await exists(local);
+          target = local;
+        } catch (error) {
+          requireObservation(error.code === "ENOENT");
+        }
+      }
+      if (!target) {
+        let resolved;
+        try {
+          resolved = await native.resolveImport(name, file);
+        } catch (cause) {
+          try {
+            Object.assign(cause, {
+              image: file,
+              importName: name,
+              delay: imported.delay,
+            });
+          } catch {
+            /* Preserve the original failure. */
+          }
+          throw cause;
+        }
+        const previous = resolutions.get(resolved.file.toLowerCase());
         requireObservation(
           !previous ||
             observationDigest(previous) === observationDigest(resolved),
@@ -99,7 +161,8 @@ export async function windowsExperimentGitRuntime(
       path: file,
       sha256: read.sha256,
       signatureSha256: read.signatureSha256,
-      imports,
+      identitySha256: read.identitySha256,
+      imports: directory && system ? null : imports,
     });
   }
   return [...images.values()];
@@ -204,11 +267,12 @@ export async function prepareWindowsExperimentCases(
     recipes = windowsSystemRecipes(),
     sourceSha256 = observationDigest(prepared.sources),
     provisionSha256 = prepared.bootstrap.bindingSha256,
-    gitRuntime = await windowsExperimentGitRuntime(
+    dependencies = await windowsExperimentDependencies(
+      prepared,
       native,
-      prepared.environment.SystemRoot,
       options,
     ),
+    gitRuntime = dependencies.git,
     foreignVolume = await native.prepareVolume(),
     helper = (name) => prepared.helpers.find((image) => image.name === name),
     pins = (name) => {
@@ -369,10 +433,7 @@ export async function prepareWindowsExperimentCases(
         ],
         runtimeAssets = [];
       // The observed loader graph fixes every individual copied dependency.
-      const dependencies = observation.runtime.filter((image) =>
-        observation.helperLoaders[payload].includes(image.path),
-      );
-      for (const image of dependencies) {
+      for (const image of dependencies.payload.slice(1)) {
         const target = imageAsset(
             request.storage + "\\" + path.basename(image.path),
             image,
@@ -622,30 +683,28 @@ export async function prepareWindowsExperimentCases(
             requireObservation(index >= 0);
             byPath.set(image.path.toLowerCase(), index);
           }
-      const observedImages = [...observation.runtime, ...gitRuntime];
-      const loader = roots.map((index) => ({ index, imports: [] }));
+      const loader = roots.map((index) => ({
+        index,
+        imports: git && index === slots.git ? [] : null,
+      }));
       for (let i = 0; i < loader.length; i++) {
+        if (loader[i].imports === null) continue;
         const entry = entries[loader[i].index],
-          original = roots.includes(loader[i].index)
-            ? entry.path === request.launcher.path
-              ? pins("launcher").path
-              : entry.path === request.executable.path
-                ? pins(payload).path
-                : entry.path === (git ? input.git.path : null)
-                  ? gitRuntime[0].path
-                  : entry.path
-            : git && entry.path.startsWith(request.storage + "\\")
-              ? gitRuntime.find(
-                  (image) =>
-                    path.basename(image.path) === path.basename(entry.path),
-                )?.path
-              : entry.path,
-          image = observedImages.find(
+          original =
+            loader[i].index === slots.git
+              ? gitRuntime[0].path
+              : entry.path.startsWith(request.storage + "\\")
+                ? gitRuntime.find(
+                    (image) =>
+                      path.basename(image.path) === path.basename(entry.path),
+                  )?.path
+                : entry.path,
+          image = gitRuntime.find(
             (image) => image.path.toLowerCase() === original.toLowerCase(),
           );
-        requireObservation(image);
+        requireObservation(image && Array.isArray(image.imports));
         for (const imported of image.imports) {
-          const dependency = observedImages.find(
+          const dependency = gitRuntime.find(
             (image) => image.path.toLowerCase() === imported.path.toLowerCase(),
           );
           requireObservation(dependency);
@@ -655,7 +714,10 @@ export async function prepareWindowsExperimentCases(
             byPath.set(imported.path.toLowerCase(), index);
           }
           if (!loader.some((component) => component.index === index))
-            loader.push({ index, imports: [] });
+            loader.push({
+              index,
+              imports: dependency.imports === null ? null : [],
+            });
           loader[i].imports.push({
             name: imported.name,
             index,
@@ -723,7 +785,7 @@ export async function prepareWindowsExperimentCases(
       delete bound.bindingSha256;
       if (files) bound.base = bound.root = null;
       const expectation = {
-          schemaVersion: 1,
+          schemaVersion: 2,
           contextSha256: observationDigest(context),
           id: recipe.id,
           inputSha256: observationDigest(bound),
@@ -754,5 +816,5 @@ export async function prepareWindowsExperimentCases(
       policyBinding: { purpose: "experiment", template, context },
     });
   }
-  return { purpose: "experiment", cases, bindings, recipes };
+  return { purpose: "experiment", dependencies, cases, bindings, recipes };
 }

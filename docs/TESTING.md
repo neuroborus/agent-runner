@@ -1254,16 +1254,20 @@ never additional local FINALIZE commands.
 
 ## Native proof harness
 
-Windows experiment regressions inject namespace aliases and physical forwarding
-DLLs through the existing installed-loader operation, retaining declared names
-and delay flags. Held-image protocol tests join actual canonical paths, file
-identities and hashes; build/cold-load coverage rejects unresolved imports and
-identity/byte substitution without recompilation. Case graph readers retain
-reviewed rejection and require matching ordinary delay edges and alias targets.
-Custody recovery retains original process-hold failure even after a later
-observer completes. These neutral injections use existing fast discovery and
-the selected native harness; they invoke no Windows tool, add no slow tier and
-establish no native acceptance or original-owner retirement.
+Windows experiment regressions prove that helper admission and cold verification
+bind thirteen images without traversing their installed-system imports. Dependency
+coverage is scoped to private payload and Git copies, preserving held source/copy
+identities, delay edges and substitution refusal. Explicit null helper/system
+import inventories cannot be promoted to empty observed graphs or used for reviewed
+admission. Live loader coverage accepts hosted System32 module observations while
+rejecting undeclared private modules and incomplete private dependency evidence.
+Version-3 preparation and version-2 operation records reject legacy, mixed or
+missing evidence without recompilation. Custody recovery retains original
+process-hold failure even after a later observer completes. These neutral
+injections use existing fast discovery and the selected native harness; they invoke
+no Windows tool, add no slow tier and establish no native acceptance or original-owner
+retirement. Windows observer-transfer 10022, missing 4663 audit and Darwin inherited
+fault authority/model-free prerequisites remain required external concerns.
 
 Darwin injected/source regressions protect shared sandbox function/data bindings,
 unavailable exports, all custody query consumers, path-filter results and PF

@@ -104,7 +104,7 @@ function fixture() {
     },
     prepared = {
       purpose: "experiment",
-      schemaVersion: 2,
+      schemaVersion: 3,
       job,
       directory,
       sourceDirectory,
@@ -179,7 +179,7 @@ function fixture() {
       GITHUB_RUN_ID: "1",
       GITHUB_RUN_ATTEMPT: "1",
     };
-  declaration.schemaVersion = 2;
+  declaration.schemaVersion = 3;
   declaration.command = { helper: declaration.command.helper };
   for (const entry of declaration.cases)
     entry.custody.context.jobBindingSha256 = observationDigest(binding);
@@ -267,6 +267,7 @@ test("Windows experiment preparation requires every fixed helper/header/case and
   assert.throws(() => normalizeWindowsPreparation(f.declaration, candidateSha));
   for (const damage of [
     (value) => value.helpers.pop(),
+    (value) => (value.schemaVersion = 2),
     (value) => value.sources.pop(),
     (value) => (value.helpers[0].sourceSha256 = "d".repeat(64)),
   ]) {
@@ -274,6 +275,11 @@ test("Windows experiment preparation requires every fixed helper/header/case and
     damage(value);
     assert.throws(() => windowsExperimentBuildInventory(value));
   }
+  const legacy = structuredClone(f.declaration);
+  legacy.schemaVersion = 2;
+  assert.throws(() =>
+    normalizeWindowsExperimentPreparation(legacy, candidateSha),
+  );
   const missing = structuredClone(f.declaration);
   missing.cases.pop();
   assert.throws(() =>
@@ -295,25 +301,7 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
     bytes = Buffer.from("held Git fixture"),
     dependency = path.join(path.dirname(git), "runtime.dll"),
-    image = (file, imports) => ({
-      path: file,
-      sha256: H,
-      signatureSha256: H,
-      imports,
-    }),
-    runtime = [
-      ...prepared.helpers.map((helper) =>
-        image(helper.path, [
-          { name: "KERNEL32.dll", path: system, delay: false },
-        ]),
-      ),
-      image(system, []),
-    ],
     observed = {
-      runtime,
-      helperLoaders: Object.fromEntries(
-        prepared.helpers.map(({ name }) => [name, [system]]),
-      ),
       sdkInputs: [
         {
           file: "C:\\Program Files (x86)\\Windows Kits\\10\\Include\\10.0.26100.0\\um\\windows.h",
@@ -327,25 +315,51 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
         held: true,
         independent: true,
         unchanged: true,
+        protectedDacl: true,
+        protectedParents: true,
         bytes,
         sha256: createHash("sha256").update(bytes).digest("hex"),
         identitySha256: H,
         signatureSha256: H,
         pe: {
-          imports: file === git ? [{ name: "runtime.dll", delay: false }] : [],
+          imports:
+            file === git
+              ? [
+                  { name: "runtime.dll", delay: false },
+                  { name: "KERNEL32.dll", delay: true },
+                ]
+              : file === system
+                ? [{ name: "unneeded.dll", delay: false }]
+                : [],
         },
       }),
+      resolveImport: async (name, image) => {
+        assert.equal(name, "KERNEL32.dll");
+        assert.equal(image, git);
+        return {
+          file: system,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          identitySha256: H,
+        };
+      },
       prepareVolume: async () => ({ file: "D:\\Fixture\\foreign" }),
       write: async (name, value) =>
         records.set(name, Buffer.from(JSON.stringify(value) + "\n")),
       writeBytes: async (name, value) => records.set(name, value),
     };
+  for (const helper of prepared.helpers)
+    helper.sha256 = createHash("sha256").update(bytes).digest("hex");
   prepared.environment = { SystemRoot: "C:\\Windows" };
   const result = await prepareWindowsExperimentCases(
     prepared,
     observed,
     native,
-    { exists: async (file) => assert.equal(file, dependency) },
+    {
+      exists: async (file) => {
+        if (file !== dependency)
+          throw Object.assign(new Error("Not local"), { code: "ENOENT" });
+      },
+    },
   );
   assert.deepEqual(
     result.cases.map(({ id }) => id),
@@ -373,10 +387,19 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
       if (asset.source !== null)
         assert.equal(entries[asset.index].kind, entries[asset.source].kind);
     const loader = specification.slots.loader;
+    assert.ok(
+      loader
+        .filter(({ index }) => entries[index].kind === "helper")
+        .every(({ imports }) => imports === null),
+    );
     for (const component of loader)
-      for (const imported of component.imports)
+      for (const imported of component.imports ?? [])
         assert.ok(loader.some(({ index }) => index === imported.index));
     if (entry.id.startsWith("git.")) {
+      assert.equal(
+        loader.find(({ index }) => entries[index].path === system).imports,
+        null,
+      );
       assert.ok(
         loader.some(
           ({ index }) =>
@@ -682,6 +705,7 @@ function hostedFixture() {
   const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const compiler = f.prepared.tools[0].path,
     sdk = f.prepared.tools[1].path;
+  files.set("C:\\Program Files\\Git\\mingw64\\bin\\git.exe", image);
   files.set(compiler, source);
   files.set(sdk, source);
   files.set(f.prepared.sdkHeader.file, source);
@@ -820,7 +844,7 @@ function hostedFixture() {
       };
       await write("windows-experiment-close.json", {
         purpose: "experiment",
-        schemaVersion: 2,
+        schemaVersion: 3,
         observer,
       });
       for (const [kind, status] of [
@@ -860,7 +884,7 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
         args.includes("/DNATIVE_CI_EXPERIMENT=1"),
     ),
   );
-  assert.equal(built.preparation.schemaVersion, 2);
+  assert.equal(built.preparation.schemaVersion, 3);
   assert.ok(
     built.preparation.commands.every(
       (command) =>
@@ -954,9 +978,49 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
       assert.throws(() => windowsExperimentBuildInventory(record));
     }
   }
+  for (const [name, damage] of [
+    [
+      "preparation",
+      (record) => {
+        record.schemaVersion = 2;
+      },
+    ],
+    [
+      "preparation",
+      (record) => {
+        delete record.system.dependencies;
+      },
+    ],
+    [
+      "preparation",
+      (record) => {
+        record.runtime = [];
+        record.helperLoaders = {};
+      },
+    ],
+    [
+      "close",
+      (record) => {
+        record.schemaVersion = 2;
+      },
+    ],
+  ]) {
+    const file = path.join(directory, `windows-experiment-${name}.json`),
+      original = f.files.get(file),
+      record = JSON.parse(original);
+    damage(record);
+    f.files.set(file, Buffer.from(JSON.stringify(record)));
+    await assert.rejects(
+      loadWindowsExperiment(built.job, directory, {
+        ...f.options,
+        files: f.filesOwner,
+      }),
+    );
+    f.files.set(file, original);
+  }
 });
 
-test("Windows ordinary imports rejoin observed namespace and physical modules on cold load", async () => {
+test("Windows helper admission omits installed traversal while private payload dependencies rejoin on cold load", async () => {
   const f = hostedFixture(),
     contract = "api-fixture-runtime-l1-1-0.dll",
     physical = "api-fixture-forward-l1-1-0.dll",
@@ -1042,19 +1106,23 @@ test("Windows ordinary imports rejoin observed namespace and physical modules on
     recorded = JSON.parse(
       f.files.get(path.join(directory, "windows-experiment-preparation.json")),
     );
-  assert.deepEqual(names.slice(beforeCold), [
-    contract,
-    physical,
-    contract,
-    physical,
-    contract,
-  ]);
-  assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length + 2);
-  assert.deepEqual(recorded.runtime[0].imports, [
+  assert.deepEqual(names.slice(beforeCold), [contract, physical, contract]);
+  assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length);
+  assert.equal(recorded.runtime, undefined);
+  assert.equal(recorded.helperLoaders, undefined);
+  assert.deepEqual(recorded.system.dependencies.payload[0].imports, [
     { name: contract, path: host, delay: false },
-    { name: physical, path: forward, delay: true },
   ]);
-  assert.deepEqual(recorded.helperLoaders["access-fixture"], [host, forward]);
+  assert.deepEqual(
+    recorded.system.dependencies.payload.map(({ path }) => path),
+    [
+      built.preparation.prepared.helpers.find(
+        ({ name }) => name === "access-fixture",
+      ).path,
+      host,
+      forward,
+    ],
+  );
   const access = built.preparation.system.cases.find(
     ({ bindings }) => bindings.access,
   ).bindings;
@@ -1072,7 +1140,7 @@ test("Windows ordinary imports rejoin observed namespace and physical modules on
         fault !== "unresolved" ||
         (error === unresolved &&
           error.importName === contract &&
-          error.image === recorded.runtime[0].path),
+          error.image === recorded.system.dependencies.payload[0].path),
     );
   fault = "immutable-error";
   await assert.rejects(load, (error) => error === immutable);

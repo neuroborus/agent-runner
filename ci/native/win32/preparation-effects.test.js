@@ -1955,6 +1955,7 @@ test("Windows loader reads reject repeated imports replacing a required API-set 
     loaded = reader.loader;
   reader.loader = async () => ({
     ...(await loaded()),
+    importScope: "private-runtime",
     imports: mappedImports.map(({ name, delay }) => ({
       source: 0,
       resolved: 1,
@@ -1977,6 +1978,52 @@ test("Windows loader reads reject repeated imports replacing a required API-set 
   };
   await assert.rejects(experiment.loader(ordinary, [0]));
   await assert.rejects(experiment.runtime(0, 0, ordinary));
+  // Omitted helper admission is explicit; it cannot omit private DLL evidence.
+  const omitted = [{ index: 0, imports: null }];
+  await assert.rejects(experiment.loader(omitted, [0]));
+  entries[0].kind = "helper";
+  let malformed;
+  reader.operation = async (name, index) => {
+    const value = await original(name, index);
+    if (name === "release-pe")
+      value.imports = value.imports.map(({ name, delay }, index) => ({
+        name: !index && malformed === "name" ? "../foreign.dll" : name,
+        delay: !index && malformed === "delay" ? "false" : delay,
+      }));
+    return value;
+  };
+  const module = { ...(await loaded()).loaded[0] };
+  const system = {
+    ...module,
+    pathHex: Buffer.from(
+      "C:\\Windows\\System32\\fixture.dll",
+      "utf16le",
+    ).toString("hex"),
+  };
+  reader.loader = async () => ({
+    importScope: "private-runtime",
+    loaded: [module, system],
+    imports: [],
+  });
+  await experiment.loader(omitted, [0]);
+  for (malformed of ["delay", "name"])
+    await assert.rejects(experiment.loader(omitted, [0]));
+  malformed = null;
+  await experiment.runtime(0, 0, omitted);
+  await assert.rejects(reads.loader(omitted, [0]));
+  await assert.rejects(reads.runtime(0, 0, omitted));
+  system.pathHex = Buffer.from(
+    "C:\\Fixture\\substituted.dll",
+    "utf16le",
+  ).toString("hex");
+  await assert.rejects(experiment.runtime(0, 0, omitted));
+  module.identity = "substituted";
+  reader.loader = async () => ({
+    importScope: "private-runtime",
+    loaded: [module],
+    imports: [],
+  });
+  await assert.rejects(experiment.runtime(0, 0, omitted));
 });
 
 test("Windows interrupted publication retires held workers and retains objects without matched final state", async () => {
@@ -2134,6 +2181,8 @@ function rawPreparation({ experiment = false, environment } = {}) {
       { schemaVersion: 7, purpose: "experiment" },
     );
     f.manifest.purpose = plan.purpose = plan.bootstrap.purpose = "experiment";
+    plan.schemaVersion = 3;
+    plan.command = { helper: plan.command.helper };
     plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
     delete plan.bootstrap.reviewSha256;
     plan.sources.push({ name: "experiment.h", sha256: hash });
@@ -3975,7 +4024,7 @@ test("Windows preparation preserves the open failure and separately persists cle
     receipt = new Error("job receipt unavailable"),
     saved = [];
   const prepared = structuredClone(f.prepared);
-  prepared.schemaVersion = 2;
+  prepared.schemaVersion = 3;
   prepared.sourceDirectory = directory + "-bootstrap";
   prepared.helpers = prepared.helpers.map((helper) => ({
     ...helper,

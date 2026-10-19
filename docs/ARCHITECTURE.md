@@ -75,21 +75,26 @@ ordinary protected-file and production launcher admission unchanged.
 Windows's indexed ordinary preparer uses installed MSVC/SDK and a closed explicit
 compiler environment to build each exact-candidate helper once. Bounded ordinary
 child-tree execution retains actual command diagnostics, versions, tool hashes,
-marked PE output and ABI observations. The private version-2 record migrates
-preparation, loading, build policy and recovery together. Cold loading verifies
-completed outputs without acquisition or recompilation; mixed, legacy and missing
-records fail. Compiler dependency/SDK/library trust reconstruction, System
-compiler controllers, compiler Jobs/tasks and their bootstrap journals are removed.
-Ordinary PE enumeration retains declared names and delay flags separately from
-installed-loader resolution. The constrained System32 operation returns the
-canonical observed module and held identity/hash; initial, completed-build and
-cold reads rejoin them. Physical forwarding DLLs require no identical API-set
-namespace entry. Case graph and live mapped-module observations retain physical
-dependencies and resolve aliases against actual held modules. Unresolved imports
-and substituted images fail; reviewed namespace admission remains strict.
-The recursive graph is retained for exact private runtime copying and case
-inventories. Ordinary preparation maps installed DLLs without initialization or
-dependency execution; actual payload loader observations retain normal loading.
+marked PE output and ABI observations. Private version-3 build/preparation records
+and version-2 operation declarations migrate producers, validation, cold loading
+and recovery together; legacy, mixed or missing evidence fails without rebuilding.
+Compiler dependency/SDK/library trust reconstruction, System compiler controllers,
+compiler Jobs/tasks and their bootstrap journals are removed. Ordinary admission
+binds the thirteen actual helpers without traversing installed-system imports.
+Explicit null case import inventories denote omitted admission, not empty observed
+graphs. Held image, source, signature-observation and PE/ABI checks remain required.
+
+Only private access-payload and Git copies discover dependencies. Their individual
+held source/copy identities and delay edges remain bound, including fresh cold
+verification; Git does not traverse the hosted System32 targets' own imports.
+The existing native import owner observes loaded modules or maps through the
+documented loader without initialization or dependency execution, then joins the
+mapped physical System32 file and held identity/hash. API-set contracts are not
+physical filename assumptions and no private namespace parsing is added.
+Live module censuses retain mapped/held identity, hash, signature and DACL checks;
+only canonical direct hosted System32 DLLs may supplement declared private images.
+Experiment responses explicitly bind private-runtime import scope; reviewed
+namespace, complete import-graph and protected package admission remain strict.
 
 Existing bridge sealing and one System file observer protect the actual generated
 images and sources. A private sibling selector identifies possible publication;

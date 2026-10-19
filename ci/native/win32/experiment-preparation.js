@@ -21,7 +21,10 @@ import {
   WINDOWS_EXPERIMENT_SOURCES,
   windowsHostedCompilerArguments,
 } from "./experiment-native.js";
-import { prepareWindowsExperimentCases } from "./experiment-cases.js";
+import {
+  prepareWindowsExperimentCases,
+  windowsExperimentDependencies,
+} from "./experiment-cases.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
 import {
@@ -92,7 +95,7 @@ export function windowsExperimentBuildInventory(prepared) {
     "versions",
   ]);
   requireObservation(
-    prepared.schemaVersion === 2 &&
+    prepared.schemaVersion === 3 &&
       prepared.purpose === "experiment" &&
       prepared.job.platform === "win32" &&
       prepared.output === path.join(prepared.directory, "platform-build") &&
@@ -347,9 +350,7 @@ async function observeBuild(
 ) {
   windowsExperimentBuildInventory(prepared);
   const proofs = [],
-    actualHelpers = new Map(),
-    runtime = [],
-    helperLoaders = {};
+    actualHelpers = new Map();
   const held = async (file, sha256, installed = false) => {
     const read = installed
       ? await native.readInput(file)
@@ -388,8 +389,8 @@ async function observeBuild(
         digest(read.bytes) === helper.sha256,
     );
     proofs.push(read.nativeEventSha256);
-    const image = inspectWindowsExperimentPe(read.bytes);
-    actualHelpers.set(helper.name, { read, image });
+    inspectWindowsExperimentPe(read.bytes);
+    actualHelpers.set(helper.name, read);
   }
   const sdk = {
       build: prepared.sdkBuild,
@@ -409,12 +410,11 @@ async function observeBuild(
     build = observationDigest(commands),
     abi = sdk.sha256,
     components = [],
-    reads = [],
-    paths = new Map();
-  const add = (id, role, read, imports, source) => {
+    reads = [];
+  const add = (id, read, source) => {
     const component = {
       id,
-      role,
+      role: "helper",
       sha256: digest(read.bytes),
       format: "pe-x64",
       loader: [],
@@ -429,99 +429,9 @@ async function observeBuild(
       held: true,
       independent: true,
     });
-    return { component, read, imports, imagePath: null };
   };
-  const pending = prepared.helpers.map((helper) => {
-    const { read, image } = actualHelpers.get(helper.name);
-    const item = add(
-      helper.name,
-      "helper",
-      read,
-      read.pe.imports,
-      helper.sourceSha256,
-    );
-    item.imagePath = helper.path;
-    runtime.push({
-      path: helper.path,
-      sha256: helper.sha256,
-      signatureSha256: helper.signatureSha256,
-      imports: [],
-    });
-    return item;
-  });
-  for (let index = 0; index < pending.length; index++) {
-    requireObservation(pending.length <= 128);
-    const item = pending[index];
-    for (const imported of item.imports) {
-      const name = imported.name;
-      requireObservation(
-        typeof name === "string" &&
-          /^[A-Za-z0-9_.-]{1,124}\.dll$/iu.test(name) &&
-          typeof imported.delay === "boolean",
-      );
-      let resolved;
-      try {
-        resolved = await native.resolveImport(name, item.imagePath);
-      } catch (cause) {
-        try {
-          Object.assign(cause, {
-            image: item.imagePath,
-            importName: name,
-            delay: imported.delay,
-          });
-        } catch {
-          // Diagnostic context cannot replace the original loader failure.
-        }
-        throw cause;
-      }
-      const { file } = resolved;
-      let dependency = paths.get(file.toLowerCase());
-      if (!dependency) {
-        const read = await native.readImage(file, true),
-          id =
-            "dll-" +
-            path
-              .basename(file)
-              .toLowerCase()
-              .replace(/\.dll$/u, "");
-        requireObservation(
-          !components.some((component) => component.id === id),
-        );
-        requireObservation(
-          read.independent &&
-            read.held &&
-            read.unchanged &&
-            read.protectedDacl &&
-            read.protectedParents &&
-            hash(read.signatureSha256),
-        );
-        proofs.push(read.nativeEventSha256);
-        dependency = add(id, "dependency", read, read.pe.imports, sdk.sha256);
-        dependency.imagePath = file;
-        runtime.push({
-          path: file,
-          sha256: read.sha256,
-          signatureSha256: read.signatureSha256,
-          imports: [],
-        });
-        paths.set(file.toLowerCase(), dependency);
-        pending.push(dependency);
-      }
-      requireObservation(
-        dependency.read.sha256 === resolved.sha256 &&
-          digest(dependency.read.bytes) === resolved.sha256 &&
-          dependency.read.identitySha256 === resolved.identitySha256,
-      );
-      runtime
-        .find((image) => image.path === item.imagePath)
-        .imports.push({ name, path: file, delay: imported.delay });
-      if (!item.component.loader.includes(dependency.component.id))
-        item.component.loader.push(dependency.component.id);
-    }
-    reads.find((read) => read.id === item.component.id).loader = [
-      ...item.component.loader,
-    ];
-  }
+  for (const helper of prepared.helpers)
+    add(helper.name, actualHelpers.get(helper.name), helper.sourceSha256);
   const sources = prepared.sources.map((source) => ({
       id: source.name.endsWith(".c") ? source.name.slice(0, -2) : source.name,
       sha256: source.sha256,
@@ -547,22 +457,8 @@ async function observeBuild(
         ),
       ),
     );
-  for (const helper of prepared.helpers) {
-    const reached = new Set([helper.path]);
-    for (let size = -1; size !== reached.size;) {
-      size = reached.size;
-      for (const image of runtime)
-        if (reached.has(image.path))
-          for (const target of image.imports) reached.add(target.path);
-    }
-    helperLoaders[helper.name] = [...reached].filter(
-      (file) => file !== helper.path,
-    );
-  }
   return {
     observation,
-    runtime,
-    helperLoaders,
     sdkInputs: [
       { file: prepared.sdkHeader.file, sha256: digest(sdkInput.bytes) },
     ],
@@ -646,7 +542,7 @@ export async function prepareWindowsExperiment(
     system.bindings.unshift({ id: "build", policyBinding: buildBinding });
     await native.write("windows-experiment-preparation.json", {
       purpose: "experiment",
-      schemaVersion: 2,
+      schemaVersion: 3,
       prepared,
       commands,
       versions,
@@ -681,7 +577,7 @@ export async function prepareWindowsExperiment(
       job,
       preparation: {
         purpose: "experiment",
-        schemaVersion: 2,
+        schemaVersion: 3,
         prepared,
         commands,
         versions,
@@ -755,7 +651,7 @@ export function windowsExperimentSystemInput(job, preparation) {
   requireObservation(
     job.purpose === "experiment" &&
       preparation.purpose === "experiment" &&
-      preparation.schemaVersion === 2 &&
+      preparation.schemaVersion === 3 &&
       retired(preparation.settlement),
   );
   const { prepared, system } = preparation;
@@ -763,6 +659,12 @@ export function windowsExperimentSystemInput(job, preparation) {
   requireObservation(
     system.purpose === "experiment" &&
       system.bindings.length === windowsSystemRecipes().length,
+  );
+  observationObject(system.dependencies, ["payload", "git"]);
+  requireObservation(
+    Object.values(system.dependencies).every(
+      (images) => Array.isArray(images) && images.length > 0,
+    ),
   );
   for (const [index, recipe] of windowsSystemRecipes().entries()) {
     const entry = system.bindings[index],
@@ -786,7 +688,7 @@ export function windowsExperimentSystemInput(job, preparation) {
   const plan = normalizeWindowsExperimentPreparation(
     {
       purpose: "experiment",
-      schemaVersion: 2,
+      schemaVersion: 3,
       sourceDirectory: prepared.sourceDirectory,
       sources: prepared.sources,
       bootstrap: prepared.bootstrap,
@@ -822,7 +724,7 @@ export function windowsExperimentSystemInput(job, preparation) {
  * ordinary compiler commands have no System worker or retirement receipts. */
 export async function verifyWindowsExperimentBuild(
   input,
-  { files, signal, readInstalled } = {},
+  { files, signal, readInstalled, exists } = {},
 ) {
   const { job, preparation } = input,
     { prepared, commands, versions, settlement } = preparation;
@@ -865,6 +767,11 @@ export async function verifyWindowsExperimentBuild(
     observationDigest(observed.observation.expected) ===
       observationDigest(job.preparation.expected),
   );
+  requireObservation(
+    observationDigest(
+      await windowsExperimentDependencies(prepared, native, { exists }),
+    ) === observationDigest(preparation.system.dependencies),
+  );
   actual.push(
     observed.observation.observed.readSha256,
     retiredDomains.nativeEventSha256,
@@ -905,6 +812,7 @@ export function createWindowsExperimentSystemEffects(
         verifyExperimentBuild: (state, settings) =>
           verifyWindowsExperimentBuild(state, {
             files,
+            exists: options.exists,
             readInstalled:
               options.readInstalled ?? options.filesystem?.readFile,
             ...settings,
@@ -1017,7 +925,7 @@ export async function recoverWindowsExperimentPreparation(
     const prepared = await publicationSelector(job, directory, options),
       plan = {
         purpose: "experiment",
-        schemaVersion: 2,
+        schemaVersion: 3,
         bootstrap: prepared.bootstrap,
       },
       input = {
@@ -1094,7 +1002,10 @@ async function withWindowsExperimentPreparation(
         job,
         directory,
         output: prepared.output,
-        manifest: { windowsPreparation: { bootstrap: prepared.bootstrap } },
+        manifest: {
+          helpers: prepared.helpers,
+          windowsPreparation: { bootstrap: prepared.bootstrap },
+        },
       },
       options,
     );
@@ -1113,6 +1024,19 @@ async function withWindowsExperimentPreparation(
         ...record,
         settlement: job.preparationEffects.settlement,
       };
+    observationObject(record, [
+      "purpose",
+      "schemaVersion",
+      "prepared",
+      "commands",
+      "versions",
+      "system",
+      "observation",
+      "sdkInputs",
+    ]);
+    requireObservation(
+      record.purpose === "experiment" && record.schemaVersion === 3,
+    );
     // The preparation close is itself protected; the job digest alone cannot
     // establish original helper/observer identities or whole-domain settlement.
     const close = JSON.parse(
@@ -1125,7 +1049,7 @@ async function withWindowsExperimentPreparation(
     );
     observationObject(close, ["purpose", "schemaVersion", "observer"]);
     requireObservation(
-      close.purpose === "experiment" && close.schemaVersion === 2,
+      close.purpose === "experiment" && close.schemaVersion === 3,
     );
     const birth = JSON.parse(
         (
@@ -1170,8 +1094,7 @@ async function withWindowsExperimentPreparation(
       nativeEventSha256: observationDigest({ close, birth, result }),
     };
     requireObservation(
-      record.schemaVersion === 2 &&
-        observationDigest(record.prepared) === observationDigest(prepared) &&
+      observationDigest(record.prepared) === observationDigest(prepared) &&
         observationDigest(record.prepared.bootstrap) ===
           observationDigest(prepared.bootstrap),
     );
@@ -1205,6 +1128,7 @@ export function loadWindowsExperiment(input, directory, options = {}) {
         windowsExperimentSystemInput(job, preparation),
         {
           files,
+          exists: options.exists,
           signal: options.signal,
           readInstalled: options.readInstalled ?? options.filesystem?.readFile,
         },

@@ -164,7 +164,6 @@ export function createWindowsFileEffects(core) {
         observation: await loaded.runtime(
           helperSlots.get(observationDigest(helper)),
           current.resources.transfer.helper,
-          slots.loader,
         ),
       });
       const raw = await reader.operation("operation-authority"),

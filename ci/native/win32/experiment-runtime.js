@@ -31,9 +31,9 @@ export function createWindowsExperimentRuntimeEffects(core) {
           image.index,
         );
         // Dynamic System/COM loads are observed by the native held-module lane.
-        // Their complete mapped identities and API-set/import edges are recorded,
-        // rather than promoted to a reviewed static release closure.
-        const runtime = await reader.loader(retained.slot, image.index),
+        // Mapped identities remain held; import edges cover private runtimes,
+        // without claiming transitive hosted-system admission.
+        const runtime = await reads.runtime(retained.slot, image.index),
           verifier = await witness(),
           observation = {
             purpose: "experiment",

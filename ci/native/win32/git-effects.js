@@ -317,7 +317,7 @@ export function createWindowsGitEffects(core) {
           );
           await persist({
             kind: "git-runtime-loader",
-            observation: await loaded.runtime(held.slot, 6, slots.loader),
+            observation: await loaded.runtime(held.slot, 6),
           });
           ready = true;
           await channel.send("P\n");
@@ -529,11 +529,7 @@ export function createWindowsGitEffects(core) {
         const held = await reader.retainProcess(writer.identity);
         await persist({
           kind: "git-policy-runtime-loader",
-          observation: await loaded.runtime(
-            held.slot,
-            slots.policyHelper,
-            slots.loader,
-          ),
+          observation: await loaded.runtime(held.slot, slots.policyHelper),
         });
         await writer.send("I\n");
         const complete = await writer.receive();

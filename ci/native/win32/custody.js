@@ -1730,6 +1730,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       );
       const value = await observe("loader", process, index);
       closed(value, [
+        ...(input.purpose === "experiment" ? ["importScope"] : []),
         "loaded",
         "imports",
         "linkerMajor",
@@ -1739,6 +1740,8 @@ export function createWindowsCustodyReader(value, options = {}) {
       ]);
       requireWindows(
         value.complete === true &&
+          (input.purpose !== "experiment" ||
+            value.importScope === "private-runtime") &&
           dense(value.loaded, 128).length > 0 &&
           integer(value.linkerMajor, 255) &&
           integer(value.linkerMinor, 255) &&

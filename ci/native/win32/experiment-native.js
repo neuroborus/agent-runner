@@ -450,7 +450,7 @@ export async function bootstrapWindowsExperiment(
     requireObservation(digest(await read(tool.path)) === tool.sha256);
   const prepared = {
     purpose: "experiment",
-    schemaVersion: 2,
+    schemaVersion: 3,
     job,
     binding,
     directory,
@@ -523,7 +523,7 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
       environment: prepared.environment,
       windowsPreparation: {
         purpose: "experiment",
-        schemaVersion: 2,
+        schemaVersion: 3,
         bootstrap,
         sourceDirectory: prepared.sourceDirectory,
         sources: prepared.sources,
@@ -578,7 +578,7 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
           if (!recovery)
             await write("windows-experiment-close.json", {
               purpose: "experiment",
-              schemaVersion: 2,
+              schemaVersion: 3,
               observer,
             });
         } catch (error) {
@@ -638,7 +638,7 @@ export async function openWindowsExperimentNative(prepared, options = {}) {
     await files.verifyDirectory({ directory, context: bootstrap.context });
     await write("windows-experiment-selector.json", {
       purpose: "experiment",
-      schemaVersion: 2,
+      schemaVersion: 3,
       prepared,
     });
     if (!options.reopen) await files.provisionBuild({ output });

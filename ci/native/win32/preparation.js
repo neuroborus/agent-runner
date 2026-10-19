@@ -63,7 +63,7 @@ function normalizePreparation(value, candidateSha, experiment) {
     "cases",
   ]);
   requireObservation(
-    (value.schemaVersion === 1 || (experiment && value.schemaVersion === 2)) &&
+    (experiment ? value.schemaVersion === 3 : value.schemaVersion === 1) &&
       (!experiment || value.purpose === "experiment") &&
       location(value.sourceDirectory),
   );
@@ -78,7 +78,7 @@ function normalizePreparation(value, candidateSha, experiment) {
   );
   observationObject(
     value.command,
-    value.schemaVersion === 2
+    value.schemaVersion === 3
       ? ["helper"]
       : ["helper", "toolSignatures", "unsignedHelpers", "helperSignatures"],
   );
@@ -994,7 +994,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             Number(left.name.split("-")[2]) - Number(right.name.split("-")[2]),
         );
       requireObservation(
-        (plan.purpose === "experiment" && plan.schemaVersion === 2
+        (plan.purpose === "experiment" && plan.schemaVersion === 3
           ? boots.length === 0
           : boots.length > 0) &&
           boots.length <= 128 &&
@@ -1101,7 +1101,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         /^windows-command-[a-f0-9]{64}-intent\.json$/u.test(name),
       );
       requireObservation(
-        plan.purpose === "experiment" && plan.schemaVersion === 2
+        plan.purpose === "experiment" && plan.schemaVersion === 3
           ? intents.length === 0
           : intents.length <= 2 + WINDOWS_HELPER_NAMES.length,
       );
@@ -1196,7 +1196,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         tasks = [];
       if (onReadersRetired && subjects.length === 0) {
         requireObservation(
-          plan.purpose === "experiment" && plan.schemaVersion === 2,
+          plan.purpose === "experiment" && plan.schemaVersion === 3,
         );
         const held = await files.verify(
           "retainObservers",

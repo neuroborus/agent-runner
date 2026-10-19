@@ -267,30 +267,35 @@ native PE/import observations. Initial, cold and completed-build image reads use
 the same held boundary: each helper must match its exact listed path and SHA-256
 in `prepare-read`. Unlisted helpers, changed hashes and helper/installed-image
 substitutions fail; installed inputs retain their separate native path restrictions.
-Ordinary PE enumeration preserves each declared DLL name and delay flag without
-requiring an API-set namespace host. The existing constrained System32 loader
-operation resolves those names and returns the canonical module actually mapped,
-its held file identity and byte hash. Fresh installed-image reads must match all
-three, including repeated observations and cold loading. A physical forwarding
-DLL need not appear identically in the API-set namespace. Missing imports fail;
-neither filenames nor copied expectations invent a host. Copied Git dependencies
-retain their existing local held-image path and byte bindings. Case graph reads
-retain delay edges and rejoin loader aliases to the held target; live module
-reads bind actual mapped files and identities. Reviewed namespace/import
-admission and payload loader/isolation checks stay strict.
+Ordinary helper admission binds exactly thirteen marked images and their source,
+build and ABI observations. It does not resolve their imports or reconstruct
+transitive System32 admission. Experiment case declarations use explicit `null`
+import inventories for those helpers and hosted system modules; this denotes
+omitted admission, never an observed empty dependency graph. Fresh static reads
+still verify the held helper bytes, purpose, signature observation and PE/ABI.
+Live module censuses still bind mapped paths to held physical files, identities,
+bytes, signatures and DACLs. Only canonical direct System32 DLLs may supplement
+the explicitly declared private images under the hosted-runtime assumption.
 
-Recursive held PE/import discovery remains necessary for individual private
-runtime copies and exact case loader inventories, including transitive and delay
-edges. Ordinary preparation uses `LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE` with
-`LOAD_LIBRARY_AS_IMAGE_RESOURCE`. It clears both resource-handle tag bits at
-pointer width for `GetMappedFileNameW`, opens the observed NT path through
-`GLOBALROOT`, and rejoins its canonical System32 path and held file identity.
-This also handles an already-loaded executable module without assuming resource
-handles support `GetModuleFileNameW`. `FreeLibrary` receives the original returned
-handle. Identifying a file does not require initializing its DLL or executing
-its dependency loads. Live payload/module checks retain normal loader execution;
-reviewed admission is unchanged. This removes an unnecessary preparation demand,
-not an actual payload dependency or an isolation restriction.
+Dependency discovery belongs to actual private consumers: the access payload's
+individual runtime copies and Git's private DLL copies. Their source/copy slots,
+held identities, bytes and declared delay edges remain required. Git's direct
+system targets are held, but their transitive imports are not reconstructed.
+Cold loading reobserves both retained inventories and rejects substitution or
+missing evidence without rebuilding. Case loader checks retain the private Git
+graph; reviewed import admission and protected package readers remain strict.
+
+The existing native import owner first observes an already loaded module with
+`GetModuleHandleExW`, or maps it with `LoadLibraryExW` using
+`LOAD_LIBRARY_SEARCH_SYSTEM32 | DONT_RESOLVE_DLL_REFERENCES`. This documented
+loader path resolves API-set contracts without running DLL initialization or
+loading dependencies merely for inspection. The mapped NT name is joined through
+`GLOBALROOT` to a held canonical System32 file and its identity; the acquired
+module reference is released. No contract spelling is assumed to name a file,
+no private namespace layout is parsed, and private copies are never replaced by
+a shared runtime. Experiment loader responses explicitly declare
+`importScope: "private-runtime"`; the closed parser rejects missing or mixed
+scope. Reviewed loader records retain their original complete-import contract.
 
 The original `prepare-experiment-pe` sequence 263 followed signature observation
 262 and failed at the API-set entry match count (`found == 1`, old line 290),
@@ -311,8 +316,16 @@ token-open results; uncalled predicates retain explicit sentinels. Sequence,
 command and original native error precede diagnostic effects. No process cause or original-owner retirement
 is claimed. Recovery still retains that blocker even when a later observer exits.
 
+The later original `prepare-experiment-loader` sequence 781 failed with error 2
+while treating `api-ms-win-eventing-controller-l1-1-0.dll` imported by System32
+`advapi32.dll` as a resource-mapped physical file (flags 2144). Removing ordinary
+all-helper traversal does not establish private-runtime or native acceptance.
+The separate original `verify-retain` process/token failures remain blockers;
+a missing numeric PID or a later observer's completion supplies no original
+descendant retirement evidence.
+
 The duplicate compiler bootstrap reader/task is
-removed. Private version-2 preparation records reject legacy, mixed or incomplete
+removed. Private version-3 preparation records and version-2 operation declarations reject legacy, mixed or incomplete
 build evidence. Cold loading verifies the original completed outputs without
 selection, acquisition or recompilation. A private sibling selector identifies
 possible System publication; protected records and original births supply all

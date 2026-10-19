@@ -1773,7 +1773,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     },
     prepared = {
       purpose: "experiment",
-      schemaVersion: 2,
+      schemaVersion: 3,
       binding: failed.preparation.expected.binding,
       sourceDirectory: directory + "-bootstrap",
       entries: [],
@@ -1831,13 +1831,22 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     records = new Map([
       [
         "windows-experiment-preparation.json",
-        { schemaVersion: 2, prepared, observation: failed.preparation },
+        {
+          purpose: "experiment",
+          schemaVersion: 3,
+          prepared,
+          commands: prepared.commands,
+          versions: prepared.versions,
+          system: null,
+          observation: failed.preparation,
+          sdkInputs: [],
+        },
       ],
       [
         "windows-experiment-close.json",
         {
           purpose: "experiment",
-          schemaVersion: 2,
+          schemaVersion: 3,
           observer,
         },
       ],
@@ -1872,7 +1881,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     stdout,
     stderr: "",
   });
-  prepared.commands = [
+  prepared.commands.push(
     command("git", ["rev-parse", "HEAD"], C),
     command("where.exe", ["cl.exe"], prepared.tools[0].path),
     command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
@@ -1895,7 +1904,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
       ["/user", "/fo", "csv", "/nh"],
       '"fixture","S-1-5-21-1-2-3-1001"',
     ),
-  ];
+  );
   bootstrap.runnerSid = "S-1-5-21-1-2-3-1001";
   let saved,
     requests = 0,
@@ -1983,6 +1992,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     }),
   );
   records.set("windows-experiment-preparation.json", {
+    ...records.get("windows-experiment-preparation.json"),
     prepared: {
       ...prepared,
       bootstrap: {

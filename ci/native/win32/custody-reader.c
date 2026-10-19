@@ -336,18 +336,18 @@ static void api_host(HANDLE process, const wchar_t *contract, wchar_t host[256],
 /* Observe the installed loader; an API-set spelling need not have a namespace
  * entry when the image supplies a physical forwarding DLL of that name. */
 static struct held_file experiment_import(const wchar_t *name, const wchar_t *image, wchar_t actual[4096]) {
-  /* Preparation needs a mapped file identity, not DLL initialization or an
-   * executable dependency load. Live payload loader checks keep normal loading. */
-  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 | (preparation_only ? (LOAD_LIBRARY_AS_DATAFILE_EXCLUSIVE | LOAD_LIBRARY_AS_IMAGE_RESOURCE) : 0);
+  /* Resolve API-set contracts through the documented loader without running
+   * DllMain or loading dependencies. Resource-only mapping treats them as files. */
+  DWORD flags = LOAD_LIBRARY_SEARCH_SYSTEM32 | DONT_RESOLVE_DLL_REFERENCES;
   reader_loader.image = image; reader_loader.name = name; reader_loader.flags = flags; reader_loader.active = TRUE;
   size_t size = wcslen(name);
   need(size > 4 && size <= 128 && !_wcsicmp(name+size-4, L".dll") && wcsspn(name,L"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") == size);
-  HMODULE module = LoadLibraryExW(name, NULL, flags);
+  HMODULE module = NULL;
+  if (!GetModuleHandleExW(0, name, &module)) module = LoadLibraryExW(name, NULL, flags);
   need(module);
-  /* Resource handles tag the view's low two bits; executable handles are untagged.
-   * Open the observed NT path through GLOBALROOT rather than guessing a DOS alias. */
+  /* Open the observed NT path through GLOBALROOT rather than guessing a DOS alias. */
   wchar_t canonical[4100], mapped[4100], named[4100], mappedPath[4120], system[4096];
-  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), (void *)((ULONG_PTR)module & ~(ULONG_PTR)3), mapped, 4100);
+  DWORD mappedSize = GetMappedFileNameW(GetCurrentProcess(), module, mapped, 4100);
   need(mappedSize && mappedSize < 4100);
   DWORD prefix = GetSystemDirectoryW(system, 4096);
   need(prefix && prefix < 4096 && swprintf_s(mappedPath, 4120, L"\\\\?\\GLOBALROOT%ls", mapped) > 0);
@@ -371,6 +371,13 @@ static void experiment_loader(const wchar_t *name, const wchar_t *image) {
   printf("{\"pathHex\":\""); hex((BYTE *)actual, wcslen(actual)*2); printf("\",\"identity\":\""); file_id(&file);
   printf("\",\"sha256\":\"%s\"}", hash); close_file(&file);
 }
+static BOOL experiment_system_image(const wchar_t *name) {
+  wchar_t system[4096]; DWORD length = GetSystemDirectoryW(system, 4096);
+  need(length && length < 4096);
+  size_t size = wcslen(name);
+  return size > length + 5 && !_wcsnicmp(name, system, length) && name[length] == '\\' &&
+    !wcschr(name+length+1, '\\') && !_wcsicmp(name+size-4, L".dll");
+}
 #endif
 static DWORD rva(BYTE *bytes, DWORD size, IMAGE_NT_HEADERS64 *pe, DWORD address, DWORD needed) {
   need(needed <= size); if (address < pe->OptionalHeader.SizeOfHeaders) { need(address <= size-needed); return address; }
@@ -392,10 +399,21 @@ static void loader(unsigned subject, struct entry *image) {
     wchar_t mapped[4100], named[4100]; DWORD mappedSize = GetMappedFileNameW(process, modules[i], mapped, 4100), namedSize = GetFinalPathNameByHandleW(files[i].handle, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
     need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
     security(files[i].handle, SE_FILE_OBJECT, FALSE, dacl); signature(&files[i], NULL, sig);
+#ifdef NATIVE_CI_EXPERIMENT
+    if (experiment_system_image(paths[i])) stock_security(files[i].handle, dacl);
+#endif
     if (i) putchar(','); printf("{\"pathHex\":\""); hex((BYTE *)paths[i], wcslen(paths[i])*2); printf("\",\"identity\":\""); file_id(&files[i]);
     printf("\",\"sha256\":\"%s\",\"signatureSha256\":\"%s\",\"daclSha256\":\"%s\",\"links\":%lu}", hash, sig, dacl, files[i].links); }
   printf("],\"imports\":["); unsigned emitted = 0;
   for (unsigned source = 0; source < n; source++) {
+#ifdef NATIVE_CI_EXPERIMENT
+  /* Hosted System32 modules and marked helpers are observed above, not a
+   * reconstructed trust graph. Only private runtime images retain import edges. */
+  BOOL helper = FALSE;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && entries[i].file.handle &&
+    !memcmp(&entries[i].file.id, &files[source].id, sizeof(files[source].id))) helper = TRUE;
+  if (helper || experiment_system_image(paths[source])) continue;
+#endif
   DWORD size; BYTE *bytes = read_file(&files[source], 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
   need(size >= 512 && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64));
   IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew); need(pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
@@ -428,7 +446,11 @@ static void loader(unsigned subject, struct entry *image) {
   DWORD size; BYTE *bytes = read_file(&image->file, 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
   need(size >= 512 && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64)); IMAGE_NT_HEADERS64 *pe = (void *)(bytes + dos->e_lfanew);
   HMODULE again[128]; DWORD next; need(EnumProcessModulesEx(process, again, sizeof(again), &next, LIST_MODULES_64BIT) && next == used && !memcmp(modules, again, used));
+#ifdef NATIVE_CI_EXPERIMENT
+  printf("],\"importScope\":\"private-runtime\",\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"complete\":true}", pe->OptionalHeader.MajorLinkerVersion, pe->OptionalHeader.MinorLinkerVersion, pe->FileHeader.TimeDateStamp);
+#else
   printf("],\"linkerMajor\":%u,\"linkerMinor\":%u,\"timestamp\":%lu,\"complete\":true}", pe->OptionalHeader.MajorLinkerVersion, pe->OptionalHeader.MinorLinkerVersion, pe->FileHeader.TimeDateStamp);
+#endif
   free(bytes); free(paths); dependencies[dependency_count] = files; dependency_sizes[dependency_count++] = n;
 }
 static void quoted(wchar_t *command, size_t maximum, const wchar_t *value) {

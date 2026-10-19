@@ -56,7 +56,7 @@ export async function windowsOperationPreparation(
   ];
   if (id.startsWith("files.")) reviewed.base = reviewed.root = null;
   requireObservation(
-    value.schemaVersion === 1 &&
+    value.schemaVersion === (binding.purpose === "experiment" ? 2 : 1) &&
       value.id === id &&
       value.contextSha256 === observationDigest(binding.context) &&
       hash(value.sourceSha256) &&
