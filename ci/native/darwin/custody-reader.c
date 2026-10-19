@@ -189,23 +189,14 @@ static void identity(struct entry *value) {
     (unsigned long long)(S_ISDIR(s->st_mode) ? 0 : s->st_size), s->st_uid, s->st_gid, s->st_mode & 07777, S_ISDIR(s->st_mode) ? "true" : "false");
 }
 static void signing_check(const char *path, bool report) {
-#ifndef NATIVE_CI_EXPERIMENT
-  reviewed_image(path);
-#endif
-  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path, (CFIndex)strlen(path), false);
-  SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
-  need(url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
-    SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess &&
-    SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess);
-  CFDataRef unique = CFDictionaryGetValue(info, kSecCodeInfoUnique);
-  need(unique && CFGetTypeID(unique) == CFDataGetTypeID() && CFDataGetLength(unique) == 20);
-  char cdhash[41], entitlement[65]; hex(CFDataGetBytePtr(unique), 20, cdhash);
+  CFDictionaryRef info = signature_information(path, false);
+  char cdhash[41], entitlement[65]; signature_hash(path, info, cdhash);
   CFDictionaryRef grants = CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict);
   CFDataRef data = grants ? CFPropertyListCreateData(NULL, grants, kCFPropertyListBinaryFormat_v1_0, 0, NULL) : NULL;
   need(!grants || (data && CFDataGetLength(data) <= 65536));
   unsigned char sum[32]; need(CC_SHA256(data ? CFDataGetBytePtr(data) : (const unsigned char *)"", data ? (CC_LONG)CFDataGetLength(data) : 0, sum));
   hex(sum, 32, entitlement); if (report) printf("{\"cdhash\":\"%s\",\"entitlementsSha256\":\"%s\",\"valid\":true}", cdhash, entitlement);
-  if (data) CFRelease(data); CFRelease(info); CFRelease(code); CFRelease(url);
+  if (data) CFRelease(data); CFRelease(info);
 }
 static void signing(const char *path) { signing_check(path, true); }
 static void macho(const unsigned char *bytes, size_t size) {

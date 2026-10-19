@@ -470,6 +470,13 @@ directories, sources, receipts, plans and copied case destinations remain strict
 Canonical nonsymlink regular files and directory ancestry, stable metadata,
 positive links, bounded complete reads, held/native identities, whole-file byte
 hashes and native signature/CDHash verification remain required. Installed case
+originals use the same strict native signature reader without the private helper
+entitlement allowlist. Only the existing ordinary installed-path classifier
+selects that distinction; private copies, generated helpers and reviewed/protected
+signature admission retain the two-JIT-entitlement allowlist. Signature refusals
+identify the original input and the evaluated native, CDHash or helper entitlement
+rule while diagnostic failure preserves the primary refusal and errno. No
+historical offending tool, entitlement key or value is inferred. Installed case
 tools retain any available Mach-O observation; thin or universal Git uses the
 matching x64 native loader to select its slice. Generated helpers and dyld still
 require their Mach-O observations. Cold readers rejoin the recorded identities,

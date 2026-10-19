@@ -325,7 +325,7 @@ static void signature_sample_report(struct signature_sample *sample, OSStatus st
     sample->started, (intmax_t)sample->before.tv_sec, (intmax_t)sample->before.tv_nsec,
     sample->ended, (intmax_t)sample->after.tv_sec, (intmax_t)sample->after.tv_nsec, (intmax_t)status);
 }
-static void signature(const char *name, const char *pin) {
+static CFDictionaryRef signature_information(const char *name, bool detailed) {
 #ifndef NATIVE_CI_EXPERIMENT
   reviewed_image(name);
 #endif
@@ -337,11 +337,13 @@ static void signature(const char *name, const char *pin) {
   bool create_called = false, validity_called = false, info_called = false;
   OSStatus create_status = 0, validity_status = 0, info_status = 0;
   struct signature_sample sample = {0};
-  /* The old API delegates with NULL errors; requesting errors additionally
-   * enables internal full-report work. */
+  /* Keep observation reads on their original API. Requesting errors for pinned
+   * admission additionally enables internal full-report work. */
   bool signature_ok = url &&
        (create_called = true, create_status = SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code), create_status == errSecSuccess) &&
-       (validity_called = true, signature_begin(&sample), validity_status = SecStaticCodeCheckValidityWithErrors(code, kSecCSStrictValidate, NULL, &error), signature_end(&sample), validity_status == errSecSuccess) &&
+       (validity_called = true, validity_status = detailed ?
+         (signature_begin(&sample), validity_status = SecStaticCodeCheckValidityWithErrors(code, kSecCSStrictValidate, NULL, &error), signature_end(&sample), validity_status) :
+         SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL), validity_status == errSecSuccess) &&
        (info_called = true, info_status = SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info), info_status == errSecSuccess);
   int signature_errno = errno;
   if (!signature_ok) {
@@ -356,7 +358,7 @@ static void signature(const char *name, const char *pin) {
     else fprintf(stderr, "native-darwin-signature-validity: uncalled\n");
     if (info_called) fprintf(stderr, "native-darwin-signature-info: status=%jd\n", (intmax_t)info_status);
     else fprintf(stderr, "native-darwin-signature-info: uncalled\n");
-    if (validity_called && validity_status != errSecSuccess) {
+    if (detailed && validity_called && validity_status != errSecSuccess) {
       signature_error_details(error); signature_sample_report(&sample, validity_status);
     }
     fflush(stderr);
@@ -364,20 +366,41 @@ static void signature(const char *name, const char *pin) {
   if (error) CFRelease(error);
   errno = signature_errno;
   need(signature_ok);
+  CFRelease(code); CFRelease(url); errno = signature_errno;
+  return info;
+}
+static void signature_rule(const char *name, const char *predicate, bool ok) {
+  if (!ok) { input_refusal(name, predicate, NULL); need(false); }
+}
+static void signature_hash(const char *name, CFDictionaryRef info, char actual[41]) {
   CFDataRef hash = CFDictionaryGetValue(info, kSecCodeInfoUnique);
-  need(hash && CFGetTypeID(hash) == CFDataGetTypeID() && CFDataGetLength(hash) == 20);
-  char actual[41]; hex(CFDataGetBytePtr(hash), 20, actual); need(!strcmp(actual, pin));
-  CFDictionaryRef entitlements = CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict);
+  signature_rule(name, "signature-cdhash-data", hash && CFGetTypeID(hash) == CFDataGetTypeID());
+  signature_rule(name, "signature-cdhash-size", CFDataGetLength(hash) == 20);
+  hex(CFDataGetBytePtr(hash), 20, actual);
+}
+static void signature_entitlements(const char *name, CFDictionaryRef entitlements) {
   /* An allowed JIT entitlement is not permission to obtain foreign task/persona rights. */
   if (entitlements) {
-    need(CFGetTypeID(entitlements) == CFDictionaryGetTypeID());
+    signature_rule(name, "helper-entitlements-dictionary", CFGetTypeID(entitlements) == CFDictionaryGetTypeID());
     const void *keys[2], *values[2]; CFIndex n = CFDictionaryGetCount(entitlements);
-    need(n <= 2); CFDictionaryGetKeysAndValues(entitlements, keys, values);
-    for (CFIndex i = 0; i < n; i++) need(values[i] == kCFBooleanTrue &&
-      (CFEqual(keys[i], CFSTR("com.apple.security.cs.allow-jit")) ||
-       CFEqual(keys[i], CFSTR("com.apple.security.cs.allow-unsigned-executable-memory"))));
+    signature_rule(name, "helper-entitlements-count", n >= 0 && n <= 2);
+    CFDictionaryGetKeysAndValues(entitlements, keys, values);
+    for (CFIndex i = 0; i < n; i++) {
+      signature_rule(name, "helper-entitlement-value", values[i] == kCFBooleanTrue);
+      signature_rule(name, "helper-entitlement-key", CFEqual(keys[i], CFSTR("com.apple.security.cs.allow-jit")) ||
+        CFEqual(keys[i], CFSTR("com.apple.security.cs.allow-unsigned-executable-memory")));
+    }
   }
-  CFRelease(info); CFRelease(code); CFRelease(url);
+}
+static void signature(const char *name, const char *pin) {
+  CFDictionaryRef info = signature_information(name, true);
+  char actual[41]; signature_hash(name, info, actual);
+  signature_rule(name, "signature-cdhash-match", !strcmp(actual, pin));
+  /* Only ordinary installed originals use hosted toolchain trust. Private
+   * copies, generated helpers and every reviewed caller retain the allowlist. */
+  if (!experiment_installed_path(name))
+    signature_entitlements(name, CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict));
+  CFRelease(info);
 }
 #ifdef NATIVE_CI_EXPERIMENT
 /* Derive one documented installation, never search for another toolchain.

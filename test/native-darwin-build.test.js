@@ -288,11 +288,12 @@ test("Darwin SDK guard samples each original predicate once and preserves refusa
   }
 });
 
-test("Darwin signature admission observes only original failures with bounded bytes and signed statuses", async () => {
+test("Darwin signature information preserves original APIs and observes failures with bounded bytes and signed statuses", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8"),
-    body = /static void signature\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
-      source,
-    )?.[1],
+    body =
+      /static CFDictionaryRef signature_information\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1],
     hexBody = /static void hex\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)?.[1],
     guardBody = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
       source,
@@ -329,7 +330,7 @@ test("Darwin signature admission observes only original failures with bounded by
       .replace(/"\s*\n\s*"/gu, "");
   };
   assert.ok(body && hexBody && guardBody && textBody && errorBody);
-  // Retain the complete admission, diagnostics, downstream guards and cleanup.
+  // Retain the complete native verification, diagnostics and cleanup.
   const script = new Script(`
     function hex(data, n, out) {${hexBody.replace("size_t i", "let i").replace("out + 2*i,", "out, 2*i,")}}
     function guard(ok, file, line) {${guardBody.replace("int error", "let error")}}
@@ -347,7 +348,7 @@ test("Darwin signature admission observes only original failures with bounded by
     function signature_begin(sample) {${sampleBody("signature_begin")}}
     function signature_end(sample) {${sampleBody("signature_end")}}
     function signature_sample_report(sample, status) {${sampleBody("signature_sample_report")}}
-    function signature(name, pin) {${body
+    function signature_information(name, detailed) {${body
       .replace(/^#.*$/gmu, "")
       .replace(
         "SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;",
@@ -356,11 +357,6 @@ test("Darwin signature admission observes only original failures with bounded by
       .replace(
         "char path_hex[2*PATH_MAX] = {0};",
         "const path_hex = Buffer.alloc(2*PATH_MAX);",
-      )
-      .replace("char actual[41];", "const actual = Buffer.alloc(41);")
-      .replace(
-        "const void *keys[2], *values[2];",
-        "const keys = [], values = [];",
       )
       .replace(
         /\((?:const UInt8 \*|const unsigned char \*|CFIndex|intmax_t)\)/gu,
@@ -378,7 +374,7 @@ test("Darwin signature admission observes only original failures with bounded by
       .replaceAll("&sample", "sample")
       .replace("&error", "(value) => { error = value; }")
       .replace(/&(code|info)\b/gu, "$1")}}
-    ({signature, guard});
+    ({signature: signature_information, guard});
   `);
   const PATH_MAX = 1024,
     operations = ["url", "create", "validity", "info"],
@@ -420,6 +416,8 @@ test("Darwin signature admission observes only original failures with bounded by
       { errorOnSuccess: true },
       { stop: "info", errorOnSuccess: true },
       { name: Buffer.alloc(PATH_MAX + 7, 0xff) },
+      { detailed: false },
+      { detailed: false, stop: "validity" },
     ];
   for (const {
     stop,
@@ -430,13 +428,13 @@ test("Darwin signature admission observes only original failures with bounded by
     errorOnSuccess,
     sampleFault,
     zeroErrno,
+    detailed = true,
   } of cases) {
     const calls = [],
       releases = [],
       url = {},
       code = {},
       info = {},
-      hash = Buffer.alloc(20, 0xab),
       terminal = operations.indexOf(stop),
       originalError = stop === "info" || zeroErrno ? 0 : 2;
     const text = (value) => ({ type: "string", text: value }),
@@ -466,7 +464,10 @@ test("Darwin signature admission observes only original failures with bounded by
                 code:
                   detail === "code-boundary" ? -9223372036854775808n : -7300n,
               },
-      error = stop === "validity" || errorOnSuccess ? returnedError : null;
+      error =
+        detailed && (stop === "validity" || errorOnSuccess)
+          ? returnedError
+          : null;
     let output = "",
       encoded = 0,
       flushes = 0,
@@ -552,8 +553,6 @@ test("Darwin signature admission observes only original failures with bounded by
       kSecCSStrictValidate: 2,
       kSecCSSigningInformation: 4,
       errSecSuccess: 0,
-      kSecCodeInfoUnique: "hash",
-      kSecCodeInfoEntitlementsDict: "entitlements",
       reviewed_image(input) {
         calls.push(["reviewed", input]);
       },
@@ -573,10 +572,18 @@ test("Darwin signature admission observes only original failures with bounded by
         return stop === "create" ? status : 0;
       },
       SecStaticCodeCheckValidityWithErrors(input, flags, requirement, target) {
+        assert.equal(detailed, true);
         assert.equal(context.errno, originalError);
         calls.push(["validity", input.value, flags, requirement]);
         assert.equal(typeof target, "function");
         if (error) target(error);
+        context.errno = originalError;
+        return stop === "validity" ? status : 0;
+      },
+      SecStaticCodeCheckValidity(input, flags, requirement) {
+        assert.equal(detailed, false);
+        assert.equal(context.errno, originalError);
+        calls.push(["validity", input.value, flags, requirement]);
         context.errno = originalError;
         return stop === "validity" ? status : 0;
       },
@@ -586,11 +593,6 @@ test("Darwin signature admission observes only original failures with bounded by
         target.value = info;
         context.errno = originalError;
         return stop === "info" ? status : 0;
-      },
-      CFDictionaryGetValue(input, key) {
-        assert.equal(input.value, info);
-        if (key === "hash") assert.equal(context.errno, originalError);
-        return key === "hash" ? hash : null;
       },
       CFGetTypeID(value) {
         context.errno = 94;
@@ -633,14 +635,10 @@ test("Darwin signature admission observes only original failures with bounded by
         used(n);
         return bytes.length > size ? size : value.text.length;
       },
-      CFDataGetTypeID: () => "data",
-      CFDataGetLength: (value) => value.length,
-      CFDataGetBytePtr: (value) => value,
       CFRelease(value) {
         context.errno = 91;
         releases.push(value.value ?? value);
       },
-      strcmp: (actual, pin) => (cString(actual) === pin ? 0 : 1),
       sprintf(target, offset, format, byte) {
         assert.equal(format, "%02x");
         assert.equal(offset, 2 * encoded++);
@@ -685,9 +683,9 @@ test("Darwin signature admission observes only original failures with bounded by
       },
     };
     const executed = script.runInNewContext(context),
-      run = () => executed.signature(name, hash.toString("hex"));
+      run = () => executed.signature(name, detailed);
     if (stop) assert.throws(run, { code: 126, errno: originalError });
-    else run();
+    else assert.equal(run().value, info);
     assert.deepEqual(calls, [
       ["reviewed", name],
       ["strlen", name],
@@ -700,7 +698,7 @@ test("Darwin signature admission observes only original failures with bounded by
     ]);
     assert.deepEqual(
       samples,
-      terminal >= 0 && terminal < 2
+      !detailed || (terminal >= 0 && terminal < 2)
         ? []
         : [...(sampleFault ? ["birth", "audit"] : []), "start", "end"],
     );
@@ -709,17 +707,17 @@ test("Darwin signature admission observes only original failures with bounded by
     assert.deepEqual(releases, [
       ...(hasDetails && description ? [description] : []),
       ...(error ? [error] : []),
-      ...(stop ? [] : [info, code, url]),
+      ...(stop ? [] : [code, url]),
     ]);
     const emitted = Math.min(name.length, PATH_MAX - 1);
-    assert.equal(encoded, terminal < 0 ? 20 : emitted);
+    assert.equal(encoded, terminal < 0 ? 0 : emitted);
     assert.equal(flushes, terminal < 0 ? 0 : 2);
     let expected = "";
     if (terminal >= 0) {
       expected = `native-darwin-signature: path-length=${name.length} path-emitted=${emitted} path-truncated=${Number(emitted !== name.length)} path-hex=${fault === "encode" ? "" : name.subarray(0, emitted).toString("hex")} url=${Number(stop !== "url")}\n`;
       for (const [index, operation] of operations.slice(1).entries())
         expected += `native-darwin-signature-${operation}: ${index + 1 > terminal ? "uncalled" : `status=${operation === stop ? status : 0}`}\n`;
-      if (stop === "validity") {
+      if (detailed && stop === "validity") {
         expected += `native-darwin-signature-error: available=${Number(hasDetails)}${hasDetails ? ` code=${error.code}` : ""}\n`;
         for (const [field, value] of [
           ["domain", hasDetails ? domain : null],

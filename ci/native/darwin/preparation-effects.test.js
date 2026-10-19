@@ -9450,6 +9450,7 @@ async function installedCaseAcquisition(format) {
       build: true,
       hosted: true,
       inputData: read,
+      signing: { entitlements: [["fixture.installed-tool", true]] },
     }),
     reader = {
       readBuildInput: async (file, sha256, signature) => {
@@ -9578,28 +9579,31 @@ async function installedCaseAcquisition(format) {
     reader.readBuildInput(selectedGit, acquired.inputs.git.sha256),
   );
   records.set(selectedGit, gitBytes);
-  const invalidSignature = darwinCustodyFixture({
-    purpose: "experiment",
-    build: true,
-    hosted: true,
-    inputData: read,
-    failure: "build-signature",
-  });
-  await invalidSignature.reader.start();
-  await assert.rejects(
-    acquireDarwinExperimentInputs(
-      built.prepared,
-      built.build,
-      {
-        ...reader,
-        readBuildInput: (...args) =>
-          invalidSignature.reader.readBuildInput(...args),
-      },
-      persist,
-      options,
-    ),
-  );
-  await invalidSignature.reader.close();
+  for (const failure of ["build-signature", "native-signature"]) {
+    const invalidSignature = darwinCustodyFixture({
+      purpose: "experiment",
+      build: true,
+      hosted: true,
+      inputData: read,
+      failure,
+      signing: { valid: failure !== "native-signature" },
+    });
+    await invalidSignature.reader.start();
+    await assert.rejects(
+      acquireDarwinExperimentInputs(
+        built.prepared,
+        built.build,
+        {
+          ...reader,
+          readBuildInput: (...args) =>
+            invalidSignature.reader.readBuildInput(...args),
+        },
+        persist,
+        options,
+      ),
+    );
+    await invalidSignature.reader.close();
+  }
   records.set(
     "/usr/lib/dyld",
     Buffer.from("missing required image observation"),

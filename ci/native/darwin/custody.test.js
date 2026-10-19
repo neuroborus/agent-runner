@@ -217,6 +217,215 @@ const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
   cdhash = "c".repeat(40);
 
+let signatureScript;
+async function checkInputSignature(
+  file,
+  pin,
+  signing = {},
+  purpose = "experiment",
+) {
+  if (!signatureScript) {
+    const source = await readFile(
+      new URL("custody.h", import.meta.url),
+      "utf8",
+    );
+    const functions = [
+      ["input_refusal", "name, predicate, st"],
+      ["signature_rule", "name, predicate, ok"],
+      ["signature_hash", "name, info, actual"],
+      ["signature_entitlements", "name, entitlements"],
+      ["signature", "name, pin"],
+    ].map(([name, parameters]) => {
+      const body = new RegExp(
+        `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)?.[1];
+      assert.ok(body, name);
+      return `function ${name}(${parameters}) {${body
+        .replace(
+          "char encoded[PATH_MAX*2+1] = {0};",
+          'const encoded = {value: ""};',
+        )
+        .replace("char actual[41];", "const actual = {};")
+        .replace(
+          "const void *keys[2], *values[2];",
+          "const keys = [], values = [];",
+        )
+        .replaceAll("st->", "st.")
+        .replace(/\((?:const unsigned char \*|intmax_t|uintmax_t)\)/gu, "")
+        .replace(
+          /\b(?:int|size_t|CFDataRef|CFDictionaryRef|CFIndex) /gu,
+          "let ",
+        )}}`;
+    });
+    signatureScript = new Script(`${functions.join("\n")} signature;`);
+  }
+  const diagnostics = [],
+    operations = [],
+    grants = signing.entitlements ?? null,
+    info = {
+      hash:
+        signing.hash === undefined
+          ? Buffer.from(signing.cdhash ?? cdhash, "hex")
+          : signing.hash,
+      entitlements: grants,
+    },
+    context = {
+      PATH_MAX: 1024,
+      NULL: null,
+      stderr: {},
+      errno: signing.errno ?? 0,
+      kSecCodeInfoUnique: "hash",
+      kSecCodeInfoEntitlementsDict: "entitlements",
+      kCFBooleanTrue: true,
+      signature_information(name, detailed) {
+        assert.equal(detailed, true);
+        operations.push(["native-signature", name]);
+        context.need(signing.valid !== false);
+        return info;
+      },
+      experiment_installed_path: (name) =>
+        purpose === "experiment" && isDarwinInstalledPath(name),
+      CFDictionaryGetValue: (value, key) => value[key],
+      CFGetTypeID: (value) =>
+        Buffer.isBuffer(value)
+          ? "data"
+          : Array.isArray(value)
+            ? "dictionary"
+            : "other",
+      CFDataGetTypeID: () => "data",
+      CFDictionaryGetTypeID: () => "dictionary",
+      CFDataGetLength: (value) => value.length,
+      CFDataGetBytePtr: (value) => value,
+      CFDictionaryGetCount: (value) => value.length,
+      CFDictionaryGetKeysAndValues(value, keys, values) {
+        operations.push(["helper-entitlements", file]);
+        for (const [key, grant] of value) {
+          keys.push(key);
+          values.push(grant);
+        }
+      },
+      CFEqual: (left, right) => left === right,
+      CFSTR: (value) => value,
+      CFRelease: () => operations.push(["release", file]),
+      strlen: (value) => Buffer.byteLength(value),
+      strcmp: (left, right) => Number(left.value !== right),
+      hex(bytes, size, output) {
+        output.value = Buffer.from(bytes).subarray(0, size).toString("hex");
+      },
+      fprintf(stream, format, ...values) {
+        diagnostics.push({
+          format,
+          values: values.map((value) => value?.value ?? value),
+        });
+        context.errno = 97;
+        return -1; // Diagnostic failure must preserve the original refusal.
+      },
+      fflush() {
+        context.errno = 98;
+        return -1;
+      },
+      need(ok) {
+        if (!ok)
+          throw Object.assign(new Error("Native signature refused"), {
+            errno: context.errno,
+            diagnostics,
+          });
+      },
+    };
+  signatureScript.runInNewContext(context)(file, pin);
+  return { diagnostics, operations };
+}
+
+test("Darwin signature policy exempts only installed experiment originals and preserves native refusals", async () => {
+  const installed = "/usr/bin/hdiutil",
+    helper = "/fixture/report/platform-build/launcher",
+    foreign = [["fixture.entitlement", true]],
+    jit = [["com.apple.security.cs.allow-jit", true]];
+  for (const [file, purpose, signing, rule] of [
+    [
+      installed,
+      "experiment",
+      { entitlements: [...foreign, ...foreign, ...foreign] },
+    ],
+    [helper, "experiment", { entitlements: jit }],
+    [helper, "experiment", {}],
+    [
+      installed,
+      "reviewed",
+      { entitlements: foreign },
+      "helper-entitlement-key",
+    ],
+    [helper, "experiment", { entitlements: foreign }, "helper-entitlement-key"],
+    [
+      "/private/var/run/native-poc/cases/fixture/storage/git",
+      "experiment",
+      { entitlements: foreign },
+      "helper-entitlement-key",
+    ],
+    [
+      helper,
+      "experiment",
+      { entitlements: [...jit, ...jit, ...jit] },
+      "helper-entitlements-count",
+    ],
+    [
+      helper,
+      "experiment",
+      { entitlements: [[jit[0][0], false]] },
+      "helper-entitlement-value",
+    ],
+    [
+      helper,
+      "experiment",
+      { entitlements: "malformed" },
+      "helper-entitlements-dictionary",
+    ],
+    [installed, "experiment", { hash: null }, "signature-cdhash-data"],
+    [
+      installed,
+      "experiment",
+      { hash: Buffer.alloc(19) },
+      "signature-cdhash-size",
+    ],
+    [
+      installed,
+      "experiment",
+      { cdhash: "e".repeat(40) },
+      "signature-cdhash-match",
+    ],
+    [installed, "experiment", { valid: false }, "native"],
+  ]) {
+    for (const errno of rule ? [0, 7] : [0]) {
+      const run = () =>
+        checkInputSignature(file, cdhash, { ...signing, errno }, purpose);
+      if (rule)
+        await assert.rejects(run, (error) => {
+          assert.equal(error.errno, errno);
+          if (rule !== "native")
+            assert.deepEqual(error.diagnostics[0].values, [
+              rule,
+              Buffer.byteLength(file),
+              Buffer.from(file).toString("hex"),
+              errno,
+            ]);
+          return true;
+        });
+      else {
+        const result = await run();
+        assert.deepEqual(result.diagnostics, []);
+        assert.deepEqual(result.operations[0], ["native-signature", file]);
+        assert.equal(
+          result.operations.some(
+            ([operation]) => operation === "helper-entitlements",
+          ),
+          file === helper && signing.entitlements !== undefined,
+        );
+      }
+    }
+  }
+});
+
 test("Darwin native installed, build and helper-slot guards distinguish hosted files from private inputs", async () => {
   const reader = await readFile(
       new URL("custody-reader.c", import.meta.url),
@@ -396,6 +605,7 @@ export function fixture({
   inputBytes = 4,
   buildBytes = 4,
   hosted = false,
+  signing,
   inputData,
   entries = [],
 } = {}) {
@@ -540,6 +750,18 @@ export function fixture({
           const file = Buffer.from(a, "hex").toString(),
             data = await inputData?.(file),
             installed = hosted && isDarwinInstalledPath(file);
+          if (c)
+            await checkInputSignature(
+              file,
+              c,
+              {
+                ...signing,
+                ...(failure === "build-signature"
+                  ? { cdhash: "e".repeat(40) }
+                  : {}),
+              },
+              purpose,
+            );
           value = {
             object: {
               ...object(4),
