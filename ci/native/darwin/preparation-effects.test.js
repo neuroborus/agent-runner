@@ -488,7 +488,7 @@ function experimentBuildFixture(failure = null) {
     ...jobContextForTest(job),
     checkoutSha: candidateSha,
     image: "macos-15-intel",
-    osBuild: "24A",
+    osBuild: "20260101.1",
     architecture: "x64",
     nodeVersion: "v24.21.0",
     workflow: "native-poc",
@@ -723,7 +723,7 @@ function experimentBuildFixture(failure = null) {
         await save("build", { sequence: 1, arguments: [] });
         return {
           purpose: "experiment",
-          osBuild: "24A",
+          osBuild: "24A100",
           observedBindings: { sdkSha256: hash, buildSha256: hash },
         };
       },
@@ -1043,6 +1043,10 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
     directory,
     f.options,
   );
+  for (const observed of [built, loaded]) {
+    assert.equal(observed.prepared.binding.osBuild, "20260101.1");
+    assert.equal(observed.build.abi.osBuild, "24A100");
+  }
   const stored = JSON.parse(
     await f.options.readSelector(
       path.join(directory, "darwin-experiment-build-selector.json"),
@@ -1137,6 +1141,20 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
   f.files.set(buildPath, original);
   const create = f.options.createReader;
   f.options.createReader = (...args) => {
+    const reader = create(...args);
+    return {
+      ...reader,
+      build: async () => ({
+        ...(await reader.build()),
+        osBuild: "24A101",
+      }),
+    };
+  };
+  await assert.rejects(
+    loadDarwinExperimentBuild(built.job, directory, f.options),
+    /Unverified native tool observation/u,
+  );
+  f.options.createReader = (...args) => {
     const reader = create(...args),
       read = reader.readBuildImage;
     return {
@@ -1178,6 +1196,25 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
       ...f.options,
       readCandidate: async () => Buffer.from("substituted source"),
     }),
+  );
+});
+
+test("Darwin initial preparation rejects non-experiment native build observations", async () => {
+  const f = experimentBuildFixture(),
+    create = f.options.createReader;
+  f.options.createReader = (...args) => {
+    const reader = create(...args);
+    return {
+      ...reader,
+      build: async () => ({
+        ...(await reader.build()),
+        purpose: "reviewed",
+      }),
+    };
+  };
+  await assert.rejects(
+    prepareDarwinExperimentBuild(f.job, directory, f.persist, f.options),
+    /Unverified native tool observation/u,
   );
 });
 

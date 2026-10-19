@@ -383,14 +383,17 @@ then published using existing root custody. A timeout or cancellation owns the
 ordinary process group and awaits leader reaping; uncertain completion cannot
 publish a successful build. Original diagnostics survive cleanup failure.
 
-`experiment-build.js` uses private version-3 records and declarations. Sealed
-native readers independently inspect published helper/source bytes, signatures
+`experiment-build.js` uses private version-3 records and declarations. The job
+binding's `osBuild` records GitHub `ImageVersion`; `build.abi` retains the complete
+native build observation, with `osBuild` recording `kern.osversion`. Sealed native
+readers independently inspect published helper/source bytes, signatures
 and ABI. The build recipe inspects this completed
 build and fresh output identities, without parked compiler domains or compiler
 policy receipts. Every other recipe retains its native policy and retirement
 requirements. Cold loading verifies the existing output, source, tool and SDK
-observations without discovery, acquisition or recompilation. Incompatible, mixed,
-incomplete and substituted records fail.
+observations without discovery, acquisition or recompilation, then requires
+equality with the original complete build, including its native ABI. Incompatible,
+mixed, incomplete and substituted records fail.
 
 Ordinary Darwin preparation explicitly trusts the disposable hosted system runtime.
 Initial preparation, cold loading, recovery and runtime observation do not discover

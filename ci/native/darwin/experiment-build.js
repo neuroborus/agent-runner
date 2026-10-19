@@ -405,10 +405,7 @@ async function observe(prepared, reader, options, previous) {
     });
   }
   const installed = await reader.build();
-  requireObservation(
-    installed.purpose === "experiment" &&
-      installed.osBuild === prepared.binding.osBuild,
-  );
+  requireObservation(installed.purpose === "experiment");
   const sdk = { ...prepared.sdk };
   sdk.sha256 = observationDigest(sdk);
   const build = {
