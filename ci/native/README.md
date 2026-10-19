@@ -61,6 +61,40 @@ Protected helper guard failures emit the calling source file and line with an im
 errno or last-error snapshot on existing stderr channels before exit or Job
 termination. These snapshots are diagnostic only; feasibility helpers retain
 their existing named API checks, first-failure records and cleanup classification.
+Ordinary Windows experiment helpers additionally diagnose the original
+`open_file_shared` admission stages: `CreateFileW`,
+`GetFileInformationByHandleEx/FileAttributeTagInfo`, reparse refusal and
+file/directory-kind refusal. Existing stderr publication carries the exact
+requested path as four hex digits per UTF-16 code unit, its unit count, the
+operation and expected kind. Failed APIs retain their immediately captured
+Win32 error; invariant refusals mark that error unavailable. Attributes are
+published only after a successful attribute query; the reparse tag is available
+only when those attributes identify a reparse point. Other samples remain
+unavailable. Parent and volume opens pass through this same owner.
+The scheduled System reader also carries these fields in its existing
+authenticated reader-failure exception, because its stderr may be unavailable.
+An open refusal during import resolution retains its exact failed path rather
+than being replaced by the broader loader context.
+That open-only diagnostic frame has a 17 KiB bound for the complete path;
+other failure frames retain their 2 KiB bound. The closed failure grammar
+rejects mixed or malformed context and never admits a failed operation.
+Its existing `lastError` remains the original guard snapshot; `apiFailure`
+distinguishes a failed API from an invariant's potentially stale snapshot.
+Diagnostic writes preserve the original last-error and errno even when output
+fails. Successful opens are silent. Reviewed/protected helpers retain their
+original guard; receipt schemas, held identity/hash reads, canonical-path and
+private/protected permission checks remain unchanged.
+
+SDK `Windows.h`, the private access-payload dependency graph and installed Git
+selected by `windowsExperimentGitRuntime` remain distinct inputs. Initial and
+cold reads reuse `preparation-files.js` and native held custody. An earlier
+last-error 3 alone establishes neither a missing path nor a selector mismatch.
+The separate `verify-retain` error 87 still withholds original-domain retirement:
+failure to acquire the original PID and later observer completion leave its
+owner RETAINED, preserving first and cleanup causes independently. These
+diagnostics repair no separate feasibility blocker and establish no native
+acceptance; fresh matching external CI remains required.
+
 Darwin fault custody retains possible effects across both sealed root reexec and
 the original payload execs. It verifies descriptor 3 against the protected journal
 and requires its original read/write access before retaining that description;

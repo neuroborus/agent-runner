@@ -257,8 +257,12 @@ export function windowsCustodyChannel(
       const diagnostic = buffer.indexOf(0x1e);
       if (diagnostic >= 0) {
         const end = buffer.indexOf(10, diagnostic);
+        const openContext = buffer
+          .subarray(diagnostic + 1, end < 0 ? undefined : end)
+          .includes('"open":{');
         requireWindows(
-          (end < 0 ? buffer.length : end + 1) - diagnostic <= 2048,
+          (end < 0 ? buffer.length : end + 1) - diagnostic <=
+            (openContext ? 17408 : 2048),
         );
         if (end < 0) return;
         const value = JSON.parse(
@@ -268,6 +272,52 @@ export function windowsCustodyChannel(
         );
         const fields = ["phase", "sequence", "command", "source", "line"];
         const uint32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xffffffff;
+        requireWindows(
+          Object.hasOwn(value, "open") || end + 1 - diagnostic <= 2048,
+        );
+        if (Object.hasOwn(value, "open")) {
+          fields.push("open");
+          const open = value.open;
+          closed(open, [
+            "operation",
+            "pathUnits",
+            "pathUtf16",
+            "directory",
+            "apiFailure",
+            "attributes",
+            "tag",
+          ]);
+          const apiFailure = [
+            "CreateFileW",
+            "GetFileInformationByHandleEx/FileAttributeTagInfo",
+          ].includes(open.operation);
+          requireWindows(
+            Object.hasOwn(value, "lastError") &&
+              !["trust", "transfer", "loader", "retain"].some((field) =>
+                Object.hasOwn(value, field),
+              ) &&
+              [
+                "CreateFileW",
+                "GetFileInformationByHandleEx/FileAttributeTagInfo",
+                "reparse-point",
+                "file-kind",
+              ].includes(open.operation) &&
+              open.apiFailure === apiFailure &&
+              typeof open.directory === "boolean" &&
+              Number.isInteger(open.pathUnits) &&
+              open.pathUnits > 0 &&
+              open.pathUnits < 4096 &&
+              typeof open.pathUtf16 === "string" &&
+              /^(?:[a-f0-9]{4})+$/u.test(open.pathUtf16) &&
+              open.pathUtf16.length === open.pathUnits * 4 &&
+              (apiFailure
+                ? open.attributes === null && open.tag === null
+                : uint32(open.attributes) &&
+                  (open.attributes & 0x400
+                    ? uint32(open.tag)
+                    : open.tag === null)),
+          );
+        }
         if (Object.hasOwn(value, "lastError")) {
           fields.push("lastError");
           requireWindows(

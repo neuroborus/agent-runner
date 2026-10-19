@@ -161,11 +161,35 @@ static void reader_trust_failure(const char *source, unsigned line) {
     (unsigned long)(DWORD)signature_trust.result, (unsigned long)(DWORD)signature_trust.closed, index, identity, pin, expected, signature_trust.inputs, provider);
   if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
 }
+static BOOL reader_open_failure(const char *source, unsigned line, DWORD error) {
+  (void)source; (void)line; (void)error;
+#ifdef NATIVE_CI_EXPERIMENT
+  if (open_file_failure.name) {
+    size_t units = wcslen(open_file_failure.name);
+    if (units && units < 4096) {
+      char bytes[17408], path[16385] = {0}, attributes[16] = "null", tag[16] = "null"; DWORD written;
+      for (size_t i = 0; i < units; i++) sprintf_s(path+i*4, sizeof(path)-i*4, "%04x", (unsigned)open_file_failure.name[i]);
+      if (open_file_failure.sampled) {
+        sprintf_s(attributes, sizeof(attributes), "%lu", open_file_failure.tag.FileAttributes);
+        if (open_file_failure.tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+          sprintf_s(tag, sizeof(tag), "%lu", open_file_failure.tag.ReparseTag);
+      }
+      int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"open\":{\"operation\":\"%s\",\"pathUnits\":%zu,\"pathUtf16\":\"%s\",\"directory\":%s,\"apiFailure\":%s,\"attributes\":%s,\"tag\":%s}}\n",
+        sequence, reader_command, source, line, error, open_file_failure.operation, units, path,
+        open_file_failure.directory ? "true" : "false", open_file_failure.api_failure ? "true" : "false", attributes, tag);
+      if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+      return TRUE;
+    }
+  }
+#endif
+  return FALSE;
+}
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
-  if (reader_context_failure(source, line, error)) return;
+  /* Import resolution can fail while holding the resolved file or its parents. */
+  if (reader_open_failure(source, line, error) || reader_context_failure(source, line, error)) return;
   char bytes[1024], transfer[256] = ""; DWORD written;
   if (reader_transfer.active) sprintf_s(transfer, sizeof(transfer), ",\"transfer\":{\"ordinal\":%llu,\"count\":%llu,\"type\":%u,\"access\":%lu,\"attributes\":%lu,\"creator\":%u,\"child\":%u}",
     reader_transfer.ordinal, reader_transfer.count, reader_transfer.type, reader_transfer.access, reader_transfer.attributes, reader_transfer.creator, reader_transfer.child);

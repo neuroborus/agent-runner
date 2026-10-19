@@ -268,6 +268,7 @@ export async function compilerTrustFixture({
     reader_command: "open",
     reader_transfer: { active: false },
     reader_context_failure: () => false,
+    reader_open_failure: () => false,
     reader_diagnostics_ready: false,
     signature_trust,
     errno: 11,

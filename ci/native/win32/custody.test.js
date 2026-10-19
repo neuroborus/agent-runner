@@ -1995,6 +1995,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
         reader_context_failure: () => false,
+        reader_open_failure: () => false,
         reader_command: "open",
         reader_transfer: { active: false },
         sequence: 2,
@@ -2148,6 +2149,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           reader_context_failure: () => false,
+          reader_open_failure: () => false,
           control: "authenticated",
           out,
           TRUE: true,
@@ -3128,7 +3130,37 @@ test("Windows failure metadata stays closed and bounded across complete and frag
       tokenResult: -1,
     },
   };
+  const opened = {
+    ...legacy,
+    lastError: 3,
+    open: {
+      operation: "CreateFileW",
+      pathUnits: 4,
+      pathUtf16: "0043003a005c0066",
+      directory: false,
+      apiFailure: true,
+      attributes: null,
+      tag: null,
+    },
+  };
   const invalid = [
+    ...[
+      { pathUnits: 4096 },
+      { apiFailure: false },
+      { attributes: 0 },
+      { extra: true },
+    ].map((damage) => ({ ...opened, open: { ...opened.open, ...damage } })),
+    {
+      ...opened,
+      open: {
+        ...opened.open,
+        operation: "file-kind",
+        apiFailure: false,
+        attributes: 0x10,
+        tag: 0xcafebabe,
+      },
+    },
+    { ...opened, retain: retain.retain },
     ...[
       { flags: 0x800 },
       { flags: 0x801 },
@@ -3196,6 +3228,7 @@ test("Windows failure metadata stays closed and bounded across complete and frag
     })),
   ];
   const valid = [
+    opened,
     loader,
     {
       ...loader,
@@ -3746,10 +3779,359 @@ test("Windows task principals route SID syntax and account names to exact LocalS
   }
 });
 
-test("Windows guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
+test("Windows installed-input open guards diagnose only sampled failures and preserve native errors", async () => {
+  const source = await readFile(new URL("custody.h", import.meta.url), "utf8"),
+    refusal = /static void open_file_refusal\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1],
+    opening = /static HANDLE open_file_shared\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(refusal && opening);
+  const reader = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    start = reader.indexOf("  if (open_file_failure.name) {"),
+    sending = reader.slice(start, reader.indexOf("#endif", start));
+  assert.ok(start > 0 && sending);
+  const failure = /static void reader_failure\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      reader,
+    )[1],
+    dispatch = new Script(
+      `(file,line,error)=>{${failure
+        .slice(0, failure.indexOf("  char bytes[1024]"))
+        .replace("const char *source", "let source")
+        .replace("source+1", "source.slice(1)")}
+        throw new Error("Missing native failure context");
+      }`,
+    ),
+    strrchr = (file, separator) => {
+      const index = file.lastIndexOf(separator);
+      return index < 0 ? null : file.slice(index);
+    };
+  const formatC = (text, args) => {
+    let i = 0;
+    return text.replace(/%(?:0(\d+))?(s|lu|zu|u|lx|x)/gu, (_, width, kind) => {
+      const argument = args[i++],
+        value = argument?.value ?? argument;
+      return kind === "s"
+        ? value
+        : Number(value)
+            .toString(kind.endsWith("x") ? 16 : 10)
+            .padStart(Number(width ?? 0), "0");
+    });
+  };
+  const translate = (body) =>
+    body
+      .replace(
+        "FILE_ATTRIBUTE_TAG_INFO tag; wchar_t canonical[4100]; DWORD size;",
+        "const tag = {}, canonical = 0; let size;",
+      )
+      .replaceAll(/\((?:unsigned long|unsigned)\)/gu, "")
+      .replaceAll(/\b(?:DWORD|HANDLE|size_t|int) /gu, "let ")
+      .replaceAll("tag->", "tag.")
+      .replaceAll("&tag", "tag")
+      .replaceAll('L"', '"')
+      .replaceAll(/\bNULL\b/gu, "null");
+  const sender = new Script(
+    `function publish(source, line, error) {${translate(sending)
+      .replace(
+        'char bytes[17408], path[16385] = {0}, attributes[16] = "null", tag[16] = "null";',
+        'const bytes = {value:""}, path = {value:""}, attributes = {value:"null"}, tag = {value:"null"};',
+      )
+      .replaceAll(
+        /sizeof\((bytes|path|attributes|tag)\)/gu,
+        (_, name) =>
+          ({ bytes: 17408, path: 16385, attributes: 16, tag: 16 })[name],
+      )
+      .replaceAll("path+i*4", "{parent:path, offset:i*4}")
+      .replaceAll("(DWORD)", "")
+      .replaceAll("&written", "null")
+      .replaceAll("\\036", "\\x1e")} return FALSE;} publish;`,
+  );
+  const selected = "C:\\Fixture SDK\\\ud83d\ude00\\Windows.h";
+  for (const experiment of [false, true]) {
+    const body = opening.replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/gu,
+        (_, ordinary, reviewed) => (experiment ? ordinary : reviewed),
+      ),
+      program = new Script(`
+        function open_file_refusal(name, operation, api_failure, directory, tag) {${translate(refusal)}}
+        function open_file_shared(name, directory, access, mutable) {${translate(body).replaceAll("sizeof(tag)", "8")}}
+        open_file_shared(name, directory, 1, false);
+      `);
+    for (const [fault, directory, file = selected] of [
+      ["open", false],
+      ["query", false],
+      ["reparse", false],
+      ["kind", false],
+      ["kind", true, "C:\\Fixture SDK"],
+      ["query", true, "C:\\Fixture SDK"],
+      ["open", true, "C:\\"],
+      ["write", false],
+      ["open", false, "C:\\" + "x".repeat(4092)],
+      [null, false],
+      [null, true, "C:\\"],
+    ]) {
+      const calls = [],
+        chunks = [],
+        name = Uint16Array.from(
+          file
+            .split("")
+            .map((unit) => unit.charCodeAt(0))
+            .concat(0),
+        ),
+        apiFailure = ["open", "write", "query"].includes(fault),
+        attributes =
+          fault === "reparse"
+            ? 0x420
+            : directory !== (fault === "kind")
+              ? 0x10
+              : 0x20,
+        // Without the reparse attribute, Windows leaves ReparseTag undefined.
+        tag = fault === "reparse" ? 0xa000000c : 0xcafebabe;
+      let error = 87;
+      const emit = (bytes) => {
+          error = 999;
+          api.errno = 99;
+          if (fault === "write") return -1;
+          chunks.push(bytes);
+          return bytes.length;
+        },
+        api = {
+          name,
+          directory: Number(directory),
+          errno: 23,
+          stderr: "stderr",
+          open_file_failure: { tag: {} },
+          TRUE: 1,
+          FALSE: 0,
+          INVALID_HANDLE_VALUE: -1,
+          READ_CONTROL: 0x20000,
+          FILE_READ_ATTRIBUTES: 0x80,
+          FILE_SHARE_READ: 1,
+          FILE_SHARE_WRITE: 2,
+          OPEN_EXISTING: 3,
+          FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+          FILE_FLAG_BACKUP_SEMANTICS: 0x2000000,
+          FILE_ATTRIBUTE_REPARSE_POINT: 0x400,
+          FILE_ATTRIBUTE_DIRECTORY: 0x10,
+          FileAttributeTagInfo: 9,
+          FILE_NAME_NORMALIZED: 0,
+          VOLUME_NAME_DOS: 0,
+          HANDLE_FLAG_INHERIT: 1,
+          CreateFileW(actual, access, share) {
+            assert.equal(actual, name);
+            assert.equal(access, 0x20081);
+            assert.equal(share, directory ? 3 : 1);
+            calls.push("open");
+            if (["open", "write"].includes(fault)) {
+              error = 3;
+              return -1;
+            }
+            return 7;
+          },
+          GetFileInformationByHandleEx(handle, kind, actual, size) {
+            assert.equal(handle, 7);
+            assert.equal(kind, 9);
+            assert.equal(size, 8);
+            calls.push("query");
+            if (fault === "query") {
+              error = 5;
+              return 0;
+            }
+            Object.assign(actual, {
+              FileAttributes: attributes,
+              ReparseTag: tag,
+            });
+            return 1;
+          },
+          GetFinalPathNameByHandleW() {
+            calls.push("canonical");
+            return 20;
+          },
+          SetHandleInformation() {
+            calls.push("inheritance");
+            return 1;
+          },
+          GetLastError() {
+            calls.push("error");
+            return error;
+          },
+          SetLastError(value) {
+            error = value;
+          },
+          wcslen: (value) => value.indexOf(0),
+          wcsncmp: () => 0,
+          wcscmp: () => 0,
+          fprintf(stream, format, ...args) {
+            assert.equal(stream, "stderr");
+            return emit(formatC(format, args));
+          },
+          fputs: (text) => emit(text),
+          fputc: (unit) => emit(unit),
+          fflush: () => {
+            error = 998;
+          },
+          need(ok) {
+            if (!ok)
+              throw Object.assign(new Error("Original open refusal"), {
+                lastError: error,
+              });
+          },
+        };
+      if (fault) {
+        assert.throws(
+          () => program.runInNewContext(api),
+          (cause) => {
+            assert.equal(cause.message, "Original open refusal");
+            assert.equal(
+              cause.lastError,
+              apiFailure ? (fault === "query" ? 5 : 3) : 87,
+            );
+            return true;
+          },
+        );
+        assert.equal(api.errno, 23);
+        assert.deepEqual(calls, [
+          "open",
+          ...(["open", "write"].includes(fault) ? [] : ["query"]),
+          ...(experiment ? ["error"] : []),
+        ]);
+      } else {
+        assert.equal(program.runInNewContext(api), 7);
+        assert.deepEqual(calls, ["open", "query", "canonical", "inheritance"]);
+      }
+      const output = chunks.join("");
+      if (!experiment || !fault || fault === "write") assert.equal(output, "");
+      else {
+        const operation =
+          fault === "open"
+            ? "CreateFileW"
+            : fault === "query"
+              ? "GetFileInformationByHandleEx/FileAttributeTagInfo"
+              : fault === "reparse"
+                ? "reparse-point"
+                : "file-kind";
+        assert.ok(
+          output.includes(
+            `operation=${operation} domain=${apiFailure ? "win32" : "invariant"} expected-kind=${directory ? "directory" : "file"}`,
+          ),
+        );
+        assert.ok(
+          output.includes(
+            apiFailure
+              ? `error=${fault === "query" ? 5 : 3} attributes=unavailable tag=unavailable`
+              : `error=unavailable attributes=0x${attributes.toString(16).padStart(8, "0")} tag=${fault === "reparse" ? `0x${tag.toString(16).padStart(8, "0")}` : "unavailable"}`,
+          ),
+        );
+        assert.ok(
+          output.endsWith(
+            `path-units=${file.length} path-utf16=${file
+              .split("")
+              .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+              .join("")}\n`,
+          ),
+        );
+      }
+      if (experiment && fault) {
+        const frames = [];
+        Object.assign(api, {
+          capturedError: apiFailure ? (fault === "query" ? 5 : 3) : 87,
+          reader_diagnostics_ready: true,
+          signature_trust: { active: false },
+          strrchr,
+          reader_context_failure() {
+            assert.fail("Loader context masked the sampled open refusal");
+          },
+          sequence: 459,
+          reader_command: "prepare-experiment-input",
+          control: "authenticated",
+          sprintf_s(target, maximum, format, ...args) {
+            const text = formatC(format, args);
+            assert.ok(text.length < maximum);
+            if (target.parent)
+              target.parent.value =
+                target.parent.value.slice(0, target.offset) + text;
+            else target.value = text;
+            return text.length;
+          },
+          WriteFile(handle, bytes, size) {
+            assert.equal(handle, "authenticated");
+            if (fault === "write") return false;
+            frames.push(bytes.value.slice(0, size));
+            return true;
+          },
+        });
+        api.reader_open_failure = sender.runInNewContext(api);
+        dispatch.runInNewContext(api)("custody.h", 174, api.capturedError);
+        if (fault === "write") assert.deepEqual(frames, []);
+        else {
+          assert.equal(frames.length, 1);
+          assert.ok(Buffer.byteLength(frames[0]) < 17408);
+          const f = transport(),
+            pending = f.channel.receive().catch((cause) => cause),
+            completion = f.channel.completion.catch((cause) => cause);
+          try {
+            f.child.stdout.write(frames[0].slice(0, 29));
+            f.child.stdout.write(frames[0].slice(29));
+            const cause = await pending;
+            assert.equal(
+              cause.custodyReaderFailure.lastError,
+              api.capturedError,
+            );
+            const observed = cause.custodyReaderFailure.open;
+            assert.equal(observed.pathUnits, file.length);
+            assert.equal(
+              observed.pathUtf16,
+              file
+                .split("")
+                .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+                .join(""),
+            );
+            assert.equal(observed.apiFailure, apiFailure);
+            assert.equal(observed.attributes, apiFailure ? null : attributes);
+            assert.equal(observed.tag, fault === "reparse" ? tag : null);
+            f.child.emit("close", 126, null);
+            assert.equal(await completion, cause);
+          } finally {
+            f.channel.close();
+            f.child.stdin.destroy();
+            f.child.stdout.destroy();
+            f.child.stderr.destroy();
+          }
+        }
+      }
+    }
+  }
+  const fallback = [];
+  dispatch.runInNewContext({
+    reader_diagnostics_ready: true,
+    signature_trust: { active: false },
+    strrchr,
+    reader_open_failure() {
+      fallback.push("open");
+      return false;
+    },
+    reader_context_failure(source, line, error) {
+      fallback.push([source, line, error]);
+      return true;
+    },
+  })("custody-reader.c", 274, 87);
+  assert.deepEqual(fallback, ["open", ["custody-reader.c", 274, 87]]);
+});
+
+test("Windows open, guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
   const chunks = [],
+    inputPath = "C:\\Fixture SDK\\Windows.h",
+    open = `native-windows-open: operation=CreateFileW domain=win32 expected-kind=file error=3 attributes=unavailable tag=unavailable path-units=${inputPath.length} path-utf16=${inputPath
+      .split("")
+      .map((unit) => unit.charCodeAt(0).toString(16).padStart(4, "0"))
+      .join("")}\n`,
     guard = Buffer.from(
-      "native-windows-hresult: operation=ITaskFolder_RegisterTask hresult=0x80070005 file=fixture.c line=23\n" +
+      open +
+        "native-windows-hresult: operation=ITaskFolder_RegisterTask hresult=0x80070005 file=fixture.c line=23\n" +
         "native-windows-guard: file=fixture.c line=23 last-error=5\n",
     ),
     cleanup = Buffer.from(
@@ -3794,6 +4176,7 @@ test("Windows guard and scheduler HRESULT diagnostics retain independent origina
     createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
   );
   const output = Buffer.concat(chunks).toString();
+  assert.ok(output.includes(open.trim()));
   assert.ok(output.includes("native-windows-guard"));
   assert.ok(output.includes("file=fixture.c line=23 last-error=5"));
   assert.ok(

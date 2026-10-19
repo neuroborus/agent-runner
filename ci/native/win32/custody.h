@@ -140,12 +140,51 @@ static void security(HANDLE handle, SE_OBJECT_TYPE kind, BOOL private, char dige
   sum((BYTE *)sd, size, digest); LocalFree(sd);
 }
 struct held_file { HANDLE handle, volume, parents[32]; unsigned count; DWORD links; wchar_t path[4096], volumeName[64], filesystem[32]; FILE_ID_INFO id; };
+#ifdef NATIVE_CI_EXPERIMENT
+static __declspec(thread) struct {
+  const wchar_t *name; const char *operation; BOOL api_failure, directory, sampled;
+  FILE_ATTRIBUTE_TAG_INFO tag;
+} open_file_failure;
+/* Only sampled metadata is published; invariant refusals have no API error.
+ * Preserve the original guard's last-error/errno even when stderr fails. */
+static void open_file_refusal(const wchar_t *name, const char *operation, BOOL api_failure, BOOL directory, const FILE_ATTRIBUTE_TAG_INFO *tag) {
+  DWORD error = GetLastError(); int saved_errno = errno;
+  open_file_failure.name = name; open_file_failure.operation = operation;
+  open_file_failure.api_failure = api_failure; open_file_failure.directory = directory;
+  open_file_failure.sampled = tag != NULL;
+  if (tag) {
+    open_file_failure.tag.FileAttributes = tag->FileAttributes;
+    if (tag->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) open_file_failure.tag.ReparseTag = tag->ReparseTag;
+  }
+  fprintf(stderr, "native-windows-open: operation=%s domain=%s expected-kind=%s error=", operation,
+    api_failure ? "win32" : "invariant", directory ? "directory" : "file");
+  if (api_failure) fprintf(stderr, "%lu", error); else fputs("unavailable", stderr);
+  if (tag) fprintf(stderr, " attributes=0x%08lx", (unsigned long)tag->FileAttributes);
+  else fputs(" attributes=unavailable", stderr);
+  if (tag && (tag->FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) fprintf(stderr, " tag=0x%08lx", (unsigned long)tag->ReparseTag);
+  else fputs(" tag=unavailable", stderr);
+  size_t units = wcslen(name);
+  fprintf(stderr, " path-units=%zu path-utf16=", units);
+  for (size_t i = 0; i < units; i++) fprintf(stderr, "%04x", (unsigned)name[i]);
+  fputc('\n', stderr); fflush(stderr);
+  errno = saved_errno; SetLastError(error);
+}
+#endif
 static HANDLE open_file_shared(const wchar_t *name, BOOL directory, DWORD access, BOOL mutable) {
   HANDLE result = CreateFileW(name, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | (directory || mutable ? FILE_SHARE_WRITE : 0),
     NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
   FILE_ATTRIBUTE_TAG_INFO tag; wchar_t canonical[4100]; DWORD size;
+#ifdef NATIVE_CI_EXPERIMENT
+  if (result == INVALID_HANDLE_VALUE) { open_file_refusal(name, "CreateFileW", TRUE, directory, NULL); need(false); }
+  if (!GetFileInformationByHandleEx(result, FileAttributeTagInfo, &tag, sizeof(tag))) {
+    open_file_refusal(name, "GetFileInformationByHandleEx/FileAttributeTagInfo", TRUE, directory, NULL); need(false);
+  }
+  if (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) { open_file_refusal(name, "reparse-point", FALSE, directory, &tag); need(false); }
+  if (!!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != directory) { open_file_refusal(name, "file-kind", FALSE, directory, &tag); need(false); }
+#else
   need(result != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(result, FileAttributeTagInfo, &tag, sizeof(tag)) &&
     !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == directory);
+#endif
   size = GetFinalPathNameByHandleW(result, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
   need(size > 4 && size < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !wcscmp(canonical + 4, name) &&
     SetHandleInformation(result, HANDLE_FLAG_INHERIT, 0)); return result;
