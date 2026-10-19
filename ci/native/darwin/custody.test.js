@@ -217,6 +217,429 @@ const hash = "a".repeat(64),
   candidateSha = "b".repeat(40),
   cdhash = "c".repeat(40);
 
+function loaderImage(format) {
+  const thin = Buffer.alloc(144);
+  for (const [at, value] of [
+    [0, 0xfeedfacf],
+    [4, 0x01000007],
+    [8, 3],
+    [12, 7],
+    [16, 3],
+    [20, 96],
+    [32, 0x24],
+    [36, 16],
+    [40, 0xe0000],
+    [44, 0xf0000],
+    [48, 0x1b],
+    [52, 24],
+    [72, 0xc],
+    [76, 56],
+    [80, 24],
+  ])
+    thin.writeUInt32LE(value, at);
+  thin.fill(0xdd, 56, 72);
+  thin.write("/usr/lib/libfixture.dylib\0", 96);
+  thin.fill(0x5a, 128);
+  if (format === "thin") return thin;
+  const wide = format.startsWith("fat64"),
+    little = format.endsWith("le"),
+    bytes = Buffer.alloc(768),
+    width = wide ? 32 : 20,
+    write = (value, at, size = 4) => {
+      if (size === 8)
+        bytes[little ? "writeBigUInt64LE" : "writeBigUInt64BE"](
+          BigInt(value),
+          at,
+        );
+      else bytes[little ? "writeUInt32LE" : "writeUInt32BE"](value, at);
+    };
+  write(wide ? 0xcafebabf : 0xcafebabe, 0);
+  write(2, 4);
+  for (const [index, cpu, start] of [
+    [0, 0x0100000c, 256],
+    [1, 0x01000007, 512],
+  ]) {
+    const at = 8 + index * width;
+    write(cpu, at);
+    write(3, at + 4);
+    write(start, at + 8, wide ? 8 : 4);
+    write(thin.length, at + (wide ? 16 : 12), wide ? 8 : 4);
+    write(8, at + (wide ? 24 : 16));
+    thin.copy(bytes, start);
+    bytes.writeUInt32LE(cpu, start + 4);
+  }
+  return bytes;
+}
+
+let imageScript;
+async function nativeImageRead(
+  bytes,
+  {
+    file = "/usr/lib/dyld",
+    purpose = "experiment",
+    operation = "macho",
+    pin = digest(bytes),
+  } = {},
+) {
+  if (!imageScript) {
+    const source = await readFile(
+        new URL("custody-reader.c", import.meta.url),
+        "utf8",
+      ),
+      parser = source.slice(
+        source.indexOf("static void macho("),
+        source.indexOf("static void case_members("),
+      ),
+      input = /  char actual\[65\]; sha_range\(value.fd,[^\n]+/u.exec(
+        source,
+      )?.[0];
+    assert.ok(parser && input);
+    const translate = (body) =>
+      body
+        .replace(/#ifndef NATIVE_CI_EXPERIMENT[\s\S]*?#endif/gu, "")
+        .replace(/static void macho\([^\n]+\)/u, "function macho(bytes, size)")
+        .replace(
+          /static bool installed_loader\([^\n]+\)/u,
+          "function installed_loader(value)",
+        )
+        .replace(
+          /static uint64_t container_number\([^\n]+\)/u,
+          "function container_number(bytes, width, little)",
+        )
+        .replace(/static void image\([^\n]+\)/u, "function image(value)")
+        .replace(
+          "const struct mach_header_64 *h = (const void *)bytes",
+          "const h = headerView(bytes)",
+        )
+        .replaceAll(
+          "const struct load_command *lc = (const void *)(bytes + at)",
+          "const lc = commandView(bytes, at)",
+        )
+        .replace(
+          /const struct (?:build_version_command|version_min_command) \*v = \(const void \*\)lc/gu,
+          "const v = lc",
+        )
+        .replace(
+          /\(\(const struct (?:dylib_command|dylinker_command|rpath_command) \*\)lc\)->(?:dylib.name|name|path).offset/gu,
+          "lc.name",
+        )
+        .replace("((const struct uuid_command *)lc)->uuid", "lc.uuid")
+        .replace(
+          "const unsigned char *name = bytes + at + offset",
+          "const name = bytes.subarray(at + offset)",
+        )
+        .replace(
+          /container_number\((prefix|record) \+ \(([^)]+)\),/gu,
+          "container_number($1.subarray($2),",
+        )
+        .replace(
+          /container_number\((prefix|record) \+ (\d+),/gu,
+          "container_number($1.subarray($2),",
+        )
+        .replace(/char (sum|encoded|id|actual)\[[^;]+\]/gu, "let $1 = {}")
+        .replace(
+          /unsigned char (digest_bytes|uuid|prefix|record)\[(\d+)\](?: = \{0\})?/gu,
+          "let $1 = Buffer.alloc($2)",
+        )
+        .replace(
+          "struct mach_header_64 header",
+          "let header = {nativeHeader: true}",
+        )
+        .replace(
+          "unsigned char *bytes = malloc(size)",
+          "let bytes = Buffer.alloc(size)",
+        )
+        .replace("starts[128], lengths[128]", "starts = [], lengths = []")
+        .replaceAll("sizeof(struct mach_header_64)", "32")
+        .replaceAll("sizeof(struct load_command)", "8")
+        .replaceAll("sizeof(struct dylib_command)", "24")
+        .replaceAll("sizeof(struct dylinker_command)", "12")
+        .replaceAll("sizeof(struct rpath_command)", "12")
+        .replaceAll("sizeof(struct build_tool_version)", "8")
+        .replaceAll("sizeof(struct uuid_command)", "24")
+        .replaceAll("sizeof(*h)", "32")
+        .replaceAll("sizeof(*v)", "v.width")
+        .replaceAll("sizeof(header)", "32")
+        .replaceAll("sizeof(prefix)", "8")
+        .replaceAll("sizeof(magic)", "4")
+        .replaceAll("(1ULL << alignment)", "(2 ** alignment)")
+        .replaceAll(/\((?:uint64_t|uint32_t|CC_LONG|const char \*)\)/gu, "")
+        .replaceAll("->", ".")
+        .replaceAll(/&(header|value|magic)\b/gu, "$1")
+        .replaceAll(/\b(?:uint64_t|uint32_t|unsigned|size_t|bool) /gu, "let ");
+    const buildInput = input
+      .replace("uint32_t magic = 0", "uint32_t magic = {value: 0}")
+      .replace("magic == MH_MAGIC_64", "magic.value == MH_MAGIC_64");
+    imageScript = new Script(`${translate(parser)}
+      function build_input(value, pin) { ${translate(buildInput)} stable(value); }
+      operation === "build-input" ? build_input(value, pin) : image(value);`);
+  }
+  let output = "",
+    stable = 0;
+  const need = (ok) => {
+      if (!ok) throw new Error("Native image refused");
+    },
+    number = (data, at) => data.readUInt32LE(at),
+    headerView = (data) =>
+      Object.fromEntries(
+        [
+          "magic",
+          "cputype",
+          "cpusubtype",
+          "filetype",
+          "ncmds",
+          "sizeofcmds",
+        ].map((name, i) => [name, number(data, i * 4)]),
+      ),
+    commandView = (data, at) => ({
+      cmd: number(data, at),
+      cmdsize: number(data, at + 4),
+      name: number(data, at + 8),
+      version: number(data, at + 8),
+      sdk: number(data, at + 12),
+      platform: number(data, at + 8),
+      minos: number(data, at + 12),
+      ntools: data.readUInt32LE(at + 20),
+      width: number(data, at) === 0x32 ? 24 : 16,
+      uuid: data.subarray(at + 8, at + 24),
+    }),
+    scalar = (value) => value?.value ?? value;
+  imageScript.runInNewContext({
+    Buffer,
+    operation,
+    pin,
+    headerView,
+    commandView,
+    value: { fd: 7, path: file, stat: { st_size: bytes.length } },
+    MH_MAGIC_64: 0xfeedfacf,
+    CPU_TYPE_X86_64: 0x01000007,
+    FAT_MAGIC: 0xcafebabe,
+    FAT_CIGAM: 0xbebafeca,
+    FAT_MAGIC_64: 0xcafebabf,
+    FAT_CIGAM_64: 0xbfbafeca,
+    MH_EXECUTE: 2,
+    MH_DYLIB: 6,
+    MH_DYLINKER: 7,
+    LC_DYLD_ENVIRONMENT: 0x27,
+    LC_LOAD_DYLIB: 0xc,
+    LC_LOAD_WEAK_DYLIB: 0x80000018,
+    LC_REEXPORT_DYLIB: 0x8000001f,
+    LC_LOAD_UPWARD_DYLIB: 0x80000023,
+    LC_LAZY_LOAD_DYLIB: 0x20,
+    LC_LOAD_DYLINKER: 0xe,
+    LC_RPATH: 0x8000001c,
+    LC_BUILD_VERSION: 0x32,
+    LC_VERSION_MIN_MACOSX: 0x24,
+    LC_UUID: 0x1b,
+    PLATFORM_MACOS: 1,
+    PATH_MAX: 1024,
+    experiment_installed_path: (name) =>
+      purpose === "experiment" && isDarwinInstalledPath(name),
+    need,
+    stdout: {},
+    read_at(fd, out, size, at) {
+      need(fd === 7 && at >= 0 && at + size <= bytes.length);
+      const data = bytes.subarray(at, at + size);
+      if (Buffer.isBuffer(out)) {
+        need(size <= out.length);
+        data.copy(out);
+      } else if (out.nativeHeader) Object.assign(out, headerView(data));
+      else out.value = data.readUInt32LE(0);
+    },
+    sha_range(fd, at, size, out) {
+      need(fd === 7 && at === 0 && size === bytes.length);
+      out.value = digest(bytes);
+    },
+    CC_SHA256(data, size, out) {
+      Buffer.from(digest(data.subarray(0, size)), "hex").copy(out);
+      return true;
+    },
+    hex(data, size, out) {
+      out.value = data.subarray(0, size).toString("hex");
+    },
+    strcmp: (a, b) => Number(scalar(a) !== scalar(b)),
+    strnlen: (data, size) => {
+      const end = data.subarray(0, size).indexOf(0);
+      return end < 0 ? size : end;
+    },
+    memcpy: (target, source, size) => source.copy(target, 0, 0, size),
+    printf(format, ...args) {
+      output += format.replace(/%[su]/gu, () => scalar(args.shift()));
+    },
+    fputs: (text) => {
+      output += scalar(text);
+    },
+    putchar: (text) => {
+      output += text;
+    },
+    free() {},
+    stable() {
+      stable++;
+    },
+  });
+  assert.ok(stable > 0);
+  return JSON.parse(
+    operation === "build-input" ? `{${output.slice(1)}}` : output,
+  );
+}
+
+test("Darwin native loader reads select identical thin metadata from every universal container encoding", async () => {
+  const thin = loaderImage("thin"),
+    expected = await nativeImageRead(thin);
+  assert.equal(expected.headerSha256, digest(thin.subarray(0, 128)));
+  assert.deepEqual(expected.dependencies, [
+    Buffer.from("/usr/lib/libfixture.dylib").toString("hex"),
+  ]);
+  assert.equal(expected.sdk, 0xf0000);
+  assert.deepEqual(
+    await nativeImageRead(thin, {
+      file: "/fixture/helper",
+      purpose: "reviewed",
+    }),
+    expected,
+  );
+  for (const format of [
+    "thin",
+    "fat32-be",
+    "fat32-le",
+    "fat64-be",
+    "fat64-le",
+  ]) {
+    const bytes = loaderImage(format),
+      acquired = await nativeImageRead(bytes, { operation: "build-input" });
+    assert.deepEqual(acquired.macho, expected, format);
+    assert.deepEqual(await nativeImageRead(bytes), expected, format);
+    assert.equal(acquired.sha256, digest(bytes));
+    await assert.rejects(
+      nativeImageRead(bytes, { operation: "build-input", pin: "f".repeat(64) }),
+      /Native image refused/u,
+    );
+    if (format === "thin") continue;
+    for (const [file, purpose] of [
+      ["/usr/lib/dyld", "reviewed"],
+      ["/fixture/helper", "experiment"],
+      ["/usr/bin/git", "experiment"],
+    ])
+      await assert.rejects(
+        nativeImageRead(bytes, { file, purpose }),
+        /Native image refused/u,
+      );
+    assert.equal(
+      Object.hasOwn(
+        await nativeImageRead(bytes, {
+          file: "/usr/bin/git",
+          operation: "build-input",
+        }),
+        "macho",
+      ),
+      false,
+    );
+  }
+});
+
+test("Darwin native loader container and selected Mach-O bounds reject malformed and ambiguous images", async () => {
+  for (const format of ["fat32-be", "fat32-le", "fat64-be", "fat64-le"]) {
+    const wide = format.startsWith("fat64"),
+      little = format.endsWith("le"),
+      width = wide ? 32 : 20,
+      selected = 8 + width;
+    for (const fault of [
+      "table-truncated",
+      "table-empty",
+      "table-large",
+      "missing",
+      "duplicate",
+      "table-overlap",
+      "slice-overlap",
+      "range",
+      "slice-size",
+      "unselected-range",
+      "empty-slice",
+      "alignment",
+      "misaligned",
+      "header-short",
+      "commands-short",
+      "magic",
+      "cpu",
+      "subtype",
+      "command",
+      "commands-large",
+      ...(wide ? ["reserved", "wide-offset"] : []),
+    ]) {
+      let bytes = loaderImage(format);
+      const write = (value, at, size = 4) => {
+        if (size === 8)
+          bytes[little ? "writeBigUInt64LE" : "writeBigUInt64BE"](
+            BigInt(value),
+            at,
+          );
+        else bytes[little ? "writeUInt32LE" : "writeUInt32BE"](value, at);
+      };
+      if (fault === "table-truncated")
+        bytes = bytes.subarray(0, 8 + 2 * width - 1);
+      if (fault === "table-empty") write(0, 4);
+      if (fault === "table-large") write(129, 4);
+      if (fault === "missing") write(0x0100000c, selected);
+      if (fault === "duplicate") write(0x01000007, 8);
+      if (
+        ["table-overlap", "slice-overlap", "range", "misaligned"].includes(
+          fault,
+        )
+      )
+        write(
+          {
+            "table-overlap": 0,
+            "slice-overlap": 256,
+            range: 1024,
+            misaligned: 513,
+          }[fault],
+          selected + 8,
+          wide ? 8 : 4,
+        );
+      if (["empty-slice", "header-short", "commands-short"].includes(fault))
+        write(
+          { "empty-slice": 0, "header-short": 31, "commands-short": 127 }[
+            fault
+          ],
+          selected + (wide ? 16 : 12),
+          wide ? 8 : 4,
+        );
+      if (fault === "alignment") write(63, selected + (wide ? 24 : 16));
+      if (fault === "slice-size")
+        write(257, selected + (wide ? 16 : 12), wide ? 8 : 4);
+      if (fault === "unselected-range") {
+        write(0x01000007, 8);
+        bytes.writeUInt32LE(0x01000007, 260);
+        write(0x0100000c, selected);
+        bytes.writeUInt32LE(0x0100000c, 516);
+        write(1024, selected + 8, wide ? 8 : 4);
+      }
+      if (fault === "reserved") write(1, selected + 28);
+      if (fault === "wide-offset") write(0x100000200, selected + 8, 8);
+      if (fault === "magic") bytes.writeUInt32LE(0, 512);
+      if (fault === "cpu") bytes.writeUInt32LE(0x0100000c, 516);
+      if (fault === "subtype") bytes.writeUInt32LE(8, 520);
+      if (fault === "command") bytes.writeUInt32LE(7, 512 + 36);
+      if (fault === "commands-large") bytes.writeUInt32LE(1048577, 512 + 20);
+      for (const operation of ["build-input", "macho"])
+        await assert.rejects(
+          nativeImageRead(bytes, { operation }),
+          /Native image refused/u,
+          `${format}: ${fault}: ${operation}`,
+        );
+    }
+  }
+  for (const bytes of [
+    Buffer.alloc(7),
+    Buffer.alloc(144),
+    Buffer.from("unsupported installed loader"),
+  ])
+    await assert.rejects(
+      nativeImageRead(bytes, { operation: "build-input" }),
+      /Native image refused/u,
+    );
+});
+
 let signatureScript;
 async function checkInputSignature(
   file,
@@ -607,8 +1030,16 @@ export function fixture({
   hosted = false,
   signing,
   inputData,
+  loaderFormat,
   entries = [],
 } = {}) {
+  const loaderBytes = loaderFormat
+    ? loaderImage(loaderFormat === "universal" ? "fat32-be" : loaderFormat)
+    : undefined;
+  if (loaderBytes && entries.length === 0)
+    entries = [
+      { kind: "image", path: "/usr/lib/dyld", sha256: digest(loaderBytes) },
+    ];
   const selectedInput = structuredClone(input);
   if (build) selectedInput.context.executionId = "build";
   if (purpose === "experiment") {
@@ -631,7 +1062,14 @@ export function fixture({
     reserved = false;
   const object = (index) => ({
     identity: fileId(index + 1),
-    bytes: [0, 4].includes(index) ? 4 : index === 3 ? 23 : 0,
+    bytes:
+      index === 0 && loaderBytes
+        ? loaderBytes.length
+        : [0, 4].includes(index)
+          ? 4
+          : index === 3
+            ? 23
+            : 0,
     uid: 0,
     gid: 0,
     mode:
@@ -712,7 +1150,10 @@ export function fixture({
         }
         if (op === "read")
           value = {
-            hex: Buffer.from("data")
+            hex: (Number(a) === 0 && loaderBytes
+              ? loaderBytes
+              : Buffer.from("data")
+            )
               .subarray(Number(b), Number(b) + Number(c))
               .toString("hex"),
           };
@@ -737,7 +1178,11 @@ export function fixture({
           minimum: 0xf0000,
           uuid: "d".repeat(32),
         };
-        if (op === "macho") value = metadata;
+        if (op === "macho")
+          value =
+            Number(a) === 0 && loaderBytes
+              ? await nativeImageRead(loaderBytes, { purpose })
+              : metadata;
         if (op === "build-root") value = { ...object(1), mode: 0o555 };
         if (op === "build-open")
           value = {
@@ -748,7 +1193,18 @@ export function fixture({
           };
         if (op === "build-input") {
           const file = Buffer.from(a, "hex").toString(),
-            data = await inputData?.(file),
+            data =
+              (await inputData?.(file)) ??
+              (file === "/usr/lib/dyld" ? loaderBytes : undefined),
+            native =
+              file === "/usr/lib/dyld" && data
+                ? await nativeImageRead(data, {
+                    file,
+                    purpose,
+                    operation: "build-input",
+                    pin: b,
+                  })
+                : null,
             installed = hosted && isDarwinInstalledPath(file);
           if (c)
             await checkInputSignature(
@@ -776,9 +1232,11 @@ export function fixture({
                 : data
                   ? digest(data)
                   : b,
-            ...(data?.length >= 4 && data.readUInt32LE(0) === 0xfeedfacf
-              ? { macho: metadata }
-              : {}),
+            ...(native
+              ? { macho: native.macho }
+              : data?.length >= 4 && data.readUInt32LE(0) === 0xfeedfacf
+                ? { macho: metadata }
+                : {}),
             ...(c
               ? { cdhash: failure === "build-signature" ? "e".repeat(40) : c }
               : {}),
@@ -901,7 +1359,14 @@ export function fixture({
       if (failure === "persistence") throw new Error("private detail");
     },
   });
-  return { reader, events, receipts, probed, input: selectedInput };
+  return {
+    reader,
+    events,
+    receipts,
+    probed,
+    input: selectedInput,
+    loaderBytes,
+  };
 }
 test("Darwin experiment build reads keep installed pins and held signatures separate from unsigned signing inputs", async () => {
   const value = fixture({ purpose: "experiment", build: true });

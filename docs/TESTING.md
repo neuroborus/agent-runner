@@ -157,8 +157,15 @@ through the existing case generator, private copying and native Git consumers.
 They retain whole-file pins, held identities and native CDHash verification,
 reject substitutions and changed recorded Mach-O observations, and keep helper
 and dyld observations mandatory. Incompatible images use injected native-loader
-refusal; synthetic bytes establish no native x64 loading success. These cases
-remain in the existing explicit native harness, with no test-tier reassignment.
+refusal. Held dyld fixtures execute the native container-selection and Mach-O
+parser bodies for thin and 32/64-bit universal images in both byte orders.
+Acquisition, cold loading and the runtime release consumer's native `macho`
+read retain identical selected metadata with exact whole-file pins. Refusals
+cover truncated/oversized tables, missing or duplicate x86_64 slices, invalid,
+overlapping or misaligned ranges, short headers/load commands, architecture
+and subtype mismatch, and private/reviewed admission. Synthetic bytes establish
+no native x64 loading success. These cases remain in the existing explicit
+native harness, with no test-tier reassignment.
 
 One compact actual-body census fixture injects all four BSD/audit sampling
 points. It proves whole-view discard, fresh complete enumeration/storage,

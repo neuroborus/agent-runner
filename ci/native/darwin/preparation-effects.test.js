@@ -9067,6 +9067,17 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
 
 test("Darwin cold installed Git joins optional images without reacquisition and rejects lost bindings", async () => {
   for (const format of ["thin", "universal"]) {
+    const custody = darwinCustodyFixture({
+      purpose: "experiment",
+      build: true,
+      hosted: true,
+      loaderFormat: format,
+    });
+    await custody.reader.start();
+    const loader = await custody.reader.readBuildInput(
+      "/usr/lib/dyld",
+      digest(custody.loaderBytes),
+    );
     const f = experimentBuildFixture(),
       gitPath = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
       macho = { dependencies: ["/usr/lib/libfixture.dylib"] },
@@ -9077,6 +9088,12 @@ test("Darwin cold installed Git joins optional images without reacquisition and 
     f.options.acquireCases = async (prepared, build) => {
       acquired++;
       const inputs = experimentInputs(f, build);
+      inputs.loader = {
+        path: "/usr/lib/dyld",
+        sha256: loader.sha256,
+        identity: loader.object.identity,
+        macho: loader.macho,
+      };
       inputs.git.path = gitPath;
       if (format === "thin") inputs.git.macho = macho;
       return {
@@ -9089,7 +9106,10 @@ test("Darwin cold installed Git joins optional images without reacquisition and 
         read = reader.readBuildInput,
         image = reader.readBuildImage;
       reader.readBuildInput = async (file, ...args) => {
-        const actual = await read(file, ...args);
+        const actual =
+          file === "/usr/lib/dyld"
+            ? await custody.reader.readBuildInput(file, ...args)
+            : await read(file, ...args);
         if (file === gitPath) {
           if (format === "thin") actual.macho = structuredClone(macho);
           if (fault === "bytes") actual.sha256 = "e".repeat(64);
@@ -9100,6 +9120,8 @@ test("Darwin cold installed Git joins optional images without reacquisition and 
         }
         if (file === "/usr/lib/dyld" && fault === "loader-macho")
           delete actual.macho;
+        if (file === "/usr/lib/dyld" && fault === "loader-macho-changed")
+          actual.macho.sdk++;
         return actual;
       };
       reader.readBuildImage = async (...args) => {
@@ -9122,11 +9144,17 @@ test("Darwin cold installed Git joins optional images without reacquisition and 
       Object.hasOwn(loaded.preparation.inputs.git, "macho"),
       format === "thin",
     );
+    await custody.reader.open(0);
+    assert.deepEqual(
+      loaded.preparation.inputs.loader.macho,
+      await custody.reader.macho(0),
+    );
     for (fault of [
       "bytes",
       "identity",
       "signature",
       "loader-macho",
+      "loader-macho-changed",
       "helper-macho",
       ...(format === "thin" ? ["macho-missing", "macho-changed"] : []),
     ])
@@ -9172,10 +9200,23 @@ test("Darwin cold installed Git joins optional images without reacquisition and 
     f.files.set(file, original);
     await loadDarwinExperiment(result.job, directory, f.options);
     assert.equal(acquired, 1);
+    await custody.reader.close();
   }
 });
 
-test("Darwin experiment runtime requires every held helper and original loader/ABI observations", async () => {
+async function experimentRuntime(format) {
+  const custody = darwinCustodyFixture({
+    purpose: "experiment",
+    build: true,
+    hosted: true,
+    loaderFormat: format,
+  });
+  await custody.reader.start();
+  await custody.reader.open(0);
+  const loader = await custody.reader.readBuildInput(
+    "/usr/lib/dyld",
+    digest(custody.loaderBytes),
+  );
   const f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
       f.job,
@@ -9196,9 +9237,9 @@ test("Darwin experiment runtime requires every held helper and original loader/A
           build: built.build,
           inputs: {
             loader: {
-              sha256: hash,
-              identity: "held-loader",
-              macho: { dependencies: [] },
+              sha256: loader.sha256,
+              identity: loader.object.identity,
+              macho: loader.macho,
             },
           },
         },
@@ -9206,22 +9247,26 @@ test("Darwin experiment runtime requires every held helper and original loader/A
       current: { binding: { purpose: "experiment" } },
       specification: {
         slots,
-        entries: Array.from({ length: 11 }, () => ({ sha256: hash })),
+        entries: Array.from({ length: 11 }, (_, index) => ({
+          sha256: index === 10 ? loader.sha256 : hash,
+        })),
       },
       persist: async () => {},
       latch: (fn) => fn,
       reader: {
         inspect: async (index) => ({
           identity:
-            index === 10 ? "held-loader" : built.build.helpers[index].identity,
+            index === 10
+              ? loader.object.identity
+              : built.build.helpers[index].identity,
           uid: index === 10 ? 501 : 0,
           mode: index === 10 ? 0o777 : 0o555,
           directory: false,
         }),
-        read: async (index) => (index === 10 ? bytes : f.image),
+        read: async (index) => (index === 10 ? custody.loaderBytes : f.image),
         signature: async () => ({ valid: true, cdhash }),
         macho: async (index) =>
-          index === 10 ? { dependencies: [] } : built.build.helpers[0].macho,
+          index === 10 ? custody.reader.macho(0) : built.build.helpers[0].macho,
         cache: async () =>
           assert.fail("Ordinary runtime cannot enumerate caches"),
         build: async () => built.build.abi,
@@ -9243,7 +9288,10 @@ test("Darwin experiment runtime requires every held helper and original loader/A
     createDarwinExperimentRuntimeEffects(core).effects.observe(),
   );
   core.reader.inspect = inspect;
-  core.reader.build = async () => ({ ...built.build.abi, osBuild: "changed" });
+  core.reader.build = async () => ({
+    ...built.build.abi,
+    osBuild: "changed",
+  });
   await assert.rejects(
     createDarwinExperimentRuntimeEffects(core).effects.observe(),
   );
@@ -9254,6 +9302,11 @@ test("Darwin experiment runtime requires every held helper and original loader/A
       createDarwinExperimentRuntimeEffects(core).effects,
     ),
   );
+  await custody.reader.close();
+}
+
+test("Darwin experiment runtime requires every held helper and original loader/ABI observations", async () => {
+  for (const format of ["thin", "universal"]) await experimentRuntime(format);
 });
 
 test("Darwin preparation recovery preserves failure and cannot settle admitted cases from build receipts alone", async () => {
@@ -9450,6 +9503,7 @@ async function installedCaseAcquisition(format) {
       build: true,
       hosted: true,
       inputData: read,
+      loaderFormat: format,
       signing: { entitlements: [["fixture.installed-tool", true]] },
     }),
     reader = {
@@ -9465,6 +9519,7 @@ async function installedCaseAcquisition(format) {
       ? f.image
       : Buffer.concat([Buffer.from("cafebabe00000002", "hex"), bytes]);
   records.set(selectedGit, gitBytes);
+  records.set("/usr/lib/dyld", custody.loaderBytes);
   await custody.reader.start();
   const acquired = await acquireDarwinExperimentInputs(
     built.prepared,
@@ -9492,6 +9547,8 @@ async function installedCaseAcquisition(format) {
     ),
   );
   assert.ok(acquired.inputs.loader.identity);
+  await custody.reader.open(0);
+  assert.deepEqual(acquired.inputs.loader.macho, await custody.reader.macho(0));
   const system = await prepareDarwinExperimentCases(
       {
         ...built.prepared,
@@ -9608,16 +9665,28 @@ async function installedCaseAcquisition(format) {
     "/usr/lib/dyld",
     Buffer.from("missing required image observation"),
   );
+  const invalidLoader = darwinCustodyFixture({
+    purpose: "experiment",
+    build: true,
+    hosted: true,
+    inputData: read,
+  });
+  await invalidLoader.reader.start();
   await assert.rejects(
     acquireDarwinExperimentInputs(
       built.prepared,
       built.build,
-      reader,
+      {
+        ...reader,
+        readBuildInput: (...args) =>
+          invalidLoader.reader.readBuildInput(...args),
+      },
       persist,
       options,
     ),
   );
-  records.delete("/usr/lib/dyld");
+  await invalidLoader.reader.close();
+  records.set("/usr/lib/dyld", custody.loaderBytes);
   const asset = {
     path: path.join(
       built.prepared.sourceDirectory,

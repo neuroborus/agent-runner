@@ -487,7 +487,16 @@ rule while diagnostic failure preserves the primary refusal and errno. No
 historical offending tool, entitlement key or value is inferred. Installed case
 tools retain any available Mach-O observation; thin or universal Git uses the
 matching x64 native loader to select its slice. Generated helpers and dyld still
-require their Mach-O observations. Cold readers rejoin the recorded identities,
+require their Mach-O observations. The held experiment `/usr/lib/dyld` input
+accepts thin x64 images and standard 32/64-bit universal containers in either
+byte order. Acquisition and later native `macho` reads share bounded selection:
+the complete table and nonempty, aligned, disjoint slice ranges must be valid,
+exactly one slice must be x86_64, and its actual header architecture and subtype
+must match the table. Header/load commands remain bounded by that slice and
+feed the existing Mach-O parser. Whole-file hashes still cover every slice and
+container byte. This container admission applies only to the installed experiment
+loader; it grants no optional-metadata or private/reviewed-image exception.
+Cold readers rejoin the recorded identities,
 bytes, signatures and any recorded Mach-O observations without reacquisition or
 compilation. Copied destinations retain private permissions and exact whole-file
 bytes/signatures, and native Git execution remains mandatory. The separate

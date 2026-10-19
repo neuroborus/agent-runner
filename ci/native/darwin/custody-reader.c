@@ -17,6 +17,7 @@
 #include <mach/mach_vm.h>
 #include <mach/task_info.h>
 #include <mach-o/loader.h>
+#include <mach-o/fat.h>
 #include <mach-o/dyld_images.h>
 #include <poll.h>
 #include <signal.h>
@@ -251,10 +252,52 @@ static void macho(const unsigned char *bytes, size_t size) {
   char id[33]; hex(uuid, 16, id); need(found_sdk && sdk && minimum);
   printf("],\"sdk\":%u,\"minimum\":%u,\"uuid\":\"%s\"}", sdk, minimum, id);
 }
+static bool installed_loader(struct entry *value) {
+  return experiment_installed_path(value->path) && !strcmp(value->path, "/usr/lib/dyld");
+}
+static uint64_t container_number(const unsigned char *bytes, unsigned width, bool little) {
+  uint64_t result = 0;
+  for (unsigned i = 0; i < width; i++) result = result * 256 + bytes[little ? width - 1 - i : i];
+  return result;
+}
 static void image(struct entry *value) {
-  struct mach_header_64 header; read_at(value->fd, &header, sizeof(header), 0);
-  need(header.sizeofcmds <= 1048576 && sizeof(header) + (uint64_t)header.sizeofcmds <= (uint64_t)value->stat.st_size);
-  size_t size = sizeof(header) + header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes); read_at(value->fd, bytes, size, 0); macho(bytes, size); free(bytes); stable(value);
+  need(value->stat.st_size > 0 && (uint64_t)value->stat.st_size >= sizeof(struct mach_header_64));
+  uint64_t offset = 0, limit = value->stat.st_size; uint32_t subtype = 0;
+  unsigned char prefix[8]; read_at(value->fd, prefix, sizeof(prefix), 0);
+  bool universal = container_number(prefix, 4, true) != MH_MAGIC_64;
+  if (universal) {
+    /* Only the ordinary held loader gains container admission. Private helpers,
+     * reviewed images and other installed tools retain their existing rules. */
+    need(installed_loader(value));
+    uint64_t magic = container_number(prefix, 4, false);
+    need(magic == FAT_MAGIC || magic == FAT_CIGAM || magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64);
+    bool wide = magic == FAT_MAGIC_64 || magic == FAT_CIGAM_64, little = magic == FAT_CIGAM || magic == FAT_CIGAM_64;
+    unsigned count = container_number(prefix + 4, 4, little), width = wide ? 32 : 20;
+    uint64_t table_end = sizeof(prefix) + (uint64_t)count * width, starts[128], lengths[128];
+    need(count > 0 && count <= 128 && table_end <= (uint64_t)value->stat.st_size);
+    bool found = false;
+    for (unsigned i = 0; i < count; i++) {
+      unsigned char record[32]; read_at(value->fd, record, width, sizeof(prefix) + (uint64_t)i * width);
+      uint64_t start = container_number(record + 8, wide ? 8 : 4, little),
+        length = container_number(record + (wide ? 16 : 12), wide ? 8 : 4, little);
+      unsigned alignment = container_number(record + (wide ? 24 : 16), 4, little);
+      need(start >= table_end && start <= (uint64_t)value->stat.st_size && length > 0 &&
+        length <= (uint64_t)value->stat.st_size - start && alignment < 63 && start % (1ULL << alignment) == 0 &&
+        (!wide || container_number(record + 28, 4, little) == 0));
+      for (unsigned j = 0; j < i; j++) need(start + length <= starts[j] || starts[j] + lengths[j] <= start);
+      starts[i] = start; lengths[i] = length;
+      if (container_number(record, 4, little) == CPU_TYPE_X86_64) {
+        need(!found); found = true; offset = start; limit = length; subtype = container_number(record + 4, 4, little);
+      }
+    }
+    need(found);
+  }
+  need(limit >= sizeof(struct mach_header_64));
+  struct mach_header_64 header; read_at(value->fd, &header, sizeof(header), offset);
+  need(header.magic == MH_MAGIC_64 && header.cputype == CPU_TYPE_X86_64 && (!universal || (uint32_t)header.cpusubtype == subtype) &&
+    header.sizeofcmds <= 1048576 && sizeof(header) + (uint64_t)header.sizeofcmds <= limit);
+  size_t size = sizeof(header) + header.sizeofcmds; unsigned char *bytes = malloc(size); need(bytes);
+  read_at(value->fd, bytes, size, offset); macho(bytes, size); free(bytes); stable(value);
 }
 static void case_members(unsigned asid, bool independent);
 static void probe(pid_t pid, int asid) {
@@ -1333,7 +1376,7 @@ static void build_input(const char *encoded, const char *pin, const char *cdhash
   if (!ok) input_refusal(name, predicate, sampled ? &value.stat : NULL);
   need(ok); if (hosted) need(installed_input(name, &value.stat)); else no_acl(value.fd);
   printf("{\"object\":"); identity(&value);
-  char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); }
+  char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64 || installed_loader(&value)) { fputs(",\"macho\":", stdout); image(&value); }
   stable(&value); if (hosted) need(installed_input(name, &value.stat)); else no_acl(value.fd);
   if (cdhash) {
     need(strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40);
