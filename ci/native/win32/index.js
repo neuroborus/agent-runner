@@ -207,6 +207,8 @@ export {
   runWindowsHostedCommand,
 } from "./experiment-native.js";
 export { createWindowsCaseProvisioning } from "./case-provisioning.js";
+export { windowsOperationPreparation } from "./case-operations.js";
+export { createWindowsOperationReaders } from "./operation-readers.js";
 export {
   normalizeNativePolicyBinding,
   verifyNativePolicy,

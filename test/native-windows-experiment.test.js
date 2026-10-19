@@ -28,13 +28,13 @@ import {
   loadWindowsExperiment,
   createWindowsPreparationFiles,
   createWindowsCaseProvisioning,
+  windowsOperationPreparation,
+  createWindowsOperationReaders,
   normalizeNativePolicyBinding,
   verifyNativePolicy,
   windowsHostedCompilerArguments,
   runWindowsHostedCommand,
 } from "../ci/native/win32/index.js";
-import { windowsOperationPreparation } from "../ci/native/win32/case-operations.js";
-import { createWindowsOperationReaders } from "../ci/native/win32/operation-readers.js";
 
 const candidateSha = "a".repeat(40),
   H = "b".repeat(64),
