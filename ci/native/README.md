@@ -6988,6 +6988,21 @@ cleanup before returning evidence or releasing dependencies. Its completion alon
 stored RETIRED and OpenProcess error 87 supply no original-domain proof. Reviewed
 and live-held recovery remain strict; a failed live retain never selects this lane.
 
+Experiment recovery accounts for the producer's exact
+`windows-experiment-selector.json` as metadata, separately from effect-intent
+receipts. When present, the protected receipt reader validates its closed
+experiment/schema/prepared contract and joins the candidate, bootstrap, paths,
+sources, helper/tool pins and environment to the original preparation. Unknown
+names, malformed bytes and contradictory selectors block. The selector is
+optional for original-domain recovery, which still uses protected intent/birth
+journals without requiring final preparation outputs or inferring retirement.
+This inventory-stage proof is separate from preparation-effects RETIRED and
+cleanupStatus PASS. Native acceptance still requires both original workflows on
+one final SHA and all 69 required records and guarantees. Darwin inherited task
+access and command-prerequisite exit78, Windows observer-transfer10022 including
+self-control, and broker audit delivery-missing remain open. Protected
+paid-provider acceptance, source closure and production GO remain UNESTABLISHED.
+
 Terminal reader failure rejects outstanding commands, including commands waiting
 for a dependent observer's journal. The channel separately exposes the bridge's
 actual close event: fault-rejected completion can precede that event. Failed

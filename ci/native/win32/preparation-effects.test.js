@@ -71,9 +71,11 @@ import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import {
   windowsPreparationOptions,
+  windowsPreparationContext,
   recoverWindowsPreparationOwners,
 } from "./preparation.js";
 import { windowsClosedPreparationOwner } from "./custody-protocol.js";
+import { readWindowsRecoveryRecords } from "./case-recovery.js";
 import {
   WINDOWS_EXPERIMENT_SOURCES,
   windowsHostedCompilerArguments,
@@ -84,6 +86,8 @@ import {
   recoverWindowsExperimentPreparation,
   loadWindowsExperiment,
   recoverWindowsExperimentProofs,
+  createWindowsExperimentSystemEffects,
+  windowsExperimentSystemInput,
 } from "./experiment-preparation.js";
 import { windowsExperimentGitRuntime } from "./experiment-cases.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
@@ -3841,50 +3845,24 @@ test("Windows experiment cold consumers join complete native identities across p
   const options = {
       ...f.options,
       ...f.bootstrapOptions,
+      signal: new AbortController().signal,
       bootstrap: async () => f.prepared,
       open: openWindowsExperimentNative,
       readInstalled: async (file) => f.files.get(file),
       read: async (file) => f.files.get(file),
-      createEffects: (_job, preparation) => ({
-        async recover() {
-          recoveries++;
-          const files = createWindowsPreparationFiles(f, f.options),
-            original = preparation.settlement.observer;
-          try {
-            const proof = await files.verify(
-              "verifyColdPreparation",
-              f.prepared.bootstrap,
-              [
-                windowsClosedPreparationOwner(
-                  JSON.parse(
-                    f.files.get(
-                      path.join(
-                        directory,
-                        `windows-files-${original.nonce}-birth.json`,
-                      ),
-                    ),
-                  ),
-                  JSON.parse(
-                    f.files.get(
-                      path.join(
-                        directory,
-                        `windows-files-${original.nonce}-result.json`,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            );
-            assert.equal(proof.observerSettlement.status, "RETIRED");
+      createEffects: (...args) => {
+        const owner = createWindowsExperimentSystemEffects(...args);
+        return {
+          async recover(request) {
+            recoveries++;
+            const proof = await owner.recover(request);
+            assert.equal(proof.status, "RETIRED", owner.cause?.stack);
             return proof;
-          } finally {
-            const settled = await files.settleFiles();
-            if (settled) assert.equal(settled.status, "RETIRED");
-          }
-        },
-      }),
+          },
+        };
+      },
     },
-    { job } = await prepareWindowsExperiment(
+    { job, preparation } = await prepareWindowsExperiment(
       f.job,
       directory,
       async () => {},
@@ -3954,6 +3932,117 @@ test("Windows experiment cold consumers join complete native identities across p
   );
   assert.equal(recovered.status, "RETIRED");
   assert.equal(recovered.observerSettlement.status, "RETIRED");
+  assertSettled();
+  const input = windowsExperimentSystemInput(job, preparation),
+    selectorFile = path.join(directory, "windows-experiment-selector.json"),
+    selectorBytes = f.files.get(selectorFile),
+    inventory = async () => {
+      const native = windowsPreparationOptions(input, options, new Map());
+      try {
+        return await readWindowsRecoveryRecords(
+          windowsPreparationContext(input, native),
+        );
+      } finally {
+        assert.equal((await native.settleFiles()).status, "RETIRED");
+      }
+    };
+  const selected = await inventory();
+  assert.ok(selected.entries.includes("windows-experiment-selector.json"));
+  assert.ok(
+    !selected.records.some(
+      ({ name }) => name === "windows-experiment-selector.json",
+    ),
+    "the producer selector is metadata, not an effect intent",
+  );
+  const reordered = JSON.parse(selectorBytes);
+  reordered.prepared.bootstrap.reader = Object.fromEntries(
+    Object.entries(reordered.prepared.bootstrap.reader).reverse(),
+  );
+  f.files.set(selectorFile, Buffer.from(JSON.stringify(reordered)));
+  await inventory();
+  for (const change of [
+    (value) => {
+      value.purpose = "reviewed";
+    },
+    (value) => {
+      value.schemaVersion = 4;
+    },
+    (value) => {
+      value.extra = true;
+    },
+    (value) => {
+      delete value.prepared;
+    },
+    (value) => {
+      value.prepared.extra = true;
+    },
+    (value) => {
+      value.prepared.job.candidateSha = "a".repeat(40);
+    },
+    (value) => {
+      value.prepared.bootstrap.nonce = "d".repeat(32);
+    },
+    (value) => {
+      value.prepared.bootstrap.plan.sha256 = "e".repeat(64);
+    },
+    (value) => {
+      value.prepared.directory += "-other";
+    },
+    (value) => {
+      value.prepared.commands.pop();
+    },
+    (value) => {
+      value.prepared.gitRuntime.sha256 = "e".repeat(64);
+    },
+  ]) {
+    const changed = JSON.parse(selectorBytes);
+    change(changed);
+    f.files.set(selectorFile, Buffer.from(JSON.stringify(changed)));
+    await assert.rejects(inventory());
+  }
+  f.files.set(selectorFile, Buffer.from("{"));
+  await assert.rejects(inventory());
+  f.files.set(selectorFile, selectorBytes);
+  const unknown = path.join(
+    directory,
+    "windows-experiment-selector-other.json",
+  );
+  f.files.set(unknown, selectorBytes);
+  await assert.rejects(inventory());
+  f.files.delete(unknown);
+  f.files.delete(selectorFile);
+  await inventory();
+  f.files.set(selectorFile, selectorBytes);
+  // Recovery needs original intent/birth journals, not completed preparation.
+  const finals = [
+      closeFile,
+      path.join(directory, "windows-experiment-preparation.json"),
+    ],
+    savedFinals = finals.map((file) => f.files.get(file));
+  for (const file of finals) f.files.delete(file);
+  const originalOwner = createWindowsExperimentSystemEffects(
+      job,
+      preparation,
+      options,
+    ),
+    recoveryRequest = {
+      request: {
+        candidateSha,
+        platform: "win32",
+        jobSha256: observationDigest(job),
+        preparationSha256: observationDigest(preparation),
+      },
+      job,
+      preparation,
+      signal: options.signal,
+    };
+  assert.equal(
+    (await originalOwner.recover(recoveryRequest)).status,
+    "RETIRED",
+    originalOwner.cause?.stack,
+  );
+  for (const [index, file] of finals.entries())
+    f.files.set(file, savedFinals[index]);
   assertSettled();
   // Mutate the protected receipt bytes, leaving selectors and the job intact.
   // Both consumers must refuse before treating stored completion as proof.
@@ -4085,6 +4174,37 @@ test("Windows experiment cold consumers join complete native identities across p
     beforeCold,
     "cold consumers must not rebuild",
   );
+  const owners = new Map();
+  windowsPreparationOptions(input, options, owners);
+  const heldFiles = [...owners.values()][0],
+    dependent = {
+      beginCleanup: async () => {},
+      close: async () => {
+        throw new Error("Original reader remains unverified");
+      },
+    };
+  await heldFiles.readdir(directory);
+  heldFiles.retainReader(dependent, options.signal);
+  const failedOwner = createWindowsExperimentSystemEffects(
+    job,
+    preparation,
+    options,
+    owners,
+  );
+  f.coldDamage = "census-read";
+  assert.equal((await failedOwner.recover(recoveryRequest)).status, "RETAINED");
+  const firstCause = failedOwner.cause,
+    retainedTasks = [...f.rawTasks.keys()];
+  assert.ok(firstCause);
+  assert.ok(f.rawTasks.has(heldFiles.verification.input.nonce));
+  f.coldDamage = null;
+  const later = createWindowsPreparationFiles(input, options);
+  await later.readdir(directory);
+  assert.equal((await later.settleFiles()).status, "RETIRED");
+  assert.deepEqual([...f.rawTasks.keys()], retainedTasks);
+  await assert.rejects(heldFiles.settleFiles());
+  assert.equal((await failedOwner.recover(recoveryRequest)).status, "RETAINED");
+  assert.equal(failedOwner.cause, firstCause);
 });
 
 test("Windows experiment recovery partitions departed closed observers from interrupted held originals", async () => {

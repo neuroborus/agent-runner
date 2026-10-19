@@ -1,5 +1,10 @@
 import { win32 as path } from "node:path";
-import { windowsCustodyBinding } from "./custody-protocol.js";
+import { isDeepStrictEqual } from "node:util";
+import {
+  windowsCustodyBinding,
+  windowsCustodyInput,
+  windowsVerificationArguments,
+} from "./custody-protocol.js";
 import {
   observationDigest,
   observationObject,
@@ -11,7 +16,7 @@ import {
 import { digest, hash } from "./protocol.js";
 import { windowsSystemRecipes } from "./system.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
-import { windowsVerificationArguments } from "./custody-protocol.js";
+import { windowsExperimentBuildInventory } from "./experiment-build-inputs.js";
 
 const same = (left, right) =>
   observationDigest(left) === observationDigest(right);
@@ -399,7 +404,7 @@ export async function readWindowsRecoveryRecords(state) {
         name.startsWith("windows-") &&
         !(
           state.plan.purpose === "experiment" &&
-          /^windows-experiment-(?:preparation|close|seal|(?:plan|operation|access)-[a-f0-9]{32}|asset-[0-9]+)\.json$/u.test(
+          /^windows-experiment-(?:selector|preparation|close|seal|(?:plan|operation|access)-[a-f0-9]{32}|asset-[0-9]+)\.json$/u.test(
             name,
           )
         ),
@@ -407,6 +412,40 @@ export async function readWindowsRecoveryRecords(state) {
   );
   const records = [];
   let total = 0;
+  if (
+    state.plan.purpose === "experiment" &&
+    entries.includes("windows-experiment-selector.json")
+  ) {
+    // This exact producer record is metadata, never an effect intent or proof.
+    const batch = await state.receipts(["windows-experiment-selector.json"]);
+    requireObservation(batch.length === 1);
+    const selector = JSON.parse(batch[0]);
+    observationObject(selector, ["purpose", "schemaVersion", "prepared"]);
+    requireObservation(
+      selector.purpose === "experiment" && selector.schemaVersion === 3,
+    );
+    const { prepared } = selector;
+    windowsExperimentBuildInventory(prepared);
+    requireObservation(
+      prepared.directory === state.directory &&
+        prepared.output === state.output &&
+        ["candidateSha", "platform", "repository", "runId", "runAttempt"].every(
+          (key) => prepared.job[key] === state.job[key],
+        ) &&
+        isDeepStrictEqual(
+          windowsCustodyInput(prepared.bootstrap),
+          state.plan.bootstrap,
+        ) &&
+        isDeepStrictEqual(prepared.sources, state.plan.sources) &&
+        isDeepStrictEqual(prepared.helpers, state.manifest.helpers) &&
+        isDeepStrictEqual(prepared.tools, state.manifest.tools) &&
+        isDeepStrictEqual(prepared.environment, state.manifest.environment) &&
+        (!state.preparation?.prepared ||
+          isDeepStrictEqual(prepared, state.preparation.prepared)),
+    );
+    total = Buffer.byteLength(JSON.stringify(selector));
+    requireObservation(total <= (maximum === 65536 ? 67108864 : 1073741824));
+  }
   for (let offset = 0; offset < names.length; offset += 16) {
     const group = names.slice(offset, offset + 16),
       batch = await state.receipts(group);

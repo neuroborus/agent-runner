@@ -1702,6 +1702,16 @@ retention regressions remain.
 These injected cases add no Windows execution or native-acceptance claim and
 remain owned by the existing native harness.
 
+The same producer-to-cold-consumer fixture uses the real system recovery owner
+and its original inventory, including `windows-experiment-selector.json`.
+Protected metadata reads exclude that selector from effect intents and reject
+unknown names, malformed shapes and candidate/bootstrap contradictions. Missing
+selectors and final preparation outputs do not replace original journals as
+recovery inputs. Failed fresh proof retains dependent readers and the first
+cause; a later observer's successful finish cannot clear that uncertainty.
+Inventory admission is distinct from preparation retirement and cleanup PASS;
+these portable cases establish no native acceptance.
+
 Partial package recovery models the failed cold observer's eventual EOF exit 126
 when its channel closes. The former no-op close left that observer permanently
 live after per-observer custody stopped a fresh finish from discarding its held
