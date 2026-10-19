@@ -379,11 +379,19 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
         value.sha256,
         value.cdhash,
       );
-      if (value === preparation.inputs.loader || value.identity) {
+      if (value !== preparation.inputs.volume) {
         requireObservation(
-          actual.object.identity === value.identity &&
+          typeof value.identity === "string" &&
+            actual.object.identity === value.identity &&
             actual.sha256 === value.sha256 &&
-            observationDigest(actual.macho) === observationDigest(value.macho),
+            (value === preparation.inputs.loader
+              ? value.macho && actual.macho
+              : /^[a-f0-9]{40}$/u.test(value.cdhash) &&
+                actual.cdhash === value.cdhash) &&
+            (!Object.hasOwn(value, "macho") ||
+              (actual.macho &&
+                observationDigest(actual.macho) ===
+                  observationDigest(value.macho))),
         );
       }
     }

@@ -184,13 +184,15 @@ export async function acquireDarwinExperimentInputs(
       const held = await reader.readBuildInput(
         actual.file,
         digest(actual.bytes),
+        cdhash,
       );
-      requireObservation(held.macho);
+      // Installed tools may be universal; the matching native loader selects
+      // their slice. Generated helpers and dyld retain required image reads.
       return {
         path: actual.file,
         sha256: digest(actual.bytes),
         cdhash,
-        macho: held.macho,
+        ...(held.macho ? { macho: held.macho } : {}),
         identity: held.object.identity,
       };
     };

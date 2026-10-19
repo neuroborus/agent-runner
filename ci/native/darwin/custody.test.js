@@ -554,7 +554,9 @@ export function fixture({
                 : data
                   ? digest(data)
                   : b,
-            ...(inputData ? { macho: metadata } : {}),
+            ...(data?.length >= 4 && data.readUInt32LE(0) === 0xfeedfacf
+              ? { macho: metadata }
+              : {}),
             ...(c
               ? { cdhash: failure === "build-signature" ? "e".repeat(40) : c }
               : {}),

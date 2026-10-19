@@ -151,6 +151,15 @@ obsolete owners. Fixed native launch guards and distinct reviewed compiler,
 source, signature and recovery coverage remain strict. Native file/Git/access,
 PF/audit exclusion, original-owner retirement and all 23 checks remain required.
 These portable injected tests run no Darwin tool and supply no hosted acceptance.
+
+Installed-tool acquisition and cold-load regressions cover thin and universal Git
+through the existing case generator, private copying and native Git consumers.
+They retain whole-file pins, held identities and native CDHash verification,
+reject substitutions and changed recorded Mach-O observations, and keep helper
+and dyld observations mandatory. Incompatible images use injected native-loader
+refusal; synthetic bytes establish no native x64 loading success. These cases
+remain in the existing explicit native harness, with no test-tier reassignment.
+
 One compact actual-body census fixture injects all four BSD/audit sampling
 points. It proves whole-view discard, fresh complete enumeration/storage,
 zombie visibility, success on the third attempt and deterministic exhaustion

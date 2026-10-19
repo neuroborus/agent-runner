@@ -457,11 +457,17 @@ single-link count or empty ACL. Custody kind alone grants no exception: an
 installed disk tool may occupy a helper slot, while generated helpers, private
 directories, sources, receipts, plans and copied case destinations remain strict.
 Canonical nonsymlink regular files and directory ancestry, stable metadata,
-positive links, bounded complete reads, held/native identities, byte hashes and
-Mach-O/signature observations remain required. Cold readers rejoin existing
-bindings without reacquisition or compilation. Reviewed/protected admission,
-native isolation, positive controls, sentinels and independent cleanup remain
-unchanged; there is no global experiment exemption or policy setting.
+positive links, bounded complete reads, held/native identities, whole-file byte
+hashes and native signature/CDHash verification remain required. Installed case
+tools retain any available Mach-O observation; thin or universal Git uses the
+matching x64 native loader to select its slice. Generated helpers and dyld still
+require their Mach-O observations. Cold readers rejoin the recorded identities,
+bytes, signatures and any recorded Mach-O observations without reacquisition or
+compilation. Copied destinations retain private permissions and exact whole-file
+bytes/signatures, and native Git execution remains mandatory. The separate
+thin-only executor, reviewed/protected admission, native isolation, positive
+controls, sentinels and independent cleanup remain unchanged; there is no global
+experiment exemption or policy setting.
 Effective-policy observations retain the actual installed ACL hash, including
 entries when present, without treating emptiness or protected modes as installed
 eligibility. ACL validity, stable held metadata, policy decisions and independent

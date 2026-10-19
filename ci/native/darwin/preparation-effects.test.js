@@ -60,6 +60,7 @@ import {
 import { darwinGitPolicies } from "./git-effects.js";
 import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
+import { prepareDarwinExperimentCases } from "./experiment-cases.js";
 import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
 import { darwinPreparationContext } from "./preparation.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
@@ -2820,17 +2821,20 @@ function buildTranscripts(experiment = false, complete = false) {
     directory,
   });
   const transport = async (entry, args) => {
+    const { uid = 90001, gid = 90002 } =
+      plan.cases.find(({ id }) => id === entry.context.executionId)?.bindings ??
+      {};
     if (["--probe", "--probe-domain"].includes(args[0])) {
       const verifier = subject(),
         pid = Number(args[1]);
       events.push("probe:" + pid);
       let enumeration;
       if (args[0] === "--probe-domain") {
-        assert.equal(args[2], "90001");
-        assert.equal(args[3], "90002");
+        assert.equal(args[2], String(uid));
+        assert.equal(args[3], String(gid));
         events.push("fresh-domain");
         enumeration = {
-          uid: 90001,
+          uid,
           complete: true,
           asid: Number(args[4]),
           scope: Number(args[4]) ? "audit-session" : "reserved-uid",
@@ -2839,7 +2843,7 @@ function buildTranscripts(experiment = false, complete = false) {
           live: [...processes.values()]
             .filter(
               ({ identity }) =>
-                identity.uid === 90001 ||
+                identity.uid === uid ||
                 (Number(args[4]) > 0 && identity.asid === Number(args[4])),
             )
             .map(({ identity }) => identity),
@@ -3107,8 +3111,8 @@ function buildTranscripts(experiment = false, complete = false) {
               ? { purpose: "experiment" }
               : {}),
             candidateSha,
-            uid: 90001,
-            gid: 90002,
+            uid,
+            gid,
             entries: 1,
           });
           return;
@@ -3260,12 +3264,12 @@ function buildTranscripts(experiment = false, complete = false) {
           for (let i = 0; i < 13; i++) {
             const file = accessSpec.attempts[i].target;
             if (!files.has(file) && !directories.has(file))
-              put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
+              put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, uid);
             if (i === 6) {
               const control = targetFile(i, true);
               directories.set(control, {
-                uid: 90001,
-                gid: 90002,
+                uid,
+                gid,
                 mode: 0o700,
                 ino: directories.size + 950,
               });
@@ -3273,14 +3277,14 @@ function buildTranscripts(experiment = false, complete = false) {
                 control + "/inspection",
                 Buffer.from(argsForCase.slice(0, 32)),
                 0o600,
-                90001,
+                uid,
               );
             } else if (i >= 2)
               put(
                 targetFile(i, true),
                 Buffer.from(argsForCase.slice(0, 32)),
                 0o600,
-                90001,
+                uid,
               );
           }
           value = null;
@@ -3462,13 +3466,13 @@ function buildTranscripts(experiment = false, complete = false) {
               throw new Error("Interrupted before parked payload creation");
             payload = {
               ...subject(nextPid + 200),
-              uid: 90001,
-              ruid: 90001,
-              svuid: 90001,
-              gid: 90002,
-              rgid: 90002,
-              svgid: 90002,
-              auid: 90001,
+              uid,
+              ruid: uid,
+              svuid: uid,
+              gid,
+              rgid: gid,
+              svgid: gid,
+              auid: uid,
             };
             live(payload, planEntries[5].path);
             control.push({ helper: launcher, payload, controls: true });
@@ -3499,8 +3503,8 @@ function buildTranscripts(experiment = false, complete = false) {
                       };
                 live(leaf, planEntries[5].path);
                 const file = planEntries[3].path + "/nonce-" + leaf.pid;
-                put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, 90001);
-                files.get(file).gid = 90002;
+                put(file, Buffer.from(argsForCase.slice(0, 32)), 0o600, uid);
+                files.get(file).gid = gid;
                 data.push(event("leaf", leaf.pid, 1));
               }
               if (ownershipMode !== "stale-identity")
@@ -3656,7 +3660,7 @@ function buildTranscripts(experiment = false, complete = false) {
           if (caseFault === "members-missing")
             throw new Error("Domain census unavailable");
           value = {
-            uid: 90001,
+            uid,
             asid: Number(args[0]),
             scope: Number(args[0]) ? "audit-session" : "reserved-uid",
             complete: true,
@@ -3676,10 +3680,10 @@ function buildTranscripts(experiment = false, complete = false) {
         } else if (name === "case-empty") {
           assert.ok(
             [...processes.values()].every(
-              ({ identity }) => identity.uid !== 90001,
+              ({ identity }) => identity.uid !== uid,
             ),
           );
-          value = { uid: 90001, noLiveUid: true };
+          value = { uid, noLiveUid: true };
         } else if (name === "case-signal") {
           const keys = [
               "auid",
@@ -3764,8 +3768,8 @@ function buildTranscripts(experiment = false, complete = false) {
             file = planEntries[i].path;
           assert.ok(!directories.has(file));
           directories.set(file, {
-            uid: i === 3 ? 90001 : 0,
-            gid: i === 1 || file.endsWith("/custody/files") ? 0 : 90002,
+            uid: i === 3 ? uid : 0,
+            gid: i === 1 || file.endsWith("/custody/files") ? 0 : gid,
             mode: file.endsWith("/custody/files")
               ? 0o700
               : i === 0 || i === 2 || i >= 12
@@ -3796,7 +3800,9 @@ function buildTranscripts(experiment = false, complete = false) {
             files.get(planEntries[Number(args[1])].path).bytes,
             planEntries[i].kind === "data" ? 0o400 : 0o550,
           );
-          files.get(file).gid = i === 5 ? 90002 : 0;
+          files.get(file).gid = file.startsWith(planEntries[2].path + "/")
+            ? gid
+            : 0;
           if (
             i >= 12 &&
             planEntries[i].kind === "data" &&
@@ -3804,8 +3810,8 @@ function buildTranscripts(experiment = false, complete = false) {
           ) {
             const work = /\/storage\/(?:work|control-work)\//u.test(file);
             Object.assign(files.get(file), {
-              uid: work ? 90001 : 0,
-              gid: 90002,
+              uid: work ? uid : 0,
+              gid,
               mode: work ? 0o400 : 0o440,
             });
           }
@@ -3827,8 +3833,8 @@ function buildTranscripts(experiment = false, complete = false) {
           value = {
             contextSha256:
               caseFault === "context" ? "f".repeat(64) : argsForCase,
-            uid: caseFault === "identity" ? 90003 : 90001,
-            gid: 90002,
+            uid: caseFault === "identity" ? uid + 2 : uid,
+            gid,
             accountVerified: true,
             accounts: { uidAccounts: 1, primaryGroupMembers: 1, gidGroups: 1 },
             objects: [...held]
@@ -7035,7 +7041,7 @@ test("fixed Darwin file defaults execute private, publisher, reader and recovery
   }
 });
 
-function gitBinding(f, id, fault) {
+function gitBinding(f, id, fault, generatedInput) {
   const setup = operationBinding(f, id),
     { request, add, copy } = setup,
     profileBytes = (profile) =>
@@ -7081,7 +7087,7 @@ function gitBinding(f, id, fault) {
   const initial = graph("base\n", null, "test(fixture): seed owned base"),
     after = graph(
       "owned edit\n",
-      initial.commit.sha,
+      generatedInput?.parent ?? initial.commit.sha,
       "test(fixture): record owned edit",
     );
   const index = (sha) => {
@@ -7172,7 +7178,7 @@ function gitBinding(f, id, fault) {
       },
     };
   }
-  const input = {
+  const syntheticInput = {
     request,
     git: { path: request.storage + "/git", sha256: digest(f.image), cdhash },
     metadata: request.storage + "/metadata",
@@ -7182,9 +7188,9 @@ function gitBinding(f, id, fault) {
       ? { purpose: "experiment", bindingSha256: null }
       : { reviewSha256: null }),
   };
-  const result = setup.finish(input, slots, {
+  const result = setup.finish(syntheticInput, slots, {
     kind: "darwin-git",
-    gitSha256: input.git.sha256,
+    gitSha256: syntheticInput.git.sha256,
     metadata: { identitySha256: null },
     hooks: { identitySha256: null },
     authority: { uid: 0, gid: 0, sandboxed: false },
@@ -7196,6 +7202,7 @@ function gitBinding(f, id, fault) {
   result.dynamic("git-metadata", [["policy", "metadata", "identitySha256"]]);
   result.dynamic("git-hooks", [["policy", "hooks", "identitySha256"]]);
   result.approve();
+  const input = generatedInput ?? syntheticInput;
   let owner,
     worker,
     payload,
@@ -7240,13 +7247,13 @@ function gitBinding(f, id, fault) {
     const value = ctx.subject(asid);
     if (uid)
       Object.assign(value, {
-        uid: 90001,
-        ruid: 90001,
-        svuid: 90001,
-        gid: 90002,
-        rgid: 90002,
-        svgid: 90002,
-        auid: 90001,
+        uid: input.request.uid,
+        ruid: input.request.uid,
+        svuid: input.request.uid,
+        gid: input.request.gid,
+        rgid: input.request.gid,
+        svgid: input.request.gid,
+        auid: input.request.uid,
       });
     ctx.live(value, file);
     return value;
@@ -7298,6 +7305,10 @@ function gitBinding(f, id, fault) {
       if (step === 5)
         return { nonce: request.nonce, phase: "finished", pid: owner.pid };
       if (stage === "worker") {
+        if (fault === "loader")
+          throw Object.assign(new Error("Injected x64 Git loader refusal"), {
+            code: "ENOEXEC",
+          });
         worker = spawn(ctx, input.git.path, owner.asid);
         if (fault === "stale")
           f.processes.get(worker.pid).sha256 = "f".repeat(64);
@@ -8601,9 +8612,24 @@ function experimentInputs(f, build) {
     ],
     headerVersion = 11;
   return {
-    git: { path: "/fixture/git", sha256: hash, cdhash },
-    pfctl: { path: "/sbin/pfctl", sha256: hash, cdhash },
-    hdiutil: { path: "/usr/bin/hdiutil", sha256: hash, cdhash },
+    git: {
+      path: "/fixture/git",
+      sha256: hash,
+      cdhash,
+      identity: build.helpers[0].identity,
+    },
+    pfctl: {
+      path: "/sbin/pfctl",
+      sha256: hash,
+      cdhash,
+      identity: build.helpers[0].identity,
+    },
+    hdiutil: {
+      path: "/usr/bin/hdiutil",
+      sha256: hash,
+      cdhash,
+      identity: build.helpers[0].identity,
+    },
     loader: {
       path: "/usr/lib/dyld",
       sha256: hash,
@@ -9039,6 +9065,116 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   assert.equal(mixed.preparationEffects.settlement.status, "RETAINED");
 });
 
+test("Darwin cold installed Git joins optional images without reacquisition and rejects lost bindings", async () => {
+  for (const format of ["thin", "universal"]) {
+    const f = experimentBuildFixture(),
+      gitPath = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+      macho = { dependencies: ["/usr/lib/libfixture.dylib"] },
+      createReader = f.options.createReader;
+    let fault,
+      acquired = 0;
+    f.options.fs.readFile = f.options.readReceipt;
+    f.options.acquireCases = async (prepared, build) => {
+      acquired++;
+      const inputs = experimentInputs(f, build);
+      inputs.git.path = gitPath;
+      if (format === "thin") inputs.git.macho = macho;
+      return {
+        inputs,
+        publish: async ({ path, bytes }) => f.files.set(path, bytes),
+      };
+    };
+    f.options.createReader = (input, settings) => {
+      const reader = createReader(input, settings),
+        read = reader.readBuildInput,
+        image = reader.readBuildImage;
+      reader.readBuildInput = async (file, ...args) => {
+        const actual = await read(file, ...args);
+        if (file === gitPath) {
+          if (format === "thin") actual.macho = structuredClone(macho);
+          if (fault === "bytes") actual.sha256 = "e".repeat(64);
+          if (fault === "identity") actual.object.identity = "substituted-git";
+          if (fault === "signature") actual.cdhash = "e".repeat(40);
+          if (fault === "macho-missing") delete actual.macho;
+          if (fault === "macho-changed") actual.macho.dependencies = [];
+        }
+        if (file === "/usr/lib/dyld" && fault === "loader-macho")
+          delete actual.macho;
+        return actual;
+      };
+      reader.readBuildImage = async (...args) => {
+        const actual = await image(...args);
+        if (fault === "helper-macho") delete actual.macho;
+        return actual;
+      };
+      return reader;
+    };
+    const result = await prepareDarwinExperiment(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    );
+    f.options.acquire = async () =>
+      assert.fail("Cold loading cannot acquire or compile");
+    const loaded = await loadDarwinExperiment(result.job, directory, f.options);
+    assert.equal(
+      Object.hasOwn(loaded.preparation.inputs.git, "macho"),
+      format === "thin",
+    );
+    for (fault of [
+      "bytes",
+      "identity",
+      "signature",
+      "loader-macho",
+      "helper-macho",
+      ...(format === "thin" ? ["macho-missing", "macho-changed"] : []),
+    ])
+      await assert.rejects(
+        loadDarwinExperiment(result.job, directory, f.options),
+        undefined,
+        `${format}: ${fault}`,
+      );
+    fault = undefined;
+    const file = path.join(directory, "darwin-experiment-preparation.json"),
+      original = f.files.get(file);
+    for (const [tool, field] of [
+      ["git", "identity"],
+      ["git", "cdhash"],
+      ["pfctl", "identity"],
+      ["pfctl", "cdhash"],
+      ["hdiutil", "identity"],
+      ["hdiutil", "cdhash"],
+      ["loader", "macho"],
+    ]) {
+      const preparation = structuredClone(original);
+      delete preparation.inputs[tool][field];
+      f.files.set(file, preparation);
+      await assert.rejects(
+        loadDarwinExperiment(
+          {
+            ...result.job,
+            preparationEffects: {
+              ...result.job.preparationEffects,
+              receiptSha256: observationDigest({
+                preparation,
+                close: result.preparation.close,
+              }),
+            },
+          },
+          directory,
+          f.options,
+        ),
+        undefined,
+        `${format}: ${tool}.${field}`,
+      );
+    }
+    f.files.set(file, original);
+    await loadDarwinExperiment(result.job, directory, f.options);
+    assert.equal(acquired, 1);
+  }
+});
+
 test("Darwin experiment runtime requires every held helper and original loader/ABI observations", async () => {
   const f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
@@ -9177,7 +9313,7 @@ test("Darwin preparation recovery preserves failure and cannot settle admitted c
   }
 });
 
-test("Darwin case input acquisition crosses custody and rechecks hosted inputs before private publication", async () => {
+async function installedCaseAcquisition(format) {
   let selectedGit = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
     changedIdentity = false,
     changeOnRead = false;
@@ -9241,7 +9377,7 @@ test("Darwin case input acquisition crosses custody and rechecks hosted inputs b
     commands = [],
     journal = [],
     pins = [],
-    read = async (file) => records.get(file) ?? bytes,
+    read = async (file) => records.get(file) ?? f.image,
     options = {
       ...f.options,
       fs: {
@@ -9301,6 +9437,8 @@ test("Darwin case input acquisition crosses custody and rechecks hosted inputs b
       command: async (file, args) => {
         assert.equal(journal.at(-1).phase, "case-input-command-possible");
         commands.push([file, args]);
+        if (file === "/usr/bin/sudo" && args.includes("/usr/bin/install"))
+          records.set(args.at(-1), Buffer.from(await read(args.at(-2))));
         return {
           stdout: file === "/usr/bin/xcrun" ? selectedGit + "\n" : "",
           stderr: file === "/usr/bin/codesign" ? `CDHash=${cdhash}\n` : "",
@@ -9314,13 +9452,18 @@ test("Darwin case input acquisition crosses custody and rechecks hosted inputs b
       inputData: read,
     }),
     reader = {
-      readBuildInput: async (file, sha256) => {
-        pins.push([file, sha256]);
-        return custody.reader.readBuildInput(file, sha256);
+      readBuildInput: async (file, sha256, signature) => {
+        pins.push([file, sha256, signature]);
+        return custody.reader.readBuildInput(file, sha256, signature);
       },
       pf: async () => kernelPfFixture(experimentInputs(f, built.build).pf),
     },
     persist = async (value) => journal.push(value);
+  const gitBytes =
+    format === "thin"
+      ? f.image
+      : Buffer.concat([Buffer.from("cafebabe00000002", "hex"), bytes]);
+  records.set(selectedGit, gitBytes);
   await custody.reader.start();
   const acquired = await acquireDarwinExperimentInputs(
     built.prepared,
@@ -9337,18 +9480,145 @@ test("Darwin case input acquisition crosses custody and rechecks hosted inputs b
   );
   assert.equal(acquired.inputs.classes, 1);
   assert.equal(acquired.inputs.git.path, selectedGit);
+  assert.equal(Object.hasOwn(acquired.inputs.git, "macho"), format === "thin");
+  assert.equal(acquired.inputs.git.cdhash, cdhash);
+  assert.ok(
+    pins.some(
+      ([file, pin, signature]) =>
+        file === selectedGit &&
+        pin === digest(gitBytes) &&
+        signature === cdhash,
+    ),
+  );
   assert.ok(acquired.inputs.loader.identity);
+  const system = await prepareDarwinExperimentCases(
+      {
+        ...built.prepared,
+        bootstrap: {
+          ...built.prepared.bootstrap,
+          context: context("build"),
+          reader: {
+            ...built.prepared.bootstrap.reader,
+            sha256: built.build.helpers.find(
+              ({ name }) => name === "custody-reader",
+            ).sha256,
+          },
+        },
+      },
+      built.build,
+      acquired.inputs,
+      acquired.publish,
+    ),
+    declared = system.cases.find(({ id }) => id === "git.fixed");
+  for (const fault of [undefined, "loader"]) {
+    const native = buildTranscripts(true, true);
+    gitBinding(native, declared.id, fault, declared.bindings.input);
+    native.manifest.darwinPreparation.cases = system.cases;
+    for (const upload of system.uploads)
+      native.put(upload.path, Buffer.from(upload.hex, "hex"), 0o400);
+    for (const source of declared.custody.sources)
+      native.put(source.path, bytes);
+    native.put(selectedGit, gitBytes, 0o755, 501);
+    const effects = createDarwinSystemEffects(native.input, native.options),
+      recipe = darwinSystemRecipes().find(({ id }) => id === declared.id),
+      prepared = await effects.prepare(recipe, {
+        policyBinding: system.policyBindings.find(
+          ({ context }) => context.executionId === declared.id,
+        ),
+        recordPolicy() {},
+      }),
+      copied = native.files.get(prepared.input.git.path);
+    assert.deepEqual(copied.bytes, gitBytes);
+    assert.equal(copied.mode, 0o550);
+    assert.equal(copied.uid, 0);
+    assert.equal(copied.gid, prepared.input.request.gid);
+    assert.deepEqual(prepared.input.git, {
+      path: declared.bindings.input.git.path,
+      sha256: acquired.inputs.git.sha256,
+      cdhash,
+    });
+    // The transcript supplies native outcomes, never portable loading proof.
+    const run = () =>
+      runDarwinGitCase("git.fixed-commit", prepared.input, prepared.effects);
+    if (fault) {
+      const diagnostics = [];
+      await withNativeDiagnostics(
+        () => assert.rejects(run),
+        (owner, value) => {
+          if (owner === "darwin-custody-command")
+            diagnostics.push(value.exception);
+        },
+      );
+      assert.ok(diagnostics.some((cause) => cause?.code === "ENOEXEC"));
+    } else {
+      const result = await run();
+      assert.equal(result.status, "OBSERVED", JSON.stringify(result));
+    }
+    assert.ok(native.events.includes("git-event"));
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      fault ? "RETAINED" : "RETIRED",
+    );
+    if (!fault) assert.equal(native.processes.size, 0);
+  }
   const originalPins = [...pins];
   for (let i = 0; i < 2; i++)
-    for (const [file, pin] of originalPins)
-      assert.equal((await reader.readBuildInput(file, pin)).sha256, pin);
+    for (const [file, pin, signature] of originalPins)
+      assert.equal(
+        (await reader.readBuildInput(file, pin, signature)).sha256,
+        pin,
+      );
   records.set(selectedGit, Buffer.alloc(bytes.length));
   await assert.rejects(
     reader.readBuildInput(selectedGit, acquired.inputs.git.sha256),
   );
-  records.delete(selectedGit);
+  records.set(selectedGit, gitBytes);
+  const invalidSignature = darwinCustodyFixture({
+    purpose: "experiment",
+    build: true,
+    hosted: true,
+    inputData: read,
+    failure: "build-signature",
+  });
+  await invalidSignature.reader.start();
+  await assert.rejects(
+    acquireDarwinExperimentInputs(
+      built.prepared,
+      built.build,
+      {
+        ...reader,
+        readBuildInput: (...args) =>
+          invalidSignature.reader.readBuildInput(...args),
+      },
+      persist,
+      options,
+    ),
+  );
+  await invalidSignature.reader.close();
+  records.set(
+    "/usr/lib/dyld",
+    Buffer.from("missing required image observation"),
+  );
+  await assert.rejects(
+    acquireDarwinExperimentInputs(
+      built.prepared,
+      built.build,
+      reader,
+      persist,
+      options,
+    ),
+  );
+  records.delete("/usr/lib/dyld");
   const asset = {
-    path: path.join(built.prepared.sourceDirectory, "experiment-asset-1"),
+    path: path.join(
+      built.prepared.sourceDirectory,
+      "experiment-asset-" + system.uploads.length,
+    ),
     bytes,
     sha256: hash,
   };
@@ -9427,4 +9697,8 @@ test("Darwin case input acquisition crosses custody and rechecks hosted inputs b
   changeOnRead = false;
   changedIdentity = false;
   await custody.reader.close();
-});
+}
+
+for (const format of ["thin", "universal"])
+  test(`Darwin ${format} installed Git crosses acquisition, case custody and native operations`, () =>
+    installedCaseAcquisition(format));
