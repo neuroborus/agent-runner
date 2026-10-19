@@ -21,6 +21,7 @@ import {
   windowsCustodyBinding,
   decodePlan,
   windowsVerificationArguments,
+  windowsClosedPreparationOwner,
 } from "./custody-protocol.js";
 import { createWindowsCustodyReader } from "./custody.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
@@ -871,7 +872,6 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
     ) {
       requireObservation(!signal?.aborted);
       const subjects = [],
-        observerSubjects = [],
         observerTasks = [],
         readers = [],
         preSetup = [],
@@ -905,10 +905,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             observerPrefix === `windows-files-${birth.nonce}-` &&
             hash(birth.taskSha256),
         );
-        if (observerPrefix !== filePrefix) {
-          observerSubjects.push(birth.helper, birth.bridge);
-          observerTasks.push(birth);
-        }
+        if (observerPrefix !== filePrefix) observerTasks.push(birth);
         const journal = [];
         for (const { name, record } of records.filter(({ name }) =>
           name.startsWith(observerPrefix),
@@ -965,7 +962,8 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
               match &&
                 command &&
                 (plan.purpose === "experiment" ||
-                  !command[1].startsWith("prepare-experiment-")) &&
+                  (!command[1].startsWith("prepare-experiment-") &&
+                    !command[1].startsWith("verify-cold-"))) &&
                 name === observerPrefix + Number(match[1]) + ".json" &&
                 Number(match[1]) === Number(command[2]) &&
                 Number(match[1]) <= 32768,
@@ -1157,6 +1155,33 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         );
         subjects.push(workers[0].record.worker, workers[0].record.helper);
       }
+      // Only validated original closed receipts select cold custody, before a
+      // live retain is attempted. Missing completion keeps the live path strict.
+      const coldOwners =
+          plan.purpose === "experiment" && plan.schemaVersion === 3
+            ? observerTasks
+                .filter(({ nonce }) =>
+                  byName.has(`windows-files-${nonce}-result.json`),
+                )
+                .map((birth) => ({
+                  ...windowsClosedPreparationOwner(
+                    birth,
+                    byName.get(`windows-files-${birth.nonce}-result.json`),
+                  ),
+                  receiptsSha256: observationDigest(
+                    records.filter(({ name }) =>
+                      name.startsWith(`windows-files-${birth.nonce}-`),
+                    ),
+                  ),
+                }))
+            : [],
+        coldNonces = new Set(coldOwners.map(({ nonce }) => nonce)),
+        liveObserverTasks = observerTasks.filter(
+          ({ nonce }) => !coldNonces.has(nonce),
+        ),
+        liveObserverSubjects = liveObserverTasks.flatMap(
+          ({ helper, bridge }) => [helper, bridge],
+        );
       // A failed live close must not suppress fresh original-owner evidence.
       // Registration remains until that evidence also proves task removal.
       try {
@@ -1191,23 +1216,41 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           );
         return tasks;
       };
+      let coldProof;
+      if (coldOwners.length > 0) {
+        requireObservation(subjects.length === 0 && readers.length === 0);
+        coldProof = await files.verify(
+          "verifyColdPreparation",
+          plan.bootstrap,
+          coldOwners,
+        );
+        requireObservation(
+          windowsRetired(coldProof) &&
+            coldProof.noLiveMembers === true &&
+            coldProof.tasksRemoved === true,
+        );
+      }
       let readerProof,
-        tasks = [];
-      if (onReadersRetired && subjects.length === 0) {
+        tasks = coldProof ? [coldProof] : [];
+      if (
+        onReadersRetired &&
+        subjects.length === 0 &&
+        liveObserverSubjects.length > 0
+      ) {
         requireObservation(
           plan.purpose === "experiment" && plan.schemaVersion === 3,
         );
         const held = await files.verify(
           "retainObservers",
           plan.bootstrap,
-          observerSubjects,
+          liveObserverSubjects,
         );
         requireObservation(
           held.independent === true &&
             hash(held.nativeEventSha256) &&
-            held.identities.length === observerSubjects.length &&
+            held.identities.length === liveObserverSubjects.length &&
             held.identities.every((identity, index) =>
-              sameWindowsIdentity(identity, observerSubjects[index]),
+              sameWindowsIdentity(identity, liveObserverSubjects[index]),
             ),
         );
         // No compiler reader was admitted. Hold original observer births before
@@ -1238,15 +1281,15 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         const observerCustody = await files.verify(
           "retainObservers",
           plan.bootstrap,
-          observerSubjects,
+          liveObserverSubjects,
         );
         requireObservation(
           observerCustody.independent === true &&
             hash(observerCustody.nativeEventSha256) &&
             Array.isArray(observerCustody.identities) &&
-            observerCustody.identities.length === observerSubjects.length &&
+            observerCustody.identities.length === liveObserverSubjects.length &&
             observerCustody.identities.every((identity, index) =>
-              sameWindowsIdentity(identity, observerSubjects[index]),
+              sameWindowsIdentity(identity, liveObserverSubjects[index]),
             ),
         );
         readerProof = {
@@ -1268,38 +1311,39 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       }
       const identities = [
         ...new Map(
-          [...subjects, ...observerSubjects]
+          [...subjects, ...liveObserverSubjects]
             .map(normalizeWindowsIdentity)
             .map((identity) => [observationDigest(identity), identity]),
         ).values(),
       ];
-      const result = await files.verify(
-        "recoverCompleted",
-        plan.bootstrap,
-        identities,
-        [],
-        observers
-          .filter(({ name }) => name !== filePrefix + "intent.json")
-          .flatMap(({ name }) => {
-            const birth = byName.get(
-              name.replace(/intent\.json$/u, "birth.json"),
-            );
-            return [birth.helper, birth.bridge].map((identity) => ({
-              identity,
-              nonce: birth.nonce,
-            }));
-          }),
-        preSetup,
-        readers.map(({ helper }) => helper),
-      );
-      requireObservation(
-        windowsRetired(result) && result.noLiveMembers === true,
-      );
-      tasks.push(
-        ...(await recoverTasks(
-          readerProof ? observerTasks : [...taskOwners, ...observerTasks],
-        )),
-      );
+      let result;
+      if (identities.length === 0) {
+        requireObservation(windowsRetired(coldProof));
+        result = coldProof;
+        if (onReadersRetired) await onReadersRetired(null);
+      } else {
+        result = await files.verify(
+          "recoverCompleted",
+          plan.bootstrap,
+          identities,
+          [],
+          liveObserverTasks.flatMap(({ helper, bridge, nonce }) =>
+            [helper, bridge].map((identity) => ({ identity, nonce })),
+          ),
+          preSetup,
+          readers.map(({ helper }) => helper),
+        );
+        requireObservation(
+          windowsRetired(result) && result.noLiveMembers === true,
+        );
+        tasks.push(
+          ...(await recoverTasks(
+            readerProof
+              ? liveObserverTasks
+              : [...taskOwners, ...liveObserverTasks],
+          )),
+        );
+      }
       requireObservation(
         !signal?.aborted &&
           tasks.length > 0 &&
@@ -1311,6 +1355,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
           ),
       );
       const settlement = {
+        ...coldProof,
         ...result,
         tasksRemoved: true,
         readers,

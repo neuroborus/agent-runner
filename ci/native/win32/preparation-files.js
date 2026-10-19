@@ -837,6 +837,59 @@ export function createWindowsPreparationFiles(input, options = {}) {
       if (failed) closeIndependentOwner();
     },
     async verify(name, ...args) {
+      if (name === "verifyColdPreparation") {
+        guard();
+        requireObservation(bootstrap.purpose === "experiment" && !verifier);
+        const signal = AbortSignal.any([
+            ...[workSignal].filter(Boolean),
+            AbortSignal.timeout(
+              deadline === undefined
+                ? WINDOWS_PREPARATION_CUSTODY_MS
+                : Math.max(0, deadline - clock()),
+            ),
+          ]),
+          observer = createWindowsPreparationFiles(
+            { ...input, signal },
+            options,
+          );
+        let result, settlement, primary;
+        try {
+          await observer.beginCleanup(signal);
+          const verifier = await observer.preSetupVerifier();
+          result = await verifier.verifyColdPreparation(...args);
+        } catch (cause) {
+          primary = cause;
+        }
+        try {
+          settlement = await observer.settleFiles();
+          requireObservation(
+            settlement?.status === "RETIRED" &&
+              settlement.independent === true &&
+              settlement.emergencyCleanup === false &&
+              hash(settlement.nativeEventSha256),
+          );
+        } catch (cause) {
+          failed ??= primary ?? cause;
+          if (primary)
+            throw new AggregateError(
+              [primary, cause],
+              "Windows cold proof and observer retirement failed",
+              { cause: primary },
+            );
+          throw cause;
+        }
+        if (primary) {
+          failed ??= primary;
+          throw primary;
+        }
+        guard();
+        requireObservation(!signal.aborted);
+        return {
+          ...result,
+          observerSettlement: settlement,
+          nativeEventSha256: observationDigest({ result, settlement }),
+        };
+      }
       return (await observer())[name](...args);
     },
     async preSetupVerifier() {

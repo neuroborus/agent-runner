@@ -994,11 +994,11 @@ function hostedFixture(layout = "mingw64") {
     readExperimentInput: held,
     readExperimentImage: held,
     resolveExperimentImport: () => assert.fail("No synthetic imports"),
-    verify: async () => ({
-      ...retired,
-      noLiveMembers: true,
-      tasksRemoved: true,
-    }),
+    beginVerification: (signal) => assert.ok(!signal?.aborted),
+    verify: async (name) => {
+      assert.equal(name, "verifyColdPreparation");
+      return { ...retired, noLiveMembers: true, tasksRemoved: true };
+    },
     settleFiles: async () => retired,
   };
   options.open = async (prepared) => ({
@@ -1035,11 +1035,28 @@ function hostedFixture(layout = "mingw64") {
         schemaVersion: 3,
         observer,
       });
+      await write(`windows-files-${observer.nonce}-intent.json`, {
+        schemaVersion: 1,
+        argumentsHex: [
+          "--observe",
+          prepared.bootstrap.reader.path,
+          prepared.bootstrap.reader.sha256,
+          prepared.bootstrap.reader.signatureSha256,
+          prepared.bootstrap.plan.path,
+          prepared.bootstrap.plan.sha256,
+          observer.nonce,
+          prepared.bootstrap.runnerSid,
+          prepared.directory,
+          prepared.output,
+        ].map((value) => Buffer.from(value, "utf16le").toString("hex")),
+        status: "POSSIBLE",
+      });
       for (const [kind, status] of [
         ["birth", "POSSIBLE"],
         ["result", "RETIRED"],
       ])
         await write(`windows-files-${observer.nonce}-${kind}.json`, {
+          schemaVersion: 1,
           ...observer,
           status,
         });

@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-20 — Prove closed experiment Windows custody without live originals
+
+Protected original intent, close, birth and result receipts now select explicit
+experiment cold verification before live retention. Complete process censuses
+bracket fresh empty-Job and registered/hidden-task absence reads; disappeared
+original identities stay protected declarations, while present originals require
+matching signaled native handles. A separate observer must independently settle
+before proof or dependency release. Stored retirement, error 87 and later observer
+completion cannot settle original uncertainty. Live/reviewed custody, containment,
+deadlines and failed-hold refusal remain strict. Portable regressions remove
+exited originals and exercise refusals; native acceptance and production GO remain
+unestablished.
+
 ## 2026-10-19 — Observe experiment Mach lookup outside BSM
 
 Ordinary Darwin experiments no longer require the nonexistent `AUE_BSLOOKUP`.

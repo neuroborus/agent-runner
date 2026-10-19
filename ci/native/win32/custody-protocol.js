@@ -1,5 +1,5 @@
 import { win32 as path } from "node:path";
-import { normalizeNativePolicyContext } from "../index.js";
+import { normalizeNativePolicyContext, observationDigest } from "../index.js";
 import {
   closed,
   dense,
@@ -7,6 +7,8 @@ import {
   sid,
   requireWindows,
   normalizeWindowsIdentity,
+  sameWindowsIdentity,
+  systemIdentity,
   windowsPrivatePath,
 } from "./protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
@@ -72,7 +74,16 @@ export function windowsVerificationArguments(name, values) {
       valid = args.length === 1 && location(decode(args[0]));
       break;
     case "retain":
+    case "cold-process":
       valid = birth();
+      break;
+    case "cold-jobs":
+      valid =
+        args.length === 3 &&
+        slot(args[0], 0xffffffff) &&
+        Number(args[0]) > 0 &&
+        /^[1-9][0-9]{0,19}$/u.test(args[1]) &&
+        /^[a-f0-9]{32}$/u.test(args[2]);
       break;
     case "process":
     case "job":
@@ -211,6 +222,70 @@ export function windowsVerificationArguments(name, values) {
   }
   requireWindows(valid);
   return args;
+}
+
+/** Only protected, matching original birth/result receipts select cold custody.
+ * Their identities remain declarations when the native census finds no PID. */
+export function windowsClosedPreparationOwner(birth, result) {
+  for (const value of [birth, result]) {
+    closed(value, [
+      "schemaVersion",
+      "nonce",
+      "taskSha256",
+      "helper",
+      "bridge",
+      "status",
+    ]);
+    requireWindows(
+      value.schemaVersion === 1 &&
+        /^[a-f0-9]{32}$/u.test(value.nonce) &&
+        hash(value.taskSha256),
+    );
+    normalizeWindowsIdentity(value.helper);
+    normalizeWindowsIdentity(value.bridge);
+  }
+  requireWindows(
+    birth.status === "POSSIBLE" &&
+      result.status === "RETIRED" &&
+      birth.nonce === result.nonce &&
+      birth.taskSha256 === result.taskSha256 &&
+      sameWindowsIdentity(birth.helper, result.helper) &&
+      sameWindowsIdentity(birth.bridge, result.bridge) &&
+      birth.helper.pid !== birth.bridge.pid,
+  );
+  systemIdentity(birth.helper);
+  return {
+    nonce: birth.nonce,
+    identities: [birth.helper, birth.bridge].map(normalizeWindowsIdentity),
+    taskSha256: birth.taskSha256,
+    receiptsSha256: observationDigest({ birth, result }),
+  };
+}
+
+export function coldProcessObservation(value, expected) {
+  closed(
+    value,
+    value.present === true
+      ? ["complete", "present", "identity", "signaled", "exitCode"]
+      : ["complete", "present"],
+  );
+  requireWindows(value.complete === true && typeof value.present === "boolean");
+  if (value.present)
+    requireWindows(
+      sameWindowsIdentity(value.identity, expected) &&
+        value.signaled === true &&
+        integer(value.exitCode) &&
+        value.exitCode !== 124,
+    );
+  return value.present
+    ? {
+        complete: true,
+        present: true,
+        identity: normalizeWindowsIdentity(value.identity),
+        signaled: true,
+        exitCode: value.exitCode,
+      }
+    : { complete: true, present: false };
 }
 const image = (value, signed = true) => {
   closed(

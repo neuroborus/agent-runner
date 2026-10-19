@@ -1770,6 +1770,15 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     directory = windowsPath.join("C:\\Fixture\\report", "native"),
     bootstrap = {
       context: { candidateSha: C, runId: "1", runAttempt: 1 },
+      reader: {
+        path: windowsPath.join(directory + "-bootstrap", "custody-reader.exe"),
+        sha256: H,
+        signatureSha256: H,
+      },
+      plan: {
+        path: windowsPath.join(directory + "-bootstrap", "custody-plan.json"),
+        sha256: H,
+      },
     },
     prepared = {
       purpose: "experiment",
@@ -1869,11 +1878,11 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
       ],
       [
         `windows-files-${observer.nonce}-birth.json`,
-        { ...observer, status: "POSSIBLE" },
+        { schemaVersion: 1, ...observer, status: "POSSIBLE" },
       ],
       [
         `windows-files-${observer.nonce}-result.json`,
-        { ...observer, status: "RETIRED" },
+        { schemaVersion: 1, ...observer, status: "RETIRED" },
       ],
     ]);
   bootstrap.context.jobBindingSha256 = observationDigest(prepared.binding);
@@ -1929,6 +1938,22 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     ),
   );
   bootstrap.runnerSid = "S-1-5-21-1-2-3-1001";
+  records.set(`windows-files-${observer.nonce}-intent.json`, {
+    schemaVersion: 1,
+    argumentsHex: [
+      "--observe",
+      bootstrap.reader.path,
+      bootstrap.reader.sha256,
+      bootstrap.reader.signatureSha256,
+      bootstrap.plan.path,
+      bootstrap.plan.sha256,
+      observer.nonce,
+      bootstrap.runnerSid,
+      directory,
+      prepared.output,
+    ].map((value) => Buffer.from(value, "utf16le").toString("hex")),
+    status: "POSSIBLE",
+  });
   let saved,
     requests = 0,
     closed = 0;

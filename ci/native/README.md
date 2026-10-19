@@ -6966,6 +6966,28 @@ replaced or changed births, incomplete Job
 proof, changed tasks and cancellation retain exclusion. Only then may the old
 observer close; its separate process/whole-Job and task-removal pass remains
 mandatory. A fresh observer's own successful finish cannot settle an old owner.
+
+Closed ordinary experiment observers use a separate cold-verification lane, selected
+before any live retain. Cold loading joins the protected preparation-close record
+to matching original intent, birth and result receipts. Original-owner recovery
+uses the protected journals without requiring final preparation outputs.
+Recovery selects each original independently, settling closed originals before
+retaining interrupted originals; both subsets must pass before recovery succeeds.
+Complete normalized PID, creation time, session and SID,
+original nonce/task digest, candidate/input and receipt joins remain mandatory.
+Two complete bounded process censuses surround two fresh reads of every original
+nonce/PID/birth-bound recovery Job slot, compiler Job and controlling Job. An
+absent PID contributes only census evidence plus its protected original identity;
+a present PID requires a matching native identity and signaled readable handle.
+PID reuse, inaccessible handles, incomplete enumeration, inconsistent observations,
+nonempty Jobs, unreadable objects or surviving registered/hidden task instances
+withhold retirement. Each existing Job retains strict membership, security and
+limits checks; only exact not-found observations establish object absence.
+The separate fresh proof observer must independently retire without emergency
+cleanup before returning evidence or releasing dependencies. Its completion alone,
+stored RETIRED and OpenProcess error 87 supply no original-domain proof. Reviewed
+and live-held recovery remain strict; a failed live retain never selects this lane.
+
 Terminal reader failure rejects outstanding commands, including commands waiting
 for a dependent observer's journal. The channel separately exposes the bridge's
 actual close event: fault-rejected completion can precede that event. Failed

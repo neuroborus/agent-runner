@@ -69,7 +69,11 @@ import { createWindowsOperationReaders } from "./operation-readers.js";
 import { installPackageNativeFixture } from "./package-native.fixture.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
 import { compilerTrustFixture } from "./compiler-trust.fixture.js";
-import { windowsPreparationOptions } from "./preparation.js";
+import {
+  windowsPreparationOptions,
+  recoverWindowsPreparationOwners,
+} from "./preparation.js";
+import { windowsClosedPreparationOwner } from "./custody-protocol.js";
 import {
   WINDOWS_EXPERIMENT_SOURCES,
   windowsHostedCompilerArguments,
@@ -2521,18 +2525,46 @@ function rawPreparation({ experiment = false, environment } = {}) {
         },
       };
     }
-    if (operation === "verify-recovery-jobs") {
-      const creator = retained[Number(args[0])].identity;
+    if (operation === "verify-cold-process") {
+      if (f.coldDamage === "census-read")
+        throw new Error("Process census failed");
+      const process = actors.get(Number(args[0]));
+      if (!process)
+        return {
+          complete: f.coldDamage !== "incomplete-census",
+          present: false,
+        };
+      return {
+        complete: true,
+        present: true,
+        identity: process.identity,
+        signaled: process.retired,
+        exitCode: exitCodes.get(process.identity.pid) ?? 0,
+      };
+    }
+    if (["verify-recovery-jobs", "verify-cold-jobs"].includes(operation)) {
+      const cold = operation === "verify-cold-jobs";
+      if (cold && f.coldDamage === "job-read")
+        throw new Error("Original Job read failed");
+      const creator = cold
+          ? { pid: Number(args[0]), creationTime: args[1] }
+          : retained[Number(args[0])].identity,
+        nonce = args[cold ? 2 : 1];
       const owned = [...jobs.entries()].filter(
         ([pid]) =>
-          jobNonces.get(pid) === args[1] &&
-          jobCreators.get(pid) === creator.pid,
+          jobNonces.get(pid) === nonce && jobCreators.get(pid) === creator.pid,
       );
       assert.ok(owned.length <= 128);
       for (const [pid] of owned) scope.recoveryJobs.add(pid);
       const observed = {
-        nonce: args[1],
-        identity: creator,
+        nonce,
+        ...(cold
+          ? {
+              pid: creator.pid,
+              creationTime: creator.creationTime,
+              controllingJob: { absent: true },
+            }
+          : { identity: creator }),
         jobs: Array.from({ length: 128 }, (_, index) =>
           index < owned.length
             ? job(actors.get(owned[index][0]).identity)
@@ -2737,16 +2769,21 @@ function rawPreparation({ experiment = false, environment } = {}) {
     }
     if (operation === "verify-subjects")
       return { identities: retained.map((state) => state.identity), jobs: [] };
-    if (operation === "verify-task")
+    if (operation === "verify-task") {
+      if (f.coldDamage === "task-read")
+        throw new Error("Original task read failed");
+      if (f.hiddenTasks?.has(decode(args[1])))
+        throw new Error("Original hidden task survives");
       return tasks.has(decode(args[1]))
         ? {
             absent: false,
             sha256: f.coldDamage === "task" ? "e".repeat(64) : hash,
-            instances: actors.get(tasks.get(decode(args[1])).pid).retired
+            instances: actors.get(tasks.get(decode(args[1])).pid)?.retired
               ? 0
               : 1,
           }
         : { absent: true };
+    }
     if (operation === "verify-read")
       return {
         hex: heldFiles[Number(args[0])]
@@ -3202,6 +3239,10 @@ function rawPreparation({ experiment = false, environment } = {}) {
                 }),
               ),
             );
+          if (observer && f.disappearObservers) {
+            actors.delete(helper.pid);
+            actors.delete(bridge.pid);
+          }
           queue.push({
             phase: "retired",
             taskSha256: hash,
@@ -3795,6 +3836,7 @@ test("Windows experiment cold consumers join complete native identities across p
         distinctVolume: true,
       };
   };
+  f.disappearObservers = true;
   let recoveries = 0;
   const options = {
       ...f.options,
@@ -3809,18 +3851,35 @@ test("Windows experiment cold consumers join complete native identities across p
           const files = createWindowsPreparationFiles(f, f.options),
             original = preparation.settlement.observer;
           try {
-            return await files.verify(
-              "verifyPreparation",
+            const proof = await files.verify(
+              "verifyColdPreparation",
               f.prepared.bootstrap,
               [
-                {
-                  nonce: original.nonce,
-                  identities: [original.helper, original.bridge],
-                },
+                windowsClosedPreparationOwner(
+                  JSON.parse(
+                    f.files.get(
+                      path.join(
+                        directory,
+                        `windows-files-${original.nonce}-birth.json`,
+                      ),
+                    ),
+                  ),
+                  JSON.parse(
+                    f.files.get(
+                      path.join(
+                        directory,
+                        `windows-files-${original.nonce}-result.json`,
+                      ),
+                    ),
+                  ),
+                ),
               ],
             );
+            assert.equal(proof.observerSettlement.status, "RETIRED");
+            return proof;
           } finally {
-            assert.equal((await files.settleFiles()).status, "RETIRED");
+            const settled = await files.settleFiles();
+            if (settled) assert.equal(settled.status, "RETIRED");
           }
         },
       }),
@@ -3867,13 +3926,35 @@ test("Windows experiment cold consumers join complete native identities across p
     for (const original of [observer.helper, observer.bridge])
       assert.ok(
         events.some((frame) =>
-          new RegExp(`^verify-retain [0-9]+ ${original.pid} `, "u").test(frame),
+          new RegExp(`^verify-cold-process [0-9]+ ${original.pid} `, "u").test(
+            frame,
+          ),
         ),
       );
-    assert.ok(events.some((frame) => frame.startsWith("verify-job ")));
+    assert.ok(!events.some((frame) => frame.startsWith("verify-retain ")));
+    assert.ok(events.some((frame) => frame.startsWith("verify-cold-jobs ")));
     assert.ok(events.some((frame) => frame.startsWith("verify-task ")));
     assertSettled();
   }
+  const recovered = await recoverWindowsPreparationOwners(
+    {
+      job,
+      directory,
+      output: f.prepared.output,
+      manifest: {
+        helpers: f.prepared.helpers,
+        windowsPreparation: {
+          purpose: "experiment",
+          schemaVersion: 3,
+          bootstrap: f.prepared.bootstrap,
+        },
+      },
+    },
+    f.options,
+  );
+  assert.equal(recovered.status, "RETIRED");
+  assert.equal(recovered.observerSettlement.status, "RETIRED");
+  assertSettled();
   // Mutate the protected receipt bytes, leaving selectors and the job intact.
   // Both consumers must refuse before treating stored completion as proof.
   const changes = [
@@ -3924,6 +4005,62 @@ test("Windows experiment cold consumers join complete native identities across p
       }
     }
   }
+  const intentFile = path.join(
+      directory,
+      `windows-files-${observer.nonce}-intent.json`,
+    ),
+    originalIntent = f.files.get(intentFile);
+  for (const index of [1, 2, 4, 5, 6, 7, 8, 9]) {
+    const intent = JSON.parse(originalIntent);
+    intent.argumentsHex[index] = Buffer.from(
+      "changed input",
+      "utf16le",
+    ).toString("hex");
+    f.files.set(intentFile, Buffer.from(JSON.stringify(intent)));
+    for (const consume of consumers) await assert.rejects(consume());
+    f.files.set(intentFile, originalIntent);
+  }
+  assert.ok(
+    !f.actors.has(observer.helper.pid) && !f.actors.has(observer.bridge.pid),
+  );
+  for (const fault of [
+    "census-read",
+    "incomplete-census",
+    "job-read",
+    "task-read",
+    "surviving-helper-job",
+    "surviving-compiler-job",
+    "incomplete-job-inventory",
+  ]) {
+    f.coldDamage = fault;
+    await assert.rejects(consumers[0](), fault);
+    assert.ok(
+      !f.actors.has(observer.helper.pid) && !f.actors.has(observer.bridge.pid),
+    );
+  }
+  f.coldDamage = null;
+  f.hiddenTasks = new Set([observer.nonce]);
+  await assert.rejects(consumers[0]());
+  f.hiddenTasks.clear();
+  // A PID reused by a different birth or principal is never an absent original.
+  for (const field of ["creationTime", "sessionId", "userSid"]) {
+    const changed = {
+      ...observer.helper,
+      [field]:
+        field === "creationTime"
+          ? "999"
+          : field === "sessionId"
+            ? 1
+            : f.prepared.bootstrap.runnerSid,
+    };
+    f.actors.set(changed.pid, { identity: changed, retired: true });
+    await assert.rejects(consumers[0]());
+    f.actors.delete(changed.pid);
+  }
+  // A fresh observer's own failed retirement still prevents consumer success.
+  f.damage = "finish";
+  await assert.rejects(consumers[0]());
+  f.damage = null;
   // Stored completion cannot substitute for fresh original-task absence.
   f.rawTasks.set(observer.nonce, observer.helper);
   try {
@@ -3931,14 +4068,138 @@ test("Windows experiment cold consumers join complete native identities across p
   } finally {
     f.rawTasks.delete(observer.nonce);
   }
+  const uncertainTasks = [...f.rawTasks.keys()];
+  assert.ok(
+    uncertainTasks.length > 0,
+    "failed fresh observers retain uncertainty",
+  );
   await consumers[0]();
-  assertSettled();
+  assert.deepEqual(
+    [...f.rawTasks.keys()],
+    uncertainTasks,
+    "a later observer cannot settle earlier uncertainty",
+  );
   assert.equal(recoveries, 1, "invalid receipts cannot reach recovery effects");
   assert.equal(
     f.commands.length,
     beforeCold,
     "cold consumers must not rebuild",
   );
+});
+
+test("Windows experiment recovery partitions departed closed observers from interrupted held originals", async () => {
+  for (const fault of [
+    null,
+    "cold-proof",
+    "live-hold",
+    "live-job",
+    "cold-retirement",
+  ]) {
+    const f = rawPreparation({ experiment: true }),
+      closed = createWindowsPreparationFiles(f, f.options);
+    await closed.readdir(directory);
+    const departed = [closed.verification.identity, closed.verification.bridge];
+    f.disappearObservers = true;
+    assert.equal((await closed.settleFiles()).status, "RETIRED");
+    assert.ok(departed.every(({ pid }) => !f.actors.has(pid)));
+    f.disappearObservers = false;
+    const interrupted = createWindowsPreparationFiles(f, f.options),
+      stop = new AbortController(),
+      cause = new Error("Original observer interrupted");
+    await interrupted.readdir(directory);
+    const originals = [
+        interrupted.verification.identity,
+        interrupted.verification.bridge,
+      ],
+      nonce = interrupted.verification.input.nonce;
+    await interrupted.beginCleanup(stop.signal);
+    stop.abort(cause);
+    for (const { pid } of originals) {
+      f.actors.get(pid).retired = true;
+      f.rawExitCodes.set(pid, 126);
+    }
+    assert.ok(
+      !f.files.has(path.join(directory, `windows-files-${nonce}-result.json`)),
+    );
+    f.disappearObservers = true;
+    f.beforeRawCommand = (operation) => {
+      if (
+        (fault === "cold-proof" && operation === "verify-cold-process") ||
+        (fault === "live-hold" && operation === "verify-retain") ||
+        (fault === "cold-retirement" && operation === "finish")
+      )
+        throw new Error(fault);
+      if (fault === "live-job" && operation === "verify-recovery-jobs")
+        f.coldDamage = "surviving-helper-job";
+    };
+    const start = f.rawEvents.length,
+      recover = () =>
+        recoverWindowsPreparationOwners(
+          {
+            job: f.job,
+            directory,
+            output: f.prepared.output,
+            manifest: {
+              helpers: f.prepared.helpers,
+              windowsPreparation: {
+                purpose: "experiment",
+                schemaVersion: 3,
+                bootstrap: f.prepared.bootstrap,
+              },
+            },
+          },
+          f.options,
+          { onReadersRetired: async (proof) => assert.equal(proof, null) },
+        );
+    if (fault) {
+      await assert.rejects(recover());
+      assert.ok(
+        f.rawTasks.has(nonce),
+        "incomplete proof retains the original task",
+      );
+    } else {
+      const proof = await recover();
+      assert.equal(proof.status, "RETIRED");
+      assert.equal(proof.tasksRemoved, true);
+      assert.equal(proof.observerSettlement.status, "RETIRED");
+      assert.deepEqual(
+        proof.originals.flatMap(({ identities }) => identities),
+        departed,
+      );
+      assert.equal(f.rawTasks.size, 0);
+    }
+    const events = f.rawEvents.slice(start);
+    for (const { pid } of departed)
+      assert.ok(
+        !events.some((frame) =>
+          new RegExp(`^verify-retain [0-9]+ ${pid} `, "u").test(frame),
+        ),
+      );
+    if (!fault)
+      for (const { pid } of originals)
+        assert.ok(
+          events.some((frame) =>
+            new RegExp(`^verify-retain [0-9]+ ${pid} `, "u").test(frame),
+          ),
+        );
+    const firstRetain = events.findIndex((frame) =>
+      frame.startsWith("verify-retain "),
+    );
+    if (firstRetain >= 0) {
+      const coldFinish = events.findIndex((frame) =>
+        frame.startsWith("finish "),
+      );
+      assert.ok(coldFinish >= 0 && coldFinish < firstRetain);
+      assert.ok(
+        !events
+          .slice(firstRetain)
+          .some((frame) => frame.startsWith("verify-cold-process ")),
+      );
+    }
+    if (["cold-proof", "cold-retirement"].includes(fault))
+      assert.ok(!events.some((frame) => frame.startsWith("verify-retain ")));
+    await assert.rejects(interrupted.settleFiles(), (error) => error === cause);
+  }
 });
 
 test("Windows default experiment bootstrap diagnoses strict input predicates without reselection", async () => {
@@ -4800,6 +5061,66 @@ test("Windows file observer cleanup cancellation ends pending IPC without replay
   assert.equal(
     f.rawEvents.filter((frame) => /^finish /u.test(frame)).length,
     1,
+  );
+});
+
+test("Windows experiment cold observer cancellation interrupts its pending native census", async () => {
+  const f = rawPreparation({ experiment: true }),
+    original = createWindowsPreparationFiles(f, f.options);
+  await original.readdir(directory);
+  const nonce = original.verification.input.nonce;
+  f.disappearObservers = true;
+  assert.equal((await original.settleFiles()).status, "RETIRED");
+  const receipt = (suffix) =>
+      JSON.parse(
+        f.files.get(
+          path.join(directory, `windows-files-${nonce}-${suffix}.json`),
+        ),
+      ),
+    owner = windowsClosedPreparationOwner(receipt("birth"), receipt("result")),
+    entered = Promise.withResolvers(),
+    blocked = Promise.withResolvers(),
+    work = new AbortController(),
+    cause = new Error("Cold verification canceled"),
+    open = f.options.openPreparation;
+  let closed = 0;
+  blocked.promise.catch(() => {});
+  f.beforeRawCommand = async (operation) => {
+    if (operation === "verify-cold-process") {
+      entered.resolve();
+      await blocked.promise;
+    }
+  };
+  f.options.openPreparation = async (...args) => {
+    const channel = await open(...args);
+    return {
+      ...channel,
+      close() {
+        closed++;
+        blocked.reject(cause);
+        channel.close();
+      },
+    };
+  };
+  const files = createWindowsPreparationFiles(f, f.options),
+    start = f.rawEvents.length;
+  files.beginVerification(work.signal);
+  const pending = files.verify("verifyColdPreparation", f.prepared.bootstrap, [
+    owner,
+  ]);
+  await entered.promise;
+  work.abort(cause);
+  await assert.rejects(
+    pending,
+    (error) => error === cause || error.errors?.includes(cause),
+  );
+  assert.ok(closed > 0);
+  await assert.rejects(
+    files.verify("verifyColdPreparation", f.prepared.bootstrap, [owner]),
+    (error) => error === cause,
+  );
+  assert.ok(
+    !f.rawEvents.slice(start).some((frame) => frame.startsWith("finish ")),
   );
 });
 

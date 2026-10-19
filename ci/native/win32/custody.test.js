@@ -12,6 +12,7 @@ import {
   windowsCompilerArguments,
   WINDOWS_CUSTODY_DEADLINE_MS,
 } from "./index.js";
+import { windowsClosedPreparationOwner } from "./custody-protocol.js";
 import { windowsCustodyChannel } from "./channel.js";
 import {
   digest,
@@ -4655,6 +4656,26 @@ function verificationFixture(f = fixture()) {
               })),
       };
     else if (name === "process-exit") value = { exitCode: state.exitCode ?? 0 };
+    else if (name === "cold-process") {
+      const process = states.get(Number(args[0]));
+      value = process
+        ? {
+            complete: true,
+            present: true,
+            identity: process.identity,
+            signaled: process.retired,
+            exitCode: state.exitCode ?? 0,
+          }
+        : { complete: true, present: false };
+    } else if (name === "cold-jobs")
+      value = {
+        pid: Number(args[0]),
+        creationTime: args[1],
+        nonce: args[2],
+        jobs: Array.from({ length: 128 }, () => ({ absent: true })),
+        compilerJob: { absent: true },
+        controllingJob: { absent: true },
+      };
     else if (name === "recovery-jobs")
       value = {
         nonce: args[1],
@@ -5148,6 +5169,94 @@ test("actual scheduler query explicitly includes hidden instances and selects th
   }
 });
 
+test("actual experiment cold census requires bounded complete enumeration before declaring absence", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static void cold_process[^\n]*\{([\s\S]*?)  if \(!found\)/u
+      .exec(source)[1]
+      .replace("HANDLE snapshot", "const snapshot")
+      .replace(
+        "PROCESSENTRY32W entry = {sizeof(entry)}; unsigned count = 0, found = 0;",
+        "const entry = {}; let count = 0, found = 0;",
+      )
+      .replaceAll("&entry", "entry"),
+    census = new Script(`(function(){${body}return found;})()`);
+  for (const fault of [
+    null,
+    "present",
+    "snapshot",
+    "first",
+    "next",
+    "overflow",
+    "duplicate",
+    "close",
+    "not-observer",
+  ]) {
+    let scanned = 0;
+    const present = ["present", "duplicate"].includes(fault),
+      api = {
+        preparation_only: fault !== "not-observer",
+        pid: 20,
+        creation: 10020,
+        TH32CS_SNAPPROCESS: 2,
+        INVALID_HANDLE_VALUE: -1,
+        ERROR_NO_MORE_FILES: 18,
+        need: assert.ok,
+        CreateToolhelp32Snapshot: () => (fault === "snapshot" ? -1 : 1),
+        Process32FirstW: (_snapshot, entry) => {
+          scanned++;
+          entry.th32ProcessID = present ? 20 : 10;
+          return fault !== "first";
+        },
+        Process32NextW: (_snapshot, entry) => {
+          scanned++;
+          entry.th32ProcessID = fault === "overflow" ? 10 : 20;
+          return (
+            fault === "overflow" || (fault === "duplicate" && scanned === 2)
+          );
+        },
+        GetLastError: () => (fault === "next" ? 5 : 18),
+        CloseHandle: () => fault !== "close",
+      };
+    if (fault && fault !== "present")
+      assert.throws(() => census.runInNewContext(api), undefined, fault);
+    else assert.equal(census.runInNewContext(api), present ? 1 : 0);
+    if (fault === "overflow") assert.equal(scanned, 65537);
+  }
+  const absent =
+      /if \(result == HRESULT_FROM_WIN32\(ERROR_FILE_NOT_FOUND\)\) \{([\s\S]*?)\n  \}/u
+        .exec(source)[1]
+        .replace(
+          "IRunningTask *running[32]; LONG active",
+          "const running = []; const active",
+        )
+        .replaceAll("LONG i", "let i"),
+    task = new Script(absent);
+  for (const count of [0, 1, 32]) {
+    let accepted = false;
+    const api = {
+      result: 2,
+      expected: null,
+      taskLine: 1,
+      __FILE__: "reader",
+      service: {},
+      taskName: "original",
+      need_hresult_at: (_result, ok) => assert.ok(ok),
+      need: assert.ok,
+      task_instances: () => count,
+      IRunningTask_Release: () => {},
+      printf: () => {
+        accepted = true;
+      },
+    };
+    if (count) assert.throws(() => task.runInNewContext(api));
+    else task.runInNewContext(api);
+    assert.equal(accepted, count === 0);
+  }
+});
+
 test("actual task removal refuses any live retained process or surviving held Job", async () => {
   const source = await readFile(
       new URL("./custody-reader.c", import.meta.url),
@@ -5512,6 +5621,10 @@ test("Windows original-owner recovery retains a failed process hold despite late
     (error) => error === cause,
   );
   assert.equal(k.state.removedTasks.size, 0);
+  await assert.rejects(
+    k.verifier.verifyColdPreparation(k.f.input, []),
+    (error) => error === cause,
+  );
 });
 
 test("Windows observer custody rejects missing, substituted or changed births and incomplete inventories", async () => {
@@ -5990,6 +6103,192 @@ test("Windows verification expiry fences later native reads and late protected r
     (error) => error === first,
   );
   assert.equal(receipt.events.length, 1);
+});
+
+test("Windows experiment cold custody proves disappeared originals without retaining them and refuses uncertain native observations", async () => {
+  const experiment = () => {
+    const f = fixture();
+    f.input.purpose = "experiment";
+    f.input.context.executionId = "build";
+    f.input.bindingSha256 = f.input.reviewSha256;
+    delete f.input.reviewSha256;
+    const header = { path: "C:\\Fixture\\Sealed\\experiment.h", sha256: hash };
+    f.input.sources.push(header);
+    return verificationFixture(f);
+  };
+  const faults = [
+    null,
+    "present-retired",
+    "reordered-identity",
+    "reviewed",
+    "pid-reuse",
+    "session",
+    "sid",
+    "live",
+    "handle-read",
+    "incomplete-census",
+    "census-read",
+    "contradiction",
+    "job-read",
+    "job-count",
+    "job-member",
+    "job-policy",
+    "compiler-member",
+    "controlling-member",
+    "job-reappears",
+    "job-changes",
+    "process-changes",
+    "task",
+    "task-read",
+    "nonce",
+    "birth",
+    "receipt",
+    "task-digest",
+    "extra-process-field",
+    "watchdog",
+  ];
+  for (const fault of faults) {
+    const k = experiment(),
+      helper = structuredClone(k.f.helper),
+      bridge = identity(10, runnerSid),
+      birth = {
+        schemaVersion: 1,
+        nonce,
+        taskSha256: hash,
+        helper,
+        bridge,
+        status: "POSSIBLE",
+      },
+      owner = windowsClosedPreparationOwner(birth, {
+        ...birth,
+        status: "RETIRED",
+      });
+    k.states.delete(helper.pid);
+    k.states.delete(bridge.pid);
+    k.state.absent = fault !== "task";
+    if (
+      [
+        "present-retired",
+        "reordered-identity",
+        "pid-reuse",
+        "session",
+        "sid",
+        "live",
+        "watchdog",
+        "process-changes",
+      ].includes(fault)
+    ) {
+      const actual = { ...helper };
+      if (fault === "pid-reuse") actual.creationTime = "999";
+      if (fault === "session") actual.sessionId++;
+      if (fault === "sid") actual.userSid = runnerSid;
+      k.states.set(helper.pid, { identity: actual, retired: fault !== "live" });
+      if (fault === "watchdog") k.state.exitCode = 124;
+    }
+    if (fault === "nonce") owner.nonce = k.observer.verification.input.nonce;
+    if (fault === "birth") delete owner.identities[0].creationTime;
+    if (fault === "receipt") owner.receiptsSha256 = "invalid";
+    if (fault === "task-digest") owner.taskSha256 = "invalid";
+    let scans = 0,
+      jobs = 0;
+    k.state.damage = (operation, frame) => {
+      if (operation === "verify-cold-process") {
+        scans++;
+        if (["handle-read", "census-read"].includes(fault))
+          throw new Error(fault);
+        if (fault === "process-changes" && scans === 3)
+          frame.value.exitCode = 1;
+        if (fault === "reordered-identity" && scans === 3)
+          frame.value.identity = Object.fromEntries(
+            Object.entries(frame.value.identity).reverse(),
+          );
+        if (fault === "incomplete-census") frame.value.complete = false;
+        if (fault === "extra-process-field") frame.value.identity = helper;
+        if (fault === "contradiction" && scans === 3)
+          frame.value = {
+            complete: true,
+            present: true,
+            identity: helper,
+            signaled: true,
+            exitCode: 0,
+          };
+      }
+      if (operation === "verify-cold-jobs") {
+        jobs++;
+        if (fault === "job-read") throw new Error(fault);
+        if (fault === "job-count") frame.value.jobs.pop();
+        const job = {
+          daclSha256: hash,
+          limitFlags: 0x2008,
+          processLimit: 32,
+          uiRestrictions: 255,
+          members: [helper],
+        };
+        if (fault === "job-member") frame.value.jobs[127] = job;
+        if (fault === "job-policy")
+          frame.value.jobs[0] = { ...job, members: [], limitFlags: 0 };
+        if (fault === "compiler-member")
+          frame.value.compilerJob = { ...job, processLimit: 31 };
+        if (fault === "controlling-member") frame.value.controllingJob = job;
+        if (fault === "job-reappears" && jobs === 3)
+          frame.value.jobs[0] = { ...job, members: [] };
+        if (fault === "job-changes")
+          frame.value.jobs[0] = {
+            ...job,
+            members: [],
+            daclSha256: jobs === 3 ? "d".repeat(64) : hash,
+          };
+      }
+      if (operation === "verify-task" && fault === "task-read")
+        throw new Error(fault);
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    if (fault === "reviewed") {
+      delete k.f.input.purpose;
+      k.f.input.reviewSha256 = k.f.input.bindingSha256;
+      delete k.f.input.bindingSha256;
+    }
+    const verify = () => k.verifier.verifyColdPreparation(k.f.input, [owner]);
+    if (fault && !["present-retired", "reordered-identity"].includes(fault)) {
+      await assert.rejects(verify, undefined, fault);
+      const count = k.events.length;
+      k.state.damage = null;
+      await assert.rejects(verify, "uncertainty stays latched");
+      assert.equal(k.events.length, count);
+    } else {
+      const proof = await verify();
+      assert.equal(proof.status, "RETIRED");
+      assert.equal(proof.noLiveMembers, true);
+      assert.equal(proof.tasksRemoved, true);
+      assert.deepEqual(proof.originals, [owner]);
+      if (!fault)
+        assert.deepEqual(proof.processCensus, {
+          before: [
+            { complete: true, present: false },
+            { complete: true, present: false },
+          ],
+          after: [
+            { complete: true, present: false },
+            { complete: true, present: false },
+          ],
+        });
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-process")
+          .length,
+        4,
+      );
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-jobs")
+          .length,
+        4,
+      );
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-task").length,
+        2,
+      );
+    }
+    assert.ok(!k.events.some(({ operation }) => operation === "verify-retain"));
+  }
 });
 
 test("Windows experiment custody retains native Job and handle protection requirements", async () => {

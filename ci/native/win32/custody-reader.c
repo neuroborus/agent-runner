@@ -693,6 +693,42 @@ static void recovery_jobs(unsigned subject, const char *ownedNonce) {
   need(swprintf_s(name, 128, L"Local\\NativeProof-Compiler-%hs-%lu-%llu", ownedNonce, GetProcessId(processes[subject]), creation) > 0);
   recovery_job_read(name); putchar('}');
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* A complete process census, never OpenProcess's error code, proves absence.
+ * Present originals still require a readable, birth-matched signaled handle. */
+static void cold_process(DWORD pid, ULONGLONG creation) {
+  need(preparation_only && pid && creation);
+  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+  PROCESSENTRY32W entry = {sizeof(entry)}; unsigned count = 0, found = 0;
+  need(snapshot != INVALID_HANDLE_VALUE && Process32FirstW(snapshot, &entry));
+  do { need(++count <= 65536); if (entry.th32ProcessID == pid) need(++found == 1); }
+  while (Process32NextW(snapshot, &entry));
+  need(GetLastError() == ERROR_NO_MORE_FILES && CloseHandle(snapshot));
+  if (!found) { printf("{\"complete\":true,\"present\":false}"); return; }
+  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+  FILETIME birth, exit, kernel, user; DWORD code;
+  need(process && GetProcessId(process) == pid && GetProcessTimes(process, &birth, &exit, &kernel, &user) &&
+    (((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime) == creation &&
+    WaitForSingleObject(process, 0) == WAIT_OBJECT_0 && GetExitCodeProcess(process, &code) && code <= 127 && code != 124);
+  printf("{\"complete\":true,\"present\":true,\"identity\":"); identity(process);
+  printf(",\"signaled\":true,\"exitCode\":%lu}", code); need(CloseHandle(process));
+}
+/* Names come from protected original receipts, not a reopened process handle.
+ * Every fixed slot and the controlling Job use the same strict native reader. */
+static void cold_jobs(DWORD pid, ULONGLONG creation, const char *ownedNonce) {
+  need(preparation_only && pid && creation && strlen(ownedNonce) == 32 && strspn(ownedNonce, "0123456789abcdef") == 32);
+  wchar_t name[128]; printf("{\"pid\":%lu,\"creationTime\":\"%llu\",\"nonce\":\"%s\",\"jobs\":[", pid, creation, ownedNonce);
+  for (unsigned i = 0; i < 128; i++) {
+    need(swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", ownedNonce, pid, creation, i) > 0);
+    if (i) putchar(','); recovery_job_read(name);
+  }
+  printf("],\"compilerJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-Compiler-%hs-%lu-%llu", ownedNonce, pid, creation) > 0);
+  recovery_job_read(name); printf(",\"controllingJob\":");
+  need(swprintf_s(name, 128, L"Local\\NativeProof-%hs", ownedNonce) > 0);
+  recovery_job_read(name); putchar('}');
+}
+#endif
 static struct verify_handles *handle_inventory(void) {
   typedef NTSTATUS (NTAPI *query)(ULONG, PVOID, ULONG, PULONG);
   query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQuerySystemInformation");
@@ -763,7 +799,12 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
   BSTR root = SysAllocString(L"\\"); need(root); need_hr(ITaskService_GetFolder, service, root, &folder); SysFreeString(root);
   wchar_t name[128]; need(swprintf_s(name, 128, L"%ls%ls", !strcmp(kind, "custody") ? L"NativeProof-Custody-" : L"AgentRunnerPrerequisites-", nonceText) > 0);
   BSTR taskName = SysAllocString(name); need(taskName); HRESULT result = ITaskFolder_GetTask(folder, taskName, &task); unsigned taskLine = __LINE__;
-  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) { need_hresult_at(result, !expected, "ITaskFolder_GetTask", __FILE__, taskLine); printf("{\"absent\":true}"); }
+  if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
+    need_hresult_at(result, !expected, "ITaskFolder_GetTask", __FILE__, taskLine);
+    IRunningTask *running[32]; LONG active = task_instances(service, taskName, running);
+    for (LONG i = 0; i < active; i++) IRunningTask_Release(running[i]);
+    need(!active); printf("{\"absent\":true}");
+  }
   else {
     need_hresult_at(result, SUCCEEDED(result), "ITaskFolder_GetTask", __FILE__, taskLine); BSTR xml, sd;
     need_hr(IRegisteredTask_get_Xml, task, &xml);
@@ -2295,6 +2336,10 @@ static void verification(char **values, unsigned n) {
       entry.file = hold_shared(entry.path, !strcmp(entry.kind,"directory"), TRUE, GENERIC_READ | ACCESS_SYSTEM_SECURITY, !strcmp(entry.kind,"mutable"));
       printf("{\"object\":"); inspect(&entry); printf(",\"security\":"); PSECURITY_DESCRIPTOR sd = file_sd(entry.file.handle, SE_FILE_OBJECT); sd_read(sd); LocalFree(sd); putchar('}'); close_file(&entry.file);
     } else if (!strcmp(values[0]+7, "recovery-jobs")) { need(n == 4); recovery_jobs(bounded_number(values[2], 127), values[3]);
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(values[0]+7, "cold-process")) { need(n == 4); cold_process(bounded_number(values[2], MAXDWORD), number(values[3]));
+    } else if (!strcmp(values[0]+7, "cold-jobs")) { need(n == 5); cold_jobs(bounded_number(values[2], MAXDWORD), number(values[3]), values[4]);
+#endif
     } else if (!strcmp(values[0]+7, "subjects")) {
       need(n == 2); printf("{\"identities\":[");
       for (unsigned i = 0; i < process_count; i++) { if (i) putchar(','); retained_identity(processes[i], tokens[i], sessions[i]); }

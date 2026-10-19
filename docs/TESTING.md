@@ -1681,6 +1681,27 @@ held subject, and EOF exit 126 still requires complete independent recovery proo
 Each injected observer owns its file/read/upload slots and directory snapshot;
 an independently retired fresh observer cannot consume or settle an original
 observer's pending read.
+
+The existing experiment producer-to-cold-consumer fixture now removes exited
+original observer actors from its process table. Loading and original-owner
+recovery select cold verification from matching protected intent, close, birth
+and result records rather than attempting a live retain. The mixed-inventory
+regression combines completed observers that have disappeared with interrupted
+observers whose process handles remain readable. Either subset failing retains
+the interrupted owner's task; successful recovery preserves the first failure.
+Custody regressions cover complete proof, signaled readable originals, PID reuse
+and complete identity changes, nonce/task/receipt mismatches, incomplete or failed
+process/Job/task reads, live recovery/compiler/controlling Job members, and surviving hidden task
+instances. Reordered census identities remain equivalent, and cancellation of
+pending cold-observer IPC closes that channel without clearing the failure or
+renewing the original deadline. Native-source execution exercises bounded complete
+process enumeration and the hidden-instance query even when the registered task
+is missing. Failed fresh-observer retirement withholds success; later observers
+cannot settle earlier uncertainty. The failed-live-hold and dependent-reader
+retention regressions remain.
+These injected cases add no Windows execution or native-acceptance claim and
+remain owned by the existing native harness.
+
 Partial package recovery models the failed cold observer's eventual EOF exit 126
 when its channel closes. The former no-op close left that observer permanently
 live after per-observer custody stopped a fresh finish from discarding its held

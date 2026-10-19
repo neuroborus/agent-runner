@@ -12,7 +12,11 @@ import {
   requireObservation,
 } from "../index.js";
 import { digest, hash, sameWindowsIdentity } from "./protocol.js";
-import { location } from "./custody-protocol.js";
+import {
+  encode,
+  location,
+  windowsClosedPreparationOwner,
+} from "./custody-protocol.js";
 import { WINDOWS_BUILD_TOOLS, WINDOWS_HELPER_NAMES } from "./build.js";
 import { windowsSystemRecipes } from "./system.js";
 import {
@@ -737,6 +741,68 @@ export function windowsExperimentSystemInput(job, preparation) {
   };
 }
 
+/** Protected original receipts select cold custody; stored completion supplies
+ * no current process, Job or task observation. */
+async function closedExperimentObserver(files, prepared, expected) {
+  const { directory, output, bootstrap } = prepared;
+  const read = async (name) =>
+    JSON.parse(
+      (
+        await files.readProtected({
+          file: path.join(directory, name),
+          receipt: true,
+        })
+      ).bytes,
+    );
+  const close = await read("windows-experiment-close.json");
+  observationObject(close, ["purpose", "schemaVersion", "observer"]);
+  requireObservation(
+    close.purpose === "experiment" && close.schemaVersion === 3,
+  );
+  const observer = close.observer;
+  observationObject(observer, ["nonce", "helper", "bridge", "taskSha256"]);
+  requireObservation(
+    /^[a-f0-9]{32}$/u.test(observer.nonce) && hash(observer.taskSha256),
+  );
+  const birth = await read(`windows-files-${observer.nonce}-birth.json`),
+    result = await read(`windows-files-${observer.nonce}-result.json`),
+    owner = windowsClosedPreparationOwner(birth, result),
+    intent = await read(`windows-files-${observer.nonce}-intent.json`);
+  observationObject(intent, ["schemaVersion", "argumentsHex", "status"]);
+  requireObservation(
+    intent.schemaVersion === 1 &&
+      intent.status === "POSSIBLE" &&
+      observationDigest(intent.argumentsHex) ===
+        observationDigest(
+          [
+            "--observe",
+            bootstrap.reader.path,
+            bootstrap.reader.sha256,
+            bootstrap.reader.signatureSha256,
+            bootstrap.plan.path,
+            bootstrap.plan.sha256,
+            observer.nonce,
+            bootstrap.runnerSid,
+            directory,
+            output,
+          ].map(encode),
+        ),
+  );
+  owner.receiptsSha256 = observationDigest({ close, intent, birth, result });
+  for (const value of [observer, ...(expected ? [expected] : [])])
+    requireObservation(
+      value.nonce === owner.nonce &&
+        value.taskSha256 === owner.taskSha256 &&
+        sameWindowsIdentity(value.helper, owner.identities[0]) &&
+        sameWindowsIdentity(value.bridge, owner.identities[1]),
+    );
+  return {
+    observer,
+    owner,
+    nativeEventSha256: observationDigest({ close, birth, result }),
+  };
+}
+
 /** Cold verification reads existing outputs and original case-custody births;
  * ordinary compiler commands have no System worker or retirement receipts. */
 export async function verifyWindowsExperimentBuild(
@@ -747,19 +813,20 @@ export async function verifyWindowsExperimentBuild(
     { prepared, commands, versions, settlement } = preparation;
   windowsExperimentSystemInput(job, preparation);
   requireObservation(files && retired(settlement));
+  files.beginVerification(signal);
   const actual = [];
   requireObservation(
     settlement.observer?.helper && settlement.observer?.bridge,
   );
+  const original = await closedExperimentObserver(
+    files,
+    prepared,
+    settlement.observer,
+  );
   const retiredDomains = await files.verify(
-    "verifyPreparation",
+    "verifyColdPreparation",
     prepared.bootstrap,
-    [
-      {
-        nonce: settlement.observer.nonce,
-        identities: [settlement.observer.helper, settlement.observer.bridge],
-      },
-    ],
+    [original.owner],
   );
   requireObservation(
     retired(retiredDomains) &&
@@ -1056,57 +1123,13 @@ async function withWindowsExperimentPreparation(
     );
     // The preparation close is itself protected; the job digest alone cannot
     // establish original helper/observer identities or whole-domain settlement.
-    const close = JSON.parse(
-      (
-        await files.readProtected({
-          file: path.join(directory, "windows-experiment-close.json"),
-          receipt: true,
-        })
-      ).bytes,
-    );
-    observationObject(close, ["purpose", "schemaVersion", "observer"]);
-    requireObservation(
-      close.purpose === "experiment" && close.schemaVersion === 3,
-    );
-    const birth = JSON.parse(
-        (
-          await files.readProtected({
-            file: path.join(
-              directory,
-              `windows-files-${close.observer.nonce}-birth.json`,
-            ),
-            receipt: true,
-          })
-        ).bytes,
-      ),
-      result = JSON.parse(
-        (
-          await files.readProtected({
-            file: path.join(
-              directory,
-              `windows-files-${close.observer.nonce}-result.json`,
-            ),
-            receipt: true,
-          })
-        ).bytes,
-      );
-    requireObservation(
-      birth.status === "POSSIBLE" &&
-        result.status === "RETIRED" &&
-        [birth, result].every(
-          (value) =>
-            value.nonce === close.observer.nonce &&
-            value.taskSha256 === close.observer.taskSha256 &&
-            sameWindowsIdentity(value.helper, close.observer.helper) &&
-            sameWindowsIdentity(value.bridge, close.observer.bridge),
-        ),
-    );
-    // Stored completion is a selector. Loading or recovery must independently
-    // observe original complete Jobs and task absence before using retirement.
+    const original = await closedExperimentObserver(files, prepared);
+    // Stored completion selects the explicit cold lane; fresh native proof is
+    // still required before success or dependent-reader release.
     preparation.settlement = {
       ...job.preparationEffects.settlement,
-      observer: close.observer,
-      nativeEventSha256: observationDigest({ close, birth, result }),
+      observer: original.observer,
+      nativeEventSha256: original.nativeEventSha256,
     };
     requireObservation(
       observationDigest(record.prepared) === observationDigest(prepared) &&

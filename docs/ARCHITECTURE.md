@@ -118,8 +118,21 @@ remain mandatory. Reviewed signing/import/publication validators remain strict.
 Preparation cleanup is distinct from admitted-case cleanup. Interrupted or
 unobserved work stays unsuccessful with its first cause preserved. Recovery holds
 original observer identities before waiting for actual exit, then independently
-verifies whole-domain and owned-task retirement; no empty compiler proof is
-invented. No cleanup can attest retirement of earlier uncertain Windows owners.
+verifies whole-domain and owned-task retirement. Closed experiment originals
+instead select an explicit cold lane from matching protected close/birth/result
+and exact-input intent receipts, before live retention. Recovery partitions
+closed and interrupted originals, joining the cold proof and strict live proof
+before settlement. Complete bounded native process censuses surround two fresh
+reads of every original nonce/PID/birth-bound recovery Job slot, compiler and
+controlling Job, plus registered and hidden task absence. Existing PIDs must
+match their complete native identities and have
+signaled readable handles; disappeared PIDs carry protected identities separately
+from native observations. Incomplete or contradictory reads, reused PIDs, live
+members and surviving tasks block. A separate fresh observer must independently
+settle without emergency cleanup before this proof returns or releases a dependency;
+its own successful finish cannot establish original retirement. Live/reviewed
+verification and latched live-retain failures remain strict. No empty compiler
+proof is invented, and no cleanup attests earlier uncertain Windows owners.
 Original sequence 263 identifies an API-set entry match-count failure after
 signature observation 262, without a captured image/import or zero/duplicate
 distinction. Subsequent loader error 126 supplies no missing DLL or API-set cause.
