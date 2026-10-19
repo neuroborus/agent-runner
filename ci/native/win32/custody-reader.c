@@ -409,10 +409,10 @@ static void loader(unsigned subject, struct entry *image) {
 #ifdef NATIVE_CI_EXPERIMENT
   /* Hosted System32 modules and marked helpers are observed above, not a
    * reconstructed trust graph. Only private runtime images retain import edges. */
-  BOOL helper = FALSE;
+  BOOL isHelper = FALSE;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && entries[i].file.handle &&
-    !memcmp(&entries[i].file.id, &files[source].id, sizeof(files[source].id))) helper = TRUE;
-  if (helper || experiment_system_image(paths[source])) continue;
+    !memcmp(&entries[i].file.id, &files[source].id, sizeof(files[source].id))) isHelper = TRUE;
+  if (isHelper || experiment_system_image(paths[source])) continue;
 #endif
   DWORD size; BYTE *bytes = read_file(&files[source], 536870912, &size); IMAGE_DOS_HEADER *dos = (void *)bytes;
   need(size >= 512 && dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size-sizeof(IMAGE_NT_HEADERS64));
