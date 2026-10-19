@@ -125,6 +125,7 @@ export function createDarwinSystemEffects(input, options = {}) {
   const buildRecords = async ({ recovery = false } = {}) => {
     const entries = await state.fs.readdir(state.directory);
     requireObservation(entries.length <= 65536);
+    // Experiment preparation journals cannot attest compiler or case retirement.
     const names = entries
       .filter(
         (name) =>
@@ -132,7 +133,7 @@ export function createDarwinSystemEffects(input, options = {}) {
           !name.startsWith("darwin-recovery-") &&
           !(
             state.manifest.purpose === "experiment" &&
-            /^darwin-experiment-(?:build(?:-selector|-close)?|preparation(?:-close)?)\.json$/u.test(
+            /^darwin-experiment-(?:build(?:-selector|-close)?|preparation(?:-close)?|input-[0-9]+)\.json$/u.test(
               name,
             )
           ),

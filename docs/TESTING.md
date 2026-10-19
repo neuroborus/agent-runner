@@ -1580,6 +1580,13 @@ it executes no native build, installation, system case or provider turn.
 `ci/native/darwin/preparation-effects.test.js` retains historical injected
 composition coverage and exercises build defaults through `native-effects.mjs`
 with raw held filesystem, private IPC and kernel zero-signal read transcripts.
+Experiment input-journal coverage uses the real custody reader with fake
+transport, holds its acknowledgement to prove that acquisition cannot advance,
+and rejects inadmissible receipt names. Normal and fresh recovery selectors
+exclude only the numbered preparation journal family from retirement evidence;
+malformed names and experiment journals in reviewed inventories remain failures.
+Indexed preparation and cold/recovery coverage also retains the actual producer
+names, first-cause preservation and independent non-emergency retirement.
 For reviewed preparation, the repository owners verify and persist all 22 fixed
 Clang/SDK/signing commands, snapshot unsigned inputs and rejoin final pins and original receipts
 without recompilation. Regressions cover missing source approvals, intermediate

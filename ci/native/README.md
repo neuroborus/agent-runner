@@ -428,6 +428,16 @@ original failure. Case custody recovery remains separate; a build cannot attest
 an original payload or audit domain's retirement. Reviewed source/build/signature
 validators and experiment-to-reviewed rejection remain strict.
 
+Darwin case-input acquisition writes `darwin-experiment-input-<sequence>.json`
+through the shared preparation writer. Its default receipt verification awaits
+the real custody reader's acknowledgement before the following acquisition
+effect. JavaScript and native receipt-prefix allowlists and held-file checks
+remain unchanged. System record selection recognizes only the numbered
+experiment input family as preparation-only records; those records cannot
+attest compiler or case retirement. Malformed or unexpected Darwin record names
+still fail normal admission and retain recovery uncertainty. Cold loading and
+recovery never reacquire inputs or reconstruct missing retirement evidence.
+
 Experiment PF observations carry explicit purpose and a bounded recursive graph
 across all six source rulesets, including dummynet. Dotted stock anchor names are
 observable; this read support alone does not admit their baseline for mutation.

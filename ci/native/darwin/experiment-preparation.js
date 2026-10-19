@@ -230,7 +230,7 @@ export async function prepareDarwinExperiment(
     const { reader } = await state.bootstrap(options.signal);
     let sequence = 0;
     const journal = (record) =>
-        state.write(`experiment-input-${sequence++}.json`, record),
+        state.write(`darwin-experiment-input-${sequence++}.json`, record),
       acquisition = await (
         options.acquireCases ?? acquireDarwinExperimentInputs
       )(built.prepared, built.build, reader, journal, options),

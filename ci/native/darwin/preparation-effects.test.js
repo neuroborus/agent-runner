@@ -61,6 +61,7 @@ import { darwinGitPolicies } from "./git-effects.js";
 import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
 import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
+import { darwinPreparationContext } from "./preparation.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
@@ -8647,16 +8648,193 @@ function experimentInputs(f, build) {
   };
 }
 
+test("Darwin experiment input journals await real receipt admission and stay outside retirement inventories", async () => {
+  const f = buildTranscripts(true),
+    name = "darwin-experiment-input-0.json",
+    sent = Promise.withResolvers(),
+    acknowledge = Promise.withResolvers(),
+    transport = f.options.readerOptions.transport;
+  f.options.readerOptions.transport = async (...args) => {
+    const owner = await transport(...args);
+    let inputReceipt = false;
+    return {
+      ...owner,
+      async send(frame) {
+        inputReceipt =
+          frame.startsWith("V ") &&
+          Buffer.from(frame.split(" ")[1], "hex").toString() ===
+            path.join(directory, name);
+        await owner.send(frame);
+      },
+      async receive() {
+        const actual = await owner.receive();
+        if (inputReceipt) {
+          sent.resolve();
+          await acknowledge.promise;
+          inputReceipt = false;
+          f.events.push("input-receipt-acknowledged");
+        }
+        return actual;
+      },
+    };
+  };
+  const state = darwinPreparationContext(f.input, f.options);
+  const { reader } = await state.bootstrap(),
+    primary = experimentBuildFixture(),
+    createReader = primary.options.createReader,
+    original = new Error("Original acquisition effect failure");
+  let acquiring = false;
+  // Keep hosted build effects injected; the production acquisition journal must
+  // cross the real receipt boundary over the raw held-file transport.
+  primary.options.createReader = (...args) => {
+    const injected = createReader(...args);
+    return {
+      ...injected,
+      verifyBuildReceipt: async (pin) => {
+        if (!acquiring) return injected.verifyBuildReceipt(pin);
+        f.put(
+          pin.path,
+          JSON.stringify(primary.files.get(pin.path)) + "\n",
+          0o400,
+          1001,
+        );
+        return reader.verifyBuildReceipt(pin);
+      },
+    };
+  };
+  primary.options.acquireCases = async (prepared, build, observer, journal) => {
+    acquiring = true;
+    await journal({ purpose: "experiment", phase: "case-inputs-possible" });
+    f.events.push("acquisition-effect");
+    throw original;
+  };
+  const acquisition = assert.rejects(
+    prepareDarwinExperiment(
+      primary.job,
+      directory,
+      primary.persist,
+      primary.options,
+    ),
+    (cause) => cause === original,
+  );
+  await Promise.race([sent.promise, acquisition]);
+  assert.ok(!f.events.includes("acquisition-effect"));
+  acknowledge.resolve();
+  await acquisition;
+  assert.ok(primary.events.includes(name));
+  assert.ok(
+    f.events.indexOf("input-receipt-acknowledged") <
+      f.events.indexOf("acquisition-effect"),
+  );
+  const closed = await state.releaseBootstrap();
+  assert.equal(closed.status, "RETIRED");
+  assert.equal(closed.independent, true);
+  assert.equal(closed.emergencyCleanup, false);
+  assert.equal(closed.closed, true);
+  const request = {
+    candidateSha,
+    platform: "darwin",
+    jobSha256: observationDigest(f.input.job),
+    preparationSha256: observationDigest(f.input.preparation),
+  };
+  let inspected = false;
+  const normal = createDarwinSystemEffects(f.input, {
+    ...f.options,
+    recover: async ({ records }) => {
+      inspected = true;
+      assert.ok(records.length > 0);
+      assert.ok(
+        records.every(({ name }) => !name.startsWith("darwin-experiment-")),
+      );
+      return {
+        ...retired,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((id) => [id, retired]),
+        ),
+      };
+    },
+  });
+  const input = { request, job: f.input.job, preparation: f.input.preparation };
+  assert.equal((await normal.recover(input)).status, "RETIRED");
+  assert.equal(inspected, true);
+  assert.equal(
+    (await createDarwinSystemEffects(f.input, f.options).recover(input)).status,
+    "RETIRED",
+  );
+  assert.equal(
+    f.events.some((event) => event.startsWith("tool:")),
+    false,
+  );
+  assert.equal(f.processes.size, 0);
+});
+
+test("Darwin input receipt and inventory admission refuse invalid or reviewed journal names", async () => {
+  const invalid = buildTranscripts(true),
+    state = darwinPreparationContext(invalid.input, invalid.options);
+  await state.bootstrap();
+  await assert.rejects(
+    state.write("experiment-input-0.json", {}),
+    /Unverified Darwin launch authority/,
+  );
+  assert.ok(
+    !invalid.events.includes(
+      "receipt:" + path.join(directory, "experiment-input-0.json"),
+    ),
+  );
+  assert.equal(invalid.processes.size, 0);
+  for (const [experiment, name] of [
+    [true, "darwin-experiment-input-0-extra.json"],
+    [true, "darwin-experiment-unexpected.json"],
+    [false, "darwin-experiment-input-0.json"],
+  ]) {
+    const f = buildTranscripts(experiment),
+      state = darwinPreparationContext(f.input, f.options);
+    await state.bootstrap();
+    await state.releaseBootstrap();
+    f.put(path.join(directory, name), "{}\n", 0o400, 1001);
+    const input = {
+      request: {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(f.input.preparation ?? null),
+      },
+      job: f.input.job,
+      preparation: f.input.preparation ?? null,
+    };
+    let admitted = false;
+    const normal = createDarwinSystemEffects(f.input, {
+      ...f.options,
+      recover: () => {
+        admitted = true;
+        return retired;
+      },
+    });
+    assert.equal((await normal.recover(input)).status, "RETAINED", name);
+    assert.equal(admitted, false, name);
+    assert.equal(
+      (await createDarwinSystemEffects(f.input, f.options).recover(input))
+        .status,
+      "RETAINED",
+      name,
+    );
+    assert.equal(f.processes.size, 0);
+  }
+});
+
 test("indexed Darwin experiment preparation seals all helpers and cold-loads without compilation or cache admission", async () => {
   const f = experimentBuildFixture();
   f.options.fs.readFile = f.options.readReceipt;
-  f.options.acquireCases = async (prepared, build) => ({
-    inputs: experimentInputs(f, build),
-    publish: async ({ path, bytes, sha256 }) => {
-      assert.equal(digest(bytes), sha256);
-      f.files.set(path, bytes);
-    },
-  });
+  f.options.acquireCases = async (prepared, build, reader, journal) => {
+    await journal({ purpose: "experiment", phase: "case-inputs-possible" });
+    return {
+      inputs: experimentInputs(f, build),
+      publish: async ({ path, bytes, sha256 }) => {
+        assert.equal(digest(bytes), sha256);
+        f.files.set(path, bytes);
+      },
+    };
+  };
   const result = await prepareDarwinExperiment(
     f.job,
     directory,
@@ -8664,6 +8842,10 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     f.options,
   );
   assert.equal(result.job.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(
+    f.files.get(path.join(directory, "darwin-experiment-input-0.json")).phase,
+    "case-inputs-possible",
+  );
   assert.equal(
     result.preparation.system.cases.length,
     darwinSystemRecipes().length - 1,
