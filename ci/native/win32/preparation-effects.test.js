@@ -2024,6 +2024,94 @@ test("Windows loader reads reject repeated imports replacing a required API-set 
     imports: [],
   });
   await assert.rejects(experiment.runtime(0, 0, omitted));
+
+  // The native private-runtime lane emits private Git edges, including their
+  // delay evidence, while holding stock modules without traversing their imports.
+  entries[0].kind = "image";
+  entries.push({
+    kind: "image",
+    path: "C:\\Windows\\System32\\stock.dll",
+    sha256: digest(bytes),
+    signatureSha256: hash,
+  });
+  const graph = [
+    { index: 0, imports: [{ name: "shared.dll", index: 1, delay: false }] },
+    { index: 1, imports: [{ name: "stock.dll", index: 3, delay: true }] },
+    { index: 3, imports: null },
+  ];
+  let boundaryFault;
+  reader.operation = async (name, index) => {
+    assert.notEqual(
+      name,
+      "release-import",
+      "Stock transitive imports cannot be resolved",
+    );
+    if (name !== "release-pe") return original(name, index);
+    return {
+      complete: true,
+      dll: index !== 0,
+      imports:
+        index === 3
+          ? [{ name: "unresolved-stock.dll", delay: true }]
+          : graph
+              .find((entry) => entry.index === index)
+              .imports.map(({ name, delay }) => ({
+                name,
+                delay:
+                  boundaryFault === "delay" && index === 1 ? !delay : delay,
+              })),
+    };
+  };
+  reader.loader = async () => {
+    const loaded = [0, 1, 3].map((index) => ({
+      pathHex: Buffer.from(entries[index].path, "utf16le").toString("hex"),
+      identity:
+        boundaryFault === "substitution" && index === 1
+          ? "changed"
+          : "object-" + index,
+      sha256: entries[index].sha256,
+      signatureSha256: entries[index].signatureSha256,
+      daclSha256: hash,
+      links: 1,
+    }));
+    if (boundaryFault === "missing-private") loaded.splice(1, 1);
+    const imports = [
+      {
+        source: 0,
+        resolved: 1,
+        delay: false,
+        importHex: Buffer.from("shared.dll").toString("hex"),
+      },
+      {
+        source: 1,
+        resolved: 2,
+        delay: boundaryFault !== "delay",
+        importHex: Buffer.from("stock.dll").toString("hex"),
+      },
+    ];
+    if (boundaryFault === "stock-edge")
+      imports.push({
+        source: 2,
+        resolved: 0,
+        delay: true,
+        importHex: Buffer.from("unresolved-stock.dll").toString("hex"),
+      });
+    return { importScope: "private-runtime", loaded, imports };
+  };
+  await experiment.loader(graph, [0]);
+  await experiment.runtime(0, 0, graph);
+  const emptyStock = structuredClone(graph);
+  emptyStock[2].imports = [];
+  await assert.rejects(experiment.loader(emptyStock, [0]));
+  boundaryFault = "delay";
+  await assert.rejects(experiment.loader(graph, [0]));
+  for (boundaryFault of [
+    "delay",
+    "missing-private",
+    "substitution",
+    "stock-edge",
+  ])
+    await assert.rejects(experiment.runtime(0, 0, graph));
 });
 
 test("Windows interrupted publication retires held workers and retains objects without matched final state", async () => {

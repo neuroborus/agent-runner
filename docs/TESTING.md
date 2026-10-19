@@ -1257,7 +1257,15 @@ never additional local FINALIZE commands.
 Windows experiment regressions prove that helper admission and cold verification
 bind thirteen images without traversing their installed-system imports. Dependency
 coverage is scoped to private payload and Git copies, preserving held source/copy
-identities, delay edges and substitution refusal. Explicit null helper/system
+identities, delay edges and substitution refusal. Payload and Git fixtures expose
+unresolvable ordinary and delay imports on held stock targets and assert that
+neither discovery path resolves them. Direct access copies survive, and nested
+private Git copies retain their source slots and delay edges in operation
+declarations. Cold loading rejoins both inventories without acquisition or
+compilation; missing private dependencies, changed held bytes/identities and
+changed delay evidence fail. Operation-reader coverage joins native observations
+of the private graph, omits stock edges and rejects missing/substituted private
+modules or extra stock-import evidence. Explicit null helper/system
 import inventories cannot be promoted to empty observed graphs or used for reviewed
 admission. Live loader coverage accepts hosted System32 module observations while
 rejecting undeclared private modules and incomplete private dependency evidence.
@@ -1266,8 +1274,11 @@ missing evidence without recompilation. Custody recovery retains original
 process-hold failure even after a later observer completes. These neutral
 injections use existing fast discovery and the selected native harness; they invoke
 no Windows tool, add no slow tier and establish no native acceptance or original-owner
-retirement. Windows observer-transfer 10022, missing 4663 audit and Darwin inherited
-fault authority/model-free prerequisites remain required external concerns.
+retirement. Windows `verify-retain` 87, observer-transfer 10022, missing 4663 audit
+and Darwin inherited `TASK_ACCESS_PORT`/model-free prerequisite 78 remain required
+external concerns. The retained `ole32.dll` delay-import failure is not an
+optional-contract exception; fresh matching original CI on the final SHA must
+establish native outcomes independently of these portable checks.
 
 Darwin injected/source regressions protect shared sandbox function/data bindings,
 unavailable exports, all custody query consumers, path-filter results and PF

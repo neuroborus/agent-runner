@@ -279,8 +279,13 @@ the explicitly declared private images under the hosted-runtime assumption.
 
 Dependency discovery belongs to actual private consumers: the access payload's
 individual runtime copies and Git's private DLL copies. Their source/copy slots,
-held identities, bytes and declared delay edges remain required. Git's direct
-system targets are held, but their transitive imports are not reconstructed.
+held identities, bytes and declared delay edges remain required. Both discovery
+paths stop expanding held canonical System32 targets and record their imports as
+explicit `null`, distinct from an observed empty private graph. Access isolation
+still copies each direct stock dependency beside its payload; source/copy pins,
+runtime assets and policy expectations retain those exact bytes. Git retains its
+complete private DLL closure and delay edges, with direct stock targets held
+without reconstructing their transitive imports.
 Cold loading reobserves both retained inventories and rejects substitution or
 missing evidence without rebuilding. Case loader checks retain the private Git
 graph; reviewed import admission and protected package readers remain strict.
@@ -323,6 +328,19 @@ all-helper traversal does not establish private-runtime or native acceptance.
 The separate original `verify-retain` process/token failures remain blockers;
 a missing numeric PID or a later observer's completion supplies no original
 descendant retirement evidence.
+
+The retained original sequence 458 identifies a delay import of
+`ext-ms-win32-subsystem-query-l1-1-0.dll` from held System32 `ole32.dll`, with
+error 126 and flags 2049. This is observed delay evidence, not an optional-contract
+exception. Stopping stock traversal in payload and Git discovery changes no
+loader flags, private dependency requirement or native isolation capability.
+The separate `verify-retain` error 87 on original PID 5108 with `process=false`
+remains unresolved; preparation and cleanup causes stay separate. Darwin live
+inherited `TASK_ACCESS_PORT` and model-free prerequisite 78, Windows observer
+transfer 10022 and missing broker audit delivery also remain unresolved.
+Portable checks supply no native acceptance. After the finalized repairs, the
+supervisor must inspect fresh matching runs of both original workflows on the
+same final SHA and continue until both genuinely pass.
 
 The duplicate compiler bootstrap reader/task is
 removed. Private version-3 preparation records and version-2 operation declarations reject legacy, mixed or incomplete

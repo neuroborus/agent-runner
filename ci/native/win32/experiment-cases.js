@@ -101,10 +101,10 @@ async function discoverRuntime(
           read.identitySha256 === resolved.identitySha256),
     );
     const imports = [];
-    // Git uses the hosted system runtime, but every DLL copied beside Git and
-    // every dependency copied into the access payload's private root is retained.
+    // Both consumers trust held hosted-system targets. Retain direct access
+    // copies and the complete private Git graph without expanding stock imports.
     const system = /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(file);
-    for (const imported of directory && system ? [] : read.pe.imports) {
+    for (const imported of system ? [] : read.pe.imports) {
       const name = imported.name;
       requireObservation(
         typeof name === "string" &&
@@ -162,7 +162,7 @@ async function discoverRuntime(
       sha256: read.sha256,
       signatureSha256: read.signatureSha256,
       identitySha256: read.identitySha256,
-      imports: directory && system ? null : imports,
+      imports: system ? null : imports,
     });
   }
   return [...images.values()];
@@ -432,7 +432,8 @@ export async function prepareWindowsExperimentCases(
           },
         ],
         runtimeAssets = [];
-      // The observed loader graph fixes every individual copied dependency.
+      // Preserve direct stock targets for access isolation and every private
+      // dependency; omitted stock import admission does not remove these copies.
       for (const image of dependencies.payload.slice(1)) {
         const target = imageAsset(
             request.storage + "\\" + path.basename(image.path),

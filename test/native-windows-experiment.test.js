@@ -301,6 +301,10 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
     bytes = Buffer.from("held Git fixture"),
     dependency = path.join(path.dirname(git), "runtime.dll"),
+    nested = path.join(path.dirname(git), "nested.dll"),
+    payload = prepared.helpers.find(
+      ({ name }) => name === "access-fixture",
+    ).path,
     observed = {
       sdkInputs: [
         {
@@ -328,14 +332,18 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
                   { name: "runtime.dll", delay: false },
                   { name: "KERNEL32.dll", delay: true },
                 ]
-              : file === system
-                ? [{ name: "unneeded.dll", delay: false }]
-                : [],
+              : file === dependency
+                ? [{ name: "nested.dll", delay: true }]
+                : file === payload
+                  ? [{ name: "KERNEL32.dll", delay: false }]
+                  : file === system
+                    ? [{ name: "unneeded.dll", delay: true }]
+                    : [],
         },
       }),
       resolveImport: async (name, image) => {
         assert.equal(name, "KERNEL32.dll");
-        assert.equal(image, git);
+        assert.ok([git, payload].includes(image));
         return {
           file: system,
           sha256: createHash("sha256").update(bytes).digest("hex"),
@@ -356,7 +364,7 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     native,
     {
       exists: async (file) => {
-        if (file !== dependency)
+        if (![dependency, nested].includes(file))
           throw Object.assign(new Error("Not local"), { code: "ENOENT" });
       },
     },
@@ -367,6 +375,22 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
       .slice(1)
       .map(({ id }) => id),
   );
+  assert.equal(result.dependencies.payload[1].path, system);
+  assert.equal(result.dependencies.payload[1].imports, null);
+  assert.deepEqual(
+    result.dependencies.git.find(({ path }) => path === dependency).imports,
+    [{ name: "nested.dll", path: nested, delay: true }],
+  );
+  for (const entry of result.cases.filter(({ bindings }) => bindings.access)) {
+    assert.equal(entry.bindings.access.runtimeAssets.length, 1);
+    assert.deepEqual(
+      entry.bindings.input.runtime.map(({ path }) => path).sort(),
+      [
+        entry.bindings.input.request.executable.path,
+        entry.bindings.input.request.storage + "\\KERNEL32.dll",
+      ].sort(),
+    );
+  }
   for (const entry of result.cases.filter(
     ({ bindings }) => bindings.operations,
   )) {
@@ -407,6 +431,18 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
             entry.bindings.input.request.storage + "\\runtime.dll",
         ),
       );
+      const runtime = loader.find(({ index }) =>
+        entries[index].path.endsWith("\\runtime.dll"),
+      );
+      assert.deepEqual(runtime.imports, [
+        {
+          name: "nested.dll",
+          index: loader.find(({ index }) =>
+            entries[index].path.endsWith("\\nested.dll"),
+          ).index,
+          delay: true,
+        },
+      ]);
       const asset = specification.assets.find(
           ({ index }) =>
             entries[index].path === entry.bindings.input.metadata + "\\index",
@@ -1020,12 +1056,15 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
   }
 });
 
-test("Windows helper admission omits installed traversal while private payload dependencies rejoin on cold load", async () => {
+test("Windows payload and Git stop at stock targets while private copies and delay edges rejoin on cold load", async () => {
   const f = hostedFixture(),
     contract = "api-fixture-runtime-l1-1-0.dll",
     physical = "api-fixture-forward-l1-1-0.dll",
     host = "C:\\Windows\\System32\\fixture-runtime.dll",
     forward = "C:\\Windows\\System32\\" + physical,
+    git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+    privateDll = path.join(path.dirname(git), "runtime.dll"),
+    nested = path.join(path.dirname(git), "nested.dll"),
     resolutions = new Map([
       [contract, host],
       [physical, forward],
@@ -1034,7 +1073,14 @@ test("Windows helper admission omits installed traversal while private payload d
     unresolved = new Error("Unresolved installed import"),
     immutable = Object.freeze(new Error("Immutable loader failure"));
   for (const file of resolutions.values()) f.files.set(file, f.image);
+  for (const file of [git, privateDll, nested]) f.files.set(file, f.image);
   let fault;
+  f.options.exists = async (file) => {
+    if (!f.files.has(file))
+      throw Object.assign(new Error("Missing local dependency"), {
+        code: "ENOENT",
+      });
+  };
   const open = f.options.open;
   f.options.open = async (prepared) => {
     const native = await open(prepared),
@@ -1047,19 +1093,40 @@ test("Windows helper admission omits installed traversal while private payload d
       file,
       installed,
     ) => {
+      if (fault === "missing-private" && file === nested)
+        throw Object.assign(new Error("Missing private dependency"), {
+          code: "ENOENT",
+        });
       const held = await read(file, installed);
-      if (file === image)
+      if (file === image || file === payload)
         held.pe = {
           imports: [
             { name: contract, delay: false },
-            { name: physical, delay: true },
+            { name: physical, delay: !(fault === "delay" && file === payload) },
           ],
         };
-      if (file === payload || file === forward)
-        held.pe = { imports: [{ name: contract, delay: false }] };
-      if (file === host)
-        held.pe = { imports: [{ name: physical, delay: true }] };
-      if (fault === "held-image" && file === host)
+      if (file === git)
+        held.pe = {
+          imports: [
+            { name: "runtime.dll", delay: false },
+            { name: contract, delay: true },
+          ],
+        };
+      if (file === privateDll)
+        held.pe = { imports: [{ name: "nested.dll", delay: true }] };
+      if (file === nested)
+        held.pe = { imports: [{ name: physical, delay: false }] };
+      if ([host, forward].includes(file))
+        held.pe = {
+          imports: [
+            { name: "unresolved-stock.dll", delay: false },
+            { name: "delayed-stock.dll", delay: true },
+          ],
+        };
+      if (
+        (fault === "held-image" && file === host) ||
+        (fault === "private-image" && file === privateDll)
+      )
         held.bytes = Buffer.from("changed held image");
       return held;
     };
@@ -1068,6 +1135,10 @@ test("Windows helper admission omits installed traversal while private payload d
       image,
     ) => {
       names.push(name);
+      assert.ok(
+        ![host, forward].includes(image),
+        "Stock transitive imports must never be resolved",
+      );
       assert.ok(
         f.files.has(image),
         "Import context must identify its held source image",
@@ -1094,8 +1165,11 @@ test("Windows helper admission omits installed traversal while private payload d
     ),
     compiles = f.calls.length;
   assert.ok(names.includes(contract) && names.includes(physical));
-  f.options.command = () =>
-    assert.fail("Cold loading cannot compile or acquire");
+  f.options.command =
+    f.options.bootstrap =
+    f.options.selectToolchain =
+    f.options.open =
+      () => assert.fail("Cold loading cannot compile or acquire");
   const load = () =>
     loadWindowsExperiment(built.job, directory, {
       ...f.options,
@@ -1106,13 +1180,39 @@ test("Windows helper admission omits installed traversal while private payload d
     recorded = JSON.parse(
       f.files.get(path.join(directory, "windows-experiment-preparation.json")),
     );
-  assert.deepEqual(names.slice(beforeCold), [contract, physical, contract]);
+  assert.deepEqual(names.slice(beforeCold), [
+    contract,
+    physical,
+    contract,
+    physical,
+  ]);
   assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length);
   assert.equal(recorded.runtime, undefined);
   assert.equal(recorded.helperLoaders, undefined);
   assert.deepEqual(recorded.system.dependencies.payload[0].imports, [
     { name: contract, path: host, delay: false },
+    { name: physical, path: forward, delay: true },
   ]);
+  assert.ok(
+    recorded.system.dependencies.payload
+      .slice(1)
+      .every(({ imports }) => imports === null),
+  );
+  assert.deepEqual(
+    recorded.system.dependencies.git.find(({ path }) => path === privateDll)
+      .imports,
+    [{ name: "nested.dll", path: nested, delay: true }],
+  );
+  assert.deepEqual(
+    recorded.system.dependencies.git.find(({ path }) => path === nested)
+      .imports,
+    [{ name: physical, path: forward, delay: false }],
+  );
+  assert.ok(
+    recorded.system.dependencies.git
+      .filter(({ path }) => [host, forward].includes(path))
+      .every(({ imports }) => imports === null),
+  );
   assert.deepEqual(
     recorded.system.dependencies.payload.map(({ path }) => path),
     [
@@ -1133,7 +1233,15 @@ test("Windows helper admission omits installed traversal while private payload d
     ),
   );
   assert.equal(access.input.runtime.length, 3);
-  for (fault of ["unresolved", "identity", "bytes", "held-image"])
+  for (fault of [
+    "unresolved",
+    "identity",
+    "bytes",
+    "held-image",
+    "private-image",
+    "missing-private",
+    "delay",
+  ])
     await assert.rejects(
       load,
       (error) =>

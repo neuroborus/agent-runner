@@ -86,7 +86,12 @@ graphs. Held image, source, signature-observation and PE/ABI checks remain requi
 
 Only private access-payload and Git copies discover dependencies. Their individual
 held source/copy identities and delay edges remain bound, including fresh cold
-verification; Git does not traverse the hosted System32 targets' own imports.
+verification. Both discovery paths stop at held canonical System32 targets and
+record omitted stock import admission as `null`. Access keeps its direct stock
+copies for isolation; Git keeps the complete private DLL graph. Neither expands
+stock targets' own imports. The same boundary governs generated access assets,
+operation declarations, held static reads and the native private-runtime loader
+lane; missing private images and mismatched delay observations remain failures.
 The existing native import owner observes loaded modules or maps through the
 documented loader without initialization or dependency execution, then joins the
 mapped physical System32 file and held identity/hash. API-set contracts are not
