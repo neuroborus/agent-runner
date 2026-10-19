@@ -453,28 +453,6 @@ export async function acquireDarwinExperimentBuild(
     sdkSha256: observationDigest(sdk),
     buildSha256: observationDigest({ sources, tools, environment, helpers }),
   };
-  let cachePath;
-  for (const base of [
-    "/System/Library/dyld",
-    "/System/Volumes/Preboot/Cryptexes/OS/System/Library/dyld",
-  ]) {
-    for (const name of [
-      "dyld_shared_cache_x86_64h",
-      "dyld_shared_cache_x86_64",
-    ]) {
-      try {
-        const file = await fs.realpath(path.join(base, name));
-        if ((await fs.lstat(file)).isFile()) {
-          cachePath = file;
-          break;
-        }
-      } catch (cause) {
-        if (cause.code !== "ENOENT") throw cause;
-      }
-    }
-    if (cachePath) break;
-  }
-  requireObservation(cachePath);
   await run("/usr/bin/sudo", [
     "-n",
     "--",
@@ -532,7 +510,7 @@ export async function acquireDarwinExperimentBuild(
     requireObservation(digest(await fs.readFile(tool.path)) === tool.sha256);
   return {
     purpose: "experiment",
-    schemaVersion: 2,
+    schemaVersion: 3,
     job,
     binding,
     directory,
@@ -544,7 +522,6 @@ export async function acquireDarwinExperimentBuild(
     helpers,
     bootstrap,
     command: { helper: image("build-helper") },
-    cachePath,
     sdk,
     compilerVersion: version.stdout.trim(),
     commands,

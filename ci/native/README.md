@@ -370,25 +370,24 @@ then published using existing root custody. A timeout or cancellation owns the
 ordinary process group and awaits leader reaping; uncertain completion cannot
 publish a successful build. Original diagnostics survive cleanup failure.
 
-`experiment-build.js` uses private version-2 records and declarations. Sealed
-native readers independently inspect published helper/source bytes, signatures,
-loader/shared-cache closure and ABI. The build recipe inspects this completed
+`experiment-build.js` uses private version-3 records and declarations. Sealed
+native readers independently inspect published helper/source bytes, signatures
+and ABI. The build recipe inspects this completed
 build and fresh output identities, without parked compiler domains or compiler
 policy receipts. Every other recipe retains its native policy and retirement
 requirements. Cold loading verifies the existing output, source, tool and SDK
 observations without discovery, acquisition or recompilation. Incompatible, mixed,
 incomplete and substituted records fail.
 
-Ordinary installed dyld-cache reads trust enclosing hosted directories only for
-the existing x64 cache names under `/System/Library/dyld/` and canonical
-`/System/Volumes/Preboot/` paths. Their ancestors must remain canonical
-directories with unchanged inspected identities; ordinary reads do not require
-root ownership, non-writable modes or empty ACLs on those enclosing directories.
-The held cache file retains its ownership/mode/ACL, identity, bounded reads,
-signature and mapped-image/cache UUID and byte checks. Native initial reads,
-subsequent stability checks, hardlink classification, cold loading and runtime
-consumers share that scoped policy. Reviewed ancestry and all private published
-helper, build, report and case roots remain strict.
+Ordinary Darwin preparation explicitly trusts the disposable hosted system runtime.
+Initial preparation, cold loading, recovery and runtime observation do not discover
+or enumerate a dyld cache or reconstruct installed-library admission. Preparation
+components bind the ten actual helpers; their original Mach-O load commands remain
+observations, without synthetic dependency evidence. The separate held `/usr/lib/dyld`
+input remains required for access isolation and runtime observation. Version-3
+preparation, build and runtime declarations reject incompatible or mixed records
+without rebuilding or reconstructing missing evidence. Shared reviewed cache
+inspection and all private helper, build, report and case roots remain protected.
 
 Original protocol evidence placed the first ancestor refusal after the first
 `launcher` image closed, at the next `build-runtime` consumer for CoreFoundation.
@@ -397,6 +396,9 @@ filename printed by the guard. The original output did not retain the selected
 canonical cache pathname or the particular failing ancestor; no hosted-home
 path or parent metadata is inferred from that diagnostic. Fresh matching CI
 must establish native results and independent original-owner retirement.
+The later original cache failure reached the `cache_text` version/path predicate
+inside `dyld_shared_cache_iterate_text`; its diagnostic does not establish which
+conjunct failed. Removing that ordinary admission path supplies no native acceptance.
 
 Under the explicit disposable hosted-image/toolchain assumption, ordinary builds
 no longer reconstruct installed compiler/delegated-tool/SDK trust, snapshot
@@ -627,7 +629,7 @@ held identity; it makes no filesystem case-folding claim. Both Git recipes retai
 ordinary Git denial, all three profiles, positive controls, fixed subjects and
 independent loose-object reads. Repository bootstrap generation never runs Git.
 The experimental runtime owner rereads all ten held Mach-O helpers, signatures,
-transitive shared-cache text/loader observations and native build/ABI. These local
+the separate loader and native build/ABI. These local
 hashes establish no publication, provider or licensing approval;
 `observeDarwinRelease` retains its reviewed closure requirements.
 

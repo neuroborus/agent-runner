@@ -53,7 +53,8 @@ export async function darwinOperationPreparation(
   ]);
   requireObservation(
     (value.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
-      value.schemaVersion === 1 &&
+      value.schemaVersion ===
+        (binding.purpose === "experiment" && id === "release" ? 3 : 1) &&
       hash(value.inputSha256) &&
       value.id === id &&
       value.contextSha256 === observationDigest(binding.context) &&

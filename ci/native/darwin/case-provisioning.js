@@ -258,7 +258,7 @@ export function createDarwinCaseProvisioning(state, options) {
       );
       if (binding.purpose === "experiment") {
         requireObservation(
-          build?.schemaVersion === 2 && build.purpose === "experiment",
+          build?.schemaVersion === 3 && build.purpose === "experiment",
         );
         const images = [],
           reads = [];

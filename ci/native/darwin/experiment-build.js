@@ -59,13 +59,12 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
     "helpers",
     "bootstrap",
     "command",
-    "cachePath",
     "sdk",
     "compilerVersion",
     "commands",
   ]);
   requireObservation(
-    prepared.schemaVersion === 2 &&
+    prepared.schemaVersion === 3 &&
       prepared.purpose === "experiment" &&
       prepared.directory === directory &&
       prepared.output === path.join(directory, "platform-build") &&
@@ -256,7 +255,7 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
       helpers: prepared.helpers,
       darwinPreparation: {
         purpose: "experiment",
-        schemaVersion: 2,
+        schemaVersion: 3,
         sourceDirectory: prepared.sourceDirectory,
         sources: prepared.sources,
         bootstrap: prepared.bootstrap,
@@ -279,10 +278,73 @@ async function candidateSources(prepared, options) {
         source.sha256,
     );
 }
+// Recovery validates completed records without reconstructing missing observations.
+export function assertDarwinExperimentBuild(prepared, build) {
+  observationObject(build, [
+    "schemaVersion",
+    "purpose",
+    "status",
+    "context",
+    "bindingSha256",
+    "preparationSha256",
+    "helpers",
+    "tools",
+    "sources",
+    "sdk",
+    "commands",
+    "compilerVersion",
+    "abi",
+    "pfAbi",
+  ]);
+  requireObservation(
+    prepared.schemaVersion === 3 &&
+      build.schemaVersion === 3 &&
+      build.purpose === "experiment" &&
+      build.status === "OBSERVED" &&
+      build.preparationSha256 === observationDigest(prepared) &&
+      build.bindingSha256 === observationDigest(prepared.binding) &&
+      observationDigest(build.context) ===
+        observationDigest(jobContext(prepared.job)) &&
+      observationDigest(build.sdk) ===
+        observationDigest({
+          ...prepared.sdk,
+          sha256: observationDigest(prepared.sdk),
+        }) &&
+      ["tools", "sources", "commands", "compilerVersion"].every(
+        (key) =>
+          observationDigest(build[key]) === observationDigest(prepared[key]),
+      ) &&
+      Array.isArray(build.helpers) &&
+      build.helpers.length === DARWIN_HELPER_NAMES.length &&
+      new Set(build.helpers.map(({ name }) => name)).size ===
+        DARWIN_HELPER_NAMES.length,
+  );
+  for (const helper of build.helpers) {
+    observationObject(helper, [
+      "name",
+      "sha256",
+      "sourceSha256",
+      "cdhash",
+      "identity",
+      "rootIdentity",
+      "macho",
+    ]);
+    const expected = prepared.helpers.find(({ name }) => name === helper.name);
+    requireObservation(
+      expected &&
+        ["sha256", "sourceSha256", "cdhash"].every(
+          (key) => helper[key] === expected[key],
+        ) &&
+        typeof helper.identity === "string" &&
+        helper.identity.length > 0 &&
+        typeof helper.rootIdentity === "string" &&
+        helper.rootIdentity.length > 0,
+    );
+  }
+}
 async function observe(prepared, reader, options, previous) {
   const reads = [],
     helpers = [],
-    runtime = new Map(),
     fs = options.fs ?? filesystem;
   for (const tool of prepared.tools)
     requireObservation(
@@ -332,21 +394,6 @@ async function observe(prepared, reader, options, previous) {
           observationDigest([...macho.libraries, macho.loader].sort()),
     );
     reads.push(image.nativeEventSha256);
-    for (const dependency of macho.libraries)
-      if (!runtime.has(dependency)) {
-        const value = await reader.readBuildRuntime(
-          prepared.cachePath,
-          dependency,
-        );
-        requireObservation(
-          value.independent &&
-            value.held &&
-            value.unchanged &&
-            hash(value.nativeEventSha256),
-        );
-        reads.push(value.nativeEventSha256);
-        runtime.set(dependency, value);
-      }
     helpers.push({
       name,
       sha256: image.sha256,
@@ -357,37 +404,15 @@ async function observe(prepared, reader, options, previous) {
       macho: image.macho,
     });
   }
-  // Rejoin the transitive installed cache closure, never just a helper's direct imports.
-  for (const [file, value] of runtime)
-    for (const dependency of value.runtime.macho.dependencies) {
-      if (dependency === "/usr/lib/dyld" || runtime.has(dependency)) continue;
-      requireObservation(runtime.size < 120);
-      const actual = await reader.readBuildRuntime(
-        prepared.cachePath,
-        dependency,
-      );
-      requireObservation(
-        actual.independent &&
-          actual.held &&
-          actual.unchanged &&
-          hash(actual.runtime.sha256) &&
-          hash(actual.nativeEventSha256),
-      );
-      reads.push(actual.nativeEventSha256);
-      runtime.set(dependency, actual);
-    }
   const installed = await reader.build();
   requireObservation(
     installed.purpose === "experiment" &&
       installed.osBuild === prepared.binding.osBuild,
   );
-  const sdk = {
-    ...prepared.sdk,
-    runtime: [...runtime].map(([path, observation]) => ({ path, observation })),
-  };
+  const sdk = { ...prepared.sdk };
   sdk.sha256 = observationDigest(sdk);
   const build = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     purpose: "experiment",
     status: "OBSERVED",
     context: jobContext(prepared.job),
@@ -410,6 +435,7 @@ async function observe(prepared, reader, options, previous) {
       runtimeCompatibility: "UNPROVED",
     },
   };
+  assertDarwinExperimentBuild(prepared, build);
   if (previous)
     requireObservation(
       observationDigest(build) === observationDigest(previous),
@@ -566,13 +592,14 @@ export async function loadDarwinExperimentBuild(
         ),
       );
     requireObservation(
-      observed.build.schemaVersion === 2 &&
+      observed.build.schemaVersion === 3 &&
         observationDigest({ observed, close }) ===
           job.preparationEffects.receiptSha256 &&
         observed.build.preparationSha256 === observationDigest(prepared) &&
         retired(close) &&
         close.closed === true,
     );
+    assertDarwinExperimentBuild(prepared, observed.build);
     await recoverDarwinBuild(state, await recordsFor(state), options.signal);
     const { reader } = await state.bootstrap(options.signal);
     return {
@@ -607,6 +634,7 @@ export async function recoverDarwinExperimentBuild(
   const env = darwinExperimentWorker(job, options.binding, options);
   if (job.preparationEffects.admission === "not-started") return job;
   let state,
+    prepared,
     settlement = retained(),
     receiptSha256 = null;
   try {
@@ -665,7 +693,7 @@ export async function recoverDarwinExperimentBuild(
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    ({ state } = await selected(job, directory, options));
+    ({ state, prepared } = await selected(job, directory, options));
     state.fence();
     await state.receipt(fence);
     const observed = JSON.parse(
@@ -679,7 +707,7 @@ export async function recoverDarwinExperimentBuild(
         ),
       );
     requireObservation(
-      observed.build.schemaVersion === 2 &&
+      observed.build.schemaVersion === 3 &&
         observed.build.preparationSha256 ===
           observationDigest(
             JSON.parse(
@@ -691,6 +719,7 @@ export async function recoverDarwinExperimentBuild(
         retired(close) &&
         close.closed === true,
     );
+    assertDarwinExperimentBuild(prepared, observed.build);
     const result = await recoverDarwinBuild(
       state,
       await recordsFor(state),

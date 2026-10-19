@@ -446,11 +446,10 @@ export async function prepareDarwinExperimentCases(
             index: add("helper", helper(name).path, helper(name).sha256),
           })),
           loader: add("image", inputs.loader.path, inputs.loader.sha256),
-          cachePath: prepared.cachePath,
         };
       record = {
         purpose: "experiment",
-        schemaVersion: 1,
+        schemaVersion: recipe.id === "release" ? 3 : 1,
         contextSha256: observationDigest(context),
         id: recipe.id,
         inputSha256: null,

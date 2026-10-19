@@ -1302,25 +1302,23 @@ static void build_receipt(const char *encoded, const char *pin) {
 #ifdef NATIVE_CI_EXPERIMENT
 /* Read installed build inputs without adding hundreds of SDK headers to the
  * finite custody slots. Observed pins confer no reviewed authority. */
-static void build_input(const char *encoded, const char *pin, const char *runtime, const char *cdhash) {
-  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode || (case_mode && runtime != NULL));
+static void build_input(const char *encoded, const char *pin, const char *cdhash) {
+  char name[PATH_MAX]; decode(encoded, name, sizeof(name)); need(build_mode);
   bool declared = false;
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, name) && !strcmp(entries[i].pin, pin)) declared = true;
-  bool cache = runtime != NULL;
-  if (cache) need(installed_cache_path(name));
-  else need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
+  need(declared || (!strncmp(name, "/Library/native-poc-", 20) && strlen(name) > 85 && strspn(name + 20, "0123456789abcdef") == 64 && name[84] == '/' && !strchr(name + 85, '/')) || !strcmp(name, "/sbin/pfctl") || !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/git") || !strcmp(name, "/etc/security/audit_event") || !strcmp(name, "/etc/security/audit_class") || !strcmp(name, "/private/etc/security/audit_event") || !strcmp(name, "/private/etc/security/audit_class") || (!strncmp(name, "/Applications/", 14) && strstr(name, "/Contents/Developer/")) || !strncmp(name, "/Library/Developer/", 19) ||
     !strncmp(name, "/usr/include/", 13) || !strncmp(name, "/usr/lib/clang/", 15) || !strcmp(name, "/usr/lib/dyld"));
   ancestors(name);
   char parent[PATH_MAX]; strcpy(parent, name); char *slash = strrchr(parent, '/');
   while (slash && slash != parent) {
     *slash = 0; int fd = open(parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); struct stat held, named;
     need(fd >= 0 && !fstat(fd, &held) && is_bootstrap_parent(name, &held));
-    if (!experiment_cache_ancestors(name)) no_acl(fd);
+    no_acl(fd);
     need(!lstat(parent, &named)); same_stat(held, named); need(!close(fd)); slash = strrchr(parent, '/');
   }
   struct entry sdk = {.fd = -1}, developer = {.fd = -1}; char compiler[PATH_MAX];
   const char *leaf = strrchr(name, '/');
-  if (!cache && leaf && !strcmp(leaf, "/SDKSettings.json")) {
+  if (leaf && !strcmp(leaf, "/SDKSettings.json")) {
     size_t length = (size_t)(leaf - name); need(length < sizeof(sdk.path));
     memcpy(sdk.path, name, length); sdk.path[length] = 0;
     sdk.fd = open(sdk.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -1332,15 +1330,14 @@ static void build_input(const char *encoded, const char *pin, const char *runtim
       developer.stat.st_uid == 0 && !(developer.stat.st_mode & 022)); no_acl(developer.fd); stable(&developer);
   }
   struct entry value = {.fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)};
-  strcpy(value.kind, cache ? "cache" : "data"); strcpy(value.path, name);
+  strcpy(value.kind, "data"); strcpy(value.path, name);
   need(value.fd >= 0 && !fstat(value.fd, &value.stat) && S_ISREG(value.stat.st_mode) && value.stat.st_uid == 0 &&
-    (value.stat.st_nlink == 1 || installed_input(name, &value.stat)) && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= (cache ? 17179869184ULL : 536870912ULL)); no_acl(value.fd);
+    (value.stat.st_nlink == 1 || installed_input(name, &value.stat)) && !(value.stat.st_mode & 06022) && value.stat.st_size > 0 && (uint64_t)value.stat.st_size <= 536870912ULL); no_acl(value.fd);
   printf("{\"object\":"); identity(&value);
-  if (cache) { fputs(",\"runtime\":", stdout); cache_image(&value, runtime); }
-  else { char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); } }
+  char actual[65]; sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(actual, pin)); printf(",\"sha256\":\"%s\"", actual); uint32_t magic = 0; if (value.stat.st_size >= sizeof(magic)) read_at(value.fd, &magic, sizeof(magic), 0); if (magic == MH_MAGIC_64) { fputs(",\"macho\":", stdout); image(&value); }
   stable(&value); no_acl(value.fd); need(value.stat.st_nlink == 1 || installed_input(name, &value.stat));
   if (cdhash) {
-    need(!cache && strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40);
+    need(strlen(cdhash) == 40 && strspn(cdhash, "0123456789abcdef") == 40);
     signature(name, cdhash); stable(&value); printf(",\"cdhash\":\"%s\"", cdhash);
   }
   if (sdk.fd >= 0) {
@@ -2367,9 +2364,7 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "build-root")) { need(building && n == 3); build_root_snapshot(tokens[2]);
     } else if (!strcmp(tokens[0], "build-open")) { need(building && n == 4); build_open(tokens[2], tokens[3]);
 #ifdef NATIVE_CI_EXPERIMENT
-    } else if (!strcmp(tokens[0], "build-input")) { need(building && (n == 4 || n == 5)); build_input(tokens[2], tokens[3], NULL, n == 5 ? tokens[4] : NULL);
-    } else if (!strcmp(tokens[0], "build-runtime")) { need((building || case_mode) && n == 4); char image[PATH_MAX]; decode(tokens[3], image, sizeof(image));
-      need(!strncmp(image, "/usr/lib/", 9) || !strncmp(image, "/System/Library/", 16)); build_input(tokens[2], "-", image, NULL);
+    } else if (!strcmp(tokens[0], "build-input")) { need(building && (n == 4 || n == 5)); build_input(tokens[2], tokens[3], n == 5 ? tokens[4] : NULL);
 #endif
     } else if (!strcmp(tokens[0], "root-domain")) { need(n == 5); root_domain((pid_t)number(tokens[2]), number(tokens[3]), number(tokens[4]));
     } else if (!strcmp(tokens[0], "root-retired")) {

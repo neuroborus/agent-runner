@@ -128,9 +128,14 @@ no slow-suite assignment; the explicit native harness registers them.
 Darwin's ordinary preparation coverage injects installed Clang/SDK discovery,
 exact Git-blob and checkout bytes, one compile per helper, ad-hoc signing and
 root publication. It verifies actual command diagnostics, cancellation, missing
-output and changed candidate/source/tool/output observations. Version-2 records
+output and changed candidate/source/tool/output observations. Version-3 records
 reject legacy, mixed and incomplete command/environment inventories; cold loading
 compares binding values independently of key order and cannot acquire or recompile.
+Ordinary preparation and repeated cold/runtime reads require no cache discovery
+or enumeration. The helper-only inventory retains all ten images, held identities,
+signatures and native ABI, plus the separately held dyld input. Existing regressions
+reject old or mixed private records, incomplete builds and substituted helpers;
+recovery preserves uncertainty and the original failure without rebuilding.
 A deterministic process-group fixture verifies cancellation, stream-read failure,
 reaped closure and unsuccessful completion when descendants remain. Injected streams
 retain successful diagnostics above 64 KiB, including split multibyte chunks, and
@@ -354,7 +359,7 @@ Experimental access coverage also observes installed PF/ACL pins instead
 of supplying approval hashes. `test/native-module-loading.test.js` checks the four
 complete Darwin preparation exports. These are pure or injected portable
 regressions, add no slow-tier assignment and establish no native PASS. Matching
-hosted CI still owns actual file aliases, Git commands, shared-cache/runtime reads,
+hosted CI still owns actual file aliases, Git commands, native runtime reads,
 process retirement and policy restoration.
 
 The explicit harness also registers `ci/native/system-experiment.test.js`.
@@ -1272,10 +1277,11 @@ Darwin cache regressions execute the repository loader-query body with injected
 task and memory reads. They reject failed queries, incomplete counts, unknown
 formats, short/wrapped records or reads, old versions and substituted UUID/base
 observations. Source-derived predicates reject slid-address and mapped-range
-overflow; custody fixtures retain cache/image UUID requirements in both purposes
-and mandatory mapped-text hashes for experiment builds. SDK layouts remain
+overflow; retained shared custody fixtures protect cache/image UUID requirements
+in both purposes and experiment mapped-text hashes. Ordinary helper preparation
+does not invoke those cache readers. SDK layouts remain
 symbolic in these portable tests: actual SDK compilation/linking and loaded-cache
-joins require matching macOS CI. Existing preparation coverage also freezes both
+joins require matching macOS CI. Retained reviewed preparation coverage freezes both
 loader SDK headers in the compiler dependency inventory and rejects substitution
 on cold load. These cases use existing fast discovery and the selected native
 harness, adding no slow-tier requirement.
@@ -1284,10 +1290,10 @@ The same Darwin build-source suite executes the shared native ancestor predicate
 for both compile purposes. Synthetic installed-cache paths accept hosted parent
 ownership/modes only in experiment builds; private helper/case roots, tools,
 near-miss names, non-directories and reviewed inputs retain their refusals.
-Custody regressions exercise actual held bootstrap reads under hosted ancestry,
+Shared custody regressions exercise held cache reads under hosted ancestry,
 rejecting canonical-path, parent/leaf identity, ownership and content substitution.
-Existing preparation coverage rejoins the same synthetic Preboot cache selection
-on cold loading without acquisition or recompilation. These cases add no native
+Ordinary preparation and cold loading instead bind existing helper bytes without
+cache selection, acquisition or recompilation. These cases add no native
 tool, framework, slow-tier assignment or native acceptance claim.
 
 Linux interpreter regressions inject source/running-inode and byte-window

@@ -181,20 +181,7 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       sources: [],
       output: "/synthetic/build",
     },
-    build:
-      platform === "darwin"
-        ? {
-            schemaVersion: 2,
-            purpose: "experiment",
-            commands: [],
-            helpers: inventory.helpers.map((name) => ({
-              name,
-              sha256: H,
-              sourceSha256: H,
-              macho: { dependencies: [] },
-            })),
-          }
-        : { commands: [] },
+    build: { commands: [] },
     system: {
       policyBindings: bindings,
       bindings: bindings.map((policyBinding) => ({
@@ -203,6 +190,49 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       })),
     },
   };
+  if (platform === "darwin") {
+    const prepared = preparation.prepared;
+    Object.assign(prepared, {
+      purpose: "experiment",
+      schemaVersion: 3,
+      binding: expected.binding,
+      sources: inventory.helpers.map((name) => ({
+        name: name + ".c",
+        sha256: H,
+      })),
+      tools: expected.tools,
+      sdk: { build: "synthetic", settingsSha256: H },
+      commands: [],
+      compilerVersion: "synthetic",
+      helpers: inventory.helpers.map((name) => ({
+        name,
+        sha256: H,
+        sourceSha256: H,
+        cdhash: C,
+      })),
+    });
+    preparation.build = {
+      schemaVersion: 3,
+      purpose: "experiment",
+      status: "OBSERVED",
+      context,
+      bindingSha256: observationDigest(prepared.binding),
+      preparationSha256: observationDigest(prepared),
+      helpers: prepared.helpers.map((helper) => ({
+        ...helper,
+        identity: "synthetic-" + helper.name,
+        rootIdentity: "synthetic-build-root",
+        macho: { dependencies: [] },
+      })),
+      tools: prepared.tools,
+      sources: prepared.sources,
+      sdk: { ...prepared.sdk, sha256: observationDigest(prepared.sdk) },
+      commands: prepared.commands,
+      compilerVersion: prepared.compilerVersion,
+      abi: { purpose: "experiment", osBuild },
+      pfAbi: { runtimeCompatibility: "UNPROVED" },
+    };
+  }
   const saves = [],
     events = [],
     failures = [];
@@ -1968,16 +1998,57 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
   assert.equal(closed, 3);
 });
 
+function waitForExperimentEvent(event, running, failures) {
+  return Promise.race([
+    event,
+    running.then(() => {
+      throw (
+        failures[0] ??
+        new Error("Native experiment completed before the expected event")
+      );
+    }),
+  ]);
+}
+
+test("experiment event waits expose early failed jobs, operation rejection and unexpected success", async () => {
+  for (const outcome of ["failed-job", "rejection", "success"]) {
+    const f = fixture("darwin"),
+      entered = Promise.withResolvers(),
+      failure = new Error("Synthetic early experiment failure");
+    if (outcome === "failed-job")
+      f.options.load = async () => {
+        throw failure;
+      };
+    if (outcome === "rejection")
+      f.options.persist = async () => {
+        throw failure;
+      };
+    const running = f.run(f.job, "/synthetic", f.options);
+    running.catch(() => {});
+    try {
+      await assert.rejects(
+        waitForExperimentEvent(entered.promise, running, f.failures),
+        outcome === "success"
+          ? { message: "Native experiment completed before the expected event" }
+          : (cause) => cause === failure,
+      );
+      if (outcome === "failed-job") {
+        assert.equal((await running).failure, "probe-failed");
+        assert.equal(f.failures[0], failure);
+      }
+      if (outcome === "success") assert.equal((await running).failure, null);
+    } finally {
+      entered.resolve();
+      await Promise.allSettled([running, entered.promise]);
+    }
+  }
+});
+
 test("execution deadline fences late completion and cannot witness denial or independently settle pending work", async () => {
   const f = fixture("darwin"),
-    timers = new Map();
-  let announce, finish;
-  const entered = new Promise((resolve) => {
-    announce = resolve;
-  });
-  const pending = new Promise((resolve) => {
-    finish = resolve;
-  });
+    timers = new Map(),
+    entered = Promise.withResolvers(),
+    pending = Promise.withResolvers();
   f.options.schedule = (fn, ms) => {
     const token = {};
     timers.set(token, { fn, ms });
@@ -1985,80 +2056,135 @@ test("execution deadline fences late completion and cannot witness denial or ind
   };
   f.options.cancel = (token) => timers.delete(token);
   f.options.runCase = async () => {
-    announce();
-    return pending;
+    entered.resolve();
+    return pending.promise;
   };
   const running = f.run(f.job, "/synthetic", f.options);
-  await entered;
-  [...timers.values()].find(({ ms }) => ms === 120000).fn();
-  const job = await running;
-  assert.equal(job.failure, "deadline");
-  assert.equal(job.cases.at(-1).status, "FAIL");
-  assert.equal(job.cases.at(-1).effects.helpers.settlement.status, "RETAINED");
-  assert.ok(
-    job.cases
-      .at(-1)
-      .observations.every(({ observation }) => !observation.attempted),
-  );
-  const count = f.saves.length;
-  finish({ status: "OBSERVED", evidenceSha256: H });
-  await pending;
-  assert.equal(f.saves.length, count);
-  assert.equal(timers.size, 0);
+  running.catch(() => {});
+  try {
+    await waitForExperimentEvent(entered.promise, running, f.failures);
+    [...timers.values()].find(({ ms }) => ms === 120000).fn();
+    const job = await running;
+    assert.equal(job.failure, "deadline");
+    assert.equal(job.cases.at(-1).status, "FAIL");
+    assert.equal(
+      job.cases.at(-1).effects.helpers.settlement.status,
+      "RETAINED",
+    );
+    assert.ok(
+      job.cases
+        .at(-1)
+        .observations.every(({ observation }) => !observation.attempted),
+    );
+    const count = f.saves.length;
+    pending.resolve({ status: "OBSERVED", evidenceSha256: H });
+    await pending.promise;
+    assert.equal(f.saves.length, count);
+    assert.equal(timers.size, 0);
+  } finally {
+    pending.resolve({ status: "OBSERVED", evidenceSha256: H });
+    await Promise.allSettled([running, pending.promise]);
+  }
 });
 
-test("a delayed policy publication cannot overwrite terminal failure after independent cleanup", async () => {
-  const f = fixture("darwin"),
-    timers = new Map();
-  let entered, release, cleaned;
-  const publicationEntered = new Promise((resolve) => {
-    entered = resolve;
-  });
-  const publication = new Promise((resolve) => {
-    release = resolve;
-  });
-  const cleanupEntered = new Promise((resolve) => {
-    cleaned = resolve;
-  });
-  const persist = f.options.persist,
-    create = f.options.createEffects;
-  f.options.schedule = (fn, ms) => {
-    const token = {};
-    timers.set(token, { fn, ms });
-    return token;
-  };
-  f.options.cancel = (token) => timers.delete(token);
-  f.options.persist = async (value) => {
-    const entry = value.cases.at(-1);
-    if (
-      entry.id === "release" &&
-      entry.status === "NOT_RUN" &&
-      entry.policy.independent
-    ) {
-      entered();
-      await publication;
-    }
-    await persist(value);
-  };
-  f.options.createEffects = () => {
-    const effects = create(),
-      settle = effects.settle;
-    effects.settle = async (...args) => {
-      const result = await settle(...args);
-      if (args[0].id === "release") cleaned();
-      return result;
-    };
-    return effects;
-  };
-  const running = f.run(f.job, "/synthetic", f.options);
-  await publicationEntered;
-  [...timers.values()].find(({ ms }) => ms === 120000).fn();
-  await cleanupEntered;
-  release();
-  const job = await running;
-  assert.equal(job.failure, "deadline");
-  assert.equal(job.cases.at(-1).status, "FAIL");
-  assert.equal(f.saves.at(-1).failure, "deadline");
-  assert.equal(f.saves.at(-1).cases.at(-1).status, "FAIL");
-  assert.equal(timers.size, 0);
+test("a delayed policy publication cannot overwrite terminal failure after independent cleanup", async (t) => {
+  for (const failSettlement of [false, true])
+    await t.test(
+      failSettlement
+        ? "settlement rejection is exposed while publication is held"
+        : "cleanup completes before publication is released",
+      async () => {
+        const f = fixture("darwin"),
+          timers = new Map(),
+          publicationEntered = Promise.withResolvers(),
+          publication = Promise.withResolvers(),
+          cleanupEntered = Promise.withResolvers(),
+          settlementFailure = new Error("Synthetic settlement failure");
+        // Settlement can reject before this event is awaited, while terminal
+        // ledger writes remain queued behind the held policy publication.
+        cleanupEntered.promise.catch(() => {});
+        const persist = f.options.persist,
+          create = f.options.createEffects;
+        f.options.schedule = (fn, ms) => {
+          const token = {};
+          timers.set(token, { fn, ms });
+          return token;
+        };
+        f.options.cancel = (token) => timers.delete(token);
+        f.options.persist = async (value) => {
+          const entry = value.cases.at(-1);
+          if (
+            entry.id === "release" &&
+            entry.status === "NOT_RUN" &&
+            entry.policy.independent
+          ) {
+            publicationEntered.resolve();
+            await publication.promise;
+          }
+          await persist(value);
+        };
+        f.options.createEffects = () => {
+          const effects = create(),
+            settle = effects.settle;
+          effects.settle = async (...args) => {
+            try {
+              const result = await settle(...args);
+              if (args[0].id === "release") {
+                if (failSettlement) throw settlementFailure;
+                cleanupEntered.resolve();
+              }
+              return result;
+            } catch (cause) {
+              cleanupEntered.reject(cause);
+              throw cause;
+            }
+          };
+          return effects;
+        };
+        const running = f.run(f.job, "/synthetic", f.options);
+        let completed = false;
+        running.then(
+          () => {
+            completed = true;
+          },
+          () => {
+            completed = true;
+          },
+        );
+        try {
+          await waitForExperimentEvent(
+            publicationEntered.promise,
+            running,
+            f.failures,
+          );
+          [...timers.values()].find(({ ms }) => ms === 120000).fn();
+          const cleanup = waitForExperimentEvent(
+            cleanupEntered.promise,
+            running,
+            f.failures,
+          );
+          if (failSettlement)
+            await assert.rejects(
+              cleanup,
+              (cause) => cause === settlementFailure,
+            );
+          else await cleanup;
+          assert.equal(completed, false);
+        } finally {
+          publication.resolve();
+          await Promise.allSettled([running, publication.promise]);
+        }
+        const job = await running;
+        assert.equal(job.failure, "deadline");
+        assert.equal(job.cases.at(-1).status, "FAIL");
+        assert.equal(f.saves.at(-1).failure, "deadline");
+        assert.equal(f.saves.at(-1).cases.at(-1).status, "FAIL");
+        assert.equal(f.failures.length, 1);
+        assert.equal(
+          f.failures[0].message,
+          "Native experiment execution deadline",
+        );
+        assert.equal(timers.size, 0);
+      },
+    );
 });

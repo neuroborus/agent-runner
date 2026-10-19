@@ -584,7 +584,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     "finish",
     "build-open",
     "build-root",
-    ...(input.purpose === "experiment" ? ["build-input", "build-runtime"] : []),
+    ...(input.purpose === "experiment" ? ["build-input"] : []),
     "root-retired",
     "case-read",
     "case-retire",
@@ -1045,36 +1045,6 @@ export function createDarwinCustodyReader(value, options = {}) {
       );
       return {
         ...actual,
-        independent: true,
-        held: true,
-        unchanged: true,
-        nativeEventSha256: observationDigest(actual),
-      };
-    },
-    async readBuildRuntime(cache, file) {
-      requireDarwin(
-        input.purpose === "experiment" &&
-          ["build", "release"].includes(input.context.executionId) &&
-          location(cache) &&
-          location(file),
-      );
-      const actual = await command("build-runtime", hex(cache), hex(file));
-      observationObject(actual, ["object", "runtime"]);
-      const object = snapshot(
-          actual.object,
-          { uid: 0, gid: actual.object.gid },
-          17179869184,
-        ),
-        runtime = cacheImage(actual.runtime, input.purpose);
-      requireDarwin(
-        !object.directory &&
-          object.uid === 0 &&
-          object.bytes > 0 &&
-          !(object.mode & 0o6022),
-      );
-      return {
-        ...actual,
-        runtime,
         independent: true,
         held: true,
         unchanged: true,

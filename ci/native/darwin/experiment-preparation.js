@@ -16,6 +16,7 @@ import {
   loadDarwinExperimentBuild,
   recoverDarwinExperimentBuild,
   darwinExperimentBuildInput,
+  assertDarwinExperimentBuild,
 } from "./experiment-build.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
 import { prepareDarwinExperimentCases } from "./experiment-cases.js";
@@ -33,9 +34,7 @@ const retired = (value) =>
 // Completed hosted commands are observations, not protected compiler receipts.
 // The native reader independently re-reads the published images and directory.
 export function darwinExperimentBuildBinding({ prepared, build }) {
-  requireObservation(
-    build.schemaVersion === 2 && build.purpose === "experiment",
-  );
+  assertDarwinExperimentBuild(prepared, build);
   return {
     purpose: "experiment",
     context: prepared.bootstrap.context,
@@ -85,9 +84,12 @@ export function darwinExperimentBuildBinding({ prepared, build }) {
 function systemInput(job, preparation) {
   requireObservation(
     job.purpose === "experiment" &&
+      preparation.schemaVersion === 3 &&
+      preparation.build.schemaVersion === 3 &&
       preparation.purpose === "experiment" &&
       preparation.system.cases.length === darwinSystemRecipes().length - 1,
   );
+  assertDarwinExperimentBuild(preparation.prepared, preparation.build);
   const canonical = darwinExperimentCaseDeclarations(preparation.system.cases);
   requireObservation(
     observationDigest(canonical.policyBindings) ===
@@ -138,15 +140,9 @@ function selectors(preparation, options) {
     },
   };
 }
-function observation(prepared, build, inputs, readSha256) {
-  const runtime = new Map(
-      build.sdk.runtime.map(({ path, observation }) => [path, observation]),
-    ),
-    id = (file) =>
-      file === "/usr/lib/dyld"
-        ? "dyld"
-        : "runtime-" + digest(file).slice(0, 24),
-    bindings = (source) => ({
+// Hosted libraries stay outside this inventory; the build retains actual load commands.
+function observation(prepared, build, readSha256) {
+  const bindings = (source) => ({
       source,
       build: observationDigest(build),
       abi: observationDigest(build.abi),
@@ -156,28 +152,9 @@ function observation(prepared, build, inputs, readSha256) {
       role: "helper",
       sha256: helper.sha256,
       format: "macho-x64",
-      loader: helper.macho.dependencies.map(id),
+      loader: [],
       bindings: bindings(helper.sourceSha256),
     }));
-  for (const [file, actual] of runtime) {
-    requireObservation(actual.runtime?.sha256);
-    components.push({
-      id: id(file),
-      role: "dependency",
-      sha256: actual.runtime.sha256,
-      format: "macho-x64",
-      loader: actual.runtime.macho.dependencies.map(id),
-      bindings: bindings(actual.runtime.signatureSha256),
-    });
-  }
-  components.push({
-    id: "dyld",
-    role: "dependency",
-    sha256: inputs.loader.sha256,
-    format: "macho-x64",
-    loader: inputs.loader.macho.dependencies.map(id),
-    bindings: bindings(inputs.loader.sha256),
-  });
   const expected = {
       binding: prepared.binding,
       sources: prepared.sources.map(({ name, sha256 }) => ({
@@ -200,9 +177,6 @@ function observation(prepared, build, inputs, readSha256) {
     identities = new Map(
       build.helpers.map(({ name, identity }) => [name, identity]),
     );
-  for (const [file, actual] of runtime)
-    identities.set(id(file), actual.object.identity);
-  identities.set("dyld", inputs.loader.identity);
   return normalizeExperimentPreparation(
     {
       purpose: "experiment",
@@ -268,17 +242,13 @@ export async function prepareDarwinExperiment(
       ),
       preparation = {
         purpose: "experiment",
+        schemaVersion: 3,
         prepared: built.prepared,
         buildJob: built.job,
         build: built.build,
         inputs: acquisition.inputs,
         system,
-        observation: observation(
-          built.prepared,
-          built.build,
-          acquisition.inputs,
-          built.readSha256,
-        ),
+        observation: observation(built.prepared, built.build, built.readSha256),
         recipes: darwinSystemRecipes(),
       };
     systemInput(job, preparation);
@@ -368,16 +338,17 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
         observationDigest(job.preparation) &&
       preparation.prepared.directory === directory,
   );
-  const fresh = await loadDarwinExperimentBuild(
-    preparation.buildJob,
-    directory,
-    options,
-  );
+  const declaration = systemInput(job, preparation),
+    fresh = await loadDarwinExperimentBuild(
+      preparation.buildJob,
+      directory,
+      options,
+    );
   requireObservation(
     observationDigest(fresh.build) === observationDigest(preparation.build),
   );
   const settings = selectors(preparation, options),
-    state = darwinPreparationContext(systemInput(job, preparation), settings);
+    state = darwinPreparationContext(declaration, settings);
   let primary;
   try {
     // Rejoin the protected original preparation receipts through a distinct native reader.
@@ -390,7 +361,6 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
     const { reader } = await state.bootstrap(options.signal);
     for (const { path, sha256 } of preparation.system.uploads)
       await reader.readBuildInput(path, sha256);
-    let loader;
     for (const value of [
       preparation.inputs.git,
       preparation.inputs.pfctl,
@@ -405,20 +375,10 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
             actual.sha256 === value.sha256 &&
             observationDigest(actual.macho) === observationDigest(value.macho),
         );
-        loader = {
-          path: value.path,
-          sha256: actual.sha256,
-          identity: actual.object.identity,
-          macho: actual.macho,
-        };
       }
     }
-    const runtime = observation(
-      fresh.prepared,
-      fresh.build,
-      { ...preparation.inputs, loader },
-      fresh.readSha256,
-    ).observed.components;
+    const runtime = observation(fresh.prepared, fresh.build, fresh.readSha256)
+      .observed.components;
     return { job, preparation: { ...preparation, close }, runtime };
   } catch (cause) {
     primary = cause;

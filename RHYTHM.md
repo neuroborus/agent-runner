@@ -5,6 +5,23 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-19 — Trust the hosted Darwin system runtime for ordinary experiments
+
+Ordinary Darwin preparation no longer discovers or recursively admits dyld-cache
+libraries to accept the ten exact-candidate helpers. The disposable hosted system
+runtime is trusted; helper/source identity, signatures, tool/SDK observations,
+native ABI, separate dyld input, protected private roots, policies, controls and
+independent original-owner retirement remain required. Private version-3 build,
+preparation and runtime declarations reject incompatible or mixed records during
+cold loading and recovery without rebuilding missing evidence. Shared reviewed
+cache inspection and production/provider admission retain their strict contracts.
+
+The original `cache_text` version/path refusal inside
+`dyld_shared_cache_iterate_text` remains recorded without attributing its unknown
+failed conjunct. Portable regressions prove no native acceptance. Darwin inherited
+fault authority/model-free prerequisites, Windows observer-transfer 10022, missing
+4663 audit and original `verify-retain` uncertainty remain separate blockers.
+
 ## 2026-10-18 — Observe ordinary Windows installed-loader resolution
 
 Ordinary PE reads now enumerate declared imports and delay flags separately from

@@ -111,7 +111,7 @@ export function normalizeDarwinPreparation(
   ]);
   requireObservation(
     (value.schemaVersion === 1 ||
-      (purpose === "experiment" && value.schemaVersion === 2)) &&
+      (purpose === "experiment" && value.schemaVersion === 3)) &&
       absolute(value.sourceDirectory),
   );
   const bootstrap = normalizeDarwinCustodyInput(value.bootstrap, purpose);
@@ -122,7 +122,7 @@ export function normalizeDarwinPreparation(
   );
   observationObject(
     value.command,
-    value.schemaVersion === 2
+    value.schemaVersion === 3
       ? ["helper"]
       : [
           "helper",
@@ -848,7 +848,7 @@ function darwinBuildRecoveryInventory(state, records) {
             "root-retired",
             "compiler-policy",
             ...(state.manifest.purpose === "experiment"
-              ? ["signature", "macho", "build", "build-input", "build-runtime"]
+              ? ["signature", "macho", "build", "build-input"]
               : []),
           ].includes(entry.phase),
       ),

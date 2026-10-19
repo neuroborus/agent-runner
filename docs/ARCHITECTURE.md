@@ -164,29 +164,30 @@ Darwin's ordinary preparation discovers the installed Clang/SDK and compiles eac
 of the ten exact-candidate helpers once through bounded argument-vector execution.
 Explicit SDKROOT/DEVELOPER_DIR, actual tool hashes and compiler/SDK versions,
 command results, ad-hoc signing and experiment Mach-O/ABI checks bind the completed
-build. Its private version-2 build and preparation declarations reject legacy or
+build. Its private version-3 build and preparation declarations reject legacy or
 mixed compiler records. The hosted image/toolchain assumption replaces seed then
 protected recompilation, installed-compiler signature admission, delegated-tool/
 SDK trust reconstruction and dependency snapshots. No compiler-policy receipt or
 privileged compiler domain is claimed.
 Root publication and the sealed native reader remain necessary for case custody.
-Independent held output/source, loader/shared-cache and native ABI observations
+Independent held output/source, separate loader and native ABI observations
 follow publication. The build recipe rejoins the completed record and reads the
 published images and output directory; copied expectations cannot supply those
 observations. Reviewed compiler, publication, signature and source validators,
 and every other recipe's policy requirements remain strict.
-Only ordinary installed dyld-cache ancestry uses the hosted runtime trust
-assumption: the existing x64 cache names under `/System/Library/dyld/` or
-canonical `/System/Volumes/Preboot/` retain canonical directory and stable
-identity checks without imposing root ownership, non-writable modes or empty
-ancestor ACLs. The shared native custody predicates and purpose-aware bootstrap
-file reader apply the same boundary to initial, repeated and cold reads.
-The held cache leaf, hashes, signatures, UUID/mapped-text observations and
-private helper/build/report/case roots keep their existing protections.
-Reviewed ancestry remains strict. Original protocol/source correlation identifies
-the first failed consumer as CoreFoundation's `build-runtime` cache read after
-the first launcher image closes; it does not establish the selected canonical
-cache pathname or failing parent metadata.
+Ordinary Darwin admission trusts the hosted installed system runtime. It performs
+no cache discovery or recursive shared-cache reads during preparation, cold loading,
+recovery or runtime observation. Components describe the ten held helpers without
+inventing dependency evidence; native Mach-O load commands remain observed. The
+separate held dyld input remains mandatory for access isolation and runtime reads.
+Private version-3 records and runtime declarations migrate together and reject
+incompatible or mixed evidence. Shared reviewed cache inspection and protected
+helper/build/report/case roots retain their contracts.
+Historical protocol/source correlation identified CoreFoundation's `build-runtime`
+cache read after the first launcher image closed, without establishing the selected
+canonical pathname or failing ancestor metadata. A later original failure reached
+the `cache_text` version/path predicate in `dyld_shared_cache_iterate_text`; the
+failed conjunct remains unknown. Portable regressions establish no native acceptance.
 Cold loading verifies existing sources, tools, SDK settings and held outputs
 without discovery, compilation or acquisition. Original native reader births and
 journals remain independently retired before restoration. Interrupted builds or
@@ -314,7 +315,7 @@ acquisition stays in `experiment-inputs.js`; finite selector generation stays in
 existing native custody, file and Git owners verify actual held assets and effects.
 The file alias fixture uses actual owned hard links without asserting filesystem
 case folding. An experiment-only runtime owner reobserves all ten signed Mach-O
-helpers, the transitive shared-cache text closure, loader identity and native ABI;
+helpers, the separate loader identity and native ABI;
 reviewed release/provider/publication/licensing closure stays strict and separate.
 Fresh case recovery rejoins original births and operation receipts, retires file
 writers, drains audit evidence and independently restores leased PF baseline.

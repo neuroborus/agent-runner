@@ -78,7 +78,6 @@ const operationPhases = [
   "macho",
   "cache",
   "build",
-  "build-runtime",
   "location",
   "tree",
   "barrier",

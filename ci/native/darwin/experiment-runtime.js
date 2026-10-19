@@ -1,5 +1,6 @@
 import {
   observationDigest,
+  observationObject,
   requireObservation,
   nativePolicyLaunchData,
 } from "../index.js";
@@ -16,8 +17,10 @@ export function createDarwinExperimentRuntimeEffects(core) {
   const { state, current, reader, specification, persist, latch } = core,
     { build, inputs } = state.preparation,
     slots = specification.slots;
+  observationObject(slots, ["components", "loader"]);
   requireObservation(
     current.binding.purpose === "experiment" &&
+      build.schemaVersion === 3 &&
       slots.components.length === DARWIN_HELPER_NAMES.length &&
       new Set(slots.components.map(({ id }) => id)).size ===
         DARWIN_HELPER_NAMES.length &&
@@ -32,8 +35,7 @@ export function createDarwinExperimentRuntimeEffects(core) {
     effects: {
       persist,
       observe: latch(async () => {
-        const images = [],
-          runtime = [];
+        const images = [];
         for (const { id, index } of slots.components) {
           const expected = build.helpers.find(({ name }) => name === id),
             before = await reader.inspect(index),
@@ -54,27 +56,12 @@ export function createDarwinExperimentRuntimeEffects(core) {
               signature.cdhash === expected.cdhash &&
               observationDigest(macho) === observationDigest(expected.macho),
           );
-          requireObservation(
-            parsed.libraries.every((file) =>
-              build.sdk.runtime.some(({ path }) => path === file),
-            ),
-          );
           images.push({
             id,
             sha256: digest(bytes),
             identity: before.identity,
             macho,
           });
-        }
-        for (const { path, observation: prior } of build.sdk.runtime) {
-          const observed = await reader.readBuildRuntime(slots.cachePath, path);
-          requireObservation(
-            observed.held &&
-              observed.independent &&
-              observed.unchanged &&
-              observationDigest(observed) === observationDigest(prior),
-          );
-          runtime.push({ path, observed });
         }
         const loaderBefore = await reader.inspect(slots.loader),
           loader = await reader.read(slots.loader),
@@ -96,9 +83,9 @@ export function createDarwinExperimentRuntimeEffects(core) {
         );
         const observation = {
           purpose: "experiment",
+          schemaVersion: 3,
           status: "OBSERVED",
           images,
-          runtime,
           loaderSha256: digest(loader),
           abi,
           buildSha256: observationDigest(build),

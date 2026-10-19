@@ -571,7 +571,7 @@ function experimentBuildFixture(failure = null) {
   }
   const prepared = {
     purpose: "experiment",
-    schemaVersion: 2,
+    schemaVersion: 3,
     job,
     binding,
     directory,
@@ -592,7 +592,6 @@ function experimentBuildFixture(failure = null) {
     })),
     bootstrap,
     command: { helper: f.manifest.darwinPreparation.command.helper },
-    cachePath: "/System/Library/dyld/dyld_shared_cache_x86_64h",
     sdk: { path: environment.SDKROOT, build: "24A", settingsSha256: hash },
     compilerVersion: "Apple clang version 17.0",
     commands,
@@ -679,26 +678,8 @@ function experimentBuildFixture(failure = null) {
         unchanged: true,
         nativeEventSha256: hash,
       }),
-      readBuildRuntime: async (cache, library) => {
-        assert.equal(cache, prepared.cachePath);
-        assert.ok(
-          library.startsWith("/usr/lib/") ||
-            library.startsWith("/System/Library/"),
-        );
-        f.events.push("runtime-read");
-        return {
-          object: { identity: id },
-          runtime: {
-            sha256: hash,
-            signatureSha256: hash,
-            macho: { dependencies: [] },
-          },
-          independent: failure !== "runtime",
-          held: true,
-          unchanged: true,
-          nativeEventSha256: hash,
-        };
-      },
+      cache: async () =>
+        assert.fail("Ordinary preparation cannot enumerate caches"),
       readBuildImage: async (file) => {
         assert.equal(
           joined,
@@ -782,7 +763,10 @@ function hostedAcquisitionFixture(diagnostic = "") {
     fs: {
       mkdir: async () => {},
       readdir: async () => [],
-      realpath: async (file) => file,
+      realpath: async (file) => {
+        assert.ok(!file.includes("dyld_shared_cache"));
+        return file;
+      },
       lstat: async () => ({ isFile: () => true }),
       readFile: async (file) => {
         if (files.has(file)) return files.get(file);
@@ -848,7 +832,7 @@ test("Darwin hosted preparation compiles each helper once and publishes only obs
     f.options.binding,
     f.options,
   );
-  assert.equal(prepared.schemaVersion, 2);
+  assert.equal(prepared.schemaVersion, 3);
   assert.equal(prepared.command.toolchain, undefined);
   assert.equal(prepared.bootstrapSeed, undefined);
   assert.equal(
@@ -876,7 +860,7 @@ test("Darwin hosted preparation compiles each helper once and publishes only obs
   assert.equal(
     darwinExperimentBuildInput(prepared, f.job, directory).manifest
       .darwinPreparation.schemaVersion,
-    2,
+    3,
   );
   assert.throws(() =>
     normalizeDarwinPreparation(
@@ -1043,10 +1027,8 @@ test("Darwin hosted streams retain long diagnostics and enforce the combined byt
   }
 });
 
-test("Darwin versioned build loading retains long diagnostics and rejects substituted evidence without rebuilding", async () => {
+test("Darwin versioned build loading needs no cache and rejects substituted evidence without rebuilding", async () => {
   const f = experimentBuildFixture();
-  f.prepared.cachePath =
-    "/System/Volumes/Preboot/fixture/runtime/dyld_shared_cache_x86_64h";
   f.prepared.commands[2].stderr = longDiagnostic;
   const built = await prepareDarwinExperimentBuild(
     f.job,
@@ -1068,7 +1050,6 @@ test("Darwin versioned build loading retains long diagnostics and rejects substi
   );
   assert.equal(stored.commands[2].stderr, longDiagnostic);
   assert.deepEqual(loaded.build, built.build);
-  assert.equal(f.events.filter((event) => event === "runtime-read").length, 2);
   assert.equal(loaded.build.commands[2].stderr, longDiagnostic);
   assert.ok(Buffer.byteLength(JSON.stringify(stored)) < 1048576);
   assert.ok(
@@ -1080,7 +1061,13 @@ test("Darwin versioned build loading retains long diagnostics and rejects substi
   );
   for (const mutate of [
     (record) => {
+      record.schemaVersion = 2;
+    },
+    (record) => {
       record.schemaVersion = 1;
+    },
+    (record) => {
+      record.cachePath = "/System/Library/dyld/dyld_shared_cache_x86_64h";
     },
     (record) => {
       record.bootstrapSeed = {};
@@ -1108,6 +1095,46 @@ test("Darwin versioned build loading retains long diagnostics and rejects substi
       darwinExperimentBuildInput(changed, built.job, directory),
     );
   }
+  const buildPath = path.join(directory, "darwin-experiment-build.json"),
+    original = f.files.get(buildPath),
+    close = f.files.get(
+      path.join(directory, "darwin-experiment-build-close.json"),
+    );
+  for (const mutate of [
+    (record) => {
+      record.build.schemaVersion = 2;
+    },
+    (record) => {
+      record.build.sdk.runtime = [];
+    },
+    (record) => {
+      record.build.helpers.pop();
+    },
+  ]) {
+    const changed = structuredClone(original);
+    mutate(changed);
+    f.files.set(buildPath, changed);
+    const stale = {
+      ...built.job,
+      failure: "preparation-failed",
+      preparationEffects: {
+        ...built.job.preparationEffects,
+        receiptSha256: observationDigest({ observed: changed, close }),
+      },
+    };
+    await assert.rejects(
+      loadDarwinExperimentBuild(stale, directory, f.options),
+    );
+    const recovered = await recoverDarwinExperimentBuild(
+      stale,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
+    assert.equal(recovered.failure, stale.failure);
+  }
+  f.files.set(buildPath, original);
   const create = f.options.createReader;
   f.options.createReader = (...args) => {
     const reader = create(...args),
@@ -8583,7 +8610,7 @@ function experimentInputs(f, build) {
   };
 }
 
-test("indexed Darwin experiment preparation seals the complete inventory and cold-loads without compilation", async () => {
+test("indexed Darwin experiment preparation seals all helpers and cold-loads without compilation or cache admission", async () => {
   const f = experimentBuildFixture();
   f.options.fs.readFile = f.options.readReceipt;
   f.options.acquireCases = async (prepared, build) => ({
@@ -8610,6 +8637,11 @@ test("indexed Darwin experiment preparation seals the complete inventory and col
       ({ role }) => role === "helper",
     ).length,
     DARWIN_HELPER_NAMES.length,
+  );
+  assert.ok(
+    result.job.preparation.expected.components.every(
+      ({ role, loader }) => role === "helper" && loader.length === 0,
+    ),
   );
   const commands = f.events.filter((event) =>
     event.startsWith("compile-owner:"),
@@ -8773,7 +8805,6 @@ test("Darwin experiment runtime requires every held helper and original loader/A
         index,
       })),
       loader: 10,
-      cachePath: built.prepared.cachePath,
     },
     core = {
       state: {
@@ -8807,9 +8838,8 @@ test("Darwin experiment runtime requires every held helper and original loader/A
         signature: async () => ({ valid: true, cdhash }),
         macho: async (index) =>
           index === 10 ? { dependencies: [] } : built.build.helpers[0].macho,
-        readBuildRuntime: async (_, file) =>
-          built.build.sdk.runtime.find((entry) => entry.path === file)
-            .observation,
+        cache: async () =>
+          assert.fail("Ordinary runtime cannot enumerate caches"),
         build: async () => built.build.abi,
       },
     };
