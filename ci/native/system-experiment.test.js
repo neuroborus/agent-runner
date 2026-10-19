@@ -1832,8 +1832,18 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     observer = {
       nonce: "c".repeat(32),
       taskSha256: H,
-      helper: { pid: 10 },
-      bridge: { pid: 11 },
+      helper: {
+        pid: 10,
+        creationTime: "10010",
+        sessionId: 0,
+        userSid: "S-1-5-18",
+      },
+      bridge: {
+        pid: 11,
+        creationTime: "10011",
+        sessionId: 1,
+        userSid: "S-1-5-21-1-2-3-1001",
+      },
     },
     records = new Map([
       [

@@ -11,7 +11,7 @@ import {
   observationObject,
   requireObservation,
 } from "../index.js";
-import { digest, hash } from "./protocol.js";
+import { digest, hash, sameWindowsIdentity } from "./protocol.js";
 import { location } from "./custody-protocol.js";
 import { WINDOWS_BUILD_TOOLS, WINDOWS_HELPER_NAMES } from "./build.js";
 import { windowsSystemRecipes } from "./system.js";
@@ -1097,10 +1097,8 @@ async function withWindowsExperimentPreparation(
           (value) =>
             value.nonce === close.observer.nonce &&
             value.taskSha256 === close.observer.taskSha256 &&
-            observationDigest(value.helper) ===
-              observationDigest(close.observer.helper) &&
-            observationDigest(value.bridge) ===
-              observationDigest(close.observer.bridge),
+            sameWindowsIdentity(value.helper, close.observer.helper) &&
+            sameWindowsIdentity(value.bridge, close.observer.bridge),
         ),
     );
     // Stored completion is a selector. Loading or recovery must independently

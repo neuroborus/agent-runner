@@ -324,6 +324,18 @@ Cold loading reobserves both retained inventories and rejects substitution or
 missing evidence without rebuilding. Case loader checks retain the private Git
 graph; reviewed import admission and protected package readers remain strict.
 
+Cold preparation receipt joins compare complete helper and bridge process
+identities through the strict Windows identity contract, independently of JSON
+property order. Every PID, creation time, session ID and user SID must match;
+missing or extra fields and malformed values fail. Original-reader recovery
+bindings retain exact input and task hashes, and preparation identity
+deduplication normalizes those same complete identities. Observation digests
+remain unchanged.
+Protected status/nonce/task bindings and fresh independent reads of original
+births, whole Jobs and task absence remain mandatory. The retained preparation
+fixture covers publication through cold loading and recovery, refusal and reader
+cleanup; portable coverage supplies no native acceptance or universal error87 fix.
+
 The existing native import owner first observes an already loaded module with
 `GetModuleHandleExW`, or maps it with `LoadLibraryExW` using
 `LOAD_LIBRARY_SEARCH_SYSTEM32 | DONT_RESOLVE_DLL_REFERENCES`. This documented

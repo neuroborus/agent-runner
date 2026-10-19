@@ -1016,8 +1016,18 @@ function hostedFixture(layout = "mingw64") {
     close: async () => {
       const observer = {
         nonce: "e".repeat(32),
-        helper: { pid: 3 },
-        bridge: { pid: 4 },
+        helper: {
+          pid: 3,
+          creationTime: "10003",
+          sessionId: 0,
+          userSid: "S-1-5-18",
+        },
+        bridge: {
+          pid: 4,
+          creationTime: "10004",
+          sessionId: 1,
+          userSid: prepared.bootstrap.runnerSid,
+        },
         taskSha256: H,
       };
       await write("windows-experiment-close.json", {

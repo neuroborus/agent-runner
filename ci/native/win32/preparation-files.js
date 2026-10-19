@@ -812,15 +812,22 @@ export function createWindowsPreparationFiles(input, options = {}) {
         );
       }
       for (const reader of readers.keys()) {
-        const original = reader.retirementBinding;
+        const original = reader.retirementBinding,
+          fields = ["inputSha256", "helper", "bridge", "taskSha256"];
+        closed(original, fields);
         requireObservation(
-          original?.helper &&
+          original.helper &&
             original.bridge &&
             hash(original.taskSha256) &&
-            proof.readers.some(
-              (binding) =>
-                observationDigest(binding) === observationDigest(original),
-            ),
+            proof.readers.some((binding) => {
+              closed(binding, fields);
+              return (
+                binding.inputSha256 === original.inputSha256 &&
+                binding.taskSha256 === original.taskSha256 &&
+                sameWindowsIdentity(binding.helper, original.helper) &&
+                sameWindowsIdentity(binding.bridge, original.bridge)
+              );
+            }),
         );
       }
       readers.clear();

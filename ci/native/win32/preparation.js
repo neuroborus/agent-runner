@@ -11,6 +11,7 @@ import {
   digest,
   hash,
   inspectWindowsPe,
+  normalizeWindowsIdentity,
   sameWindowsIdentity,
 } from "./protocol.js";
 import {
@@ -851,10 +852,8 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
               entry.bootstrapSettlement.helper,
               entry.bootstrapSettlement.bridge,
             ])
-            .map((identity) => {
-              requireObservation(identity);
-              return [observationDigest(identity), identity];
-            }),
+            .map(normalizeWindowsIdentity)
+            .map((identity) => [observationDigest(identity), identity]),
         ).values(),
       ];
       const result = await files.verify(
@@ -1218,7 +1217,9 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       if (onReadersRetired && subjects.length > 0) {
         const identities = [
           ...new Map(
-            subjects.map((identity) => [observationDigest(identity), identity]),
+            subjects
+              .map(normalizeWindowsIdentity)
+              .map((identity) => [observationDigest(identity), identity]),
           ).values(),
         ];
         const result = await files.verify(
@@ -1267,10 +1268,9 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
       }
       const identities = [
         ...new Map(
-          [...subjects, ...observerSubjects].map((identity) => [
-            observationDigest(identity),
-            identity,
-          ]),
+          [...subjects, ...observerSubjects]
+            .map(normalizeWindowsIdentity)
+            .map((identity) => [observationDigest(identity), identity]),
         ).values(),
       ];
       const result = await files.verify(

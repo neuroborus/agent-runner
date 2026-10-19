@@ -78,6 +78,8 @@ import {
 import {
   prepareWindowsExperiment,
   recoverWindowsExperimentPreparation,
+  loadWindowsExperiment,
+  recoverWindowsExperimentProofs,
 } from "./experiment-preparation.js";
 import { windowsExperimentGitRuntime } from "./experiment-cases.js";
 import { digest, windowsLaunchDigest } from "./protocol.js";
@@ -2379,6 +2381,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
         assert.equal(args[1], "-");
         assert.ok(
           f.manifest.tools.some((tool) => tool.path === file) ||
+            file === f.prepared?.sdkHeader?.file ||
             file === f.prepared?.gitRuntime?.path,
         );
       }
@@ -3769,6 +3772,175 @@ test("Windows default experiment bootstrap admits installed links and binds priv
   }
 });
 
+test("Windows experiment cold consumers join complete native identities across publication order and retain cleanup", async () => {
+  const f = experimentBootstrapFixture();
+  Object.assign(f.bootstrapOptions.binding, {
+    candidateSha,
+    platform: "win32",
+    repository: f.job.repository,
+    runId: f.job.runId,
+    runAttempt: f.job.runAttempt,
+    image: "windows-2025",
+    architecture: "x64",
+    workflow: "native-poc",
+    jobId: "1",
+  });
+  await assert.rejects(f.runBootstrap(), (error) => error.cause === f.reached);
+  f.prepared = f.bootstrap;
+  f.manifest.windowsPreparation.bootstrap = f.prepared.bootstrap;
+  f.accessNative = (operation, args) => {
+    if (operation === "prepare-experiment-volume")
+      return {
+        identity: f.rawFileId(Buffer.from(args[0], "hex").toString("utf16le")),
+        distinctVolume: true,
+      };
+  };
+  let recoveries = 0;
+  const options = {
+      ...f.options,
+      ...f.bootstrapOptions,
+      bootstrap: async () => f.prepared,
+      open: openWindowsExperimentNative,
+      readInstalled: async (file) => f.files.get(file),
+      read: async (file) => f.files.get(file),
+      createEffects: (_job, preparation) => ({
+        async recover() {
+          recoveries++;
+          const files = createWindowsPreparationFiles(f, f.options),
+            original = preparation.settlement.observer;
+          try {
+            return await files.verify(
+              "verifyPreparation",
+              f.prepared.bootstrap,
+              [
+                {
+                  nonce: original.nonce,
+                  identities: [original.helper, original.bridge],
+                },
+              ],
+            );
+          } finally {
+            assert.equal((await files.settleFiles()).status, "RETIRED");
+          }
+        },
+      }),
+    },
+    { job } = await prepareWindowsExperiment(
+      f.job,
+      directory,
+      async () => {},
+      options,
+    ),
+    closeFile = path.join(directory, "windows-experiment-close.json"),
+    close = JSON.parse(f.files.get(closeFile)),
+    observer = close.observer,
+    records = [
+      path.join(directory, `windows-files-${observer.nonce}-birth.json`),
+      path.join(directory, `windows-files-${observer.nonce}-result.json`),
+      closeFile,
+    ],
+    pristine = records.map((file) => f.files.get(file)),
+    consumers = [
+      () => loadWindowsExperiment(job, directory, options),
+      () =>
+        recoverWindowsExperimentProofs(job, directory, async () => {}, options),
+    ],
+    assertSettled = () => {
+      assert.equal(f.rawTasks.size, 0);
+      assert.ok([...f.actors.values()].every((actor) => actor.retired));
+    };
+  for (const file of records.slice(0, 2)) {
+    const record = JSON.parse(f.files.get(file));
+    for (const role of ["helper", "bridge"]) {
+      assert.deepEqual(record[role], observer[role]);
+      assert.notEqual(
+        observationDigest(record[role]),
+        observationDigest(observer[role]),
+      );
+    }
+  }
+  const beforeCold = f.commands.length;
+  for (const consume of consumers) {
+    const start = f.rawEvents.length;
+    await consume();
+    const events = f.rawEvents.slice(start);
+    for (const original of [observer.helper, observer.bridge])
+      assert.ok(
+        events.some((frame) =>
+          new RegExp(`^verify-retain [0-9]+ ${original.pid} `, "u").test(frame),
+        ),
+      );
+    assert.ok(events.some((frame) => frame.startsWith("verify-job ")));
+    assert.ok(events.some((frame) => frame.startsWith("verify-task ")));
+    assertSettled();
+  }
+  // Mutate the protected receipt bytes, leaving selectors and the job intact.
+  // Both consumers must refuse before treating stored completion as proof.
+  const changes = [
+    ["pid", (value) => value.pid + 1],
+    ["creationTime", (value) => String(BigInt(value.creationTime) + 1n)],
+    ["sessionId", (value) => value.sessionId + 1],
+    ["userSid", () => "S-1-5-21-4-5-6-1002"],
+    ["pid", (value) => String(value.pid)],
+    ["creationTime", (value) => Number(value.creationTime)],
+    ["sessionId", (value) => String(value.sessionId)],
+    ["userSid", () => "invalid"],
+    ["creationTime", () => undefined],
+    ["extra", () => true],
+  ];
+  for (const [index, file] of records.entries()) {
+    for (const role of ["helper", "bridge"])
+      for (const [field, change] of changes) {
+        const record = JSON.parse(pristine[index]),
+          value = (index === 2 ? record.observer : record)[role];
+        value[field] = change(value);
+        f.files.set(file, Buffer.from(JSON.stringify(record)));
+        try {
+          for (const consume of consumers) {
+            await assert.rejects(consume());
+            assertSettled();
+          }
+        } finally {
+          f.files.set(file, pristine[index]);
+        }
+      }
+    const fields =
+      index === 2 ? ["taskSha256"] : ["nonce", "taskSha256", "status"];
+    for (const field of fields) {
+      const record = JSON.parse(pristine[index]),
+        subject = index === 2 ? record.observer : record;
+      subject[field] =
+        field === "status"
+          ? "RETAINED"
+          : "d".repeat(field === "nonce" ? 32 : 64);
+      f.files.set(file, Buffer.from(JSON.stringify(record)));
+      try {
+        for (const consume of consumers) {
+          await assert.rejects(consume());
+          assertSettled();
+        }
+      } finally {
+        f.files.set(file, pristine[index]);
+      }
+    }
+  }
+  // Stored completion cannot substitute for fresh original-task absence.
+  f.rawTasks.set(observer.nonce, observer.helper);
+  try {
+    await assert.rejects(consumers[0]());
+  } finally {
+    f.rawTasks.delete(observer.nonce);
+  }
+  await consumers[0]();
+  assertSettled();
+  assert.equal(recoveries, 1, "invalid receipts cannot reach recovery effects");
+  assert.equal(
+    f.commands.length,
+    beforeCold,
+    "cold consumers must not rebuild",
+  );
+});
+
 test("Windows default experiment bootstrap diagnoses strict input predicates without reselection", async () => {
   for (const [damage, rule] of [
     ["missing", "lstat"],
@@ -4157,6 +4329,60 @@ test("Windows fresh file observer cannot consume or release an original observer
   }
   assert.equal(f.rawTasks.size, 0);
   assert.ok([...f.actors.values()].every((actor) => actor.retired));
+});
+
+test("Windows retained reader release joins complete identities and exact recovery bindings", async () => {
+  const f = rawPreparation(),
+    files = createWindowsPreparationFiles(f, f.options),
+    original = {
+      inputSha256: hash,
+      helper: identity(10),
+      bridge: identity(11),
+      taskSha256: hash,
+    },
+    reader = { retirementBinding: original },
+    reorder = (value) => Object.fromEntries(Object.entries(value).reverse());
+  await files.readdir(directory);
+  files.retainReader(reader);
+  const binding = {
+      ...original,
+      helper: reorder(original.helper),
+      bridge: reorder(original.bridge),
+    },
+    proof = {
+      ...retired,
+      noLiveMembers: true,
+      tasksRemoved: true,
+      recordsSha256: hash,
+      readers: [binding],
+      observerCustody: {
+        independent: true,
+        nativeEventSha256: hash,
+        identities: [files.verification.identity, files.verification.bridge],
+      },
+    };
+  for (const invalid of [
+    { ...binding, inputSha256: "f".repeat(64) },
+    { ...binding, taskSha256: "f".repeat(64) },
+    { ...binding, helper: { ...binding.helper, pid: 12 } },
+    { ...binding, bridge: { ...binding.bridge, pid: "11" } },
+    { ...binding, helper: { ...binding.helper, extra: true } },
+    { ...binding, bridge: { pid: 11 } },
+    { ...binding, extra: true },
+  ])
+    assert.throws(() =>
+      files.releaseRecoveredReaders({ ...proof, readers: [invalid] }),
+    );
+  original.extra = true;
+  try {
+    assert.throws(() => files.releaseRecoveredReaders(proof));
+  } finally {
+    delete original.extra;
+  }
+  await assert.rejects(files.settleFiles());
+  files.releaseRecoveredReaders(proof);
+  assert.equal((await files.settleFiles()).status, "RETIRED");
+  assert.equal(f.rawTasks.size, 0);
 });
 
 test("Windows experiment receipt rejection still settles the real file observer", async () => {
