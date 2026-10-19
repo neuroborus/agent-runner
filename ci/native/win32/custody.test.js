@@ -64,6 +64,320 @@ function executable() {
   bytes.writeUInt16LE(2, cert + 6);
   return bytes;
 }
+
+function importImage(normal = 2, delay = 1) {
+  const bytes = Buffer.alloc(0x3200);
+  executable().subarray(0, 448).copy(bytes);
+  bytes.writeUInt32LE(512, 88 + 60);
+  for (const [at, value] of [
+    [328 + 8, 0x3000],
+    [328 + 12, 0x1000],
+    [328 + 16, 0x3000],
+    [328 + 20, 512],
+  ])
+    bytes.writeUInt32LE(value, at);
+  for (const [directory, count, address, width] of [
+    [1, normal, 0x1000, 20],
+    [13, delay, 0x2400, 32],
+  ]) {
+    bytes.writeUInt32LE(address, 200 + directory * 8);
+    bytes.writeUInt32LE(0x1200, 204 + directory * 8);
+    for (let i = 0; i < count; i++) {
+      const at = address - 0x1000 + 512 + i * width;
+      if (directory === 13) bytes.writeUInt32LE(1, at);
+      bytes.writeUInt32LE(
+        i % 2 ? 0x3820 : directory === 13 ? 0x3840 : 0x3800,
+        at + (directory === 13 ? 4 : 12),
+      );
+    }
+  }
+  bytes.write("fixture.dll\0", 0x2a00);
+  bytes.write("second.dll\0", 0x2a20);
+  bytes.write("fixture.dll\0", 0x2a40);
+  return bytes;
+}
+
+let importProgram;
+async function nativeImports(bytes, mode) {
+  if (!importProgram) {
+    const source = await readFile(
+        new URL("custody-reader.c", import.meta.url),
+        "utf8",
+      ),
+      rva = source.slice(
+        source.indexOf("static DWORD rva("),
+        source.indexOf("static void loader("),
+      ),
+      prepare =
+        /static void release_pe_file\(struct held_file \*file\) \{[\s\S]*?\n\}/u.exec(
+          source,
+        )?.[0],
+      start = source.indexOf(
+        "  for (unsigned directory = 0; directory < 2; directory++)",
+        source.indexOf("static void loader("),
+      ),
+      loader = source.slice(start, source.indexOf("\n  free(bytes); }", start));
+    assert.ok(rva && prepare && start > 0 && loader);
+    const translate = (body) =>
+      body
+        .replace(/#ifndef NATIVE_CI_EXPERIMENT\n[\s\S]*?#endif/gu, "")
+        .replace(
+          /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n[\s\S]*?#endif/gu,
+          "$1",
+        )
+        .replace(/#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu, "$1")
+        .replace(
+          /static DWORD rva\([^\n]+\)/u,
+          "function rva(bytes, size, pe, address, needed)",
+        )
+        .replace(
+          /static void release_pe_file\([^\n]+\)/u,
+          "function release_pe_file(file)",
+        )
+        .replace(
+          /BYTE \*bytes\s*=\s*read_file\(file,\s*536870912,\s*&size\)/u,
+          "let bytes = read_file(file, 536870912, value => (size = value))",
+        )
+        .replace(
+          /IMAGE_DOS_HEADER \*dos\s*=\s*\(void \*\)bytes/u,
+          "const dos = dosView(bytes)",
+        )
+        .replace(
+          /IMAGE_NT_HEADERS64 \*pe\s*=\s*\(void \*\)\(bytes\s*\+\s*dos->e_lfanew\)/u,
+          "const pe = peView(bytes, dos.e_lfanew)",
+        )
+        .replace(
+          "IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe)",
+          "const sections = pe.sections",
+        )
+        .replace(
+          "(BYTE *)sections >= bytes && (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size",
+          "pe.sectionOffset >= 0 && pe.sectionOffset + pe.FileHeader.NumberOfSections * 40 <= size",
+        )
+        .replace(
+          /DWORD \*(item|entry)\s*=\s*\(void \*\)\(bytes\s*\+\s*at\s*\+\s*i\*width\)/gu,
+          "let $1 = words(bytes, at + i*width, width)",
+        )
+        .replace(
+          /wchar_t name\[256\]\s*=\s*\{0\}(, host\[256\]\s*=\s*\{0\})?/gu,
+          (_, host) =>
+            "let name = Array(256).fill(0)" +
+            (host ? ", host = Array(256).fill(0)" : ""),
+        )
+        .replace("wchar_t actual[4096]", "const actual = {}")
+        .replace("struct held_file resolved", "let resolved")
+        .replace(/wcsrchr\(paths\[j\], [^)]+\)\+1/gu, "basename(paths[j])")
+        .replaceAll("bytes+nameAt,", "bytes.subarray(nameAt),")
+        .replaceAll("sizeof(IMAGE_IMPORT_DESCRIPTOR)", "20")
+        .replaceAll("sizeof(IMAGE_NT_HEADERS64)", "264")
+        .replaceAll("sizeof(IMAGE_OPTIONAL_HEADER64)", "240")
+        .replaceAll("sizeof(files[j].id)", "1")
+        .replaceAll(/\((?:DWORD|ULONGLONG)\)/gu, "")
+        .replaceAll("->", ".")
+        .replaceAll(/&(files\[j\].id|resolved.id|resolved)/gu, "$1")
+        .replaceAll(
+          /\b(?:DWORD|BOOL|ULONGLONG|unsigned|IMAGE_DATA_DIRECTORY) /gu,
+          "let ",
+        )
+        .replace(/'((?:\\.|[^'])*)'/gu, (_, value) =>
+          String((value === "\\\\" ? "\\" : value).charCodeAt(0)),
+        );
+    importProgram = new Script(`${translate(rva)}\n${translate(prepare)}
+      if (mode === "prepare") release_pe_file({bytes});
+      else { const size = bytes.length, pe = peView(bytes, dosView(bytes).e_lfanew), source = 0, n = paths.length; let emitted = 0;
+        ${translate(loader)}
+      }`);
+  }
+  let output = mode === "prepare" ? "" : '{"imports":[';
+  const uint = (at) => bytes.readUInt32LE(at),
+    peView = (_bytes, at) => {
+      const optional = at + 24,
+        sectionOffset = optional + bytes.readUInt16LE(at + 20);
+      return {
+        Signature: uint(at),
+        sectionOffset,
+        FileHeader: {
+          Machine: bytes.readUInt16LE(at + 4),
+          NumberOfSections: bytes.readUInt16LE(at + 6),
+          TimeDateStamp: uint(at + 8),
+          SizeOfOptionalHeader: bytes.readUInt16LE(at + 20),
+          Characteristics: bytes.readUInt16LE(at + 22),
+        },
+        OptionalHeader: {
+          Magic: bytes.readUInt16LE(optional),
+          MajorLinkerVersion: bytes[optional + 2],
+          MinorLinkerVersion: bytes[optional + 3],
+          SizeOfHeaders: uint(optional + 60),
+          NumberOfRvaAndSizes: uint(optional + 108),
+          DataDirectory: Array.from({ length: 16 }, (_, i) => ({
+            VirtualAddress: uint(optional + 112 + i * 8),
+            Size: uint(optional + 116 + i * 8),
+          })),
+        },
+        sections: Array.from(
+          { length: bytes.readUInt16LE(at + 6) },
+          (_, i) => ({
+            VirtualAddress: uint(sectionOffset + i * 40 + 12),
+            SizeOfRawData: uint(sectionOffset + i * 40 + 16),
+            PointerToRawData: uint(sectionOffset + i * 40 + 20),
+          }),
+        ),
+      };
+    },
+    wide = (value) =>
+      Array.isArray(value)
+        ? String.fromCharCode(...value.slice(0, value.indexOf(0)))
+        : (value?.value ?? value),
+    need = (ok) => {
+      if (!ok) throw new Error("Native PE import refused");
+    },
+    paths = [
+      "C:\\Fixture\\image.exe",
+      "C:\\Fixture\\fixture.dll",
+      "C:\\Fixture\\second.dll",
+    ];
+  importProgram.runInNewContext({
+    bytes,
+    mode,
+    paths,
+    peView,
+    Array,
+    files: paths.map((path) => ({ id: path })),
+    process: {},
+    TRUE: true,
+    FALSE: false,
+    IMAGE_DOS_SIGNATURE: 0x5a4d,
+    IMAGE_NT_SIGNATURE: 0x4550,
+    IMAGE_FILE_MACHINE_AMD64: 0x8664,
+    IMAGE_NT_OPTIONAL_HDR64_MAGIC: 0x20b,
+    IMAGE_FILE_DLL: 0x2000,
+    IMAGE_DIRECTORY_ENTRY_IMPORT: 1,
+    IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT: 13,
+    dosView: () => ({ e_magic: bytes.readUInt16LE(0), e_lfanew: uint(60) }),
+    words: (_bytes, at, width) =>
+      Array.from({ length: width / 4 }, (_, i) => uint(at + i * 4)),
+    read_file: (file, maximum, size) => {
+      assert.equal(file.bytes, bytes);
+      assert.equal(maximum, 536870912);
+      size(bytes.length);
+      return bytes;
+    },
+    need,
+    free() {},
+    close_file() {},
+    experiment_import: () => need(false),
+    basename: (path) => path.slice(path.lastIndexOf("\\") + 1),
+    _wcsicmp: (a, b) => Number(wide(a).toLowerCase() !== wide(b).toLowerCase()),
+    wcscpy_s: (target, maximum, source) => {
+      assert.equal(maximum, 256);
+      for (let i = 0; i < source.length; i++) target[i] = source[i];
+      return 0;
+    },
+    memcmp: (a, b) => Number(a !== b),
+    strchr: (text, byte) => text.includes(String.fromCharCode(byte)),
+    printf(format, ...args) {
+      output += format.replace(/%(?:ls|lu|s|u)/gu, () => wide(args.shift()));
+    },
+    hex(data, length) {
+      output += data.subarray(0, length).toString("hex");
+    },
+  });
+  return JSON.parse(mode === "prepare" ? output : output + "]}");
+}
+
+test("Windows native import walks bound descriptors rather than the complete data extent", async () => {
+  for (const mode of ["prepare", "loader"]) {
+    const actual = await nativeImports(importImage(), mode);
+    assert.deepEqual(
+      actual.imports.map((item) => item.delay),
+      [false, false, true],
+    );
+    if (mode === "prepare")
+      assert.deepEqual(
+        actual.imports.map((item) => item.name),
+        ["fixture.dll", "second.dll", "fixture.dll"],
+      );
+    else
+      assert.deepEqual(
+        actual.imports.map((item) => [
+          item.source,
+          Buffer.from(item.importHex, "hex").toString(),
+          item.resolved,
+        ]),
+        [
+          [0, "fixture.dll", 1],
+          [0, "second.dll", 2],
+          [0, "fixture.dll", 1],
+        ],
+      );
+    assert.equal(
+      (await nativeImports(importImage(128, 128), mode)).imports.length,
+      256,
+    );
+    for (const [normal, delay] of [
+      [129, 1],
+      [1, 129],
+    ])
+      await assert.rejects(
+        nativeImports(importImage(normal, delay), mode),
+        /Native PE import refused/u,
+      );
+    for (const directory of [1, 13]) {
+      const width = directory === 1 ? 20 : 32,
+        count = directory === 1 ? 2 : 1,
+        data = importImage();
+      data.writeUInt32LE(0, 200 + directory * 8);
+      data.writeUInt32LE(0, 204 + directory * 8);
+      assert.equal(
+        (await nativeImports(data, mode)).imports.length,
+        directory === 1 ? 1 : 2,
+      );
+      const exact = importImage();
+      exact.writeUInt32LE((count + 1) * width, 204 + directory * 8);
+      assert.equal((await nativeImports(exact, mode)).imports.length, 3);
+      for (const fault of [
+        "unterminated",
+        "short-terminator",
+        "range",
+        "empty-range",
+        "name-range",
+        "name-limit",
+        "name-character",
+        ...(directory === 13 ? ["delay-attributes"] : []),
+      ]) {
+        const bytes = importImage(),
+          table = directory === 1 ? 512 : 0x1600;
+        if (fault === "unterminated")
+          bytes.writeUInt32LE(count * width, 204 + directory * 8);
+        if (fault === "short-terminator")
+          bytes.writeUInt32LE((count + 1) * width - 1, 204 + directory * 8);
+        if (fault === "range") bytes.writeUInt32LE(0x3fff, 200 + directory * 8);
+        if (fault === "empty-range")
+          bytes.writeUInt32LE(0, 204 + directory * 8);
+        if (fault === "name-range")
+          bytes.writeUInt32LE(0xffffffff, table + (directory === 1 ? 12 : 4));
+        const name = directory === 1 ? 0x2a00 : 0x2a40;
+        if (fault === "name-limit") bytes.fill(0x61, name, name + 256);
+        if (fault === "name-character") bytes[name] = 0x2f;
+        if (fault === "delay-attributes") bytes.writeUInt32LE(0, table);
+        await assert.rejects(
+          nativeImports(bytes, mode),
+          /Native PE import refused/u,
+          `${mode}: ${directory}: ${fault}`,
+        );
+      }
+    }
+    if (mode === "loader") {
+      const missing = importImage();
+      missing.write("absent.dll\0", 0x2a00);
+      await assert.rejects(
+        nativeImports(missing, mode),
+        /Native PE import refused/u,
+      );
+    }
+  }
+});
+
 function fixture({
   policy = false,
   git = false,

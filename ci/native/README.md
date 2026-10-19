@@ -336,6 +336,18 @@ a shared runtime. Experiment loader responses explicitly declare
 `importScope: "private-runtime"`; the closed parser rejects missing or mixed
 scope. Reviewed loader records retain their original complete-import contract.
 
+The native static `prepare-experiment-pe` reader and later live `loader` walk
+each bound actual nonterminal descriptors to 128 per ordinary or delay-import
+directory, followed by a complete in-range terminator. A larger valid directory
+extent containing names or lookup/address tables does not imply more descriptors.
+The complete extent must still map to held file bytes. The static 256-total cap,
+live graph bounds, bounded names, delay attributes and complete runtime joins remain
+required; over-limit, unterminated and invalid-range inputs fail without truncation.
+Existing custody fixtures execute both native walks and their RVA mapper against
+a neutral synthetic PE with large extents and few imports. They cover the exact
+128-descriptor boundary, termination, range, name, delay-attribute and unresolved
+module refusals. Portable regressions supply no native acceptance or cleanup proof.
+
 The original `prepare-experiment-pe` sequence 263 followed signature observation
 262 and failed at the API-set entry match count (`found == 1`, old line 290),
 not the earlier per-entry value count. The retained original excerpt does not

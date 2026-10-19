@@ -459,9 +459,8 @@ static void loader(unsigned subject, struct entry *image) {
   for (unsigned directory = 0; directory < 2; directory++) {
     IMAGE_DATA_DIRECTORY table = pe->OptionalHeader.DataDirectory[directory ? IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT : IMAGE_DIRECTORY_ENTRY_IMPORT];
     if (!table.Size) { need(!table.VirtualAddress); continue; } DWORD width = directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR), at = rva(bytes, size, pe, table.VirtualAddress, table.Size); BOOL terminated = FALSE;
-    need(table.Size / width <= 128);
     for (unsigned i = 0; (i+1)*width <= table.Size; i++) { DWORD *entry = (void *)(bytes + at + i*width); DWORD nameRva = directory ? entry[1] : entry[3];
-      if (!nameRva) { terminated = TRUE; break; } if (directory) need(entry[0] == 1); DWORD nameAt = rva(bytes, size, pe, nameRva, 1), length = 0;
+      if (!nameRva) { terminated = TRUE; break; } need(i < 128); if (directory) need(entry[0] == 1); DWORD nameAt = rva(bytes, size, pe, nameRva, 1), length = 0;
       while (length < 255 && nameAt + length < size && bytes[nameAt+length]) length++; need(length && length < 255 && nameAt+length < size);
       wchar_t name[256] = {0}, host[256] = {0}; for (unsigned j = 0; j < length; j++) { need(bytes[nameAt+j] >= 32 && bytes[nameAt+j] < 127 && bytes[nameAt+j] != '/' && bytes[nameAt+j] != '\\'); name[j] = bytes[nameAt+j]; }
       wcscpy_s(host, 256, name);
@@ -2956,9 +2955,9 @@ static void release_pe_file(struct held_file *file) {
   unsigned emitted=0;
   for(unsigned directory=0;directory<2;directory++) {
     IMAGE_DATA_DIRECTORY table=pe->OptionalHeader.DataDirectory[directory ? IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT : IMAGE_DIRECTORY_ENTRY_IMPORT];
-    if(!table.Size) { need(!table.VirtualAddress); continue; } DWORD width=directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR),at=rva(bytes,size,pe,table.VirtualAddress,table.Size); BOOL terminated=FALSE; need(table.Size/width<=128);
+    if(!table.Size) { need(!table.VirtualAddress); continue; } DWORD width=directory ? 32 : sizeof(IMAGE_IMPORT_DESCRIPTOR),at=rva(bytes,size,pe,table.VirtualAddress,table.Size); BOOL terminated=FALSE;
     for(unsigned i=0;(i+1)*width<=table.Size;i++) { DWORD *item=(void *)(bytes+at+i*width),nameRva=directory ? item[1] : item[3];
-      if(!nameRva) { terminated=TRUE; break; } if(directory) need(item[0]==1); DWORD nameAt=rva(bytes,size,pe,nameRva,1),length=0;
+      if(!nameRva) { terminated=TRUE; break; } need(i<128); if(directory) need(item[0]==1); DWORD nameAt=rva(bytes,size,pe,nameRva,1),length=0;
       while(length<255 && nameAt+length<size && bytes[nameAt+length]) length++; need(length && length<255 && nameAt+length<size);
       wchar_t name[256]={0}; for(unsigned j=0;j<length;j++) { need((bytes[nameAt+j]>='a' && bytes[nameAt+j]<='z') || (bytes[nameAt+j]>='A' && bytes[nameAt+j]<='Z') || (bytes[nameAt+j]>='0' && bytes[nameAt+j]<='9') || strchr("_.-",bytes[nameAt+j])); name[j]=bytes[nameAt+j]; }
       need(emitted<256);
