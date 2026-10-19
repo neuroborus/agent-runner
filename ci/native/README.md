@@ -781,6 +781,16 @@ preparation, including the ordinary workflow's explicit experiment dispatch.
 
 `experiment-inputs.js` obtains installed Git/PF/disk-tool images, loader bytes,
 SDK audit declarations, actual audit event/class mappings and host addresses.
+The audit version comes from the producer-selected `AUDIT_HEADER_VERSION_OPENBSM`
+in the held installed `audit_record.h`: a positive byte-sized decimal literal or
+one version-named OpenBSM alias with a matching literal. Beyond the ordinary
+include guard, conditional declarations, duplicates, missing aliases, unsupported
+expressions, redefinitions and contradictory version names refuse acquisition.
+Neither a generic version declaration nor a captured record supplies a fallback.
+Held header hashes, SDK/ABI bindings, event/class joins, mapping digests and
+captured-version mismatch refusals remain mandatory. Public XNU declaration
+excerpts explain this producer contract without identifying exact hosted bytes
+or establishing native acceptance.
 The mapping covers all installed events in the fixed selected audit classes,
 including Git open variants, without widening that class selection.
 Root-only bootstrap assets supply selectors, disposable data-only Git repositories

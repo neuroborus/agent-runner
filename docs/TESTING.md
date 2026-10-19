@@ -238,7 +238,16 @@ native effect or slow-tier assignment; reviewed and protected rejection coverage
 remains retained in the explicit harness.
 
 The same Darwin preparation fixtures acquire a compact real XNU event declaration
-excerpt without `BSLOOKUP`, produce versioned experiment Mach records, and carry
+excerpt without `BSLOOKUP` and an `audit_record.h` named-version/alias excerpt.
+The latter reproduces the producer-selected OpenBSM version without a synthetic
+generic declaration. Acquisition cases preserve held header pins, SDK/ABI joins
+and mapping digests, accept observed numeric or single version-named aliases,
+and reject missing, duplicate, conditional, unsupported or contradictory
+declarations before PF/volume setup. Quoted string and character comment markers
+cannot hide duplicate declarations. Existing decoder cases reject Solaris and
+other mismatched captured versions. These public excerpts explain the contract;
+they are not an exact hosted-header match or native acceptance evidence.
+The fixtures produce versioned experiment Mach records and carry
 the installed log source/tool into the retained access observation and retirement
 route. The existing portable BSM transcript model and all-profile coverage remain
 separate from native acceptance. Compact binder refusals cover missing/redacted or

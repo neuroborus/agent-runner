@@ -168,10 +168,10 @@ test("audit truncation, unmatched mappings, ambiguous selectors and helper loss 
   await lost.push(capture());
   assert.throws(() => lost.finish({ code: 126, signal: null }));
   for (const change of [
-    (value) => {
-      value.tokens[0].version = 12;
+    ...[1, 2, 10, 12, 0, 256, "11"].map((version) => (value) => {
+      value.tokens[0].version = version;
       return value;
-    },
+    }),
     (value) => {
       value.tokens[0].classes = 2;
       return value;

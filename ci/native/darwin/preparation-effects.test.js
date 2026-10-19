@@ -9760,6 +9760,22 @@ async function installedCaseAcquisition(format) {
       built.prepared.environment.SDKROOT,
       "usr/include/bsm/audit_kevents.h",
     ),
+    recordHeaderPath = path.join(
+      built.prepared.environment.SDKROOT,
+      "usr/include/bsm/audit_record.h",
+    ),
+    // Public XNU audit_record.h excerpt: producer contract, not hosted bytes.
+    recordSource = [
+      "#ifndef _BSM_AUDIT_RECORD_H_",
+      "#define _BSM_AUDIT_RECORD_H_",
+      "#define AUDIT_HEADER_VERSION_OLDDARWIN  1 /* In retrospect, a mistake. */",
+      "#define AUDIT_HEADER_VERSION_SOLARIS    2",
+      "#define AUDIT_HEADER_VERSION_OPENBSM10  10",
+      "#define AUDIT_HEADER_VERSION_OPENBSM11  11",
+      "#define AUDIT_HEADER_VERSION_OPENBSM    AUDIT_HEADER_VERSION_OPENBSM11",
+      "#endif /* ! _BSM_AUDIT_RECORD_H_ */",
+      "",
+    ].join("\n"),
     records = new Map([
       [
         headerPath,
@@ -9769,13 +9785,7 @@ async function installedCaseAcquisition(format) {
             .join("\n"),
         ),
       ],
-      [
-        path.join(
-          built.prepared.environment.SDKROOT,
-          "usr/include/bsm/audit_record.h",
-        ),
-        Buffer.from("#define AUDIT_HEADER_VERSION 11\n"),
-      ],
+      [recordHeaderPath, Buffer.from(recordSource)],
       [
         "/etc/security/audit_event",
         Buffer.from(
@@ -9897,6 +9907,27 @@ async function installedCaseAcquisition(format) {
   assert.equal(Object.hasOwn(acquired.inputs.events, "mach"), false);
   assert.equal(acquired.inputs.mach.source, "unified-log-mach-v1");
   assert.equal(acquired.inputs.mach.tool.path, "/usr/bin/log");
+  assert.equal(acquired.inputs.audit.headerVersion, 11);
+  assert.equal(acquired.inputs.audit.sdkSha256, built.build.sdk.sha256);
+  assert.equal(
+    acquired.inputs.audit.abiSha256,
+    observationDigest(built.build.abi),
+  );
+  assert.equal(
+    acquired.inputs.audit.mappingSha256,
+    digest(
+      JSON.stringify({
+        headerVersion: 11,
+        events: acquired.inputs.audit.events,
+      }),
+    ),
+  );
+  assert.ok(
+    pins.some(
+      ([file, pin]) =>
+        file === recordHeaderPath && pin === digest(Buffer.from(recordSource)),
+    ),
+  );
   assert.ok(
     acquired.inputs.audit.events.some(
       ({ opcode }) => opcode === "AUE_OPEN_RWTC",
@@ -10055,6 +10086,81 @@ async function installedCaseAcquisition(format) {
         (await reader.readBuildInput(file, pin, signature)).sha256,
         pin,
       );
+  if (format === "thin") {
+    const producer = "AUDIT_HEADER_VERSION_OPENBSM",
+      define = (value) => `#define ${producer} ${value}\n`,
+      leaf = `#define ${producer}11 11\n`,
+      alias = leaf + define(`${producer}11`),
+      sample = async (source) => {
+        records.set(recordHeaderPath, Buffer.from(source));
+        return acquireDarwinExperimentInputs(
+          built.prepared,
+          built.build,
+          reader,
+          persist,
+          options,
+        );
+      };
+    for (const source of [
+      "",
+      "#define AUDIT_HEADER_VERSION 11\n",
+      ...[
+        "0",
+        "256",
+        "11U",
+        "0x0b",
+        "(11)",
+        "11 + 1",
+        "11 trailing",
+        producer,
+        `${producer}11`,
+      ].map(define),
+      "#define AUDIT_HEADER_VERSION_SOLARIS 2\n" +
+        define("AUDIT_HEADER_VERSION_SOLARIS"),
+      define("11") + define("11"),
+      `#define FIRST_TEXT "/*"\n${define("10")}#define SECOND_TEXT "*/"\n${define("11")}`,
+      `#define FIRST_CHAR '/*'\n${define("10")}#define SECOND_CHAR '*/'\n${define("11")}`,
+      alias + define("12"),
+      leaf + alias,
+      `#define ${producer}11 12\n` + define(`${producer}11`),
+      `#define ${producer}11 ${producer}\n` + define(`${producer}11`),
+      `#define ${producer}() 11\n`,
+      `#ifndef ${producer}\n#define ${producer}\n${alias}#endif\n`,
+      `#if 1\n${alias}#endif\n`,
+      `#if 0\n${define("10")}#else\n${alias}#endif\n`,
+      alias + `#undef ${producer}\n`,
+      `/* ${alias}`,
+    ]) {
+      const before = commands.length;
+      await assert.rejects(sample(source), undefined, source);
+      assert.ok(
+        commands
+          .slice(before)
+          .every(
+            ([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file),
+          ),
+      );
+    }
+    for (const [source, version] of [
+      [define("17"), 17],
+      [`#define ${producer}10 10\n` + define(`${producer}10`), 10],
+      ["#define AUDIT_HEADER_VERSION 2\n" + alias, 11],
+      [alias + `/*\n${define("12")}*/\n`, 11],
+      [`#define FIRST_TEXT "/*"\n${alias}#define SECOND_TEXT "*/"\n`, 11],
+    ]) {
+      const actual = (await sample(source)).inputs.audit;
+      assert.equal(actual.headerVersion, version);
+      assert.equal(actual.sdkSha256, acquired.inputs.audit.sdkSha256);
+      assert.equal(actual.abiSha256, acquired.inputs.audit.abiSha256);
+      assert.equal(
+        actual.mappingSha256,
+        digest(
+          JSON.stringify({ headerVersion: version, events: actual.events }),
+        ),
+      );
+    }
+    records.set(recordHeaderPath, Buffer.from(recordSource));
+  }
   records.set(selectedGit, Buffer.alloc(bytes.length));
   await assert.rejects(
     reader.readBuildInput(selectedGit, acquired.inputs.git.sha256),

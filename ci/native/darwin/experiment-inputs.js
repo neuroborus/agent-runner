@@ -16,6 +16,80 @@ const execute = diagnosticCommand(
   promisify(execFile),
 );
 
+// Admit literal versions and the producer's single version-named alias, not
+// general preprocessor expressions or conditional version selection.
+function openBsmHeaderVersion(bytes) {
+  requireObservation(bytes.length <= 1048576);
+  // Quoted markers cannot swallow declarations; incomplete tokens fail closed.
+  let source = new TextDecoder("utf-8", { fatal: true })
+    .decode(bytes)
+    .replace(/\\\r?\n/gu, "")
+    .replace(
+      /"(?:\\[^\r\n]|[^"\\\r\n])*"|'(?:\\[^\r\n]|[^'\\\r\n])*'|\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|["']|\/\*|\*\//gu,
+      (token) => {
+        requireObservation(token.length > 1 && !["/*", "*/"].includes(token));
+        return token.startsWith("/") ? token.replace(/[^\r\n]/gu, " ") : token;
+      },
+    )
+    .trim();
+  requireObservation(!source.includes("\0"));
+  // Only a file include guard is removable; version conditions remain unproved.
+  const guard =
+    /^#[ \t]*ifndef[ \t]+([A-Za-z_][A-Za-z0-9_]*)[ \t]*\r?\n[ \t]*#[ \t]*define[ \t]+\1[ \t]*\r?\n([\s\S]*)\r?\n[ \t]*#[ \t]*endif[ \t]*$/u.exec(
+      source,
+    );
+  if (guard && !guard[1].startsWith("AUDIT_HEADER_VERSION")) source = guard[2];
+  const producer = "AUDIT_HEADER_VERSION_OPENBSM",
+    declarations = new Map();
+  let depth = 0;
+  for (const line of source.split(/\r?\n/u)) {
+    const directive = /^[ \t]*#[ \t]*([a-z]+)\b(.*)$/u.exec(line);
+    if (!directive) continue;
+    const [, operation, rest] = directive;
+    if (["if", "ifdef", "ifndef"].includes(operation)) {
+      requireObservation(++depth <= 32);
+    } else if (operation === "endif") {
+      requireObservation(depth-- > 0);
+    } else if (["else", "elif"].includes(operation)) {
+      requireObservation(depth > 0);
+    } else if (["define", "undef"].includes(operation)) {
+      const declaration =
+        /^(AUDIT_HEADER_VERSION_OPENBSM[A-Za-z0-9_]*)(.*)$/u.exec(
+          rest.trimStart(),
+        );
+      if (!declaration) continue;
+      const [, name, replacement] = declaration,
+        suffix = /^AUDIT_HEADER_VERSION_OPENBSM([1-9][0-9]{0,2})?$/u.exec(name),
+        value = replacement.trim();
+      requireObservation(
+        operation === "define" &&
+          depth === 0 &&
+          suffix &&
+          !declarations.has(name) &&
+          declarations.size < 16,
+      );
+      if (
+        name === producer &&
+        /^AUDIT_HEADER_VERSION_OPENBSM[1-9][0-9]{0,2}$/u.test(value)
+      ) {
+        declarations.set(name, value);
+      } else {
+        requireObservation(
+          /^[1-9][0-9]{0,2}$/u.test(value) &&
+            Number(value) <= 255 &&
+            (!suffix[1] || Number(suffix[1]) === Number(value)),
+        );
+        declarations.set(name, Number(value));
+      }
+    }
+  }
+  const selected = declarations.get(producer),
+    version =
+      typeof selected === "string" ? declarations.get(selected) : selected;
+  requireObservation(depth === 0 && typeof version === "number");
+  return version;
+}
+
 /** Bootstrap publication supplies selectors only. Held root reads and each
  * existing native owner independently verify the actual installed bytes. */
 export async function acquireDarwinExperimentInputs(
@@ -302,12 +376,7 @@ export async function acquireDarwinExperimentInputs(
     // open flags can select OPEN_RWTC and other installed variants; every event
     // in the admitted classes needs its SDK-joined declaration for decoding.
     used = events.filter((entry) => entry.classes & classes),
-    headerVersion = Number(
-      /#define\s+AUDIT_HEADER_VERSION\s+(\d+)\b/u.exec(
-        recordHeader.bytes.toString(),
-      )?.[1],
-    );
-  requireObservation(headerVersion > 0 && headerVersion <= 255);
+    headerVersion = openBsmHeaderVersion(recordHeader.bytes);
   const audit = {
       sdkSha256: build.sdk.sha256,
       abiSha256: observationDigest(build.abi),
