@@ -237,6 +237,18 @@ the second build observation. These tests add no
 native effect or slow-tier assignment; reviewed and protected rejection coverage
 remains retained in the explicit harness.
 
+The same Darwin preparation fixtures acquire a compact real XNU event declaration
+excerpt without `BSLOOKUP`, produce versioned experiment Mach records, and carry
+the installed log source/tool into the retained access observation and retirement
+route. The existing portable BSM transcript model and all-profile coverage remain
+separate from native acceptance. Compact binder refusals cover missing/redacted or
+ambiguous logs, wrong PID/service/nonce/birth/source, exact microsecond boundaries,
+unsupported or contradictory lookup/send results and invalid control audit
+trailers. Cold loading refuses legacy/mixed source records while recovery still
+attempts independent original-owner cleanup; a surviving named service prevents
+fresh retirement. These tests execute no Darwin commands, change no test tier,
+and establish no hosted unified-log availability or native PASS.
+
 `darwin/effective.test.js` additionally injects complete experiment PF graphs and
 counter records. It rejects missing children/rulesets, stale generations, altered
 owned semantics, incomplete state/interface evidence and unrelated counter records;

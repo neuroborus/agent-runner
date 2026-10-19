@@ -125,6 +125,7 @@ test("Darwin experiment installed reads retain canonical parents, held identitie
       "/usr/bin/clang",
       "/sbin/pfctl",
       "/usr/bin/hdiutil",
+      "/usr/bin/log",
       "/usr/lib/dyld",
       "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
       "/private/etc/security/audit_event",

@@ -2102,6 +2102,16 @@ PF, root/anchor ordering, state/NAT/skip exclusions and exclusive reservations
 before admission. A fixed native PF bridge separately admits and settles its
 root helper and worker; writes affect only the owned anchor. Acknowledged access
 fixtures join actual native attempts, ready outside controls and nonce bytes.
+The ordinary experiment models Mach lookup separately from BSM because the
+installed XNU header declares no lookup event. Versioned preparation/access
+records bind a pinned passive unified-log reader to sealed custody. Denial proof
+requires an exact kernel source, caller PID and nonce-derived service inside
+native release/completion timestamps, complete independent caller birth/audit
+joins, and a supported agreeing lookup result. The permitted control delivers a
+bounded Mach message to the held service; its kernel audit trailer must identify
+the inspected sender. Missing or contradictory evidence blocks that operation.
+Actual BSM joins, all access profiles and original-owner recovery remain required;
+portable fixtures establish no hosted log availability or native acceptance.
 Recovery preserves policy; restoration requires fresh independent retirement,
 no live reserved-UID process, helper/control settlement and unchanged owned
 configuration. Missing native readers, SDK semantics or reviewed tool/runtime

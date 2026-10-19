@@ -80,7 +80,10 @@ function provisioning(binding, values, verifierSha256, native) {
 
 /** Expected declarations for the existing finite recipes. This creates no
  * provisioning or installed-policy proof; those require the native reader below. */
-export function darwinExperimentCaseDeclarations(declarations) {
+export function darwinExperimentCaseDeclarations(
+  declarations,
+  { recovery = false } = {},
+) {
   const fixed = darwinSystemRecipes().filter(({ id }) => id !== "build"),
     legacy = fixed.filter(
       (recipe) =>
@@ -115,7 +118,8 @@ export function darwinExperimentCaseDeclarations(declarations) {
       "experiment",
     );
     requireObservation(
-      setup.schemaVersion === 1 &&
+      (setup.schemaVersion === (recipe.id.startsWith("access.") ? 2 : 1) ||
+        (recovery && setup.schemaVersion === 1)) &&
         custody.context.executionId === recipe.id &&
         custody.context.candidateSha === request.candidateSha &&
         custody.context.closureSha256 === request.bindings.closure &&
@@ -469,7 +473,10 @@ export function createDarwinCaseProvisioning(state, options) {
         ...(Object.hasOwn(setup, "operations") ? ["operations"] : []),
       ]);
       requireObservation(
-        setup.schemaVersion === 1 &&
+        setup.schemaVersion ===
+          (binding.purpose === "experiment" && declared.id.startsWith("access.")
+            ? 2
+            : 1) &&
           setup[key] === declared.custody[bindingKey(binding)] &&
           setup[key] ===
             binding.template[

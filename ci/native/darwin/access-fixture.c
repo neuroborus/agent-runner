@@ -170,7 +170,11 @@ static int execute(int argc, char **argv) {
   }
   if (getenv("NATIVE_ACCESS_CUSTODY")) printf("{\"nonce\":\"%s\",\"parked\":true,\"pid\":%d,\"descriptor\":%d}\n",nonce,getpid(),prepared_fd);
   else printf("{\"nonce\":\"%s\",\"parked\":true,\"pid\":%d}\n",nonce,getpid()); fflush(stdout); acknowledge();
-  int result=-1, fd=-1; errno=0;
+  int result=-1, fd=-1;
+#ifdef NATIVE_CI_EXPERIMENT
+  kern_return_t lookup_code = -1, send_code = -1;
+#endif
+  errno=0;
   if (!strcmp(op,"read")) {
     fd=open(target,O_RDONLY | O_NOFOLLOW); char bytes[33];
     if (fd >= 0) {
@@ -185,7 +189,22 @@ static int execute(int argc, char **argv) {
   else if (!strcmp(op,"unlink")) result=unlink(target);
   else if (!strcmp(op,"replace") || !strcmp(op,"parent")) {char source[4096]; need(strlen(target)+13 < sizeof(source)); snprintf(source,sizeof(source),"%s.replacement",target); result=!strcmp(op,"parent") ? rename(target,source) : rename(source,target);}
   else if (!strcmp(op,"unix")) {struct sockaddr_un a={.sun_len=sizeof(a),.sun_family=AF_UNIX}; need(strlen(target) < sizeof(a.sun_path)); strcpy(a.sun_path,target); fd=socket(AF_UNIX,SOCK_STREAM,0); if (fd >= 0) result=connect(fd,(struct sockaddr *)&a,sizeof(a));}
-  else if (!strcmp(op,"mach")) {mach_port_t service=MACH_PORT_NULL; kern_return_t code=bootstrap_look_up(bootstrap_port,(char *)target,&service); result=code == KERN_SUCCESS ? 0 : -1; errno=code; if (service != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(),service);}
+  else if (!strcmp(op,"mach")) {
+    mach_port_t service=MACH_PORT_NULL; kern_return_t code=bootstrap_look_up(bootstrap_port,(char *)target,&service);
+    result=code == KERN_SUCCESS ? 0 : -1; errno=code;
+#ifdef NATIVE_CI_EXPERIMENT
+    lookup_code = code;
+    if (code == KERN_SUCCESS && getenv("NATIVE_ACCESS_CONTROL")) {
+      struct { mach_msg_header_t header; char nonce[32]; } message = {0};
+      message.header.msgh_bits = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+      message.header.msgh_size = sizeof(message); message.header.msgh_remote_port = service;
+      message.header.msgh_id = 0x4e504f43; memcpy(message.nonce, nonce, 32);
+      send_code = mach_msg(&message.header, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+        sizeof(message), 0, MACH_PORT_NULL, 5000, MACH_PORT_NULL);
+    }
+#endif
+    if (service != MACH_PORT_NULL) need(mach_port_deallocate(mach_task_self(),service) == KERN_SUCCESS);
+  }
   else if (!strcmp(op,"shm")) {fd=shm_open(target,O_RDWR,0); if (fd >= 0) {void *memory=mmap(NULL,32,PROT_READ | PROT_WRITE,MAP_SHARED,fd,0); if (memory != MAP_FAILED) {memcpy(memory,nonce,32); result=munmap(memory,32);}}}
   else if (!strcmp(op,"sem")) {sem_t *sem=sem_open(target,0); if (sem != SEM_FAILED) {if (getenv("NATIVE_ACCESS_CUSTODY")) result=sem_close(sem); else {result=sem_post(sem); sem_close(sem);}}}
   else if (!strcmp(op,"sysv-shm")) {need((key_t)remote != IPC_PRIVATE); int id=shmget((key_t)remote,32,0); if (id >= 0) {void *memory=shmat(id,NULL,0); if (memory != (void *)-1) {memcpy(memory,nonce,32); result=shmdt(memory);}}}
@@ -195,7 +214,15 @@ static int execute(int argc, char **argv) {
       !strcmp(op,"tcp4-listen") || !strcmp(op,"tcp6-listen") || !strcmp(op,"udp4-listen") || !strcmp(op,"udp6-listen"));
     result=strstr(op,"-pair") ? pair(op,target,remote,local,nonce) : network(op,target,remote,local,nonce);}
   int error=result < 0 ? errno : 0; if (fd >= 0) close(fd);
-  printf("{\"nonce\":\"%s\",\"result\":%d,\"nativeCode\":%d}\n",nonce,result,error); fflush(stdout);
+#ifdef NATIVE_CI_EXPERIMENT
+  if (!strcmp(op, "mach")) {
+    printf("{\"nonce\":\"%s\",\"result\":%d,\"nativeCode\":%d,\"lookupCode\":%d,\"sendCode\":", nonce, result, error, lookup_code);
+    if (send_code == -1) fputs("null", stdout); else printf("%d", send_code);
+    puts("}");
+  } else
+#endif
+    printf("{\"nonce\":\"%s\",\"result\":%d,\"nativeCode\":%d}\n",nonce,result,error);
+  fflush(stdout);
   if (getenv("NATIVE_ACCESS_CUSTODY")) {
     acknowledge();
     if (pair_pid) {

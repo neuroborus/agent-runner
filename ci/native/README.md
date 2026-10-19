@@ -9540,6 +9540,49 @@ readers supply observations to the existing policy, access, file, Git and observ
 owners; complete build/system factory composition and fresh SDK/native execution
 remain separate work.
 
+Ordinary Darwin experiment Mach lookup uses a separate `unified-log-mach-v1`
+source. The installed `audit_kevents.h` matches Apple's
+[`xnu-11417.140.69` declarations](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/bsm/audit_kevents.h)
+and declares no `AUE_BSLOOKUP`. Mach therefore carries no BSM event ID. Actual BSM
+routes retain installed event/class/header/SDK/ABI joins and their private capture
+requirements. Experiment preparation is version 4; its system declarations,
+access setups and access binding records are version 2. Cold admission rejects
+legacy or mixed source/version shapes. Build records remain version 3 and reviewed
+schemas retain their existing contracts. Recovery can read older selectors only
+to retire original owners, without admitting their observations.
+
+The sealed custody reader retains each Mach caller and records native UTC attempt
+times around release and completion. Independent process reads before and after
+rejoin its full birth, saved credentials and audit token. A separately pinned and
+signed installed `/usr/bin/log` runs suspended until its root identity is inspected,
+then supplies at most 64 KiB within 12 seconds through the existing custody
+lifecycle. It makes no logging configuration change and gains no new privilege.
+`readDarwinUnifiedLog`, `denialEvents` and exact timestamp parsing feed a dedicated
+access binder; startup diagnostic classifications supply no proof. Rounded query
+selectors cannot widen the native window. Exactly one kernel-origin record must
+name the caller PID, `mach-lookup` and nonce-derived service inside that window,
+with `/kernel` process metadata and the exact Sandbox image source. A subsystem
+label, child text or message wording alone supplies no verdict. The real
+`bootstrap_look_up` result must be `BOOTSTRAP_NOT_PRIVILEGED` (1100) and agree with
+that denial. Missing, redacted, stale, ambiguous, malformed or unbound records
+remain operation-specific failures; there is no alternate event or fallback.
+
+The permitted control still looks up the existing registered service, then sends
+one bounded nonce-bearing Mach message through its obtained right. The held
+service port receives it with a kernel audit trailer joining all eight sender
+token words to the independently inspected control birth. Lookup, send and native
+receipt outcomes are separate and must all agree. Missing/invalid trailers,
+contradictions, extra queued control messages and timeouts refuse proof. Queue
+silence is never a denial witness. All 39 attempts, 33 denials with outside
+controls, four private echoes, unchanged sentinels and independent service/helper
+retirement remain required. Fresh recovery verifies service absence and original
+reader domains; closed audit-session custody uses a fresh reserved-UID census
+rather than reusing its old ASID. Portable injected routes establish no hosted
+log availability. Fresh macOS CI remains necessary, with the existing task-access,
+opaque-command, Windows observer-transfer/self-control and broker audit blockers
+open; preparation retirement establishes no universal error87 repair or native,
+source-closure, protected-provider or production acceptance.
+
 Windows uses native Security object-access/WFP events: failed 4656 access requests,
 successful 4663 access use, and 5152/5156/5157 network authorization. The independent
 reader joins native SID/PID, access mask, fixed object/tuple and owned WFP filter

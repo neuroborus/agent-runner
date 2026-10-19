@@ -104,7 +104,7 @@ static bool installed_input_path(const char *name) {
   return !strcmp(name, "/usr/bin/clang") || !strcmp(name, "/usr/bin/xcrun") ||
     !strcmp(name, "/usr/bin/codesign") || !strcmp(name, "/usr/bin/env") ||
     !strcmp(name, "/usr/bin/sudo") || !strcmp(name, "/usr/bin/git") ||
-    !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/sbin/pfctl") ||
+    !strcmp(name, "/usr/bin/hdiutil") || !strcmp(name, "/usr/bin/log") || !strcmp(name, "/sbin/pfctl") ||
     !strcmp(name, "/usr/lib/dyld") || !strcmp(name, "/private/etc/security/audit_event") ||
     !strcmp(name, "/private/etc/security/audit_class") || !strcmp(name, "/etc/security/audit_event") ||
     !strcmp(name, "/etc/security/audit_class") || !strncmp(name, "/Library/Developer/", 19) ||
@@ -125,7 +125,7 @@ static bool is_bootstrap_parent(const char *name, const struct stat *st) {
 /* A pin or custody kind never makes a generated input an installed input. */
 static int installed_path(const char *name, const struct stat *st) {
   const char *tools[] = {"/usr/bin/clang", "/usr/bin/xcrun", "/usr/bin/codesign", "/usr/bin/env",
-    "/usr/bin/sudo", "/usr/bin/git", "/usr/bin/hdiutil", "/sbin/pfctl"};
+    "/usr/bin/sudo", "/usr/bin/git", "/usr/bin/hdiutil", "/usr/bin/log", "/sbin/pfctl"};
   if (!S_ISREG(st->st_mode) || st->st_uid != 0 || st->st_nlink <= 0) return 0;
   mode_t mode = st->st_mode & 07777;
   for (unsigned i = 0; i < sizeof(tools) / sizeof(tools[0]); i++) if (!strcmp(name, tools[i]))

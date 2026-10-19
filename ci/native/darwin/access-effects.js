@@ -31,6 +31,12 @@ import { createDarwinPfPreparation } from "./pf-preparation.js";
 import { createDarwinAuditDecoder, bindDarwinAuditEvent } from "./audit.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 import { createDarwinCaseEffects } from "./case-effects.js";
+import { readDarwinUnifiedLog } from "./startup-crash.js";
+import {
+  assertDarwinMachRecord,
+  bindDarwinMachAccess,
+  darwinMachLogArguments,
+} from "./mach-access.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const hash = (value) =>
@@ -55,7 +61,13 @@ const ids = (plan) => [
 
 /** The purpose-bound access record contains only bounded data. Reviewed inputs
  * require approval; experimental observations supply no independent approval. */
-export async function darwinAccessPreparation(state, setup, binding, base) {
+export async function darwinAccessPreparation(
+  state,
+  setup,
+  binding,
+  base,
+  { recovery = false } = {},
+) {
   const key = binding.purpose === "experiment" ? "binding" : "approval";
   observationObject(setup.access, [key]);
   observationObject(setup.access[key], ["path", "sha256"]);
@@ -75,10 +87,16 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
     "assets",
     "objects",
     "attempts",
+    ...(value.purpose === "experiment" && value.schemaVersion === 2
+      ? ["mach"]
+      : []),
   ]);
   requireObservation(
     (value.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
-      value.schemaVersion === 1 &&
+      (value.schemaVersion === (binding.purpose === "experiment" ? 2 : 1) ||
+        (recovery &&
+          binding.purpose === "experiment" &&
+          value.schemaVersion === 1)) &&
       value.contextSha256 === observationDigest(binding.context),
   );
   observationObject(value.pf, [
@@ -135,6 +153,9 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
     );
     return entries[index];
   };
+  if (value.purpose === "experiment" && value.schemaVersion === 2) {
+    assertDarwinMachRecord(value);
+  }
   observationObject(value.pf.tool, ["index", "cdhash"]);
   observationObject(value.audit.helper, ["index", "cdhash"]);
   requireObservation(
@@ -267,6 +288,7 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
     }
     observationObject(attempt, [
       "id",
+      ...(value.mach ? ["source"] : []),
       "event",
       "controlEvent",
       "target",
@@ -303,9 +325,14 @@ export async function darwinAccessPreparation(state, setup, binding, base) {
         [attempt.remote, attempt.local].every(
           (port) => Number.isSafeInteger(port) && port >= 0 && port <= 65535,
         ) &&
-        [attempt.event, attempt.controlEvent].every((event) =>
-          value.audit.mapping.events.some((entry) => entry.event === event),
-        ),
+        (value.mach && operation === "mach"
+          ? attempt.source === value.mach.source &&
+            attempt.event === null &&
+            attempt.controlEvent === null
+          : (!value.mach || attempt.source === "bsm") &&
+            [attempt.event, attempt.controlEvent].every((event) =>
+              value.audit.mapping.events.some((entry) => entry.event === event),
+            )),
     );
   }
   return { ...value, entries };
@@ -617,7 +644,9 @@ export function createDarwinAccessEffects(state, current, save) {
       bindingSha256: observationDigest(value.value),
     };
   };
-  const attempt = async (spec, index, control) => {
+  const observeAttempt = async (spec, index, control) => {
+    const mach =
+      specification.purpose === "experiment" && spec.operation === "mach";
     const begin = await reader.access("attempt", control ? 1 : 0, index),
       before = await target(index, control),
       subject = normalizeDarwinIdentity(begin.identity);
@@ -630,9 +659,12 @@ export function createDarwinAccessEffects(state, current, save) {
     let result;
     const countersBefore =
       !control && index >= 19 ? await reader.access("counters") : null;
-    const events = await window(async () => {
+    const run = async () => {
       result = await reader.access("run", control ? 1 : 0);
-    });
+    };
+    let events = [];
+    if (mach) await run();
+    else events = await window(run);
     const countersAfter = countersBefore
       ? await reader.access("counters")
       : null;
@@ -648,15 +680,67 @@ export function createDarwinAccessEffects(state, current, save) {
     const checkedAfter = await reader.process(subject.pid),
       after = await target(index, control);
     requireObservation(sameDarwinIdentity(subject, checkedAfter));
-    const native = events.filter(
-      (event) =>
-        event.pid === subject.pid &&
-        event.opcode ===
-          specification.audit.mapping.events.find(
-            (entry) =>
-              entry.event === (control ? spec.controlEvent : spec.event),
-          ).opcode,
-    );
+    let log;
+    if (mach && !control) {
+      try {
+        const tool = specification.mach.tool,
+          args = darwinMachLogArguments(result, subject, spec.target),
+          worker = root(
+            await reader.access("mach-log-start", tool.index, tool.cdhash),
+          );
+        await persist("mach-log-reader", { worker });
+        requireObservation(
+          (await reader.helper(worker)).sha256 ===
+            specification.entries[tool.index].sha256 &&
+            (await reader.signature(tool.index)).cdhash === tool.cdhash,
+        );
+        // The native executor derives these same fixed selectors from its held
+        // attempt window and supplies bounded bytes through the custody pipe.
+        const actual = await readDarwinUnifiedLog(args, {
+          run: async () => {
+            const captured = await reader.access("mach-log-run");
+            observationObject(captured, ["hex", "exitCode", "signal"]);
+            requireObservation(
+              captured.exitCode === 0 &&
+                captured.signal === null &&
+                typeof captured.hex === "string" &&
+                /^(?:[a-f0-9]{2})*$/u.test(captured.hex) &&
+                captured.hex.length <= 131072,
+            );
+            return {
+              stdout: Buffer.from(captured.hex, "hex"),
+              stderr: Buffer.alloc(0),
+            };
+          },
+        });
+        await reader.retired(worker);
+        await persist("mach-log-closed", { worker });
+        log = new TextDecoder("utf-8", { fatal: true }).decode(actual.stdout);
+      } catch (cause) {
+        throw new Error(
+          "Unverified Darwin mach-lookup: denial log unavailable",
+          { cause },
+        );
+      }
+    }
+    const native = mach
+      ? [
+          bindDarwinMachAccess(result, checkedBefore, checkedAfter, {
+            nonce: request.nonce,
+            service: spec.target,
+            control,
+            log,
+          }),
+        ]
+      : events.filter(
+          (event) =>
+            event.pid === subject.pid &&
+            event.opcode ===
+              specification.audit.mapping.events.find(
+                (entry) =>
+                  entry.event === (control ? spec.controlEvent : spec.event),
+              ).opcode,
+        );
     requireObservation(
       native.length === 1 &&
         result.nativeCode === native[0].error &&
@@ -688,14 +772,22 @@ export function createDarwinAccessEffects(state, current, save) {
                 after.kind === "socket" ? after.value.target : after.value,
               )),
     );
-    bindDarwinAuditEvent(
-      event,
-      checkedBefore,
-      checkedAfter,
-      { before: beforeObject, after: afterObject },
-      expected,
-      event.window.barrierSha256,
-    );
+    if (mach)
+      requireObservation(
+        before.kind === "ipc" &&
+          before.path === spec.target &&
+          after.path === spec.target &&
+          same(beforeObject, afterObject),
+      );
+    else
+      bindDarwinAuditEvent(
+        event,
+        checkedBefore,
+        checkedAfter,
+        { before: beforeObject, after: afterObject },
+        expected,
+        event.window.barrierSha256,
+      );
     requireObservation(
       control
         ? event.error === 0
@@ -864,6 +956,25 @@ export function createDarwinAccessEffects(state, current, save) {
       });
     }
     return observation;
+  };
+  const attempt = async (spec, index, control) => {
+    try {
+      return await observeAttempt(spec, index, control);
+    } catch (cause) {
+      if (
+        specification.purpose === "experiment" &&
+        spec.operation === "mach" &&
+        !(
+          typeof cause?.message === "string" &&
+          cause.message.startsWith("Unverified Darwin mach-lookup:")
+        )
+      )
+        throw new Error(
+          "Unverified Darwin mach-lookup: native attempt, binding or receipt unavailable",
+          { cause },
+        );
+      throw cause;
+    }
   };
   const restore = latched(async () => {
     if (restored) return structuredClone(restored);

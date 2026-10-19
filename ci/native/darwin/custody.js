@@ -1675,6 +1675,8 @@ export function createDarwinCustodyReader(value, options = {}) {
     async access(operation, ...values) {
       requireDarwin(
         options.caseContextSha256 &&
+          (!operation.startsWith("mach-log-") ||
+            input.purpose === "experiment") &&
           [
             "sockets",
             "payload-sockets",
@@ -1689,6 +1691,8 @@ export function createDarwinCustodyReader(value, options = {}) {
             "target",
             "attempt",
             "run",
+            "mach-log-start",
+            "mach-log-run",
             "peer",
             "complete",
             "controls-close",

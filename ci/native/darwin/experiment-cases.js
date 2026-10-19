@@ -307,7 +307,7 @@ export async function prepareDarwinExperimentCases(
       ];
       record = {
         purpose: "experiment",
-        schemaVersion: 1,
+        schemaVersion: 2,
         contextSha256: observationDigest(context),
         assets,
         pf: {
@@ -333,6 +333,17 @@ export async function prepareDarwinExperimentCases(
           mapping: inputs.audit,
           classes: inputs.classes,
           helper: { index: observer, cdhash: helper("observer-helper").cdhash },
+        },
+        mach: {
+          source: inputs.mach.source,
+          tool: {
+            index: add(
+              "helper",
+              inputs.mach.tool.path,
+              inputs.mach.tool.sha256,
+            ),
+            cdhash: inputs.mach.tool.cdhash,
+          },
         },
         objects: required.map((file) => ({
           index: [...entries, ...assets].findIndex(({ path }) => path === file),
@@ -486,7 +497,7 @@ export async function prepareDarwinExperimentCases(
         plan: { path: plan.path, sha256: plan.sha256 },
       },
       bindings: {
-        schemaVersion: 1,
+        schemaVersion: access ? 2 : 1,
         bindingSha256: prepared.bootstrap.bindingSha256,
         uid,
         gid,
@@ -503,6 +514,7 @@ export async function prepareDarwinExperimentCases(
   for (const upload of uploads) await publish(upload);
   return {
     purpose: "experiment",
+    schemaVersion: 2,
     ...darwinExperimentCaseDeclarations(cases),
     uploads: uploads.map(({ bytes, ...pin }) => ({
       ...pin,
@@ -577,10 +589,14 @@ function accessAttempts(plan, root, inputs) {
         (endpoint
           ? `${endpoint.protocol}${endpoint.family === "inet" ? 4 : 6}-pair`
           : `${(i - 19) % 2 ? "udp" : "tcp"}${(i - 19) % 4 >= 2 ? 6 : 4}`),
-      event = inputs.events[operation.replace(/-pair$/u, "")];
-    requireObservation(event);
+      event =
+        operation === "mach"
+          ? null
+          : inputs.events[operation.replace(/-pair$/u, "")];
+    requireObservation(operation === "mach" || event);
     return {
       id,
+      source: operation === "mach" ? inputs.mach.source : "bsm",
       event,
       controlEvent: event,
       operation,

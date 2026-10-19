@@ -11,6 +11,7 @@ const STOCK_TOOLS = new Set([
   "/usr/bin/sudo",
   "/usr/bin/git",
   "/usr/bin/hdiutil",
+  "/usr/bin/log",
   "/sbin/pfctl",
 ]);
 const STABILITY = [

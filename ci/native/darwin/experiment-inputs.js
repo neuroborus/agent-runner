@@ -209,6 +209,7 @@ export async function acquireDarwinExperimentInputs(
     git = await image(gitPath),
     pfctl = await image("/sbin/pfctl"),
     hdiutil = await image("/usr/bin/hdiutil"),
+    log = await image("/usr/bin/log"),
     loader = await read("/usr/lib/dyld");
   const loaderRead = await reader.readBuildInput(
     loader.file,
@@ -277,7 +278,6 @@ export async function acquireDarwinExperimentInputs(
       unlink: "AUE_UNLINK",
       replace: "AUE_RENAME",
       parent: "AUE_RENAME",
-      mach: "AUE_BSLOOKUP",
       unix: "AUE_CONNECT",
       shm: "AUE_SHMOPEN",
       sem: "AUE_SEMOPEN",
@@ -438,6 +438,7 @@ export async function acquireDarwinExperimentInputs(
       volume: { path: volumePath, sha256: digest(volumeBytes) },
       pf,
       audit,
+      mach: { source: "unified-log-mach-v1", tool: log },
       classes,
       events: selected,
       addresses,

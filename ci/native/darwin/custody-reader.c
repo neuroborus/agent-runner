@@ -38,6 +38,7 @@
 #include <sys/socket.h>
 #include <sys/mman.h>
 #include <sys/time.h>
+#include <time.h>
 #include <sys/un.h>
 #include <semaphore.h>
 #include <servers/bootstrap.h>
@@ -1566,6 +1567,106 @@ static char access_names[39][2][PATH_MAX];
 static int access_shm = -1, access_sysv_shm = -1, access_sysv_sem = -1;
 static sem_t *access_sem = SEM_FAILED;
 static mach_port_t access_mach = MACH_PORT_NULL;
+#ifdef NATIVE_CI_EXPERIMENT
+static struct timeval access_mach_start, access_mach_end;
+static pid_t access_log_pid;
+static int access_log_out = -1;
+static struct identity access_log_identity;
+static struct entry *access_log_tool;
+static void access_time(char value[40], struct timeval time) {
+  struct tm utc; time_t seconds = time.tv_sec; need(gmtime_r(&seconds, &utc));
+  need(strftime(value, 24, "%Y-%m-%dT%H:%M:%S", &utc) == 19);
+  need(snprintf(value + 19, 21, ".%06dZ", (int)time.tv_usec) == 8);
+}
+static void access_mach_result(const char *result) {
+  struct identity after = inspect(access_subject.token.val[5]);
+  need(!gettimeofday(&access_mach_end, NULL));
+  int64_t elapsed = (access_mach_end.tv_sec - access_mach_start.tv_sec) * 1000000LL + access_mach_end.tv_usec - access_mach_start.tv_usec;
+  need(elapsed >= 0 && elapsed <= 30000000);
+  need(!memcmp(&after.token, &access_subject.token, sizeof(after.token)) &&
+    after.bsd.pbi_start_tvsec == access_subject.bsd.pbi_start_tvsec &&
+    after.bsd.pbi_start_tvusec == access_subject.bsd.pbi_start_tvusec &&
+    after.bsd.pbi_svuid == access_subject.bsd.pbi_svuid && after.bsd.pbi_svgid == access_subject.bsd.pbi_svgid);
+  char nonce[33], send[16], canonical[256]; int outcome, native, lookup;
+  need(sscanf(result, "{\"nonce\":\"%32[0-9a-f]\",\"result\":%d,\"nativeCode\":%d,\"lookupCode\":%d,\"sendCode\":%15[0-9a-z]}", nonce, &outcome, &native, &lookup, send) == 5);
+  snprintf(canonical, sizeof(canonical), "{\"nonce\":\"%.32s\",\"result\":%d,\"nativeCode\":%d,\"lookupCode\":%d,\"sendCode\":%s}", case_context, outcome, native, lookup, send);
+  need(!strcmp(canonical, result));
+  need(access_control ? !outcome && !native && !lookup && !strcmp(send, "0") :
+    outcome == -1 && native == BOOTSTRAP_NOT_PRIVILEGED && lookup == BOOTSTRAP_NOT_PRIVILEGED && !strcmp(send, "null"));
+  char started[40], ended[40]; access_time(started, access_mach_start); access_time(ended, access_mach_end);
+  canonical[strlen(canonical) - 1] = 0;
+  printf("%s,\"mach\":{\"source\":\"custody-mach-v1\",\"startedAt\":\"%s\",\"endedAt\":\"%s\",\"before\":", canonical, started, ended);
+  emit(access_subject); fputs(",\"after\":", stdout); emit(after); fputs(",\"receipt\":", stdout);
+  if (access_control) {
+    struct message { mach_msg_header_t header; char nonce[32]; };
+    struct { struct message message; mach_msg_max_trailer_t trailer; } received = {0};
+    need(mach_msg(&received.message.header, MACH_RCV_MSG | MACH_RCV_TIMEOUT |
+      MACH_RCV_TRAILER_TYPE(MACH_MSG_TRAILER_FORMAT_0) | MACH_RCV_TRAILER_ELEMENTS(MACH_RCV_TRAILER_AUDIT),
+      0, sizeof(received), access_mach, 5000, MACH_PORT_NULL) == MACH_MSG_SUCCESS);
+    mach_msg_header_t *header = &received.message.header;
+    need(header->msgh_size == sizeof(struct message) && !(header->msgh_bits & MACH_MSGH_BITS_COMPLEX) &&
+      header->msgh_local_port == access_mach && header->msgh_remote_port == MACH_PORT_NULL &&
+      header->msgh_id == 0x4e504f43 && !memcmp(received.message.nonce, case_context, 32));
+    mach_msg_audit_trailer_t *trailer = (void *)((char *)&received + ((header->msgh_size + 3u) & ~3u));
+    need(trailer->msgh_trailer_type == MACH_MSG_TRAILER_FORMAT_0 && trailer->msgh_trailer_size == sizeof(*trailer) &&
+      !memcmp(&trailer->msgh_audit, &access_subject.token, sizeof(access_subject.token)));
+    mach_port_status_t status; mach_msg_type_number_t size = MACH_PORT_RECEIVE_STATUS_COUNT;
+    need(mach_port_get_attributes(mach_task_self(), access_mach, MACH_PORT_RECEIVE_STATUS, (mach_port_info_t)&status, &size) == KERN_SUCCESS &&
+      size == MACH_PORT_RECEIVE_STATUS_COUNT && !status.mps_msgcount);
+    printf("{\"nonce\":\"%.32s\",\"service\":\"%s\",\"sender\":", case_context, access_names[13][0]);
+    emit(after); fputs(",\"auditToken\":[", stdout);
+    for (unsigned i = 0; i < 8; i++) printf("%s%u", i ? "," : "", trailer->msgh_audit.val[i]);
+    fputs("]}", stdout);
+  } else fputs("null", stdout);
+  fputs("}}", stdout);
+}
+static void access_log_start(struct entry *tool, const char *cdhash) {
+  need(case_mode && access_pending && access_ran && access_index == 13 && !access_control && !access_log_pid &&
+    !strcmp(tool->path, "/usr/bin/log")); reservation_guard(); stable(tool); signature(tool->path, cdhash);
+  char start[40], end[40], predicate[512]; struct tm utc; time_t seconds = access_mach_start.tv_sec;
+  need(gmtime_r(&seconds, &utc) && strftime(start, sizeof(start), "%Y-%m-%d %H:%M:%S+0000", &utc));
+  seconds = access_mach_end.tv_sec + 1;
+  need(gmtime_r(&seconds, &utc) && strftime(end, sizeof(end), "%Y-%m-%d %H:%M:%S+0000", &utc));
+  snprintf(predicate, sizeof(predicate), "processID == 0 AND senderImagePath == \"/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox\" AND eventMessage CONTAINS \"(%u)\" AND eventMessage CONTAINS \"org.native-poc.%.32s\"", access_subject.token.val[5], case_context);
+  char *args[] = {tool->path, "show", "--style", "ndjson", "--start", start, "--end", end, "--info", "--debug", "--predicate", predicate, NULL};
+  char *env[] = {"PATH=/usr/bin:/bin", "LANG=C", NULL}; int output[2]; need(!pipe(output));
+  posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+  need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
+    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_START_SUSPENDED) &&
+    !posix_spawn_file_actions_addopen(&files, 0, "/dev/null", O_RDONLY, 0) &&
+    !posix_spawn_file_actions_adddup2(&files, output[1], 1) &&
+    !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0) &&
+    !posix_spawn(&access_log_pid, tool->path, &files, &attributes, args, env) &&
+    !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes) && !close(output[1]));
+  access_log_out = output[0]; access_log_tool = tool; access_log_identity = inspect(access_log_pid);
+  need(access_log_identity.bsd.pbi_ppid == (unsigned)getpid() && !access_log_identity.token.val[1] && !access_log_identity.token.val[2]);
+  emit(access_log_identity);
+}
+static void access_log_run(void) {
+  need(access_log_pid && access_log_out >= 0); reservation_guard(); stable(access_log_tool);
+  struct identity live = inspect(access_log_pid);
+  need(!memcmp(&live.token, &access_log_identity.token, sizeof(live.token)) &&
+    live.bsd.pbi_start_tvsec == access_log_identity.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == access_log_identity.bsd.pbi_start_tvusec &&
+    !proc_signal_with_audittoken(&live.token, SIGCONT));
+  unsigned char bytes[65537]; size_t used = 0; struct timespec start, now; need(!clock_gettime(CLOCK_MONOTONIC, &start));
+  for (;;) {
+    need(!clock_gettime(CLOCK_MONOTONIC, &now)); long remaining = 12000 - (now.tv_sec - start.tv_sec) * 1000 - (now.tv_nsec - start.tv_nsec) / 1000000;
+    struct pollfd wait = {.fd = access_log_out, .events = POLLIN};
+    need(remaining > 0 && poll(&wait, 1, (int)remaining) == 1 && !(wait.revents & (POLLERR | POLLNVAL)));
+    ssize_t size = read(access_log_out, bytes + used, sizeof(bytes) - used); if (size < 0 && errno == EINTR) continue;
+    need(size >= 0); if (!size) break; used += size; need(used <= 65536);
+  }
+  int status;
+  for (;;) {
+    pid_t done = waitpid(access_log_pid, &status, WNOHANG); need(done >= 0 || errno == EINTR); if (done > 0) break;
+    need(!clock_gettime(CLOCK_MONOTONIC, &now) &&
+      (now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 < 12000); poll(NULL, 0, 1);
+  }
+  need(WIFEXITED(status) && WEXITSTATUS(status) == 0 && !close(access_log_out));
+  access_log_pid = 0; access_log_out = -1; stable(access_log_tool); access_log_tool = NULL;
+  char encoded[131073]; hex(bytes, used, encoded); printf("{\"hex\":\"%s\",\"exitCode\":0,\"signal\":null}", encoded);
+}
+#endif
 static struct timeval access_created;
 static struct stat access_unix_identity, access_shm_identity;
 static struct shmid_ds access_sysv_shm_identity;
@@ -1833,12 +1934,21 @@ static void access_attempt(unsigned control, unsigned index) {
 }
 static void access_run(unsigned control) {
   need(access_pending && !access_ran && control == access_control); reservation_guard(); struct identity live = inspect(access_subject.token.val[5]);
-  need(!memcmp(&live.token, &access_subject.token, sizeof(live.token)) && live.bsd.pbi_start_tvsec == access_subject.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == access_subject.bsd.pbi_start_tvusec);
+  need(!memcmp(&live.token, &access_subject.token, sizeof(live.token)) && live.bsd.pbi_start_tvsec == access_subject.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == access_subject.bsd.pbi_start_tvusec && live.bsd.pbi_svuid == access_subject.bsd.pbi_svuid && live.bsd.pbi_svgid == access_subject.bsd.pbi_svgid);
   int fd = access_control ? access_control_in : case_data, output = access_control ? access_control_out : case_data;
+#ifdef NATIVE_CI_EXPERIMENT
+  if (access_index == 13) need(!gettimeofday(&access_mach_start, NULL));
+#endif
   need(write(fd, "P", 1) == 1); char result[8192];
   for (unsigned i = 0; i < 4; i++) {
     access_result_line(output, result, sizeof(result));
-    if (strstr(result, "\"nativeCode\":")) { fputs(result, stdout); access_ran = true; return; }
+    if (strstr(result, "\"nativeCode\":")) {
+#ifdef NATIVE_CI_EXPERIMENT
+      if (access_index == 13) access_mach_result(result); else
+#endif
+        fputs(result, stdout);
+      access_ran = true; return;
+    }
     if (strstr(result, "\"ready\":true")) {
       char nonce[33]; unsigned pid; need(access_index >= 35 && !access_control && sscanf(result, "{\"nonce\":\"%32[0-9a-f]\",\"listener\":%u,\"descriptor\":%d,\"ready\":true}", nonce, &pid, &access_peer_descriptor) == 3 && !strncmp(nonce, case_context, 32) && access_peer_descriptor >= 0);
       access_peer_identity = inspect(pid); need(access_peer_identity.bsd.pbi_ppid == access_subject.token.val[5] && access_peer_identity.token.val[0] == subject_uid && access_peer_identity.token.val[1] == subject_uid && access_peer_identity.token.val[2] == subject_gid && access_peer_identity.token.val[6] == case_asid);
@@ -1854,6 +1964,9 @@ static void access_peer(void) {
 }
 static void access_complete(unsigned control) {
   need(access_pending && access_ran && control == access_control); reservation_guard();
+#ifdef NATIVE_CI_EXPERIMENT
+  need(!access_log_pid);
+#endif
   if (access_control) { need(write(access_control_in, "P", 1) == 1); access_wait(&access_control_pid, &access_control_in, &access_control_out); }
   else { need(write(case_data, "P", 1) == 1); char complete[64]; line(case_data, complete, sizeof(complete)); need(!strcmp(complete, "{\"complete\":true}")); }
   access_pending = false; access_ran = false; fputs("null", stdout);
@@ -2205,7 +2318,12 @@ static void case_resume(char **values) {
   need(!proc_signal_with_audittoken(&token, SIGCONT)); fputs("{\"resumed\":true}", stdout);
 }
 static bool operation_domain_finished(void) { return operation_mode && !git_pid && !file_pid; }
-static bool operations_retired(void) { need(!git_pid && !access_audit_pid && !file_caller_count && !file_reader.pid && !file_probe.pid && !volume_owner.pid && control_root < 0); return true; }
+static bool operations_retired(void) {
+#ifdef NATIVE_CI_EXPERIMENT
+  need(!access_log_pid);
+#endif
+  need(!git_pid && !access_audit_pid && !file_caller_count && !file_reader.pid && !file_probe.pid && !volume_owner.pid && control_root < 0); return true;
+}
 
 static void file_line(void) { need(file_pid); char bytes[9000]; size_t used = 0;
   for (;;) { char byte; struct pollfd wait = {.fd = file_out, .events = POLLIN}; need(poll(&wait, 1, 30000) == 1);
@@ -2332,6 +2450,10 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "access-attempt")) { need(n == 4); access_attempt(number(tokens[2]), number(tokens[3]));
     } else if (!strcmp(tokens[0], "access-target")) { need(n == 4); access_target(number(tokens[2]), number(tokens[3]));
     } else if (!strcmp(tokens[0], "access-run")) { need(n == 3); access_run(number(tokens[2]));
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(tokens[0], "access-mach-log-start")) { need(n == 4); access_log_start(slot(tokens[2]), tokens[3]);
+    } else if (!strcmp(tokens[0], "access-mach-log-run")) { need(n == 2); access_log_run();
+#endif
     } else if (!strcmp(tokens[0], "access-peer")) { need(n == 2); access_peer();
     } else if (!strcmp(tokens[0], "access-complete")) { need(n == 3); access_complete(number(tokens[2]));
     } else if (!strcmp(tokens[0], "access-controls-retired")) { need(n == 3); access_controls_retired(slot(tokens[2]));

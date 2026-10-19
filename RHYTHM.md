@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-19 — Observe experiment Mach lookup outside BSM
+
+Ordinary Darwin experiments no longer require the nonexistent `AUE_BSLOOKUP`.
+Actual BSM routes keep their installed SDK/event/class/header/ABI bindings. Mach
+uses a versioned experiment source with exact custody-owned attempt timestamps,
+independent caller birth/credential/audit joins and an unambiguous kernel denial
+record for the nonce-derived service. Rounded log selectors, startup diagnostics,
+child output and queue silence supply no access verdict.
+
+The existing registered service receives a bounded control message with a kernel
+audit trailer matched to the independently inspected sender. Lookup, send and
+receipt outcomes must agree. The pinned passive log reader shares custody and
+original-owner retirement without added privileges or global logging changes.
+Legacy/mixed records cannot admit access proof; independent cleanup remains
+available. All 39 attempts and existing native blockers remain. Portable coverage
+establishes no hosted log availability, native acceptance, source closure,
+protected-provider acceptance or production GO; fresh matching CI is still needed.
+
 ## 2026-10-19 — Trust hosted Darwin installed case inputs consistently
 
 Ordinary Darwin case-input acquisition, native custody, cold loading and actual

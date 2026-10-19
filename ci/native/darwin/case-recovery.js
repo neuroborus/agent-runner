@@ -239,6 +239,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
               "access-target",
               "access-attempt",
               "access-run",
+              "access-mach-log-start",
+              "access-mach-log-run",
               "access-peer",
               "access-complete",
               "access-controls-close",
@@ -495,6 +497,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
                       "access-policy",
                       "pf-helper",
                       "access-attempt",
+                      "mach-log-reader",
+                      "mach-log-closed",
                       "audit-possible",
                       "audit-closed",
                       "audit-retired",
@@ -583,6 +587,15 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             if (!members.some((known) => sameDarwinIdentity(known, identity)))
               members.push(identity);
         }
+        // A passive log child belongs to the original reader's root domain.
+        // Retire its protected birth before checking that whole domain absent.
+        for (const { record } of history.filter(
+          ({ kind }) => kind === "mach-log-reader",
+        ))
+          if (
+            !subjects.some((known) => sameDarwinIdentity(known, record.worker))
+          )
+            subjects.push(record.worker);
         recovered = {
           admitted,
           members,
@@ -754,6 +767,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           declared.bindings,
           binding,
           rawPlan.slice(0, 12),
+          { recovery: true },
         );
         const entriesOf = (list) =>
           list.map(({ kind, path, sha256 }) => ({ kind, path, sha256 }));
@@ -893,6 +907,21 @@ async function recoverDarwinAccess(
     if (record.worker) await reader.retired(record.worker);
     await reader.retiredRootDomain(record.helper);
   }
+  const logReaders = values("mach-log-reader"),
+    logClosed = values("mach-log-closed");
+  requireObservation(
+    custody.filter(({ phase }) => phase === "access-mach-log-start").length ===
+      logReaders.length &&
+      logReaders.length <= 1 &&
+      logClosed.length === logReaders.length,
+  );
+  for (const { worker } of logReaders) {
+    requireObservation(
+      logClosed.some((record) => sameDarwinIdentity(record.worker, worker)),
+    );
+    await reader.retired(worker);
+    await reader.retiredRootDomain(worker);
+  }
   const observers = values("audit-possible"),
     closed = values("audit-closed");
   requireObservation(
@@ -909,7 +938,7 @@ async function recoverDarwinAccess(
     );
     const frames = entries
       .filter(({ record }) => record.phase === "access-audit-frame")
-      .map(({ record: { phase, ...frame } }) => frame);
+      .map(({ record: { phase, purpose, ...frame } }) => frame);
     requireObservation(observationDigest(frames) === closed[0].framesSha256);
     for (const frame of frames) {
       observationObject(frame, ["observer", "command", "hex"]);
@@ -931,8 +960,13 @@ async function recoverDarwinAccess(
   const controls = await reader.access("controls-retired", bank);
   observationObject(controls, ["absent"]);
   requireObservation(controls.absent === true);
+  // A closed original audit session cannot be re-adopted by numeric ASID.
+  // The owner already verified its closure; independently census the whole UID.
+  const censusAsid = retirement.sessionCustody?.closed
+    ? null
+    : retirement.domain.asid;
   const verifyRetirement = async () => {
-    const actual = await reader.verifyOwnership(retirement.domain.asid ?? 0);
+    const actual = await reader.verifyOwnership(censusAsid ?? 0);
     requireObservation(
       actual.enumeration.live.length === 0 &&
         actual.enumeration.zombies.length === 0 &&
@@ -1070,7 +1104,7 @@ async function recoverDarwinAccess(
     independent: true,
     noLiveUid: true,
     helpersSettled: true,
-    domain: retirement.domain,
+    domain: { ...retirement.domain, asid: censusAsid },
     verifier: retirement.freshVerifier,
     receiptSha256: retirement.nativeEventSha256,
     pfBaselineSha256: pfBindings.baselineSha256,

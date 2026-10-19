@@ -8,6 +8,7 @@ import {
   recordExperimentPreparationEffect,
   recordExperimentRecovery,
   observationDigest,
+  observationObject,
   requireObservation,
 } from "../index.js";
 import { darwinExperimentWorker } from "./experiment-build-inputs.js";
@@ -25,6 +26,7 @@ import { darwinPreparationContext } from "./preparation.js";
 import { createDarwinSystemEffects } from "./effects.js";
 import { darwinSystemRecipes } from "./system.js";
 import { digest } from "./protocol.js";
+import { assertDarwinMachRecord } from "./mach-access.js";
 
 const retired = (value) =>
   value?.status === "RETIRED" &&
@@ -81,16 +83,39 @@ export function darwinExperimentBuildBinding({ prepared, build }) {
   };
 }
 
-function systemInput(job, preparation) {
+function systemInput(job, preparation, { recovery = false } = {}) {
   requireObservation(
     job.purpose === "experiment" &&
-      preparation.schemaVersion === 3 &&
+      (preparation.schemaVersion === 4 ||
+        (recovery && preparation.schemaVersion === 3)) &&
       preparation.build.schemaVersion === 3 &&
       preparation.purpose === "experiment" &&
       preparation.system.cases.length === darwinSystemRecipes().length - 1,
   );
   assertDarwinExperimentBuild(preparation.prepared, preparation.build);
-  const canonical = darwinExperimentCaseDeclarations(preparation.system.cases);
+  if (!recovery) {
+    observationObject(preparation.inputs.mach, ["source", "tool"]);
+    requireObservation(
+      preparation.system.schemaVersion === 2 &&
+        preparation.inputs.mach.source === "unified-log-mach-v1" &&
+        preparation.inputs.mach.tool.path === "/usr/bin/log" &&
+        !Object.hasOwn(preparation.inputs.events, "mach"),
+    );
+    for (const declared of preparation.system.cases.filter(({ id }) =>
+      id.startsWith("access."),
+    )) {
+      const pin = declared.bindings.access.binding,
+        upload = preparation.system.uploads.find(
+          ({ path }) => path === pin.path,
+        ),
+        bytes = Buffer.from(upload.hex, "hex");
+      requireObservation(digest(bytes) === pin.sha256);
+      assertDarwinMachRecord(JSON.parse(bytes), preparation.inputs.mach);
+    }
+  }
+  const canonical = darwinExperimentCaseDeclarations(preparation.system.cases, {
+    recovery,
+  });
   requireObservation(
     observationDigest(canonical.policyBindings) ===
       observationDigest(preparation.system.policyBindings),
@@ -248,7 +273,7 @@ export async function prepareDarwinExperiment(
       ),
       preparation = {
         purpose: "experiment",
-        schemaVersion: 3,
+        schemaVersion: 4,
         prepared: built.prepared,
         buildJob: built.job,
         build: built.build,
@@ -371,6 +396,7 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
       preparation.inputs.git,
       preparation.inputs.pfctl,
       preparation.inputs.hdiutil,
+      preparation.inputs.mach.tool,
       preparation.inputs.loader,
       preparation.inputs.volume,
     ]) {
@@ -455,7 +481,7 @@ export async function recoverDarwinExperimentPreparation(
     requireObservation(bytes.length <= 1048576);
     const preparation = JSON.parse(bytes),
       owner = createDarwinSystemEffects(
-        systemInput(job, preparation),
+        systemInput(job, preparation, { recovery: true }),
         selectors(preparation, options),
       ),
       request = {

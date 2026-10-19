@@ -60,6 +60,8 @@ import {
 import { darwinGitPolicies } from "./git-effects.js";
 import { createDarwinExperimentRuntimeEffects } from "./experiment-runtime.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
+import { bindDarwinMachAccess, darwinMachLogArguments } from "./mach-access.js";
+import { darwinAccessPreparation } from "./access-effects.js";
 import { prepareDarwinExperimentCases } from "./experiment-cases.js";
 import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
 import { darwinPreparationContext } from "./preparation.js";
@@ -2883,6 +2885,7 @@ function buildTranscripts(experiment = false, complete = false) {
       pfWorker,
       pfOperation,
       auditObserver,
+      machLogWorker,
       attemptSubject,
       attemptIndex,
       controlAttempt,
@@ -3081,7 +3084,7 @@ function buildTranscripts(experiment = false, complete = false) {
       data = [];
     const endpoints = [],
       argsForCase = args[3];
-    const helper = subject(nextPid + 100);
+    const helper = subject(nextPid + 10000);
     live(helper, entry.reader.path);
     const queue = [{ helper }],
       held = new Map();
@@ -3313,7 +3316,27 @@ function buildTranscripts(experiment = false, complete = false) {
             socket: { ...attemptTarget().value.target, subject: peerSubject },
           };
         else if (name === "access-target") value = attemptTarget();
-        else if (name === "access-run") {
+        else if (name === "access-mach-log-start") {
+          machLogWorker = subject(helper.asid);
+          live(machLogWorker, planEntries[Number(args[0])].path);
+          value = machLogWorker;
+        } else if (name === "access-mach-log-run") {
+          assert.ok(processes.has(attemptSubject.pid));
+          const event = {
+            timestamp: "2026-01-01T00:00:00.000150Z",
+            processID: 0,
+            processImagePath: "/kernel",
+            senderImagePath:
+              "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox",
+            eventMessage: `Sandbox: access-fixture(${attemptSubject.pid}) deny(1) mach-lookup ${accessSpec.attempts[13].target}`,
+          };
+          value = {
+            hex: Buffer.from(JSON.stringify(event) + "\n").toString("hex"),
+            exitCode: 0,
+            signal: null,
+          };
+          processes.delete(machLogWorker.pid);
+        } else if (name === "access-run") {
           let nativeCode =
             controlAttempt ||
             attemptIndex === 0 ||
@@ -3334,6 +3357,10 @@ function buildTranscripts(experiment = false, complete = false) {
           )
             nativeCode = 60;
           const spec = accessSpec.attempts[attemptIndex];
+          const mach = experiment && spec.operation === "mach";
+          if (mach && controlAttempt && caseFault === "mach-control-timeout")
+            throw new Error("Native receipt deadline");
+          if (mach && !controlAttempt) nativeCode = 1100;
           if (!nativeCode && spec.operation === "write")
             files.get(targetFile(attemptIndex, controlAttempt)).bytes =
               Buffer.from(argsForCase.slice(0, 32) + "-edit");
@@ -3341,15 +3368,17 @@ function buildTranscripts(experiment = false, complete = false) {
             for (let i = 0; i < 4; i++)
               if (caseFault !== "missing-counter-leg" || i !== 2)
                 packetCounts[(attemptIndex - 35) * 8 + i]++;
-          const raw = Buffer.alloc(18);
-          raw.writeUInt32BE(++auditCount);
-          auditRecords.set(raw.toString("hex"), auditTokens(nativeCode));
-          if (!(
-            caseFault === "audit-event-loss" &&
-            !controlAttempt &&
-            attemptIndex === 2
-          ))
-            auditPending.push(word(raw.length), raw);
+          if (!mach) {
+            const raw = Buffer.alloc(18);
+            raw.writeUInt32BE(++auditCount);
+            auditRecords.set(raw.toString("hex"), auditTokens(nativeCode));
+            if (!(
+              caseFault === "audit-event-loss" &&
+              !controlAttempt &&
+              attemptIndex === 2
+            ))
+              auditPending.push(word(raw.length), raw);
+          }
           if (
             caseFault === "stale-attempt" &&
             !controlAttempt &&
@@ -3378,6 +3407,35 @@ function buildTranscripts(experiment = false, complete = false) {
             result: nativeCode ? -1 : 0,
             nativeCode,
           };
+          if (mach)
+            Object.assign(value, {
+              lookupCode: nativeCode,
+              sendCode: controlAttempt ? 0 : null,
+              mach: {
+                source: "custody-mach-v1",
+                startedAt: "2026-01-01T00:00:00.000100Z",
+                endedAt: "2026-01-01T00:00:00.000200Z",
+                before: attemptSubject,
+                after: attemptSubject,
+                receipt: controlAttempt
+                  ? {
+                      nonce: value.nonce,
+                      service: spec.target,
+                      sender: attemptSubject,
+                      auditToken: [
+                        "auid",
+                        "uid",
+                        "gid",
+                        "ruid",
+                        "rgid",
+                        "pid",
+                        "asid",
+                        "pidVersion",
+                      ].map((key) => attemptSubject[key]),
+                    }
+                  : null,
+              },
+            });
         } else if (name === "access-complete") {
           processes.delete(attemptSubject.pid);
           if (peerSubject) processes.delete(peerSubject.pid);
@@ -3403,7 +3461,7 @@ function buildTranscripts(experiment = false, complete = false) {
           }));
         else if (name === "access-controls-retired") {
           assert.equal(accessResources, false);
-          value = { absent: true };
+          value = { absent: caseFault !== "mach-service-survives" };
         } else if (name === "access-controls-close") {
           assert.equal(auditObserver, null);
           accessResources = false;
@@ -5161,7 +5219,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
     context: bindingContext,
   };
 }
-function accessBinding(f, profile, observedPins = false) {
+function accessBinding(f, profile, observedPins = false, mach) {
   const experiment = f.manifest.purpose === "experiment",
     id = "access." + profile,
     binding = caseBinding(f, id),
@@ -5292,8 +5350,12 @@ function accessBinding(f, profile, observedPins = false) {
       const endpoint = i >= 35 ? native.value.endpoints[i - 35] : null;
       return {
         id,
-        event: i < 13 ? 1 : i < 19 ? 2 : 3,
-        controlEvent: i < 13 ? 1 : i < 19 ? 2 : 3,
+        ...(experiment
+          ? { source: i === 13 ? "unified-log-mach-v1" : "bsm" }
+          : {}),
+        event: experiment && i === 13 ? null : i < 13 ? 1 : i < 19 ? 2 : 3,
+        controlEvent:
+          experiment && i === 13 ? null : i < 13 ? 1 : i < 19 ? 2 : 3,
         operation:
           operations[i] ??
           (endpoint
@@ -5348,6 +5410,10 @@ function accessBinding(f, profile, observedPins = false) {
     sha256: digest(request.nonce),
     source: null,
   });
+  if (mach) assert.equal(mach.tool.sha256, digest(f.image));
+  const machTool = experiment
+    ? add("helper", mach?.tool.path ?? "/usr/bin/log", f.image)
+    : null;
   const entryList = [...plan, ...assets.map(({ source, ...entry }) => entry)],
     required = [
       request.custody,
@@ -5404,7 +5470,7 @@ function accessBinding(f, profile, observedPins = false) {
     ],
     record = {
       ...(experiment ? { purpose: "experiment" } : {}),
-      schemaVersion: 1,
+      schemaVersion: experiment ? 2 : 1,
       contextSha256: observationDigest(binding.context),
       pf: {
         [experiment ? "bindings" : "approval"]: {
@@ -5442,6 +5508,14 @@ function accessBinding(f, profile, observedPins = false) {
         classes: 1,
         helper: { index: observer, cdhash },
       },
+      ...(experiment
+        ? {
+            mach: {
+              source: mach?.source ?? "unified-log-mach-v1",
+              tool: { index: machTool, cdhash: mach?.tool.cdhash ?? cdhash },
+            },
+          }
+        : {}),
       assets,
       objects,
       attempts,
@@ -5495,6 +5569,7 @@ function accessBinding(f, profile, observedPins = false) {
   declared.bindings.access = {
     [experiment ? "binding" : "approval"]: approval,
   };
+  if (experiment) declared.bindings.schemaVersion = 2;
   f.access({ ...record, profile, rootRules, anchorRules, pointer });
   return binding;
 }
@@ -5607,8 +5682,9 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     "subject-authority",
     "fresh-members-missing",
     "tcp-deadline",
+    "mach-control-timeout",
   ]) {
-    const access = fault === "tcp-deadline",
+    const access = ["tcp-deadline", "mach-control-timeout"].includes(fault),
       id = access ? "access.read-only" : "ownership.cancel",
       f = buildTranscripts(true),
       binding = experimentCase(f, id),
@@ -5617,13 +5693,23 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
       work = new AbortController();
     f.caseFault(fault);
     let prepared;
-    if (["missing", "context", "subject-authority"].includes(fault))
+    if (
+      [
+        "missing",
+        "context",
+        "subject-authority",
+        "mach-control-timeout",
+      ].includes(fault)
+    )
       await assert.rejects(
         effects.prepare(recipe, {
           signal: work.signal,
           policyBinding: binding,
           recordPolicy() {},
         }),
+        fault === "mach-control-timeout"
+          ? /Unverified Darwin mach-lookup:/u
+          : undefined,
       );
     else {
       prepared = await effects.prepare(recipe, {
@@ -8450,12 +8536,12 @@ test("Darwin recovery retains policy when sealed audit frames or independent IPC
   }
 });
 
-function completeExperimentCase(f, id) {
+function completeExperimentCase(f, id, mach) {
   const create = (entry) => {
     if (entry.startsWith("files.")) return fileBinding(f, entry);
     if (entry.startsWith("git.")) return gitBinding(f, entry);
     if (entry.startsWith("access."))
-      return { binding: accessBinding(f, entry.slice(7), true) };
+      return { binding: accessBinding(f, entry.slice(7), true, mach) };
     if (entry !== "release") return { binding: caseBinding(f, entry, true) };
     const setup = operationBinding(f, entry);
     return setup.finish(
@@ -8651,6 +8737,15 @@ function experimentInputs(f, build) {
       events,
       mappingSha256: digest(JSON.stringify({ headerVersion, events })),
     },
+    mach: {
+      source: "unified-log-mach-v1",
+      tool: {
+        path: "/usr/bin/log",
+        sha256: hash,
+        cdhash,
+        identity: build.helpers[0].identity,
+      },
+    },
     classes: 1,
     addresses: { inet: "192.0.2.1", inet6: "2001:db8::1" },
     events: Object.fromEntries(
@@ -8660,7 +8755,6 @@ function experimentInputs(f, build) {
         "unlink",
         "replace",
         "parent",
-        "mach",
         "unix",
         "shm",
         "sem",
@@ -8674,6 +8768,225 @@ function experimentInputs(f, build) {
     ),
   };
 }
+
+test("Darwin Mach access binds exact native windows, caller births, kernel sources and delivered controls", () => {
+  const nonce = "b".repeat(32),
+    service = "org.native-poc." + nonce,
+    subject = { ...identity(4002), asid: 7001 },
+    event = {
+      timestamp: "2026-01-01T00:00:00.000150Z",
+      processID: 0,
+      processImagePath: "/kernel",
+      senderImagePath:
+        "/System/Library/Extensions/Sandbox.kext/Contents/MacOS/Sandbox",
+      eventMessage: `Sandbox: access-fixture(${subject.pid}) deny(1) mach-lookup ${service}`,
+    },
+    denial = {
+      nonce,
+      result: -1,
+      nativeCode: 1100,
+      lookupCode: 1100,
+      sendCode: null,
+      mach: {
+        source: "custody-mach-v1",
+        startedAt: "2026-01-01T00:00:00.000100Z",
+        endedAt: "2026-01-01T00:00:00.000200Z",
+        before: subject,
+        after: subject,
+        receipt: null,
+      },
+    },
+    control = {
+      ...denial,
+      result: 0,
+      nativeCode: 0,
+      lookupCode: 0,
+      sendCode: 0,
+      mach: {
+        ...denial.mach,
+        receipt: {
+          nonce,
+          service,
+          sender: subject,
+          auditToken: [
+            "auid",
+            "uid",
+            "gid",
+            "ruid",
+            "rgid",
+            "pid",
+            "asid",
+            "pidVersion",
+          ].map((key) => subject[key]),
+        },
+      },
+    },
+    bind = (result, log = [event], after = subject, permitted = false) =>
+      bindDarwinMachAccess(result, subject, after, {
+        nonce,
+        service,
+        control: permitted,
+        log: log.map((row) => JSON.stringify(row)).join("\n"),
+      });
+  assert.equal(bind(denial).error, 1100);
+  assert.equal(bind(control, [], subject, true).error, 0);
+  assert.match(
+    darwinMachLogArguments(denial, subject, service)[1],
+    /00:00:00\+0000$/u,
+  );
+  for (const mutate of [
+    (value) => {
+      value.nonce = "c".repeat(32);
+    },
+    (value) => {
+      value.result = 0;
+    },
+    (value) => {
+      value.lookupCode = 1102;
+    },
+    (value) => {
+      value.nativeCode = 1;
+    },
+    (value) => {
+      value.sendCode = 0;
+    },
+    (value) => {
+      value.mach.before.pidVersion++;
+    },
+    (value) => {
+      delete value.mach.after.svgid;
+    },
+    (value) => {
+      value.mach.source = "child";
+    },
+    (value) => {
+      value.mach.startedAt = value.mach.endedAt;
+    },
+  ]) {
+    const value = structuredClone(denial);
+    mutate(value);
+    assert.throws(() => bind(value), /Unverified Darwin mach-lookup:/u);
+  }
+  for (const log of [
+    [],
+    [event, event],
+    [
+      {
+        ...event,
+        eventMessage: event.eventMessage.replace(service, service + "-wrong"),
+      },
+    ],
+    [{ ...event, eventMessage: event.eventMessage.replace("4002", "4003") }],
+    [{ ...event, eventMessage: "<private>" }],
+    [
+      {
+        ...event,
+        senderImagePath: "/fixture/Sandbox",
+        subsystem: "com.apple.sandbox.reporting",
+      },
+    ],
+    [{ ...event, processID: subject.pid }],
+    [{ ...event, processImagePath: "/fixture/kernel" }],
+    [{ ...event, timestamp: "2026-01-01T00:00:00.000099Z" }],
+    [{ ...event, timestamp: "2026-01-01T00:00:00.000201Z" }],
+  ])
+    assert.throws(() => bind(denial, log), /Unverified Darwin mach-lookup:/u);
+  assert.throws(
+    () => bind(denial, [event], { ...subject, startMicroseconds: 4003 }),
+    /mach-lookup:/u,
+  );
+  for (const mutate of [
+    (value) => {
+      value.lookupCode = 1100;
+    },
+    (value) => {
+      value.sendCode = 268435460;
+    },
+    (value) => {
+      value.mach.receipt = null;
+    },
+    (value) => {
+      value.mach.receipt.auditToken[7]++;
+    },
+    (value) => {
+      value.mach.receipt.sender.startSeconds++;
+    },
+    (value) => {
+      value.mach.receipt.nonce = "c".repeat(32);
+    },
+    (value) => {
+      value.mach.receipt.service += "-wrong";
+    },
+  ]) {
+    const value = structuredClone(control);
+    mutate(value);
+    assert.throws(
+      () => bind(value, [], subject, true),
+      /Unverified Darwin mach-lookup:/u,
+    );
+  }
+});
+
+test("Darwin experiment access refuses legacy and mixed observation records before admission", async () => {
+  const f = buildTranscripts(true),
+    binding = experimentCase(f, "access.read-only"),
+    declared = f.manifest.darwinPreparation.cases.find(
+      ({ id }) => id === "access.read-only",
+    ),
+    original = JSON.parse(
+      f.files.get(declared.bindings.access.binding.path).bytes,
+    ),
+    base = f.files
+      .get(declared.custody.plan.path)
+      .bytes.toString()
+      .trim()
+      .split("\n")
+      .slice(1, 13)
+      .map((line) => {
+        const [kind, sha256, encoded] = line.split(" ");
+        return {
+          kind,
+          sha256: sha256 === "-" ? null : sha256,
+          path: Buffer.from(encoded, "hex").toString(),
+        };
+      });
+  for (const mutate of [
+    null,
+    (value) => {
+      value.schemaVersion = 1;
+    },
+    (value) => {
+      delete value.mach;
+    },
+    (value) => {
+      value.attempts[13].event = 2;
+    },
+    (value) => {
+      delete value.attempts[13].source;
+    },
+    (value) => {
+      value.attempts[13].source = "bsm";
+    },
+    (value) => {
+      value.attempts[0].source = "unified-log-mach-v1";
+    },
+  ]) {
+    const value = structuredClone(original),
+      setup = structuredClone(declared.bindings);
+    mutate?.(value);
+    const bytes = Buffer.from(JSON.stringify(value) + "\n");
+    setup.input.bindingSha256 = setup.access.binding.sha256 = digest(bytes);
+    const load = () =>
+      darwinAccessPreparation(
+        { manifest: f.manifest, read: async () => bytes },
+        setup,
+        binding,
+        base,
+      );
+    if (mutate) await assert.rejects(load);
+    else assert.equal((await load()).attempts.length, 39);
+  }
+});
 
 test("Darwin experiment input journals await real receipt admission and stay outside retirement inventories", async () => {
   const f = buildTranscripts(true),
@@ -8908,6 +9221,41 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
       "darwin-experiment-preparation.json",
     ),
     original = f.files.get(preparationPath);
+  for (const mutate of [
+    (value) => {
+      value.schemaVersion = 3;
+    },
+    (value) => {
+      value.system.schemaVersion = 1;
+    },
+    (value) => {
+      value.inputs.events.mach = 1;
+    },
+    (value) => {
+      value.inputs.mach.source = "bsm";
+    },
+    (value) => {
+      value.system.cases.find(({ id }) =>
+        id.startsWith("access."),
+      ).bindings.schemaVersion = 1;
+    },
+  ]) {
+    const preparation = structuredClone(original);
+    mutate(preparation);
+    f.files.set(preparationPath, preparation);
+    const job = {
+      ...result.job,
+      preparationEffects: {
+        ...result.job.preparationEffects,
+        receiptSha256: observationDigest({
+          preparation,
+          close: result.preparation.close,
+        }),
+      },
+    };
+    await assert.rejects(loadDarwinExperiment(job, directory, f.options));
+  }
+  f.files.set(preparationPath, original);
   for (const identity of [undefined, "substituted-loader"]) {
     const preparation = structuredClone(original);
     if (identity === undefined) delete preparation.inputs.loader.identity;
@@ -9063,6 +9411,21 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     f.options,
   );
   assert.equal(mixed.preparationEffects.settlement.status, "RETAINED");
+  const legacy = { ...original, schemaVersion: 3 },
+    beforeRetirement = f.events.filter(
+      (event) => event === "original-retirement",
+    ).length;
+  f.files.set(preparationPath, legacy);
+  await recoverDarwinExperimentPreparation(
+    mixed,
+    directory,
+    f.persist,
+    f.options,
+  );
+  assert.ok(
+    f.events.filter((event) => event === "original-retirement").length >
+      beforeRetirement,
+  );
 });
 
 test("Darwin cold installed Git joins optional images without reacquisition and rejects lost bindings", async () => {
@@ -9377,20 +9740,22 @@ async function installedCaseAcquisition(format) {
       f.persist,
       f.options,
     ),
-    names = [
-      "OPEN_R",
-      "OPEN_W",
-      "UNLINK",
-      "RENAME",
-      "BSLOOKUP",
-      "CONNECT",
-      "SHMOPEN",
-      "SEMOPEN",
-      "SHMGET",
-      "SEMGET",
-      "SENDTO",
-      "OPEN_RWTC",
-    ],
+    // Compact declaration excerpt from Apple XNU xnu-11417.140.69,
+    // bsd/bsm/audit_kevents.h. Mach lookup has no declaration here.
+    declarations = {
+      OPEN_R: 72,
+      OPEN_W: 76,
+      UNLINK: 6,
+      RENAME: 42,
+      CONNECT: 32,
+      SHMOPEN: 43035,
+      SEMOPEN: 43032,
+      SHMGET: 95,
+      SEMGET: 109,
+      SENDTO: 184,
+      OPEN_RWTC: 83,
+    },
+    names = Object.keys(declarations),
     headerPath = path.join(
       built.prepared.environment.SDKROOT,
       "usr/include/bsm/audit_kevents.h",
@@ -9400,7 +9765,7 @@ async function installedCaseAcquisition(format) {
         headerPath,
         Buffer.from(
           names
-            .map((name, index) => `#define AUE_${name} ${index + 1}`)
+            .map((name) => `#define AUE_${name} ${declarations[name]}`)
             .join("\n"),
         ),
       ],
@@ -9416,8 +9781,8 @@ async function installedCaseAcquisition(format) {
         Buffer.from(
           names
             .map(
-              (name, index) =>
-                `${index + 1}:AUE_${name}:event:${name === "OPEN_RWTC" ? "all,extra" : "all"}`,
+              (name) =>
+                `${declarations[name]}:AUE_${name}:event:${name === "OPEN_RWTC" ? "all,extra" : "all"}`,
             )
             .join("\n"),
         ),
@@ -9444,6 +9809,7 @@ async function installedCaseAcquisition(format) {
                 selectedGit,
                 "/sbin/pfctl",
                 "/usr/bin/hdiutil",
+                "/usr/bin/log",
                 "/usr/lib/dyld",
               ].includes(file),
             number = (value) => (options?.bigint ? BigInt(value) : value);
@@ -9528,7 +9894,9 @@ async function installedCaseAcquisition(format) {
     persist,
     options,
   );
-  assert.equal(acquired.inputs.events.mach, names.indexOf("BSLOOKUP") + 1);
+  assert.equal(Object.hasOwn(acquired.inputs.events, "mach"), false);
+  assert.equal(acquired.inputs.mach.source, "unified-log-mach-v1");
+  assert.equal(acquired.inputs.mach.tool.path, "/usr/bin/log");
   assert.ok(
     acquired.inputs.audit.events.some(
       ({ opcode }) => opcode === "AUE_OPEN_RWTC",
@@ -9623,6 +9991,62 @@ async function installedCaseAcquisition(format) {
       fault ? "RETAINED" : "RETIRED",
     );
     if (!fault) assert.equal(native.processes.size, 0);
+  }
+  if (format === "thin") {
+    const access = system.cases.find(({ id }) => id === "access.read-only"),
+      pin = access.bindings.access.binding,
+      record = JSON.parse(
+        Buffer.from(
+          system.uploads.find(({ path }) => path === pin.path).hex,
+          "hex",
+        ),
+      );
+    assert.equal(record.schemaVersion, 2);
+    assert.equal(record.mach.source, acquired.inputs.mach.source);
+    assert.equal(
+      record.assets[record.mach.tool.index - 12].sha256,
+      acquired.inputs.mach.tool.sha256,
+    );
+    assert.equal(record.attempts[13].event, null);
+    // Retain the separate portable BSM transcript model. The acquired Mach
+    // source/tool crosses the existing full access and original-retirement path;
+    // synthetic BSM tokens establish no installed/native acceptance.
+    const native = buildTranscripts(true, true),
+      setup = completeExperimentCase(native, access.id, acquired.inputs.mach),
+      effects = createDarwinSystemEffects(native.input, native.options),
+      recipe = darwinSystemRecipes().find(({ id }) => id === access.id);
+    native.operationFrames(undefined);
+    const bootstrap = darwinPreparationContext(native.input, native.options);
+    await bootstrap.bootstrap();
+    await bootstrap.releaseBootstrap();
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: setup.binding,
+      recordPolicy() {},
+    });
+    const result = await runDarwinAccessCase(prepared.input, prepared.effects);
+    assert.equal(result.status, "OBSERVED");
+    assert.equal(result.nativeEvidence.denials.length, 33);
+    assert.ok(native.events.includes("access-mach-log-run"));
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETIRED",
+    );
+    const diagnostics = [];
+    const recovery = await withNativeDiagnostics(
+      () => recoverTranscripts(native),
+      (owner, value) => diagnostics.push(owner + ": " + value.exception?.stack),
+    );
+    assert.equal(recovery.status, "RETIRED", diagnostics.join("\n"));
+    native.caseFault("mach-service-survives");
+    assert.equal((await recoverTranscripts(native)).status, "RETAINED");
+    native.caseFault(null);
+    assert.equal((await recoverTranscripts(native)).status, "RETIRED");
+    assert.equal(native.processes.size, 0);
   }
   const originalPins = [...pins];
   for (let i = 0; i < 2; i++)
