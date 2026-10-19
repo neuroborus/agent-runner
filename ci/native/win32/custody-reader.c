@@ -57,6 +57,20 @@ static void bridge_security(HANDLE file, char hash[65]) {
 /* Reviewed installed MSVC/SDK and native System32 DLL inputs keep their read ACLs. Only the
  * trusted installation authorities may own or mutate them; held reads still
  * deny write/delete sharing. Private build/source/receipt objects use System. */
+#ifdef NATIVE_CI_EXPERIMENT
+static BOOL installed_git_runtime(const wchar_t *name) {
+  if (wcslen(name) <= 3 || name[1] != ':' || !((name[0] >= L'A' && name[0] <= L'Z') || (name[0] >= L'a' && name[0] <= L'z'))) return FALSE;
+  const wchar_t *prefixes[] = {L"\\Program Files\\Git\\mingw64\\bin\\", L"\\Program Files\\Git\\ucrt64\\bin\\"};
+  for (unsigned i = 0; i < 2; i++) {
+    size_t length = wcslen(prefixes[i]);
+    if (_wcsnicmp(name+2, prefixes[i], length)) continue;
+    const wchar_t *leaf = name+2+length, *extension = wcsrchr(leaf, '.');
+    if (*leaf && !wcschr(leaf, '\\') && !wcschr(leaf, '/') && !wcschr(leaf, ':') && extension &&
+      (!_wcsicmp(extension, L".exe") || !_wcsicmp(extension, L".dll"))) return TRUE;
+  }
+  return FALSE;
+}
+#endif
 static BOOL stock_entry(const wchar_t *name, const char *pin) {
   const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
   BOOL installed = wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, msvc, wcslen(msvc)) || !wcsncmp(name+2, sdk, wcslen(sdk)));
@@ -66,7 +80,7 @@ static BOOL stock_entry(const wchar_t *name, const char *pin) {
   BOOL nativeDll = wcslen(name) > size + 1 && !_wcsnicmp(name, system, size) && name[size] == '\\' && leaf == name + size &&
     wcslen(leaf+1) > 4 && !_wcsicmp(leaf+wcslen(leaf)-4, L".dll");
 #ifdef NATIVE_CI_EXPERIMENT
-  BOOL gitRuntime = wcslen(name) > 3 && name[1] == ':' && !wcsncmp(name+2,L"\\Program Files\\Git\\mingw64\\bin\\",wcslen(L"\\Program Files\\Git\\mingw64\\bin\\"));
+  BOOL gitRuntime = installed_git_runtime(name);
   installed = installed || gitRuntime;
 #endif
   if (!installed && !nativeDll) return FALSE;
@@ -2464,8 +2478,7 @@ static void preparation_command(char **v, unsigned n) {
       need(extension && (!_wcsicmp(extension, L".h") || !_wcsicmp(extension, L".lib") || !_wcsicmp(extension, L".exe") || !_wcsicmp(extension, L".dll")));
       wchar_t system[4096]; DWORD length = GetSystemDirectoryW(system, 4096); need(length && length < 4096);
       const wchar_t *msvc = L"\\Program Files\\Microsoft Visual Studio\\", *sdk = L"\\Program Files (x86)\\Windows Kits\\10\\";
-      const wchar_t *git = L"\\Program Files\\Git\\mingw64\\bin\\";
-      need(wcslen(name) > 3 && name[1] == ':' && (!wcsncmp(name+2, git, wcslen(git)) || !wcsncmp(name+2, msvc, wcslen(msvc)) ||
+      need(wcslen(name) > 3 && name[1] == ':' && (installed_git_runtime(name) || !wcsncmp(name+2, msvc, wcslen(msvc)) ||
         !wcsncmp(name+2, sdk, wcslen(sdk)) ||
         (!_wcsnicmp(name, system, length) && name[length] == '\\' && leaf == name+length && !_wcsicmp(extension, L".dll"))));
     }

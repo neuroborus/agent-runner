@@ -4,11 +4,12 @@ import { win32 as path } from "node:path";
 import { lstat } from "node:fs/promises";
 import {
   observationDigest,
+  observationObject,
   nativePolicyLaunchData,
   requireObservation,
 } from "../index.js";
 import { digest, hash, WINDOWS_LITERAL_ARGUMENTS } from "./protocol.js";
-import { encodeWindowsCustodyPlan } from "./custody-protocol.js";
+import { encodeWindowsCustodyPlan, location } from "./custody-protocol.js";
 import { buildWindowsPolicy } from "./policy.js";
 import {
   windowsOwnershipArguments,
@@ -28,19 +29,53 @@ const rule = (id, kind, paths) => ({
   maximum: null,
 });
 
+/** The ordinary selector admits only the two installed Git runtime layouts. */
+export function assertWindowsExperimentGitSelection(selection) {
+  observationObject(selection, [
+    "executable",
+    "execPath",
+    "directory",
+    "path",
+    "sha256",
+  ]);
+  const installed =
+    /^([A-Z]:\\Program Files\\Git)\\(mingw64|ucrt64)\\bin$/u.exec(
+      selection.directory,
+    );
+  requireObservation(
+    installed &&
+      [
+        selection.executable,
+        selection.execPath,
+        selection.directory,
+        selection.path,
+      ].every(location) &&
+      selection.execPath ===
+        path.join(installed[1], installed[2], "libexec", "git-core") &&
+      selection.path === path.join(selection.directory, "git.exe") &&
+      ["cmd", "bin", path.join(installed[2], "bin")].some(
+        (directory) =>
+          selection.executable ===
+          path.join(installed[1], directory, "git.exe"),
+      ) &&
+      hash(selection.sha256),
+  );
+}
+
 /** Discover private Git dependencies and direct system targets. Bytes/signatures are
  * independently held by the System reader, including unsigned runtime bytes. */
 export async function windowsExperimentGitRuntime(
   native,
-  systemRoot,
+  selection,
   options = {},
 ) {
-  const directory =
-    path.parse(systemRoot).root + "Program Files\\Git\\mingw64\\bin";
-  return discoverRuntime(native, path.join(directory, "git.exe"), {
+  assertWindowsExperimentGitSelection(selection);
+  const images = await discoverRuntime(native, selection.path, {
     ...options,
-    directory,
+    directory: selection.directory,
   });
+  requireObservation(images[0].sha256 === selection.sha256);
+  return images;
 }
 
 /** Only private payload copies and Git need dependency discovery. Helper
@@ -63,7 +98,7 @@ export async function windowsExperimentDependencies(
     payload,
     git: await windowsExperimentGitRuntime(
       native,
-      prepared.environment.SystemRoot,
+      prepared.gitRuntime,
       options,
     ),
   };

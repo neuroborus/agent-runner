@@ -1773,7 +1773,14 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
     },
     prepared = {
       purpose: "experiment",
-      schemaVersion: 3,
+      schemaVersion: 4,
+      gitRuntime: {
+        executable: "C:\\Program Files\\Git\\cmd\\git.exe",
+        execPath: "C:\\Program Files\\Git\\mingw64\\libexec\\git-core",
+        directory: "C:\\Program Files\\Git\\mingw64\\bin",
+        path: "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+        sha256: H,
+      },
       binding: failed.preparation.expected.binding,
       sourceDirectory: directory + "-bootstrap",
       entries: [],
@@ -1833,7 +1840,7 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
         "windows-experiment-preparation.json",
         {
           purpose: "experiment",
-          schemaVersion: 3,
+          schemaVersion: 4,
           prepared,
           commands: prepared.commands,
           versions: prepared.versions,
@@ -1884,6 +1891,12 @@ test("Windows fresh cleanup rejoins protected selectors despite missing final ou
   prepared.commands.push(
     command("git", ["rev-parse", "HEAD"], C),
     command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command("where.exe", ["git.exe"], prepared.gitRuntime.executable),
+    command(
+      prepared.gitRuntime.executable,
+      ["--exec-path"],
+      prepared.gitRuntime.execPath,
+    ),
     command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
     ...WINDOWS_HELPER_NAMES.map((name) =>
       command(

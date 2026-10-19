@@ -4112,7 +4112,14 @@ test("Windows preparation preserves the open failure and separately persists cle
     receipt = new Error("job receipt unavailable"),
     saved = [];
   const prepared = structuredClone(f.prepared);
-  prepared.schemaVersion = 3;
+  prepared.schemaVersion = 4;
+  prepared.gitRuntime = {
+    executable: "C:\\Program Files\\Git\\cmd\\git.exe",
+    execPath: "C:\\Program Files\\Git\\mingw64\\libexec\\git-core",
+    directory: "C:\\Program Files\\Git\\mingw64\\bin",
+    path: "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+    sha256: hash,
+  };
   prepared.sourceDirectory = directory + "-bootstrap";
   prepared.helpers = prepared.helpers.map((helper) => ({
     ...helper,
@@ -4164,6 +4171,12 @@ test("Windows preparation preserves the open failure and separately persists cle
   prepared.commands = [
     command("git", ["rev-parse", "HEAD"], candidateSha),
     command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command("where.exe", ["git.exe"], prepared.gitRuntime.executable),
+    command(
+      prepared.gitRuntime.executable,
+      ["--exec-path"],
+      prepared.gitRuntime.execPath,
+    ),
     command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
     ...WINDOWS_HELPER_NAMES.map((name) =>
       command(

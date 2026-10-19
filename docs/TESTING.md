@@ -1278,7 +1278,7 @@ modules or extra stock-import evidence. Explicit null helper/system
 import inventories cannot be promoted to empty observed graphs or used for reviewed
 admission. Live loader coverage accepts hosted System32 module observations while
 rejecting undeclared private modules and incomplete private dependency evidence.
-Version-3 preparation and version-2 operation records reject legacy, mixed or
+Version-4 preparation and version-2 operation records reject legacy, mixed or
 missing evidence without recompilation. Custody recovery retains original
 process-hold failure even after a later observer completes. These neutral
 injections use existing fast discovery and the selected native harness; they invoke
@@ -1288,6 +1288,16 @@ and Darwin inherited `TASK_ACCESS_PORT`/model-free prerequisite 78 remain requir
 external concerns. The retained `ole32.dll` delay-import failure is not an
 optional-contract exception; fresh matching original CI on the final SHA must
 establish native outcomes independently of these portable checks.
+
+The existing Windows preparation-to-operation and cold-load cases cover both
+installed UCRT and MinGW Git layouts. They exercise shared discovery, persisted
+runtime selection and whole-file pins, copied/private import inventories and
+their actual operation consumers. Missing or substituted selectors/images,
+discovery disagreement and changed private or delay dependencies fail without
+cold rediscovery. The native reader's shared installed-path predicate is exercised
+with injected string operations, including out-of-root and nested-path refusals.
+These cases change no test assignment and establish no native Windows loading or
+retirement success.
 
 Darwin injected/source regressions protect shared sandbox function/data bindings,
 unavailable exports, all custody query consumers, path-filter results and PF

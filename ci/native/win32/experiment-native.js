@@ -24,6 +24,7 @@ import {
   windowsRetired,
 } from "./preparation.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
+import { discoverWindowsGitRuntime } from "./feasibility-git.js";
 
 // Ordinary compilers own a bounded child tree; privileged case processes retain
 // their separate creation-time Jobs and native retirement owners.
@@ -287,6 +288,11 @@ export async function bootstrapWindowsExperiment(
       sha256: digest(bytes),
     });
   }
+  // The OS loads the discovered launcher. The System reader later owns the
+  // installed runtime's x64 PE, signature and held-file checks, including DLLs.
+  const gitRuntime = await discoverWindowsGitRuntime(run, read);
+  const gitBytes = await read(gitRuntime.path);
+  gitRuntime.sha256 = digest(gitBytes);
   await filesystem.mkdir(sourceDirectory);
   await filesystem.mkdir(directory);
   const sources = [],
@@ -450,7 +456,7 @@ export async function bootstrapWindowsExperiment(
     requireObservation(digest(await read(tool.path)) === tool.sha256);
   const prepared = {
     purpose: "experiment",
-    schemaVersion: 3,
+    schemaVersion: 4,
     job,
     binding,
     directory,
@@ -464,6 +470,7 @@ export async function bootstrapWindowsExperiment(
     environment,
     sdkBuild,
     sdkHeader,
+    gitRuntime,
     commands,
     versions,
   };

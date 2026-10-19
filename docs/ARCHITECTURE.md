@@ -75,7 +75,7 @@ ordinary protected-file and production launcher admission unchanged.
 Windows's indexed ordinary preparer uses installed MSVC/SDK and a closed explicit
 compiler environment to build each exact-candidate helper once. Bounded ordinary
 child-tree execution retains actual command diagnostics, versions, tool hashes,
-marked PE output and ABI observations. Private version-3 build/preparation records
+marked PE output and ABI observations. Private version-4 build/preparation records
 and version-2 operation declarations migrate producers, validation, cold loading
 and recovery together; legacy, mixed or missing evidence fails without rebuilding.
 Compiler dependency/SDK/library trust reconstruction, System compiler controllers,
@@ -83,6 +83,11 @@ compiler Jobs/tasks and their bootstrap journals are removed. Ordinary admission
 binds the thirteen actual helpers without traversing installed-system imports.
 Explicit null case import inventories denote omitted admission, not empty observed
 graphs. Held image, source, signature-observation and PE/ABI checks remain required.
+Bootstrap reuses feasibility's installed Git discovery and pins the selected
+UCRT or MinGW runtime before System reads. The recorded executable, exec path,
+bin directory and whole-file pin rejoin dependency and case inventories on cold
+loading without rediscovery or fallback; native installed-path admission stays
+bounded to the two Git bin layouts.
 
 Only private access-payload and Git copies discover dependencies. Their individual
 held source/copy identities and delay edges remain bound, including fresh cold

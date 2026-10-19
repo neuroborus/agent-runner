@@ -33,6 +33,8 @@ import {
   windowsHostedCompilerArguments,
   runWindowsHostedCommand,
 } from "../ci/native/win32/index.js";
+import { windowsOperationPreparation } from "../ci/native/win32/case-operations.js";
+import { createWindowsOperationReaders } from "../ci/native/win32/operation-readers.js";
 
 const candidateSha = "a".repeat(40),
   H = "b".repeat(64),
@@ -45,7 +47,7 @@ const sources = [
   "audit-policy-remove.h",
   "experiment.h",
 ].map((name) => ({ name, sha256: H }));
-function fixture() {
+function fixture(layout = "mingw64") {
   const job = initializeNativeJob(
     {
       candidateSha,
@@ -56,7 +58,8 @@ function fixture() {
     },
     { schemaVersion: 7, purpose: "experiment" },
   );
-  const sourceDirectory = directory + "-bootstrap",
+  const gitDirectory = `C:\\Program Files\\Git\\${layout}\\bin`,
+    sourceDirectory = directory + "-bootstrap",
     output = path.join(directory, "platform-build"),
     image = (name) => ({
       path: path.join(sourceDirectory, name + ".exe"),
@@ -104,7 +107,17 @@ function fixture() {
     },
     prepared = {
       purpose: "experiment",
-      schemaVersion: 3,
+      schemaVersion: 4,
+      gitRuntime: {
+        executable:
+          layout === "ucrt64"
+            ? path.join(gitDirectory, "git.exe")
+            : "C:\\Program Files\\Git\\cmd\\git.exe",
+        execPath: path.resolve(gitDirectory, "..", "libexec", "git-core"),
+        directory: gitDirectory,
+        path: path.join(gitDirectory, "git.exe"),
+        sha256: H,
+      },
       job,
       directory,
       sourceDirectory,
@@ -223,6 +236,12 @@ function fixture() {
   prepared.commands = [
     command("git", ["rev-parse", "HEAD"], candidateSha),
     command("where.exe", ["cl.exe"], prepared.tools[0].path),
+    command("where.exe", ["git.exe"], prepared.gitRuntime.executable),
+    command(
+      prepared.gitRuntime.executable,
+      ["--exec-path"],
+      prepared.gitRuntime.execPath,
+    ),
     command(prepared.tools[0].path, ["/Bv"], "Compiler Version 1.2 for x64"),
     ...WINDOWS_HELPER_NAMES.map((name) =>
       command(
@@ -268,6 +287,20 @@ test("Windows experiment preparation requires every fixed helper/header/case and
   for (const damage of [
     (value) => value.helpers.pop(),
     (value) => (value.schemaVersion = 2),
+    (value) => (value.schemaVersion = 3),
+    (value) => delete value.gitRuntime,
+    (value) => delete value.gitRuntime.directory,
+    (value) => (value.gitRuntime.path = "C:\\Other\\git.exe"),
+    (value) => (value.gitRuntime.directory = "C:\\Other"),
+    (value) => (value.gitRuntime.executable = "C:\\Other\\git.exe"),
+    (value) =>
+      (value.gitRuntime.executable =
+        "C:\\Program Files\\Git\\ucrt64\\bin\\git.exe"),
+    (value) => (value.gitRuntime.execPath = "C:\\Other\\libexec\\git-core"),
+    (value) => (value.commands[2].stdout = "C:\\Other\\git.exe"),
+    (value) =>
+      (value.commands[3].stdout =
+        "C:/Program Files/Git/ucrt64/libexec/git-core"),
     (value) => value.sources.pop(),
     (value) => (value.helpers[0].sourceSha256 = "d".repeat(64)),
   ]) {
@@ -294,11 +327,11 @@ test("Windows experiment preparation requires every fixed helper/header/case and
   );
 });
 
-test("Windows fixed cases retain copy kinds and the complete copied Git loader graph", async () => {
-  const { prepared } = fixture(),
+async function generatedGitCases(layout) {
+  const { prepared } = fixture(layout),
     records = new Map(),
     system = "C:\\Windows\\System32\\KERNEL32.dll",
-    git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+    git = prepared.gitRuntime.path,
     bytes = Buffer.from("held Git fixture"),
     dependency = path.join(path.dirname(git), "runtime.dll"),
     nested = path.join(path.dirname(git), "nested.dll"),
@@ -357,6 +390,8 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
     };
   for (const helper of prepared.helpers)
     helper.sha256 = createHash("sha256").update(bytes).digest("hex");
+  prepared.gitRuntime.sha256 = createHash("sha256").update(bytes).digest("hex");
+  observed.sdkInputs[0].sha256 = prepared.gitRuntime.sha256;
   prepared.environment = { SystemRoot: "C:\\Windows" };
   const result = await prepareWindowsExperimentCases(
     prepared,
@@ -404,8 +439,13 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
         .split("\n")
         .slice(1)
         .map((line) => {
-          const [kind, _sha, _signature, hex] = line.split(" ");
-          return { kind, path: Buffer.from(hex, "hex").toString("utf16le") };
+          const [kind, sha256, signatureSha256, hex] = line.split(" ");
+          return {
+            kind,
+            sha256,
+            signatureSha256,
+            path: Buffer.from(hex, "hex").toString("utf16le"),
+          };
         });
     for (const asset of specification.assets)
       if (asset.source !== null)
@@ -420,6 +460,64 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
       for (const imported of component.imports ?? [])
         assert.ok(loader.some(({ index }) => index === imported.index));
     if (entry.id.startsWith("git.")) {
+      const consumed = await windowsOperationPreparation(
+        {
+          plan: { sources: prepared.sources },
+          read: async (file, pin) => {
+            const data = records.get(path.basename(file));
+            assert.equal(createHash("sha256").update(data).digest("hex"), pin);
+            return data;
+          },
+        },
+        entry.bindings,
+        result.bindings.find(({ id }) => id === entry.id).policyBinding,
+        entries,
+        entry.id,
+      );
+      const selected = consumed.assets.find(
+        ({ index }) => index === consumed.slots.git,
+      );
+      assert.equal(entries[selected.source].path, git);
+      const reads = createWindowsOperationReaders(
+        {
+          inspect: async (index) => ({ identity: String(index) }),
+          read: async (_index, offset, length) =>
+            bytes.subarray(offset, offset + length),
+          signature: async () => H,
+          buildBindings: async () => ({
+            major: 10,
+            minor: 0,
+            build: 26100,
+            sdkRootHex: Buffer.from(
+              "C:\\Program Files (x86)\\Windows Kits\\10\\",
+              "utf16le",
+            ).toString("hex"),
+          }),
+          operation: async (operation, index) => {
+            if (operation === "release-build") return { bytes: bytes.length };
+            assert.equal(operation, "release-pe");
+            const source =
+              index === 5 || index === 6
+                ? index + 2
+                : (consumed.assets.find((asset) => asset.index === index)
+                    ?.source ?? index);
+            return {
+              complete: true,
+              dll: entries[index].path.endsWith(".dll"),
+              imports: (await native.readImage(entries[source].path)).pe
+                .imports,
+            };
+          },
+        },
+        consumed,
+        "experiment",
+      );
+      await reads.loader(loader, [
+        5,
+        6,
+        consumed.slots.git,
+        consumed.slots.policyHelper,
+      ]);
       assert.equal(
         loader.find(({ index }) => entries[index].path === system).imports,
         null,
@@ -447,8 +545,8 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
           ({ index }) =>
             entries[index].path === entry.bindings.input.metadata + "\\index",
         ),
-        bytes = records.get(path.basename(entries[asset.source].path)),
-        body = bytes.subarray(0, -20);
+        indexBytes = records.get(path.basename(entries[asset.source].path)),
+        body = indexBytes.subarray(0, -20);
       assert.equal(body.subarray(0, 4).toString(), "DIRC");
       assert.equal(body.readUInt32BE(4), 2);
       assert.equal(body.readUInt32BE(8), 1);
@@ -457,12 +555,16 @@ test("Windows fixed cases retain copy kinds and the complete copied Git loader g
       assert.ok(body.subarray(pathnameEnd).length > 0);
       assert.ok(body.subarray(pathnameEnd).every((byte) => byte === 0));
       assert.deepEqual(
-        bytes.subarray(-20),
+        indexBytes.subarray(-20),
         createHash("sha1").update(body).digest(),
       );
     }
   }
-});
+}
+
+for (const layout of ["mingw64", "ucrt64"])
+  test(`Windows ${layout} fixed cases retain copy kinds and the complete copied Git loader graph`, () =>
+    generatedGitCases(layout));
 
 function markedPe() {
   const bytes = Buffer.alloc(1024),
@@ -731,8 +833,8 @@ test("experiment registry retains pre-setup dependencies until independent task 
   }
 });
 
-function hostedFixture() {
-  const f = fixture(),
+function hostedFixture(layout = "mingw64") {
+  const f = fixture(layout),
     files = new Map(),
     calls = [],
     directories = new Set(),
@@ -741,7 +843,17 @@ function hostedFixture() {
   const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
   const compiler = f.prepared.tools[0].path,
     sdk = f.prepared.tools[1].path;
-  files.set("C:\\Program Files\\Git\\mingw64\\bin\\git.exe", image);
+  // Installed images need not satisfy the unsigned generated-helper marker.
+  const gitImage = Buffer.concat([image, Buffer.alloc(8)]);
+  gitImage.fill(0, 328, 336);
+  gitImage.write(".text", 328);
+  gitImage.writeUInt32LE(1024, 232);
+  gitImage.writeUInt32LE(8, 236);
+  gitImage.writeUInt32LE(8, 1024);
+  gitImage.writeUInt16LE(0x200, 1028);
+  gitImage.writeUInt16LE(2, 1030);
+  files.set(f.prepared.gitRuntime.path, gitImage);
+  files.set(f.prepared.gitRuntime.executable, gitImage);
   files.set(compiler, source);
   files.set(sdk, source);
   files.set(f.prepared.sdkHeader.file, source);
@@ -798,8 +910,14 @@ function hostedFixture() {
       let stdout = "",
         stderr = "";
       if (file === "git") stdout = candidateSha + "\n";
-      else if (file === "where.exe") stdout = compiler + "\n";
-      else if (file === compiler) {
+      else if (file === "where.exe")
+        stdout =
+          (args[0] === "cl.exe" ? compiler : f.prepared.gitRuntime.executable) +
+          "\n";
+      else if (file === f.prepared.gitRuntime.executable) {
+        assert.deepEqual(args, ["--exec-path"]);
+        stdout = f.prepared.gitRuntime.execPath.replaceAll("\\", "/") + "\n";
+      } else if (file === compiler) {
         if (args[0] === "/Bv") stdout = "Compiler Version 1.2 for x64";
         else
           files.set(args.find((arg) => arg.startsWith("/Fe")).slice(3), image);
@@ -834,7 +952,10 @@ function hostedFixture() {
       unchanged: true,
       protectedDacl: true,
       protectedParents: true,
-      signatureSha256: sha(bytes),
+      signatureSha256:
+        bytes === gitImage
+          ? inspectWindowsPe(bytes).signatureSha256
+          : sha(bytes),
       pe: { imports: [] },
     };
   };
@@ -897,8 +1018,8 @@ function hostedFixture() {
   return { ...f, files, calls, options, filesOwner, source, image };
 }
 
-test("Windows hosted preparation builds each exact-candidate helper once and cold-loads held output", async () => {
-  const f = hostedFixture(),
+async function hostedPreparation(layout) {
+  const f = hostedFixture(layout),
     saved = [];
   f.options.env.Path = f.options.env.PATH;
   delete f.options.env.PATH;
@@ -920,7 +1041,13 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
         args.includes("/DNATIVE_CI_EXPERIMENT=1"),
     ),
   );
-  assert.equal(built.preparation.schemaVersion, 3);
+  assert.equal(built.preparation.schemaVersion, 4);
+  assert.deepEqual(built.preparation.prepared.gitRuntime, {
+    ...f.prepared.gitRuntime,
+    sha256: createHash("sha256")
+      .update(f.files.get(f.prepared.gitRuntime.path))
+      .digest("hex"),
+  });
   assert.ok(
     built.preparation.commands.every(
       (command) =>
@@ -971,21 +1098,25 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
   assert.equal(loaded.runtime.length, WINDOWS_HELPER_NAMES.length);
   for (const fault of [
     "output",
+    "git-image",
+    "missing-git",
     "mixed-close",
     "candidate",
     "environment",
     "legacy",
     "incomplete",
   ]) {
-    if (["output", "mixed-close"].includes(fault)) {
+    if (["output", "mixed-close", "git-image", "missing-git"].includes(fault)) {
       const file =
           fault === "output"
             ? built.preparation.prepared.helpers[0].path
-            : path.join(directory, "windows-experiment-close.json"),
+            : ["git-image", "missing-git"].includes(fault)
+              ? prepared.gitRuntime.path
+              : path.join(directory, "windows-experiment-close.json"),
         original = f.files.get(file);
       f.files.set(
         file,
-        fault === "output"
+        fault !== "mixed-close"
           ? Buffer.from("substituted output")
           : Buffer.from(
               JSON.stringify({
@@ -994,6 +1125,7 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
               }),
             ),
       );
+      if (fault === "missing-git") f.files.delete(file);
       await assert.rejects(
         loadWindowsExperiment(built.job, directory, {
           ...f.options,
@@ -1019,6 +1151,24 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
       "preparation",
       (record) => {
         record.schemaVersion = 2;
+      },
+    ],
+    [
+      "preparation",
+      (record) => {
+        delete record.prepared.gitRuntime;
+      },
+    ],
+    [
+      "preparation",
+      (record) => {
+        record.prepared.gitRuntime.sha256 = "f".repeat(64);
+      },
+    ],
+    [
+      "preparation",
+      (record) => {
+        record.system.dependencies.git[0].path = "C:\\Other\\git.exe";
       },
     ],
     [
@@ -1054,15 +1204,43 @@ test("Windows hosted preparation builds each exact-candidate helper once and col
     );
     f.files.set(file, original);
   }
-});
+  const selector = directory + "-selector.json",
+    original = f.files.get(selector);
+  for (const change of [
+    (record) => {
+      delete record.gitRuntime;
+    },
+    (record) => {
+      record.gitRuntime.directory = "C:\\Other";
+    },
+    (record) => {
+      record.gitRuntime.sha256 = "f".repeat(64);
+    },
+  ]) {
+    const record = JSON.parse(original);
+    change(record);
+    f.files.set(selector, Buffer.from(JSON.stringify(record)));
+    await assert.rejects(
+      loadWindowsExperiment(built.job, directory, {
+        ...f.options,
+        files: f.filesOwner,
+      }),
+    );
+  }
+  f.files.set(selector, original);
+}
 
-test("Windows payload and Git stop at stock targets while private copies and delay edges rejoin on cold load", async () => {
-  const f = hostedFixture(),
+for (const layout of ["mingw64", "ucrt64"])
+  test(`Windows ${layout} hosted preparation builds each exact-candidate helper once and cold-loads held output`, () =>
+    hostedPreparation(layout));
+
+async function privateRuntimeColdLoad(layout) {
+  const f = hostedFixture(layout),
     contract = "api-fixture-runtime-l1-1-0.dll",
     physical = "api-fixture-forward-l1-1-0.dll",
     host = "C:\\Windows\\System32\\fixture-runtime.dll",
     forward = "C:\\Windows\\System32\\" + physical,
-    git = "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+    git = f.prepared.gitRuntime.path,
     privateDll = path.join(path.dirname(git), "runtime.dll"),
     nested = path.join(path.dirname(git), "nested.dll"),
     resolutions = new Map([
@@ -1128,6 +1306,10 @@ test("Windows payload and Git stop at stock targets while private copies and del
         (fault === "private-image" && file === privateDll)
       )
         held.bytes = Buffer.from("changed held image");
+      if (fault === "private-identity" && file === privateDll)
+        held.identitySha256 = "f".repeat(64);
+      if (fault === "private-signature" && file === privateDll)
+        held.signatureSha256 = "f".repeat(64);
       return held;
     };
     native.resolveImport = f.filesOwner.resolveExperimentImport = async (
@@ -1239,6 +1421,8 @@ test("Windows payload and Git stop at stock targets while private copies and del
     "bytes",
     "held-image",
     "private-image",
+    "private-identity",
+    "private-signature",
     "missing-private",
     "delay",
   ])
@@ -1253,11 +1437,26 @@ test("Windows payload and Git stop at stock targets while private copies and del
   fault = "immutable-error";
   await assert.rejects(load, (error) => error === immutable);
   assert.equal(f.calls.length, compiles);
-});
+}
 
-test("Windows direct-build failures and cancellation preserve the cause before System publication", async () => {
-  for (const fault of ["compiler", "candidate", "output", "cancel"]) {
-    const f = hostedFixture(),
+for (const layout of ["mingw64", "ucrt64"])
+  test(`Windows ${layout} payload and Git stop at stock targets while private copies and delay edges rejoin on cold load`, () =>
+    privateRuntimeColdLoad(layout));
+
+test("Windows Git/build failures and cancellation preserve causes and actual cleanup status", async () => {
+  for (const fault of [
+    "compiler",
+    "candidate",
+    "output",
+    "cancel",
+    "git-missing",
+    "git-architecture",
+    "git-launcher",
+    "git-disagreement",
+  ]) {
+    const f = hostedFixture(
+        fault === "git-disagreement" ? "ucrt64" : "mingw64",
+      ),
       run = f.options.command,
       controller = new AbortController(),
       original = Object.assign(new Error("Original MSVC failure"), {
@@ -1268,7 +1467,41 @@ test("Windows direct-build failures and cancellation preserve the cause before S
     f.options.signal = controller.signal;
     if (fault === "candidate")
       f.options.readCandidate = async () => Buffer.from("changed source");
+    if (fault === "git-missing") f.files.delete(f.prepared.gitRuntime.path);
+    if (fault === "git-disagreement")
+      f.files.set(
+        "C:\\Program Files\\Git\\mingw64\\bin\\git.exe",
+        f.files.get(f.prepared.gitRuntime.path),
+      );
+    const open = f.options.open;
+    let opened = false;
+    f.options.open = async (...args) => {
+      opened = true;
+      const native = await open(...args),
+        readImage = native.readImage;
+      if (fault === "git-architecture")
+        native.readImage = (file, ...values) => {
+          if (file === f.prepared.gitRuntime.path)
+            throw Object.assign(new Error("Native x64 PE check refused Git"), {
+              code: 193,
+            });
+          return readImage(file, ...values);
+        };
+      return native;
+    };
     f.options.command = async (file, args, settings) => {
+      if (fault === "git-launcher" && args[0] === "--exec-path")
+        throw Object.assign(new Error("OS loader refused Git launcher"), {
+          code: 193,
+        });
+      if (fault === "git-disagreement" && args[0] === "--exec-path")
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: "C:/Program Files/Git/mingw64/libexec/git-core\n",
+          stderr: "",
+        };
       if (file === f.prepared.tools[0].path && args[0] !== "/Bv") {
         if (fault === "compiler") throw original;
         if (fault === "cancel") {
@@ -1298,9 +1531,14 @@ test("Windows direct-build failures and cancellation preserve the cause before S
           ? error.cause === original
           : true,
     );
-    assert.equal(saved.at(-1).preparationEffects.settlement.status, "RETAINED");
+    assert.equal(
+      saved.at(-1).preparationEffects.settlement.status,
+      fault === "git-architecture" ? "RETIRED" : "RETAINED",
+    );
     assert.equal(saved.at(-1).preparation, null);
-    assert.ok(!f.calls.some(({ args }) => args[0] === "--experiment-seal"));
+    assert.equal(opened, fault === "git-architecture");
+    if (!["git-architecture", "git-disagreement"].includes(fault))
+      assert.ok(!f.calls.some(({ args }) => args[0] === "--experiment-seal"));
   }
 });
 

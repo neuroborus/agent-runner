@@ -24,6 +24,7 @@ import {
 import {
   prepareWindowsExperimentCases,
   windowsExperimentDependencies,
+  assertWindowsExperimentGitSelection,
 } from "./experiment-cases.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
 import { createWindowsPreparationFiles } from "./preparation-files.js";
@@ -91,11 +92,12 @@ export function windowsExperimentBuildInventory(prepared) {
     "environment",
     "sdkBuild",
     "sdkHeader",
+    "gitRuntime",
     "commands",
     "versions",
   ]);
   requireObservation(
-    prepared.schemaVersion === 3 &&
+    prepared.schemaVersion === 4 &&
       prepared.purpose === "experiment" &&
       prepared.job.platform === "win32" &&
       prepared.output === path.join(prepared.directory, "platform-build") &&
@@ -103,6 +105,7 @@ export function windowsExperimentBuildInventory(prepared) {
       prepared.bootstrap.context.jobBindingSha256 ===
         observationDigest(prepared.binding),
   );
+  assertWindowsExperimentGitSelection(prepared.gitRuntime);
   for (const [entries, names] of [
     [prepared.sources, WINDOWS_EXPERIMENT_SOURCES],
     [prepared.helpers, WINDOWS_HELPER_NAMES],
@@ -170,7 +173,7 @@ export function windowsExperimentBuildInventory(prepared) {
       /^[0-9.]+$/u.test(value),
     ) &&
       Array.isArray(prepared.commands) &&
-      prepared.commands.length === WINDOWS_HELPER_NAMES.length + 5,
+      prepared.commands.length === WINDOWS_HELPER_NAMES.length + 7,
   );
   for (const command of prepared.commands) {
     observationObject(command, [
@@ -206,7 +209,7 @@ export function windowsExperimentBuildInventory(prepared) {
         ),
     );
   }
-  const [git, where] = prepared.commands,
+  const [git, where, gitWhere, gitExec] = prepared.commands,
     who = prepared.commands.at(-1);
   requireObservation(
     git.file === "git" &&
@@ -218,6 +221,16 @@ export function windowsExperimentBuildInventory(prepared) {
       observationDigest(where.args) === observationDigest(["cl.exe"]) &&
       where.stdout.trim().split(/\r?\n/u)[0] === prepared.tools[0].path &&
       where.exitCode === 0 &&
+      gitWhere.file === "where.exe" &&
+      observationDigest(gitWhere.args) === observationDigest(["git.exe"]) &&
+      gitWhere.stdout.trim().split(/\r?\n/u)[0] ===
+        prepared.gitRuntime.executable &&
+      gitWhere.exitCode === 0 &&
+      gitExec.file === prepared.gitRuntime.executable &&
+      observationDigest(gitExec.args) === observationDigest(["--exec-path"]) &&
+      gitExec.stdout.trim().replaceAll("/", "\\") ===
+        prepared.gitRuntime.execPath &&
+      gitExec.exitCode === 0 &&
       who.file ===
         path.join(prepared.environment.SystemRoot, "System32", "whoami.exe") &&
       observationDigest(who.args) ===
@@ -542,7 +555,7 @@ export async function prepareWindowsExperiment(
     system.bindings.unshift({ id: "build", policyBinding: buildBinding });
     await native.write("windows-experiment-preparation.json", {
       purpose: "experiment",
-      schemaVersion: 3,
+      schemaVersion: 4,
       prepared,
       commands,
       versions,
@@ -577,7 +590,7 @@ export async function prepareWindowsExperiment(
       job,
       preparation: {
         purpose: "experiment",
-        schemaVersion: 3,
+        schemaVersion: 4,
         prepared,
         commands,
         versions,
@@ -651,7 +664,7 @@ export function windowsExperimentSystemInput(job, preparation) {
   requireObservation(
     job.purpose === "experiment" &&
       preparation.purpose === "experiment" &&
-      preparation.schemaVersion === 3 &&
+      preparation.schemaVersion === 4 &&
       retired(preparation.settlement),
   );
   const { prepared, system } = preparation;
@@ -665,6 +678,10 @@ export function windowsExperimentSystemInput(job, preparation) {
     Object.values(system.dependencies).every(
       (images) => Array.isArray(images) && images.length > 0,
     ),
+  );
+  requireObservation(
+    system.dependencies.git[0].path === prepared.gitRuntime.path &&
+      system.dependencies.git[0].sha256 === prepared.gitRuntime.sha256,
   );
   for (const [index, recipe] of windowsSystemRecipes().entries()) {
     const entry = system.bindings[index],
@@ -1035,7 +1052,7 @@ async function withWindowsExperimentPreparation(
       "sdkInputs",
     ]);
     requireObservation(
-      record.purpose === "experiment" && record.schemaVersion === 3,
+      record.purpose === "experiment" && record.schemaVersion === 4,
     );
     // The preparation close is itself protected; the job digest alone cannot
     // establish original helper/observer identities or whole-domain settlement.

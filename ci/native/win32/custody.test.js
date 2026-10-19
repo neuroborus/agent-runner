@@ -5735,6 +5735,81 @@ test("Windows experiment custody retains native Job and handle protection requir
   await assert.rejects(reader.loader(0, 0));
 });
 
+test("installed Git admission shares a bounded UCRT and MinGW path predicate", async () => {
+  const source = await readFile(
+      new URL("./custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static BOOL installed_git_runtime\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(/\bL(?=["'])/gu, "")
+      .replace("const wchar_t *prefixes[] = {", "const prefixes = [")
+      .replace("};", "];")
+      .replace("unsigned i", "let i")
+      .replace("size_t length", "const length")
+      .replace(
+        "const wchar_t *leaf = name+2+length, *extension = wcsrchr(leaf, '.');",
+        "const leaf = name.slice(2+length), extension = wcsrchr(leaf, '.');",
+      )
+      .replace("name+2,", "name.slice(2),")
+      .replace("*leaf &&", "leaf.length &&"),
+    script = new Script(`(function(name){${body}})`),
+    find = (text, character, last = false) => {
+      const index = last
+        ? text.lastIndexOf(character)
+        : text.indexOf(character);
+      return index < 0 ? null : text.slice(index);
+    },
+    admitted = script.runInNewContext({
+      TRUE: true,
+      FALSE: false,
+      wcslen: (text) => text.length,
+      wcschr: find,
+      wcsrchr: (text, character) => find(text, character, true),
+      _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+      _wcsnicmp: (a, b, length) =>
+        a.slice(0, length).toLowerCase() === b.slice(0, length).toLowerCase()
+          ? 0
+          : 1,
+    });
+  for (const layout of ["ucrt64", "mingw64"])
+    for (const leaf of ["git.exe", "runtime.DLL"])
+      assert.equal(
+        admitted(`C:\\Program Files\\Git\\${layout}\\bin\\${leaf}`),
+        true,
+      );
+  for (const file of [
+    "C:\\Other\\Git\\ucrt64\\bin\\git.exe",
+    "C:\\Program Files\\Git\\cmd\\git.exe",
+    "C:\\Program Files\\Git\\bin\\git.exe",
+    "C:\\Program Files\\Git\\other\\bin\\git.exe",
+    "C:\\Program Files\\Git\\ucrt64\\bin-other\\git.exe",
+    "C:\\Program Files\\Git\\ucrt64\\bin\\nested\\runtime.dll",
+    "C:\\Program Files\\Git\\ucrt64\\bin\\runtime.dll:stream",
+    "C:\\Program Files\\Git\\ucrt64\\bin\\runtime:stream.dll",
+    "C:\\Program Files\\Git\\ucrt64\\bin\\input.h",
+  ])
+    assert.equal(admitted(file), false, file);
+  for (const section of [
+    source.slice(
+      source.indexOf("static BOOL stock_entry"),
+      source.indexOf("static void stock_security"),
+    ),
+    source.slice(
+      source.indexOf(
+        'experimentInput = !strcmp(v[0], "prepare-experiment-input")',
+      ),
+      source.indexOf(
+        "if (snapshot) {",
+        source.indexOf(
+          'experimentInput = !strcmp(v[0], "prepare-experiment-input")',
+        ),
+      ),
+    ),
+  ])
+    assert.match(section, /installed_git_runtime\(name\)/u);
+});
+
 test("cold account recovery cannot signal a Job reopened by name or remove a surviving principal", async () => {
   const source = await readFile(
     new URL("./custody-reader.c", import.meta.url),

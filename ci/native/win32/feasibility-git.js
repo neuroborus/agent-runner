@@ -136,6 +136,35 @@ const localPath = (value) => {
   return normalized;
 };
 
+/** Discover the installed runtime before privileged custody; callers retain
+ * their own executable inspection and installed-path admission. */
+export async function discoverWindowsGitRuntime(command, inspectExecutable) {
+  const locations = output(
+    (await command("where.exe", ["git.exe"])).stdout,
+  ).split(/\r?\n/u);
+  requireGit(locations.length <= 16, "ERR_FEASIBILITY_GIT_PATH");
+  const executable = locations.map(localPath)[0];
+  requireGit(
+    path.basename(executable).toLowerCase() === "git.exe",
+    "ERR_FEASIBILITY_GIT_PATH",
+  );
+  await inspectExecutable(executable);
+  const execPath = localPath(
+    output((await command(executable, ["--exec-path"])).stdout),
+  );
+  requireGit(
+    /\\libexec\\git-core$/iu.test(execPath),
+    "ERR_FEASIBILITY_GIT_PATH",
+  );
+  const directory = path.resolve(execPath, "..", "..", "bin");
+  return {
+    executable,
+    execPath,
+    directory,
+    path: path.join(directory, "git.exe"),
+  };
+}
+
 /** Join the suspended fixed command to fresh native reads and a distinct
  * verifier; payload claims alone never release Git. */
 export function validateWindowsFeasibilityGitStart({
@@ -305,35 +334,24 @@ export async function prepareWindowsFeasibilityGit(
     root = localPath(root);
     systemRoot = localPath(systemRoot);
     requireGit(/^[a-f0-9]{32}$/u.test(nonce ?? ""), "ERR_FEASIBILITY_GIT_PATH");
-    operation = "git-discovery";
-    const locations = output(
-      (await command("where.exe", ["git.exe"])).stdout,
-    ).split(/\r?\n/u);
-    requireGit(locations.length <= 16, "ERR_FEASIBILITY_GIT_PATH");
-    const executable = locations.map(localPath)[0];
-    requireGit(
-      path.basename(executable).toLowerCase() === "git.exe",
-      "ERR_FEASIBILITY_GIT_PATH",
+    const { directory } = await discoverWindowsGitRuntime(
+      (file, args) => {
+        operation = file === "where.exe" ? "git-discovery" : "git-exec-path";
+        return command(file, args);
+      },
+      async (executable) => {
+        operation = "git-executable-inspection";
+        const launcher = await read(executable);
+        components.push({
+          role: "tool",
+          name: "git-launcher",
+          version: "unobserved",
+          sha256: digest(launcher),
+        });
+        inspect(launcher);
+      },
     );
-    operation = "git-executable-inspection";
-    const launcher = await read(executable);
-    components.push({
-      role: "tool",
-      name: "git-launcher",
-      version: "unobserved",
-      sha256: digest(launcher),
-    });
-    inspect(launcher);
-    operation = "git-exec-path";
-    const execPath = localPath(
-      output((await command(executable, ["--exec-path"])).stdout),
-    );
-    requireGit(
-      /\\libexec\\git-core$/iu.test(execPath),
-      "ERR_FEASIBILITY_GIT_PATH",
-    );
-    const directory = path.resolve(execPath, "..", "..", "bin"),
-      build = path.join(root, "build"),
+    const build = path.join(root, "build"),
       workspace = path.join(root, "workspace"),
       config = path.join(workspace, ".git", "runner-global.conf"),
       image = path.join(build, "git.exe"),

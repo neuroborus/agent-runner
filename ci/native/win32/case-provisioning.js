@@ -144,7 +144,7 @@ export function createWindowsCaseProvisioning(state, options) {
       );
       if (binding.purpose === "experiment") {
         requireObservation(
-          prepared?.schemaVersion === 3 && prepared.purpose === "experiment",
+          prepared?.schemaVersion === 4 && prepared.purpose === "experiment",
         );
         const images = [],
           reads = [];

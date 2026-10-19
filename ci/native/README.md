@@ -377,11 +377,22 @@ supervisor must inspect fresh matching runs of both original workflows on the
 same final SHA and continue until both genuinely pass.
 
 The duplicate compiler bootstrap reader/task is
-removed. Private version-3 preparation records and version-2 operation declarations reject legacy, mixed or incomplete
+removed. Private version-4 preparation records and version-2 operation declarations reject legacy, mixed or incomplete
 build evidence. Cold loading verifies the original completed outputs without
 selection, acquisition or recompilation. A private sibling selector identifies
 possible System publication; protected records and original births supply all
 custody/retirement evidence. No public compiler bootstrap journal is required.
+
+Ordinary Windows bootstrap reuses feasibility's bounded `where.exe git.exe` and
+`--exec-path` discovery before opening the System reader. Its private selector
+pins the resolved runtime `git.exe` and bin directory for installed UCRT and
+MinGW layouts. Cold loading requires that recorded selection and its command,
+image and dependency joins, without discovery or fallback. Native installed
+admission accepts only direct EXE/DLL files in those two Program Files Git bin
+directories, retaining exact path/pin joins, x64 PE, held identity, byte and
+signature checks and stock ACLs. Private copies and complete private/delay-import
+edges retain their existing protections; stock system-library boundaries and
+separate first/cleanup causes remain unchanged.
 
 Every existing system recipe remains required. The build recipe independently
 reads the completed images and output-directory identity/DACL; it asserts no
