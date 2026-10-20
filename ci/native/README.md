@@ -9881,6 +9881,19 @@ mandatory for closed admissions, exclusive writers, ancestor/creation authority,
 foreign handles, account reservations, endpoint leases and the complete global
 route/flow/callout/precedence view. Missing coverage cannot become inferred flags.
 
+Both native security reopen masks include `FILE_READ_ATTRIBUTES` for their
+`FileIdInfo` queries. These rights belong to temporary trusted observer handles;
+payload grants remain unchanged. Original identity, reopening, reopened identity,
+same-object comparison, descriptor read/write and close failures have separate
+call sites and finite diagnostics. Win32 errors are saved immediately;
+`GetSecurityInfo` and `SetSecurityInfo` use their returned status codes. Identity
+and descriptor invariants remain distinct from API failures. Partial failures
+release temporary handles and returned descriptors before entering the existing
+custody failure owner, retaining the first cause and separate cleanup diagnostics.
+No-follow flags, no-delete sharing and complete owner/group/DACL/label/SACL reads
+remain required. The historical compound error does not identify its failed
+subcall; portable regressions establish no matching Windows native acceptance.
+
 The sealed plan distinguishes immutable `data` from explicitly reviewed
 `mutable` leaves. Only mutable leaves permit shared writes while their handles
 remain held; images, helpers, SDK and immutable data keep their existing sharing

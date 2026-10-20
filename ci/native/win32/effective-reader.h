@@ -44,28 +44,61 @@ static void acl_read(PACL acl) {
     emit_sid(&ace->SidStart); putchar('}');
   } putchar(']');
 }
+/* Settle only temporary observer resources before forwarding the saved cause to
+ * the existing custody failure owner. Cleanup/diagnostics cannot replace it. */
+static void file_security_failure(const char *operation, BOOL api_failure, DWORD error,
+                                 HANDLE temporary, PSECURITY_DESCRIPTOR sd, unsigned line) {
+  DWORD closeError = ERROR_SUCCESS, freeError = ERROR_SUCCESS;
+  BOOL closeFailed = FALSE, freeFailed = FALSE;
+  if (temporary != INVALID_HANDLE_VALUE) {
+    closeFailed = !CloseHandle(temporary); closeError = GetLastError();
+  }
+  if (sd) { freeFailed = LocalFree(sd) != NULL; freeError = GetLastError(); }
+  fprintf(stderr, "native-windows-security: operation=%s domain=%s value=%lu\n", operation, api_failure ? "win32" : "invariant", error);
+  if (closeFailed) fprintf(stderr, "native-windows-security-cleanup: operation=CloseHandle error=%lu\n", closeError);
+  if (freeFailed) fprintf(stderr, "native-windows-security-cleanup: operation=LocalFree error=%lu\n", freeError);
+  fflush(stderr); SetLastError(error); need_at(false, __FILE__, line);
+}
 static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
-  HANDLE actual = file;
+  HANDLE actual = file, temporary = INVALID_HANDLE_VALUE;
   if (kind == SE_FILE_OBJECT) {
     FILE_ID_INFO before, after;
-    need(GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)));
-    actual = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY, FILE_SHARE_READ | FILE_SHARE_WRITE,
-      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-    need(actual != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(actual, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)));
+    BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
+    if (!read) file_security_failure("security-read-original-id", TRUE, error, temporary, NULL, __LINE__);
+    temporary = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
+    if (temporary == INVALID_HANDLE_VALUE) file_security_failure("security-read-reopen", TRUE, error, temporary, NULL, __LINE__);
+    actual = temporary;
+    read = GetFileInformationByHandleEx(actual, FileIdInfo, &after, sizeof(after)); error = GetLastError();
+    if (!read) file_security_failure("security-read-reopened-id", TRUE, error, temporary, NULL, __LINE__);
+    if (memcmp(&before, &after, sizeof(before))) file_security_failure("security-read-same-object", FALSE, ERROR_INVALID_DATA, temporary, NULL, __LINE__);
   }
-  PSECURITY_DESCRIPTOR sd; need(GetSecurityInfo(actual, kind, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &sd) == ERROR_SUCCESS);
-  need(IsValidSecurityDescriptor(sd) && GetSecurityDescriptorLength(sd) <= 65536);
-  if (actual != file) need(CloseHandle(actual));
+  PSECURITY_DESCRIPTOR sd = NULL;
+  DWORD status = GetSecurityInfo(actual, kind, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &sd);
+  if (status != ERROR_SUCCESS) file_security_failure("security-read-descriptor", TRUE, status, temporary, sd, __LINE__);
+  if (!IsValidSecurityDescriptor(sd)) file_security_failure("security-read-valid", FALSE, ERROR_INVALID_SECURITY_DESCR, temporary, sd, __LINE__);
+  if (GetSecurityDescriptorLength(sd) > 65536) file_security_failure("security-read-size", FALSE, ERROR_INVALID_DATA, temporary, sd, __LINE__);
+  if (temporary != INVALID_HANDLE_VALUE) {
+    BOOL closed = CloseHandle(temporary); DWORD error = GetLastError();
+    if (!closed) file_security_failure("security-read-close", TRUE, error, INVALID_HANDLE_VALUE, sd, __LINE__);
+  }
   return sd;
 }
 static void set_file_security(HANDLE file, SECURITY_INFORMATION info, PACL dacl, PACL sacl) {
   FILE_ID_INFO before, after;
-  need(GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)));
-  HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
-    FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-  need(writer != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(writer, FileIdInfo, &after, sizeof(after)) &&
-    !memcmp(&before, &after, sizeof(before)) && SetSecurityInfo(writer, SE_FILE_OBJECT, info, NULL, NULL, dacl, sacl) == ERROR_SUCCESS && CloseHandle(writer));
+  BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
+  if (!read) file_security_failure("security-write-original-id", TRUE, error, INVALID_HANDLE_VALUE, NULL, __LINE__);
+  HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
+  if (writer == INVALID_HANDLE_VALUE) file_security_failure("security-write-reopen", TRUE, error, writer, NULL, __LINE__);
+  read = GetFileInformationByHandleEx(writer, FileIdInfo, &after, sizeof(after)); error = GetLastError();
+  if (!read) file_security_failure("security-write-reopened-id", TRUE, error, writer, NULL, __LINE__);
+  if (memcmp(&before, &after, sizeof(before))) file_security_failure("security-write-same-object", FALSE, ERROR_INVALID_DATA, writer, NULL, __LINE__);
+  DWORD status = SetSecurityInfo(writer, SE_FILE_OBJECT, info, NULL, NULL, dacl, sacl);
+  if (status != ERROR_SUCCESS) file_security_failure("security-write-descriptor", TRUE, status, writer, NULL, __LINE__);
+  BOOL closed = CloseHandle(writer); error = GetLastError();
+  if (!closed) file_security_failure("security-write-close", TRUE, error, INVALID_HANDLE_VALUE, NULL, __LINE__);
 }
 static void sd_read(PSECURITY_DESCRIPTOR sd) {
   PSID owner; PACL dacl, sacl; BOOL present, defaulted; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision; char hash[65], descriptorHash[65];

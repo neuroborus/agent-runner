@@ -1672,6 +1672,13 @@ policy/filter-absence snapshots and retirement-gated owned audit restoration.
 Interrupted audit setup retains its first cause and permits recovery only after
 independent payload retirement, observer drain and retirement, and fresh reads
 of unchanged baseline or exactly owned per-user policy and SACL changes.
+The effective suite also executes the actual native security-reader/writer and
+custody failure bodies with injected APIs. It checks identity-query reopen rights,
+complete security selectors, borrowed registry handles, separate native/status
+and invariant refusals, volume/file-ID substitution, descriptor bounds and partial
+handle/descriptor release. Close, free and diagnostic failures cannot replace the
+original error; no failed close is retried. These fixtures run no Windows API or
+compiler and add no slow-tier requirement.
 Their focused commands are `node ci/native/win32/effective.test.js` and
 `node ci/native/win32/audit.test.js`. Harness discovery includes both without
 removing existing coverage. They perform no native build, audit mutation, task

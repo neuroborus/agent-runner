@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import {
   createWindowsEffectiveReaders,
   normalizeWindowsBarrierRead,
@@ -14,6 +16,352 @@ import {
 import { digest } from "./protocol.js";
 import { encode } from "./custody-protocol.js";
 import { observationDigest } from "../index.js";
+
+async function securityNative({
+  writer = false,
+  fault,
+  closeFailure,
+  freeFailure,
+  registry = false,
+  length = 64,
+} = {}) {
+  const [source, custody] = await Promise.all(
+    ["effective-reader.h", "custody.h"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  // Project only C representations. Execute the actual security and custody
+  // failure bodies; the native calls and opaque descriptor remain injected.
+  const project = (text, name, args) => {
+    const match = new RegExp(
+      `static [^\\n]+ ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(text);
+    assert.ok(match, name);
+    const start = match.index + match[0].indexOf("{") + 1;
+    const body = match[1]
+      .replace(/__LINE__/gu, (_, at) =>
+        String(text.slice(0, start + at).split("\n").length),
+      )
+      .replaceAll("__FILE__", '"effective-reader.h"')
+      .replace(/^#.*$/gmu, "")
+      .replace(
+        "FILE_ID_INFO before, after;",
+        "const before=Buffer.alloc(24),after=Buffer.alloc(24);",
+      )
+      .replace(/sizeof\((?:before|after)\)/gu, "24")
+      .replace(/&(before|after)\b/gu, "$1")
+      .replace("&sd", "{set value(value){sd=value}}")
+      .replace(/\b(?:HANDLE|DWORD|BOOL|PSECURITY_DESCRIPTOR) /gu, "let ");
+    return `function ${name}(${args}){${body}}`;
+  };
+  const calls = [],
+    diagnostics = [],
+    guards = [],
+    sd = { descriptor: true };
+  let lastError = 999;
+  const api = {
+    Buffer,
+    NULL: null,
+    TRUE: true,
+    FALSE: false,
+    stderr: {},
+    INVALID_HANDLE_VALUE: -1,
+    ERROR_SUCCESS: 0,
+    ERROR_INVALID_DATA: 13,
+    ERROR_INVALID_SECURITY_DESCR: 1338,
+    READ_CONTROL: 0x20000,
+    WRITE_DAC: 0x40000,
+    ACCESS_SYSTEM_SECURITY: 0x1000000,
+    FILE_READ_ATTRIBUTES: 0x80,
+    FILE_SHARE_READ: 1,
+    FILE_SHARE_WRITE: 2,
+    FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+    FILE_FLAG_BACKUP_SEMANTICS: 0x2000000,
+    SE_FILE_OBJECT: 1,
+    SE_REGISTRY_KEY: 4,
+    OWNER_SECURITY_INFORMATION: 1,
+    GROUP_SECURITY_INFORMATION: 2,
+    DACL_SECURITY_INFORMATION: 4,
+    LABEL_SECURITY_INFORMATION: 16,
+    SACL_SECURITY_INFORMATION: 8,
+    GetLastError: () => lastError,
+    SetLastError: (value) => {
+      lastError = value;
+    },
+    GetFileInformationByHandleEx(handle, kind, target, size) {
+      assert.equal(kind, "FileIdInfo");
+      assert.equal(size, 24);
+      const operation = handle === 1 ? "original-id" : "reopened-id";
+      assert.ok(handle === 1 || handle === 2);
+      calls.push(operation);
+      lastError = handle === 1 ? 5 : 87;
+      if (fault === operation) return false;
+      target.fill(1);
+      if (handle === 2 && fault === "volume") target[0]++;
+      if (handle === 2 && fault === "file-id") target[23]++;
+      return true;
+    },
+    FileIdInfo: "FileIdInfo",
+    ReOpenFile(handle, access, sharing, flags) {
+      assert.equal(handle, 1);
+      assert.equal(
+        access,
+        api.READ_CONTROL |
+          api.ACCESS_SYSTEM_SECURITY |
+          api.FILE_READ_ATTRIBUTES |
+          (writer ? api.WRITE_DAC : 0),
+      );
+      assert.equal(sharing, api.FILE_SHARE_READ | api.FILE_SHARE_WRITE);
+      assert.equal(
+        flags,
+        api.FILE_FLAG_OPEN_REPARSE_POINT | api.FILE_FLAG_BACKUP_SEMANTICS,
+      );
+      calls.push("reopen");
+      lastError = 32;
+      return fault === "reopen" ? -1 : 2;
+    },
+    memcmp: (left, right, size) =>
+      Buffer.compare(left.subarray(0, size), right.subarray(0, size)),
+    GetSecurityInfo(handle, kind, mask, owner, group, dacl, sacl, out) {
+      assert.equal(handle, registry ? 1 : 2);
+      assert.equal(kind, registry ? 4 : 1);
+      assert.equal(mask, 1 | 2 | 4 | 8 | 16);
+      assert.deepEqual([owner, group, dacl, sacl], [null, null, null, null]);
+      calls.push("descriptor");
+      out.value = sd;
+      lastError = 999;
+      return fault === "descriptor" ? 5 : 0;
+    },
+    IsValidSecurityDescriptor(value) {
+      assert.equal(value, sd);
+      calls.push("valid");
+      return fault !== "valid";
+    },
+    GetSecurityDescriptorLength(value) {
+      assert.equal(value, sd);
+      calls.push("size");
+      return length;
+    },
+    SetSecurityInfo(handle, kind, info, owner, group, dacl, sacl) {
+      assert.deepEqual(
+        [handle, kind, info, owner, group, dacl, sacl],
+        [2, 1, 8, null, null, null, "owned-sacl"],
+      );
+      calls.push("descriptor");
+      lastError = 999;
+      return fault === "descriptor" ? 87 : 0;
+    },
+    CloseHandle(handle) {
+      assert.equal(handle, 2, "Never close the original held object");
+      calls.push("close");
+      lastError = 6;
+      return !(closeFailure || fault === "close");
+    },
+    LocalFree(value) {
+      assert.equal(value, sd);
+      calls.push("free");
+      lastError = 8;
+      return freeFailure ? value : null;
+    },
+    fprintf(_stream, format, ...values) {
+      diagnostics.push({ format, values });
+      lastError = 901;
+    },
+    fflush() {
+      lastError = 902;
+    },
+    NATIVE_CUSTODY_FAILURE(file, line, error) {
+      guards.push({ file, line, error });
+      lastError = 903;
+    },
+    ExitProcess(code) {
+      throw Object.assign(new Error("Native security refusal"), {
+        code,
+        guard: guards.at(-1),
+      });
+    },
+  };
+  const native = new Script(
+    [
+      project(custody, "need_at", "ok,file,line"),
+      project(
+        source,
+        "file_security_failure",
+        "operation,api_failure,error,temporary,sd,line",
+      ),
+      project(source, "file_sd", "file,kind"),
+      project(source, "set_file_security", "file,info,dacl,sacl"),
+      "({file_sd,set_file_security})",
+    ].join("\n"),
+  ).runInNewContext(api);
+  return {
+    calls,
+    diagnostics,
+    sd,
+    run: () =>
+      writer
+        ? native.set_file_security(1, 8, null, "owned-sacl")
+        : native.file_sd(1, registry ? 4 : 1),
+  };
+}
+
+test("Windows native security handles request identity-query rights and retain complete observations", async () => {
+  const read = await securityNative({ length: 65536 });
+  assert.equal(read.run(), read.sd);
+  assert.deepEqual(read.calls, [
+    "original-id",
+    "reopen",
+    "reopened-id",
+    "descriptor",
+    "valid",
+    "size",
+    "close",
+  ]);
+  const write = await securityNative({ writer: true });
+  write.run();
+  assert.deepEqual(write.calls, [
+    "original-id",
+    "reopen",
+    "reopened-id",
+    "descriptor",
+    "close",
+  ]);
+  const registry = await securityNative({ registry: true });
+  assert.equal(registry.run(), registry.sd);
+  assert.deepEqual(registry.calls, ["descriptor", "valid", "size"]);
+});
+
+test("Windows native security failures keep distinct API, identity and descriptor causes through partial cleanup", async () => {
+  for (const writer of [false, true]) {
+    const failures = [
+      ["original-id", 5, ["original-id"]],
+      ["reopen", 32, ["original-id", "reopen"]],
+      ["reopened-id", 87, ["original-id", "reopen", "reopened-id", "close"]],
+      ["volume", 13, ["original-id", "reopen", "reopened-id", "close"]],
+      ["file-id", 13, ["original-id", "reopen", "reopened-id", "close"]],
+      [
+        "descriptor",
+        writer ? 87 : 5,
+        [
+          "original-id",
+          "reopen",
+          "reopened-id",
+          "descriptor",
+          "close",
+          ...(writer ? [] : ["free"]),
+        ],
+      ],
+      [
+        "close",
+        6,
+        [
+          "original-id",
+          "reopen",
+          "reopened-id",
+          "descriptor",
+          ...(writer ? [] : ["valid", "size"]),
+          "close",
+          ...(writer ? [] : ["free"]),
+        ],
+      ],
+      ...(writer
+        ? []
+        : [
+            [
+              "valid",
+              1338,
+              [
+                "original-id",
+                "reopen",
+                "reopened-id",
+                "descriptor",
+                "valid",
+                "close",
+                "free",
+              ],
+            ],
+            [
+              "size",
+              13,
+              [
+                "original-id",
+                "reopen",
+                "reopened-id",
+                "descriptor",
+                "valid",
+                "size",
+                "close",
+                "free",
+              ],
+            ],
+          ]),
+    ];
+    const sites = new Map();
+    for (const [fault, error, calls] of failures) {
+      const f = await securityNative({
+        writer,
+        fault,
+        length: fault === "size" ? 65537 : 64,
+      });
+      assert.throws(f.run, (cause) => {
+        assert.equal(cause.code, 126);
+        assert.equal(cause.guard.file, "effective-reader.h");
+        assert.equal(cause.guard.error, error);
+        return true;
+      });
+      assert.deepEqual(f.calls, calls);
+      const primary = f.diagnostics.find((item) =>
+        item.format.startsWith("native-windows-security:"),
+      );
+      const invariant = ["volume", "file-id", "valid", "size"].includes(fault);
+      const operation = `security-${writer ? "write" : "read"}-${["volume", "file-id"].includes(fault) ? "same-object" : fault}`;
+      assert.deepEqual(primary.values, [
+        operation,
+        invariant ? "invariant" : "win32",
+        error,
+      ]);
+      const guard = f.diagnostics.find((item) =>
+        item.format.startsWith("native-windows-guard:"),
+      );
+      assert.equal(
+        guard.values[2],
+        error,
+        "Cleanup and diagnostic sinks cannot replace the original cause",
+      );
+      if (!["volume", "file-id"].includes(fault)) {
+        assert.ok(
+          !sites.has(guard.values[1]),
+          "Failure sites must remain individually attributable",
+        );
+        sites.set(guard.values[1], fault);
+      }
+    }
+    const partial = await securityNative({
+      writer,
+      fault: "descriptor",
+      closeFailure: true,
+      freeFailure: true,
+    });
+    assert.throws(
+      partial.run,
+      (cause) => cause.guard.error === (writer ? 87 : 5),
+    );
+    const cleanup = partial.diagnostics.filter((item) =>
+      item.format.startsWith("native-windows-security-cleanup:"),
+    );
+    assert.deepEqual(
+      cleanup.map((item) => [
+        /operation=(\w+)/u.exec(item.format)[1],
+        ...item.values,
+      ]),
+      [["CloseHandle", 6], ...(writer ? [] : [["LocalFree", 8]])],
+    );
+  }
+  const registry = await securityNative({ registry: true, fault: "valid" });
+  assert.throws(registry.run, (cause) => cause.guard.error === 1338);
+  assert.deepEqual(registry.calls, ["descriptor", "valid", "free"]);
+});
 
 test("Windows effective composition joins independently approved bindings to actual ACL/MIC, registry and WFP reads", async () => {
   const f = effectiveFixture();
