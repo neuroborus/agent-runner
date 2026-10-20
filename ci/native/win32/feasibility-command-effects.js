@@ -126,269 +126,31 @@ function commandAuditSnapshot(value, read, installed) {
     );
   }
 }
-const diagnosticStatus = (value) =>
-  Number.isInteger(value) && value >= 0 && value <= 0xffffffff;
-const diagnosticShape = (value, keys) =>
-  value &&
-  typeof value === "object" &&
-  !Array.isArray(value) &&
-  Object.keys(value).sort().join() === keys;
-function commandSystemPolicy(read) {
-  const value = read?.fileSystem;
-  return diagnosticShape(value, "available,value") &&
-    typeof value.available === "boolean" &&
-    (value.available ? diagnosticStatus(value.value) : value.value === null)
-    ? { ...value }
-    : { available: false, value: null };
-}
-function commandGateObservation(value) {
-  const optional = (v) => v === null || diagnosticStatus(v);
-  const status = (v) => v === -1 || diagnosticStatus(v);
-  const sid = (v) =>
-    v === null ||
-    (typeof v === "string" &&
-      v.length < 184 &&
-      /^S-[0-9]+(?:-[0-9]+)+$/u.test(v));
-  return diagnosticShape(
-    value,
-    "aceCount,aces,api,caller,error,level,logon,policy,present,status,subject,tokenType,truncated",
-  ) &&
-    value.caller === "command_gate_read" &&
-    ["ReadFile", "CreateFileW", "identity"].includes(value.api) &&
-    diagnosticStatus(value.error) &&
-    Array.isArray(value.status) &&
-    value.status.length === 9 &&
-    value.status.every(status) &&
-    Number.isInteger(value.aceCount) &&
-    value.aceCount >= -1 &&
-    value.aceCount <= 65535 &&
-    typeof value.truncated === "boolean" &&
-    value.truncated === value.aceCount > 8 &&
-    Array.isArray(value.aces) &&
-    value.aces.length === Math.min(Math.max(value.aceCount, 0), 8) &&
-    value.aces.every(
-      (ace, i) =>
-        Array.isArray(ace) &&
-        ace.length === 6 &&
-        ace[0] === i &&
-        ace.slice(1, 5).every(status) &&
-        ace[2] <= 255 &&
-        ace[3] <= 255 &&
-        sid(ace[5]),
-    ) &&
-    (value.present === null || typeof value.present === "boolean") &&
-    sid(value.subject) &&
-    (value.logon === null ||
-      (typeof value.logon === "string" &&
-        /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(value.logon))) &&
-    [null, 1, 2].includes(value.tokenType) &&
-    [null, 0, 1, 2, 3].includes(value.level) &&
-    optional(value.policy)
-    ? structuredClone(value)
-    : null;
-}
-/** Optional carriers are never admission evidence. Invalid carriers become
- * unknown without replacing the original missing-delivery cause. */
-function commandPrerequisites(
-  value,
-  installation,
-  broker,
-  start,
-  query,
-  authenticationId,
-) {
-  if (
-    !diagnosticShape(value, "channel,policy") &&
-    !diagnosticShape(value, "channel,gate,policy")
-  )
-    return null;
-  const stamp = (v) =>
-    typeof v === "string" &&
-    /^[1-9][0-9]{0,19}$/u.test(v) &&
-    BigInt(v) <= 0xffffffffffffffffn;
-  const installed = (v) =>
-    diagnosticShape(v, "error,from,to") &&
-    diagnosticStatus(v.error) &&
-    stamp(v.from) &&
-    stamp(v.to) &&
-    BigInt(v.from) <= BigInt(v.to);
-  const count = (v, maximum) =>
-    Number.isSafeInteger(v) && v >= 0 && v <= maximum;
-  const p = value.policy,
-    c = value.channel;
-  const policy =
-    diagnosticShape(
-      p,
-      "bytes,complete,error,installation,logonError,logonId,matches,observationError,records,scannedBytes,scannedRecords,to,unavailableRecords,unknown",
-    ) &&
-    installed(p.installation) &&
-    installed(installation) &&
-    p.installation.from === installation.from &&
-    p.installation.to === installation.to &&
-    p.installation.error === installation.error &&
-    p.installation.error === 0 &&
-    BigInt(p.installation.from) > BigInt(broker.creationTime) &&
-    BigInt(p.installation.to) <= BigInt(start.time) &&
-    query &&
-    p.to === query.to &&
-    stamp(p.to) &&
-    BigInt(p.to) >= BigInt(p.installation.to) &&
-    diagnosticStatus(p.error) &&
-    diagnosticStatus(p.observationError) &&
-    diagnosticStatus(p.logonError) &&
-    typeof p.complete === "boolean" &&
-    (p.logonId === null ||
-      (p.logonError === 0 &&
-        /^[a-f0-9]{16}$/u.test(p.logonId) &&
-        p.logonId === authenticationId.replace(":", ""))) &&
-    count(p.records, 4096) &&
-    count(p.scannedRecords, 4096) &&
-    p.scannedRecords === query.scannedRecords + query.records &&
-    p.scannedRecords + p.records <= 4096 &&
-    count(p.bytes, p.records * 65536) &&
-    p.scannedBytes === query.scannedBytes + query.bytes &&
-    count(p.scannedBytes + p.bytes, 8388608) &&
-    (!p.complete ||
-      (p.error === 0 &&
-        p.observationError === 0 &&
-        p.bytes >= p.records * 4)) &&
-    count(p.unavailableRecords, p.records) &&
-    Boolean(p.unavailableRecords) === Boolean(p.observationError) &&
-    Array.isArray(p.matches) &&
-    p.matches.length === 5 &&
-    p.matches.every((v) => count(v, p.records)) &&
-    (p.logonId !== null || (p.matches[1] === 0 && p.matches[4] === 0)) &&
-    Array.isArray(p.unknown) &&
-    p.unknown.length === 4 &&
-    p.unknown.every(
-      (v, i) => count(v, p.unavailableRecords) && v + p.matches[i] <= p.records,
-    ) &&
-    p.matches[4] <= Math.min(...p.matches.slice(0, 4)) &&
-    p.matches[4] >=
-      Math.max(
-        0,
-        p.matches.slice(0, 4).reduce((a, b) => a + b, 0) - 3 * p.records,
-      );
-  const optionalStatus = (v) => v === -1 || diagnosticStatus(v);
-  const channel =
-    diagnosticShape(
-      c,
-      "closeError,enabled,openError,readError,requiredBytes,size,usedBytes",
-    ) &&
-    diagnosticStatus(c.openError) &&
-    diagnosticStatus(c.size) &&
-    [c.readError, c.usedBytes, c.requiredBytes, c.closeError].every(
-      optionalStatus,
-    ) &&
-    [-1, 0, 1].includes(c.enabled) &&
-    (c.readError === -1
-      ? c.enabled === -1 &&
-        c.usedBytes === -1 &&
-        c.requiredBytes === -1 &&
-        c.closeError === -1 &&
-        c.size === 0
-      : c.openError === 0 && c.closeError >= 0) &&
-    (c.readError === 0 && c.usedBytes !== -1
-      ? c.usedBytes === c.size && c.requiredBytes === -1
-      : c.usedBytes === -1 &&
-        c.enabled === -1 &&
-        (c.readError === 122
-          ? c.requiredBytes === c.size
-          : c.requiredBytes === -1)) &&
-    (c.enabled === -1 || (c.readError === 0 && c.usedBytes === 16));
-  return {
-    policy: policy ? structuredClone(p) : null,
-    channel: channel ? { ...c } : null,
-    ...(Object.hasOwn(value, "gate")
-      ? { gate: commandGateObservation(value.gate) }
-      : {}),
-  };
-}
-/** Fixed operation labels explain local admission failures even when no native
- * stderr exists. A native/transport first cause remains authoritative. */
-function commandCoverageFailure(operation, error) {
+function commandSetupFailure(operation, error) {
   error.feasibilityCause ??= windowsFeasibilityCause(
     `broker-${operation}`,
     error,
   );
   return error;
 }
-function commandQueryPredicates(query, broker) {
-  const counts = query.predicates;
-  need(
-    query.brokerPid === broker.pid &&
-      Number.isInteger(query.observationError) &&
-      query.observationError >= 0 &&
-      query.observationError <= 0xffffffff &&
-      [query.lossRecords, query.unavailableRecords].every(
-        (count) =>
-          Number.isSafeInteger(count) && count >= 0 && count <= query.records,
-      ) &&
-      Boolean(query.unavailableRecords) === Boolean(query.observationError) &&
-      (!query.complete || query.observationError === 0) &&
-      counts &&
-      Object.keys(counts).sort().join() ===
-        "gate,pid,pidGate,pidGateReadSid,pidGateReadSidType,pidGateReadType,sid,successRead,type" &&
-      Object.values(counts).every(
-        (count) =>
-          Number.isSafeInteger(count) &&
-          count >= 0 &&
-          count <= query.records - query.lossRecords,
-      ),
-  );
-  need(
-    counts.pidGate <= Math.min(counts.pid, counts.gate) &&
-      counts.pidGate >=
-        Math.max(
-          0,
-          counts.pid + counts.gate - (query.records - query.lossRecords),
-        ) &&
-      query.candidates <= Math.min(counts.pidGate, counts.successRead) &&
-      query.candidates >=
-        Math.max(
-          0,
-          counts.pidGate +
-            counts.successRead -
-            (query.records - query.lossRecords),
-        ) &&
-      counts.pidGateReadSid <= Math.min(query.candidates, counts.sid) &&
-      counts.pidGateReadType <= Math.min(query.candidates, counts.type) &&
-      counts.pidGateReadSid >=
-        Math.max(
-          0,
-          query.candidates + counts.sid - (query.records - query.lossRecords),
-        ) &&
-      counts.pidGateReadType >=
-        Math.max(
-          0,
-          query.candidates + counts.type - (query.records - query.lossRecords),
-        ) &&
-      counts.pidGateReadSidType <=
-        Math.min(counts.pidGateReadSid, counts.pidGateReadType) &&
-      counts.pidGateReadSidType >=
-        Math.max(
-          0,
-          counts.pidGateReadSid + counts.pidGateReadType - query.candidates,
-        ),
-  );
-}
-/** Interface/configuration claims cannot admit a broker. Join independent held
- * token/object reads to the actual decoder's fresh native success delivery. */
-export function windowsCommandBrokerCoverage(value, observation) {
-  const { baseline, before, after, start, end, control, events } = observation,
+/** Setup establishes held broker authority and installed policy. Only the
+ * independently observed real command control establishes event delivery. */
+export function windowsCommandBrokerSetup(value, observation) {
+  const { baseline, before, after } = observation,
     broker = normalizeWindowsIdentity(value.observer),
     original = value.original.files[3];
   commandAuditSnapshot(value, baseline.audit, false);
   commandAuditSnapshot(value, before.audit, true);
   commandAuditSnapshot(value, after.audit, true);
   need(
-    sameWindowsIdentity(broker, baseline.identity) &&
-      sameWindowsIdentity(broker, before.identity) &&
-      sameWindowsIdentity(broker, after.identity) &&
+    observation.captureComplete === true &&
+      [baseline, before, after].every((read) =>
+        sameWindowsIdentity(broker, read.identity),
+      ) &&
       /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.tokenId) &&
       /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.modifiedId) &&
-      JSON.stringify(before.token) === JSON.stringify(after.token) &&
       JSON.stringify(baseline.token) === JSON.stringify(before.token) &&
+      JSON.stringify(before.token) === JSON.stringify(after.token) &&
       before.token.details.appContainer === false &&
       before.token.details.restricted === false &&
       before.token.details.restrictingSids === 0 &&
@@ -403,198 +165,167 @@ export function windowsCommandBrokerCoverage(value, observation) {
         (gate) => JSON.stringify(gate) === JSON.stringify(original),
       ),
   );
-  const unavailable = (reason, delivery = {}) => {
-    const detail = `Broker audit ${reason}; delivered=${control?.delivered === true}; records=${start.records}..${end.records}; joined=${delivery.joined ?? 0}/${events.length}; query=${control?.query?.complete === true ? "complete" : "unobserved"}:${control?.query?.records ?? 0}; gateCandidates=${control?.query?.candidates ?? 0}.`;
-    throw Object.assign(
-      new Error("Effective broker audit coverage unavailable"),
-      {
-        code: 78,
-        feasibilityCause: { code: "prerequisite-unavailable", detail },
-        brokerCoverage: {
-          reason,
-          broker,
-          authenticationId: before.token.details.authenticationId,
-          object: {
-            identity: original.identity,
-            nameSha256: digest(value.gateFile.toLowerCase()),
-          },
-          start: {
-            sequence: start.sequence,
-            time: start.time,
-            records: start.records,
-          },
-          end: { sequence: end.sequence, time: end.time, records: end.records },
-          control: {
-            ...control,
-            ...(Object.hasOwn(control, "prerequisites")
-              ? {
-                  prerequisites: commandPrerequisites(
-                    control.prerequisites,
-                    observation.installation,
-                    broker,
-                    start,
-                    control.query,
-                    before.token.details.authenticationId,
-                  ),
-                }
-              : {}),
-          },
-          systemPolicy: [
-            value.original.cleanup,
-            baseline.audit,
-            before.audit,
-            after.audit,
-          ].map(commandSystemPolicy),
-          ...delivery,
-        },
-      },
-    );
-  };
-  need(
-    observation.captureComplete === true &&
-      Number.isSafeInteger(start.sequence) &&
-      start.sequence > 0 &&
-      end.sequence <= 256 &&
-      end.sequence === start.sequence + 1 &&
-      [start.time, end.time].every(
-        (time) =>
-          typeof time === "string" &&
-          /^[1-9][0-9]{0,19}$/u.test(time) &&
-          BigInt(time) <= 0xffffffffffffffffn,
-      ) &&
-      BigInt(end.time) > BigInt(start.time) &&
-      BigInt(broker.creationTime) < BigInt(start.time) &&
-      Number.isSafeInteger(start.records) &&
-      start.records >= 0 &&
-      Number.isSafeInteger(end.records) &&
-      end.records <= 4096 &&
-      end.records - start.records === events.length,
-  );
-  need(
-    control?.event === "P" &&
-      Object.keys(control)
-        .filter((key) => key !== "prerequisites")
-        .sort()
-        .join() === "delivered,elapsedMs,endRecords,event,query,startRecords" &&
-      (!control.delivered || !Object.hasOwn(control, "prerequisites")) &&
-      typeof control.delivered === "boolean" &&
-      Number.isSafeInteger(control.elapsedMs) &&
-      control.elapsedMs >= 0 &&
-      control.elapsedMs <= 150000 &&
-      Number.isSafeInteger(control.startRecords) &&
-      control.startRecords >= start.records &&
-      Number.isSafeInteger(control.endRecords) &&
-      control.endRecords >= control.startRecords &&
-      control.endRecords <= end.records &&
-      (!control.delivered || control.endRecords > control.startRecords),
-  );
-  const query = control.query;
-  need(
-    query === null ||
-      (!control.delivered &&
-        query &&
-        Object.keys(query)
-          .filter((key) => key !== "audit")
-          .sort()
-          .join() ===
-          "brokerPid,bytes,candidates,complete,error,from,gateIdentity,lossRecords,observationError,performedAccess,predicates,readBytes,records,requestedAccess,scannedBytes,scannedRecords,to,unavailableRecords" &&
-        (!Object.hasOwn(query, "audit") ||
-          (Array.isArray(query.audit) &&
-            query.audit.length === 9 &&
-            query.audit.every(
-              (entry) =>
-                Number.isInteger(entry) && entry >= -1 && entry <= 0xffffffff,
-            ) &&
-            query.audit[0] >= 0 &&
-            query.audit[0] <= 6 &&
-            [0, 1].includes(query.audit[8]))) &&
-        typeof query.complete === "boolean" &&
-        Number.isInteger(query.error) &&
-        query.error >= 0 &&
-        query.error <= 0xffffffff &&
-        (!query.complete || query.error === 0) &&
-        [query.from, query.to].every(
-          (time) =>
-            typeof time === "string" && /^[1-9][0-9]{0,19}$/u.test(time),
-        ) &&
-        BigInt(query.from) >= BigInt(start.time) &&
-        BigInt(query.to) >= BigInt(query.from) &&
-        BigInt(query.to) <= BigInt(end.time) &&
-        Number.isSafeInteger(query.scannedRecords) &&
-        query.scannedRecords >= control.endRecords &&
-        query.scannedRecords <= 4096 &&
-        Number.isSafeInteger(query.scannedBytes) &&
-        query.scannedBytes >= query.scannedRecords * 4 &&
-        query.scannedBytes <= Math.min(query.scannedRecords * 65536, 8388608) &&
-        Number.isSafeInteger(query.records) &&
-        query.records >= 0 &&
-        query.records + query.scannedRecords <= 4096 &&
-        Number.isSafeInteger(query.bytes) &&
-        query.bytes >= (query.complete ? query.records * 4 : 0) &&
-        query.bytes <= query.records * 65536 &&
-        query.bytes + query.scannedBytes <= 8388608 &&
-        Number.isSafeInteger(query.candidates) &&
-        query.candidates >= 0 &&
-        query.candidates <= query.records &&
-        query.gateIdentity === original.identity &&
-        query.requestedAccess === 0x80000080 &&
-        query.performedAccess === 1 &&
-        query.readBytes === 32),
-  );
-  if (query !== null) commandQueryPredicates(query, broker);
   if (
     ![before, after].every(
-      (v) =>
-        v.effective.available === true &&
-        v.effective.success === true &&
-        v.effective.failure === true &&
-        v.effective.error === 0,
+      (read) =>
+        read.effective.available === true &&
+        read.effective.success === true &&
+        read.effective.failure === true &&
+        read.effective.error === 0,
     )
   )
-    unavailable("effective-policy");
-  const predicates = events.map(({ raw, time, logonId, index }) => ({
-      process: raw.pid === broker.pid,
-      sid: raw.subjectSid === broker.userSid,
-      logon: logonId === before.token.details.authenticationId.replace(":", ""),
-      opcode: raw.opcode === "4663",
-      success: raw.auditFailure === false,
-      access: (raw.accessMask & 1) !== 0,
-      object: raw.target.toLowerCase() === value.gateFile.toLowerCase(),
-      afterStart: BigInt(time) > BigInt(start.time),
-      beforeEnd: BigInt(time) < BigInt(end.time),
-      controlWindow:
-        index >= control.startRecords && index < control.endRecords,
-    })),
-    joined = predicates.filter((checks) =>
-      Object.values(checks).every(Boolean),
-    ).length;
-  if (!control.delivered || !joined)
-    unavailable(control.delivered ? "join-rejected" : "delivery-missing", {
-      joined,
-      rejected: Object.fromEntries(
-        Object.keys(predicates[0] ?? {}).map((key) => [
-          key,
-          predicates.filter((checks) => !checks[key]).length,
-        ]),
-      ),
-      // Retain bounded typed facts, never raw XML or file paths.
-      candidates: events
-        .slice(0, 8)
-        .map(({ raw, time, logonId, recordId, index }, i) => ({
-          index,
-          recordId,
-          time,
-          pid: raw.pid,
-          subjectSid: raw.subjectSid,
-          logonId,
-          opcode: raw.opcode,
-          auditFailure: raw.auditFailure,
-          accessMask: raw.accessMask,
-          objectSha256: digest(raw.target.toLowerCase()),
-          predicates: predicates[i],
-        })),
+    throw Object.assign(new Error("Effective broker auditing unavailable"), {
+      code: 78,
     });
   return digest(JSON.stringify(observation));
+}
+const commandEvidence = (value, detail, code = "missing-observation") => {
+  if (!value)
+    throw Object.assign(new Error("Windows command evidence rejected"), {
+      feasibilityCause: { code, detail },
+    });
+};
+const hash = (value) =>
+  typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+/** A reply cannot replace native token, held object, or Security observations. */
+export function assessWindowsCommandObservation(
+  spec,
+  observation,
+  reply,
+  nonce,
+) {
+  const before = normalizeWindowsIdentity(observation.before),
+    after = normalizeWindowsIdentity(observation.after);
+  commandEvidence(
+    sameWindowsIdentity(before, after) &&
+      before.userSid === spec.userSid &&
+      before.sessionId === spec.sessionId &&
+      observation.creationJob === true &&
+      observation.imageSha256 === spec.helperSha256 &&
+      observation.beforeToken.appContainer === false &&
+      observation.beforeToken.integrity === 8192 &&
+      typeof observation.beforeToken.restricted === "boolean" &&
+      (spec.control || observation.beforeToken.restricted === true) &&
+      Number.isInteger(observation.beforeToken.restrictingSids) &&
+      observation.beforeToken.restrictingSids <= 32 &&
+      (spec.control
+        ? observation.beforeToken.restrictingSids === 0
+        : observation.beforeToken.restrictingSids > 0) &&
+      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(spec.authenticationId) &&
+      observation.beforeToken.authenticationId === spec.authenticationId &&
+      hash(observation.beforeToken.restrictedSidsSha256) &&
+      JSON.stringify(observation.beforeToken) ===
+        JSON.stringify(observation.afterToken),
+    "Command process, image, token or creation-time Job custody did not join.",
+  );
+  commandEvidence(
+    reply.exitCode === 0 &&
+      reply.stdout ===
+        (spec.action === "inspect"
+          ? nonce
+          : spec.permit
+            ? "attempt:written"
+            : "attempt:denied"),
+    "The fixed command did not acknowledge its expected result.",
+  );
+  const start = BigInt(observation.start.time),
+    end = BigInt(observation.end.time);
+  commandEvidence(
+    observation.captureComplete === true &&
+      end > start &&
+      BigInt(before.creationTime) > start &&
+      BigInt(before.creationTime) < end &&
+      observation.end.sequence === observation.start.sequence + 1,
+    "The acknowledged native capture window is incomplete.",
+  );
+  const events = observation.events.filter(
+    ({ raw, time, logonId }) =>
+      raw.pid === before.pid &&
+      raw.subjectSid === before.userSid &&
+      logonId === spec.authenticationId?.replace(":", "") &&
+      BigInt(time) > start &&
+      BigInt(time) < end,
+  );
+  const mask = spec.action === "inspect" ? 1 : 2;
+  const target = events.filter(
+    ({ raw }) =>
+      raw.target.toLowerCase() === spec.target.toLowerCase() &&
+      (raw.accessMask & mask) !== 0,
+  );
+  commandEvidence(
+    target.length > 0 &&
+      target.every(({ raw }) =>
+        spec.permit
+          ? raw.opcode === "4663" && raw.auditFailure === false
+          : raw.opcode === "4656" && raw.auditFailure === true,
+      ),
+    "Security object access did not establish the permitted control or denial.",
+  );
+  commandEvidence(
+    events.some(
+      ({ raw, recordId, time }) =>
+        raw.target.toLowerCase() === spec.gateFile.toLowerCase() &&
+        raw.opcode === "4663" &&
+        raw.auditFailure === false &&
+        (raw.accessMask & 1) !== 0 &&
+        target.every(
+          (v) =>
+            BigInt(recordId) > BigInt(v.recordId) &&
+            BigInt(time) >= BigInt(v.time),
+        ),
+    ),
+    "The audited held gate did not acknowledge completed target I/O.",
+  );
+  for (const object of [observation.object, observation.gate])
+    commandEvidence(
+      object.before.identity === object.after.identity &&
+        /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(object.before.identity) &&
+        hash(object.before.daclSha256) &&
+        hash(object.after.daclSha256),
+      "A held file/DACL observation lost its original native identity.",
+    );
+  commandEvidence(
+    observation.gate.before.sha256 === digest(nonce) &&
+      observation.gate.after.sha256 === digest(nonce) &&
+      observation.gate.before.daclSha256 ===
+        observation.gate.after.daclSha256 &&
+      observation.object.before.sha256 === digest(nonce) &&
+      observation.object.after.sha256 ===
+        digest(
+          spec.permit && spec.action !== "inspect" ? nonce + "-edited" : nonce,
+        ) &&
+      (spec.action !== "outside" ||
+        observation.object.before.daclSha256 ===
+          observation.object.after.daclSha256),
+    "The held sentinel changed outside its permitted operation.",
+    "observed-escape",
+  );
+  return digest(JSON.stringify({ spec, observation }));
+}
+
+/** The last command marker cannot replace a fresh post-domain broker witness. */
+export function windowsCommandTerminalCapture(value, capture, logons) {
+  const broker = normalizeWindowsIdentity(value.observer),
+    token = value.brokerSetup.before.token.details,
+    boundary = value.auditRetirement;
+  need(
+    /^[1-9][0-9]{0,19}$/u.test(boundary) &&
+      BigInt(boundary) > BigInt(broker.creationTime) &&
+      (!value.lastAuditTime ||
+        BigInt(boundary) > BigInt(value.lastAuditTime)) &&
+      capture.events.some(
+        ({ raw, time }) =>
+          raw.pid === broker.pid &&
+          raw.subjectSid === broker.userSid &&
+          logons.get(raw.id) === token.authenticationId.replace(":", "") &&
+          raw.opcode === "4663" &&
+          raw.auditFailure === false &&
+          (raw.accessMask & 1) !== 0 &&
+          raw.target.toLowerCase() === value.gateFile.toLowerCase() &&
+          BigInt(time) > BigInt(boundary),
+      ),
+  );
+  return digest(JSON.stringify(capture));
 }
 export function windowsCommandEnvironment(home, directory, systemRoot) {
   for (const value of [home, directory, systemRoot])
@@ -1447,7 +1178,9 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     cleanupReady = false,
     readerVerifier,
     observerVerifier,
-    coverageAdmitted = false,
+    setupVerified = false,
+    controlVerified = false,
+    serverAdmission,
     cleanupDeadline = Infinity;
   const pending = new Map(),
     xml = new Map(),
@@ -1483,7 +1216,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       settlement = ["D", "S"].includes(key);
     need(broker?.stdin.writable && !pending.has(key));
     if (!settlement) need(!failed && !closing && !observationSignal.aborted);
-    if (["V", "G", "A", "R", "J", "C"].includes(key)) need(coverageAdmitted);
+    if (["V", "G", "A", "C"].includes(key)) need(setupVerified);
+    if (["R", "J", "K"].includes(key)) need(controlVerified);
     if (key === "D") closing = true;
     return new Promise((resolve, reject) => {
       pending.set(key, { resolve, reject });
@@ -1558,6 +1292,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     const settled = await call("U");
     const end = await call("B"),
       state = decoder.state();
+    prepared.lastAuditTime = end.time;
     return {
       controlExitCode: settled.exitCode,
       before: independentBefore.identity,
@@ -1666,7 +1401,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         return prepared;
       });
     },
-    async coverage(value, signal) {
+    async setup(value, signal) {
       let operation = "startup";
       try {
         observationSignal = signal;
@@ -1715,7 +1450,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               },
             );
             error.feasibilityCause = windowsFeasibilityCause(
-              "broker-coverage",
+              "broker-setup",
               diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
             );
             if (diagnosis?.cleanup) {
@@ -1789,7 +1524,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 failed &&
                 !["D", "S"].includes(frame.event) &&
                 !(
-                  coverageAdmitted &&
+                  setupVerified &&
                   ["audit", "capture-end"].includes(frame.event)
                 )
               )
@@ -2024,36 +1759,26 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             new Error("Effective broker auditing unavailable"),
             { code: 78 },
           );
-        operation = "gate-delivery";
-        const start = await call("B");
-        const control = await call("P");
-        const end = await call("B"),
-          after = await inspect(),
+        const after = await inspect(),
           state = decoder.state();
         const observation = {
           baseline,
           before,
           after,
-          start,
-          end,
-          control,
           installation,
           captureComplete: state.ready && !failed,
-          events: state.events
-            .slice(start.records, end.records)
-            .map((event) => ({ ...event, logonId: logons.get(event.raw.id) })),
         };
-        operation = "coverage-join";
-        windowsCommandBrokerCoverage(value, observation);
-        await call("M");
-        coverageAdmitted = true;
+        operation = "setup-join";
+        windowsCommandBrokerSetup(value, observation);
+        value.brokerSetup = observation;
+        setupVerified = true;
         return observation;
       } catch (error) {
-        throw commandCoverageFailure(operation, error);
+        throw commandSetupFailure(operation, error);
       }
     },
     async schema(value) {
-      need(coverageAdmitted);
+      need(setupVerified);
       probeOutput = "";
       need(
         (await call("V")).exitCode === 0 &&
@@ -2080,11 +1805,13 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       need((await readdir(value.home)).length === 0);
       const admitted = await call("A");
       const independent = await verifier(admitted, "provider", signal);
+      serverAdmission = independent;
       input.on("data", (chunk) => {
         if (
           failed ||
           closing ||
           observationSignal.aborted ||
+          !controlVerified ||
           chunk.length > 65536
         ) {
           fail(new Error("Command admission closed"));
@@ -2105,6 +1832,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     },
     release: () => call("R"),
     async control(value, signal) {
+      need(setupVerified && serverAdmission && !controlVerified);
       start = await call("B");
       probeOutput = "";
       await call("C");
@@ -2114,7 +1842,24 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           stdout: probeOutput,
           stderr: "",
         };
+      assessWindowsCommandObservation(
+        {
+          action: "outside",
+          control: true,
+          permit: true,
+          target: value.files.outside,
+          gateFile: value.gateFile,
+          helperSha256: value.helperSha256,
+          userSid: serverAdmission.identity.userSid,
+          sessionId: serverAdmission.identity.sessionId,
+          authenticationId: serverAdmission.token.authenticationId,
+        },
+        observed,
+        reply,
+        value.nonce,
+      );
       await call("X");
+      controlVerified = true;
       return { observation: observed, reply };
     },
     async begin(value, spec) {
@@ -2182,7 +1927,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         async retireDomain() {
           // Even a broken broker pipe cannot replace the early native custody.
           try {
-            await call("D");
+            const stopped = await call("D");
+            if (setupVerified) {
+              need(/^[1-9][0-9]{0,19}$/u.test(stopped.auditFrom));
+              value.auditRetirement = stopped.auditFrom;
+            }
           } catch (error) {
             nativeException(
               "win32/feasibility-command-effects.js:exception",
@@ -2223,7 +1972,9 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           await reading;
           if (failure) throw failure;
           need(completion.code === 0 && !completion.signal);
-          capture = coverageAdmitted ? decoder.finish() : { admitted: false };
+          capture = setupVerified ? decoder.finish() : { admitted: false };
+          if (setupVerified)
+            windowsCommandTerminalCapture(value, capture, logons);
           need(stopped?.captureRetired === true);
           return stopped;
         },

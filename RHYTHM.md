@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-20 — Verify ordinary command auditing with the real control
+
+Ordinary Windows command experiments replace the extra administrative broker P/M
+delivery preflight with the existing permitted outside-write control. Independent
+broker token/object, policy and SACL reads still establish setup after every
+cleanup/restoration owner holds original custody. Setup may run schema/version
+probes and create the suspended server and control inside existing native Jobs.
+Only fresh control 4663 success and its later audited completion marker, joined to
+actual PID/birth, SID/logon, image, token, held target and capture window, permit
+server release or RPC forwarding. Every restricted command retains its own audit
+observations, marker and protected sentinel guarantees.
+
+The separate terminal broker witness follows complete domain retirement and its
+native FILETIME boundary; the last command marker cannot replace it. Full decoder
+closure, independent domain/observer retirement and verified owned restoration
+remain mandatory. Obsolete preflight diagnostics and their specific tests are
+removed; no control protocol, service or global audit-policy setter is introduced.
+Missing delivery remains unresolved without fresh matching native evidence.
+Portable regressions establish neither a producer/subscription repair nor native
+acceptance; the original workflows and all 69 system records remain required.
+
 ## 2026-10-20 — Admit ordinary Windows accounts through effective authority
 
 Ordinary experiment account readback no longer gates admission on the coarse

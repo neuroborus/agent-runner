@@ -172,10 +172,7 @@ export {
   prepareWindowsFeasibilityGit,
   validateWindowsFeasibilityGitStart,
 } from "./feasibility-git.js";
-export {
-  runWindowsFeasibilityCommand,
-  assessWindowsCommandObservation,
-} from "./feasibility-command.js";
+export { runWindowsFeasibilityCommand } from "./feasibility-command.js";
 export {
   windowsCommandEnvironment,
   buildWindowsCommandHelper,
@@ -183,7 +180,9 @@ export {
   createWindowsCommandPreparation,
   settleWindowsCommandCustody,
   windowsCommandAuditRead,
-  windowsCommandBrokerCoverage,
+  windowsCommandBrokerSetup,
+  assessWindowsCommandObservation,
+  windowsCommandTerminalCapture,
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
 } from "./feasibility-command-effects.js";

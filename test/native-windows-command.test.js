@@ -12,7 +12,9 @@ import {
   windowsCommandEnvironment,
   settleWindowsCommandCustody,
   windowsCommandAuditRead,
-  windowsCommandBrokerCoverage,
+  windowsCommandBrokerSetup,
+  assessWindowsCommandObservation,
+  windowsCommandTerminalCapture,
   createWindowsAuditDecoder,
   windowsCommandCleanupSnapshot,
   openWindowsCommandWatcher,
@@ -46,80 +48,7 @@ const identity = {
 };
 // Bounded native-shaped bytes/fields exercise the real finite decoder. These
 // portable transcripts supply no Windows compilation, query or delivery proof.
-async function brokerCapture(prepared, overrides = {}) {
-  const fields = {
-    Provider: "Microsoft-Windows-Security-Auditing",
-    Channel: "Security",
-    EventID: "4663",
-    Version: "0",
-    Keywords: "0x8020000000000000",
-    TimeCreated: "2026-10-09T00:00:00.0000100Z",
-    EventRecordID: "1",
-    ObjectType: "File",
-    ProcessId: String(prepared.observer.pid),
-    ObjectName: prepared.gateFile,
-    SubjectUserSid: identity.userSid,
-    AccessMask: "0x1",
-    SubjectLogonId: "0x1",
-    ...overrides,
-  };
-  const native = {
-      kind: "event",
-      fields: Object.entries(fields).map(([name, text]) => ({
-        nameHex: Buffer.from(name, "utf16le").toString("hex"),
-        hex: Buffer.from(text, "utf16le").toString("hex"),
-      })),
-    },
-    raw = Buffer.from(
-      `<Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="${fields.Provider}"/><EventID>${fields.EventID}</EventID><Version>${fields.Version}</Version><Keywords>${fields.Keywords}</Keywords><TimeCreated SystemTime="${fields.TimeCreated}"/><EventRecordID>${fields.EventRecordID}</EventRecordID><Channel>${fields.Channel}</Channel></System><EventData>${Object.entries(
-        fields,
-      )
-        .filter(
-          ([name]) =>
-            ![
-              "Provider",
-              "Channel",
-              "EventID",
-              "Version",
-              "Keywords",
-              "TimeCreated",
-              "EventRecordID",
-            ].includes(name),
-        )
-        .map(([k, v]) => `<Data Name="${k}">${v}</Data>`)
-        .join("")}</EventData></Event>\0`,
-      "utf16le",
-    ),
-    decoded = windowsCommandAuditRead(native),
-    versions = [4656, 4663, 5152, 5156, 5157].map((id) => ({
-      id,
-      versions: [0],
-    })),
-    decoder = createWindowsAuditDecoder(
-      { xml: async () => decoded.native },
-      {
-        sdkSha256: PIN,
-        abiSha256: PIN,
-        versions,
-        mappingSha256: observationDigest(versions),
-      },
-    ),
-    epoch =
-      (BigInt(Date.parse("2026-10-09T00:00:00Z")) + 11644473600000n) * 10000n,
-    barrier = (sequence, records, time) => {
-      const frame = Buffer.alloc(20);
-      frame.writeUInt32LE(0xfffffffe);
-      frame.writeUInt32LE(sequence, 4);
-      frame.writeBigUInt64LE(time, 8);
-      frame.writeUInt32LE(records, 16);
-      return frame;
-    },
-    frame = Buffer.alloc(4);
-  frame.writeUInt32LE(raw.length);
-  await decoder.push(Buffer.alloc(4));
-  await decoder.push(barrier(1, 0, epoch));
-  await decoder.push(Buffer.concat([frame, raw]));
-  await decoder.push(barrier(2, 1, epoch + 200n));
+async function brokerSetup(prepared) {
   const gate = {
       identity: "1".repeat(16) + ":" + "2".repeat(32),
       sha256: sha(prepared.nonce),
@@ -171,25 +100,116 @@ async function brokerCapture(prepared, overrides = {}) {
     before: inspected,
     after: structuredClone(inspected),
     captureComplete: true,
-    start: { sequence: 1, time: epoch.toString(), records: 0 },
-    end: { sequence: 2, time: (epoch + 200n).toString(), records: 1 },
-    control: {
-      event: "P",
-      delivered: true,
-      startRecords: 0,
-      endRecords: 1,
-      elapsedMs: 1,
-      query: null,
-    },
-    events: decoder
-      .state()
-      .events.map((event) => ({ ...event, logonId: decoded.logonId })),
   };
 }
 function alter(value, key, replacement) {
   const parts = key.split("."),
     last = parts.pop();
   parts.reduce((v, part) => v[part], value)[last] = replacement;
+}
+
+const commandEpoch =
+  (BigInt(Date.parse("2026-10-09T00:00:00Z")) + 11644473600000n) * 10000n;
+async function decodedCommandCapture(rows, endOffset = 200n) {
+  const reads = new Map(),
+    logons = new Map(),
+    versions = [4656, 4663, 5152, 5156, 5157].map((id) => ({
+      id,
+      versions: [0],
+    })),
+    decoder = createWindowsAuditDecoder(
+      { xml: async (bytes) => reads.get(sha(bytes)) },
+      {
+        sdkSha256: PIN,
+        abiSha256: PIN,
+        versions,
+        mappingSha256: observationDigest(versions),
+      },
+    ),
+    fields = (values) =>
+      Object.entries(values).map(([name, value]) => ({
+        nameHex: Buffer.from(name, "utf16le").toString("hex"),
+        hex: Buffer.from(value, "utf16le").toString("hex"),
+      })),
+    barrier = async (sequence, count, time) => {
+      const bytes = Buffer.alloc(20);
+      bytes.writeUInt32LE(0xfffffffe);
+      bytes.writeUInt32LE(sequence, 4);
+      bytes.writeBigUInt64LE(time, 8);
+      bytes.writeUInt32LE(count, 16);
+      await decoder.push(bytes);
+      return { sequence, time: time.toString(), records: count };
+    };
+  let total = 0;
+  await decoder.push(Buffer.alloc(4));
+  const start = await barrier(1, 0, commandEpoch);
+  for (const [index, row] of rows.entries()) {
+    const values = {
+        Provider: "Microsoft-Windows-Security-Auditing",
+        Channel: "Security",
+        EventID: "4663",
+        Version: "0",
+        Keywords: "0x8020000000000000",
+        TimeCreated:
+          "2026-10-09T00:00:00." +
+          String(row.offset ?? 100).padStart(7, "0") +
+          "Z",
+        EventRecordID: String(index + 1),
+        ObjectType: "File",
+        ProcessId: "123",
+        ObjectName: "C:\\fixture\\outside",
+        SubjectUserSid: identity.userSid,
+        AccessMask: "0x2",
+        SubjectLogonId: "0x1",
+        ...row.fields,
+      },
+      bytes = Buffer.from(
+        `<Event><System><EventID>${values.EventID}</EventID></System><EventData>${Object.entries(
+          values,
+        )
+          .map(([key, value]) => `<Data Name="${key}">${value}</Data>`)
+          .join("")}</EventData></Event>\0`,
+        "utf16le",
+      ),
+      parsed = windowsCommandAuditRead({
+        kind: "event",
+        fields: fields(values),
+      }),
+      header = Buffer.alloc(4);
+    reads.set(sha(bytes), parsed.native);
+    logons.set(sha(bytes), parsed.logonId);
+    header.writeUInt32LE(bytes.length);
+    total += bytes.length;
+    await decoder.push(Buffer.concat([header, bytes]));
+  }
+  const end = await barrier(2, rows.length, commandEpoch + endOffset);
+  return {
+    decoder,
+    logons,
+    start,
+    end,
+    async finish() {
+      const bytes = Buffer.from(
+          `<BookmarkList><Bookmark Channel="Security" RecordId="${rows.length}" IsCurrent="true"/></BookmarkList>\0`,
+          "utf16le",
+        ),
+        header = Buffer.alloc(16);
+      reads.set(sha(bytes), {
+        kind: "bookmark",
+        fields: fields({
+          Channel: "Security",
+          RecordId: String(rows.length),
+          IsCurrent: "true",
+        }),
+      });
+      header.writeUInt32LE(0xffffffff);
+      header.writeUInt32LE(total, 4);
+      header.writeUInt32LE(rows.length, 8);
+      header.writeUInt32LE(bytes.length, 12);
+      await decoder.push(Buffer.concat([header, bytes]));
+      return decoder.finish();
+    },
+  };
 }
 function fixture(change = () => {}) {
   const calls = [],
@@ -320,10 +340,10 @@ function fixture(change = () => {}) {
       calls.push("prepare");
       return prepared;
     },
-    coverage: async () => {
-      calls.push("coverage");
+    setup: async () => {
+      calls.push("setup");
       custody = true;
-      return brokerCapture(prepared);
+      return brokerSetup(prepared);
     },
     schema: async () => {
       calls.push("schema");
@@ -458,7 +478,7 @@ test("Windows requests keep the supported default cap, credential-free homes and
   assert.deepEqual(f.deadlines, [120000, 30000]);
   assert.deepEqual(f.calls.slice(0, 6), [
     "prepare",
-    "coverage",
+    "setup",
     "schema",
     "arm",
     "control",
@@ -580,7 +600,7 @@ test("unavailable prerequisites block before release; capture and retirement fai
   }
 });
 
-test("system-success disabled admits effective per-user broker coverage only with native delivery", async () => {
+test("system-success disabled permits verified setup and requires the real control before release", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
@@ -593,33 +613,22 @@ test("system-success disabled admits effective per-user broker coverage only wit
   assert.equal(result.status, "PASS");
   assert.equal(result.cleanup.status, "PASS");
   assert.equal(f.requests.length, 6);
-  assert.deepEqual(f.calls.slice(0, 3), ["prepare", "coverage", "schema"]);
+  assert.deepEqual(f.calls.slice(0, 3), ["prepare", "setup", "schema"]);
 });
 
-test("unavailable policy or missing/mismatched delivery blocks every Codex probe and settles custody", async () => {
+test("unavailable effective policy blocks setup before Codex probes and settles custody", async () => {
   for (const [key, value] of [
     ["before.effective.available", false],
     ["after.effective.success", false],
     ["before.effective.failure", false],
     ["after.effective.error", 5],
-    ["events", []],
-    ["events.0.raw.pid", 999],
-    ["events.0.raw.subjectSid", "S-1-5-21-10-20-30-1002"],
-    ["events.0.logonId", "0000000000000002"],
-    ["events.0.raw.accessMask", 2],
-    ["events.0.raw.target", "C:\\fixture\\other"],
-    ["events.0.time", "0"],
   ]) {
     const f = fixture(({ effects }) => {
-        const capture = effects.coverage;
-        effects.coverage = async () => {
+        const capture = effects.setup;
+        effects.setup = async () => {
           const o = await capture();
           alter(o, key, value);
-          if (key === "events") {
-            o.end.records = 0;
-            o.control.endRecords = 0;
-            o.control.delivered = false;
-          }
+
           return o;
         };
       }),
@@ -627,23 +636,23 @@ test("unavailable policy or missing/mismatched delivery blocks every Codex probe
     assert.equal(result.status, "BLOCKED");
     assert.equal(result.cause.code, "prerequisite-unavailable");
     assert.equal(result.cleanup.status, "PASS");
-    assert.deepEqual(f.calls, ["prepare", "coverage", "retire"]);
+    assert.deepEqual(f.calls, ["prepare", "setup", "retire"]);
     assert.deepEqual(f.requests, []);
   }
 });
 
-test("coverage binds the original administrative token and held gate, not an inclusion or RPC claim", async () => {
+test("setup binds the original administrative token and held gate before any command control", async () => {
   const prepared = {
       nonce: "a".repeat(32),
       observer: identity,
       gateFile: "C:\\fixture\\gate",
     },
-    complete = await brokerCapture(prepared);
+    complete = await brokerSetup(prepared);
   assert.match(
-    windowsCommandBrokerCoverage(prepared, complete),
+    windowsCommandBrokerSetup(prepared, complete),
     /^[a-f0-9]{64}$/u,
   );
-  assert.throws(() => windowsCommandBrokerCoverage(prepared, true));
+  assert.throws(() => windowsCommandBrokerSetup(prepared, true));
   for (const [key, value] of [
     ["after.identity.creationTime", "102"],
     ["after.token.tokenId", "00000000:00000004"],
@@ -659,18 +668,10 @@ test("coverage binds the original administrative token and held gate, not an inc
     ["after.audit.files.2.saclSha256", sha("foreign")],
     ["baseline.token.modifiedId", "00000000:00000004"],
     ["captureComplete", false],
-    ["end.sequence", 3],
-    ["control", { event: "P" }],
-    ["control.startRecords", -1],
-    ["control.endRecords", 2],
-    ["control.elapsedMs", 150001],
-    ["events.0.index", 1],
-    ["start.time", "1".repeat(21)],
-    ["end.sequence", 257],
   ]) {
     const o = structuredClone(complete);
     alter(o, key, value);
-    assert.throws(() => windowsCommandBrokerCoverage(prepared, o));
+    assert.throws(() => windowsCommandBrokerSetup(prepared, o));
   }
   const source = await readFile(
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
@@ -694,17 +695,579 @@ test("coverage binds the original administrative token and held gate, not an inc
     assert.match(
       source,
       new RegExp(
-        `strcmp\\(line,"${operation}"\\).*?need\\(command_coverage_admitted\\)`,
+        `strcmp\\(line,"${operation}"\\).*?need\\(command_setup_verified(?:[)&])`,
         "u",
       ),
     );
 });
 
-test("partial setup and interrupted coverage preserve the first cause and separate settlement uncertainty", async () => {
+test("real control delivery joins decoded subject, object and completion evidence before release", async () => {
+  for (const fault of [
+    null,
+    "missing",
+    "historical",
+    "pid",
+    "sid",
+    "logon",
+    "object",
+    "mask",
+    "opcode",
+    "marker",
+    "marker-order",
+    "loss",
+    "reply",
+    "restoration",
+  ]) {
+    const f = fixture(({ effects, prepared }) => {
+        const control = effects.control,
+          retire = effects.retire;
+        effects.control = async () => {
+          const value = await control(),
+            rows = [
+              {
+                offset: 100,
+                fields: {
+                  ProcessId: "456",
+                  ObjectName: prepared.files.outside.toUpperCase(),
+                },
+              },
+              {
+                offset: 150,
+                fields: {
+                  ProcessId: "456",
+                  ObjectName: prepared.gateFile.toUpperCase(),
+                  AccessMask: "0x1",
+                },
+              },
+            ];
+          if (fault === "missing") rows.length = 0;
+          if (fault === "historical")
+            rows[0].fields.TimeCreated = "2026-10-08T23:59:59.9999999Z";
+          if (fault === "pid") rows[0].fields.ProcessId = "999";
+          if (fault === "sid")
+            rows[0].fields.SubjectUserSid = "S-1-5-21-10-20-30-1002";
+          if (fault === "logon") rows[0].fields.SubjectLogonId = "0x2";
+          if (fault === "object")
+            rows[0].fields.ObjectName = "C:\\fixture\\other";
+          if (fault === "mask") rows[0].fields.AccessMask = "0x1";
+          if (fault === "opcode")
+            Object.assign(rows[0].fields, {
+              EventID: "4656",
+              Keywords: "0x8010000000000000",
+            });
+          if (fault === "marker") rows.pop();
+          if (fault === "marker-order") rows[1].offset = 90;
+          if (fault === "loss") rows[0].fields.EventID = "1101";
+          const capture = await decodedCommandCapture(rows),
+            observation = value.observation;
+          observation.before = {
+            ...identity,
+            pid: 456,
+            creationTime: (commandEpoch + 10n).toString(),
+          };
+          observation.after = { ...observation.before };
+          observation.start = capture.start;
+          observation.end = capture.end;
+          observation.events = capture.decoder.state().events.map((event) => ({
+            ...event,
+            logonId: capture.logons.get(event.raw.id),
+          }));
+          if (fault === "reply") value.reply.exitCode = 7;
+          return value;
+        };
+        effects.retire = async () => ({
+          ...(await retire()),
+          auditRestored: fault !== "restoration",
+        });
+      }),
+      result = await f.run();
+    assert.equal(result.status, fault ? "FAIL" : "PASS", fault);
+    assert.equal(
+      result.cleanup.status,
+      fault === "restoration" ? "UNCERTAIN" : "PASS",
+      fault,
+    );
+    assert.ok(f.calls.indexOf("schema") < f.calls.indexOf("control"));
+    assert.ok(f.calls.indexOf("arm") < f.calls.indexOf("control"));
+    if (fault && fault !== "restoration") {
+      assert.equal(f.calls.includes("release"), false, fault);
+      assert.equal(f.requests.length, 0, fault);
+    } else {
+      assert.ok(f.calls.indexOf("control") < f.calls.indexOf("release"));
+      assert.equal(f.requests.length, 6);
+    }
+  }
+});
+
+test("native subscription and capture retain case-variant real control names through decoding", async () => {
+  const program = await commandCaptureProgram();
+  assert.match(program.source, /SubjectUserSid/u);
+  assert.match(program.source, /EventID=1101 or EventID=1102/u);
+  const query = /static void command_audit_query[^\n]+\n([^\n]+)/u.exec(
+    program.source,
+  )[1];
+  assert.ok(query.includes("ObjectType") && !query.includes("ObjectName"));
+  for (const substitute of [false, true]) {
+    let original;
+    fixture((value) => {
+      original = value;
+    });
+    await original.effects.prepare("a".repeat(32));
+    const { observation, reply } = await original.effects.control(),
+      capture = commandCaptureFixture(program),
+      rows = [
+        {
+          offset: 100,
+          fields: {
+            ObjectName: substitute
+              ? "C:\\fixture\\other"
+              : original.prepared.files.outside.toUpperCase(),
+          },
+        },
+        {
+          offset: 150,
+          fields: {
+            ObjectName: original.prepared.gateFile.toUpperCase(),
+            AccessMask: "0x1",
+          },
+        },
+      ];
+    Object.assign(capture.api, {
+      command_case_pid: identity.pid,
+      command_action: 2,
+      command_target_seen: false,
+      command_marker_seen: false,
+      command_paths: [
+        original.prepared.files.inspect,
+        original.prepared.files.edit,
+        original.prepared.files.outside,
+        original.prepared.gateFile,
+      ],
+      _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      _wcstoui64: (text, end) => {
+        end("");
+        return Number(text);
+      },
+    });
+    capture.api.onProject = (index) => {
+      Object.assign(capture.api, {
+        process: String(identity.pid),
+        object: rows[index].fields.ObjectName,
+        eventId: "4663",
+        mask: rows[index].fields.AccessMask ?? "0x2",
+      });
+      const selected = program.selection.runInNewContext(capture.api);
+      if (selected) program.caseProjection.runInNewContext(capture.api);
+      return selected;
+    };
+    capture.notify(["0", "1"]);
+    capture.capture();
+    assert.equal(capture.api.command_target_seen, !substitute);
+    assert.equal(capture.api.command_marker_seen, !substitute);
+    const decoded = await decodedCommandCapture(
+      capture.projected.map((index) => rows[index]),
+    );
+    observation.before.creationTime = observation.after.creationTime = (
+      commandEpoch + 10n
+    ).toString();
+    observation.start = decoded.start;
+    observation.end = decoded.end;
+    observation.events = decoded.decoder.state().events.map((event) => ({
+      ...event,
+      logonId: decoded.logons.get(event.raw.id),
+    }));
+    const verify = () =>
+      assessWindowsCommandObservation(
+        {
+          action: "outside",
+          control: true,
+          permit: true,
+          target: original.prepared.files.outside,
+          gateFile: original.prepared.gateFile,
+          helperSha256: PIN,
+          userSid: identity.userSid,
+          sessionId: identity.sessionId,
+          authenticationId: "00000000:00000001",
+        },
+        observation,
+        reply,
+        original.prepared.nonce,
+      );
+    if (substitute) assert.throws(verify);
+    else assert.match(verify(), /^[a-f0-9]{64}$/u);
+  }
+});
+
+test("actual effects require the assessed real control and restored target before release", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    call = source.slice(
+      source.indexOf("  const call = (operation) =>"),
+      source.indexOf("  const native = async"),
+    ),
+    control = source.slice(
+      source.indexOf("    async control(value, signal) {"),
+      source.indexOf("    async begin(value, spec)"),
+    ),
+    program = new Script(`(async () => {
+      let failed, closing = false, setupVerified = true, controlVerified = false, start, probeOutput = "";
+      const pending = new Map(), observationSignal = signal;
+      const broker = { stdin: { writable: true, write(frame) {
+        const key = frame.trim(); calls.push(key);
+        if(key === "C") probeOutput = reply.stdout;
+        const entry = pending.get(key); pending.delete(key);
+        if(key === "X" && resetFailure) entry.reject(resetFailure);
+        else entry.resolve(key === "B" ? observed.start : {});
+      } } };
+      ${call}
+      const effects = { release: () => call("R"), ${control} };
+      let refused = 0, failure;
+      try { effects.release(); } catch { refused++; }
+      let result;
+      try { result = await effects.control(value, signal); } catch (error) { failure = error; }
+      if(failure) { try { effects.release(); } catch { refused++; } }
+      else await effects.release();
+      return { result, failure, refused, controlVerified };
+    })()`);
+  for (const fault of [null, "marker", "reset"]) {
+    let original;
+    fixture((value) => {
+      original = value;
+    });
+    const { effects, prepared } = original;
+    await effects.prepare("a".repeat(32));
+    const { observation: observed, reply } = await effects.control();
+    if (fault === "marker") observed.events.pop();
+    const calls = [],
+      resetFailure = new Error("Owned control target reset failed"),
+      result = await program.runInNewContext({
+        need: assert.ok,
+        calls,
+        value: prepared,
+        reply,
+        observed,
+        signal: new AbortController().signal,
+        resetFailure: fault === "reset" ? resetFailure : null,
+        serverAdmission: {
+          identity,
+          token: { authenticationId: "00000000:00000001" },
+        },
+        observation: async () => ({
+          ...observed,
+          controlExitCode: reply.exitCode,
+        }),
+        assessWindowsCommandObservation,
+      });
+    assert.equal(result.controlVerified, !fault, fault);
+    assert.equal(result.refused, fault ? 2 : 1);
+    assert.deepEqual(
+      calls,
+      fault === "marker"
+        ? ["B", "C"]
+        : fault === "reset"
+          ? ["B", "C", "X"]
+          : ["B", "C", "X", "R"],
+    );
+    if (fault === "reset") assert.equal(result.failure, resetFailure);
+  }
+});
+
+test("terminal capture requires a separate post-domain broker event and complete decoder closure", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/win32/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    close = source.slice(
+      source.indexOf("        async closeObserver() {"),
+      source.indexOf("        async verifyObserver() {"),
+    ),
+    program = new Script(`(async () => {
+      let capture;
+      const owner = { ${close} };
+      await owner.closeObserver();
+      return capture;
+    })()`);
+  for (const fault of [
+    null,
+    "absent",
+    "last-marker",
+    "stale",
+    "sid",
+    "logon",
+    "object",
+    "mask",
+    "boundary",
+    "unclosed",
+  ]) {
+    const value = {
+        nonce: "a".repeat(32),
+        observer: { ...identity, pid: 321 },
+        gateFile: "C:\\fixture\\gate",
+      },
+      setup = await brokerSetup(value),
+      rows =
+        fault === "absent"
+          ? []
+          : [
+              {
+                offset: 300,
+                fields: {
+                  ProcessId: "321",
+                  ObjectName: value.gateFile.toUpperCase(),
+                  AccessMask: "0x1",
+                },
+              },
+            ];
+    value.brokerSetup = setup;
+    value.lastAuditTime = (commandEpoch + 200n).toString();
+    value.auditRetirement = (
+      commandEpoch + (fault === "boundary" ? 100n : 250n)
+    ).toString();
+    if (fault === "last-marker") rows[0].fields.ProcessId = "456";
+    if (fault === "stale") rows[0].offset = 100;
+    if (fault === "sid")
+      rows[0].fields.SubjectUserSid = "S-1-5-21-10-20-30-1002";
+    if (fault === "logon") rows[0].fields.SubjectLogonId = "0x2";
+    if (fault === "object") rows[0].fields.ObjectName = "C:\\fixture\\other";
+    if (fault === "mask") rows[0].fields.AccessMask = "0x2";
+    const capture = await decodedCommandCapture(rows, 400n);
+    const finished = fault === "unclosed" ? null : await capture.finish(),
+      verify = () =>
+        program.runInNewContext({
+          value,
+          setupVerified: true,
+          logons: capture.logons,
+          decoder: { finish: () => finished ?? capture.decoder.finish() },
+          windowsCommandTerminalCapture,
+          need: assert.ok,
+          call: async (key) => {
+            assert.equal(key, "S");
+            return { captureRetired: true };
+          },
+          closed: Promise.resolve({ code: 0, signal: null }),
+          reading: Promise.resolve(),
+          nativeException: assert.fail,
+          fail: assert.fail,
+        });
+    if (fault) await assert.rejects(verify, fault);
+    else
+      assert.equal(
+        (await verify()).nativeEventSha256,
+        finished.nativeEventSha256,
+      );
+  }
+});
+
+test("native setup permits the parked control while release and forwarding require its completion", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    line = (key) =>
+      source
+        .split("\n")
+        .find(
+          (row) =>
+            row.includes(`strcmp(line,"${key}")`) ||
+            row.includes(`strncmp(line,"${key} ",`),
+        ),
+    check = (key, api) =>
+      new Script(/need\((.+?)\);/u.exec(line(key))[1]).runInNewContext(api);
+  for (const setup of [false, true]) {
+    const api = {
+      command_setup_verified: setup,
+      server: { hProcess: 1 },
+      command_server_released: false,
+      command_control_verified: false,
+      command_control: false,
+    };
+    assert.equal(check("C", api), setup);
+    assert.equal(check("A", { ...api, server: {} }), setup);
+  }
+  for (const control of [false, true])
+    for (const released of [false, true])
+      assert.equal(
+        !!check("J", {
+          command_control_verified: control,
+          command_server_released: released,
+          command_input: 1,
+          command_closing: false,
+        }),
+        control && released,
+      );
+  for (const control of [false, true]) {
+    let resumed = 0;
+    assert.equal(
+      check("R", {
+        command_control_verified: control,
+        command_server_released: false,
+        command_closing: false,
+        server: { hProcess: 1, hThread: 2 },
+        ResumeThread: () => {
+          resumed++;
+          return 1;
+        },
+      }),
+      control,
+    );
+    assert.equal(resumed, control ? 1 : 0);
+  }
+  for (const missing of [
+    null,
+    "command_control_completed",
+    "command_target_seen",
+    "command_marker_seen",
+  ]) {
+    const api = {
+      command_control_completed: true,
+      command_target_seen: true,
+      command_marker_seen: true,
+      command_server_released: false,
+      command_control_verified: false,
+    };
+    if (missing) api[missing] = false;
+    assert.equal(check("X", api), !missing);
+  }
+  assert.doesNotMatch(
+    source,
+    /strcmp\(line,"[PM]"\)|command_coverage_control|command_delivery_query/u,
+  );
+  const retirement = source.slice(
+    source.indexOf("static void command_retire_domain(void) {"),
+    source.indexOf("static void command_check("),
+  );
+  assert.ok(
+    retirement.indexOf("!command_members(ownedJob)") <
+      retirement.indexOf("GetSystemTimePreciseAsFileTime(&auditFrom)"),
+  );
+  assert.ok(
+    retirement.indexOf("GetSystemTimePreciseAsFileTime(&auditFrom)") <
+      retirement.indexOf("command_gate_read()"),
+  );
+});
+
+test("native terminal waiting ignores queued broker records from before domain retirement", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    body = /static BOOL command_terminal_time\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};",
+        "const parts=Array(6).fill(0),starts=[0,5,8,11,14,17];",
+      )
+      .replace(
+        "WCHAR c=text[starts[i]+j]",
+        "let c=text.charCodeAt(starts[i]+j)",
+      )
+      .replaceAll("text[i]", "text.charCodeAt(i)")
+      .replaceAll("L'0'", "48")
+      .replaceAll("L'9'", "57")
+      .replace("SYSTEMTIME value={0};", "const value={};")
+      .replace("FILETIME time;", "const time={};")
+      .replace("ULARGE_INTEGER ticks;", "const ticks={};")
+      .replaceAll("(WORD)", "")
+      .replace(
+        "SystemTimeToFileTime(&value,&time)",
+        "SystemTimeToFileTime(value,time)",
+      )
+      .replace("ticks.QuadPart+fraction", "BigInt(time.ticks)+BigInt(fraction)")
+      .replace(/\bL(?=['"])/gu, "")
+      .replace(/\b(?:size_t|unsigned|DWORD)\b/gu, "let"),
+    timestamp = new Script(`(text) => {${body}}`).runInNewContext({
+      FALSE: false,
+      wcslen: (text) => text.length,
+      BigInt,
+      command_retirement_from: commandEpoch + 100n,
+      SystemTimeToFileTime: (value, result) => {
+        const time = new Date(
+          Date.UTC(
+            value.wYear,
+            value.wMonth - 1,
+            value.wDay,
+            value.wHour,
+            value.wMinute,
+            value.wSecond,
+          ),
+        );
+        if (
+          time.getUTCFullYear() !== value.wYear ||
+          time.getUTCMonth() + 1 !== value.wMonth ||
+          time.getUTCDate() !== value.wDay ||
+          value.wHour > 23 ||
+          value.wMinute > 59 ||
+          value.wSecond > 59
+        )
+          return false;
+        result.ticks = (BigInt(time.getTime()) + 11644473600000n) * 10000n;
+        return true;
+      },
+    }),
+    line = source
+      .split("\n")
+      .find((row) => row.trim().startsWith("if(command_closing&&process")),
+    project = new Script(
+      line
+        .replace(/\bL(?=")/gu, "")
+        .replace("WCHAR *end;", "let end;")
+        .replace(/ULONGLONG (pid|rights)/gu, "let $1")
+        .replaceAll("&end", "value=>end=value")
+        .replaceAll("!*end", "!end"),
+    );
+  for (const [stamp, expected] of [
+    ["2026-10-09T00:00:00Z", false],
+    ["2026-10-09T00:00:00.0000099Z", false],
+    ["2026-10-09T00:00:00.0000100Z", false],
+    ["2026-10-09T00:00:00.0000101Z", true],
+    ["2026-10-09T00:00:00.1Z", true],
+    ["2026-10-09T00:00:01Z", true],
+    ["2026-10-09T00:00:00.Z", false],
+    ["2026-10-09T00:00:00.00001010Z", false],
+    ["2026-10-09T00:00:00.0000101+00:00", false],
+    ["2026-10-09 00:00:00.0000101Z", false],
+    ["2026-10-09T00:00:0a.0000101Z", false],
+    ["2026-13-09T00:00:00.0000101Z", false],
+    ["2026-02-31T00:00:00.0000101Z", false],
+  ]) {
+    const api = {
+      command_closing: true,
+      command_retirement_seen: false,
+      process: "321",
+      object: "C:\\fixture\\gate",
+      eventId: "4663",
+      mask: "1",
+      stamp,
+      command_paths: [null, null, null, "C:\\fixture\\gate"],
+      command_terminal_time: timestamp,
+      GetCurrentProcessId: () => 321,
+      TRUE: true,
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+      _wcstoui64: (text, end) => {
+        end("");
+        return Number(text);
+      },
+    };
+    project.runInNewContext(api);
+    assert.equal(api.command_retirement_seen, expected, stamp);
+  }
+});
+
+test("partial setup and interrupted admission preserve the first cause and separate settlement uncertainty", async () => {
   for (const stage of ["partial-installation", "transport", "interruption"]) {
     const f = fixture(({ effects, signals }) => {
-        const capture = effects.coverage;
-        effects.coverage = async () => {
+        const capture = effects.setup;
+        effects.setup = async () => {
           await capture();
           if (stage === "interruption") {
             signals[0].abort();
@@ -725,7 +1288,7 @@ test("partial setup and interrupted coverage preserve the first cause and separa
       stage === "transport" ? "UNCERTAIN" : "PASS",
     );
     assert.deepEqual(f.requests, []);
-    assert.deepEqual(f.calls.slice(0, 2), ["prepare", "coverage"]);
+    assert.deepEqual(f.calls.slice(0, 2), ["prepare", "setup"]);
   }
   const source = await readFile(
       new URL(
@@ -735,21 +1298,26 @@ test("partial setup and interrupted coverage preserve the first cause and separa
       "utf8",
     ),
     coverage = source.slice(
-      source.indexOf("async coverage("),
+      source.indexOf("async setup("),
       source.indexOf("async schema("),
     );
+  for (const owner of [
+    "watcher = await watch(",
+    "cleanupReader.initialize(",
+    "restorationReader.initialize(",
+    "restorationVerifier = await watch(",
+    "readerVerifier = await watch(",
+    "observerVerifier = await watch(",
+  ]) {
+    const acquired = coverage.indexOf(owner);
+    assert.ok(acquired >= 0 && acquired < coverage.indexOf('call("I")'), owner);
+  }
   assert.ok(
-    coverage.indexOf("cleanupReader.initialize(") <
-      coverage.indexOf('call("I")'),
+    coverage.indexOf("windowsCommandBrokerSetup(") <
+      coverage.indexOf("setupVerified = true"),
   );
-  assert.ok(
-    coverage.indexOf("readerVerifier = await watch(") <
-      coverage.indexOf('call("I")'),
-  );
-  assert.ok(
-    coverage.indexOf("windowsCommandBrokerCoverage(") <
-      coverage.indexOf('call("M")'),
-  );
+  for (const obsolete of ['call("P")', 'call("M")'])
+    assert.equal(coverage.includes(obsolete), false);
 });
 
 test("failed buffered replies and unavailable routes retain the first process cause and components", async () => {
@@ -3387,7 +3955,7 @@ async function brokerCloseBoundary() {
   );
   const start = source.indexOf(
       "const ready = new Promise",
-      source.indexOf("async coverage("),
+      source.indexOf("async setup("),
     ),
     end = source.indexOf("reading = (async", start),
     failureStart = source.indexOf("const fail = (error) =>"),
@@ -3481,7 +4049,7 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
     assert.equal(Boolean(error.feasibilityCleanup), Boolean(tail));
     const run = fixture(({ effects }) => {
       effects.noCustody = () => false;
-      effects.coverage = async () => {
+      effects.setup = async () => {
         throw error;
       };
       effects.retire = async () => {
@@ -3620,11 +4188,11 @@ test("post-ready broker refusal survives later watcher and cleanup failures thro
     f.pending.delete("ready");
     const run = fixture(({ effects }) => {
       const retire = effects.retire,
-        coverage = effects.coverage;
+        coverage = effects.setup;
       effects.noCustody = () => false;
       effects.retainFailure = f.retainFailure;
       effects.failure = f.collectFailure;
-      effects.coverage = async () => {
+      effects.setup = async () => {
         if (acknowledged) return coverage();
         f.broker.stderr.write(primary.slice(0, 23));
         throw watcher;
@@ -3801,7 +4369,7 @@ test("failure collection uses the original cleanup deadline and retains the firs
   });
   const f = fixture(({ effects, signals }) => {
     effects.noCustody = () => false;
-    effects.coverage = async () => {
+    effects.setup = async () => {
       throw first;
     };
     effects.retire = async () => {
@@ -4179,27 +4747,6 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         windowsFeasibilityDiagnostics(observation + refusal).failure,
         { operation: "command-gate-read", domain: "win32", value: 5 },
       );
-    const prepared = {
-      nonce: "a".repeat(32),
-      observer: identity,
-      gateFile: "C:\\fixture\\gate",
-    };
-    for (const gate of [value, { ...value, unexpected: true }]) {
-      const observed = await brokerCapture(prepared);
-      observed.control.delivered = false;
-      observed.control.prerequisites = { policy: {}, channel: {}, gate };
-      assert.throws(
-        () => windowsCommandBrokerCoverage(prepared, observed),
-        (error) => {
-          assert.equal(error.code, 78);
-          assert.deepEqual(
-            error.brokerCoverage.control.prerequisites.gate,
-            gate.unexpected ? null : value,
-          );
-          return true;
-        },
-      );
-    }
   }
 });
 
@@ -4263,9 +4810,9 @@ test("actual gate-read source captures the first API cause before independent ha
       FILE_SHARE_DELETE: 4,
       OPEN_EXISTING: 3,
       FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      command_observed: { audit: Array(9).fill(0) },
       command_preflight_owned: owned,
       command_broker_token: 7,
-      command_gate_bytes: 0,
       command_files: [0, 0, 0, 8],
       command_prerequisite_cleanup_failed: false,
       command_paths: [null, null, null, "C:\\fixture\\gate"],
@@ -4684,7 +5231,7 @@ test("actual retirement releases only exited children before the complete whole-
     function command_child_close(index){${translate(body("command_child_close"))}}
     function command_release_exited(){${translate(body("command_release_exited"))}}
     function command_members(job){${translate(body("command_members"))}}
-    function retire(){${translate(retirement.slice(retirement.indexOf("for(;;)"), retirement.indexOf("/* Admitted")))}}
+    function retire(){${translate(retirement.slice(retirement.indexOf("for(;;)"), retirement.indexOf("/* This broker")))}}
     function finish(){let closed=true;${translate(closeChildren)}return closed;}
   `);
   for (const fault of [
@@ -4881,6 +5428,7 @@ test("actual retirement releases only exited children before the complete whole-
       command_closing: closing,
       server: { hProcess: 51, hThread: 52 },
       command_server_released: false,
+      command_control_verified: true,
       TRUE: true,
       need: assert.ok,
       ResumeThread: (thread) => {
@@ -4954,9 +5502,9 @@ async function commandCaptureProgram() {
   assert.equal(creations.length, 2);
   const selectionBody =
       /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(source)[1],
-    probeBody = source
+    caseBody = source
       .split("\n")
-      .find((line) => line.trim().startsWith("if(command_probing&&process"));
+      .find((line) => line.trim().startsWith("if(command_case_pid&&process"));
   return {
     dispatch,
     createEvents: new Script(creations.join("\n")),
@@ -4964,8 +5512,8 @@ async function commandCaptureProgram() {
     selection: new Script(
       `(() => {${selectionBody.replace(/\bL(?=")/gu, "").replace(/\b(?:BOOL|unsigned)\b/gu, "let")} return selected;})()`,
     ),
-    probe: new Script(
-      probeBody
+    caseProjection: new Script(
+      caseBody
         .replace(/\bL(?=")/gu, "")
         .replace("WCHAR *end;", "let end;")
         .replace(/ULONGLONG (pid|rights)/gu, "let $1")
@@ -5339,7 +5887,7 @@ test("actual capture retirement checks all closures and partial resources even w
   }
 });
 
-test("coverage admission and retirement preserve immediate errors and independent closure", async () => {
+test("setup admission and retirement preserve immediate errors and independent closure", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
@@ -5399,19 +5947,11 @@ test("coverage admission and retirement preserve immediate errors and independen
   }
   assert.match(
     retirement,
-    /if\(command_coverage_admitted\)\{command_gate_read\(\)[\s\S]*!command_retirement_seen[\s\S]*command-retirement-delivery/u,
+    /if\(command_setup_verified\)\{command_gate_read\(\)[\s\S]*!command_retirement_seen[\s\S]*command-retirement-delivery/u,
   );
   assert.match(
     source,
     /invariant\(!ferror\(stdout\),"command-ready-output"\)/u,
-  );
-  assert.match(
-    source,
-    /WaitForSingleObject\(command_audit_intent,0\)[\s\S]*command-coverage-wait[\s\S]*command_coverage_control\(\)/u,
-  );
-  assert.match(
-    source,
-    /command_coverage_seen&&!command_coverage_admitted,"command-coverage-state"/u,
   );
   const final = source.slice(
     source.indexOf('else if(!strcmp(line,"S"))'),
@@ -5428,7 +5968,7 @@ test("coverage admission and retirement preserve immediate errors and independen
   );
 });
 
-async function commandCoverageOwnerProgram() {
+async function commandSetupOwnerProgram() {
   const source = await readFile(
       new URL(
         "../ci/native/win32/feasibility-command-effects.js",
@@ -5438,11 +5978,11 @@ async function commandCoverageOwnerProgram() {
     ),
     guards = source.slice(
       source.indexOf("function commandAuditSnapshot("),
-      source.indexOf("/** Interface/configuration"),
+      source.indexOf("/** Setup establishes"),
     ),
     start = source.indexOf(
       "const inspect = () =>",
-      source.indexOf("async coverage("),
+      source.indexOf("async setup("),
     ),
     end =
       source.indexOf("return observation;", start) +
@@ -5452,18 +5992,17 @@ async function commandCoverageOwnerProgram() {
     ${guards}
     let operation;
     try { ${source.slice(start, end)} }
-    catch (error) { throw commandCoverageFailure(operation, error); }
+    catch (error) { throw commandSetupFailure(operation, error); }
   })()`);
 }
 
-test("actual coverage rejects stale baselines before installation and joins all held SACLs before probes", async () => {
-  const program = await commandCoverageOwnerProgram();
+test("actual setup rejects stale baselines before installation and joins all held SACLs before probes", async () => {
+  const program = await commandSetupOwnerProgram();
   for (const fault of [
     null,
     "baseline",
     "sacl",
     "failure-policy",
-    "delivery",
     "reader-error",
   ]) {
     const value = {
@@ -5473,7 +6012,7 @@ test("actual coverage rejects stale baselines before installation and joins all 
         helperSha256: PIN,
         jobHandle: "7",
       },
-      capture = await brokerCapture(value),
+      capture = await brokerSetup(value),
       reads = [capture.baseline, capture.before, capture.after],
       calls = [],
       originalCause = {
@@ -5491,14 +6030,8 @@ test("actual coverage rejects stale baselines before installation and joins all 
     if (fault === "sacl")
       capture.before.audit.files[0].saclSha256 = sha("foreign");
     if (fault === "failure-policy") capture.before.effective.failure = false;
-    if (fault === "delivery") {
-      capture.events = [];
-      capture.end.records = 0;
-      capture.control.delivered = false;
-      capture.control.endRecords = 0;
-    }
-    let coverageAdmitted = false,
-      barriers = 0;
+
+    let setupVerified = false;
     const context = {
       value,
       original: value.original.cleanup,
@@ -5513,7 +6046,7 @@ test("actual coverage rejects stale baselines before installation and joins all 
       digest: sha,
       sameWindowsIdentity: (a, b) => JSON.stringify(a) === JSON.stringify(b),
       windowsFeasibilityCause,
-      windowsCommandBrokerCoverage,
+      windowsCommandBrokerSetup,
       native: async (args) => {
         calls.push("read");
         assert.deepEqual(Array.from(args), [
@@ -5533,39 +6066,22 @@ test("actual coverage rejects stale baselines before installation and joins all 
       },
       call: async (key) => {
         calls.push(key);
-        return key === "B"
-          ? barriers++
-            ? capture.end
-            : capture.start
-          : key === "P"
-            ? capture.control
-            : {};
+        assert.equal(key, "I");
+        return {};
       },
-      decoder: { state: () => ({ ready: true, events: capture.events }) },
-      logons: new Map(
-        capture.events.map((event) => [event.raw.id, event.logonId]),
-      ),
+      decoder: { state: () => ({ ready: true }) },
       failed: null,
-      set coverageAdmitted(value) {
-        coverageAdmitted = value;
+      set setupVerified(value) {
+        setupVerified = value;
       },
-      get coverageAdmitted() {
-        return coverageAdmitted;
+      get setupVerified() {
+        return setupVerified;
       },
     };
     if (!fault) {
       await program.runInNewContext(context);
-      assert.deepEqual(calls, [
-        "read",
-        "I",
-        "read",
-        "B",
-        "P",
-        "B",
-        "read",
-        "M",
-      ]);
-      assert.equal(coverageAdmitted, true);
+      assert.deepEqual(calls, ["read", "I", "read", "read"]);
+      assert.equal(setupVerified, true);
     } else {
       await assert.rejects(program.runInNewContext(context), (error) => {
         if (fault === "reader-error") {
@@ -5574,16 +6090,12 @@ test("actual coverage rejects stale baselines before installation and joins all 
         } else
           assert.ok(
             error.feasibilityCause.detail.includes(
-              fault === "delivery"
-                ? "delivery-missing"
-                : fault === "baseline"
-                  ? "baseline-read"
-                  : "installed-audit-read",
+              fault === "baseline" ? "baseline-read" : "installed-audit-read",
             ),
           );
         return true;
       });
-      assert.equal(coverageAdmitted, false);
+      assert.equal(setupVerified, false);
       assert.equal(calls.includes("M"), false);
       if (["baseline", "reader-error"].includes(fault))
         assert.equal(calls.includes("I"), false);
@@ -5593,7 +6105,7 @@ test("actual coverage rejects stale baselines before installation and joins all 
   }
 });
 
-test("coverage operation labels preserve native failure classes and bounded report causes", async () => {
+test("setup operation labels preserve native failure classes and bounded report causes", async () => {
   const source = await readFile(
       new URL(
         "../ci/native/win32/feasibility-command-effects.js",
@@ -5601,7 +6113,7 @@ test("coverage operation labels preserve native failure classes and bounded repo
       ),
       "utf8",
     ),
-    start = source.indexOf("function commandCoverageFailure("),
+    start = source.indexOf("function commandSetupFailure("),
     end = source.indexOf("\n}", start) + 2;
   assert.ok(start >= 0 && end > start);
   const annotate = new Script(`(${source.slice(start, end)})`).runInNewContext({
@@ -5638,7 +6150,7 @@ test("coverage operation labels preserve native failure classes and bounded repo
       expected.code,
     );
     const first = error.feasibilityCause;
-    assert.equal(annotate("coverage-join", error).feasibilityCause, first);
+    assert.equal(annotate("setup-join", error).feasibilityCause, first);
   }
 });
 
@@ -5832,6 +6344,50 @@ test("effective audit reads retain both outcomes and the immediate native query 
       available ? 0 : 5,
     ]);
     assert.equal(closed, available ? 1 : 0);
+  }
+});
+
+test("original policy diagnostics preserve unavailable values without querying or changing policy", async () => {
+  const { source } = await commandCaptureProgram();
+  const system =
+    /static void command_system_observation\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
+  const project = new Script(
+    system
+      .replace(/\b(?:BOOL|DWORD|ULONG)\b/gu, "let")
+      .replaceAll(
+        "&command_system[i].AuditSubCategoryGuid",
+        "command_system[i].AuditSubCategoryGuid",
+      )
+      .replaceAll("&command_category", "command_category"),
+  );
+  for (const policy of [
+    null,
+    [],
+    [{ AuditSubCategoryGuid: "other", AuditingInformation: 3 }],
+    [{ AuditSubCategoryGuid: "file", AuditingInformation: 0 }],
+    [{ AuditSubCategoryGuid: "file", AuditingInformation: 3 }],
+  ]) {
+    const output = [];
+    project.runInNewContext({
+      FALSE: false,
+      TRUE: true,
+      command_system: policy,
+      command_category_count: policy?.length ?? 0,
+      command_category: "file",
+      IsEqualGUID: (a, b) => a === b,
+      printf: (_f, v) => output.push(v),
+      fputs: (v) => output.push(v),
+      putchar: () => {},
+      stdout: {},
+    });
+    assert.deepEqual(
+      output,
+      policy?.[0]?.AuditSubCategoryGuid === "file"
+        ? ["true", policy[0].AuditingInformation]
+        : ["false", "null"],
+    );
   }
 });
 
@@ -6140,2123 +6696,6 @@ test("a failed restoration writer settles both early readers without replacing t
   }
 });
 
-test("broker subscription retains Windows name variants through native capture, decoding and independent restoration", async () => {
-  const program = await commandCaptureProgram(),
-    queryBody =
-      /static void command_audit_query\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
-        program.source,
-      )[1],
-    queryProgram = new Script(
-      `(query, interval) => {${queryBody.replace(/\bL(?=")/gu, "")}}`,
-    ),
-    selection = program.selection,
-    probe = program.probe;
-  let selected;
-  const buildQuery = queryProgram.runInNewContext({
-    userText: identity.userSid,
-    invariant: assert.ok,
-    swprintf_s: (target, capacity, format, ...values) => {
-      let index = 0;
-      target.value = format.replace(/%ls/gu, () => values[index++]);
-      assert.ok(target.value.length < capacity);
-      selected = target.value;
-      return target.value.length;
-    },
-  });
-  buildQuery({}, "");
-  assert.ok(
-    selected.includes(`Data[@Name="SubjectUserSid"]="${identity.userSid}"`),
-  );
-  assert.ok(selected.includes('Data[@Name="ObjectType"]="File"'));
-  assert.equal(selected.includes("ObjectName"), false);
-  assert.ok(selected.includes("EventID=1101 or EventID=1102"));
-  assert.ok(selected.includes("EventID=4663"));
-  assert.match(
-    program.source,
-    /command_audit_query\(query,L""\);\s*command_subscription=EvtSubscribe\(NULL,command_event,L"Security",query/u,
-  );
-  for (const fault of [
-    null,
-    "missing",
-    "logon",
-    "object",
-    "restoration",
-    "missing-restoration",
-    "missing-observations",
-    "missing-observations-restoration",
-  ]) {
-    const missing = fault?.startsWith("missing");
-    let observed, capture;
-    const f = fixture(({ effects, prepared }) => {
-      const original = effects.coverage,
-        retire = effects.retire;
-      effects.coverage = async () => {
-        await original();
-        observed = await brokerCapture(prepared, {
-          ObjectName:
-            fault === "object"
-              ? "C:\\fixture\\other"
-              : prepared.gateFile.toUpperCase(),
-          SubjectLogonId: fault === "logon" ? "0x2" : "0x1",
-        });
-        capture = commandCaptureFixture(program);
-        Object.assign(capture.api, {
-          command_probing: true,
-          command_coverage_seen: false,
-          command_paths: [
-            prepared.files.inspect,
-            prepared.files.edit,
-            prepared.files.outside,
-            prepared.gateFile,
-          ],
-          GetCurrentProcessId: () => prepared.observer.pid,
-          _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
-          wcscmp: (a, b) => (a === b ? 0 : 1),
-          _wcstoui64: (text, end) => {
-            end("");
-            return Number(text);
-          },
-        });
-        capture.api.onProject = () => {
-          const raw = observed.events[0].raw;
-          Object.assign(capture.api, {
-            process: String(raw.pid),
-            object: raw.target,
-            eventId: raw.opcode,
-            mask: String(raw.accessMask),
-          });
-          const selected = selection.runInNewContext(capture.api);
-          if (selected) probe.runInNewContext(capture.api);
-          return selected;
-        };
-        if (!missing) capture.notify(["original-read"]);
-        capture.capture();
-        observed.control.delivered = capture.api.command_coverage_seen;
-        observed.control.endRecords = observed.end.records =
-          capture.api.command_records;
-        if (fault === "object") observed.events = [];
-        if (missing) {
-          observed.events = [];
-          observed.control.query = {
-            from: observed.start.time,
-            to: observed.end.time,
-            records: 1,
-            bytes: 8,
-            candidates: 1,
-            complete: true,
-            error: 0,
-            gateIdentity: prepared.original.files[3].identity,
-            requestedAccess: 0x80000080,
-            performedAccess: 1,
-            readBytes: 32,
-            scannedRecords: 0,
-            scannedBytes: 0,
-            ...queryObservations(prepared.observer.pid, 1),
-          };
-          if (fault.includes("observations"))
-            Object.assign(observed.control.query, {
-              records: 2,
-              bytes: 16,
-              complete: false,
-              observationError: 5,
-              unavailableRecords: 1,
-            });
-        }
-        return observed;
-      };
-      effects.retire = async (...args) => {
-        const cleanup = await retire(...args);
-        if (fault?.endsWith("restoration")) cleanup.auditRestored = false;
-        return cleanup;
-      };
-    });
-    const result = await f.run();
-    assert.equal(
-      result.status,
-      !fault ? "PASS" : fault === "restoration" ? "FAIL" : "BLOCKED",
-    );
-    assert.equal(f.calls.includes("retire"), true);
-    assert.equal(
-      result.cleanup.status,
-      fault?.endsWith("restoration") ? "UNCERTAIN" : "PASS",
-    );
-    if (missing || ["logon", "object"].includes(fault)) {
-      assert.equal(f.calls.includes("schema"), false);
-      assert.deepEqual(f.requests, []);
-    }
-    if (missing) {
-      assert.equal(capture.projected.length, 0);
-      assert.equal(observed.control.query.candidates, 1);
-      assert.equal(result.cause.detail.includes("delivery-missing"), true);
-    } else
-      assert.deepEqual(
-        capture.projected,
-        fault === "object" ? [] : ["original-read"],
-      );
-    if (fault === "object") {
-      assert.equal(capture.api.command_scanned, 1);
-      assert.equal(capture.api.command_records, 0);
-      assert.equal(
-        capture.calls.some(([name]) => name === "bookmark"),
-        false,
-      );
-    }
-  }
-});
-
-const queryPredicateNames = [
-  "pid",
-  "gate",
-  "successRead",
-  "sid",
-  "type",
-  "pidGate",
-  "pidGateReadSid",
-  "pidGateReadType",
-  "pidGateReadSidType",
-];
-const emptyQueryCounts = (count = 0) => ({
-  ...Object.fromEntries(queryPredicateNames.map((name) => [name, count])),
-  candidates: 0,
-  loss: 0,
-  unavailable: 0,
-});
-const queryObservations = (brokerPid, count = 0) => ({
-  brokerPid,
-  observationError: 0,
-  lossRecords: 0,
-  unavailableRecords: 0,
-  predicates: Object.fromEntries(
-    queryPredicateNames.map((name) => [name, count]),
-  ),
-});
-
-test("original diagnostic fields count filter intersections, loss and unavailable data without admission", async () => {
-  const { source } = await commandCaptureProgram();
-  const body = (name) =>
-    new RegExp(
-      `static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
-      "u",
-    ).exec(source)[1];
-  const number = body("command_query_number")
-    .replaceAll("value->", "value.")
-    .replace(/\bL(?=["'])/gu, "")
-    .replaceAll("*number=", "set(")
-    .replace(/set\(([^;]+);/gu, "set($1);")
-    .replace("const WCHAR *text", "const text")
-    .replace(/\b(?:unsigned|WCHAR|ULONGLONG)\b/gu, "let")
-    .replace("result=0;", "result=0n;")
-    .replace(
-      "((~(let)0)-digit)/base",
-      "(0xffffffffffffffffn-BigInt(digit))/BigInt(base)",
-    )
-    .replace("result*base+digit", "result*BigInt(base)+BigInt(digit)")
-    .replace("c-'a'+10", "c.charCodeAt(0)-87")
-    .replace("c-'A'+10", "c.charCodeAt(0)-55");
-  const sid = body("command_query_sid")
-    .replaceAll("value->", "value.")
-    .replaceAll("sid->", "sid.")
-    .replace(
-      /ULONG_PTR first=[^;]+;/u,
-      "const first=value.SidVal?.address,base=0;",
-    )
-    .replace("SID *sid", "const sid")
-    .replace("const WCHAR *text", "const text")
-    .replace(/\bL(?=["'])/gu, "")
-    .replace(/\b(?:ULONGLONG|unsigned|WCHAR)\b/gu, "let")
-    .replace("0xffffffffffffULL", "0xffffffffffff");
-  const fields = body("command_query_fields")
-    .replaceAll("counts->", "counts.")
-    .replace(/&values\[(\d)\]/gu, "values[$1]")
-    .replace(/,&(event|pid|mask|keywords)\b/gu, ",value=>$1=value")
-    .replace(/\bL(?=")/gu, "")
-    .replace(/0x([0-9a-f]+)ULL/gu, "0x$1n")
-    .replace("mask&FILE_READ_DATA", "mask&BigInt(FILE_READ_DATA)")
-    .replace("const WCHAR *object", "const object")
-    .replace(",*type=", ",type=")
-    .replace(/BOOL (\w+)=([^;]+);/gu, "let $1=Boolean($2);")
-    .replace(/\b(?:ULONGLONG|int)\b/gu, "let");
-  const api = {
-    TRUE: true,
-    FALSE: false,
-    NULL: null,
-    MAXDWORD: 0xffffffff,
-    ERROR_SUCCESS: 0,
-    ERROR_INVALID_DATA: 13,
-    FILE_READ_DATA: 1,
-    EvtVarTypeUInt16: 6,
-    EvtVarTypeUInt32: 8,
-    EvtVarTypeUInt64: 10,
-    EvtVarTypeHexInt32: 20,
-    EvtVarTypeHexInt64: 21,
-    EvtVarTypeSid: 19,
-    SID_MAX_SUB_AUTHORITIES: 15,
-    userText: identity.userSid,
-    userSid: identity.userSid,
-    command_paths: [null, null, null, "C:\\fixture\\gate"],
-    command_query_string: (value) =>
-      value.Type === 1 &&
-      typeof value.StringVal === "string" &&
-      value.StringVal.length > 0 &&
-      value.StringVal.length < 4096
-        ? value.StringVal
-        : null,
-    GetSidLengthRequired: (count) => 8 + 4 * count,
-    IsValidSid: (value) => value.valid,
-    EqualSid: (value, expected) => value.text === expected,
-    GetCurrentProcessId: () => identity.pid,
-    wcscmp: (a, b) => (a === b ? 0 : 1),
-    wcsncmp: (a, b, size) => (a.slice(0, size) === b.slice(0, size) ? 0 : 1),
-    _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
-  };
-  const project = new Script(`
-    function command_query_number(value,buffer,length,set) {${number}}
-    function command_query_sid(value,buffer,length) {${sid}}
-    (values,counts) => {${fields.replaceAll("buffer,length", "null,1024")}}
-  `).runInNewContext(api);
-  const original = [
-    { Type: 6, UInt16Val: 4663n },
-    { Type: 21, UInt64Val: BigInt(identity.pid) },
-    { Type: 1, StringVal: "C:\\FIXTURE\\GATE" },
-    { Type: 20, UInt32Val: 1n },
-    { Type: 21, UInt64Val: 0x8020000000000000n },
-    {
-      Type: 19,
-      SidVal: {
-        address: 128,
-        SubAuthorityCount: 5,
-        valid: true,
-        text: identity.userSid,
-      },
-    },
-    { Type: 1, StringVal: "File" },
-  ];
-  for (const fault of [
-    null,
-    "sid",
-    "type",
-    "both",
-    "pid",
-    "gate",
-    "failure",
-    "access",
-    "loss",
-    "missing",
-    "malformed",
-    "overflow",
-    "sid-bounds",
-    "string-number",
-    "string-sid",
-    "malformed-sid",
-    "malformed-keywords",
-  ]) {
-    const values = structuredClone(original),
-      counts = emptyQueryCounts();
-    if (["sid", "both"].includes(fault))
-      values[5].SidVal.text = "S-1-5-21-10-20-30-1002";
-    if (["type", "both"].includes(fault)) values[6].StringVal = "Pipe";
-    if (fault === "pid") values[1].UInt64Val++;
-    if (fault === "gate") values[2].StringVal = "C:\\fixture\\other";
-    if (fault === "failure") values[4].UInt64Val = 0x8010000000000000n;
-    if (fault === "access") values[3].UInt32Val = 0n;
-    if (fault === "loss") {
-      values.fill({ Type: 0 });
-      values[0] = { Type: 6, UInt16Val: 1101n };
-    }
-    if (fault === "missing") values[5] = { Type: 0 };
-    if (fault === "malformed") values[3] = { Type: 1, StringVal: "0x1tail" };
-    if (fault === "overflow")
-      values[1] = { Type: 1, StringVal: "18446744073709551616" };
-    if (fault === "sid-bounds") values[5].SidVal.address = 1020;
-    if (fault === "string-number")
-      values[4] = { Type: 1, StringVal: "0x8020000000000000" };
-    if (fault === "string-sid")
-      values[5] = { Type: 1, StringVal: identity.userSid };
-    if (fault === "malformed-sid")
-      values[5] = { Type: 1, StringVal: "S-1-5-invalid" };
-    if (fault === "malformed-keywords")
-      values[4].UInt64Val = 0x8030000000000000n;
-    const unavailable = [
-      "missing",
-      "malformed",
-      "overflow",
-      "sid-bounds",
-      "malformed-sid",
-      "malformed-keywords",
-    ].includes(fault);
-    assert.equal(project(values, counts), unavailable ? 13 : 0, fault);
-    const expectedPredicates = {
-      pid: Number(!["loss", "pid", "overflow"].includes(fault)),
-      gate: Number(!["loss", "gate"].includes(fault)),
-      successRead: Number(
-        ![
-          "loss",
-          "failure",
-          "access",
-          "malformed",
-          "malformed-keywords",
-        ].includes(fault),
-      ),
-      sid: Number(
-        ![
-          "loss",
-          "sid",
-          "both",
-          "missing",
-          "sid-bounds",
-          "malformed-sid",
-        ].includes(fault),
-      ),
-      type: Number(!["loss", "type", "both"].includes(fault)),
-      pidGate: Number(!["loss", "pid", "gate", "overflow"].includes(fault)),
-    };
-    for (const [name, expected] of Object.entries(expectedPredicates))
-      assert.equal(counts[name], expected, `${fault}: ${name}`);
-    assert.equal(counts.loss, fault === "loss" ? 1 : 0, fault);
-    assert.equal(
-      counts.candidates,
-      [
-        null,
-        "sid",
-        "type",
-        "both",
-        "missing",
-        "sid-bounds",
-        "string-number",
-        "string-sid",
-        "malformed-sid",
-      ].includes(fault)
-        ? 1
-        : 0,
-      fault,
-    );
-    assert.equal(
-      counts.pidGateReadSid,
-      counts.candidates &&
-        !["sid", "both", "missing", "sid-bounds", "malformed-sid"].includes(
-          fault,
-        )
-        ? 1
-        : 0,
-      fault,
-    );
-    assert.equal(
-      counts.pidGateReadType,
-      counts.candidates && !["type", "both"].includes(fault) ? 1 : 0,
-      fault,
-    );
-    assert.equal(
-      counts.pidGateReadSidType,
-      Math.min(counts.pidGateReadSid, counts.pidGateReadType),
-      fault,
-    );
-    if (fault === "loss")
-      assert.deepEqual(counts, { ...emptyQueryCounts(), loss: 1 });
-  }
-});
-
-test("failed delivery queries only its original interval within capture bounds and closes independent handles", async () => {
-  const program = await commandCaptureProgram(),
-    body = (name) =>
-      new RegExp(
-        `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
-        "u",
-      ).exec(program.source)[1];
-  const query = body("command_delivery_query");
-  const queryCode = query
-      .replace(
-        "WCHAR from[40],to[40],interval[256],query[2048];",
-        "let from={},to={},interval={},query={};",
-      )
-      .replace(
-        /ULARGE_INTEGER start,end;[^\n]+/u,
-        "const start={QuadPart:first.time},end={QuadPart:last.time};",
-      )
-      .replaceAll("(DWORD)", "")
-      .replaceAll("(size_t)", "")
-      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
-      .replace("BYTE *raw", "let raw")
-      .replace(
-        "struct command_query_counts counts={0};",
-        "let counts=emptyQueryCounts();",
-      )
-      .replace(/\bL(?=")/gu, "")
-      .replace(
-        /&command_preflight_owned\.(queryItem|query|queryContext)\b/gu,
-        'ref(command_preflight_owned,"$1")',
-      )
-      .replace(/,&(count|length|properties)\b/gu, ",value=>$1=value")
-      .replaceAll("&counts", "counts")
-      .replace(/printf\([^\n]*?,start\.QuadPart/u, "emit(start.QuadPart"),
-    observeCode = body("command_query_observe")
-      .replace(/const WCHAR \*paths\[\]=\{([^;]+)\};/u, "const paths=[$1];")
-      .replaceAll("sizeof(EVT_VARIANT)", "16")
-      .replaceAll("(EVT_VARIANT *)buffer", "buffer")
-      .replace("BYTE *buffer", "let buffer")
-      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
-      .replace(/,&(length|properties)\b/gu, ",value=>$1=value")
-      .replace(/\bL(?=")/gu, ""),
-    timeCode = body("command_query_time")
-      .replace("SYSTEMTIME value;", "let value={};")
-      .replace(
-        "ULARGE_INTEGER ticks;",
-        "const ticks={get QuadPart(){return BigInt(this.LowPart)+(BigInt(this.HighPart)<<32n);}};",
-      )
-      .replace("&time,&value", "time,value")
-      .replace("ticks.QuadPart%10000000", "ticks.QuadPart%10000000n")
-      .replace(/\bL(?=")/gu, ""),
-    script = new Script(`
-      function command_query_observe(event,xmlLength,counts) {${observeCode}}
-      function command_query_time(time,text) {${timeCode}}
-      function command_audit_query(query,interval) {${body("command_audit_query").replace(/\bL(?=")/gu, "")}}
-      (first,last) => {${queryCode}}
-    `),
-    epoch =
-      (BigInt(Date.parse("2026-10-09T00:00:00Z")) + 11644473600000n) * 10000n,
-    stamp = (time) => ({
-      time,
-      dwLowDateTime: Number(time & 0xffffffffn),
-      dwHighDateTime: Number(time >> 32n),
-    });
-  for (const fault of [
-    null,
-    "open",
-    "next",
-    "render",
-    "records",
-    "bytes",
-    "close",
-    "empty",
-    "context",
-    "values-query",
-    "values-render",
-    "values-properties",
-    "values-missing",
-    "values-bytes",
-    "record-size",
-    "later-records",
-    "later-bytes",
-  ]) {
-    const f = commandCaptureFixture(program, {
-      fault: ["next", "render"].includes(fault) ? fault : null,
-      closeFailures:
-        fault === "close" ? ["query-event", "query", "query-context"] : [],
-    });
-    const next = f.api.EvtNext,
-      render = f.api.EvtRender,
-      nativeError = f.api.GetLastError;
-    let receipt,
-      selected,
-      optionalError = null;
-    const unavailable = [
-      "context",
-      "values-query",
-      "values-render",
-      "values-properties",
-      "values-missing",
-      "values-bytes",
-      "record-size",
-    ].includes(fault);
-    Object.assign(f.api, {
-      userText: identity.userSid,
-      GENERIC_READ: 0x80000000,
-      FILE_READ_ATTRIBUTES: 128,
-      FILE_READ_DATA: 1,
-      EvtQueryChannelPath: 1,
-      EvtQueryForwardDirection: 256,
-      ERROR_INVALID_DATA: 13,
-      ERROR_OUTOFMEMORY: 14,
-      command_gate_bytes: 32,
-      command_ids: [null, null, null, "held"],
-      command_records: 0,
-      command_bytes: 0,
-      command_scanned:
-        fault === "records"
-          ? 4096
-          : fault === "later-records"
-            ? 4095
-            : ["bytes", "values-bytes", "later-bytes"].includes(fault)
-              ? 128
-              : 0,
-      command_scanned_bytes:
-        fault === "bytes"
-          ? 8388608
-          : fault === "values-bytes"
-            ? 8388600
-            : fault === "later-bytes"
-              ? 8388488
-              : fault === "later-records"
-                ? 16380
-                : 0,
-      EvtRenderContextValues: 0,
-      EvtRenderEventValues: 0,
-      GetLastError: () => {
-        const value = optionalError;
-        optionalError = null;
-        return value ?? nativeError();
-      },
-      EvtCreateRenderContext: (count, paths, flags) => {
-        assert.equal(count, 7);
-        assert.equal(flags, 0);
-        assert.equal(paths[0], "Event/System/EventID");
-        assert.equal(paths[5], "Event/EventData/Data[@Name='SubjectUserSid']");
-        if (fault === "context") {
-          optionalError = 5;
-          return null;
-        }
-        return "query-context";
-      },
-      EvtRender: (context, event, flags, size, buffer, length, properties) => {
-        if (flags === 1)
-          return render(
-            context,
-            event,
-            flags,
-            size,
-            buffer,
-            length,
-            properties,
-          );
-        assert.equal(context, "query-context");
-        length(fault === "record-size" ? 65536 : 112);
-        properties(fault === "values-properties" ? 6 : 7);
-        if (fault === (size ? "values-render" : "values-query")) {
-          optionalError = 5;
-          return false;
-        }
-        if (!size) {
-          optionalError = 122;
-          return false;
-        }
-        return true;
-      },
-      command_coverage_seen: false,
-      command_bound: () => {},
-      FileTimeToSystemTime: (_time, result) => {
-        Object.assign(result, {
-          wYear: 2026,
-          wMonth: 10,
-          wDay: 9,
-          wHour: 0,
-          wMinute: 0,
-          wSecond: 0,
-        });
-        return true;
-      },
-      swprintf_s: (target, capacity, format, ...values) => {
-        let index = 0;
-        target.value = format.replace(
-          /%(?:0([0-9]+))?(ls|llu|u)/gu,
-          (_match, width) => {
-            const value = values[index++];
-            return String(value?.value ?? value).padStart(
-              Number(width ?? 0),
-              "0",
-            );
-          },
-        );
-        assert.ok(target.value.length < capacity);
-        return target.value.length;
-      },
-      EvtQuery: (session, channel, value, flags) => {
-        assert.deepEqual([session, channel, flags], [null, "Security", 257]);
-        selected = value.value;
-        if (fault === "open") {
-          f.api.GetLastError = () => 5;
-          return null;
-        }
-        if (fault !== "empty") f.notify(["query-event"]);
-        return "query";
-      },
-      EvtNext: (handle, size, slot, timeout, flags, count) => {
-        assert.deepEqual([handle, size, timeout, flags], ["query", 1, 0, 0]);
-        const events = [];
-        const result = next("subscription", 16, events, timeout, flags, count);
-        slot.value = events[0] ?? null;
-        return result;
-      },
-      emptyQueryCounts,
-      GetCurrentProcessId: () => identity.pid,
-      command_query_fields: (_values, _buffer, length, counts) => {
-        assert.equal(length, 112);
-        if (fault === "values-missing") return 13;
-        Object.assign(counts, { ...emptyQueryCounts(1), candidates: 1 });
-        return 0;
-      },
-      emit: (
-        from,
-        to,
-        records,
-        bytes,
-        candidates,
-        error,
-        complete,
-        gateIdentity,
-        requestedAccess,
-        performedAccess,
-        readBytes,
-        scannedRecords,
-        scannedBytes,
-        brokerPid,
-        observationError,
-        lossRecords,
-        unavailableRecords,
-        ...values
-      ) => {
-        const predicates = Object.fromEntries(
-          queryPredicateNames.map((name, i) => [name, values[i]]),
-        );
-        receipt = {
-          from: from.toString(),
-          to: to.toString(),
-          records,
-          bytes,
-          candidates,
-          error,
-          complete: complete === "true",
-          gateIdentity,
-          // Match native %lu serialization of the DWORD access mask.
-          requestedAccess: requestedAccess >>> 0,
-          performedAccess,
-          readBytes,
-          scannedRecords,
-          scannedBytes,
-          brokerPid,
-          observationError,
-          lossRecords,
-          unavailableRecords,
-          predicates,
-          audit: values.slice(queryPredicateNames.length),
-        };
-      },
-    });
-    script.runInNewContext(f.api)(stamp(epoch), stamp(epoch + 100n));
-    assert.ok(
-      selected.includes(
-        'TimeCreated[@SystemTime>="2026-10-09T00:00:00.0000000Z" and @SystemTime<="2026-10-09T00:00:00.0000100Z"]',
-      ),
-    );
-    assert.equal(selected.includes("ObjectName"), false);
-    assert.equal(selected.includes("SubjectUserSid"), false);
-    assert.equal(selected.includes("ObjectType"), false);
-    assert.ok(
-      selected.includes("EventID=4656 and band(Keywords,4503599627370496)"),
-    );
-    assert.ok(selected.includes("EventID=4663"));
-    assert.ok(selected.includes("EventID=1101 or EventID=1102"));
-    assert.equal(receipt.from, epoch.toString());
-    assert.equal(receipt.to, (epoch + 100n).toString());
-    assert.deepEqual(receipt.audit, f.api.command_observed.audit);
-    assert.equal(
-      receipt.complete,
-      !fault || ["empty", "later-bytes"].includes(fault),
-      fault,
-    );
-    assert.equal(
-      receipt.observationError,
-      unavailable
-        ? ["context", "values-query", "values-render"].includes(fault)
-          ? 5
-          : 13
-        : 0,
-      fault,
-    );
-    assert.equal(receipt.unavailableRecords, unavailable ? 1 : 0, fault);
-    if (unavailable) assert.equal(f.api.first, undefined, fault);
-    assert.equal(
-      receipt.records,
-      ["open", "next", "records", "empty"].includes(fault) ? 0 : 1,
-      fault,
-    );
-    assert.equal(
-      receipt.error,
-      !fault || unavailable || ["empty", "later-bytes"].includes(fault)
-        ? 0
-        : fault === "next"
-          ? 4317
-          : ["open", "render"].includes(fault)
-            ? 5
-            : 13,
-    );
-    assert.equal(f.api.command_coverage_seen, false);
-    assert.equal(f.api.command_records, 0);
-    assert.equal(
-      f.api.command_scanned,
-      receipt.scannedRecords + receipt.records,
-    );
-    assert.equal(
-      f.api.command_scanned_bytes,
-      receipt.scannedBytes + receipt.bytes,
-    );
-    assert.deepEqual(
-      f.closed,
-      fault === "open"
-        ? []
-        : ["records", "empty"].includes(fault)
-          ? ["query"]
-          : [
-              "query-event",
-              "query",
-              ...(!["next", "render", "bytes", "context"].includes(fault)
-                ? ["query-context"]
-                : []),
-            ],
-    );
-    if (fault === "close") assert.equal(f.cleanup.length, 3);
-    if (["later-records", "later-bytes"].includes(fault)) {
-      f.api.EvtNext = next;
-      f.notify(["later-capture"]);
-      assert.throws(
-        () => f.capture(),
-        (code) => code === 126,
-      );
-      assert.equal(
-        f.calls.some(([name]) => name === "bookmark"),
-        false,
-      );
-    }
-    if (!fault)
-      assert.deepEqual(
-        [
-          receipt.records,
-          receipt.bytes,
-          receipt.candidates,
-          receipt.requestedAccess,
-          receipt.performedAccess,
-          receipt.readBytes,
-        ],
-        [1, 120, 1, 0x80000080, 1, 32],
-      );
-  }
-  const value = {
-      nonce: "a".repeat(32),
-      observer: identity,
-      gateFile: "C:\\fixture\\gate",
-    },
-    observed = await brokerCapture(value);
-  observed.events = [];
-  observed.end.records = 0;
-  observed.control.delivered = false;
-  observed.control.endRecords = 0;
-  observed.control.query = {
-    from: observed.start.time,
-    to: observed.end.time,
-    records: 1,
-    bytes: 8,
-    candidates: 1,
-    error: 0,
-    complete: true,
-    gateIdentity: value.original.files[3].identity,
-    requestedAccess: 0x80000080,
-    performedAccess: 1,
-    readBytes: 32,
-    scannedRecords: 0,
-    scannedBytes: 0,
-    ...queryObservations(identity.pid, 1),
-    audit: [5, 0, 1, 2, 0, 1, 0, 32, 0],
-  };
-  for (const [field, replacement] of [
-    ["from", (BigInt(observed.start.time) - 1n).toString()],
-    ["to", (BigInt(observed.end.time) + 1n).toString()],
-    ["records", 4097],
-    ["bytes", 8388609],
-    ["candidates", 2],
-    ["error", 5],
-    ["scannedRecords", 4096],
-    ["scannedBytes", 8388608],
-    ["readBytes", 31],
-    ["gateIdentity", "foreign"],
-    ["requestedAccess", 2],
-    ["brokerPid", identity.pid + 1],
-    ["observationError", -1],
-    ["observationError", 0x100000000],
-    ["observationError", 5],
-    ["unavailableRecords", 2],
-    ["lossRecords", 1],
-    ["predicates", null],
-    ["predicates", { ...observed.control.query.predicates, pid: 0 }],
-    [
-      "predicates",
-      { ...observed.control.query.predicates, pidGateReadSidType: 2 },
-    ],
-    [
-      "predicates",
-      {
-        ...observed.control.query.predicates,
-        privateField: "untrusted-query-field",
-      },
-    ],
-    ["audit", []],
-    ["audit", Array(9).fill("untrusted-query-field")],
-    ["audit", Array(9).fill(7)],
-    ["unexpected", "untrusted-query-field"],
-  ]) {
-    const rejected = structuredClone(observed);
-    rejected.control.query[field] = replacement;
-    assert.throws(
-      () => windowsCommandBrokerCoverage(value, rejected),
-      (error) => {
-        assert.equal(error.brokerCoverage, undefined);
-        assert.equal(error.message.includes("untrusted-query-field"), false);
-        return true;
-      },
-    );
-  }
-  assert.throws(
-    () => windowsCommandBrokerCoverage(value, observed),
-    (error) => {
-      assert.equal(error.brokerCoverage?.reason, "delivery-missing");
-      assert.deepEqual(
-        error.brokerCoverage.control.query.audit,
-        observed.control.query.audit,
-      );
-      return true;
-    },
-  );
-  for (const complete of [true, false]) {
-    const diagnostic = structuredClone(observed);
-    if (complete)
-      Object.assign(diagnostic.control.query, {
-        records: 0,
-        bytes: 0,
-        candidates: 0,
-        ...queryObservations(identity.pid),
-      });
-    else
-      Object.assign(diagnostic.control.query, {
-        records: 2,
-        bytes: 16,
-        complete: false,
-        observationError: 5,
-        unavailableRecords: 1,
-      });
-    assert.throws(
-      () => windowsCommandBrokerCoverage(value, diagnostic),
-      (error) => {
-        assert.equal(error.brokerCoverage?.reason, "delivery-missing");
-        assert.deepEqual(
-          error.brokerCoverage.control.query,
-          diagnostic.control.query,
-        );
-        return true;
-      },
-    );
-  }
-});
-
-async function commandCoverageControlProgram() {
-  const source = await readFile(
-      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
-      "utf8",
-    ),
-    body = /static void command_coverage_control\(void\) \{([\s\S]*?)\n\}/u
-      .exec(source)[1]
-      .replace(/\b(?:unsigned|ULONGLONG)\b/gu, "let")
-      .replace("FILETIME first,last;", "let first={}, last={};")
-      .replace(/&(first|last)\b/gu, "$1")
-      .replace(
-        /printf\([^\n]*?,command_coverage_seen/u,
-        "emit(command_coverage_seen",
-      ),
-    program = new Script(body);
-  return program;
-}
-
-test("original prerequisite scalars retain unknown channel readings and independent close status", async () => {
-  const { source } = await commandCaptureProgram();
-  const body =
-    /static void command_channel_observe\(void\) \{([\s\S]*?)\n\}/u.exec(
-      source,
-    )[1];
-  const script = new Script(
-    body
-      .replace("EVT_VARIANT value={0}", "let value={}")
-      .replace(/\b(?:DWORD|LONGLONG|BOOL|EVT_HANDLE)\b/gu, "let")
-      .replaceAll("sizeof(value)", "16")
-      .replace("&value,&size", "value,n=>size=n")
-      .replaceAll("(let)", "")
-      .replace(/\bL(?=")/gu, ""),
-  );
-  for (const fault of [
-    null,
-    "false",
-    "open",
-    "open-zero",
-    "read",
-    "read-zero",
-    "short",
-    "type",
-    "array",
-    "boolean",
-    "insufficient",
-    "close",
-    "close-zero",
-  ]) {
-    let lastError = 77,
-      receipt,
-      reads = 0,
-      closes = 0;
-    const cleanup = [];
-    const api = {
-      NULL: null,
-      TRUE: 1,
-      FALSE: 0,
-      ERROR_SUCCESS: 0,
-      ERROR_INSUFFICIENT_BUFFER: 122,
-      EvtChannelConfigEnabled: 0,
-      EvtVarTypeBoolean: 13,
-      command_preflight_owned: {},
-      command_prerequisite_cleanup_failed: false,
-      command_bound: () => {},
-      GetLastError: () => lastError,
-      SetLastError: (v) => {
-        lastError = v;
-      },
-      EvtOpenChannelConfig: (...args) => {
-        assert.deepEqual(args, [null, "Security", 0]);
-        lastError = fault === "open-zero" ? 0 : 5;
-        return fault?.startsWith("open") ? null : "channel";
-      },
-      EvtGetChannelConfigProperty: (
-        handle,
-        property,
-        flags,
-        capacity,
-        value,
-        size,
-      ) => {
-        reads++;
-        assert.deepEqual(
-          [handle, property, flags, capacity],
-          ["channel", 0, 0, 16],
-        );
-        size(fault === "insufficient" ? 64 : fault === "short" ? 8 : 16);
-        Object.assign(value, {
-          Type: fault === "type" ? 1 : fault === "array" ? 141 : 13,
-          BooleanVal: fault === "boolean" ? 2 : fault === "false" ? 0 : 1,
-        });
-        lastError =
-          fault === "insufficient" ? 122 : fault === "read-zero" ? 0 : 5;
-        return !["read", "read-zero", "insufficient"].includes(fault);
-      },
-      EvtClose: (handle) => {
-        closes++;
-        assert.equal(handle, "channel");
-        lastError = fault === "close-zero" ? 0 : 6;
-        return !fault?.startsWith("close");
-      },
-      remember: () => {},
-      cleanup_error: (...v) => cleanup.push(v),
-      printf: (_format, ...v) => {
-        receipt = v;
-      },
-    };
-    script.runInNewContext(api);
-    assert.equal(
-      Boolean(api.command_prerequisite_cleanup_failed),
-      Boolean(fault?.startsWith("close")),
-    );
-    assert.equal(lastError, 77);
-    assert.equal(reads, fault?.startsWith("open") ? 0 : 1);
-    assert.equal(closes, reads);
-    assert.equal(
-      receipt[5],
-      fault === null || fault?.startsWith("close")
-        ? 1
-        : fault === "false"
-          ? 0
-          : -1,
-    );
-    assert.equal(
-      receipt[1],
-      fault?.startsWith("open")
-        ? -1
-        : fault === "read"
-          ? 5
-          : fault === "insufficient"
-            ? 122
-            : 0,
-    );
-    assert.equal(receipt[4], fault === "insufficient" ? 64 : -1);
-    assert.equal(
-      receipt[6],
-      fault?.startsWith("open") ? -1 : fault === "close" ? 6 : 0,
-    );
-    assert.equal(cleanup.length, fault?.startsWith("close") ? 1 : 0);
-  }
-  const system =
-    /static void command_system_observation\(void\) \{([\s\S]*?)\n\}/u.exec(
-      source,
-    )[1];
-  const project = new Script(
-    system
-      .replace(/\b(?:BOOL|DWORD|ULONG)\b/gu, "let")
-      .replaceAll(
-        "&command_system[i].AuditSubCategoryGuid",
-        "command_system[i].AuditSubCategoryGuid",
-      )
-      .replaceAll("&command_category", "command_category"),
-  );
-  for (const policy of [
-    null,
-    [],
-    [{ AuditSubCategoryGuid: "other", AuditingInformation: 3 }],
-    [{ AuditSubCategoryGuid: "file", AuditingInformation: 0 }],
-    [{ AuditSubCategoryGuid: "file", AuditingInformation: 3 }],
-  ]) {
-    const output = [];
-    project.runInNewContext({
-      FALSE: false,
-      TRUE: true,
-      command_system: policy,
-      command_category_count: policy?.length ?? 0,
-      command_category: "file",
-      IsEqualGUID: (a, b) => a === b,
-      printf: (_f, v) => output.push(v),
-      fputs: (v) => output.push(v),
-      putchar: () => {},
-      stdout: {},
-    });
-    assert.deepEqual(
-      output,
-      policy?.[0]?.AuditSubCategoryGuid === "file"
-        ? ["true", policy[0].AuditingInformation]
-        : ["false", "null"],
-    );
-  }
-});
-
-test("4912 query binds original installation, charges later capture and independently closes each resource", async () => {
-  const program = await commandCaptureProgram();
-  const body = (name) =>
-    new RegExp(
-      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
-      "u",
-    ).exec(program.source)[1];
-  const translate = (text) =>
-    text
-      .replace(
-        "WCHAR from[40],to[40],query[512];",
-        "let from={},to={},query={};",
-      )
-      .replace(/const WCHAR \*paths\[\]=\{([^;]+)\};/u, "const paths=[$1];")
-      .replace("TOKEN_STATISTICS stats={0};", "let stats={};")
-      .replace(/ULONGLONG logon=[^;]+;/u, "let logon=1n;")
-      .replace(/ULARGE_INTEGER end;[^\n]+/u, "const end={QuadPart:last.value};")
-      .replace(
-        "struct command_policy_counts counts={0};",
-        "let counts={unavailable:0};",
-      )
-      .replace("BYTE *raw", "let raw")
-      .replace("BYTE *buffer", "let buffer")
-      .replaceAll("sizeof(EVT_VARIANT)", "16")
-      .replaceAll("sizeof(stats)", "56")
-      .replaceAll("(EVT_VARIANT *)buffer", "buffer")
-      .replaceAll("(DWORD)", "")
-      .replace(/\b(?:DWORD|BOOL)\b/gu, "let")
-      .replace(/\bL(?=")/gu, "")
-      .replace(
-        /&command_preflight_owned\.(queryItem|query|queryContext)\b/gu,
-        'ref(command_preflight_owned,"$1")',
-      )
-      .replace(/,&(count|length|properties|used)\b/gu, ",value=>$1=value")
-      .replaceAll("&stats", "stats")
-      .replaceAll("&counts", "counts");
-  const script = new Script(
-    `function command_policy_observe(event,xmlLength,logonKnown,logon,counts){${translate(body("command_policy_observe"))}};last=>{${translate(body("command_policy_query"))}}`,
-  );
-  for (const fault of [
-    null,
-    "open",
-    "next",
-    "render",
-    "context",
-    "values-query",
-    "values-render",
-    "values-size",
-    "missing",
-    "records",
-    "bytes",
-    "combined",
-    "close-event",
-    "close-query",
-    "close-context",
-    "later-records",
-    "later-bytes",
-    "token",
-  ]) {
-    const f = commandCaptureFixture(program, {
-      fault: ["next", "render"].includes(fault) ? fault : null,
-      closeFailures:
-        {
-          "close-event": ["query-event"],
-          "close-query": ["query"],
-          "close-context": ["query-context"],
-        }[fault] ?? [],
-    });
-    const next = f.api.EvtNext,
-      render = f.api.EvtRender;
-    let receipt,
-      selected,
-      installation,
-      rendered = 0;
-    Object.assign(f.api, {
-      command_install_from: { value: "installation-start" },
-      command_broker_token: "token",
-      TokenStatistics: 10,
-      GetTokenInformation: (token, kind, _stats, size, used) => {
-        assert.deepEqual([token, kind, size], ["token", 10, 56]);
-        used(56);
-        f.api.SetLastError(5);
-        return fault !== "token";
-      },
-      EvtQueryChannelPath: 1,
-      EvtQueryForwardDirection: 256,
-      EvtRenderContextValues: 0,
-      EvtRenderEventValues: 0,
-      ERROR_INVALID_DATA: 13,
-      ERROR_OUTOFMEMORY: 14,
-      command_query_time: (time, text) => {
-        text.value = time.value;
-      },
-      swprintf_s: (out, _size, format, from, to) => {
-        out.value = format.replace("%ls", from.value).replace("%ls", to.value);
-        return out.value.length;
-      },
-      command_bound: () => {},
-      command_installation: () => {
-        installation = true;
-      },
-      fputs: () => {},
-      stdout: {},
-      EvtQuery: (_session, channel, query, flags) => {
-        assert.equal(channel, "Security");
-        assert.equal(flags, 257);
-        selected = query.value;
-        if (fault === "open") {
-          f.api.SetLastError(5);
-          return null;
-        }
-        f.notify(["query-event"]);
-        return "query";
-      },
-      EvtNext: (handle, size, slot, timeout, flags, count) => {
-        assert.deepEqual([handle, size, timeout, flags], ["query", 1, 0, 0]);
-        const rows = [];
-        const ok = next("subscription", 16, rows, 0, 0, count);
-        slot.value = rows[0] ?? null;
-        return ok;
-      },
-      EvtCreateRenderContext: (count, paths, flags) => {
-        assert.equal(count, 5);
-        assert.equal(flags, 0);
-        assert.equal(paths[4], "Event/EventData/Data[@Name='SubcategoryGuid']");
-        if (fault === "context") {
-          f.api.SetLastError(5);
-          return null;
-        }
-        return "query-context";
-      },
-      EvtRender: (context, event, flags, size, buffer, length, properties) => {
-        if (flags === 1)
-          return render(
-            context,
-            event,
-            flags,
-            size,
-            buffer,
-            length,
-            properties,
-          );
-        length(fault === "combined" ? 65536 : 80);
-        properties(fault === "values-size" ? 4 : 5);
-        if (fault === (size ? "values-render" : "values-query")) {
-          f.api.SetLastError(5);
-          return false;
-        }
-        if (!size) {
-          f.api.SetLastError(122);
-          return false;
-        }
-        rendered++;
-        return true;
-      },
-      command_policy_fields: (_values, _buffer, _length, known, logon) => {
-        assert.equal(known, fault !== "token");
-        assert.equal(logon, 1n);
-        return ["missing", "token"].includes(fault) ? 13 : 0;
-      },
-      printf: (format, ...values) => {
-        if (format.includes("scannedRecords")) {
-          const [
-            to,
-            records,
-            bytes,
-            scannedRecords,
-            scannedBytes,
-            error,
-            observationError,
-            complete,
-            logonError,
-          ] = values;
-          receipt = {
-            to,
-            records,
-            bytes,
-            scannedRecords,
-            scannedBytes,
-            error,
-            observationError,
-            complete: complete === "true",
-            logonError,
-          };
-        }
-      },
-    });
-    f.api.command_scanned = ["records", "later-records"].includes(fault)
-      ? fault === "records"
-        ? 4096
-        : 4095
-      : 128;
-    f.api.command_scanned_bytes =
-      fault === "bytes" ? 8388608 : fault === "later-bytes" ? 8388520 : 512;
-    script.runInNewContext(f.api)({ value: "original-P-end" });
-    assert.equal(installation, true);
-    assert.equal(receipt.to, "original-P-end");
-    assert.ok(
-      selected.includes(
-        'EventID=4912 and TimeCreated[@SystemTime>="installation-start" and @SystemTime<="original-P-end"]',
-      ),
-    );
-    assert.equal(selected.includes("ProcessID"), false);
-    assert.equal(
-      f.api.command_scanned,
-      receipt.scannedRecords + receipt.records,
-    );
-    assert.equal(
-      f.api.command_scanned_bytes,
-      receipt.scannedBytes + receipt.bytes,
-    );
-    assert.equal(f.api.command_records, 0);
-    assert.deepEqual(f.projected, []);
-    assert.equal(receipt.complete, !fault || fault === "later-bytes", fault);
-    if (
-      [
-        "context",
-        "values-query",
-        "values-render",
-        "values-size",
-        "missing",
-        "combined",
-        "token",
-      ].includes(fault)
-    )
-      assert.notEqual(receipt.observationError, 0, fault);
-    if (fault?.startsWith("close-")) {
-      assert.equal(f.cleanup.length, 1);
-      assert.deepEqual(f.closed, ["query-event", "query", "query-context"]);
-      assert.equal(f.api.command_capture_close(), false);
-      assert.deepEqual(f.closed.slice(3), [
-        "subscription",
-        "bookmark",
-        "notification",
-      ]);
-    }
-    if (fault === "values-render") assert.equal(receipt.bytes, 88);
-    if (fault === "combined") assert.equal(rendered, 0);
-    if (["later-records", "later-bytes"].includes(fault)) {
-      f.api.EvtNext = next;
-      f.notify(["later-capture"]);
-      assert.throws(
-        () => f.capture(),
-        (code) => code === 126,
-      );
-      assert.equal(
-        f.calls.some(([name]) => name === "bookmark"),
-        false,
-      );
-    }
-  }
-});
-
-test("4912 typed fields join principal, logon, target and subcategory without an execution PID", async () => {
-  const { source } = await commandCaptureProgram();
-  const body = (name) =>
-    new RegExp(
-      `static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
-      "u",
-    ).exec(source)[1];
-  const fields = body("command_policy_fields")
-    .replaceAll("counts->", "counts.")
-    .replace(/&values\[(\d)\]/gu, "values[$1]")
-    .replace(/,&(event|subjectLogon)/gu, ",v=>$1=v")
-    .replace(/\b(?:ULONGLONG|BOOL|int)\b/gu, "let");
-  const category = body("command_policy_category")
-    .replaceAll("value->", "value.")
-    .replace(
-      /ULONG_PTR first=[^;]+;/u,
-      "const first=value.GuidVal?.address,base=0;",
-    )
-    .replaceAll("sizeof(GUID)", "16")
-    .replaceAll("sizeof(DWORD)", "4")
-    .replaceAll("&command_category", "command_category")
-    .replace("const WCHAR *text", "const text")
-    .replace(/\bL(?=["'])/gu, "")
-    .replace(/\bunsigned\b/gu, "let");
-  const project = new Script(
-    `function command_policy_category(value,buffer,length){${category}};(values,counts,logonKnown,logon)=>{${fields.replaceAll("buffer,length", "null,128")}}`,
-  ).runInNewContext({
-    EvtVarTypeGuid: 15,
-    command_category: "file",
-    ERROR_SUCCESS: 0,
-    ERROR_INVALID_DATA: 13,
-    command_query_number: (v, _b, _l, set) => {
-      if (typeof v !== "number") return false;
-      set(v);
-      return true;
-    },
-    command_query_sid: (v) => (v === null ? -1 : v === "principal" ? 1 : 0),
-    command_query_string: (v) => (v?.Type === 1 ? v.StringVal : null),
-    IsEqualGUID: (a, b) => a.value === b,
-    wcslen: (v) => v.length,
-    _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
-    iswxdigit: (v) => /^[a-fA-F0-9]$/u.test(v),
-  });
-  for (const fault of [
-    null,
-    "principal",
-    "target",
-    "logon",
-    "category",
-    "missing",
-    "unavailable-logon",
-    "wrong-event",
-    "guid",
-    "short-guid",
-    "bad-guid",
-  ]) {
-    const values = [
-      4912,
-      "principal",
-      1,
-      "principal",
-      { Type: 1, StringVal: "{0CCE921D-69AE-11D9-BED3-505054503030}" },
-    ];
-    if (fault === "principal") values[1] = "other";
-    if (fault === "target") values[3] = "other";
-    if (fault === "logon") values[2] = 2;
-    if (fault === "category")
-      values[4].StringVal = "{00000000-0000-0000-0000-000000000000}";
-    if (fault === "missing") values[3] = null;
-    if (fault === "wrong-event") values[0] = 4663;
-    if (fault?.includes("guid"))
-      values[4] =
-        fault === "bad-guid"
-          ? { Type: 1, StringVal: "{invalid}" }
-          : {
-              Type: 15,
-              GuidVal: {
-                address: fault === "short-guid" ? 120 : 32,
-                value: "file",
-              },
-            };
-    const counts = Object.fromEntries(
-      [
-        "principal",
-        "target",
-        "subcategory",
-        "logon",
-        "intersection",
-        "principalUnknown",
-        "targetUnknown",
-        "subcategoryUnknown",
-        "logonUnknown",
-      ].map((k) => [k, 0]),
-    );
-    const result = project(values, counts, fault !== "unavailable-logon", 1);
-    assert.equal(
-      counts.intersection,
-      fault === null || fault === "guid" ? 1 : 0,
-    );
-    assert.equal(
-      result,
-      [
-        "missing",
-        "unavailable-logon",
-        "wrong-event",
-        "short-guid",
-        "bad-guid",
-      ].includes(fault)
-        ? 13
-        : 0,
-    );
-    if (fault === "missing") assert.equal(counts.targetUnknown, 1);
-    if (fault === "unavailable-logon") assert.equal(counts.logonUnknown, 1);
-  }
-});
-
-test("optional original prerequisites preserve missing-delivery refusal and discard malformed scalar authority", async () => {
-  const value = {
-    nonce: "a".repeat(32),
-    observer: identity,
-    gateFile: "C:\\fixture\\gate",
-  };
-  const original = await brokerCapture(value);
-  original.events = [];
-  original.end.records = 0;
-  Object.assign(original.control, {
-    delivered: false,
-    endRecords: 0,
-    query: {
-      from: original.start.time,
-      to: original.end.time,
-      records: 0,
-      bytes: 0,
-      candidates: 0,
-      error: 0,
-      complete: true,
-      gateIdentity: value.original.files[3].identity,
-      requestedAccess: 0x80000080,
-      performedAccess: 1,
-      readBytes: 32,
-      scannedRecords: 0,
-      scannedBytes: 0,
-      ...queryObservations(identity.pid),
-    },
-  });
-  original.installation = {
-    from: (BigInt(original.start.time) - 100n).toString(),
-    to: (BigInt(original.start.time) - 50n).toString(),
-    error: 0,
-  };
-  original.control.prerequisites = {
-    policy: {
-      installation: { ...original.installation },
-      to: original.end.time,
-      records: 1,
-      bytes: 88,
-      scannedRecords: 0,
-      scannedBytes: 0,
-      error: 0,
-      observationError: 0,
-      complete: true,
-      logonError: 0,
-      logonId: "0000000000000001",
-      unavailableRecords: 0,
-      matches: [1, 1, 1, 1, 1],
-      unknown: [0, 0, 0, 0],
-    },
-    channel: {
-      openError: 0,
-      readError: 0,
-      size: 16,
-      usedBytes: 16,
-      requiredBytes: -1,
-      enabled: 1,
-      closeError: 0,
-    },
-  };
-  for (const read of [
-    value.original.cleanup,
-    original.baseline.audit,
-    original.before.audit,
-    original.after.audit,
-  ])
-    read.fileSystem = { available: true, value: 0 };
-  for (const fault of [
-    null,
-    "interval",
-    "logon",
-    "budget",
-    "intersection",
-    "shape",
-    "unknown",
-    "unknown-logon",
-    "query-error",
-    "channel-read",
-    "channel-read-zero",
-    "channel-type",
-    "channel-close",
-    "system",
-  ]) {
-    const observed = structuredClone(original),
-      p = observed.control.prerequisites.policy,
-      c = observed.control.prerequisites.channel;
-    if (fault === "interval") p.installation.from = "102";
-    if (fault === "logon") p.logonId = "0000000000000002";
-    if (fault === "budget") p.scannedBytes = 8388608;
-    if (fault === "intersection") p.matches = [0, 1, 1, 1, 1];
-    if (fault === "shape") p.foreign = "untrusted-data";
-    if (fault === "unknown")
-      Object.assign(p, {
-        complete: false,
-        observationError: 13,
-        unavailableRecords: 1,
-        matches: [1, 1, 0, 1, 0],
-        unknown: [0, 0, 1, 0],
-      });
-    if (fault === "query-error")
-      Object.assign(p, { complete: false, error: 5 });
-    if (fault === "unknown-logon")
-      Object.assign(p, {
-        complete: false,
-        observationError: 13,
-        logonError: 5,
-        logonId: null,
-        unavailableRecords: 1,
-        matches: [1, 0, 1, 1, 0],
-        unknown: [0, 1, 0, 0],
-      });
-    if (fault === "channel-read")
-      Object.assign(c, { readError: 5, size: 0, usedBytes: -1, enabled: -1 });
-    if (fault === "channel-read-zero")
-      Object.assign(c, { readError: 0, size: 0, usedBytes: -1, enabled: -1 });
-    if (fault === "channel-type") c.enabled = true;
-    if (fault === "channel-close") c.closeError = 6;
-    if (fault === "system")
-      observed.before.audit.fileSystem.value = "untrusted-data";
-    assert.throws(
-      () => windowsCommandBrokerCoverage(value, observed),
-      (error) => {
-        assert.equal(error.code, 78);
-        assert.equal(error.brokerCoverage.reason, "delivery-missing");
-        assert.equal(error.feasibilityCause.code, "prerequisite-unavailable");
-        const diagnostic = error.brokerCoverage.control.prerequisites;
-        assert.deepEqual(
-          diagnostic.policy,
-          ["interval", "logon", "budget", "intersection", "shape"].includes(
-            fault,
-          )
-            ? null
-            : p,
-        );
-        assert.deepEqual(
-          diagnostic.channel,
-          fault === "channel-type" ? null : c,
-        );
-        assert.deepEqual(
-          error.brokerCoverage.systemPolicy[2],
-          fault === "system"
-            ? { available: false, value: null }
-            : { available: true, value: 0 },
-        );
-        assert.equal(
-          JSON.stringify(error.brokerCoverage).includes("untrusted-data"),
-          false,
-        );
-        return true;
-      },
-    );
-  }
-});
-
-test("actual bounded coverage control distinguishes absent delivery from a delivered event rejected by the join", async () => {
-  const program = await commandCoverageControlProgram();
-  for (const fault of [
-    null,
-    "missing",
-    "logon",
-    "afterStart",
-    "object",
-    "controlWindow",
-  ]) {
-    const delivered = fault !== "missing";
-    let clock = 0,
-      reads = 0,
-      captures = 0,
-      receipt;
-    const api = {
-      TRUE: true,
-      FALSE: false,
-      command_records: 0,
-      command_gate_bytes: 32,
-      command_observed: { audit: Array(9).fill(0) },
-      GetTickCount64: () => clock,
-      GetSystemTimePreciseAsFileTime: () => {},
-      command_delivery_query: () => assert.equal(delivered, false),
-      command_policy_query: () => assert.equal(delivered, false),
-      command_channel_observe: () => assert.equal(delivered, false),
-      command_gate_audit_write: () => assert.equal(delivered, false),
-      putchar: () => {},
-      fputs: () => {},
-      puts: () => {},
-      stdout: {},
-      command_gate_read: () => {
-        reads++;
-      },
-      command_bound: () => assert.ok(clock < 10000),
-      command_capture: (timeout) => {
-        assert.equal(timeout, 1);
-        captures++;
-        clock += 5000;
-        if (delivered) {
-          api.command_records++;
-          api.command_coverage_seen = true;
-        }
-      },
-      emit: (seen, startRecords, endRecords, elapsedMs) => {
-        receipt = {
-          event: "P",
-          delivered: seen === "true",
-          startRecords,
-          endRecords,
-          elapsedMs,
-          query: null,
-        };
-      },
-    };
-    program.runInNewContext(api);
-    assert.equal(reads, 1);
-    assert.equal(api.command_observed.audit[0], 5);
-    assert.equal(api.command_observed.audit[7], 32);
-    assert.equal(captures, delivered ? 1 : 2);
-    assert.equal(api.command_probing, false);
-    const value = {
-        nonce: "a".repeat(32),
-        observer: identity,
-        gateFile: "C:\\fixture\\gate",
-      },
-      observed = await brokerCapture(value);
-    observed.control = receipt;
-    observed.start.unexpected = "untrusted-barrier-field";
-    observed.end.unexpected = "untrusted-barrier-field";
-    if (!delivered) {
-      observed.events = [];
-      observed.end.records = 0;
-    } else if (fault === "logon")
-      observed.events[0].logonId = "0000000000000002";
-    else if (fault === "afterStart")
-      observed.events[0].time = observed.start.time;
-    else if (fault === "object")
-      observed.events[0].raw.target = "C:\\fixture\\other";
-    else if (fault === "controlWindow") observed.events[0].index = 1;
-    if (!fault) {
-      assert.match(
-        windowsCommandBrokerCoverage(value, observed),
-        /^[a-f0-9]{64}$/u,
-      );
-      continue;
-    }
-    assert.throws(
-      () => windowsCommandBrokerCoverage(value, observed),
-      (error) => {
-        const diagnosis = error.brokerCoverage;
-        assert.equal(error.code, 78);
-        assert.equal(
-          diagnosis.reason,
-          delivered ? "join-rejected" : "delivery-missing",
-        );
-        assert.equal(diagnosis.control.elapsedMs, delivered ? 5000 : 10000);
-        assert.equal(diagnosis.joined, 0);
-        assert.equal(diagnosis.broker.creationTime, identity.creationTime);
-        assert.equal(
-          diagnosis.object.identity,
-          value.original.files[3].identity,
-        );
-        if (delivered) {
-          assert.equal(diagnosis.rejected[fault], 1);
-          assert.equal(diagnosis.candidates[0].accessMask, 1);
-          assert.equal(diagnosis.candidates[0].time, observed.events[0].time);
-          assert.equal(diagnosis.candidates[0].subjectSid, identity.userSid);
-        }
-        assert.ok(
-          error.feasibilityCause.detail.includes(`delivered=${delivered}`),
-        );
-        assert.equal(JSON.stringify(diagnosis).includes(value.gateFile), false);
-        assert.equal(
-          JSON.stringify(diagnosis).includes("untrusted-barrier-field"),
-          false,
-        );
-        return true;
-      },
-    );
-  }
-  const value = {
-      nonce: "a".repeat(32),
-      observer: identity,
-      gateFile: "C:\\fixture\\gate",
-    },
-    observed = await brokerCapture(value);
-  observed.after.effective.available = false;
-  observed.control.unexpected = "untrusted-control-field";
-  assert.throws(
-    () => windowsCommandBrokerCoverage(value, observed),
-    (error) => {
-      assert.equal(error.brokerCoverage, undefined);
-      assert.equal(error.message.includes("untrusted-control-field"), false);
-      return true;
-    },
-  );
-});
-
-test("production coverage joins a fresh audited open to native capture and rejects completed reads without delivery", async () => {
-  const [owner, install, gate, control, captureProgram] = await Promise.all([
-    commandCoverageOwnerProgram(),
-    commandAuditInstallProgram(),
-    commandGateReadProgram(),
-    commandCoverageControlProgram(),
-    commandCaptureProgram(),
-  ]);
-  // Delivery is an independent injected observation. The original completed
-  // read and empty query do not identify a particular API as their cause.
-  for (const fault of [
-    null,
-    "missing",
-    "logon",
-    "object",
-    "time",
-    "token",
-    "substitution",
-    "open",
-  ]) {
-    const calls = [];
-    let capture,
-      observed,
-      receipt,
-      admitted = false;
-    const f = fixture(({ effects, prepared }) => {
-      const coverage = effects.coverage;
-      effects.coverage = async () => {
-        await coverage();
-        observed = await brokerCapture(prepared, {
-          SubjectLogonId: fault === "logon" ? "0x2" : "0x1",
-          ObjectName:
-            fault === "object" ? prepared.files.inspect : prepared.gateFile,
-          TimeCreated:
-            fault === "time"
-              ? "2026-10-09T00:00:00.0000300Z"
-              : "2026-10-09T00:00:00.0000100Z",
-        });
-        prepared.jobHandle = "7";
-        prepared.original.cleanup.files.forEach((file, i) => {
-          file.handle = String(i + 10);
-        });
-        capture = commandCaptureFixture(captureProgram);
-        const api = capture.api,
-          wait = api.WaitForSingleObject,
-          release = api.release_handle,
-          pump = api.command_capture,
-          sacls = new Set();
-        let clock = 0,
-          intent = false,
-          policy = false,
-          impersonated = null,
-          reads = 0,
-          barriers = 0;
-        Object.assign(api, {
-          command_audit_intent: "intent",
-          command_category: "file-system",
-          userSid: prepared.observer.userSid,
-          PER_USER_AUDIT_SUCCESS_INCLUDE: 1,
-          PER_USER_AUDIT_FAILURE_INCLUDE: 4,
-          SE_FILE_OBJECT: 1,
-          SACL_SECURITY_INFORMATION: 8,
-          command_files: [0, 1, 2, 3],
-          command_sacls: [4, 5, 6, 7],
-          command_ids: prepared.original.files.map((file) => file.identity),
-          command_paths: [...Object.values(prepared.files), prepared.gateFile],
-          command_broker_token: "held-primary-token",
-          command_gate_bytes: 0,
-          GENERIC_READ: 0x80000000,
-          FILE_READ_ATTRIBUTES: 0x80,
-          FILE_SHARE_READ: 1,
-          FILE_SHARE_WRITE: 2,
-          FILE_SHARE_DELETE: 4,
-          OPEN_EXISTING: 3,
-          FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
-          CP_UTF8: 65001,
-          WC_ERR_INVALID_CHARS: 128,
-          nonce: prepared.nonce,
-          stdout: {},
-          fputs: () => {},
-          puts: () => {},
-          putchar: () => {},
-          command_policy_query: () => {},
-          command_channel_observe: () => {},
-          command_gate_audit_write: () => {},
-          command_policy_equal: () => calls.push("system-baseline"),
-          command_principal_exists: () => policy,
-          WaitForSingleObject: (event, timeout) =>
-            event === "intent" ? (intent ? 0 : 258) : wait(event, timeout),
-          SetEvent: (event) => {
-            assert.equal(event, "intent");
-            calls.push("intent");
-            intent = true;
-            return true;
-          },
-          AuditSetPerUserPolicy: (sid, value, count) => {
-            assert.equal(intent, true);
-            assert.equal(sid, prepared.observer.userSid);
-            assert.equal(count, 1);
-            assert.equal(value.AuditSubCategoryGuid, "file-system");
-            assert.equal(value.AuditingInformation, 5);
-            calls.push("policy");
-            policy = true;
-            return true;
-          },
-          SetSecurityInfo: (file, kind, mask, owner, group, dacl, sacl) => {
-            assert.equal(policy, true);
-            assert.deepEqual(
-              [kind, mask, owner, group, dacl, sacl],
-              [1, 8, null, null, null, file + 4],
-            );
-            calls.push(`sacl-${file}`);
-            sacls.add(file);
-            return 0;
-          },
-          status_check: (status) => assert.equal(status, 0),
-          ImpersonateLoggedOnUser: (token) => {
-            assert.equal(token, "held-primary-token");
-            calls.push("impersonate");
-            impersonated = token;
-            return true;
-          },
-          CreateFileW: (...args) => {
-            assert.equal(impersonated, "held-primary-token");
-            assert.equal(sacls.size, 4);
-            assert.equal(reads, 2);
-            // The C call converts the desired-access bitmask to a DWORD.
-            args[1] >>>= 0;
-            assert.deepEqual(args, [
-              prepared.gateFile,
-              0x80000080,
-              7,
-              null,
-              3,
-              0x200000,
-              null,
-            ]);
-            calls.push("fresh-open");
-            return fault === "open" ? -1 : "gate-access";
-          },
-          fileid: (handle, output) => {
-            assert.equal(handle, "gate-access");
-            calls.push("identity");
-            output(
-              fault === "substitution"
-                ? "foreign"
-                : prepared.original.files[3].identity,
-            );
-          },
-          strcmp: (a, b) => (a === b ? 0 : 1),
-          wcscmp: (a, b) => (a === b ? 0 : 1),
-          _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
-          _wcstoui64: (text, end) => {
-            end("");
-            return Number(text);
-          },
-          memcmp: (a, b) => (a === b ? 0 : 1),
-          ReadFile: (handle, output, size, count) => {
-            assert.equal(handle, "gate-access");
-            assert.equal(impersonated, "held-primary-token");
-            assert.equal(size, 32);
-            assert.equal(calls.at(-1), "identity");
-            calls.push("read-32");
-            output(prepared.nonce);
-            count(32);
-            if (fault !== "missing") capture.notify(["original-read"]);
-            return true;
-          },
-          release_handle: (slot, operation) =>
-            release(
-              slot === api.command_preflight_owned
-                ? api.ref(slot, "gateRead")
-                : slot,
-              operation,
-            ),
-          command_revert: () => {
-            impersonated = null;
-            api.command_preflight_owned.impersonating = false;
-            return true;
-          },
-          WideCharToMultiByte: (_cp, _flags, nonce, _length, output) => {
-            output(nonce);
-            return 33;
-          },
-          GetCurrentProcessId: () => prepared.observer.pid,
-          GetTickCount64: () => clock,
-          GetSystemTimePreciseAsFileTime: () => {},
-          command_bound: () => assert.ok(clock < 10000),
-          command_gate_read: () => gate.program.runInNewContext(api),
-          command_gate_audit: () =>
-            assert.equal(impersonated, "held-primary-token"),
-          command_capture: (timeout) => {
-            pump(timeout);
-            clock += 5000;
-          },
-          emit: (delivered, startRecords, endRecords, elapsedMs) => {
-            receipt = {
-              event: "P",
-              delivered: delivered === "true",
-              startRecords,
-              endRecords,
-              elapsedMs,
-              query: null,
-            };
-          },
-          command_delivery_query: () => {
-            receipt.query = {
-              from: observed.start.time,
-              to: observed.end.time,
-              records: 0,
-              bytes: 0,
-              candidates: 0,
-              complete: true,
-              error: 0,
-              gateIdentity: prepared.original.files[3].identity,
-              requestedAccess: 0x80000080,
-              performedAccess: 1,
-              readBytes: api.command_gate_bytes,
-              scannedRecords: api.command_scanned,
-              scannedBytes: api.command_scanned_bytes,
-              ...queryObservations(prepared.observer.pid),
-            };
-          },
-          failure: (code) => {
-            api.command_preflight_close(false);
-            const [operation, domain, value] = api.first;
-            throw Object.assign(new Error("Native gate refused"), {
-              code,
-              stderr: `native-windows: operation=${operation} domain=${domain} value=${value}\n`,
-            });
-          },
-        });
-        if (fault === "open") api.GetLastError = () => 5;
-        api.onProject = () => {
-          const event = observed.events[0].raw;
-          Object.assign(api, {
-            process: String(event.pid),
-            object: event.target,
-            eventId: event.opcode,
-            mask: String(event.accessMask),
-          });
-          const selected = captureProgram.selection.runInNewContext(api);
-          if (selected) captureProgram.probe.runInNewContext(api);
-          return selected;
-        };
-        const context = {
-          value: prepared,
-          original: prepared.original.cleanup,
-          admitted: {
-            files: prepared.original.files,
-            tokenHandle: "8",
-            gateHandle: "13",
-          },
-          signal: new AbortController().signal,
-          Buffer,
-          need: assert.ok,
-          digest: sha,
-          windowsFeasibilityCause,
-          windowsCommandBrokerCoverage,
-          sameWindowsIdentity: (a, b) =>
-            JSON.stringify(a) === JSON.stringify(b),
-          native: async () => {
-            calls.push("inspect");
-            const snapshot = structuredClone(
-              reads++ ? observed.before : observed.baseline,
-            );
-            snapshot.audit.included = policy;
-            snapshot.effective.success = snapshot.effective.failure = policy;
-            snapshot.audit.files.forEach((file, i) => {
-              file.saclSha256 = sha(sacls.has(i) ? "owned-acl" : "baseline");
-            });
-            if (fault === "token" && reads === 3)
-              snapshot.token.modifiedId = "00000000:00000009";
-            return snapshot;
-          },
-          call: async (key) => {
-            calls.push(key);
-            if (key === "I") install.runInNewContext(api);
-            if (key === "P") {
-              control.runInNewContext(api);
-              return receipt;
-            }
-            if (key === "B")
-              return {
-                ...(barriers++ ? observed.end : observed.start),
-                records: api.command_records,
-              };
-          },
-          decoder: {
-            state: () => ({
-              ready: true,
-              events: observed.events.slice(0, api.command_records),
-            }),
-          },
-          logons: new Map(
-            observed.events.map((event) => [event.raw.id, event.logonId]),
-          ),
-          failed: null,
-          set coverageAdmitted(value) {
-            admitted = value;
-          },
-        };
-        return owner.runInNewContext(context);
-      };
-    });
-    const result = await f.run();
-    assert.equal(result.status === "PASS", fault === null, fault);
-    assert.equal(admitted, fault === null);
-    assert.equal(f.calls.includes("retire"), true);
-    if (fault) assert.deepEqual(f.requests, []);
-    assert.deepEqual(calls.slice(0, 9), [
-      "inspect",
-      "I",
-      "system-baseline",
-      "intent",
-      "policy",
-      "sacl-0",
-      "sacl-1",
-      "sacl-2",
-      "sacl-3",
-    ]);
-    assert.ok(
-      calls.indexOf("fresh-open") < calls.indexOf("read-32") ||
-        ["open", "substitution"].includes(fault),
-    );
-    if (fault === "missing") {
-      assert.equal(capture.api.command_gate_bytes, 32);
-      assert.equal(capture.api.command_records, 0);
-      assert.equal(receipt.delivered, false);
-      assert.equal(receipt.query.complete, true);
-      assert.equal(receipt.query.records, 0);
-      assert.equal(receipt.query.candidates, 0);
-      assert.equal(receipt.query.readBytes, 32);
-      assert.match(result.cause.detail, /delivery-missing/u);
-    }
-    if (["logon", "time"].includes(fault)) {
-      assert.equal(receipt.delivered, true);
-      assert.equal(capture.api.command_gate_bytes, 32);
-      assert.equal(capture.api.command_records, 1);
-      assert.match(result.cause.detail, /join-rejected/u);
-    }
-    if (fault === "object") {
-      assert.equal(receipt.delivered, false);
-      assert.equal(capture.api.command_records, 1);
-      assert.match(result.cause.detail, /delivery-missing/u);
-    }
-    if (["open", "substitution"].includes(fault)) {
-      assert.equal(calls.includes("read-32"), false);
-      assert.match(
-        result.cause.detail,
-        fault === "open"
-          ? /command-gate-open.*win32=5/u
-          : /command-gate-identity/u,
-      );
-    }
-    assert.equal(capture.api.command_preflight_owned.gateRead, null);
-    assert.equal(capture.api.command_preflight_owned.impersonating, false);
-    if (fault !== "open")
-      assert.equal(capture.closed.includes("gate-access"), true);
-    capture.api.command_preflight_close(false);
-    assert.ok(
-      ["subscription", "bookmark", "notification"].every((handle) =>
-        capture.closed.includes(handle),
-      ),
-    );
-  }
-});
-
 test("actual failed broker reader retains admitted terminal capture and records a separate cleanup error", async () => {
   const source = await readFile(
       new URL(
@@ -8281,7 +6720,7 @@ test("actual failed broker reader retains admitted terminal capture and records 
       const stdout = new PassThrough(),
         pushed = [],
         settled = [],
-        primary = new Error("coverage or command rejected"),
+        primary = new Error("setup or command rejected"),
         pending = new Map(
           ["D", "S"].map((event) => [
             event,
@@ -8298,7 +6737,7 @@ test("actual failed broker reader retains admitted terminal capture and records 
           broker: { stdout },
           pending,
           closing: false,
-          coverageAdmitted: admitted,
+          setupVerified: admitted,
           nativeException: () => {},
           need: assert.ok,
           digest: sha,
@@ -8341,7 +6780,7 @@ test("actual failed broker reader retains admitted terminal capture and records 
     }
 });
 
-test("actual rejected-coverage retirement restores originals without rethrowing the primary and still rejects cleanup failures", async () => {
+test("actual rejected-setup retirement restores originals without rethrowing the primary and still rejects cleanup failures", async () => {
   const source = await readFile(
       new URL(
         "../ci/native/win32/feasibility-command-effects.js",
@@ -8369,10 +6808,10 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
     "reader-barrier",
     "abandon",
   ]) {
-    const primary = Object.assign(new Error("coverage delivery absent"), {
+    const primary = Object.assign(new Error("broker setup authority absent"), {
         feasibilityCause: {
           code: "prerequisite-unavailable",
-          detail: "coverage delivery absent",
+          detail: "broker setup authority absent",
         },
       }),
       cleanup = Object.assign(new Error(`${fault} refused`), {
@@ -8399,7 +6838,7 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
         cleanupReady: true,
         pending: new Map(),
         prepared: value,
-        coverageAdmitted: false,
+        setupVerified: false,
         need: assert.ok,
         digest: sha,
         nativeException: () => {},
@@ -8407,7 +6846,7 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
         windowsCommandCleanupSnapshot,
         closed: Promise.resolve({ code: 0, signal: null }),
         reading: Promise.resolve(),
-        decoder: { finish: assert.fail }, // Rejected coverage cannot claim admitted capture.
+        decoder: { finish: assert.fail }, // Rejected setup cannot claim admitted capture.
         preparation: { settle: async () => calls.push("preparation") },
         call: async (key) => {
           calls.push(key);
@@ -8467,12 +6906,12 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
       };
     const f = fixture(({ effects }) => {
       const prepare = effects.prepare,
-        coverage = effects.coverage;
+        coverage = effects.setup;
       effects.prepare = async (...args) => ({
         ...(await prepare(...args)),
         sentinelSha256: sha(JSON.stringify(file)),
       });
-      effects.coverage = async () => {
+      effects.setup = async () => {
         await coverage();
         throw primary;
       };
@@ -8493,7 +6932,10 @@ test("actual rejected-coverage retirement restores originals without rethrowing 
       assert.equal(result.cleanup.emergency, false);
     }
     assert.deepEqual(f.requests, []);
-    assert.equal(primary.feasibilityCause.detail, "coverage delivery absent");
+    assert.equal(
+      primary.feasibilityCause.detail,
+      "broker setup authority absent",
+    );
     assert.deepEqual(calls.slice(0, 5), [
       "D",
       "domain",

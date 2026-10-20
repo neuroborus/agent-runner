@@ -4,14 +4,11 @@ import {
   feasibilityFailureCause,
   unavailableFeasibilityResults,
 } from "../feasibility/index.js";
-import {
-  digest,
-  normalizeWindowsIdentity,
-  sameWindowsIdentity,
-} from "./protocol.js";
+import { digest, normalizeWindowsIdentity } from "./protocol.js";
 import {
   createWindowsCommandEffects,
-  windowsCommandBrokerCoverage,
+  windowsCommandBrokerSetup,
+  assessWindowsCommandObservation,
 } from "./feasibility-command-effects.js";
 
 const hash = (v) => typeof v === "string" && /^[a-f0-9]{64}$/u.test(v);
@@ -21,122 +18,6 @@ const need = (value, detail, code = "missing-observation") => {
       feasibilityCause: { code, detail },
     });
 };
-/** A reply cannot replace native token, held object, or Security observations. */
-export function assessWindowsCommandObservation(
-  spec,
-  observation,
-  reply,
-  nonce,
-) {
-  const before = normalizeWindowsIdentity(observation.before),
-    after = normalizeWindowsIdentity(observation.after);
-  need(
-    sameWindowsIdentity(before, after) &&
-      before.userSid === spec.userSid &&
-      before.sessionId === spec.sessionId &&
-      observation.creationJob === true &&
-      observation.imageSha256 === spec.helperSha256 &&
-      observation.beforeToken.appContainer === false &&
-      observation.beforeToken.integrity === 8192 &&
-      typeof observation.beforeToken.restricted === "boolean" &&
-      (spec.control || observation.beforeToken.restricted === true) &&
-      Number.isInteger(observation.beforeToken.restrictingSids) &&
-      observation.beforeToken.restrictingSids <= 32 &&
-      (spec.control
-        ? observation.beforeToken.restrictingSids === 0
-        : observation.beforeToken.restrictingSids > 0) &&
-      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(spec.authenticationId) &&
-      observation.beforeToken.authenticationId === spec.authenticationId &&
-      hash(observation.beforeToken.restrictedSidsSha256) &&
-      JSON.stringify(observation.beforeToken) ===
-        JSON.stringify(observation.afterToken),
-    "Command process, image, token or creation-time Job custody did not join.",
-  );
-  need(
-    reply.exitCode === 0 &&
-      reply.stdout ===
-        (spec.action === "inspect"
-          ? nonce
-          : spec.permit
-            ? "attempt:written"
-            : "attempt:denied"),
-    "The fixed command did not acknowledge its expected result.",
-  );
-  const start = BigInt(observation.start.time),
-    end = BigInt(observation.end.time);
-  need(
-    observation.captureComplete === true &&
-      end > start &&
-      BigInt(before.creationTime) > start &&
-      BigInt(before.creationTime) < end &&
-      observation.end.sequence === observation.start.sequence + 1,
-    "The acknowledged native capture window is incomplete.",
-  );
-  const events = observation.events.filter(
-    ({ raw, time, logonId }) =>
-      raw.pid === before.pid &&
-      raw.subjectSid === before.userSid &&
-      logonId === spec.authenticationId?.replace(":", "") &&
-      BigInt(time) > start &&
-      BigInt(time) < end,
-  );
-  const mask = spec.action === "inspect" ? 1 : 2;
-  const target = events.filter(
-    ({ raw }) =>
-      raw.target.toLowerCase() === spec.target.toLowerCase() &&
-      (raw.accessMask & mask) !== 0,
-  );
-  need(
-    target.length > 0 &&
-      target.every(({ raw }) =>
-        spec.permit
-          ? raw.opcode === "4663" && raw.auditFailure === false
-          : raw.opcode === "4656" && raw.auditFailure === true,
-      ),
-    "Security object access did not establish the permitted control or denial.",
-  );
-  need(
-    events.some(
-      ({ raw, recordId, time }) =>
-        raw.target.toLowerCase() === spec.gateFile.toLowerCase() &&
-        raw.opcode === "4663" &&
-        raw.auditFailure === false &&
-        (raw.accessMask & 1) !== 0 &&
-        target.every(
-          (v) =>
-            BigInt(recordId) > BigInt(v.recordId) &&
-            BigInt(time) >= BigInt(v.time),
-        ),
-    ),
-    "The audited held gate did not acknowledge completed target I/O.",
-  );
-  for (const object of [observation.object, observation.gate])
-    need(
-      object.before.identity === object.after.identity &&
-        /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(object.before.identity) &&
-        hash(object.before.daclSha256) &&
-        hash(object.after.daclSha256),
-      "A held file/DACL observation lost its original native identity.",
-    );
-  need(
-    observation.gate.before.sha256 === digest(nonce) &&
-      observation.gate.after.sha256 === digest(nonce) &&
-      observation.gate.before.daclSha256 ===
-        observation.gate.after.daclSha256 &&
-      observation.object.before.sha256 === digest(nonce) &&
-      observation.object.after.sha256 ===
-        digest(
-          spec.permit && spec.action !== "inspect" ? nonce + "-edited" : nonce,
-        ) &&
-      (spec.action !== "outside" ||
-        observation.object.before.daclSha256 ===
-          observation.object.after.daclSha256),
-    "The held sentinel changed outside its permitted operation.",
-    "observed-escape",
-  );
-  return digest(JSON.stringify({ spec, observation }));
-}
-
 export async function runWindowsFeasibilityCommand(
   dispatch,
   inputs,
@@ -212,9 +93,9 @@ export async function runWindowsFeasibilityCommand(
       "Native privileges, audit interfaces or complete Job custody is unavailable.",
       "prerequisite-unavailable",
     );
-    stage = "broker-coverage";
-    const coverage = await bounded(() => effects.coverage(prepared, signal)),
-      witnesses = [windowsCommandBrokerCoverage(prepared, coverage)];
+    stage = "broker-setup";
+    const setup = await bounded(() => effects.setup(prepared, signal)),
+      witnesses = [windowsCommandBrokerSetup(prepared, setup)];
     stage = "installed-schema";
     const schema = await bounded(() => effects.schema(prepared, signal));
     need(

@@ -847,75 +847,34 @@ held deletion handles and permitted command opens; it does not compile the helpe
 Native watcher transport tests retain pipe errors and require a complete retirement
 witness. Source checks protect live custody, the held NUL handle, audit-gate DACL
 protection against inherited workspace grants and saved ACL protection through restoration.
-Bounded native transcripts exercise the finite decoder and broker coverage gate:
-system success disabled with effective per-user success and matching delivery,
-unavailable queries/coverage, missing or misattributed delivery, and actual
-administrative token binding. No version/schema or other Codex probe precedes
-coverage. Controlled interruption and partial-setup failures preserve first causes
-and separate cleanup uncertainty; restoration follows independent closed custody.
-Capture and watcher delivery errors still fail after verified safe restoration;
-missing retirement proof refuses restoration.
-Actual-source coverage-control and driver regressions use controlled clocks and
-native calls to distinguish a bounded no-event receipt from rejected logon/time/
-object attribution. Refusal diagnostics retain bounded typed facts and predicate
-counts without raw XML or paths. The actual broker reader preserves admitted
-terminal capture after a primary failure. Rejected-coverage cleanup exercises
-original domain retirement, capture closure, watcher barriers, independent exact
-restoration and fixture removal; the original refusal survives both successful
-settlement and separate cleanup failures. These tests add no native support claim
-or slow-tier assignment.
-The same controlled capture fixture drives case-variant original names through
-the source subscription contract, native control predicate and real decoder/join.
-Missing delivery and mismatched attribution still refuse all probes and attempt
-independent restoration; restoration failure remains separate. Source execution
-also checks the diagnostic query's original FILETIME interval, shared capture
-limits and independent query/event/render-context closure. Only that failure-only
-query drops the subscription's SID/type filter. Actual predicate bodies count
-original actor, held-name and successful read matches and SID/type intersections,
-with loss and unavailable observations separate. Fixtures cover zero results,
-filter exclusion, malformed or missing fields, original native render failures,
-strict scalar/identity/interval/access carriers, and separate closure failures.
-All examined records and XML/value render reservations consume the shared
-4096-record/8-MiB budget and combined 64-KiB record ceiling; subsequent capture
-cannot reuse that budget. Historical matches and incomplete diagnostics still
-refuse probes and preserve independent restoration and separate cleanup failure.
-These focused portable fixtures add no slow-tier requirement and establish no
-Windows event generation, native XPath/SDK acceptance or hosted audit delivery.
-The gate audit fixture executes the actual query and writer bodies with injected
-installed SACL and effective thread-token APIs. It covers native failures, short
-token reads, unsupported ACE layouts, explicit truncation and independent token
-closure, retaining saved errors even when later queries or cleanup change them.
-The original gate-read fixture verifies sampling while still impersonating and
-after the original read failure is latched. Cached facts appear only in refused
-coverage diagnostics or fatal native output; successful broker output stays
-unchanged and retirement does not replay queries. Optional malformed facts cannot
-replace the missing-delivery refusal, admit empty or mismatched records, or
-change the original 4656/4663 joins. These fast fixtures establish neither a
-socket-transfer repair nor an audit-delivery repair and add no slow-tier check.
-The same actual-body fixtures cover original setter start/completion binding and
-immediate-error preservation, File System snapshot projection, and a separate
-installation-to-control 4912 query. They exercise principal/logon/target/GUID
-matches and unknown fields, original query preservation, shared record/render
-charges through later capture, and independent query/event/context closure.
-Fixed-buffer channel fixtures cover Boolean values, unavailable reads, malformed
-types/sizes and separate closure failures, including zero-error failed reads
-and consumed-slot closure failures that must still refuse capture retirement.
-Strict caller fixtures bind the installation and original control intervals,
-reject inconsistent scalar authority, and retain the original missing-delivery
-refusal. All APIs and clocks are injected; these additions perform no native
-tool, policy or channel change and add no slow-tier assignment or native
-acceptance claim.
-The production coverage sequence also drives the actual policy/SACL installer,
-gate open/read, bounded delivery loop and capture/bookmark bodies together.
-Injected APIs verify the fresh `CreateFileW` pathname open under the held broker
-token independently of whether the fixture delivers an event. A completed
-32-byte read with zero delivered records still blocks. Changed token, object,
-event time or logon and a substituted file ID cannot admit probes. Installed
-policy/SACL readback precedes the new open, and file identity precedes I/O.
-Rejected-coverage retirement additionally attempts every independent reader and
-restoration barrier after capture, writer or abandon failure, retaining separate
-first and cleanup causes. These fast regressions add no slow-tier requirement;
-matching Windows CI must establish actual generation and subscription delivery.
+Bounded native transcripts distinguish verified setup from real command delivery.
+System-success-disabled cases still require both effective per-user outcomes and
+all original token/object/SACL joins. Setup admits only schema/version probes,
+suspended-server admission and the real permitted outside control. The native and
+JavaScript guards reject release or forwarding before that control has fresh
+4663 target evidence, its later audited marker, independent process/token/image
+joins, held-file observations and successful target restoration.
+The actual setup owner checks stale baselines before setters and all cleanup,
+restoration and watcher acknowledgements before installation. Controlled failures
+preserve the original setup cause separately from settlement uncertainty. Native
+subscription/projection and decoder fixtures retain case-variant names and reject
+wrong subjects/objects/logons, stale or historical records, missing target/marker
+evidence, loss and failed controls. Every restricted command keeps its own
+4656 denial or 4663 permitted I/O, completed-I/O marker and sentinel checks.
+
+Terminal regressions require a separate broker 4663 gate read after complete domain
+retirement, bound to D's native domain-empty FILETIME and the last command window.
+The last child marker, absent/stale events and an unclosed decoder cannot replace
+it. Actual-source UTC parsing and native projection reject queued older broker
+records, equal timestamps and malformed dates while retaining supported fractional
+precision. The actual failed broker reader keeps terminal capture through cleanup;
+independent domain/watcher retirement, exact restoration/readback, fixture removal
+and separate cleanup failures remain covered. The retained gate-read fixtures
+execute installed SACL/ACE/thread-token query and failure output bodies, including
+short reads, unsupported layouts, truncation, original-error preservation and
+independent token/handle closure. Only obsolete P/M-specific delivery/query tests
+are removed. These portable cases introduce no validation command, slow-tier
+assignment, provider service, system-policy change or native acceptance claim.
 Custody/channel source execution covers original overlapped completion before
 event release, cancellation settlement within the original operation deadline,
 process failure without releasing unsettled I/O storage, distinct bridge

@@ -2548,15 +2548,14 @@ restoration and whole-domain verification remain mandatory; matching native CI
 must establish the lifecycle repair separately from subscription delivery.
 The original lifetime launch count and census capacity remain unchanged.
 The nine `audit` slots retain the reached stage (0 admission, 1 admitted,
-2 held files prepared, 3 subscribed, 4 policy/SACL installed, 5 control read,
-6 control acknowledged), subscription status, notifications, enumeration calls,
-returned events, resets, successful selected bookmarks, control read bytes and
-acknowledgment. These cache existing operations only, without additional gate
+2 held files prepared, 3 subscribed, 4 policy/SACL installed, 5 real control started,
+6 real control acknowledged), subscription status, notifications, enumeration calls,
+returned events, resets, successful selected bookmarks, terminal read bytes and
+control acknowledgment. These cache existing operations only, without additional gate
 I/O or policy changes. The strict caller retains the raw record within its
 existing 4 KiB failure bound; malformed metadata cannot supply a cause or proof.
-Missing delivery also carries these audit counters in the existing diagnostic
-query object, since a normally returned `P` control need not trigger native
-fatal-error reporting. The counters never satisfy delivery or its held-object joins.
+The counters accompany fatal native refusals within the existing bound; they
+never satisfy control delivery or terminal retirement proof.
 The command subscription filters the original principal, file type and event
 classes, retaining loss/clear events. A native case-insensitive filter forwards
 only the original four held names, and unrelated rows consume the same limits.
@@ -2566,13 +2565,11 @@ token/logon, process-birth, successful-4663, access and acknowledged-time bounds
 remain mandatory. The gate requests one fresh pathname open under the queried
 token and checks its file ID against the original held file before reading;
 no account or exclusion policy changes establish coverage.
-When its ten-second delivery control fails, a separate Security query uses only
-that original read interval and the remaining 4096-record/8-MiB capture bounds.
-It reports bounded enumeration/candidate counts, exact errors, completion state
-and the verified held read's identity/access/byte facts. Query rows never enter
-the subscription decoder, advance its bookmark or satisfy admission. Zero counts
-describe this scoped observation, not global event absence. Independent custody,
-retirement, restoration and verification remain required after either outcome.
+A real command control and later audited completion marker establish delivery;
+missing or mismatched events keep release fenced. No retrospective query can
+replace the original subscription. Complete domain retirement precedes the
+separate terminal broker gate read, full decoder closure, independent observer
+retirement and verified restoration.
 There is no external input-release service, foreign SDK or provider installer.
 Native and model-free FAIL, malformed/missing evidence, unsettled cleanup and any
 required BLOCKED record fail the OS check. Protected-only BLOCKED records are
@@ -3028,8 +3025,8 @@ Neither missing audit delivery nor a diagnostic supplies admission or settlement
 
 Pull subscriptions use initially nonsignaled manual-reset notification events.
 `command_capture` alone owns readiness waits, enumeration and checked reset:
-nonblocking pumps return without `EvtNext` when not ready; coverage and delivery
-retain 1-ms waits and barriers retain 10-ms waits. Notified batches drain through
+nonblocking pumps return without `EvtNext` when not ready; terminal delivery
+retains 1-ms waits and barriers retain 10-ms waits. Notified batches drain through
 `ERROR_NO_MORE_ITEMS`, then one query after `ResetEvent` catches arrivals between
 exhaustion and reset. A second empty result returns to notification waiting;
 later signals remain pending instead of repeatedly enumerating an exhausted
@@ -3039,7 +3036,7 @@ batch, subscription, bookmark and notification closures on retirement or partial
 failure, including inactive preflight. Immediate primary errors and separate
 cleanup uncertainty remain intact; 4317 and other unexpected API errors stay fatal.
 The Security channel, query, strict/future flags, missing-record requirements and
-10-second coverage/barrier/delivery and 120/30-second operation/cleanup bounds
+10-second barrier/terminal-delivery and 120/30-second operation/cleanup bounds
 remain unchanged.
 
 Fresh hosted Windows CI must establish whether the observed
@@ -3056,20 +3053,26 @@ that live broker's actual token, principal/logon and creation identity.
 must establish effective File System success after owned inclusion is installed.
 The query takes the actual held `HANDLE` with `TOKEN_QUERY`, not `HANDLE *`, and
 links with Advapi32; that existing contract is preserved.
-A bounded positive control uses
+Verified setup admits only version/schema probes, suspended App Server creation
+and admission, and the existing permitted outside control. These processes keep
+their native creation-time Job and token checks. Setup supplies no event-delivery
+proof. App Server release and RPC forwarding remain fenced until the real control
+has independently established its expected permitted I/O and subsequent audited
+completion marker. The obsolete broker-only P/M preflight receipt and its
+retrospective delivery/policy/channel diagnostics are removed; there is no new
+control protocol or privileged service.
+
+The separate post-domain terminal witness still uses
 [CreateFileW](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew)
-with `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT` under that exact token.
-It requests a new pathname access check against the installed SACL instead of
-using `ReOpenFile` on an access grant acquired before installation. The original
-file and parent handles remain held; the opened file ID must match before its
-single 32-byte nonce read. Checked closure and impersonation reversion remain
-independent. A completed read without original subscription delivery still blocks;
-the empty original-interval diagnostic query identifies no more specific cause.
+with `OPEN_EXISTING` and `FILE_FLAG_OPEN_REPARSE_POINT` under the held broker token.
+The file ID must match before reading the nonce. Gate closure, token closure and
+impersonation reversion remain independently checked. A completed read without
+delivered evidence still cannot establish auditing.
 
 The producer uses
 [ImpersonateLoggedOnUser](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-impersonateloggedonuser)
 with the broker's held primary token, opened for query and duplication, and
-performs the fresh gate open/read before reverting. The owned
+performs the post-domain gate open/read before reverting. The owned
 [per-user policy](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditsetperuserpolicy)
 targets that user SID and includes File System success and failure auditing;
 the SACL audit ACE covers that SID's `FILE_READ_DATA | FILE_WRITE_DATA` with
@@ -3089,127 +3092,50 @@ Its fixed predicate selects loss/clear records plus failed
 (`AuditFailure`, `0x0010000000000000`) and 4663 records for the exact subject SID
 and `ObjectType=File`. The decoder requires successful
 [4663 access use](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4663)
-(`AuditSuccess`, `0x0020000000000000`) for the gate read: a successful 4656
-handle request cannot replace actual `FILE_READ_DATA` use. Held-name joins are
-case-insensitive; exact principal/logon, broker PID/birth and fresh barrier
-time/record-count joins remain separate requirements. Historical query matches
-cannot satisfy this future-delivery contract.
+(`AuditSuccess`, `0x0020000000000000`) for permitted target I/O and the later
+completed-I/O gate read. Denied commands still require failed 4656 access checks;
+a successful handle request, successful read, historical event or empty capture
+cannot establish denial. Held-name joins remain case-insensitive and every event
+joins the exact command PID/birth, principal/logon, image, token, access mask and
+fresh acknowledged capture window.
 
-The original impersonated gate read now caches query-only producer inputs once:
-the installed held gate SACL's presence and ACE count, at most eight ACEs with
-type/flags and supported audit-ACE mask/SID, and the actual thread token's user
-SID, authentication ID, token type/impersonation level and effective File System
-policy bits. Each query retains its immediate native status; `-1` statuses and
-`null` values distinguish unattempted, short or unsupported facts. More than
-eight ACEs explicitly marks truncation. The token handle is closed independently
-and queries restore the caller's last error. A refused token close keeps its
-separate cleanup cause and blocks after the gate handle and impersonation have
-received their independent settlement attempts. No policy setter is added.
-The nine status slots name, in order, `GetSecurityInfo`,
-`GetSecurityDescriptorSacl`, `GetAclInformation`, `OpenThreadToken`,
-`GetTokenInformation(TokenUser)`, subject SID conversion,
-`GetTokenInformation(TokenStatistics)`, `AuditComputeEffectivePolicyByToken`
-and token `CloseHandle`. Each ACE row contains index, query/conversion status,
-type, flags, mask and SID; unsupported layouts leave mask/SID unavailable.
-On missing delivery these facts accompany existing policy/channel prerequisites
-in the diagnostic `P` receipt; fatal native refusal emits the same cached facts
-through ordinary stderr before cleanup. Successful delivery emits no extra
-carrier, and retirement does not repeat the queries. Missing or malformed optional
-facts stay unavailable without replacing the original refusal. Neither these
-queries nor a completed gate read substitute for nonempty subscription delivery
-and the original subject/object/time joins.
+The real control reuses C/N/T/F/U/B and the same independent process/token
+readers, held targets and decoder as the restricted command cases. Its fresh
+4663 write success and later 4663 gate-read marker must join the actual helper
+birth, SID/logon, image, token, access mask and capture window. The expected write
+must complete with its fixed reply while original gate bytes/DACLs and held file
+identities remain unchanged. After assessment, X restores the outside control
+target before release. Native guards require the completed control, delivered
+target/marker observations and reset; the JavaScript effects owner independently
+assesses that evidence before allowing R or RPC input. Readiness, verified setup
+or an RPC success cannot replace this proof.
 
-Saved native observations show all nine query statuses succeeded and one
-supported audit ACE with flags `0xc0` and mask `0x3` matching the actual thread
-subject. The thread token had `SecurityImpersonation` level and effective
-success/failure policy bits `0x3`. The original gate read completed,
-but the subscription record window was empty and no event joined. These facts
-establish no producer/subscription mismatch or supported functional correction;
-the missing-delivery refusal continues to block provider launch pending fresh
-matching Windows evidence.
+Independent baseline and installed reads retain the administrative broker's exact
+primary token, SID/logon, birth and held gate, its exclusion from the empty payload
+Job, unchanged global system policy, exact per-user inclusion and the SACL on each
+of four original objects. Both effective audit outcomes remain required. A stale
+baseline refuses installation; setup cannot start setters until every cleanup,
+restoration and watcher owner has acknowledged original custody. Exact occupied
+ACL sizing excludes unused bytes from readback authority.
 
-The finite decoder additionally requires a delivered Security 4663 success with
-matching PID, principal/logon, read access and fresh acknowledged window, while
-independent before/after reads preserve the original file/DACL/bytes and token.
-The reader additionally checks the broker is outside its empty payload Job,
-the unchanged system policy, exact owned per-user inclusion across every
-subcategory, and the installed SACL on each of the four original held objects.
-Both effective success and failure auditing are required. A separate baseline
-read precedes the installation intent; stale object identities, ACLs or policy
-stop before mutation. Audit ACLs use their exact occupied size, including the
-SID's embedded first DWORD, so unused allocation bytes do not become authority.
-Configured bits, RPC acknowledgements and injected booleans supply no delivery
-proof. Unavailable effective coverage remains BLOCKED with zero Codex launches.
-The fixed `P` receipt reports whether its bounded native loop saw delivery,
-record counts before/after and elapsed time, joined to the surrounding decoder
-barriers. The independent matching event must fall inside those control record
-counts as well as the strict barrier times. Refusal
-retains the original broker birth, token logon, held object identity/name digest,
-barrier times/counts and at most eight typed event candidates with failed
-predicates. Missing delivery and rejected attribution have distinct fixed causes;
-neither establishes an absent API. Raw XML and object paths stay out of this
-diagnosis, and all original SID/logon/access/time comparisons remain mandatory.
-On missing delivery, the retrospective query retains only the original event IDs
-and FILETIME interval, without the subscription's SID/ObjectType restriction.
-The subscription itself remains unchanged. Scalar predicate counts distinguish
-the original broker PID, case-insensitive held gate name, successful 4663
-FILE_READ_DATA use, SID and exact File type, with their actor/object/read and
-SID/type intersections. Loss events remain a separate count. The receipt binds
-the broker PID, original held identity, interval and original read/access facts;
-it exposes no unrelated event contents or names and never advances a bookmark.
+After complete process/Job retirement, D records a fresh native FILETIME boundary
+and performs the separate broker gate read. Its delivered 4663 success must join
+the original broker PID/birth, SID/logon and held gate after that boundary and
+after the last command window. The native wait ignores queued broker events whose
+UTC timestamp does not follow the boundary; final decoding independently checks
+the join. The last child-command marker cannot replace it.
+S retains full bookmark/record/byte decoder closure and independent observer
+retirement. Capture failure still fails settlement while independently verified
+empty custody permits owned restoration; missing retirement proof cannot permit
+restoration. Original failures and separate cleanup uncertainty remain distinct.
 
-Optional typed field rendering uses a separately owned
-[EvtCreateRenderContext](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtcreaterendercontext)
-and bounded [EvtRender](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtrender) values;
-missing, malformed or unavailable fields make the observation incomplete.
-Its first native read failure (or local invalid-data status) and unavailable-record
-count remain separate from query/enumeration and cleanup failures. Known partial
-predicate counts cannot establish absence or delivery. Every examined diagnostic
-record consumes the same lifetime 4096-record budget as subscription capture,
-including rejected or unrenderable records. XML and typed-value render
-reservations share the same
-8-MiB budget and combined 64-KiB per-record ceiling; later capture retains those
-charges. No budget, original query interval or deadline resets, extra gate I/O,
-control, subscription retry or policy setter are introduced. Complete zero
-results and historical matches both preserve the original missing-delivery
-refusal. These observations supply diagnostics, not an audit repair or native
-acceptance; matching Windows CI must establish the next supported correction.
-The original system-policy snapshots also project the selected File System
-`AuditingInformation` scalar with explicit availability, without another policy
-read. Hashes, effective-policy observations and all SACL comparisons remain
-independent preservation evidence.
-The original `I` receipt retains FILETIME start/completion bounds and its setter
-status. After the unchanged failed `P` query, a separate 4912 query spans that
-installation start through the original `P` completion. Its match counts are
-principal SID, subject logon, target SID, subcategory and their complete
-intersection; unknown counts follow the first four fields. It retains query,
-render and optional held-token logon-read statuses. The system execution PID is
-never treated as the broker PID. These rows consume the same remaining capture
-budgets, including rejected rows and both render reservations.
-That failure path reads local Security channel configuration once with reserved
-flags zero and fixed caller-owned storage. It retains actual open/read/close
-statuses, returned size and used/required sizes; only a scalar Boolean of the
-expected size yields a known enabled value. It never enables or saves the
-channel. Its owned handle closes independently; failed prerequisite-handle
-closure remains a capture-retirement refusal after its slot is consumed.
-Missing or malformed optional carriers become unknown in caller diagnostics
-without replacing the original delivery refusal. None of these observations
-establishes event absence, generation, delivery, admission or cleanup, or selects
-a functional repair.
-Fixed operation labels distinguish startup, cleanup admission, baseline reads,
-installation, effective reads, delivery and the final join. They preserve the
-original native or transport cause and report local admission failures even when
-stderr is absent. The saved absent-output report establishes no particular API
-or provider-authorization cause. Fresh post-preparation Windows evidence remains
-necessary to identify any remaining refusal and prove broker coverage and all
-original model-free cases; portable coverage does not establish that acceptance.
-Rejected coverage fences provider work but does not itself fail independently
-verified cleanup. Retirement retains a separate failure latch, drains admitted
-terminal capture even after a primary refusal, and preserves actual stop errors.
-Empty original custody and unchanged sentinels precede observer/capture closure,
-watcher retirement, exact baseline restoration, independent restoration readback
-and fixture removal. Any failed cleanup predicate still withholds settlement;
-the primary refusal remains separate from cleanup causes.
+The terminal gate-read diagnostics retain bounded installed SACL/ACE and effective
+thread-token facts, immediate query failures and checked token/handle closure.
+They remain fatal-refusal diagnostics, never success or retirement authority.
+Saved broker-only reads with empty capture establish no producer/subscription
+repair. Missing actual control or terminal delivery remains unresolved until fresh
+matching Windows CI establishes it. Portable regressions supply no native
+acceptance; all original scenarios and system records remain required.
 A retirement `lstat` returning `ENOENT` is diagnostic only until independent
 original-domain settlement authorizes closure; an absent path alone proves
 neither process/Job retirement nor audit restoration.

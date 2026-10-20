@@ -857,21 +857,27 @@ only owned audit changes and refuses altered DACLs. Its fixture deletion waits
 for the independent restoration reader's complete baseline check and separately
 observed retirement. Capture and original command failures still fail settlement;
 later cleanup uncertainty is recorded separately without replacing the cause.
-After owned per-user inclusion, independent native reads bind
-AuditComputeEffectivePolicyByToken to the held administrative broker's actual
-primary token, principal/logon and creation identity. A matching delivered Security
-4663 gate-read success in a fresh bounded capture window must precede every Codex
-launch, including version/schema probes. The control requests a fresh
-`CreateFileW` pathname access check after independent installed-policy/SACL
-inspection, impersonating that same held token. Original file and parent handles
-remain held; `OPEN_EXISTING`, `FILE_FLAG_OPEN_REPARSE_POINT` and a matching file ID
-before the one nonce read preserve object attribution. This replaces the
-`ReOpenFile` control without diagnosing the previous missing delivery.
-The original-interval query remains diagnostic-only, and even a completed read
-with no delivered records refuses admission. System bits remain preservation evidence;
-unavailable coverage blocks with zero Codex effects. Inclusion can add auditing;
-the Administrators exception applies to exclusion, as documented by the
-[primary Microsoft references](../ci/native/README.md#separate-minimal-feasibility-experiment).
+After owned per-user inclusion, independent native reads bind the administrative
+broker's held primary token, principal/logon, birth and original gate to unchanged
+system policy, exact per-user inclusion and all four installed SACLs. Every
+cleanup/restoration owner acknowledges original custody before setters. Verified
+setup permits V/G, suspended server creation/admission and the existing permitted
+outside control within native Jobs; it supplies no event-delivery proof.
+The real C/N/T/F/U/B control must establish fresh target 4663 success and a later
+audited completion marker through independent process/token readers and held-file
+observations. SID/logon, PID/birth, image, token, access mask and capture window
+must join. Only assessed control completion and outside-target restoration admit
+App Server release or RPC forwarding, with guards in both controller and native
+broker. Restricted commands retain their own failed 4656 or successful 4663
+observations, subsequent markers and unchanged protected sentinels.
+The broker-only P/M preflight and its diagnostic retrospective queries are removed.
+Post-domain retirement still performs a distinct broker gate read: its fresh 4663
+success must follow the native domain-empty FILETIME boundary and the last command
+window. The last child marker cannot replace it. Full decoder/bookmark closure,
+independent domain/observer retirement and exact owned restoration remain required.
+Missing events, stale evidence, successful queries or completed reads cannot
+establish denial or delivery. System audit policy remains unchanged; actual
+producer/subscription delivery and native acceptance remain unresolved.
 The reached command preflight splits API failures from pure admission invariants
 and preserves their fixed operation/domain/value at `native-prerequisites` through
 the closed diagnostic parser. Immediate failure-only Win32 errors, returned
@@ -920,7 +926,7 @@ Command pull subscriptions use initially nonsignaled manual-reset notification
 events. The capture owner alone waits, drains signaled batches to exhaustion,
 checks reset and performs one post-reset query to preserve racing arrivals.
 A second empty result returns to waiting; non-ready pumps never enumerate.
-Coverage/delivery retain 1-ms waits, barriers retain 10-ms waits, and all existing
+Terminal delivery retains 1-ms waits, barriers retain 10-ms waits, and all existing
 windows, strict query and admission requirements remain fixed. Remaining batch,
 subscription, bookmark and notification handles retire independently on success
 and partial failure, including inactive preflight, preserving primary errors and
@@ -939,15 +945,16 @@ NUL descriptors, system policy, absent inclusion and unset intent before reporti
 custody readiness. A separate broker baseline read precedes installation; later
 reads bind every original held object to its exact owned SACL and require full
 per-user inclusion, unchanged system policy and effective success/failure auditing.
-The broker must remain outside its empty payload Job. Only the actual nonce
-gate-read event joined to its original token, birth, SID/logon and acknowledged
-barriers admits the unchanged buffered command cases. Exact occupied ACL sizing
+The broker must remain outside its empty payload Job. Only the real permitted
+control and later audited completion marker, joined to independent process/token
+observations and acknowledged windows, admit the buffered command cases. Exact occupied ACL sizing
 excludes unused allocation bytes from the expected readback. Fixed operation
 labels preserve local startup/admission failures without inferring a native API
 or authorization cause from absent output. Matching Windows acceptance is pending.
 The custody owners prove complete empty custody and observer retirement before
-restoring verified unchanged owned changes, including partial installation. Refused admission
-needs no missing success witness; admitted capture/terminal requirements remain.
+restoring verified unchanged owned changes, including partial installation. Refused setup
+claims no admitted capture; verified setup retains complete terminal delivery and
+decoder closure even after a later control or command refusal.
 Safe restoration is attempted even after capture failure, with first cause and
 settlement uncertainty retained separately. Preparation acquisition precedes
 canonicalization, directory identity reads and building. Observed closure of

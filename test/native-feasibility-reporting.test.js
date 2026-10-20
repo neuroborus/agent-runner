@@ -1017,10 +1017,7 @@ test("Windows final report preserves broker refusal through later watcher and cl
       "native-windows: operation=helper-invariant domain=invariant value=0\n",
     ),
   });
-  original.feasibilityCause = windowsFeasibilityCause(
-    "broker-coverage",
-    original,
-  );
+  original.feasibilityCause = windowsFeasibilityCause("broker-setup", original);
   const watcher = Object.assign(new Error("Later watcher failed"), {
       code: 126,
     }),
@@ -1054,7 +1051,7 @@ test("Windows final report preserves broker refusal through later watcher and cl
           auditInterface: true,
           completeRetirement: true,
         }),
-        coverage: async () => {
+        setup: async () => {
           throw watcher;
         },
         retainFailure: (error) => {
