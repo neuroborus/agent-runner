@@ -816,6 +816,17 @@ print concise labeled activity as it is persisted; `status` prints the resolved
 mode, current state, pause, artifact paths, findings, fingerprints, commit SHAs,
 and a bounded public activity summary.
 
+Status also shows the latest observed attempt's role, exact checkpoint, outcome,
+accounting completeness, native turns, command completions, and compactions.
+UTF-8 byte measurements for the supplied prompt, reconstruction prompt, schema,
+output, and structured-result JSON stay separate from provider token snapshots.
+Prompt bytes include directly supplied text; referenced-file contents and reads
+remain unknown. These measurements exclude native wrappers and existing session
+context and do not establish an output limit or a byte-to-token conversion.
+Failed or interrupted results and unavailable usage remain unknown or incomplete.
+No prompt, reasoning, transcript, tool output, secret, native identifier, or
+arbitrary provider error is retained in these diagnostics.
+
 An action-free resume also recovers a nonterminal, nonpaused persisted active
 turn after its execution owner is lost. Recovery retains the active marker
 through input and repository reconciliation, replaces it when the complete
@@ -1217,6 +1228,14 @@ notifications while the model sleeps; live rendering depends on the MCP host.
 Public projections contain no inactive role configuration or provider-private
 data. When present, `launchRecovery` is the same strict checkpoint/class value
 shown by CLI status.
+`run_status` and `run_wait` return `observations` with the latest 32 runner
+attempts and `omittedAttempts`; legacy absence is `null`. Each attempt includes
+its runner-owned ID, role, checkpoint, status, accounting, nullable measurements,
+and bounded native observations with their original cumulative scope and token
+inclusion rules. Earlier attempts can lack measurements. Snapshots are never
+summed into consumption totals. `run_activity` and live progress include concise
+observation events at attempt start, changed fallback batches, and settlement.
+They do not grant progress, retry, or effect authority.
 
 ## Provider Boundary
 

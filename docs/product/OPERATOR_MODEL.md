@@ -185,6 +185,16 @@ remains incomplete. Legacy runs have absent observations until new attempts
 occur. Observation publication is coalesced at native fallback and terminal
 boundaries and uses the same write-ahead recovery; it grants no retry or effect
 permission and stores no prompts, transcripts, or native session identifiers.
+Runner results and MCP status/wait expose this bounded `observations` evidence;
+CLI status shows the latest attempt, and activity records concise start,
+fallback, and terminal summaries. Optional measurements distinguish supplied
+prompt/reconstruction/schema bytes and returned output/structured JSON bytes
+from provider tokens. Earlier attempts project absent measurements as null.
+Referenced-file bytes and read counts remain unknown; including a path in a
+prompt does not prove its contents were supplied or read. These figures exclude
+native wrappers and existing session context and cannot establish service limits
+or complete consumption. Diagnostics contain only allowlisted evidence, never
+reasoning, tool output, secrets, arbitrary errors, or other provider content.
 The common run envelope also holds one bounded provider-policy receipt slot per
 resolved role. Legacy state migrates before provider work and pins a role's
 first current receipt when that role is required; resume rejects policy drift

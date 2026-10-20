@@ -1,4 +1,7 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { normalizeProviderObservation } from "../agents/index.js";
+import { observationActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
 
 // Adapters publish sealed native turns synchronously. Batch their bounded facts
@@ -11,10 +14,39 @@ export async function runObservedAttempt({
   request,
   operation,
   persist = (write) => write(),
+  publish = async () => {},
 }) {
-  const started = await persist(() =>
-    runStore.startObservationAttempt(lease, { role, checkpoint }),
+  const bytes = (value) =>
+    typeof value === "string" ? Buffer.byteLength(value, "utf8") : null;
+  const jsonBytes = (value) => {
+    try {
+      return value == null ? null : bytes(JSON.stringify(value));
+    } catch {
+      return null;
+    }
+  };
+  const started = await persist(
+    () =>
+      runStore.startObservationAttempt(
+        lease,
+        { role, checkpoint },
+        {
+          promptBytes: bytes(request.prompt),
+          recoveryPromptBytes: bytes(request.recoveryPrompt ?? request.prompt),
+          schemaBytes: jsonBytes(request.schema),
+          resultBytes: null,
+          structuredResultBytes: null,
+          referencedFileCount: null,
+          referencedFileBytes: null,
+        },
+      ),
+    "start",
   );
+  await publish(
+    observationActivity(started.observations.attempts.at(-1)),
+    started,
+  );
+  let publishedAttempt = started.observations.attempts.at(-1);
   const { id } = started.observations.attempts.at(-1);
   const identity = { id, role, checkpoint };
   const records = new Map();
@@ -33,12 +65,27 @@ export async function runObservedAttempt({
     }
   }
   async function flush(status) {
-    await persist(() =>
+    const next = await persist(() =>
       runStore.recordObservationBatch(lease, identity, [...records.values()], {
         status,
         incomplete,
+        ...(status === "completed"
+          ? {
+              resultBytes: bytes(response?.output),
+              structuredResultBytes: jsonBytes(response?.structured),
+            }
+          : {}),
       }),
     );
+    const latest = next?.observations.attempts.at(-1);
+    if (
+      latest?.id === id &&
+      latest.status === status &&
+      !isDeepStrictEqual(latest, publishedAttempt)
+    ) {
+      publishedAttempt = latest;
+      await publish(observationActivity(latest), next);
+    }
   }
   try {
     response = await operation({
@@ -68,10 +115,11 @@ export async function runObservedAttempt({
       );
     } catch {
       // An established provider, effect, ownership, or safety failure wins.
-      failure ??= new RunnerError(
-        "Attempt observations could not be persisted.",
-        { code: "ERR_OBSERVATION_PERSISTENCE" },
-      );
+      failure ??= request.signal?.aborted
+        ? request.signal.reason
+        : new RunnerError("Attempt observations could not be persisted.", {
+            code: "ERR_OBSERVATION_PERSISTENCE",
+          });
     }
   }
   if (failure !== undefined) throw failure;

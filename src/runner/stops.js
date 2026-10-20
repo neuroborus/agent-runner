@@ -322,6 +322,8 @@ export async function reconcileOperatorStop({
     current = await runStore.recordExecutionProcess(lease, null);
   }
   current = await cleanupResources(current);
+  if (current.observations?.attempts.at(-1).status === "active")
+    current = await runStore.recoverRun(lease);
   const activity = {
     actor: "runner",
     phase: "stop",

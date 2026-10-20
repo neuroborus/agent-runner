@@ -20,6 +20,7 @@ import { getPipeline, resolveStopBoundary } from "../pipeline-registry.js";
 import {
   createRunStore,
   deepFreeze,
+  projectObservations,
   RUNTIME_COMPATIBILITY,
   RUNTIME_COMPATIBILITY_TOKEN,
   RUN_STATE_SCHEMA_VERSION,
@@ -784,6 +785,8 @@ export function createRunner(options = {}) {
       }
     }
     run = await cleanupExecutionResource(run, lease);
+    if (run.observations?.attempts.at(-1).status === "active")
+      run = await runStore.recoverRun(lease);
     if (
       configurationFailure !== null &&
       !stopPending(run) &&
@@ -1076,6 +1079,7 @@ export function createRunner(options = {}) {
     return Object.freeze({
       directoryPath: await runStore.getRunDirectory(run.runId),
       run,
+      observations: deepFreeze(projectObservations(run)),
     });
   }
 
@@ -1147,9 +1151,8 @@ export function createRunner(options = {}) {
         { activity },
       );
       await publish(activity, run);
-    } else {
-      run = await runStore.recoverRun(lease);
     }
+    run = await runStore.recoverRun(lease);
     pipelineForRun(run, prepared.pipeline);
     return Object.freeze({
       pipeline: prepared.pipeline,

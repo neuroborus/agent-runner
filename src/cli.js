@@ -16,6 +16,7 @@ import {
   projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
+  projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
 } from "./state/index.js";
 
@@ -237,6 +238,23 @@ function runSummary({ directoryPath, run }) {
       `Provider inactivity: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
     );
   const retry = projectAvailabilityRetry(run);
+  const observations = projectObservations(run);
+  if (observations !== null) {
+    const latest = observations.attempts.at(-1);
+    const known = (value) => value ?? "unknown";
+    const measured = latest.measurements;
+    lines.push(
+      `Observations: attempt ${latest.id}; ${latest.role} ${latest.checkpoint}; ${latest.status}; accounting ${latest.accounting}; omitted attempts ${observations.omittedAttempts}`,
+      `Supplied context bytes: prompt ${known(measured?.promptBytes)}; reconstruction prompt ${known(measured?.recoveryPromptBytes)}; schema ${known(measured?.schemaBytes)}`,
+      `Result bytes: output ${known(measured?.resultBytes)}; structured JSON ${known(measured?.structuredResultBytes)}; referenced file bytes/count unknown`,
+    );
+    for (const value of latest.observations) {
+      lines.push(
+        `  Native attempt ${value.attempt} turn ${value.turn} (${value.kind}): ${value.outcome}; accounting ${value.accounting}; commands ${value.commandCompletions}; compactions ${value.compactions}; facts incomplete ${value.factsIncomplete}`,
+        `  Tokens (last request / cumulative ${value.cumulativeScope}): input ${known(value.last?.inputTokens)}/${known(value.cumulative?.inputTokens)}; output ${known(value.last?.outputTokens)}/${known(value.cumulative?.outputTokens)}; context capacity ${known(value.contextCapacity)}`,
+      );
+    }
+  }
   if (retry !== null) {
     lines.push(
       `Availability retry: ${retry.role} ${retry.checkpoint}; ${retry.reason}; attempt ${retry.attempt}; delay ${retry.delayMs}ms; deadline ${retry.nextRetryAt}`,

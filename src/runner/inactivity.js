@@ -131,7 +131,9 @@ export function createInactivityCoordinator({
   async function record(recovery, kind) {
     return guarded(async () => {
       const activity = inactivityActivity(recovery, kind);
-      const next = await runStore.recordInactivity(lease, recovery, kind);
+      const next = await monitor.persist(() =>
+        runStore.recordInactivity(lease, recovery, kind),
+      );
       pending = true;
       await publish(activity, next);
       return next;
@@ -263,7 +265,13 @@ export function createInactivityCoordinator({
           lease,
           role,
           checkpoint,
-          persist: (write) => watchdog.suspend(() => monitor.persist(write)),
+          // Exclude startup storage latency. Mid-attempt diagnostics neither
+          // suspend nor rearm the existing provider deadline.
+          persist: (write, phase) =>
+            phase === "start"
+              ? watchdog.suspend(() => monitor.persist(write))
+              : monitor.persist(write),
+          publish,
           operation: async (attemptRequest) => {
             try {
               return await operation(attemptRequest);

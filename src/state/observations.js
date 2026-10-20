@@ -7,6 +7,15 @@ const MAX_OBSERVATIONS = 9;
 const STATUSES = ["active", "completed", "failed", "interrupted"];
 const count = (value) => Number.isSafeInteger(value) && value >= 0;
 const key = ({ attempt, turn }) => `${attempt}:${turn}`;
+const MEASUREMENT_FIELDS = [
+  "promptBytes",
+  "recoveryPromptBytes",
+  "schemaBytes",
+  "resultBytes",
+  "structuredResultBytes",
+  "referencedFileCount",
+  "referencedFileBytes",
+];
 
 function exact(value, fields) {
   return (
@@ -20,6 +29,20 @@ function exact(value, fields) {
 
 function invalid() {
   throw new TypeError("Run observations are invalid.");
+}
+
+function normalizeMeasurements(value) {
+  if (
+    !exact(value, MEASUREMENT_FIELDS) ||
+    MEASUREMENT_FIELDS.some(
+      (field) => value[field] !== null && !count(value[field]),
+    ) ||
+    // References in a prompt are not evidence that their contents were read.
+    value.referencedFileCount !== null ||
+    value.referencedFileBytes !== null
+  )
+    invalid();
+  return { ...value };
 }
 
 function accounting(attempt) {
@@ -60,6 +83,11 @@ export function normalizeObservationState(state) {
         "accounting",
         "incomplete",
         "observations",
+        ...(state.schemaVersion >= 19 &&
+        attempt != null &&
+        Object.hasOwn(attempt, "measurements")
+          ? ["measurements"]
+          : []),
       ]) ||
       !count(attempt.id) ||
       attempt.id <= previousId ||
@@ -77,12 +105,22 @@ export function normalizeObservationState(state) {
       invalid();
     previousId = attempt.id;
     const observations = attempt.observations.map(normalizeProviderObservation);
+    const measurements = Object.hasOwn(attempt, "measurements")
+      ? normalizeMeasurements(attempt.measurements)
+      : undefined;
     if (
       new Set(observations.map(key)).size !== observations.length ||
-      attempt.accounting !== accounting({ ...attempt, observations })
+      attempt.accounting !== accounting({ ...attempt, observations }) ||
+      (attempt.status !== "completed" &&
+        (measurements?.resultBytes != null ||
+          measurements?.structuredResultBytes != null))
     )
       invalid();
-    return { ...attempt, observations };
+    return {
+      ...attempt,
+      observations,
+      ...(Object.hasOwn(attempt, "measurements") ? { measurements } : {}),
+    };
   });
   return { ...value, attempts };
 }
@@ -99,11 +137,14 @@ export function interruptObservations(value) {
   return { ...value, attempts };
 }
 
-export function beginObservationAttempt(state, identity) {
+export function beginObservationAttempt(state, identity, measurements) {
   if (
     !exact(identity, ["role", "checkpoint"]) ||
     state.schemaVersion < 18 ||
-    state.activeTurn?.role !== identity.role
+    (state.schemaVersion < 19 && measurements !== undefined) ||
+    state.activeTurn?.role !== identity.role ||
+    measurements?.resultBytes != null ||
+    measurements?.structuredResultBytes != null
   )
     invalid();
   const value = interruptObservations(state.observations) ?? {
@@ -120,6 +161,9 @@ export function beginObservationAttempt(state, identity) {
       accounting: "incomplete",
       incomplete: false,
       observations: [],
+      ...(measurements === undefined
+        ? {}
+        : { measurements: normalizeMeasurements(measurements) }),
     },
   ];
   const omitted = Math.max(0, attempts.length - MAX_ATTEMPTS);
@@ -139,6 +183,7 @@ export function recordObservations(
   records,
   status,
   incomplete,
+  { resultBytes, structuredResultBytes } = {},
 ) {
   if (
     !exact(identity, ["id", "role", "checkpoint"]) ||
@@ -146,7 +191,15 @@ export function recordObservations(
     !Array.isArray(records) ||
     records.length > MAX_OBSERVATIONS ||
     !STATUSES.includes(status) ||
-    typeof incomplete !== "boolean"
+    typeof incomplete !== "boolean" ||
+    (resultBytes !== undefined &&
+      resultBytes !== null &&
+      !count(resultBytes)) ||
+    (structuredResultBytes !== undefined &&
+      structuredResultBytes !== null &&
+      !count(structuredResultBytes)) ||
+    (status !== "completed" &&
+      (resultBytes != null || structuredResultBytes != null))
   )
     invalid();
   const value = state.observations;
@@ -175,6 +228,12 @@ export function recordObservations(
     observations,
     incomplete: current.incomplete || incomplete,
   };
+  if (current.measurements !== undefined)
+    next.measurements = {
+      ...current.measurements,
+      resultBytes: resultBytes ?? null,
+      structuredResultBytes: structuredResultBytes ?? null,
+    };
   next.accounting = accounting(next);
   return { ...value, attempts: [...value.attempts.slice(0, -1), next] };
 }
@@ -186,10 +245,15 @@ export function assertObservationContinuity(previous, current) {
   if (after === null) invalid();
   const started = after.attempts.at(-1).id === current.revision;
   if (started) {
-    const expected = beginObservationAttempt(previous, {
-      role: after.attempts.at(-1).role,
-      checkpoint: after.attempts.at(-1).checkpoint,
-    });
+    const latest = after.attempts.at(-1);
+    const expected = beginObservationAttempt(
+      previous,
+      {
+        role: latest.role,
+        checkpoint: latest.checkpoint,
+      },
+      latest.measurements,
+    );
     if (!isDeepStrictEqual(expected, after)) invalid();
     return;
   }
@@ -207,9 +271,53 @@ export function assertObservationContinuity(previous, current) {
     ) ||
     (prior.incomplete && !next.incomplete) ||
     !isDeepStrictEqual(
+      prior.measurements,
+      next.measurements === undefined
+        ? undefined
+        : {
+            ...next.measurements,
+            resultBytes: null,
+            structuredResultBytes: null,
+          },
+    ) ||
+    !isDeepStrictEqual(
       prior.observations,
       next.observations.slice(0, prior.observations.length),
     )
   )
     invalid();
+}
+
+// Public evidence is copied from validated state, never from provider errors or
+// native session state. Legacy absence stays distinguishable from missing usage.
+export function projectObservations(run) {
+  const value = run.observations;
+  if (value == null) return null;
+  return {
+    omittedAttempts: value.omittedAttempts,
+    attempts: value.attempts.map((attempt) => ({
+      id: attempt.id,
+      role: attempt.role,
+      checkpoint: attempt.checkpoint,
+      status: attempt.status,
+      accounting: attempt.accounting,
+      incomplete: attempt.incomplete,
+      measurements:
+        attempt.measurements === undefined
+          ? null
+          : normalizeMeasurements(attempt.measurements),
+      observations: attempt.observations.map(normalizeProviderObservation),
+    })),
+  };
+}
+
+export function observationActivity(attempt) {
+  const measured = attempt.measurements;
+  const known = (value) => value ?? "unknown";
+  return {
+    actor: attempt.role,
+    phase: "observations",
+    kind: attempt.status,
+    message: `Attempt ${attempt.id} ${attempt.checkpoint}: ${attempt.status}; accounting ${attempt.accounting}; native turns ${attempt.observations.length}; prompt/schema/output/structured bytes ${known(measured?.promptBytes)}/${known(measured?.schemaBytes)}/${known(measured?.resultBytes)}/${known(measured?.structuredResultBytes)}.`,
+  };
 }

@@ -409,8 +409,17 @@ provider branches to pipeline policy.
 Adapters optionally report bounded numeric usage and payload-free command and
 compaction facts through the public agent boundary. Native correlation stays
 private; missing values and incomplete terminal accounting remain explicit.
-These observations change no workflow, progress, retry, configuration, or public
-CLI/MCP projection. The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
+The runner connects them to durable attempt evidence on success, failure,
+cancellation, compaction, and fresh reconstruction. CLI and MCP expose bounded,
+allowlisted numeric diagnostics, keeping runner-supplied UTF-8 payload sizes
+separate from native token counters. Referenced files are not assumed read;
+unknown and incomplete accounting stays explicit, including failed usage and
+results. No prompt, reasoning text, transcript, tool output, credential, native
+identifier, or arbitrary provider message enters these diagnostics.
+They change no workflow, progress, retry, or configuration. Observation
+settlement cannot replace an established ownership, isolation, or effect failure
+or extend a running inactivity deadline.
+The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
 owns snapshot scopes, inclusion rules, bounds, and provider mappings. The
 inspected Codex public protocol exposes no numeric generation-budget control;
 model output ceilings do not establish the effective Codex service limit.

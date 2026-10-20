@@ -59,7 +59,9 @@ test("both writable pipelines reconcile partial inactivity and preserve one sour
       1,
     );
     assert.deepEqual(
-      recovery.events.map(({ kind }) => kind),
+      recovery.events
+        .filter(({ phase }) => phase === "inactivity")
+        .map(({ kind }) => kind),
       ["expired", "reconstructing", "recovered"],
     );
   }

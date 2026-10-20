@@ -23,14 +23,32 @@ const missing = {
 };
 function fixture() {
   const writes = [];
+  const starts = [];
   return {
     writes,
+    starts,
     lease: {},
     role: "worker",
     checkpoint: "implement:workspace-write:1",
     runStore: {
-      async startObservationAttempt(lease, selected) {
-        return { observations: { attempts: [{ id: 3, ...selected }] } };
+      async startObservationAttempt(lease, selected, measurements) {
+        starts.push(measurements);
+        return {
+          revision: 3,
+          observations: {
+            attempts: [
+              {
+                id: 3,
+                ...selected,
+                status: "active",
+                accounting: "incomplete",
+                incomplete: false,
+                observations: [],
+                measurements,
+              },
+            ],
+          },
+        };
       },
       async recordObservationBatch(lease, identity, records, options) {
         writes.push({ identity, records, options });
@@ -75,24 +93,79 @@ test("observations coalesce until fallback and terminal boundaries, reject paylo
   assert.deepEqual(f.writes[1].options, {
     status: "completed",
     incomplete: true,
+    resultBytes: null,
+    structuredResultBytes: null,
   });
   stale({ ...missing, turn: 2 });
   assert.equal(f.writes.length, 2);
   assert.ok(!JSON.stringify(f.writes).includes("private payload"));
 });
 
+test("runner measures supplied UTF-8 payloads without retaining content or inventing referenced-file reads", async () => {
+  const f = fixture();
+  const schema = { type: "object", description: "Résumé" };
+  const structured = { summary: "✓" };
+  await runObservedAttempt({
+    ...f,
+    request: {
+      prompt: "Résumé; inspect a referenced file.",
+      recoveryPrompt: "Full supplied context ✓",
+      schema,
+      session: { id: "private-native-id", mode: "continue" },
+    },
+    operation: async ({ onObservation, onFreshSession }) => {
+      onObservation({ ...missing, outcome: "failed" });
+      await onFreshSession();
+      onObservation({ ...missing, turn: 2, kind: "compaction" });
+      onObservation({ ...missing, attempt: 2, kind: "recovery" });
+      return { output: "✓ output", structured, sessionId: "private-native-id" };
+    },
+  });
+  assert.deepEqual(f.starts, [
+    {
+      promptBytes: Buffer.byteLength("Résumé; inspect a referenced file."),
+      recoveryPromptBytes: Buffer.byteLength("Full supplied context ✓"),
+      schemaBytes: Buffer.byteLength(JSON.stringify(schema)),
+      resultBytes: null,
+      structuredResultBytes: null,
+      referencedFileCount: null,
+      referencedFileBytes: null,
+    },
+  ]);
+  assert.equal(f.writes[1].options.resultBytes, Buffer.byteLength("✓ output"));
+  assert.equal(
+    f.writes[1].options.structuredResultBytes,
+    Buffer.byteLength(JSON.stringify(structured)),
+  );
+  assert.deepEqual(
+    f.writes[1].records.map(({ attempt, turn, kind }) => [attempt, turn, kind]),
+    [
+      [1, 1, "primary"],
+      [1, 2, "compaction"],
+      [2, 1, "recovery"],
+    ],
+  );
+  assert.doesNotMatch(
+    JSON.stringify([f.starts, f.writes]),
+    /Résumé|supplied context|native-id|✓ output/u,
+  );
+});
+
 test("terminal evidence flushes on failure and interruption while persistence errors preserve failure precedence", async () => {
   for (const aborted of [false, true]) {
     const f = fixture(),
       controller = new AbortController();
-    const failure = new Error("established safety failure");
+    const failure = Object.assign(new Error("established safety failure"), {
+      code: "ERR_EXECUTION_OWNERSHIP",
+      effectStarted: true,
+    });
     await assert.rejects(
       runObservedAttempt({
         ...f,
         request: { signal: controller.signal },
         operation: async ({ onObservation }) => {
           onObservation(missing);
-          if (aborted) controller.abort();
+          if (aborted) controller.abort(failure);
           throw failure;
         },
       }),
@@ -106,6 +179,16 @@ test("terminal evidence flushes on failure and interruption while persistence er
     f.runStore.recordObservationBatch = async () => {
       throw new Error("private storage diagnostic");
     };
+    if (aborted) {
+      await assert.rejects(
+        runObservedAttempt({
+          ...f,
+          request: { signal: controller.signal },
+          operation: async () => "late response",
+        }),
+        (cause) => cause === failure,
+      );
+    }
     await assert.rejects(
       runObservedAttempt({
         ...f,

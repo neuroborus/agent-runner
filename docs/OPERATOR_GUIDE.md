@@ -369,6 +369,12 @@ cursor. Do not poll status, activity, or waits at a fixed cadence.
 An omitted `run_wait.timeoutMs` waits 30 seconds; the maximum is 24 hours. This
 deadline ends only the client wait and never stops the detached run.
 
+Use CLI status or MCP `observations` to inspect output pressure by attempt, role,
+and checkpoint. Compare byte measurements and token snapshots separately;
+unknown referenced-file reads, missing results, incomplete accounting, and
+omitted attempts are evidence limits. Never infer a service output limit, sum
+cumulative snapshots, or collect private provider content to fill those gaps.
+
 A timeout, wait cancellation, or MCP disconnect ends only that wait. Detached
 work continues. Inspect the returned execution state to distinguish a live
 owner, an interrupted turn, and idle work. `execution.leaseOwner` reports the

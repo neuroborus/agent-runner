@@ -3,6 +3,8 @@ import test from "node:test";
 
 import packageMetadata from "../package.json" with { type: "json" };
 import {
+  createDetachedRuntimeCompatibilityToken,
+  createRunner,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
   main,
@@ -626,6 +628,96 @@ test("status dispatches and renders concise persisted state", async () => {
   assert.equal(stderr.read(), "");
 });
 
+test("status separates byte measurements from token evidence and excludes private state", async () => {
+  const result = commandResult();
+  result.run.observations = {
+    schemaVersion: 1,
+    omittedAttempts: 5,
+    attempts: [
+      {
+        id: 6,
+        role: "worker",
+        checkpoint: "implement:workspace-write:1",
+        status: "failed",
+        accounting: "incomplete",
+        incomplete: false,
+        observations: [
+          {
+            attempt: 1,
+            turn: 2,
+            kind: "compaction",
+            outcome: "failed",
+            accounting: "incomplete",
+            last: null,
+            cumulative: {
+              inputTokens: 100,
+              cachedInputTokens: 40,
+              cacheWriteInputTokens: null,
+              outputTokens: 30,
+              reasoningOutputTokens: 10,
+              totalTokens: null,
+            },
+            cumulativeScope: "thread",
+            inputIncludesCached: true,
+            outputIncludesReasoning: true,
+            contextCapacity: 1000,
+            commandCompletions: 2,
+            compactions: 0,
+            factsIncomplete: true,
+          },
+        ],
+        measurements: {
+          promptBytes: 120,
+          recoveryPromptBytes: 300,
+          schemaBytes: 50,
+          resultBytes: null,
+          structuredResultBytes: null,
+          referencedFileCount: null,
+          referencedFileBytes: null,
+        },
+        nativeSessionId: "private-native-id",
+        prompt: "private prompt",
+        error: "private arbitrary error",
+      },
+    ],
+  };
+  const stdout = createSink();
+  const stderr = createSink();
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({ status: async () => result }),
+    }),
+    0,
+  );
+  assert.match(
+    stdout.read(),
+    /attempt 6; worker implement:workspace-write:1; failed; accounting incomplete; omitted attempts 5/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Supplied context bytes: prompt 120; reconstruction prompt 300; schema 50/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Result bytes: output unknown; structured JSON unknown; referenced file bytes\/count unknown/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Native attempt 1 turn 2 \(compaction\): failed; accounting incomplete; commands 2; compactions 0; facts incomplete true/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Tokens \(last request \/ cumulative thread\): input unknown\/100; output unknown\/30; context capacity 1000/u,
+  );
+  assert.doesNotMatch(
+    stdout.read(),
+    /private|nativeSessionId|arbitrary error/u,
+  );
+  assert.equal(stderr.read(), "");
+});
+
 test("renders bounded finalization correction activity without rejected content", async () => {
   const stdout = createSink();
   const stderr = createSink();
@@ -1183,6 +1275,28 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
     `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
   );
   assert.match(stderr.read(), /Runtime mismatch/u);
+});
+
+test("detached version-18 dispatch rejects before accessing run state", async () => {
+  const parentToken = createDetachedRuntimeCompatibilityToken({
+    runtimeCompatibility: { runnerVersion: 1, runStateVersion: 18 },
+  });
+  let accessed = false;
+  const exitCode = await main(["resume", "--run", RUN_ID], {
+    environment: { [DETACHED_RUNTIME_COMPATIBILITY_ENV]: parentToken },
+    stdout: createSink().stream,
+    stderr: createSink().stream,
+    runner: createRunner({
+      runStore: {
+        async acquireRunLease() {
+          accessed = true;
+          throw new Error("Incompatible dispatch accessed run state.");
+        },
+      },
+    }),
+  });
+  assert.equal(exitCode, RUNTIME_VERSION_SKEW_EXIT_CODE);
+  assert.equal(accessed, false);
 });
 
 test("resume rejects conflicting or invalid fix actions", async () => {

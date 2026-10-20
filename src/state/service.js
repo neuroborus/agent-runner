@@ -35,6 +35,7 @@ import {
   beginObservationAttempt,
   interruptObservations,
   recordObservations,
+  observationActivity,
 } from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
@@ -893,6 +894,12 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       await journal.recover(runDirectory, snapshot);
+      // Diagnostic retirement cannot precede proof that owned work is settled.
+      if (
+        snapshot.state.executionProcess !== null ||
+        snapshot.state.executionResource !== null
+      )
+        return deepFreeze(snapshot.state);
       return persistObservations(
         runDirectory,
         snapshot,
@@ -928,13 +935,19 @@ export function createRunStore({
     return deepFreeze(next);
   }
 
-  async function startObservationAttempt(lease, identity) {
+  async function startObservationAttempt(lease, identity, measurements) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      const observations = beginObservationAttempt(
+        snapshot.state,
+        identity,
+        measurements,
+      );
       return persistObservations(
         runDirectory,
         snapshot,
-        beginObservationAttempt(snapshot.state, identity),
+        observations,
+        observationActivity(observations.attempts.at(-1)),
       );
     });
   }
@@ -943,22 +956,32 @@ export function createRunStore({
     lease,
     identity,
     records,
-    { status = "active", incomplete = false } = {},
+    {
+      status = "active",
+      incomplete = false,
+      resultBytes,
+      structuredResultBytes,
+    } = {},
   ) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       // Terminal diagnostics may flush during a stop or process cleanup. This
       // operation changes no workflow, process, retry, or effect authority.
+      const observations = recordObservations(
+        snapshot.state,
+        identity,
+        records,
+        status,
+        incomplete,
+        { resultBytes, structuredResultBytes },
+      );
       return persistObservations(
         runDirectory,
         snapshot,
-        recordObservations(
-          snapshot.state,
-          identity,
-          records,
-          status,
-          incomplete,
-        ),
+        observations,
+        observations === null
+          ? null
+          : observationActivity(observations.attempts.at(-1)),
       );
     });
   }

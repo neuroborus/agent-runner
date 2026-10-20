@@ -13,6 +13,75 @@ import {
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
+test("status and wait expose bounded observation evidence without private run or session data", async () => {
+  const run = {
+    runId: RUN_ID,
+    revision: 5,
+    pipelineId: "plan-execution",
+    taskPath: "/task",
+    activeTurn: null,
+    executionProcess: null,
+    pause: null,
+    providerMessage: "private arbitrary error",
+    sessionId: "private-native-id",
+    pipelineState: {
+      workflowState: "DONE",
+      settings: { mode: "combined" },
+      currentStep: null,
+      findings: [],
+      findingOverrides: [],
+      completedCommits: [],
+    },
+    observations: {
+      schemaVersion: 1,
+      omittedAttempts: 2,
+      attempts: [
+        {
+          id: 3,
+          role: "worker",
+          checkpoint: "implement:workspace-write:1",
+          status: "failed",
+          accounting: "incomplete",
+          incomplete: false,
+          observations: [],
+          prompt: "private prompt",
+          transcript: "private transcript",
+        },
+      ],
+    },
+  };
+  const control = createMcpControlPlane({
+    runner: { status: async () => ({ run, directoryPath: "/state/run" }) },
+    runStore: { inspectRunLeaseOwner: async () => ({ status: "none" }) },
+  });
+  const status = await control.runStatus({ runId: RUN_ID });
+  assert.deepEqual(status.observations, {
+    omittedAttempts: 2,
+    attempts: [
+      {
+        id: 3,
+        role: "worker",
+        checkpoint: "implement:workspace-write:1",
+        status: "failed",
+        accounting: "incomplete",
+        incomplete: false,
+        measurements: null,
+        observations: [],
+      },
+    ],
+  });
+  assert.doesNotMatch(
+    JSON.stringify(status),
+    /private|sessionId|transcript|providerMessage/u,
+  );
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 5,
+    timeoutMs: 0,
+  });
+  assert.deepEqual(waited.observations, status.observations);
+});
+
 test("action acquisition returns retryable contention without polling", async () => {
   const failure = Object.assign(new Error("Action is owned"), {
     code: "ERR_MCP_ACTION_IN_PROGRESS",

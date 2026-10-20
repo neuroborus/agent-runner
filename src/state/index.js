@@ -12,6 +12,7 @@ export {
   projectLaunchRecovery,
 } from "./launch-recovery.js";
 export { projectOperatorStop } from "./stop-projection.js";
+export { projectObservations, observationActivity } from "./observations.js";
 export {
   deepFreeze,
   RUNTIME_COMPATIBILITY,

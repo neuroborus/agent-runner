@@ -30,6 +30,7 @@ import {
   projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
+  projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
   normalizeRecoveryDispatch,
@@ -363,6 +364,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     launchRecovery: projectLaunchRecovery(run),
     availabilityRetry: projectAvailabilityRetry(run),
     inactivityRecovery: projectInactivityRecovery(run),
+    observations: projectObservations(run),
     stop: projectOperatorStop(run),
     pendingStop:
       run.stopRequest?.reconciledRevision === null

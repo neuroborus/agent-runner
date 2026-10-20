@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-10-20
 
+- **Output-pressure diagnostics preserve evidence boundaries.** Runner, CLI,
+  MCP status/wait, and bounded activity expose correlated attempt evidence and
+  measured supplied-payload bytes separately from provider token snapshots.
+  Referenced-file reads, unavailable results, and incomplete usage stay explicit
+  rather than implying complete consumption or a service output limit. Optional
+  measurements use run-envelope version 19 and preserve legacy observation
+  history through leased migration; detached compatibility rejects older
+  dispatchers before run mutation. Fallback publication keeps
+  the existing inactivity deadline, and settlement retains stronger ownership,
+  isolation, and consumed-effect failures without persisting private content.
+
 - **Attempt evidence survives disposable provider context.** The state-owned
   versioned observation envelope retains bounded failed and interrupted evidence
   under runner-owned role/checkpoint identities. Fallback and terminal batches

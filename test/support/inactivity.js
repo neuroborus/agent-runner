@@ -50,9 +50,13 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
       async loadRun() {
         return fixture.currentRun;
       },
-      async startObservationAttempt(_lease, identity) {
+      async startObservationAttempt(_lease, identity, measurements) {
         return transition({
-          observations: beginObservationAttempt(fixture.currentRun, identity),
+          observations: beginObservationAttempt(
+            fixture.currentRun,
+            identity,
+            measurements,
+          ),
         });
       },
       async recordObservationBatch(_lease, identity, records, options) {
@@ -62,6 +66,10 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
           records,
           options.status,
           options.incomplete,
+          {
+            resultBytes: options.resultBytes,
+            structuredResultBytes: options.structuredResultBytes,
+          },
         );
         return isDeepStrictEqual(observations, fixture.currentRun.observations)
           ? fixture.currentRun

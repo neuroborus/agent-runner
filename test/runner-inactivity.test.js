@@ -247,7 +247,9 @@ test("inactivity journals before abort, retains its one reconstruction across re
     assert.equal(stored.inactivityRecovery.attempt, 2);
     assert.equal(stored.inactivityRecovery.contentFingerprint, "b".repeat(64));
     assert.deepEqual(
-      f.activities.map(({ kind }) => kind),
+      f.activities
+        .filter(({ phase }) => phase === "inactivity")
+        .map(({ kind }) => kind),
       ["expired", "reconstructing", "expired"],
     );
   }
@@ -284,6 +286,34 @@ test("observation startup persistence does not consume provider inactivity", asy
   assert.equal(inspectStart, false);
   assert.equal(f.timers.size, 0);
   assert.equal((await f.store.loadRun(f.run.runId)).inactivityRecovery, null);
+});
+
+test("fallback observation settlement cannot extend the existing inactivity deadline", async (t) => {
+  const f = await fixture(t);
+  await f.coordinator.before(f.input);
+  await f.start();
+  await assert.rejects(
+    f.coordinator.invoke(
+      "worker",
+      async ({ onObservation, onFreshSession, signal }) => {
+        f.timers.advance(99);
+        onObservation({ unsupported: "private" });
+        assert.equal(await onFreshSession(), true);
+        const retired = new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          });
+        });
+        f.timers.advance(1);
+        return retired;
+      },
+      { access: "read-only" },
+    ),
+    { code: "ERR_PROVIDER_INACTIVE" },
+  );
+  const run = await f.store.loadRun(f.run.runId);
+  assert.equal(run.inactivityRecovery.attempt, 2);
+  assert.equal(run.observations.attempts[0].status, "interrupted");
 });
 
 test("a returned response clears recovery atomically with reconciled partial content", async (t) => {
@@ -538,6 +568,19 @@ test("both provider roles pause a repeated read-only expiry and resume without r
       settingOverrides: { mode: "lazy" },
     });
     assert.equal(first.run.pause.reason, "backend_unavailable");
+    assert.deepEqual(
+      first.observations,
+      (await createRunner(parameters).status(first.run.runId)).observations,
+    );
+    assert.equal(first.observations.attempts.length, 2);
+    assert.ok(
+      first.observations.attempts.every(
+        ({ status, measurements }) =>
+          status === "interrupted" &&
+          measurements.promptBytes > 0 &&
+          measurements.resultBytes === null,
+      ),
+    );
     assert.equal(first.run.pause.code, "ERR_PROVIDER_INACTIVE");
     assert.equal(calls, 2);
     assert.equal(first.run.inactivityRecovery.attempt, 2);

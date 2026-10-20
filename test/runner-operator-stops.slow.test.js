@@ -1396,9 +1396,13 @@ test("action-free recovery retires a dead session before further provider work",
         ...delegate,
         async run() {
           resumedTurns++;
+          const current = await recoveredStore.loadRun(fixture.runId);
+          assert.equal(current.executionProcess, null);
+          const interrupted = checkpoint.observations.attempts.at(-1).id;
           assert.equal(
-            (await recoveredStore.loadRun(fixture.runId)).executionProcess,
-            null,
+            current.observations.attempts.find(({ id }) => id === interrupted)
+              .status,
+            "interrupted",
           );
           throw Object.assign(new Error("Retryable proof failure"), {
             code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",

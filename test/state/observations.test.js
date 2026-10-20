@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
+  projectObservations,
 } from "../../src/state/index.js";
 import { isRecoveryPreparation } from "../../src/state/dispatch.js";
 import { normalizeRunState } from "../../src/state/validation.js";
@@ -16,6 +17,7 @@ import {
   normalizeObservationState,
   recordObservations,
 } from "../../src/state/observations.js";
+import { runObservedAttempt } from "../../src/runner/observations.js";
 
 const selected = { role: "worker", checkpoint: "implement:workspace-write:1" };
 const observation = {
@@ -45,6 +47,217 @@ const identity = (state) => {
   const { id, role, checkpoint } = state.observations.attempts.at(-1);
   return { id, role, checkpoint };
 };
+
+test("measured attempts survive durable failure and expose only allowlisted evidence and activity", async (t) => {
+  const f = await fixture(t);
+  const failure = new Error("private arbitrary provider error");
+  const published = [];
+  await assert.rejects(
+    runObservedAttempt({
+      runStore: f.store,
+      lease: f.lease,
+      ...selected,
+      request: {
+        prompt: "private prompt secret",
+        recoveryPrompt: "private reconstruction secret",
+        schema: { type: "object" },
+        session: { id: "private-native-id", mode: "continue" },
+      },
+      publish: async (activity) => published.push(activity),
+      operation: async ({ onObservation }) => {
+        onObservation(observation);
+        onObservation({
+          ...observation,
+          turn: 2,
+          transcript: "private transcript",
+          reasoning: "private reasoning",
+          toolOutput: "private tool output",
+        });
+        throw failure;
+      },
+    }),
+    (cause) => cause === failure,
+  );
+  const reader = createRunStore({ stateRoot: f.stateRoot });
+  const run = await reader.loadRun(f.state.runId);
+  const projected = projectObservations({
+    ...run,
+    providerMessage: "private message",
+  });
+  const attempt = projected.attempts[0];
+  assert.equal(attempt.role, selected.role);
+  assert.equal(attempt.checkpoint, selected.checkpoint);
+  assert.equal(attempt.status, "failed");
+  assert.equal(attempt.accounting, "incomplete");
+  assert.equal(attempt.incomplete, true);
+  assert.deepEqual(attempt.observations, [observation]);
+  assert.deepEqual(attempt.measurements, {
+    promptBytes: 21,
+    recoveryPromptBytes: 29,
+    schemaBytes: 17,
+    resultBytes: null,
+    structuredResultBytes: null,
+    referencedFileCount: null,
+    referencedFileBytes: null,
+  });
+  const page = await reader.readPublicActivity(run.runId, {
+    afterRevision: 0,
+    limit: 100,
+  });
+  assert.deepEqual(
+    page.activities
+      .filter(({ phase }) => phase === "observations")
+      .map(({ message }) => message),
+    published.map(({ message }) => message),
+  );
+  assert.match(
+    page.activities.at(-1).message,
+    /failed; accounting incomplete/u,
+  );
+  const response = {
+    output: "private result ✓",
+    structured: { summary: "private result" },
+    sessionId: "private-native-id",
+  };
+  const successActivity = [];
+  let otherTransitions = 0;
+  await runObservedAttempt({
+    runStore: f.store,
+    lease: f.lease,
+    ...selected,
+    request: {
+      prompt: "private reconstruction",
+      onFreshSession: async () => {
+        await f.store.transitionRun(f.lease, {
+          counters: { fixRounds: ++otherTransitions },
+        });
+        return true;
+      },
+    },
+    publish: async (activity) => successActivity.push(activity),
+    operation: async ({ onObservation, onFreshSession }) => {
+      onObservation(observation);
+      onObservation({
+        ...observation,
+        turn: 2,
+        kind: "compaction",
+        compactions: 1,
+      });
+      assert.equal(await onFreshSession(), true);
+      assert.equal(await onFreshSession(), true);
+      onObservation({
+        ...observation,
+        attempt: 2,
+        kind: "recovery",
+        outcome: "completed",
+        accounting: "reported",
+      });
+      return response;
+    },
+  });
+  const succeeded = projectObservations(
+    await reader.loadRun(run.runId),
+  ).attempts.at(-1);
+  assert.equal(succeeded.status, "completed");
+  assert.equal(succeeded.accounting, "incomplete");
+  assert.deepEqual(
+    successActivity.map(({ kind }) => kind),
+    ["active", "active", "completed"],
+  );
+  assert.equal(
+    succeeded.measurements.resultBytes,
+    Buffer.byteLength(response.output),
+  );
+  assert.equal(
+    succeeded.measurements.structuredResultBytes,
+    Buffer.byteLength(JSON.stringify(response.structured)),
+  );
+  assert.deepEqual(
+    succeeded.observations.map(({ attempt, turn, kind }) => [
+      attempt,
+      turn,
+      kind,
+    ]),
+    [
+      [1, 1, "primary"],
+      [1, 2, "compaction"],
+      [2, 1, "recovery"],
+    ],
+  );
+  assert.doesNotMatch(
+    JSON.stringify([
+      projected,
+      published,
+      page,
+      await reader.loadRunHistory(run.runId),
+    ]),
+    /private|transcript|reasoning"|toolOutput|sessionId/u,
+  );
+});
+
+test("measurement extensions preserve legacy absence and immutable source and terminal measurements", () => {
+  const state = {
+    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    revision: 10,
+    roles: { worker: {} },
+    activeTurn: { role: "worker" },
+    observations: null,
+  };
+  const legacy = {
+    ...state,
+    revision: 11,
+    observations: beginObservationAttempt(state, selected),
+  };
+  assert.equal(projectObservations(legacy).attempts[0].measurements, null);
+  const measurements = {
+    promptBytes: 4,
+    recoveryPromptBytes: 8,
+    schemaBytes: 0,
+    resultBytes: null,
+    structuredResultBytes: null,
+    referencedFileCount: null,
+    referencedFileBytes: null,
+  };
+  const started = {
+    ...legacy,
+    revision: 12,
+    observations: beginObservationAttempt(legacy, selected, measurements),
+  };
+  assertObservationContinuity(legacy, started);
+  const completed = {
+    ...started,
+    revision: 13,
+    observations: recordObservations(
+      started,
+      identity(started),
+      [],
+      "completed",
+      false,
+      { resultBytes: 6, structuredResultBytes: 2 },
+    ),
+  };
+  assertObservationContinuity(started, completed);
+  assert.deepEqual(
+    normalizeObservationState(completed),
+    completed.observations,
+  );
+  for (const patch of [
+    { promptBytes: 99 },
+    { prompt: "private" },
+    { schemaBytes: -1 },
+    { referencedFileBytes: 1 },
+  ]) {
+    const changed = structuredClone(completed);
+    Object.assign(changed.observations.attempts.at(-1).measurements, patch);
+    assert.throws(() => {
+      normalizeObservationState(changed);
+      assertObservationContinuity(started, changed);
+    });
+  }
+  const rewritten = structuredClone(completed);
+  rewritten.observations.attempts.at(-1).measurements.resultBytes = 9;
+  assert.throws(() => assertObservationContinuity(completed, rewritten));
+});
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "observations-"));
@@ -188,6 +401,43 @@ test("observation publication recovers at every write-ahead boundary and retires
   }
 });
 
+test("recovery defers observation retirement until process and resource ownership are settled", async (t) => {
+  const processIdentity = (pid) => ({
+    bootId: "11111111-1111-4111-8111-111111111111",
+    startTicks: String(pid),
+  });
+  const f = await fixture(t, { processIdentity });
+  const started = await f.store.startObservationAttempt(f.lease, selected);
+  await f.store.recordObservationBatch(f.lease, identity(started), [
+    observation,
+  ]);
+  const owned = await f.store.recordExecutionProcess(f.lease, 300, {
+    processIdentity: processIdentity(300),
+  });
+  assert.deepEqual(await f.store.recoverRun(f.lease), owned);
+  assert.deepEqual(await f.store.loadRun(owned.runId), owned);
+
+  await f.store.recordExecutionProcess(f.lease, null);
+  const allocated = await f.store.recordExecutionResource(f.lease, {
+    id: "22222222-2222-4222-8222-222222222222",
+    hostname: "fixture-host",
+    commandIdentity: "a".repeat(64),
+    phase: "allocating",
+    root: { path: f.stateRoot, device: "1", inode: "1" },
+    directory: null,
+  });
+  assert.deepEqual(await f.store.recoverRun(f.lease), allocated);
+  const retired = await f.store.recordExecutionResource(f.lease, null);
+  const recovered = await f.store.recoverRun(f.lease);
+  assert.equal(recovered.revision, retired.revision + 1);
+  assert.equal(recovered.observations.attempts[0].status, "interrupted");
+  assert.deepEqual(recovered.observations.attempts[0].observations, [
+    observation,
+  ]);
+  assert.deepEqual(recovered.activeTurn, owned.activeTurn);
+  assert.deepEqual(recovered.pipelineState, owned.pipelineState);
+});
+
 test("legacy absence migrates without inventing observations or rewriting historical events", async (t) => {
   const f = await fixture(t);
   const eventsPath = join(f.directoryPath, "events.jsonl"),
@@ -229,6 +479,83 @@ test("legacy absence migrates without inventing observations or rewriting histor
   assert.throws(() =>
     normalizeRunState({ ...migrated, observations: undefined }),
   );
+});
+
+test("version-18 observations require migration before measurements and preserve accepted history", async (t) => {
+  const f = await fixture(t);
+  const started = await f.store.startObservationAttempt(f.lease, selected);
+  await f.store.recordObservationBatch(
+    f.lease,
+    identity(started),
+    [observation],
+    {
+      status: "failed",
+    },
+  );
+  const eventsPath = join(f.directoryPath, "events.jsonl");
+  const events = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  for (const event of events) {
+    event.schemaVersion = event.state.schemaVersion = 18;
+    event.state.runtimeCompatibility.runStateVersion = 18;
+  }
+  const source = events.map(JSON.stringify).join("\n") + "\n";
+  await writeFile(eventsPath, source);
+  await writeFile(
+    join(f.directoryPath, "state.json"),
+    JSON.stringify(events.at(-1).state),
+  );
+  const legacy = await f.store.loadRun(f.state.runId);
+  const measurements = {
+    promptBytes: 4,
+    recoveryPromptBytes: 4,
+    schemaBytes: null,
+    resultBytes: null,
+    structuredResultBytes: null,
+    referencedFileCount: null,
+    referencedFileBytes: null,
+  };
+  const invalid = structuredClone(legacy);
+  invalid.observations.attempts[0].measurements = measurements;
+  assert.throws(() => normalizeRunState(invalid));
+  await assert.rejects(
+    f.store.startObservationAttempt(f.lease, selected, measurements),
+  );
+  assert.equal(await readFile(eventsPath, "utf8"), source);
+  const migrated = await f.store.migrateRun(
+    f.lease,
+    {
+      pipelineState: legacy.pipelineState,
+      pipelineStateVersion: legacy.pipelineStateVersion,
+    },
+    {
+      activity: {
+        actor: "runner",
+        phase: "runtime",
+        kind: "migrated",
+        message: "Migrated measurement support.",
+      },
+    },
+  );
+  assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+  assert.deepEqual(migrated.observations, legacy.observations);
+  const measured = await f.store.startObservationAttempt(
+    f.lease,
+    selected,
+    measurements,
+  );
+  await f.store.recordObservationBatch(f.lease, identity(measured), [], {
+    status: "completed",
+    resultBytes: 2,
+  });
+  const reader = createRunStore({ stateRoot: f.stateRoot });
+  const projected = projectObservations(await reader.loadRun(legacy.runId));
+  assert.equal(projected.attempts[0].measurements, null);
+  assert.deepEqual(projected.attempts[0].observations, [observation]);
+  assert.equal(projected.attempts[1].measurements.resultBytes, 2);
+  assert.ok((await readFile(eventsPath, "utf8")).startsWith(source));
 });
 
 test("bounded retention and closed numeric contracts preserve nullable counters and native scopes", () => {
