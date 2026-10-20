@@ -166,6 +166,14 @@ Ordinary Darwin preparation uses one hosted Clang build per helper. The previous
 preliminary compiler/PF-header and elevated-tool bootstrap observers are removed;
 actual PF readback, audit capture and model-free controls remain owned by native
 cases and cannot be replaced by successful compiler diagnostics.
+The complete `darwin-experiment-preparation.json` aggregate has a finite four-MiB
+serialized bound, including its uploaded bytes, full case inventory and retained
+build diagnostics. Every other receipt, including the preparation close record,
+retains its one-MiB bound. Exclusive writing, held receipt reads, native custody
+verification and preparation observations, normal loading and cold recovery use
+the same filename-specific limits. Hashes, private-directory checks, stable held
+identity, ownership, mode, link and ACL checks remain required; the larger bound
+does not admit an undeclared preparation input or supply retirement evidence.
 Underlying Windows command/audit errors remain visible before strict projection;
 diagnostic output grants no authority and leaves cleanup failures independent.
 

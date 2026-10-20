@@ -22,7 +22,10 @@ import {
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
 import { prepareDarwinExperimentCases } from "./experiment-cases.js";
 import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
-import { darwinPreparationContext } from "./preparation.js";
+import {
+  darwinPreparationContext,
+  darwinPreparationReceiptLimit,
+} from "./preparation.js";
 import { createDarwinSystemEffects } from "./effects.js";
 import { darwinSystemRecipes } from "./system.js";
 import { digest } from "./protocol.js";
@@ -355,7 +358,12 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
       path.join(directory, "darwin-experiment-preparation-close.json"),
     );
   requireObservation(
-    preparationBytes.length <= 1048576 && closeBytes.length <= 1048576,
+    preparationBytes.length <=
+      darwinPreparationReceiptLimit("darwin-experiment-preparation.json") &&
+      closeBytes.length <=
+        darwinPreparationReceiptLimit(
+          "darwin-experiment-preparation-close.json",
+        ),
   );
   const preparation = JSON.parse(preparationBytes),
     close = JSON.parse(closeBytes);
@@ -478,7 +486,10 @@ export async function recoverDarwinExperimentPreparation(
     const bytes = await fs.readFile(
       path.join(directory, "darwin-experiment-preparation.json"),
     );
-    requireObservation(bytes.length <= 1048576);
+    requireObservation(
+      bytes.length <=
+        darwinPreparationReceiptLimit("darwin-experiment-preparation.json"),
+    );
     const preparation = JSON.parse(bytes),
       owner = createDarwinSystemEffects(
         systemInput(job, preparation, { recovery: true }),
@@ -500,7 +511,12 @@ export async function recoverDarwinExperimentPreparation(
       const closeBytes = await fs.readFile(
         path.join(directory, "darwin-experiment-preparation-close.json"),
       );
-      requireObservation(closeBytes.length <= 1048576);
+      requireObservation(
+        closeBytes.length <=
+          darwinPreparationReceiptLimit(
+            "darwin-experiment-preparation-close.json",
+          ),
+      );
       const close = JSON.parse(closeBytes);
       requireObservation(
         retired(close) &&

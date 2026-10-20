@@ -1316,6 +1316,10 @@ static void build_open(const char *encoded, const char *pin) {
   struct entry root = {.fd = build_root}; strcpy(root.kind, "build"); strcpy(root.path, build_path); need(!fstat(build_root, &root.stat)); stable(&root);
   fputs(",\"root\":", stdout); identity(&root); printf(",\"sha256\":\"%s\"}", actual);
 }
+static size_t preparation_receipt_limit(const char *name) {
+  const char *leaf = strrchr(name, '/');
+  return !strcmp(leaf ? leaf + 1 : name, "darwin-experiment-preparation.json") ? 4194304 : 1048576;
+}
 static void build_receipt(const char *encoded, const char *pin) {
   char name[PATH_MAX], parent[PATH_MAX], canonical[PATH_MAX]; decode(encoded, name, sizeof(name));
   need(realpath(name, canonical) && !strcmp(name, canonical)); strcpy(parent, name);
@@ -1331,7 +1335,8 @@ static void build_receipt(const char *encoded, const char *pin) {
   need(root >= 0 && !fstat(root, &authority) && authority.st_uid > 500 && (authority.st_mode & 07777) == 0700); no_acl(root);
   fd = openat(root, strrchr(name, '/') + 1, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC);
   need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == authority.st_uid &&
-    (before.st_mode & 07777) == 0400 && before.st_nlink == 1 && before.st_size > 0 && before.st_size <= 1048576); no_acl(fd);
+    (before.st_mode & 07777) == 0400 && before.st_nlink == 1 && before.st_size > 0 &&
+    before.st_size <= preparation_receipt_limit(name)); no_acl(fd);
   char actual[65]; sha_range(fd, 0, before.st_size, actual);
   need(!strcmp(actual, pin) && !fstat(fd, &after) && !lstat(name, &named)); same_stat(before, after); same_stat(before, named);
   need(!fstat(root, &parent_after) && !lstat(parent, &named)); same_stat(authority, parent_after); same_stat(authority, named);
@@ -1412,6 +1417,11 @@ static void preparation_observe(const char *encoded, const char *pin, bool direc
   need(roots == 1);
   bool receipt = !strncmp(name, report_path, strlen(report_path)) && name[strlen(report_path)] == '/' &&
     !strncmp(name + strlen(report_path) + 1, "provider-", 9) && !strchr(name + strlen(report_path) + 1, '/');
+  /* Declared Darwin receipts use the same bounds without admitting unpinned data. */
+  const char *suffix = strrchr(name, '.');
+  bool darwin_receipt = !directory && suffix && !strcmp(suffix, ".json") &&
+    !strncmp(name, report_path, strlen(report_path)) && name[strlen(report_path)] == '/' &&
+    !strncmp(name + strlen(report_path) + 1, "darwin-", 7) && !strchr(name + strlen(report_path) + 1, '/');
   if (receipt) {
     const char *base = name + strlen(report_path) + 1; size_t length = strlen(base);
     need(length > 14 && length <= 240 && !strcmp(base + length - 5, ".json") &&
@@ -1432,7 +1442,8 @@ static void preparation_observe(const char *encoded, const char *pin, bool direc
   bool stock_tool = approved && !directory && (!strcmp(name, "/usr/bin/clang") || !strcmp(name, "/usr/bin/xcrun") || !strcmp(name, "/usr/bin/codesign"));
   need(directory || ((value.stat.st_uid == 0 || value.stat.st_uid == authority.st_uid) && !(value.stat.st_mode & 06022) &&
     (!(value.stat.st_mode & 0200) || (stock_tool && value.stat.st_uid == 0 && value.stat.st_gid == 0))));
-  if (receipt) need(value.stat.st_uid == authority.st_uid && (value.stat.st_mode & 07777) == 0400 && value.stat.st_size <= 1048576);
+  if (receipt || darwin_receipt) need(value.stat.st_uid == authority.st_uid && (value.stat.st_mode & 07777) == 0400 &&
+    value.stat.st_size <= preparation_receipt_limit(name));
   char actual[65]; if (!directory) { sha_range(value.fd, 0, value.stat.st_size, actual); need(!strcmp(pin, actual)); }
   struct stat after, named; need(!fstat(value.fd, &after) && !lstat(name, &named)); same_stat(value.stat, after); same_stat(value.stat, named); no_acl(value.fd);
   printf("{\"object\":"); identity(&value); printf(",\"sha256\":");

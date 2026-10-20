@@ -39,6 +39,15 @@ const absolute = (value) =>
   path.isAbsolute(value) &&
   path.normalize(value) === value &&
   !/[\u0000-\u001f\u007f]/u.test(value);
+
+// The complete experiment inventory includes uploaded bytes and build diagnostics.
+// All other journals, selectors and close records retain their smaller bound.
+export function darwinPreparationReceiptLimit(file) {
+  return path.basename(file) === "darwin-experiment-preparation.json"
+    ? 4194304
+    : 1048576;
+}
+
 async function readReceipt(file, fs, ownerUid) {
   requireObservation((await fs.realpath(file)) === file);
   const handle = await fs.open(
@@ -53,7 +62,7 @@ async function readReceipt(file, fs, ownerUid) {
         before.nlink === 1n &&
         (before.mode & 0o7777n) === 0o400n &&
         before.size > 0n &&
-        before.size <= 1048576n,
+        before.size <= BigInt(darwinPreparationReceiptLimit(file)),
     );
     const bytes = Buffer.alloc(Number(before.size) + 1);
     let offset = 0;
@@ -307,7 +316,7 @@ export function darwinPreparationContext(input, options) {
       stat = await fs.lstat(directory);
     requireObservation(
       /^[a-zA-Z0-9.-]+\.json$/u.test(name) &&
-        bytes.length <= 1048576 &&
+        bytes.length <= darwinPreparationReceiptLimit(name) &&
         stat.isDirectory() &&
         !stat.isSymbolicLink() &&
         stat.uid === (options.ownerUid ?? (() => process.getuid()))() &&

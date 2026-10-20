@@ -9195,8 +9195,94 @@ test("Darwin input receipt and inventory admission refuse invalid or reviewed jo
   }
 });
 
-test("indexed Darwin experiment preparation seals all helpers and cold-loads without compilation or cache admission", async () => {
-  const f = experimentBuildFixture();
+test("Darwin aggregate receipt bounds preserve exclusive writes and held metadata at exact byte limits", async () => {
+  for (const [name, limit] of [
+    ["darwin-experiment-preparation.json", 4194304],
+    ["darwin-experiment-preparation-close.json", 1048576],
+    ["darwin-experiment-build-selector.json", 1048576],
+    ["darwin-experiment-preparation-extra.json", 1048576],
+  ]) {
+    const f = buildTranscripts(true),
+      state = darwinPreparationContext(f.input, f.options),
+      file = path.join(directory, name),
+      data = { purpose: "experiment", payload: "" },
+      overhead = Buffer.byteLength(JSON.stringify(data) + "\n");
+    data.payload = "x".repeat(limit + 1 - overhead);
+    await assert.rejects(state.write(name, data, false), /Unverified/);
+    assert.equal(f.files.has(file), false);
+    data.payload = data.payload.slice(1);
+    const pin = await state.write(name, data, false),
+      stored = f.files.get(file).bytes;
+    assert.equal(stored.length, limit);
+    assert.equal(pin.sha256, digest(stored));
+    assert.deepEqual(await state.stockReceipt(file), stored);
+    await assert.rejects(state.write(name, data, false));
+    f.files.get(file).bytes = Buffer.concat([stored, Buffer.from(" ")]);
+    await assert.rejects(state.stockReceipt(file), /Unverified/);
+  }
+  for (const fault of ["uid", "mode", "nlink", "substitution", "growth"]) {
+    const f = buildTranscripts(true),
+      state = darwinPreparationContext(f.input, f.options),
+      file = path.join(directory, "darwin-experiment-preparation.json"),
+      bytes = Buffer.alloc(1048577, "x");
+    f.put(file, bytes, 0o400, 1001);
+    const open = f.options.fs.open,
+      lstat = f.options.fs.lstat;
+    let substituted = false;
+    f.options.fs.lstat = async (...args) => {
+      const stat = await lstat(...args);
+      return substituted && args[0] === file
+        ? { ...stat, ino: stat.ino + 1n }
+        : stat;
+    };
+    f.options.fs.open = async (...args) => {
+      const handle = await open(...args),
+        stat = handle.stat,
+        read = handle.read;
+      handle.stat = async (...args) => ({
+        ...(await stat(...args)),
+        ...(fault === "uid" ? { uid: 1002n } : {}),
+        ...(fault === "mode" ? { mode: 0o600n } : {}),
+        ...(fault === "nlink" ? { nlink: 2n } : {}),
+      });
+      handle.read = async (...args) => {
+        const result = await read(...args);
+        if (fault === "substitution") substituted = true;
+        if (fault === "growth")
+          f.files.get(file).bytes = Buffer.concat([bytes, Buffer.from(" ")]);
+        return result;
+      };
+      return handle;
+    };
+    await assert.rejects(state.stockReceipt(file), /Unverified/, fault);
+    assert.equal(f.events.filter((event) => event === "fd-close").length, 1);
+  }
+});
+
+test("indexed Darwin experiment preparation seals the complete large aggregate and cold-loads without compilation or cache admission", async () => {
+  const f = experimentBuildFixture(),
+    diagnostic = longDiagnostic.repeat(2),
+    hosted = hostedAcquisitionFixture(diagnostic),
+    acquired = await acquireDarwinExperimentBuild(
+      hosted.job,
+      directory,
+      hosted.options.binding,
+      hosted.options,
+    ),
+    reportDirectory =
+      "/fixture/work/_temp/native-poc/" + candidateSha + "/darwin";
+  f.prepared.directory = reportDirectory;
+  f.prepared.output = path.join(reportDirectory, "platform-build");
+  f.prepared.bootstrap.reportDirectory = reportDirectory;
+  f.prepared.commands = acquired.commands.map((command) => ({
+    ...command,
+    cwd: reportDirectory,
+    args: command.args.map((argument, index) =>
+      command.file === "git" && index === 1
+        ? "/fixture/work/project/project"
+        : argument.replaceAll(directory, reportDirectory),
+    ),
+  }));
   f.options.fs.readFile = f.options.readReceipt;
   f.options.acquireCases = async (prepared, build, reader, journal) => {
     await journal({ purpose: "experiment", phase: "case-inputs-possible" });
@@ -9210,13 +9296,25 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   };
   const result = await prepareDarwinExperiment(
     f.job,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );
   assert.equal(result.job.preparationEffects.settlement.status, "RETIRED");
+  const aggregate = f.files.get(
+      path.join(reportDirectory, "darwin-experiment-preparation.json"),
+    ),
+    aggregateBytes = Buffer.from(JSON.stringify(aggregate) + "\n");
+  assert.ok(aggregateBytes.length > 1048576, String(aggregateBytes.length));
+  assert.ok(aggregateBytes.length <= 4194304);
+  assert.equal(aggregate.system.uploads.length, 109);
+  assert.equal(aggregate.build.commands.length, 78);
+  assert.ok(
+    aggregate.build.commands.some(({ stderr }) => stderr === diagnostic),
+  );
   assert.equal(
-    f.files.get(path.join(directory, "darwin-experiment-input-0.json")).phase,
+    f.files.get(path.join(reportDirectory, "darwin-experiment-input-0.json"))
+      .phase,
     "case-inputs-possible",
   );
   assert.equal(
@@ -9238,8 +9336,16 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   const commands = f.events.filter((event) =>
     event.startsWith("compile-owner:"),
   ).length;
-  const loaded = await loadDarwinExperiment(result.job, directory, f.options);
-  const reloaded = await loadDarwinExperiment(result.job, directory, f.options);
+  const loaded = await loadDarwinExperiment(
+    result.job,
+    reportDirectory,
+    f.options,
+  );
+  const reloaded = await loadDarwinExperiment(
+    result.job,
+    reportDirectory,
+    f.options,
+  );
   assert.equal(observationDigest(reloaded), observationDigest(loaded));
   assert.equal(
     f.events.filter((event) => event.startsWith("compile-owner:")).length,
@@ -9249,8 +9355,31 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     observationDigest(loaded.preparation),
     observationDigest(result.preparation),
   );
+  const readFile = f.options.fs.readFile,
+    bounds = [
+      ["darwin-experiment-preparation.json", 4194304],
+      ["darwin-experiment-preparation-close.json", 1048576],
+    ],
+    paddedRead = (name, size) => async (file) => {
+      const bytes = await readFile(file);
+      return path.basename(file) === name
+        ? Buffer.concat([bytes, Buffer.alloc(size - bytes.length, " ")])
+        : bytes;
+    };
+  // Trailing JSON whitespace preserves every digest and semantic observation:
+  // only the real size predicate can reject these otherwise valid records.
+  for (const [name, limit] of bounds) {
+    f.options.fs.readFile = paddedRead(name, limit);
+    await loadDarwinExperiment(result.job, reportDirectory, f.options);
+    f.options.fs.readFile = paddedRead(name, limit + 1);
+    await assert.rejects(
+      loadDarwinExperiment(result.job, reportDirectory, f.options),
+      /Unverified/,
+    );
+  }
+  f.options.fs.readFile = readFile;
   const preparationPath = path.join(
-      directory,
+      reportDirectory,
       "darwin-experiment-preparation.json",
     ),
     original = f.files.get(preparationPath);
@@ -9286,7 +9415,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
         }),
       },
     };
-    await assert.rejects(loadDarwinExperiment(job, directory, f.options));
+    await assert.rejects(loadDarwinExperiment(job, reportDirectory, f.options));
   }
   f.files.set(preparationPath, original);
   for (const identity of [undefined, "substituted-loader"]) {
@@ -9306,7 +9435,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
             }),
           },
         },
-        directory,
+        reportDirectory,
         f.options,
       ),
     );
@@ -9384,7 +9513,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     return reader;
   };
   await assert.rejects(
-    loadDarwinExperiment(result.job, directory, f.options),
+    loadDarwinExperiment(result.job, reportDirectory, f.options),
     /Original cold input read failure/,
   );
   const failed = { ...result.job, failure: "preparation-failed" };
@@ -9396,7 +9525,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   });
   const retained = await recoverDarwinExperimentPreparation(
     failed,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );
@@ -9405,7 +9534,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   f.options.createReader = createReader;
   const recovered = await recoverDarwinExperimentPreparation(
     retained,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );
@@ -9420,8 +9549,32 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
     f.events.filter((event) => event.startsWith("compile-owner:")).length,
     commands,
   );
+  for (const [name, limit] of bounds) {
+    f.options.fs.readFile = paddedRead(name, limit);
+    const bounded = await recoverDarwinExperimentPreparation(
+      recovered,
+      reportDirectory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(bounded.preparationEffects.settlement.status, "RETIRED");
+    f.options.fs.readFile = paddedRead(name, limit + 1);
+    const overflowing = await recoverDarwinExperimentPreparation(
+      recovered,
+      reportDirectory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(
+      overflowing.preparationEffects.settlement.status,
+      "RETAINED",
+      name,
+    );
+    assert.equal(overflowing.failure, failed.failure);
+  }
+  f.options.fs.readFile = readFile;
   const closePath = path.join(
-    directory,
+    reportDirectory,
     "darwin-experiment-preparation-close.json",
   );
   f.files.set(closePath, {
@@ -9430,7 +9583,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   });
   const substituted = await recoverDarwinExperimentPreparation(
     recovered,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );
@@ -9439,7 +9592,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   f.files.set(closePath, { ...f.files.get(closePath), purpose: "reviewed" });
   const mixed = await recoverDarwinExperimentPreparation(
     substituted,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );
@@ -9451,7 +9604,7 @@ test("indexed Darwin experiment preparation seals all helpers and cold-loads wit
   f.files.set(preparationPath, legacy);
   await recoverDarwinExperimentPreparation(
     mixed,
-    directory,
+    reportDirectory,
     f.persist,
     f.options,
   );

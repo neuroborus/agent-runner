@@ -1023,6 +1023,136 @@ test("Darwin signature policy exempts only installed experiment originals and pr
   }
 });
 
+test("Darwin native receipt guards bound the aggregate separately without broadening preparation admission", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    extract = (name) => {
+      const body = new RegExp(
+        `static [^\\n]+ ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)?.[1];
+      assert.ok(body, name);
+      return body;
+    },
+    limit = extract("preparation_receipt_limit")
+      .replace("const char *leaf", "const leaf")
+      .replace("leaf + 1", "leaf.slice(1)"),
+    build = extract("build_receipt"),
+    observe = extract("preparation_observe"),
+    buildGuard =
+      /need\(fd >= 0 && !fstat\(fd, &before\)[\s\S]*?\); no_acl\(fd\);/u.exec(
+        build,
+      )?.[0],
+    admission = /need\(approved \|\| \(!directory && receipt\)\);/u.exec(
+      observe,
+    )?.[0],
+    classify = observe.slice(
+      observe.indexOf("  bool receipt ="),
+      observe.indexOf("  if (receipt)"),
+    ),
+    preparationGuard = observe.slice(
+      observe.indexOf("  if (receipt ||"),
+      observe.indexOf("  char actual[65]"),
+    ),
+    project = (body) =>
+      body
+        .replaceAll(/\bbool\b/gu, "let")
+        .replaceAll("const char *suffix", "const suffix")
+        .replaceAll("&before", "before")
+        .replaceAll(/\b0([0-7]{2,})\b/gu, "0o$1")
+        .replaceAll(
+          "name + strlen(report_path) + 1",
+          "name.slice(report_path.length + 1)",
+        );
+  assert.ok(buildGuard && admission && preparationGuard);
+  const prefix = `function preparation_receipt_limit(name) {${limit}}\n`;
+  for (const [name, size, accepted, onlyLane] of [
+    ["darwin-experiment-preparation.json", 1048577, true],
+    ["darwin-experiment-preparation.json", 4194304, true],
+    ["darwin-experiment-preparation.json", 4194305, false],
+    ["darwin-experiment-preparation-close.json", 1048576, true],
+    ["darwin-experiment-preparation-close.json", 1048577, false],
+    ["darwin-experiment-preparation-extra.json", 1048577, false],
+    ["provider-preparation.json", 1048576, true],
+    ["provider-preparation.json", 1048577, false],
+    ["darwin-input.bin", 4194305, true, "preparation"],
+  ]) {
+    for (const lane of ["build", "preparation"]) {
+      if (onlyLane && lane !== onlyLane) continue;
+      const stat = {
+          st_uid: 1001,
+          st_mode: 0o100400,
+          st_nlink: 1,
+          st_size: size,
+        },
+        context = {
+          name: "/fixture/report/" + name,
+          report_path: "/fixture/report",
+          directory: false,
+          approved: true,
+          fd: 3,
+          before: stat,
+          value: { stat },
+          authority: { st_uid: 1001 },
+          strlen: (value) => value.length,
+          strcmp: (left, right) => Number(left !== right),
+          strncmp: (left, right, length) =>
+            Number(left.slice(0, length) !== right.slice(0, length)),
+          strchr: (value, character) =>
+            value.includes(character)
+              ? value.slice(value.indexOf(character))
+              : null,
+          strrchr: (value, character) =>
+            value.includes(character)
+              ? value.slice(value.lastIndexOf(character))
+              : null,
+          fstat: () => 0,
+          S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+          no_acl() {},
+          need: (ok) => assert.ok(ok, "Native receipt refused"),
+        },
+        run = () =>
+          new Script(
+            prefix +
+              "{\n" +
+              project(
+                lane === "build"
+                  ? buildGuard
+                  : classify + admission + preparationGuard,
+              ) +
+              "\n}",
+          ).runInNewContext(context);
+      if (accepted) run();
+      else
+        assert.throws(run, /Native receipt refused/, `${lane}:${name}:${size}`);
+      if (lane === "build" && accepted)
+        for (const [key, value] of [
+          ["st_uid", 1002],
+          ["st_mode", 0o100600],
+          ["st_nlink", 2],
+          ["st_size", 0],
+        ]) {
+          const previous = stat[key];
+          stat[key] = value;
+          assert.throws(run, /Native receipt refused/, key);
+          stat[key] = previous;
+        }
+      if (lane === "preparation" && accepted) {
+        context.approved = false;
+        if (name.startsWith("provider-")) run();
+        else
+          assert.throws(
+            run,
+            /Native receipt refused/,
+            "Aggregate bound must not grant admission",
+          );
+      }
+    }
+  }
+});
+
 test("Darwin native installed, build and helper-slot guards distinguish hosted files from private inputs", async () => {
   const reader = await readFile(
       new URL("custody-reader.c", import.meta.url),

@@ -1694,6 +1694,20 @@ exclude only the numbered preparation journal family from retirement evidence;
 malformed names and experiment journals in reviewed inventories remain failures.
 Indexed preparation and cold/recovery coverage also retains the actual producer
 names, first-cause preservation and independent non-emergency retirement.
+The complete aggregate fixture retains all 109 uploads and 78 hosted command
+observations, neutral CI-shaped paths and compiler diagnostics. Its serialization
+exceeds one MiB and must pass the actual aggregate writer, normal loader and
+interrupted cold recovery without losing inventory or rebuilding. Exact-boundary
+and one-byte-overflow cases exercise the production writer and held reader:
+only `darwin-experiment-preparation.json` admits four MiB; close, selector and
+similarly prefixed receipts remain limited to one MiB. Held metadata, substitution
+and growth failures still close their descriptors. Source-driven native receipt
+guards exercise the same limits and preserve declared-input admission, private
+ownership/mode/link checks and the separate provider-receipt lane. These portable
+regressions also pad otherwise unchanged JSON with whitespace to prove normal
+loading and recovery reject overflow at the size predicate, rather than at JSON
+parsing or binding comparison. They add no native acceptance or durable slow-tier
+requirement.
 For reviewed preparation, the repository owners verify and persist all 22 fixed
 Clang/SDK/signing commands, snapshot unsigned inputs and rejoin final pins and original receipts
 without recompilation. Regressions cover missing source approvals, intermediate
