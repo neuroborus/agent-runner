@@ -268,10 +268,22 @@ export async function darwinAccessPreparation(
     else if (i >= 19) {
       const family = (i - 19) % 4 >= 2 ? 6 : 4,
         category = Math.floor((i - 19) / 4),
+        [literal, zone, extra] = attempt.target.split("%"),
+        scoped = family === 6 && /^fe[89ab][0-9a-f]:/iu.test(literal),
         loopback = family === 6 ? "::1" : "127.0.0.1",
         wildcard = family === 6 ? "::" : "0.0.0.0";
       requireObservation(
-        isIP(attempt.target) === family &&
+        isIP(literal) === family &&
+          extra === undefined &&
+          (scoped
+            ? binding.purpose === "experiment" &&
+              category === 2 &&
+              /^[1-9][0-9]{0,9}$/u.test(zone ?? "") &&
+              Number(zone) <= 0xffffffff
+            : zone === undefined) &&
+          (category !== 2 ||
+            (i - 19) % 2 === 0 ||
+            attempt.target === value.attempts[i - 1].target) &&
           attempt.remote >= 1024 &&
           attempt.local >= 1024 &&
           (category === 1

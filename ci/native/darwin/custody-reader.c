@@ -1684,10 +1684,28 @@ static int access_seed(const char *path, bool custody) {
     !fchmod(fd, custody ? 0400 : 0600) && !fsync(fd));
   return fd;
 }
+static uint32_t access_scope(const char *text, char *literal, size_t capacity) {
+  size_t length = strcspn(text, "%"); need(length > 0 && length < capacity);
+  memcpy(literal, text, length); literal[length] = 0;
+  uint64_t scope = 0;
+  if (text[length]) {
+    size_t offset = length + 1; need(text[offset] >= '1' && text[offset] <= '9');
+    for (; text[offset]; offset++) {
+      need(text[offset] >= '0' && text[offset] <= '9'); scope = scope * 10 + (unsigned)(text[offset] - '0'); need(scope <= UINT32_MAX);
+    }
+  }
+  return (uint32_t)scope;
+}
 static socklen_t access_address(struct sockaddr_storage *storage, unsigned family, const char *name, unsigned port) {
+  char literal[INET6_ADDRSTRLEN]; uint32_t scope = access_scope(name, literal, sizeof(literal));
+#ifndef NATIVE_CI_EXPERIMENT
+  need(!scope);
+#endif
   memset(storage, 0, sizeof(*storage));
-  if (family == AF_INET) { struct sockaddr_in *a = (void *)storage; a->sin_len = sizeof(*a); a->sin_family = family; a->sin_port = htons(port); need(inet_pton(family, name, &a->sin_addr) == 1); return sizeof(*a); }
-  struct sockaddr_in6 *a = (void *)storage; a->sin6_len = sizeof(*a); a->sin6_family = family; a->sin6_port = htons(port); need(inet_pton(family, name, &a->sin6_addr) == 1); return sizeof(*a);
+  if (family == AF_INET) { need(!scope); struct sockaddr_in *a = (void *)storage; a->sin_len = sizeof(*a); a->sin_family = family; a->sin_port = htons(port); need(inet_pton(family, literal, &a->sin_addr) == 1); return sizeof(*a); }
+  need(family == AF_INET6);
+  struct sockaddr_in6 *a = (void *)storage; a->sin6_len = sizeof(*a); a->sin6_family = family; a->sin6_port = htons(port); need(inet_pton(family, literal, &a->sin6_addr) == 1);
+  need(!!scope == !!IN6_IS_ADDR_LINKLOCAL(&a->sin6_addr)); a->sin6_scope_id = scope; return sizeof(*a);
 }
 static bool owned_access_socket(const char *name, const struct stat *st) {
   if (strcmp(name, "ipc")) return false;

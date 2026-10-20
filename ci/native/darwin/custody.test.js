@@ -3,6 +3,7 @@ import test from "node:test";
 import { EventEmitter } from "node:events";
 import { constants } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { Script } from "node:vm";
 import { PassThrough, Writable } from "node:stream";
 import {
@@ -17,6 +18,178 @@ import {
   createNativeDiagnosticWriter,
   withNativeDiagnostics,
 } from "../diagnostics.js";
+
+test("Darwin native access sockaddr builders decode exact experiment scope and preserve unscoped addresses", async () => {
+  // Execute the two small C constructors with injected sockaddr/inet operations;
+  // this is portable source coverage, not Darwin compilation or native proof.
+  for (const [file, prefix, end] of [
+    ["access-fixture.c", "address", "static const char *network_source"],
+    ["custody-reader.c", "access", "static bool owned_access_socket"],
+  ]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8"),
+      start = source.indexOf(`static uint32_t ${prefix}_scope(`),
+      body = source.slice(start, source.indexOf(end, start));
+    assert.ok(body.startsWith(`static uint32_t ${prefix}_scope(`));
+    for (const experiment of [false, true]) {
+      const translated = body
+        .replace(
+          /#ifndef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu,
+          (_, guarded) => (experiment ? "" : guarded),
+        )
+        .replace(
+          /static uint32_t (\w+)\([^\n]+\)/u,
+          "function $1(text, literal, capacity)",
+        )
+        .replace(
+          /static socklen_t \w+\(struct sockaddr_storage \*storage, (?:int|unsigned) family, const char \*(text|name), unsigned (value|port)\)/u,
+          (_, target, port) =>
+            `function build(storage, family, ${target}, ${port})`,
+        )
+        .replace(/char literal\[INET6_ADDRSTRLEN\]/u, "let literal = []")
+        .replace(/\b(?:size_t|uint64_t|uint32_t) /gu, "let ")
+        .replace(/\((?:uint32_t|unsigned)\)/gu, "")
+        .replace(
+          /struct sockaddr_in6? \*a\s*=\s*\(void \*\)storage/gu,
+          "let a = storage",
+        )
+        .replaceAll("sizeof(literal)", "46")
+        .replaceAll("sizeof(*storage)", "128")
+        .replaceAll("sizeof(*a)", "(family === AF_INET ? 16 : 28)")
+        .replaceAll("&a->", "a.")
+        .replaceAll("->", ".");
+      const build = new Script(`${translated}\nbuild;`).runInNewContext({
+        AF_INET: 2,
+        AF_INET6: 30,
+        UINT32_MAX: 0xffffffff,
+        strcspn: (text, delimiter) =>
+          text.includes(delimiter) ? text.indexOf(delimiter) : text.length,
+        memcpy(target, text, length) {
+          for (let i = 0; i < length; i++) target[i] = text[i];
+        },
+        memset(target) {
+          Object.assign(target, {
+            sin_addr: {},
+            sin6_addr: {},
+            sin6_scope_id: 0,
+          });
+        },
+        htons: (port) => port,
+        inet_pton(family, literal, target) {
+          const text = literal.slice(0, literal.indexOf(0)).join("");
+          target.text = text;
+          return Number(isIP(text) === (family === 2 ? 4 : 6));
+        },
+        IN6_IS_ADDR_LINKLOCAL: (address) =>
+          /^fe[89ab][0-9a-f]:/iu.test(address.text),
+        need: (ok) => assert.ok(ok, "Native address refused"),
+      });
+      for (const [target, family, scope] of [
+        ["192.0.2.2", 2, 0],
+        ["2001:db8::2", 30, 0],
+        ["::1", 30, 0],
+        ["::", 30, 0],
+        ["fe80::2%7", 30, 7],
+        ["FEBF::2%4294967295", 30, 0xffffffff],
+        ...[
+          "fe80::2",
+          "fe80::2%",
+          "fe80::2%0",
+          "fe80::2%07",
+          "fe80::2%-1",
+          "fe80::2%fixture",
+          "fe80::2%1.5",
+          "fe80::2%4294967296",
+          "fe80::2%7%8",
+          "2001:db8::2%7",
+          "::1%7",
+          "fe80:::2%7",
+        ].map((target) => [target, 30, null]),
+        ["192.0.2.2%7", 2, null],
+        ["192.0.2.2", 99, null],
+      ]) {
+        const storage = {},
+          run = () => build(storage, family, target, 48001);
+        if (scope === null || (!experiment && scope))
+          assert.throws(run, /Native address refused/);
+        else {
+          assert.equal(run(), family === 2 ? 16 : 28);
+          assert.equal(storage.sin6_scope_id, scope);
+          assert.equal(
+            storage[family === 2 ? "sin_addr" : "sin6_addr"].text,
+            target.split("%")[0],
+          );
+          assert.equal(storage[family === 2 ? "sin_port" : "sin6_port"], 48001);
+        }
+      }
+    }
+  }
+});
+
+test("Darwin scoped access targets survive control and payload argv with confined source binding", async () => {
+  const fixture = await readFile(
+      new URL("access-fixture.c", import.meta.url),
+      "utf8",
+    ),
+    custody = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    source =
+      /static const char \*network_source\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        fixture,
+      )?.[1],
+    controlVector =
+      /char \*argv\[\] = \{entries\[5\]\.path, nonce, args\[0\], target,[^\n]+?\};/u.exec(
+        custody,
+      )?.[0],
+    payloadVector =
+      /char \*vector\[\] = \{argv\[0\], fields\[0\],[^\n]+?\};/u.exec(
+        fixture,
+      )?.[0];
+  assert.ok(source && controlVector && payloadVector);
+  for (const control of [false, true]) {
+    const select = new Script(
+      `(family, target) => {${source}}`,
+    ).runInNewContext({
+      AF_INET: 2,
+      getenv: () => control,
+      strchr: (text, character) => text.includes(character),
+    });
+    assert.equal(select(30, "fe80::2%7"), control ? "fe80::2%7" : "::1");
+    assert.equal(select(30, "::1"), "::1");
+    assert.equal(select(2, "192.0.2.2"), "127.0.0.1");
+  }
+  for (const operation of ["tcp6", "udp6"]) {
+    const target = "fe80::2%7",
+      nonce = "a".repeat(32),
+      args = [operation, Buffer.from(target).toString("hex"), "48001", "48002"];
+    for (const vector of [controlVector, payloadVector]) {
+      const expression = vector.slice(
+          vector.indexOf("{") + 1,
+          vector.lastIndexOf("}"),
+        ),
+        actual = new Script(`[${expression}]`).runInNewContext({
+          entries: Array.from({ length: 6 }, () => ({
+            path: "/fixture/access",
+          })),
+          argv: ["/fixture/access"],
+          fields: [nonce, ...args],
+          args,
+          nonce,
+          target,
+          index: 29,
+          NULL: null,
+        });
+      assert.deepEqual(Array.from(actual.slice(1, 5)), [
+        nonce,
+        operation,
+        target,
+        "48001",
+      ]);
+      assert.equal(actual[5], vector === controlVector ? "0" : "48002");
+    }
+  }
+});
 
 test("Darwin protected installed hardlinks require classification, protected ancestry and stable held bytes", async () => {
   for (const fault of [

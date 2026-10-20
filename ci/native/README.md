@@ -786,15 +786,20 @@ required families. A missing eligible IPv4 or IPv6 address emits ordinary
 `darwin-experiment-addresses` diagnostics before refusing acquisition: the failed
 family, every interface name, address, family, internal flag, scope ID and
 selection exclusions. An absent scope ID remains unavailable, distinct from zero.
-Internal and mismatched-family candidates stay excluded. IPv6 link-local
-addresses, zone-qualified literals and nonzero scope IDs remain unsupported:
-`access-fixture.c` uses `inet_pton` and supplies no `sin6_scope_id`. Observations
-do not admit a scoped address, invent a fallback or relabel loopback. The selected
-host addresses still feed the family-bound host-network denials, separately from
-loopback controls, with all 39 attempts, 33 denials and four native echoes required.
-No interface or host network configuration changes. This localizes the missing
-family; actual hosted acquisition remains unresolved until fresh observations
-support a specific repair. Diagnostics establish no native acceptance.
+Internal, loopback, unspecified and mismatched-family candidates stay excluded.
+An eligible unscoped address retains preference. Otherwise actual IPv6 link-local
+addresses require a positive observed 32-bit interface scope; an optional zone
+must match the observed interface name or exact decimal scope ID. Malformed
+addresses, zones, interface names, scopes and conflicting interface/scope joins
+refuse selection. The selected numeric zone stays in the pinned target string
+through case records, operation vectors, cold reads and control/payload arguments.
+Both native sockaddr builders strip that zone for `inet_pton` and set
+`sin6_scope_id`; reviewed inputs retain their unscoped contract. Scoped positive
+controls use the observed source address, while payloads retain their loopback
+pre-bind. Host-network denials remain separate from loopback controls, with all
+39 attempts, 33 denials and four native echoes required. No address is fabricated,
+loopback relabelled, or interface or host network configuration changed. Fresh
+same-candidate hosted evidence remains required for acquisition and native acceptance.
 The audit version comes from the producer-selected `AUDIT_HEADER_VERSION_OPENBSM`
 in the held installed `audit_record.h`: a positive byte-sized decimal literal or
 one version-named OpenBSM alias with a matching literal. Beyond the ordinary

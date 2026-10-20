@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ipc.h>
@@ -43,14 +44,38 @@ static int wait_read(int fd) {
   if (poll(&event, 1, 5000) != 1) {errno=ETIMEDOUT; return -1;}
   return 0;
 }
+static uint32_t address_scope(const char *text, char *literal, size_t capacity) {
+  size_t length = strcspn(text, "%"); need(length > 0 && length < capacity);
+  memcpy(literal, text, length); literal[length] = 0;
+  uint64_t scope = 0;
+  if (text[length]) {
+    size_t offset = length + 1; need(text[offset] >= '1' && text[offset] <= '9');
+    for (; text[offset]; offset++) {
+      need(text[offset] >= '0' && text[offset] <= '9'); scope = scope * 10 + (unsigned)(text[offset] - '0'); need(scope <= UINT32_MAX);
+    }
+  }
+  return (uint32_t)scope;
+}
 static socklen_t address(struct sockaddr_storage *storage, int family, const char *text, unsigned value) {
+  char literal[INET6_ADDRSTRLEN]; uint32_t scope = address_scope(text, literal, sizeof(literal));
+#ifndef NATIVE_CI_EXPERIMENT
+  need(!scope);
+#endif
   memset(storage, 0, sizeof(*storage));
   if (family == AF_INET) {
+    need(!scope);
     struct sockaddr_in *a = (void *)storage; a->sin_len=sizeof(*a); a->sin_family=family;
-    a->sin_port=htons(value); need(inet_pton(family,text,&a->sin_addr) == 1); return sizeof(*a);
+    a->sin_port=htons(value); need(inet_pton(family,literal,&a->sin_addr) == 1); return sizeof(*a);
   }
+  need(family == AF_INET6);
   struct sockaddr_in6 *a = (void *)storage; a->sin6_len=sizeof(*a); a->sin6_family=family;
-  a->sin6_port=htons(value); need(inet_pton(family,text,&a->sin6_addr) == 1); return sizeof(*a);
+  a->sin6_port=htons(value); need(inet_pton(family,literal,&a->sin6_addr) == 1);
+  need(!!scope == !!IN6_IS_ADDR_LINKLOCAL(&a->sin6_addr)); a->sin6_scope_id=scope; return sizeof(*a);
+}
+static const char *network_source(int family, const char *target) {
+  /* Root positive controls must use the observed interface for scoped peers.
+   * Payloads retain their admitted loopback pre-bind before the denial turn. */
+  return getenv("NATIVE_ACCESS_CONTROL") && strchr(target, '%') ? target : (family == AF_INET ? "127.0.0.1" : "::1");
 }
 static int network(const char *op, const char *target, unsigned remote, unsigned local, const char *nonce) {
   int family=strstr(op,"6") ? AF_INET6 : AF_INET, type=strstr(op,"udp") ? SOCK_DGRAM : SOCK_STREAM;
@@ -89,7 +114,7 @@ static int network(const char *op, const char *target, unsigned remote, unsigned
     if (fd != listener_fd) need(!close(listener_fd));
     close(fd); held_fd = -1; return 0;
   }
-  socklen_t sourceLength=address(&source,family,family == AF_INET ? "127.0.0.1" : "::1",local);
+  socklen_t sourceLength=address(&source,family,network_source(family,target),local);
   if (!bound && bind(fd,(struct sockaddr *)&source,sourceLength)) return -1;
   int result=connect(fd,(struct sockaddr *)&destination,length);
   if (result && errno == EINPROGRESS) {
@@ -164,7 +189,7 @@ static int execute(int argc, char **argv) {
     if (prepared_fd < 0) {
       prepared_fd = socket(family, type, 0); need(prepared_fd >= 0);
       if (family == AF_INET6) {int one=1; need(!setsockopt(prepared_fd,IPPROTO_IPV6,IPV6_V6ONLY,&one,sizeof(one)));}
-      struct sockaddr_storage a; socklen_t size = address(&a, family, strstr(op,"listen") ? target : (family == AF_INET ? "127.0.0.1" : "::1"), selected);
+      struct sockaddr_storage a; socklen_t size = address(&a, family, strstr(op,"listen") ? target : network_source(family,target), selected);
       need(!bind(prepared_fd, (void *)&a, size));
     }
   }

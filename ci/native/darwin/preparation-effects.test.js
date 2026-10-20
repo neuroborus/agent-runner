@@ -2987,7 +2987,7 @@ function buildTranscripts(experiment = false, complete = false) {
           target: socket(helper, attemptIndex + 20, {
             family: spec.operation.includes("6") ? "inet6" : "inet",
             protocol: spec.operation.startsWith("tcp") ? "tcp" : "udp",
-            address: spec.target,
+            address: spec.target.split("%")[0],
             port: spec.remote,
           }),
         },
@@ -5219,7 +5219,7 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
     context: bindingContext,
   };
 }
-function accessBinding(f, profile, observedPins = false, mach) {
+function accessBinding(f, profile, observedPins = false, mach, scopedTarget) {
   const experiment = f.manifest.purpose === "experiment",
     id = "access." + profile,
     binding = caseBinding(f, id),
@@ -5371,7 +5371,7 @@ function accessBinding(f, profile, observedPins = false, mach) {
                 : "0.0.0.0"
               : Math.floor((i - 19) / 4) === 2
                 ? (i - 19) % 4 >= 2
-                  ? "2001:db8::1"
+                  ? (scopedTarget ?? "2001:db8::1")
                   : "192.0.2.1"
                 : (i - 19) % 4 >= 2
                   ? "::1"
@@ -8536,12 +8536,14 @@ test("Darwin recovery retains policy when sealed audit frames or independent IPC
   }
 });
 
-function completeExperimentCase(f, id, mach) {
+function completeExperimentCase(f, id, mach, scopedTarget) {
   const create = (entry) => {
     if (entry.startsWith("files.")) return fileBinding(f, entry);
     if (entry.startsWith("git.")) return gitBinding(f, entry);
     if (entry.startsWith("access."))
-      return { binding: accessBinding(f, entry.slice(7), true, mach) };
+      return {
+        binding: accessBinding(f, entry.slice(7), true, mach, scopedTarget),
+      };
     if (entry !== "release") return { binding: caseBinding(f, entry, true) };
     const setup = operationBinding(f, entry);
     return setup.finish(
@@ -8658,38 +8660,40 @@ test("complete Darwin experiments retain all file and Git native owners and orig
   }
 });
 
-test("Darwin experiment access drains capture before restoring owned PF effects over stock policy", async () => {
-  const f = buildTranscripts(true),
-    id = "access.read-only",
-    setup = completeExperimentCase(f, id),
-    effects = createDarwinSystemEffects(f.input, f.options),
-    recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
-    prepared = await effects.prepare(recipe, {
-      policyBinding: setup.binding,
-      recordPolicy() {},
-    });
-  assert.equal(
-    (await runDarwinAccessCase(prepared.input, prepared.effects)).status,
-    "OBSERVED",
-  );
-  assert.equal(
-    settled(
-      await effects.settle(recipe, prepared, {
-        signal: new AbortController().signal,
-        execution: execution(recipe),
-      }),
-    ).status,
-    "RETIRED",
-  );
-  assert.ok(
-    f.events.indexOf("access-audit-close") <
-      f.events.lastIndexOf("access-pf-run"),
-  );
-  assert.ok(
-    f.events.lastIndexOf("access-pf-run") <
-      f.events.indexOf("access-lease-released"),
-  );
-  assert.equal(f.processes.size, 0);
+test("Darwin scoped experiment access retains every profile and drains capture before PF restoration", async () => {
+  for (const profile of ["read-only", "workspace-write", "trusted-command"]) {
+    const f = buildTranscripts(true),
+      id = "access." + profile,
+      setup = completeExperimentCase(f, id, undefined, "fe80::2%7"),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
+      prepared = await effects.prepare(recipe, {
+        policyBinding: setup.binding,
+        recordPolicy() {},
+      });
+    const result = await runDarwinAccessCase(prepared.input, prepared.effects);
+    assert.equal(result.status, "OBSERVED");
+    assert.equal(result.nativeEvidence.denials.length, 33);
+    assert.equal(result.nativeEvidence.loopback.length, 4);
+    assert.equal(
+      settled(
+        await effects.settle(recipe, prepared, {
+          signal: new AbortController().signal,
+          execution: execution(recipe),
+        }),
+      ).status,
+      "RETIRED",
+    );
+    assert.ok(
+      f.events.indexOf("access-audit-close") <
+        f.events.lastIndexOf("access-pf-run"),
+    );
+    assert.ok(
+      f.events.lastIndexOf("access-pf-run") <
+        f.events.indexOf("access-lease-released"),
+    );
+    assert.equal(f.processes.size, 0);
+  }
 });
 
 function experimentInputs(f, build) {
@@ -8927,7 +8931,7 @@ test("Darwin Mach access binds exact native windows, caller births, kernel sourc
   }
 });
 
-test("Darwin experiment access refuses legacy and mixed observation records before admission", async () => {
+test("Darwin access cold reads retain numeric scope and refuse legacy, mixed or malformed targets", async () => {
   const f = buildTranscripts(true),
     binding = experimentCase(f, "access.read-only"),
     declared = f.manifest.darwinPreparation.cases.find(
@@ -8950,6 +8954,7 @@ test("Darwin experiment access refuses legacy and mixed observation records befo
           path: Buffer.from(encoded, "hex").toString(),
         };
       });
+  for (const i of [29, 30]) original.attempts[i].target = "fe80::2%7";
   for (const mutate of [
     null,
     (value) => {
@@ -8969,6 +8974,34 @@ test("Darwin experiment access refuses legacy and mixed observation records befo
     },
     (value) => {
       value.attempts[0].source = "unified-log-mach-v1";
+    },
+    ...[
+      "fe80::2",
+      "fe80::2%",
+      "fe80::2%fixture",
+      "fe80::2%0",
+      "fe80::2%-1",
+      "fe80::2%07",
+      "fe80::2%1.5",
+      "fe80::2%4294967296",
+      "fe80::2%7%8",
+      "2001:db8::2%7",
+      "::1%7",
+      "malformed%7",
+    ].map((target) => (value) => {
+      for (const i of [29, 30]) value.attempts[i].target = target;
+    }),
+    (value) => {
+      value.attempts[30].target = "fe80::2%8";
+    },
+    (value) => {
+      value.attempts[27].target = "192.0.2.1%7";
+    },
+    (value) => {
+      value.attempts[21].target = "fe80::2%7";
+    },
+    (value) => {
+      value.attempts[38].target = "::1%7";
     },
   ]) {
     const value = structuredClone(original),
@@ -9870,12 +9903,16 @@ async function installedCaseAcquisition(format) {
               scopeid: 7,
             },
             { internal: false, family: "IPv4", address: "192.0.2.1" },
-            {
-              internal: false,
-              family: "IPv6",
-              address: "2001:db8::1",
-              scopeid: 0,
-            },
+            ...(format === "thin"
+              ? [
+                  {
+                    internal: false,
+                    family: "IPv6",
+                    address: "2001:db8::1",
+                    scopeid: 0,
+                  },
+                ]
+              : []),
           ],
         };
       },
@@ -9927,7 +9964,7 @@ async function installedCaseAcquisition(format) {
   );
   assert.deepEqual(acquired.inputs.addresses, {
     inet: "192.0.2.1",
-    inet6: "2001:db8::1",
+    inet6: format === "thin" ? "2001:db8::1" : "fe80::1%7",
   });
   assert.equal(Object.hasOwn(acquired.inputs.events, "mach"), false);
   assert.equal(acquired.inputs.mach.source, "unified-log-mach-v1");
@@ -9992,6 +10029,38 @@ async function installedCaseAcquisition(format) {
       acquired.publish,
     ),
     declared = system.cases.find(({ id }) => id === "git.fixed");
+  for (const access of system.cases.filter(({ id }) =>
+    id.startsWith("access."),
+  )) {
+    const record = JSON.parse(
+        Buffer.from(
+          system.uploads.find(
+            ({ path }) => path === access.bindings.access.binding.path,
+          ).hex,
+          "hex",
+        ),
+      ),
+      bank = record.assets.find(({ path }) => path.endsWith("/access-cases")),
+      bytes = Buffer.from(
+        system.uploads.find(({ sha256 }) => sha256 === bank.sha256).hex,
+        "hex",
+      ),
+      rows = bytes.toString().trim().split("\n");
+    assert.equal(rows.length, 39);
+    assert.equal(digest(bytes), bank.sha256);
+    for (const i of [29, 30]) {
+      assert.equal(record.attempts[i].target, acquired.inputs.addresses.inet6);
+      assert.equal(
+        Buffer.from(rows[i].split(" ")[1], "hex").toString(),
+        acquired.inputs.addresses.inet6,
+      );
+    }
+    assert.equal(record.attempts[21].target, "::1");
+    assert.equal(
+      record.attempts.find(({ id }) => id === "loopback-inet6-tcp").target,
+      "::1",
+    );
+  }
   for (const fault of [undefined, "loader"]) {
     const native = buildTranscripts(true, true);
     gitBinding(native, declared.id, fault, declared.bindings.input);
@@ -10136,7 +10205,7 @@ async function installedCaseAcquisition(format) {
       },
       excluded = [
         { internal: true, family: "IPv6", address: "::1", scopeid: 0 },
-        { internal: false, family: "IPv6", address: "fe80::1", scopeid: 7 },
+        { internal: false, family: "IPv6", address: "fe80::1", scopeid: 0 },
         { internal: false, family: "IPv6", address: "FEBF::2", scopeid: 0 },
         { internal: false, family: "IPv6", address: "2001:db8::2", scopeid: 4 },
         {
@@ -10198,7 +10267,7 @@ async function installedCaseAcquisition(format) {
             address: entry.address,
             internal: entry.internal,
             scopeId: entry.scopeid,
-            exclusions: [i === 0 ? "internal" : "unsupported-ipv6-scope"],
+            exclusions: [i === 0 ? "internal" : "invalid-address-scope"],
           })),
         );
       }
@@ -10209,6 +10278,93 @@ async function installedCaseAcquisition(format) {
           throw new Error("Diagnostic sink failure");
         },
       );
+      assert.ok(
+        commands
+          .slice(before)
+          .every(
+            ([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file),
+          ),
+      );
+    }
+    const scoped = {
+      internal: false,
+      family: "IPv6",
+      address: "fe80::2",
+      scopeid: 7,
+    };
+    for (const [entry, expected] of [
+      [scoped, "fe80::2%7"],
+      [{ ...scoped, address: "fe80::2%fixture" }, "fe80::2%7"],
+      [{ ...scoped, address: "fe80::2%7" }, "fe80::2%7"],
+      [{ ...scoped, address: "FEBF::2" }, "FEBF::2%7"],
+      [
+        { ...scoped, address: "fe80::2%4294967295", scopeid: 0xffffffff },
+        "fe80::2%4294967295",
+      ],
+    ]) {
+      let reads = 0;
+      options.networkInterfaces = () => {
+        reads++;
+        return { fixture: [ipv4, entry] };
+      };
+      const actual = await acquireDarwinExperimentInputs(
+        built.prepared,
+        built.build,
+        reader,
+        persist,
+        options,
+      );
+      assert.equal(reads, 1);
+      assert.deepEqual(actual.inputs.addresses, {
+        inet: ipv4.address,
+        inet6: expected,
+      });
+    }
+    for (const inventory of [
+      ...[undefined, null, 0, -1, 1.5, "7", 0x100000000, NaN].map(
+        (scopeid) => ({
+          fixture: [ipv4, { ...scoped, scopeid }],
+        }),
+      ),
+      ...[
+        "fe80::2%",
+        "fe80::2%other",
+        "fe80::2%8",
+        "fe80::2%07",
+        "fe80::2%7%7",
+        "fe80::2%+7",
+        "fe80::2%7.0",
+        "fe80::2%7\n",
+        "malformed",
+        "2001:db8::2%7",
+        "::1",
+        "::",
+        "fe80:::2",
+      ].map((address) => ({ fixture: [ipv4, { ...scoped, address }] })),
+      { fixture: [{ ...ipv4, scopeid: 7 }, scoped] },
+      { fixture: [{ ...ipv4, address: "127.0.0.2" }, scoped] },
+      { fixture: [ipv4, { ...scoped, internal: undefined }] },
+      { fixture: [ipv4], "bad interface": [scoped] },
+      { fixture: [ipv4], 7: [scoped] },
+      { fixture: [ipv4, scoped, { ...scoped, scopeid: 8 }] },
+      { fixture: [ipv4, scoped], other: [scoped] },
+    ]) {
+      let reads = 0;
+      const before = commands.length;
+      options.networkInterfaces = () => {
+        reads++;
+        return inventory;
+      };
+      await assert.rejects(() =>
+        acquireDarwinExperimentInputs(
+          built.prepared,
+          built.build,
+          reader,
+          persist,
+          options,
+        ),
+      );
+      assert.equal(reads, 1);
       assert.ok(
         commands
           .slice(before)

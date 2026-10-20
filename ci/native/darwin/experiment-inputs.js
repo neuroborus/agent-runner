@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
 import * as filesystem from "node:fs/promises";
+import { isIP } from "node:net";
 import { networkInterfaces } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -15,6 +16,50 @@ const execute = diagnosticCommand(
   "darwin-experiment-inputs",
   promisify(execFile),
 );
+
+// Only observed link-local scope is admitted. Persist a numeric zone so cold
+// consumers never rediscover an interface or resolve a name in another snapshot.
+function experimentAddress(entry, interfaces) {
+  const { name, family, address, internal, scopeId } = entry;
+  if (
+    !/^[A-Za-z][A-Za-z0-9_.:-]{0,14}$/u.test(name) ||
+    internal !== false ||
+    typeof address !== "string" ||
+    (scopeId !== null &&
+      (!Number.isInteger(scopeId) || scopeId < 0 || scopeId > 0xffffffff))
+  )
+    return null;
+  const [literal, zone, extra] = address.split("%"),
+    version = family === "IPv4" ? 4 : family === "IPv6" ? 6 : 0;
+  if (!version || isIP(literal) !== version || extra !== undefined) return null;
+  if (version === 4)
+    return zone === undefined &&
+      !scopeId &&
+      !/^127\./u.test(literal) &&
+      literal !== "0.0.0.0"
+      ? literal
+      : null;
+  const canonical = new URL(`http://[${literal}]/`).hostname.slice(1, -1),
+    linkLocal = /^fe[89ab][0-9a-f]:/iu.test(canonical);
+  if (["::", "::1"].includes(canonical)) return null;
+  if (!linkLocal) return zone === undefined && !scopeId ? literal : null;
+  if (
+    !scopeId ||
+    (zone !== undefined && zone !== name && zone !== String(scopeId)) ||
+    interfaces.some(
+      (other) =>
+        other !== entry &&
+        other.family === "IPv6" &&
+        Number.isInteger(other.scopeId) &&
+        other.scopeId > 0 &&
+        (other.name === name
+          ? other.scopeId !== scopeId
+          : other.scopeId === scopeId),
+    )
+  )
+    return null;
+  return `${literal}%${scopeId}`;
+}
 
 // Admit literal versions and the producer's single version-named alias, not
 // general preprocessor expressions or conditional version selection.
@@ -405,16 +450,18 @@ export async function acquireDarwinExperimentInputs(
             exclusions: [
               ...(entry.family !== family ? ["family-mismatch"] : []),
               ...(entry.internal ? ["internal"] : []),
-              // access-fixture.c uses inet_pton without a sockaddr scope ID.
-              ...(entry.family === "IPv6" &&
-              ((entry.scopeId !== null && entry.scopeId !== 0) ||
-                entry.address.includes("%") ||
-                /^fe[89ab][0-9a-f]:/iu.test(entry.address))
-                ? ["unsupported-ipv6-scope"]
+              ...(entry.family === family &&
+              !entry.internal &&
+              experimentAddress(entry, interfaces) === null
+                ? ["invalid-address-scope"]
                 : []),
             ],
           })),
-          value = candidates.find((entry) => entry.exclusions.length === 0);
+          eligible = candidates.filter(
+            (entry) => entry.exclusions.length === 0,
+          ),
+          // Preserve the existing unscoped choice when one is available.
+          value = eligible.find((entry) => !entry.scopeId) ?? eligible[0];
         try {
           requireObservation(value);
         } catch (cause) {
@@ -428,7 +475,7 @@ export async function acquireDarwinExperimentInputs(
           }
           throw cause;
         }
-        return [kind, value.address];
+        return [kind, experimentAddress(value, interfaces)];
       }),
     );
   // Create only the fixed, previously absent host lease and private case parent.

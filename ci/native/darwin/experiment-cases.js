@@ -275,6 +275,8 @@ export async function prepareDarwinExperimentCases(
         ),
         attempts = accessAttempts(plan, root, inputs);
       const bank = Buffer.from(
+        // A validated numeric IPv6 zone stays in the pinned target bytes through
+        // cold reads and both native control and payload argument vectors.
         attempts
           .map(
             ({ operation, target, remote, local }) =>

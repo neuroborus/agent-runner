@@ -249,16 +249,22 @@ other mismatched captured versions. These public excerpts explain the contract;
 they are not an exact hosted-header match or native acceptance evidence.
 The same installed-input acquisition fixture requires one interface snapshot for
 both address families and retains successful thin/universal acquisition. Missing
-IPv4, missing IPv6 and internal/scoped-only IPv6 inventories must refuse before
+IPv4, missing IPv6 and internal-only or malformed IPv6 inventories must refuse before
 PF/volume setup while reporting the failed family and all named candidates with
-addresses, internal flags, scope IDs and exclusions. Scoped cases include
-link-local addresses across `fe80::/10`, nonzero scope IDs and zone-qualified
-literals. A throwing diagnostic sink cannot replace the original refusal.
+addresses, internal flags, scope IDs and exclusions. Scoped acquisition accepts
+observed link-local addresses across `fe80::/10` with matching named or numeric
+zones, preserves unscoped preference, and rejects missing, malformed or conflicting
+interface/scope evidence. A throwing diagnostic sink cannot replace the original refusal.
 The existing case consumer additionally asserts all 39 attempts, distinct
-family-bound host-network and loopback targets, 33 denials and four echoes.
+family-bound host-network and loopback targets, pinned numeric zones, 33 denials
+and four echoes. Scoped transcripts retain all access profiles and independent
+retirement; cold reads reject malformed scopes and disagreeing TCP/UDP targets.
+The custody suite executes both native sockaddr constructors and control/payload
+argument expressions with injected operations, covering exact scope IDs, source
+binding and reviewed-scope refusal without compiling or running Darwin code.
 These synthetic reads and injected commands run through the existing native
 harness without a slow-tier addition or host networking changes. Missing-family
-diagnostics supply neither a hosted acquisition repair nor native acceptance.
+diagnostics and portable regressions supply no native acceptance.
 The fixtures produce versioned experiment Mach records and carry
 the installed log source/tool into the retained access observation and retirement
 route. The existing portable BSM transcript model and all-profile coverage remain
