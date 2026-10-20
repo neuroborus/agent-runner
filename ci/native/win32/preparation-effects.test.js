@@ -75,7 +75,10 @@ import {
   recoverWindowsPreparationOwners,
 } from "./preparation.js";
 import { windowsClosedPreparationOwner } from "./custody-protocol.js";
-import { readWindowsRecoveryRecords } from "./case-recovery.js";
+import {
+  readWindowsRecoveryRecords,
+  recoverWindowsCases,
+} from "./case-recovery.js";
 import {
   WINDOWS_EXPERIMENT_SOURCES,
   windowsHostedCompilerArguments,
@@ -3814,6 +3817,213 @@ test("Windows default experiment bootstrap admits installed links and binds priv
     f.files.set(file, bytes);
   } finally {
     assert.equal((await native.close()).status, "RETIRED");
+  }
+});
+
+test("Windows experiment case recovery rejoins closed original receipts and separates cancellation and observer cleanup failure", async () => {
+  for (const fault of [null, "source", "object", "cleanup", "cancel"]) {
+    const f = experimentBootstrapFixture();
+    Object.assign(f.bootstrapOptions.binding, {
+      candidateSha,
+      platform: "win32",
+      repository: f.job.repository,
+      runId: f.job.runId,
+      runAttempt: f.job.runAttempt,
+      image: "windows-2025",
+      architecture: "x64",
+      workflow: "native-poc",
+      jobId: "1",
+    });
+    await assert.rejects(
+      f.runBootstrap(),
+      (error) => error.cause === f.reached,
+    );
+    f.prepared = f.bootstrap;
+    f.manifest.windowsPreparation.bootstrap = f.prepared.bootstrap;
+    f.accessNative = (operation, args) => {
+      if (operation === "prepare-experiment-volume")
+        return {
+          identity: f.rawFileId(
+            Buffer.from(args[0], "hex").toString("utf16le"),
+          ),
+          distinctVolume: true,
+        };
+    };
+    f.disappearObservers = true;
+    const options = {
+        ...f.options,
+        ...f.bootstrapOptions,
+        signal: new AbortController().signal,
+        bootstrap: async () => f.prepared,
+        open: openWindowsExperimentNative,
+        readInstalled: async (file) => f.files.get(file),
+        read: async (file) => f.files.get(file),
+      },
+      { job, preparation } = await prepareWindowsExperiment(
+        f.job,
+        directory,
+        async () => {},
+        options,
+      ),
+      input = windowsExperimentSystemInput(job, preparation),
+      owners = new Map(),
+      system = createWindowsExperimentSystemEffects(
+        job,
+        preparation,
+        options,
+        owners,
+      ),
+      recipe = windowsSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      );
+    f.manifest.windowsPreparation.cases =
+      input.manifest.windowsPreparation.cases;
+    const prepared = await system.prepare(recipe, {
+      policyBinding: preparation.system.bindings.find(
+        ({ id }) => id === recipe.id,
+      ).policyBinding,
+      recordPolicy: async () => {},
+    });
+    prepared.admitted = await prepared.admitLiteral();
+    assert.equal(
+      assertWindowsLiteralObservation(
+        prepared.input,
+        WINDOWS_LITERAL_ARGUMENTS,
+        prepared.admitted.record,
+        await system.literal(prepared),
+      ).status,
+      "OBSERVED",
+    );
+    const settlements = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((effect) => [
+            effect,
+            { admission: "possible" },
+          ]),
+        ),
+      },
+    });
+    assert.ok(
+      Object.values(settlements).every(
+        (entry) => !entry || entry.settlement.status === "RETIRED",
+      ),
+    );
+    for (const files of owners.values())
+      assert.equal((await files.settleFiles()).status, "RETIRED");
+    assert.equal(f.rawTasks.size, 0);
+    for (const [pid, actor] of f.actors) {
+      assert.equal(actor.retired, true);
+      f.actors.delete(pid);
+      f.rawJobs.delete(pid);
+      f.rawCompilerJobs.delete(pid);
+    }
+    for (const helper of input.manifest.helpers)
+      f.files.delete(path.join(input.output, helper.name + ".exe"));
+    const native = windowsPreparationOptions(input, options, new Map()),
+      state = windowsPreparationContext(input, native),
+      cleanup = new AbortController(),
+      cleanupCause = new Error("Independent case observer finish failed"),
+      cancellation = new Error("Case census canceled"),
+      entered = Promise.withResolvers(),
+      blocked = Promise.withResolvers();
+    blocked.promise.catch(() => {});
+    try {
+      const { records } = await readWindowsRecoveryRecords(state),
+        before = f.rawEvents.length,
+        commands = f.commands.length;
+      if (fault === "source")
+        f.files.set(
+          input.manifest.windowsPreparation.cases.find(
+            ({ id }) => id === recipe.id,
+          ).custody.sources[0].path,
+          Buffer.from("changed sealed source"),
+        );
+      if (fault === "object") {
+        const read = f.objectRead;
+        f.objectRead = (entry) => ({
+          ...read(entry),
+          identity: "f".repeat(16) + ":" + "e".repeat(32),
+        });
+      }
+      f.beforeRawCommand = async (operation) => {
+        if (operation === "verify-cold-process" && fault === "cancel") {
+          entered.resolve();
+          await blocked.promise;
+        }
+        if (operation === "finish" && fault === "cleanup") throw cleanupCause;
+      };
+      let closed = 0;
+      if (fault === "cancel") {
+        const open = options.openPreparation;
+        options.openPreparation = async (...args) => {
+          const channel = await open(...args);
+          return {
+            ...channel,
+            close() {
+              closed++;
+              blocked.reject(cancellation);
+              channel.close();
+            },
+          };
+        };
+      }
+      if (fault === "cleanup") f.coldDamage = "rights";
+      const recover = () =>
+        recoverWindowsCases(
+          state,
+          options,
+          records,
+          new Map(),
+          () => assert.fail("No live case is available for replay"),
+          {},
+          cleanup.signal,
+        );
+      if (!fault) {
+        const result = await recover();
+        assert.equal(result.status, "RETIRED");
+        assert.equal(result.independent, true);
+      } else if (["source", "object"].includes(fault)) {
+        await assert.rejects(recover);
+      } else {
+        const pending = recover();
+        if (fault === "cancel") {
+          await entered.promise;
+          cleanup.abort(cancellation);
+        }
+        await assert.rejects(pending, (cause) => {
+          assert.ok(cause instanceof AggregateError);
+          assert.equal(cause.cause, cause.errors[0]);
+          if (fault === "cleanup") assert.equal(cause.errors[1], cleanupCause);
+          if (fault === "cancel") assert.equal(cause.cause, cancellation);
+          return true;
+        });
+        if (fault === "cancel") assert.ok(closed > 0);
+      }
+      const events = f.rawEvents.slice(before);
+      assert.equal(
+        events.some((frame) => frame.startsWith("verify-cold-process ")),
+        fault !== "source",
+      );
+      assert.ok(
+        !events.some((frame) =>
+          /^(?:verify-retain|helper-start|case-account|case-copy) /u.test(
+            frame,
+          ),
+        ),
+      );
+      assert.equal(f.commands.length, commands, "Recovery cannot rebuild");
+      assert.ok(
+        !events.some((frame) => frame.startsWith("prepare-experiment-pe ")),
+        "Final images remain unopened",
+      );
+    } finally {
+      f.beforeRawCommand = null;
+      f.coldDamage = null;
+      assert.equal((await native.settleFiles()).status, "RETIRED");
+    }
   }
 });
 

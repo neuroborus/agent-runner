@@ -4891,6 +4891,16 @@ function verificationFixture(f = fixture()) {
             ? state.compilerJob
             : { absent: true },
       };
+    else if (name === "case-recover")
+      value = {
+        accountAbsent: true,
+        rightsAbsent: true,
+        jobAbsent: true,
+        contextSha256: args[1],
+        policyRestored: true,
+        auditDrained: true,
+        readersClosed: true,
+      };
     else if (name === "transfer") {
       transferred.add(Number(args[0]));
       value = {
@@ -6483,6 +6493,214 @@ test("Windows experiment cold custody proves disappeared originals without retai
       );
     }
     assert.ok(!k.events.some(({ operation }) => operation === "verify-retain"));
+  }
+});
+
+test("Windows experiment case recovery selects acknowledged cold owners before retention and keeps every cleanup obligation", async () => {
+  for (const fault of [
+    null,
+    "observer-only",
+    "missing-ack",
+    "duplicate-ack",
+    "task-binding",
+    "birth-binding",
+    "observer-result",
+    "observer-birth",
+    "reviewed",
+    "live",
+    "pid-reuse",
+    "incomplete",
+    "error-87",
+    "survivor",
+    "job-count",
+    "task",
+    "accountAbsent",
+    "rightsAbsent",
+    "jobAbsent",
+    "policyRestored",
+    "auditDrained",
+    "readersClosed",
+  ]) {
+    const f = fixture();
+    f.input.purpose = "experiment";
+    f.input.context.executionId = "ownership.literal";
+    f.input.bindingSha256 = f.input.reviewSha256;
+    delete f.input.reviewSha256;
+    f.input.sources.push({
+      path: "C:\\Fixture\\Sealed\\experiment.h",
+      sha256: hash,
+    });
+    const k = verificationFixture(f),
+      bridge = identity(10, runnerSid),
+      observerHelper = identity(60),
+      observerBridge = identity(61, runnerSid),
+      observerNonce = "d".repeat(32),
+      birth = {
+        schemaVersion: 1,
+        nonce: observerNonce,
+        taskSha256: hash,
+        helper: observerHelper,
+        bridge: observerBridge,
+        status: "POSSIBLE",
+      },
+      observers = [
+        {
+          intent: {
+            schemaVersion: 1,
+            status: "POSSIBLE",
+            argumentsHex: ["", "", "", "", "", "", hex(observerNonce)],
+          },
+          birth,
+          result: { ...birth, status: "RETIRED" },
+        },
+      ],
+      records = [
+        { phase: "task-register-possible", bridge, taskSha256: "a".repeat(64) },
+        { phase: "task-run-possible", bridge, taskSha256: hash },
+        {
+          phase: "admitted",
+          helper: f.helper,
+          verifier: f.verifier,
+          taskSha256: hash,
+        },
+        { phase: "helper-start" },
+        { phase: "helper-admitted", child: f.fileHelper },
+        { phase: "case-account" },
+        {
+          phase: "finish-possible",
+          helper: f.helper,
+          verifier: f.verifier,
+          nativeEventSha256: hash,
+        },
+        {
+          phase: "finish-acknowledged",
+          helper: f.helper,
+          commandSequence: 12,
+          nativeEventSha256: hash,
+        },
+        {
+          phase: "retired",
+          helper: f.helper,
+          verifier: f.verifier,
+          taskSha256: hash,
+          nativeEventSha256: hash,
+        },
+      ];
+    for (const actor of k.states.values()) actor.retired = true;
+    if (fault !== "observer-only") k.states.clear();
+    else records.pop();
+    k.state.absent = fault !== "task";
+    if (fault === "missing-ack") records.splice(7, 1);
+    if (fault === "duplicate-ack") records.splice(7, 0, { ...records[7] });
+    if (fault === "task-binding") records.at(-1).taskSha256 = "e".repeat(64);
+    if (fault === "birth-binding")
+      records.at(-1).helper = { ...f.helper, creationTime: "999" };
+    if (fault === "observer-result") delete observers[0].result;
+    if (fault === "observer-birth")
+      observers[0].result.helper = { ...observerHelper, creationTime: "999" };
+    if (fault === "reviewed") {
+      delete f.input.purpose;
+      f.input.reviewSha256 = f.input.bindingSha256;
+      delete f.input.bindingSha256;
+    }
+    if (["live", "pid-reuse"].includes(fault))
+      k.states.set(f.helper.pid, {
+        ...f.process,
+        identity: {
+          ...f.helper,
+          creationTime: fault === "pid-reuse" ? "999" : f.helper.creationTime,
+        },
+        retired: fault !== "live",
+      });
+    const refused = new Error("Original census refusal");
+    k.state.damage = (operation, frame) => {
+      if (operation === "verify-cold-process") {
+        if (fault === "incomplete") frame.value.complete = false;
+        if (fault === "error-87") throw Object.assign(refused, { code: 87 });
+      }
+      if (operation === "verify-cold-jobs") {
+        if (fault === "job-count") frame.value.jobs.pop();
+        if (fault === "survivor")
+          frame.value.jobs[127] = {
+            daclSha256: hash,
+            limitFlags: 0x2008,
+            processLimit: 32,
+            uiRestrictions: 255,
+            members: [identity(99)],
+          };
+      }
+      if (
+        operation === "verify-case-recover" &&
+        Object.hasOwn(frame.value, fault)
+      )
+        frame.value[fault] = false;
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    const recover = () => k.verifier.recoverCase(f.input, records, observers);
+    if (fault && fault !== "observer-only") {
+      let original;
+      await assert.rejects(
+        recover,
+        (cause) => {
+          original = cause;
+          return true;
+        },
+        fault,
+      );
+      if (fault === "error-87") assert.equal(original, refused);
+      const count = k.events.length;
+      k.state.damage = null;
+      await assert.rejects(recover, (cause) => cause === original);
+      assert.equal(
+        k.events.length,
+        count,
+        "A refusal cannot fall back or replay observations",
+      );
+    } else {
+      const proof = await recover();
+      assert.equal(proof.status, "RETIRED");
+      assert.equal(proof.independent, true);
+      assert.equal(proof.noLiveMembers, true);
+      assert.equal(proof.taskRemoved, true);
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-case-recover")
+          .length,
+        2,
+      );
+      assert.ok(
+        k.events
+          .filter(({ operation }) => operation === "verify-case-recover")
+          .every(({ args }) => args.at(-1) === "1"),
+      );
+    }
+    const retains = k.events.filter(
+      ({ operation }) => operation === "verify-retain",
+    );
+    if (!fault) {
+      assert.equal(retains.length, 0);
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-process")
+          .length,
+        10,
+      );
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-jobs")
+          .length,
+        10,
+      );
+    }
+    if (fault === "observer-only") {
+      assert.ok(retains.length > 0);
+      assert.ok(retains.every(({ args }) => !["60", "61"].includes(args[0])));
+      const first = k.events.findIndex(
+        ({ operation }) => operation === "verify-retain",
+      );
+      assert.ok(
+        k.events
+          .slice(0, first)
+          .some(({ operation }) => operation === "verify-cold-jobs"),
+      );
+    }
   }
 });
 

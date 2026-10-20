@@ -28,6 +28,7 @@ import {
   windowsCustodyBinding,
   processObservation,
   coldProcessObservation,
+  windowsClosedPreparationOwner,
   fileObservation,
   jobObservation,
   windowsVerificationArguments,
@@ -373,6 +374,120 @@ export function createWindowsCustodyVerifier(
     requireWindows(before.absent && after.absent);
     return retired([installed, ...observations, before, after]);
   };
+  // Protected original acknowledgements select this lane before live retention.
+  // It reuses the same native census, complete Job slots and task observations
+  // for build readers and closed case owners; missing PIDs supply no proof.
+  const coldOwners = async (owners) => {
+    requireWindows(input.purpose === "experiment" && subjects.size === 0);
+    requireWindows(
+      dense(owners, 64).length > 0 &&
+        new Set(owners.map(({ nonce }) => nonce)).size === owners.length,
+    );
+    const identities = new Map();
+    for (const owner of owners) {
+      closed(owner, ["nonce", "identities", "taskSha256", "receiptsSha256"]);
+      requireWindows(
+        /^[a-f0-9]{32}$/u.test(owner.nonce) &&
+          owner.nonce !== observerInput.nonce &&
+          hash(owner.taskSha256) &&
+          hash(owner.receiptsSha256) &&
+          dense(owner.identities, maximumSubjects).length >= 2,
+      );
+      systemIdentity(owner.identities[0]);
+      requireWindows(owner.identities[1].userSid === input.runnerSid);
+      for (const value of owner.identities) {
+        const identity = normalizeWindowsIdentity(value);
+        requireWindows(
+          identity.pid !== verifier().pid && !identities.has(identity.pid),
+        );
+        identities.set(identity.pid, identity);
+      }
+    }
+    requireWindows(identities.size <= maximumSubjects);
+    const census = async () => {
+      const observed = [];
+      for (const identity of identities.values())
+        observed.push(
+          coldProcessObservation(
+            await call("cold-process", [identity.pid, identity.creationTime]),
+            identity,
+          ),
+        );
+      return observed;
+    };
+    const before = await census(),
+      observations = [],
+      jobs = new Map();
+    const consistent = (first, last) =>
+      last.absent === true || (first.absent !== true && same(first, last));
+    for (let pass = 0; pass < 2; pass++) {
+      for (const { nonce, identities: originals } of owners) {
+        for (const value of originals) {
+          const identity = normalizeWindowsIdentity(value),
+            actual = await call("cold-jobs", [
+              identity.pid,
+              identity.creationTime,
+              nonce,
+            ]);
+          closed(actual, [
+            "pid",
+            "creationTime",
+            "nonce",
+            "jobs",
+            "compilerJob",
+            "controllingJob",
+          ]);
+          requireWindows(
+            actual.pid === identity.pid &&
+              actual.creationTime === identity.creationTime &&
+              actual.nonce === nonce &&
+              dense(actual.jobs, 128).length === 128,
+          );
+          actual.jobs.forEach((job) => settled(job));
+          settled(actual.compilerJob, true);
+          settled(actual.controllingJob);
+          if (actual.controllingJob.absent !== true)
+            requireWindows(
+              actual.controllingJob.processLimit === 32 &&
+                actual.controllingJob.uiRestrictions === 255,
+            );
+          const previous = jobs.get(identity.pid);
+          if (previous)
+            requireWindows(
+              actual.jobs.every((job, index) =>
+                consistent(previous.jobs[index], job),
+              ) &&
+                consistent(previous.compilerJob, actual.compilerJob) &&
+                consistent(previous.controllingJob, actual.controllingJob),
+            );
+          jobs.set(identity.pid, actual);
+          observations.push(actual);
+        }
+        const absent = await task("custody", nonce);
+        requireWindows(absent.absent === true);
+        observations.push(absent);
+      }
+    }
+    const after = await census();
+    requireWindows(
+      after.every(
+        (value, index) =>
+          !value.present ||
+          (before[index].present && same(before[index], value)),
+      ),
+    );
+    const originals = owners.map((owner) => ({
+      ...owner,
+      identities: owner.identities.map(normalizeWindowsIdentity),
+    }));
+    return {
+      ...retired({ input, originals, before, observations, after }),
+      originals,
+      processCensus: { before, after },
+      noLiveMembers: true,
+      tasksRemoved: true,
+    };
+  };
   const api = {
     read,
     async verifyRestoration(value) {
@@ -700,7 +815,8 @@ export function createWindowsCustodyVerifier(
       const original = bind(declaration),
         contextSha256 = observationDigest(original.context),
         observations = [],
-        identities = [];
+        identities = [],
+        closedOwners = [];
       const registered = records.find(
           (record) => record.phase === "task-register-possible",
         ),
@@ -712,6 +828,65 @@ export function createWindowsCustodyVerifier(
       if (registered)
         identities.push(normalizeWindowsIdentity(registered.bridge));
       if (admitted) identities.push(systemIdentity(admitted.helper));
+      const completed = records.find((record) => record.phase === "retired"),
+        acknowledged = records.find(
+          (record) => record.phase === "finish-acknowledged",
+        ),
+        finish = records.find((record) => record.phase === "finish-possible");
+      if (
+        original.purpose === "experiment" &&
+        completed &&
+        !completed.preSetup
+      ) {
+        requireWindows(
+          registered &&
+            run &&
+            admitted &&
+            acknowledged &&
+            finish &&
+            [
+              "task-register-possible",
+              "task-run-possible",
+              "admitted",
+              "finish-possible",
+              "finish-acknowledged",
+              "retired",
+            ].every(
+              (phase) =>
+                records.filter((record) => record.phase === phase).length === 1,
+            ) &&
+            records.indexOf(finish) < records.indexOf(acknowledged) &&
+            records.indexOf(acknowledged) < records.indexOf(completed) &&
+            sameWindowsIdentity(run.bridge, registered.bridge) &&
+            hash(registered.taskSha256) &&
+            [run, completed].every(
+              (record) => record.taskSha256 === admitted.taskSha256,
+            ) &&
+            [finish, acknowledged, completed].every(
+              (record) =>
+                sameWindowsIdentity(record.helper, admitted.helper) &&
+                hash(record.nativeEventSha256),
+            ) &&
+            finish.nativeEventSha256 === acknowledged.nativeEventSha256 &&
+            sameWindowsIdentity(finish.verifier, admitted.verifier) &&
+            sameWindowsIdentity(completed.verifier, admitted.verifier) &&
+            integer(acknowledged.commandSequence, 32768) &&
+            acknowledged.commandSequence > 0,
+        );
+        closedOwners.push({
+          nonce: original.nonce,
+          identities: [admitted.helper, registered.bridge],
+          taskSha256: admitted.taskSha256,
+          receiptsSha256: observationDigest({
+            registered,
+            run,
+            admitted,
+            finish,
+            acknowledged,
+            completed,
+          }),
+        });
+      }
       const starts = records.filter(
           (record) => record.phase === "helper-start",
         ),
@@ -847,8 +1022,21 @@ export function createWindowsCustodyVerifier(
         requireWindows(
           nativeRecords.some((record) => record.kind === "operation-restored"),
         );
+      if (closedOwners.length) {
+        const owner = closedOwners[0];
+        // The acknowledged reader's pre-finish proof covers its complete held
+        // child inventory too. Reuse those original births, never PID guesses.
+        owner.identities = [
+          ...new Map(
+            [...owner.identities, ...identities].map((value) => {
+              const identity = normalizeWindowsIdentity(value);
+              return [observationDigest(identity), identity];
+            }),
+          ).values(),
+        ];
+      }
       const observerOwners = new Map();
-      for (const { intent, birth } of observers) {
+      for (const { intent, birth, result } of observers) {
         requireWindows(
           intent.schemaVersion === 1 &&
             intent.status === "POSSIBLE" &&
@@ -866,6 +1054,11 @@ export function createWindowsCustodyVerifier(
             observationDigest(normalizeWindowsIdentity(identity)),
             birth.nonce,
           );
+        if (original.purpose === "experiment" && result) {
+          const owner = windowsClosedPreparationOwner(birth, result);
+          owner.receiptsSha256 = observationDigest({ intent, birth, result });
+          closedOwners.push(owner);
+        }
       }
       const unique = [
         ...new Map(
@@ -873,17 +1066,31 @@ export function createWindowsCustodyVerifier(
         ).values(),
       ];
       requireWindows(unique.length <= maximumSubjects);
-      for (const identity of unique) await retain(identity);
+      // Select acknowledged originals before the first retain. A failed live
+      // call remains terminal and can never retry through the cold lane.
+      const closedIdentities = new Set();
+      if (closedOwners.length) {
+        observations.push(await coldOwners(closedOwners));
+        for (const owner of closedOwners)
+          for (const identity of owner.identities)
+            closedIdentities.add(
+              observationDigest(normalizeWindowsIdentity(identity)),
+            );
+      }
+      const live = unique.filter(
+        (identity) => !closedIdentities.has(observationDigest(identity)),
+      );
+      for (const identity of live) await retain(identity);
       observations.push(
         ...(await recoveryJobs(
-          unique.map((identity) => ({
+          live.map((identity) => ({
             identity,
             nonce:
               observerOwners.get(observationDigest(identity)) ?? original.nonce,
           })),
         )),
       );
-      for (const identity of unique) {
+      for (const identity of live) {
         observations.push(await empty(identity), await empty(identity));
       }
       if (
@@ -979,13 +1186,20 @@ export function createWindowsCustodyVerifier(
         !run ||
           (registered && sameWindowsIdentity(run.bridge, registered.bridge)),
       );
-      observations.push(
-        await recoverTask(original.nonce, run?.taskSha256, registered?.bridge),
-      );
-      for (const { birth } of observers)
+      const closedNonces = new Set(closedOwners.map((owner) => owner.nonce));
+      if (!closedNonces.has(original.nonce))
         observations.push(
-          await recoverTask(birth.nonce, birth.taskSha256, birth.bridge),
+          await recoverTask(
+            original.nonce,
+            run?.taskSha256,
+            registered?.bridge,
+          ),
         );
+      for (const { birth } of observers)
+        if (!closedNonces.has(birth.nonce))
+          observations.push(
+            await recoverTask(birth.nonce, birth.taskSha256, birth.bridge),
+          );
       return {
         ...retired(observations),
         noLiveMembers: true,
@@ -1493,121 +1707,10 @@ export function createWindowsCustodyVerifier(
     },
     async verifyColdPreparation(declaration, owners) {
       bind(declaration);
-      // This is selected by protected closed receipts before any live retain.
-      // A failed live operation stays latched; it cannot enter this path later.
-      requireWindows(
-        input.purpose === "experiment" &&
-          input.context.executionId === "build" &&
-          subjects.size === 0,
-      );
-      requireWindows(
-        dense(owners, 64).length > 0 &&
-          new Set(owners.map(({ nonce }) => nonce)).size === owners.length,
-      );
-      const identities = new Map();
-      for (const owner of owners) {
-        closed(owner, ["nonce", "identities", "taskSha256", "receiptsSha256"]);
-        requireWindows(
-          /^[a-f0-9]{32}$/u.test(owner.nonce) &&
-            owner.nonce !== observerInput.nonce &&
-            hash(owner.taskSha256) &&
-            hash(owner.receiptsSha256) &&
-            dense(owner.identities, 2).length === 2,
-        );
-        systemIdentity(owner.identities[0]);
-        requireWindows(owner.identities[1].userSid === input.runnerSid);
-        for (const value of owner.identities) {
-          const identity = normalizeWindowsIdentity(value);
-          requireWindows(
-            identity.pid !== verifier().pid && !identities.has(identity.pid),
-          );
-          identities.set(identity.pid, identity);
-        }
-      }
-      requireWindows(identities.size <= maximumSubjects);
-      const census = async () => {
-        const observed = [];
-        for (const identity of identities.values())
-          observed.push(
-            coldProcessObservation(
-              await call("cold-process", [identity.pid, identity.creationTime]),
-              identity,
-            ),
-          );
-        return observed;
-      };
-      const before = await census(),
-        observations = [],
-        jobs = new Map();
-      const consistent = (first, last) =>
-        last.absent === true || (first.absent !== true && same(first, last));
-      for (let pass = 0; pass < 2; pass++) {
-        for (const { nonce, identities: originals } of owners) {
-          for (const value of originals) {
-            const identity = normalizeWindowsIdentity(value),
-              actual = await call("cold-jobs", [
-                identity.pid,
-                identity.creationTime,
-                nonce,
-              ]);
-            closed(actual, [
-              "pid",
-              "creationTime",
-              "nonce",
-              "jobs",
-              "compilerJob",
-              "controllingJob",
-            ]);
-            requireWindows(
-              actual.pid === identity.pid &&
-                actual.creationTime === identity.creationTime &&
-                actual.nonce === nonce &&
-                dense(actual.jobs, 128).length === 128,
-            );
-            actual.jobs.forEach((job) => settled(job));
-            settled(actual.compilerJob, true);
-            settled(actual.controllingJob);
-            if (actual.controllingJob.absent !== true)
-              requireWindows(
-                actual.controllingJob.processLimit === 32 &&
-                  actual.controllingJob.uiRestrictions === 255,
-              );
-            const previous = jobs.get(identity.pid);
-            if (previous)
-              requireWindows(
-                actual.jobs.every((job, index) =>
-                  consistent(previous.jobs[index], job),
-                ) &&
-                  consistent(previous.compilerJob, actual.compilerJob) &&
-                  consistent(previous.controllingJob, actual.controllingJob),
-              );
-            jobs.set(identity.pid, actual);
-            observations.push(actual);
-          }
-          const absent = await task("custody", nonce);
-          requireWindows(absent.absent === true);
-          observations.push(absent);
-        }
-      }
-      const after = await census();
-      requireWindows(
-        after.every(
-          (value, index) =>
-            !value.present ||
-            (before[index].present && same(before[index], value)),
-        ),
-      );
-      const originals = owners.map((owner) => ({
-        ...owner,
-        identities: owner.identities.map(normalizeWindowsIdentity),
-      }));
-      return {
-        ...retired({ input, originals, before, observations, after }),
-        originals,
-        processCensus: { before, after },
-        noLiveMembers: true,
-        tasksRemoved: true,
-      };
+      requireWindows(input.context.executionId === "build");
+      for (const owner of dense(owners, 64))
+        requireWindows(dense(owner.identities, 2).length === 2);
+      return coldOwners(owners);
     },
     async recoverCompleted(
       declaration,

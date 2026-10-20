@@ -268,6 +268,8 @@ async function observeCase(state, options, group, signal) {
   const files = createWindowsPreparationFiles(input, options);
   let result, failure;
   try {
+    await files.beginCleanup(signal);
+    await files.verify("verifyBootstrap", group.declared.custody);
     result = await files.verify(
       "recoverCase",
       group.declared.custody,
@@ -290,7 +292,13 @@ async function observeCase(state, options, group, signal) {
       retired(settlement) && settlement.noLiveMembers && settlement.taskRemoved,
     );
   } catch (cause) {
-    failure ??= cause;
+    failure = failure
+      ? new AggregateError(
+          [failure, cause],
+          "Windows case proof and observer retirement failed",
+          { cause: failure },
+        )
+      : cause;
   }
   if (failure) throw failure;
   return result;
@@ -353,6 +361,8 @@ export async function recoverWindowsCases(
       return {
         intent: records.find((entry) => entry.name === name).record,
         birth: records.find((entry) => entry.name === prefix + "birth.json")
+          ?.record,
+        result: records.find((entry) => entry.name === prefix + "result.json")
           ?.record,
       };
     });

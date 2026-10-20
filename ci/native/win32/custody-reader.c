@@ -3820,9 +3820,10 @@ static void recovery_policy(unsigned custody,const char *context,const char *cas
   printf("{\"restored\":true}");
 }
 /* Cold recovery uses the independently approved observer's case plan. Node
- * first proves all possible System creators and observers retired through held
- * creation identities. This lane separately rejoins the account, whole Job and
- * private objects; it never opens a final helper or executes a payload. */
+ * first proves original creators and observers retired through held births or
+ * acknowledged cold census/Job/task reads. Neither PID-open failure nor a saved
+ * completion supplies that proof. This lane still rejoins the account, whole
+ * Job and private objects; it never opens a final helper or executes a payload. */
 static void recovery_case(unsigned custody, const char *context, const char *caseNonce, BOOL required) {
   need(preparation_only && custody == 2 && count >= 9 && !strcmp(entries[custody].kind,"directory") &&
     strlen(context)==64 && strspn(context,"0123456789abcdef")==64 && strlen(caseNonce)==32 &&

@@ -9537,6 +9537,22 @@ it never kills by PID or name. Task removal requires its protected registration,
 exact unchanged task hash, zero instances and independently retired held owners.
 Explicit observer-drain or absent-lane evidence remains mandatory for audit setup.
 
+Ordinary experiment recovery selects acknowledged closed originals before any
+live PID retention. Matching protected observer birth/result records, or an
+admitted case reader's finish acknowledgement and independent task-retirement
+record, permit reuse of the build cold-custody lane. The original case ledger
+supplies child births; no second inventory or control protocol is introduced.
+A fresh bootstrap/source/plan read rejoins candidate/build pins, file identities
+and protected parents without opening final helpers. Complete process censuses
+surround two reads of every original Job slot, compiler/controlling Job and owned
+task. Present originals must retain their exact birth/session/SID and be signaled;
+missing PIDs, error 87 or missing paths supply no retirement authority.
+Unacknowledged originals keep live custody requirements, and a failed live call
+cannot fall back to cold recovery. Account, rights, object/security, policy and
+audit cleanup remain independently required. A proof failure and a separate
+fresh-observer retirement failure retain both causes; no cleanup success can
+erase the original case failure. Fresh matching Windows CI remains necessary.
+
 A missing birth, changed object, incomplete audit drain, surviving creator, altered
 task or unavailable baseline retains exclusion. Native setup flushes the complete
 audit baseline before inclusion/SACL effects and source-derived descriptor/network

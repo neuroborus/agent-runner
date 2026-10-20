@@ -1865,6 +1865,16 @@ extra authority/principals/endpoints, undeclared SIDs, substituted objects and
 wrong job/attempt contexts. Interrupted account or observer reads and cleanup
 cancellation retain possible custody; completed pre-execution setup retires only
 with independent account/rights/Job and custodian closure.
+Experiment case recovery regressions reuse the original protected ledger and
+closed-custody observations. They cover acknowledged disappeared readers and
+children, mixed closed observers and live custody, damaged births/task bindings,
+missing acknowledgements, surviving Jobs, incomplete censuses, error 87 and
+account, rights, policy, audit and reader closure requirements. Production
+preparation and case owners complete a literal fixture before fresh recovery,
+then prove no rebuild, payload replay or final-image opening. Cancellation and separate proof
+and observer-retirement failures preserve exclusion and the primary cause.
+Existing build/cold-load and reviewed recovery coverage remains required; these
+injections add no check, tier, native invocation or native acceptance claim.
 Controlled clocks cover the whole command-plus-cleanup lifetime. Partial recovery
 needs no final prepared images. Its focused invocation is
 `node ci/native/win32/preparation-effects.test.js`; the existing native harness
