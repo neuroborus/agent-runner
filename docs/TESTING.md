@@ -611,6 +611,17 @@ reenacting their old Boolean assumption. They establish neither libc ACL behavio
 nor native compilation or the cause of the separate first-launch SIGABRT.
 These source assertions are not native compilation; both helper variants and live
 controls still require fresh matching external macOS CI. No slow tier is added.
+`test/native-darwin-command.test.js` executes the command signal, full token/birth
+liveness and shared prerequisite-settlement bodies with injected native APIs.
+Positive-signal controls require exact SIGKILL termination and an empty session;
+launcher SIGCONT permission checks retain the private provider-release barrier.
+Coverage rejects birth/pidversion/credential/session drift and direct API refusals,
+including EINVAL, while retaining independent close/wait failures and the original
+refusal. Child reaping alone cannot report possible command effects settled.
+The existing fault-sanitation fixture also distinguishes earlier null/dead
+observations from a later live task-access slot, preserving the authority refusal
+and separate getter-reference release failures. These portable tests establish no
+native signal delivery or safe inherited-authority correction.
 Fast source and injected-stream regressions in `test/native-feasibility.test.js`
 protect parked Git admission through the outside observers: original parent and
 child birth/credential joins, immutable helper images, applied policy and policy

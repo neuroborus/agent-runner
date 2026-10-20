@@ -4388,6 +4388,23 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     ],
     ["live send", { access: 200, rights: SEND }, "fault-access-authority", 0],
     [
+      "dead observation cannot admit a later live slot",
+      { childAccess: DEAD, access: 200, rights: SEND },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "null observation cannot admit a later live slot or hide release failure",
+      { childAccess: 0, access: 200, rights: SEND, release: 15 },
+      "fault-access-authority",
+      0,
+      15,
+    ],
+    [
+      "live getter copy does not replace the authoritative null read",
+      { childAccess: 200 },
+    ],
+    [
       "live send/receive",
       { access: 200, rights: SEND | RECEIVE },
       "fault-access-authority",
@@ -4458,6 +4475,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       executed = {},
       originalBirth = { pid: 42 },
       domain = { uid: 90001, gid: 90002 };
+    const childAccess = options.childAccess ?? options.access ?? 0;
     let first,
       replies = 0,
       observing = true;
@@ -4572,7 +4590,8 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
         if (which === 1) observing = false;
         calls.push([observing ? "observe-get" : "get", which]);
         if (observing && options.childGet) return options.childGet;
-        target.value = which === 1 ? 103 : (options.access ?? 0);
+        target.value =
+          which === 1 ? 103 : observing ? childAccess : (options.access ?? 0);
         return which === 2 && !observing ? (options.get ?? 0) : 0;
       },
       mach_port_kobject(_self, _host, type, address) {
@@ -4685,18 +4704,18 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
         [
           "child-fork",
           options.childGet ?? 0,
-          options.childGet ? 0 : (options.access ?? 0),
+          options.childGet ? 0 : childAccess,
           options.childGet
             ? 0
-            : options.access === DEAD
+            : childAccess === DEAD
               ? DEAD_NAME
-              : options.access === 200 && !options.childQuery
+              : childAccess === 200 && !options.childQuery
                 ? SEND
                 : 0,
-          options.access === 200 && !options.childGet
+          childAccess === 200 && !options.childGet
             ? (options.childQuery ?? 0)
             : -1,
-          options.access === 200 && !options.childGet
+          childAccess === 200 && !options.childGet
             ? (options.childRelease ?? 0)
             : -1,
         ],

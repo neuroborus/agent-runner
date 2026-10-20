@@ -3341,7 +3341,17 @@ JSON protocol. The API review preserves these authoritative contracts:
   the original Mach failure independently of a release failure.
 - [proc_signal_with_audittoken](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/wrappers/libproc/libproc.c)
   returns errno directly. The helper retains that value, never stale global errno
-  or a numeric-PID fallback.
+  or a numeric-PID fallback. Its [kernel signal contract](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/kern/proc_info.c)
+  requires `0 < signal < NSIG`; signal zero returns EINVAL and proves no permission.
+  Command prerequisites use the real SIGKILL control after full token/birth
+  liveness checks, then require the original child's observed SIGKILL termination
+  and an empty held audit session. The existing EOF-only prerequisite owner
+  closes and reaps that child on refusal, retaining separate cleanup failures.
+  Command admission sends generation-bound SIGCONT to the original launcher
+  between full liveness checks while its private `P` pipe remains unreleased.
+  [XNU SIGCONT behavior](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/kern/kern_sig.c)
+  preserves event sleep; this cannot satisfy the pipe read or create the provider.
+  The provider still starts suspended and requires its separate release.
 
 Prerequisite children have an unreleased EOF-only gate and their own bounded
 backstop. Failure closes both pipe ends and attempts reaping independently;
@@ -3471,7 +3481,14 @@ Portable classification and caller coverage supply no native acceptance.
 
 The live inherited slot remains a technical blocker. The pinned public XNU
 `ipc_task_init` copies it on fork; `task_set_special_port` refuses overwriting a
-valid slot, and `ipc_task_reset` does not clear it. No supported confined launch
+valid slot, and `ipc_task_reset` does not clear it. Public
+[`posix_spawn` attributes](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/sys/spawn.h)
+provide credential reset and descriptor-close controls, not a task-access-slot
+reset. The existing deny-default sandbox and its installed-state query neither
+identify the inherited endpoint nor prove that delegated work is confined.
+The saved lifecycle reads already show live authority before the child's
+credential transition; copied-reference release cannot establish its absence.
+No supported confined launch
 or endpoint ownership has been established. The smallest missing authority fact
 is a public-contract-supported launch with absent authority, or an independently
 identified endpoint with proved confinement and ownership. No unidentified

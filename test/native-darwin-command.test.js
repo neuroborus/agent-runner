@@ -51,18 +51,34 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "const a={ap_pid:pids[i]}, b={ap_pid:pids[i]};",
         )
         .replace("struct identity member;", "const member={token:{val:[]}};")
+        .replace(
+          /struct identity (value|actual);/gu,
+          "const $1={token:{val:[]},bsd:{}};",
+        )
+        .replace("struct proc_bsdinfo bsd;", "const bsd={};")
+        .replace("char byte;", "let byte;")
         .replace("au_mask_t empty={0,0};", "const empty={};")
         .replace(
           "struct auditpipe_ioctl_preselect choice={0};",
           "const choice={aip_mask:{}};",
         )
         .replace(/sizeof\(pids\)/gu, "4096")
-        .replace(/sizeof\((?:pid_t|before|after|a|b|member|attempt)\)/gu, "1")
+        .replace(
+          /sizeof\((?:pid_t|before|after|a|b|member|attempt|bsd|actual.token)\)/gu,
+          "1",
+        )
         .replace(
           /&(low|high|size)\b/gu,
           (_, name) => `{set value(v){${name}=v}}`,
         )
         .replace(/&foreign\b/gu, "{set value(v){foreign=v}}")
+        .replace(/&right\b/gu, "{set value(v){right=v}}")
+        .replace(/&byte\b/gu, "{set value(v){byte=v}}")
+        .replace(
+          /&(prerequisite_status)\b/gu,
+          "{set value(v){prerequisite_status=v}}",
+        )
+        .replace(/&(\w+\.token|actual|value|bsd)\b/gu, "$1")
         .replace(
           /&(before|after|a|b|member|queue|mode|empty|choice|status|attempt)\b/gu,
           "$1",
@@ -70,7 +86,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
         .replace(/\((?:int|unsigned|void)\)/gu, "")
         .replace(/\blong long /gu, "let ")
         .replace(
-          /\b(?:unsigned|int|bool|uid_t|au_asid_t|mach_port_t) /gu,
+          /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t) /gu,
           "let ",
         )
         .replace(
@@ -98,6 +114,11 @@ function commandGuards(header, helper, body, caller, options = {}) {
       ENOENT: 2,
       ENOTSUP: 45,
       WNOHANG: 1,
+      EINTR: 4,
+      ESRCH: 3,
+      SIGCONT: 19,
+      SIGKILL: 9,
+      SIGALRM: 14,
       __func__: caller,
       __LINE__: 1,
       failed_operation: null,
@@ -166,6 +187,13 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [helper, "failure", "code"],
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
+    ...(options.lifecycle
+      ? [
+          [helper, "live", "expected"],
+          [helper, "settle_prerequisite", ""],
+          [header, "command_continue", "identity"],
+        ]
+      : []),
   ];
   const declarations = owners
     .map(([source, name, args]) => {
@@ -206,6 +234,340 @@ function commandGuards(header, helper, body, caller, options = {}) {
     reports,
   };
 }
+
+function commandSignalFixture(header, helper, body, options = {}) {
+  const original = {
+    token: { val: [501, 501, 20, 501, 20, 123, 17, 2] },
+    bsd: {
+      pbi_start_tvsec: 90,
+      pbi_start_tvusec: 1,
+      pbi_svuid: 501,
+      pbi_svgid: 20,
+      pbi_status: 1,
+    },
+  };
+  const f = commandGuards(header, helper, body, "command_entry", {
+    lifecycle: true,
+    context: { command_prerequisite: options.prerequisite === true },
+  });
+  let reads = 0,
+    signalled = false,
+    memberships = 0;
+  const gate = [31, 32];
+  Object.assign(f.context, {
+    child: 123,
+    owner: structuredClone(original),
+    ready: [33, 34],
+    release: gate,
+    prerequisite_gate: gate,
+    prerequisite_mode: options.prerequisite === true,
+    prerequisite_child: -1,
+    prerequisite_status: 0,
+    prerequisite_signalled: false,
+    command_uid: 501,
+    command_gid: 20,
+    command_helper: "/fixture/helper",
+    command_helper_hash: PIN,
+    sandbox_binding: {},
+    wrapper: 123,
+    parent: { token: { val: [501, 501, 20, 501, 20, 42, 3, 1] } },
+    PROC_PIDTBSDINFO: 1,
+    SZOMB: 5,
+    MACH_PORT_NULL: 0,
+    KERN_SUCCESS: 0,
+    byte: null,
+    fd: 35,
+    proc_pidinfo(pid, _flavor, _arg, output) {
+      assert.equal(pid, 123);
+      reads++;
+      f.calls.push("live");
+      Object.assign(output, original.bsd);
+      if (reads === (options.driftAt ?? 1)) {
+        if (options.drift === "birth") output.pbi_start_tvusec++;
+        if (options.drift === "zombie") output.pbi_status = 5;
+        if (options.drift === "saved") output.pbi_svuid++;
+      }
+      return 1;
+    },
+    inspect(pid, output) {
+      assert.equal(pid, 123);
+      Object.assign(output, structuredClone(original));
+      if (reads === (options.driftAt ?? 1)) {
+        if (options.drift === "version") output.token.val[7]++;
+        if (options.drift === "credential") output.token.val[1]++;
+        if (options.drift === "asid") output.token.val[6]++;
+        if (options.drift === "inspect") return false;
+      }
+      return true;
+    },
+    memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+    audit_signal(token, signal) {
+      assert.deepEqual(Array.from(token.val), original.token.val);
+      assert.ok(
+        signal === 9 || signal === 19,
+        "Only an owned positive control is signalled",
+      );
+      f.calls.push(["signal", signal]);
+      f.context.errno = 97;
+      signalled = !options.signal && signal === 9;
+      return options.signal ?? 0;
+    },
+    command_members(asid, signalling) {
+      assert.equal(asid, 17);
+      assert.equal(signalling, false);
+      f.calls.push("members");
+      return memberships++ ? (options.survivor ? 1 : 0) : 1;
+    },
+    audit_session_port(asid, target) {
+      assert.equal(asid, 17);
+      f.calls.push("hold");
+      target.value = 200;
+      return 0;
+    },
+    command_image_identity(value) {
+      assert.deepEqual(Array.from(value.token.val), original.token.val);
+      f.calls.push("image");
+    },
+    feasibility_sandbox_active() {
+      f.calls.push("sandbox");
+      return 1;
+    },
+    read(fd, target) {
+      assert.equal(fd, 33);
+      target.value = "W";
+      return 1;
+    },
+    close(fd) {
+      f.calls.push(["close", fd]);
+      f.context.errno = options.close === fd ? 16 : 0;
+      return options.close === fd ? -1 : 0;
+    },
+    waitpid(pid, target, flags) {
+      assert.equal(pid, 123);
+      assert.equal(flags, 1);
+      f.calls.push("wait");
+      f.context.errno = options.wait ? 5 : 0;
+      target.value = options.status ?? (signalled ? 9 : 0);
+      return options.wait ? -1 : 123;
+    },
+    WIFEXITED: (status) => status === 0,
+    WEXITSTATUS: () => 0,
+    WIFSIGNALED: (status) => status > 0,
+    WTERMSIG: (status) => status,
+    usleep: () => 0,
+    mach_task_self: () => 101,
+    mach_port_deallocate(self, right) {
+      assert.deepEqual([self, right], [101, 200]);
+      f.calls.push("release-right");
+      return 0;
+    },
+    write(fd, byte) {
+      assert.deepEqual([fd, byte], [32, "P"]);
+      f.calls.push("P");
+      return 1;
+    },
+    emit_identity: () => f.calls.push("custody"),
+    printf() {},
+    puts() {},
+  });
+  return f;
+}
+
+test("Darwin command prerequisite proves positive signal, exact child termination and empty session", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = header.indexOf("    prerequisite_child=child;"),
+    end = header.indexOf('    printf("{\\"audit\\":true', start);
+  assert.ok(start > 0 && end > start);
+  const body = header.slice(start, end);
+  for (const options of [
+    {},
+    ...[1, 3, 22].map((signal) => ({ signal })),
+    ...[
+      "birth",
+      "version",
+      "credential",
+      "asid",
+      "saved",
+      "zombie",
+      "inspect",
+    ].map((drift) => ({ drift })),
+    { status: 0 },
+    { status: 14 },
+    { survivor: true },
+    { wait: true },
+    { close: 31 },
+    { close: 32 },
+    { signal: 1, wait: true },
+    { signal: 22, close: 32, wait: true },
+  ]) {
+    const f = commandSignalFixture(header, helper, body, {
+      ...options,
+      prerequisite: true,
+    });
+    if (Object.keys(options).length === 0) {
+      f.run();
+      assert.deepEqual(f.calls, [
+        ["close", 34],
+        ["close", 31],
+        "sandbox",
+        "hold",
+        "members",
+        "live",
+        ["signal", 9],
+        ["close", 32],
+        "wait",
+        ["close", 33],
+        "members",
+        "release-right",
+        ["close", 35],
+      ]);
+      assert.equal(f.context.prerequisite_child, -1);
+      assert.equal(f.context.resource_uncertain, false);
+      continue;
+    }
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 78);
+      assert.equal(error.operation, "helper-invariant");
+      // libproc's returned status, rather than the deliberately stale errno.
+      assert.equal(
+        error.value,
+        options.signal ??
+          (options.close === 31 ? 16 : options.survivor ? 1 : 0),
+        JSON.stringify(options),
+      );
+      const cleanup = options.close
+        ? ["prerequisite-close", "errno", 16]
+        : options.wait
+          ? ["prerequisite-wait", "errno", 5]
+          : options.status === 14
+            ? ["prerequisite-backstop", "invariant", 14]
+            : null;
+      assert.deepEqual(error.cleanup, cleanup);
+      return true;
+    });
+    assert.equal(f.calls.includes("release-right"), false);
+    assert.equal(
+      f.reports[0][4],
+      "unsettled",
+      "Child reaping alone cannot settle possible command-domain effects",
+    );
+    assert.equal(
+      f.calls.includes("wait"),
+      true,
+      "Refusal independently reaps the EOF-only original child",
+    );
+    assert.equal(
+      f.calls.some((call) => Array.isArray(call) && call[0] === "signal"),
+      !options.drift && options.close !== 31,
+    );
+    if (options.signal) {
+      assert.equal(f.diagnostics[0][3], options.signal);
+      assert.equal(f.diagnostics[0][4], 97);
+    }
+  }
+});
+
+test("Darwin command admission proves positive-signal permission before its private provider release", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = header.indexOf("  command_image_identity(owner,"),
+    end = header.indexOf("pid_t child;", start);
+  assert.ok(start > 0 && end > start);
+  for (const options of [
+    {},
+    ...[1, 3, 22].map((signal) => ({ signal })),
+    ...[1, 2].flatMap((driftAt) =>
+      [
+        "birth",
+        "version",
+        "credential",
+        "asid",
+        "saved",
+        "zombie",
+        "inspect",
+      ].map((drift) => ({ drift, driftAt })),
+    ),
+  ]) {
+    const f = commandSignalFixture(
+      header,
+      helper,
+      header.slice(start, end),
+      options,
+    );
+    if (Object.keys(options).length === 0) {
+      f.run();
+      assert.deepEqual(f.calls, [
+        "image",
+        "sandbox",
+        "live",
+        ["signal", 19],
+        "live",
+        "custody",
+        "P",
+        ["close", 32],
+      ]);
+    } else {
+      assert.throws(f.run, { code: 126 });
+      assert.equal(f.calls.includes("custody"), false);
+      assert.equal(f.calls.includes("P"), false);
+      assert.equal(
+        f.calls.some((call) => Array.isArray(call) && call[0] === "signal"),
+        !options.drift || options.driftAt === 2,
+      );
+    }
+  }
+  const gateStart = header.indexOf(
+      '    char byte;command_native(write(birth[1],"W",1)',
+    ),
+    gateEnd = header.indexOf("    posix_spawnattr_t attributes;", gateStart);
+  assert.ok(gateStart > 0 && gateEnd > gateStart);
+  for (const [count, byte] of [
+    [1, "P"],
+    [1, "R"],
+    [0, ""],
+    [-1, ""],
+  ]) {
+    const f = commandGuards(
+      header,
+      helper,
+      `${header.slice(gateStart, gateEnd)}spawn();`,
+      "command_spawn",
+      {
+        context: { command_prerequisite: false, command_owner: 0 },
+      },
+    );
+    Object.assign(f.context, {
+      birth: [40, 41],
+      release: [42, 43],
+      write(fd, value) {
+        assert.deepEqual([fd, value], [41, "W"]);
+        f.calls.push("W");
+        return 1;
+      },
+      read(fd, target) {
+        assert.equal(fd, 42);
+        f.calls.push("read-P");
+        target.value = byte;
+        return count;
+      },
+      spawn: () => f.calls.push("spawn"),
+    });
+    if (count === 1 && byte === "P") {
+      f.run();
+      assert.deepEqual(f.calls, ["W", "read-P", "spawn"]);
+    } else {
+      assert.throws(f.run, { code: 126 });
+      assert.deepEqual(f.calls, ["W", "read-P"]);
+    }
+  }
+});
 
 test("Darwin command audit prerequisites retain exact native guards through cleanup", async () => {
   const [header, helper] = await Promise.all(

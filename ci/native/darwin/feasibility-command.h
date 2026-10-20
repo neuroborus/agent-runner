@@ -241,6 +241,9 @@ static void command_barrier(void) {
   /* The next release/operation cannot share the acknowledged start tick. */
   do{command_poll();}while(command_clock(&time)<=stamp);
 }
+static void command_continue(struct identity identity) {
+  need(live(identity));command_native(audit_signal(&identity.token,SIGCONT), == 0);
+}
 static struct identity command_spawn(char **args, const char *home_leaf) {
   need(command_count<16 && !command_expired && !command_admissions_closed); int input[2],output[2],errors[2],birth[2],release[2];
   command_native(pipe(input), == 0);command_native(pipe(output), == 0);command_native(pipe(errors), == 0);
@@ -270,7 +273,10 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   struct identity owner;need(inspect(wrapper,&owner));need(owner.token.val[0]==command_uid&&owner.token.val[1]==command_uid&&owner.token.val[2]==command_gid&&owner.token.val[6]>0);
   command_native(audit_session_port(owner.token.val[6],&command_rights[command_count]), == 0);need(command_rights[command_count]!=MACH_PORT_NULL);
   command_sessions[command_count]=owner.token.val[6];command_wrappers[command_count++]=wrapper;
-  command_image_identity(owner,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,wrapper), == 1);command_native(audit_signal(&owner.token,0), == 0);
+  command_image_identity(owner,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,wrapper), == 1);
+  /* libproc requires a positive signal. SIGCONT checks permission on this exact
+   * launcher without satisfying its private P gate or spawning provider code. */
+  command_continue(owner);need(live(owner));
   printf("{\"event\":\"custody\",\"identity\":");emit_identity(owner);puts(",\"sessionHeld\":true}");
   command_native(write(release[1],"P",1), == 1);command_native(close(release[1]), == 0);pid_t child;
   command_native(read(birth[0],&child,sizeof(child)), == sizeof(child));command_native(close(birth[0]), == 0);
@@ -279,7 +285,6 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   command_native(feasibility_sandbox_active(sandbox_binding,child), == 1);
   command_in=input[1];command_out=output[0];command_err=errors[0];return identity;
 }
-static void command_continue(struct identity identity){need(live(identity));command_native(audit_signal(&identity.token,SIGCONT), == 0);}
 static void command_capture(const char *event) {
   unsigned char output[65536],errors[65536];size_t used=0,err=0;int fds[]={command_out,command_err};
   while(fds[0]>=0||fds[1]>=0){command_poll();struct pollfd p[]={{fds[0],POLLIN,0},{fds[1],POLLIN,0}};command_native(poll(p,2,10), >= 0);
@@ -339,12 +344,12 @@ static int command_entry(int argc,char **argv) {
   if(!strcmp(argv[1],"command-observe")){need(argc==14);struct identity value=parse_identity(argv+2);need(!live(value));puts("{\"status\":\"RETIRED\"}");return 0;}
   if(!strcmp(argv[1],"command-verify")){need(argc==3);unsigned asid=(unsigned)number(argv[2]);need(asid>0);command_native(command_members(asid,false), == 0);puts("{\"empty\":true}");return 0;}
   command_prerequisite=!strcmp(argv[1],"command-prerequisites");unsigned classes=command_classes();
-  if(command_prerequisite){need(argc==5&&AUT_ATTR32==0x3e&&AUT_ATTR64==0x73&&AUT_PATH==0x23);command_root=argv[2];command_path(command_policy,"admission.sb");command_uid=(uid_t)number(argv[3]);command_gid=(gid_t)number(argv[4]);need(command_uid>500);
+  if(command_prerequisite){prerequisite_mode=true;need(argc==5&&AUT_ATTR32==0x3e&&AUT_ATTR64==0x73&&AUT_PATH==0x23);command_root=argv[2];command_path(command_policy,"admission.sb");command_uid=(uid_t)number(argv[3]);command_gid=(gid_t)number(argv[4]);need(command_uid>500);
     struct identity parent;need(inspect(getpid(),&parent));need(parent.token.val[6]>0&&parent.token.val[0]==command_uid);
-    int fd=command_pipe(classes,command_uid,true), ready[2], release[2];
+    int fd=command_pipe(classes,command_uid,true), ready[2], *release=prerequisite_gate;
     command_native(pipe(ready), == 0);command_native(pipe(release), == 0);
     pid_t child=fork();int fork_error=errno;command_observed(child>=0, child, fork_error);
-    if(!child){alarm(10);close(ready[0]);close(release[1]);auditinfo_addr_t audit={0};audit.ai_auid=command_uid;audit.ai_asid=AU_ASSIGN_ASID;audit.ai_termid.at_type=AU_IPv4;
+    if(!child){alarm(10);close(ready[0]);close(release[1]);release[1]=-1;auditinfo_addr_t audit={0};audit.ai_auid=command_uid;audit.ai_asid=AU_ASSIGN_ASID;audit.ai_termid.at_type=AU_IPv4;
       command_native(setaudit_addr(&audit,sizeof(audit)), == 0);command_native(setgroups(0,NULL), == 0);
       command_native(setgid(command_gid), == 0);command_native(setuid(command_uid), == 0);policy(command_policy);
       /* Session membership is useful only if the admitted normal-UID policy
@@ -355,14 +360,20 @@ static int command_entry(int argc,char **argv) {
       mach_port_t foreign=MACH_PORT_NULL;int acquired=audit_session_port(parent.token.val[6],&foreign), acquire_error=errno;
       command_observed(acquired!=0, acquired, acquire_error);need(foreign==MACH_PORT_NULL);
       char byte;command_native(write(ready[1],"W",1), == 1);(void)read(release[0],&byte,1);_exit(0);}
-    close(ready[1]);close(release[0]);char byte;command_native(read(ready[0],&byte,1), == 1);need(byte=='W');struct identity value;
+    prerequisite_child=child;
+    close(ready[1]);int closed=close(release[0]), close_error=errno;release[0]=-1;
+    if(closed)remember_cleanup("prerequisite-close","errno",close_error);command_observed(!closed, closed, close_error);
+    char byte;command_native(read(ready[0],&byte,1), == 1);need(byte=='W');struct identity value;
     need(inspect(child,&value));need(value.token.val[0]==command_uid&&value.token.val[1]==command_uid&&value.token.val[6]>0&&value.token.val[6]!=parent.token.val[6]);
     command_native(feasibility_sandbox_active(sandbox_binding,child), == 1);
     mach_port_t right=MACH_PORT_NULL;command_native(audit_session_port(value.token.val[6],&right), == 0);
     need(right!=MACH_PORT_NULL);command_native(command_members(value.token.val[6],false), == 1);
-    command_native(audit_signal(&value.token,0), == 0);command_native(audit_signal(&value.token,SIGKILL), == 0);
-    close(release[1]);close(ready[0]);int status;
-    command_native(waitpid(child,&status,0), == child);need(WIFSIGNALED(status)&&WTERMSIG(status)==SIGKILL);
+    /* Permission is proved by a real generation-bound signal and its observed
+     * effect. The shared EOF-only child owner also settles every refusal. */
+    need(live(value));command_native(audit_signal(&value.token,SIGKILL), == 0);prerequisite_signalled=true;
+    settle_prerequisite();need(!resource_uncertain&&prerequisite_child<0);
+    need(WIFSIGNALED(prerequisite_status)&&WTERMSIG(prerequisite_status)==SIGKILL);
+    command_native(close(ready[0]), == 0);
     command_native(command_members(value.token.val[6],false), == 0);
     command_native(mach_port_deallocate(mach_task_self(),right), == KERN_SUCCESS);command_native(close(fd), == 0);
     printf("{\"audit\":true,\"admission\":true,\"completeRetirement\":true,\"sessionEscapeDenied\":true,\"classes\":%u,",classes);command_mapping(classes);puts("}");return 0;}

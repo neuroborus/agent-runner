@@ -128,10 +128,12 @@ static void failure(int code) {
   settle_bundle();
   settle_fault();
   settle_domain();
+  /* Reaping an EOF-only control settles a no-admission prerequisite. Possible
+   * command effects still require their separate empty-session proof. */
   fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",
     failed_operation ? failed_operation : "helper-invariant", failed_domain ? failed_domain : "invariant",
     failed_operation ? failed_value : 0, admitted_effects ? "possible" : "none",
-    prerequisite_mode && !resource_uncertain && prerequisite_child < 0 ? "settled" : "unsettled");
+    prerequisite_mode && !admitted_effects && !resource_uncertain && prerequisite_child < 0 ? "settled" : "unsettled");
   if (cleanup_operation) fprintf(stderr, "native-darwin-cleanup: operation=%s domain=%s value=%d effects=%s settlement=unsettled\n",
     cleanup_operation, cleanup_domain, cleanup_value, admitted_effects ? "possible" : "none");
   fflush(stderr);
