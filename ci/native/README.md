@@ -9927,11 +9927,23 @@ mandatory for closed admissions, exclusive writers, ancestor/creation authority,
 foreign handles, account reservations, endpoint leases and the complete global
 route/flow/callout/precedence view. Missing coverage cannot become inferred flags.
 
-Both native security reopen masks include `FILE_READ_ATTRIBUTES` for their
-`FileIdInfo` queries. These rights belong to temporary trusted observer handles;
-payload grants remain unchanged. Both temporary reopens share read, write and
-delete access so they can coexist with a live DELETE-granted control open on the
-same object. `FILE_SHARE_DELETE` accommodates existing access; it does not grant
+File security reads check the borrowed original handle's `FileIdInfo`, then
+query its complete owner/group/DACL/label/SACL with `GetSecurityInfo`. A successful
+query must return a valid descriptor no larger than 65,536 bytes; the caller
+owns that descriptor. Already-granted query rights need no fresh open. Only a
+file query returning `ERROR_ACCESS_DENIED` may use the retained strict
+reopen-and-query fallback, after releasing any partial descriptor. Failed
+partial-descriptor cleanup stops without retrying or reopening and preserves
+the query status with a separate cleanup diagnostic. Other direct-query errors
+stop immediately; registry reads remain direct and the setter is unchanged.
+This supported equivalent read operation does not identify the kernel condition
+behind the observed Windows system `ReOpenFile` error5.
+
+Both the read fallback and setter reopen masks include `FILE_READ_ATTRIBUTES`
+for their `FileIdInfo` queries. These rights belong to temporary trusted observer
+handles; payload grants remain unchanged. Both temporary reopens share read,
+write and delete access so they can coexist with a live DELETE-granted control
+open on the same object. `FILE_SHARE_DELETE` accommodates existing access; it does not grant
 `DELETE` to either observer. Original protective handles retain their existing
 access and sharing restrictions, and control-handle access and sharing remain
 unchanged. Original identity, reopening, reopened identity, same-object
@@ -9943,9 +9955,11 @@ release temporary handles and returned descriptors before entering the existing
 custody failure owner, retaining the first cause and separate cleanup diagnostics.
 No-follow flags, original protective no-delete sharing and complete
 owner/group/DACL/label/SACL reads remain required. The existing injected fixture
-exercises both actual security bodies while a DELETE-granted open remains live
-on the same object, refusing incompatible temporary sharing. The historical
-compound error does not identify its failed subcall; this sharing correction
+models live grants and descriptor lifetimes for the original read, strict
+fallback and unchanged setter while a DELETE-granted open remains live on the
+same object, refusing incompatible temporary sharing. A granted original read
+must succeed even when a fresh reopen would fail. The historical compound error
+does not identify its failed subcall; the retained sharing correction
 does not attribute that failure or claim an observed native error32. Portable
 regressions establish no matching Windows native acceptance; fresh original
 Windows CI remains necessary.

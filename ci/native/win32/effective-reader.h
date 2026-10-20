@@ -60,22 +60,35 @@ static void file_security_failure(const char *operation, BOOL api_failure, DWORD
   fflush(stderr); SetLastError(error); need_at(false, __FILE__, line);
 }
 static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
-  HANDLE actual = file, temporary = INVALID_HANDLE_VALUE;
+  HANDLE temporary = INVALID_HANDLE_VALUE;
+  FILE_ID_INFO before, after;
   if (kind == SE_FILE_OBJECT) {
-    FILE_ID_INFO before, after;
     BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
     if (!read) file_security_failure("security-read-original-id", TRUE, error, temporary, NULL, __LINE__);
-    temporary = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
-    if (temporary == INVALID_HANDLE_VALUE) file_security_failure("security-read-reopen", TRUE, error, temporary, NULL, __LINE__);
-    actual = temporary;
-    read = GetFileInformationByHandleEx(actual, FileIdInfo, &after, sizeof(after)); error = GetLastError();
-    if (!read) file_security_failure("security-read-reopened-id", TRUE, error, temporary, NULL, __LINE__);
-    if (memcmp(&before, &after, sizeof(before))) file_security_failure("security-read-same-object", FALSE, ERROR_INVALID_DATA, temporary, NULL, __LINE__);
   }
   PSECURITY_DESCRIPTOR sd = NULL;
-  DWORD status = GetSecurityInfo(actual, kind, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &sd);
+  SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+  DWORD status = GetSecurityInfo(file, kind, info, NULL, NULL, NULL, NULL, &sd);
+  /* Complete original grants need no new open. Only denied file queries may
+   * acquire the same strict observer handle used by insufficient-grant callers. */
+  if (kind == SE_FILE_OBJECT && status == ERROR_ACCESS_DENIED) {
+    if (sd) {
+      BOOL freed = LocalFree(sd) == NULL; DWORD error = GetLastError();
+      if (!freed) {
+        fprintf(stderr, "native-windows-security-cleanup: operation=LocalFree error=%lu\n", error);
+        file_security_failure("security-read-descriptor", TRUE, status, temporary, NULL, __LINE__);
+      }
+      sd = NULL;
+    }
+    temporary = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); DWORD error = GetLastError();
+    if (temporary == INVALID_HANDLE_VALUE) file_security_failure("security-read-reopen", TRUE, error, temporary, NULL, __LINE__);
+    BOOL read = GetFileInformationByHandleEx(temporary, FileIdInfo, &after, sizeof(after)); error = GetLastError();
+    if (!read) file_security_failure("security-read-reopened-id", TRUE, error, temporary, NULL, __LINE__);
+    if (memcmp(&before, &after, sizeof(before))) file_security_failure("security-read-same-object", FALSE, ERROR_INVALID_DATA, temporary, NULL, __LINE__);
+    status = GetSecurityInfo(temporary, kind, info, NULL, NULL, NULL, NULL, &sd);
+  }
   if (status != ERROR_SUCCESS) file_security_failure("security-read-descriptor", TRUE, status, temporary, sd, __LINE__);
   if (!IsValidSecurityDescriptor(sd)) file_security_failure("security-read-valid", FALSE, ERROR_INVALID_SECURITY_DESCR, temporary, sd, __LINE__);
   if (GetSecurityDescriptorLength(sd) > 65536) file_security_failure("security-read-size", FALSE, ERROR_INVALID_DATA, temporary, sd, __LINE__);

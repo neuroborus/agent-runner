@@ -23,6 +23,8 @@ async function securityNative({
   closeFailure,
   freeFailure,
   registry = false,
+  queryGranted = registry,
+  partialDenied = false,
   length = 64,
   deleteOpen = false,
 } = {}) {
@@ -52,15 +54,20 @@ async function securityNative({
       )
       .replace(/sizeof\((?:before|after)\)/gu, "24")
       .replace(/&(before|after)\b/gu, "$1")
-      .replace("&sd", "{set value(value){sd=value}}")
-      .replace(/\b(?:HANDLE|DWORD|BOOL|PSECURITY_DESCRIPTOR) /gu, "let ");
+      .replaceAll("&sd", "{get value(){return sd},set value(value){sd=value}}")
+      .replace(
+        /\b(?:HANDLE|DWORD|BOOL|PSECURITY_DESCRIPTOR|SECURITY_INFORMATION) /gu,
+        "let ",
+      );
     return `function ${name}(${args}){${body}}`;
   };
   const calls = [],
     diagnostics = [],
     guards = [],
     opens = new Map(),
-    sd = { descriptor: true };
+    descriptors = new Set(),
+    sd = { descriptor: true },
+    partial = { partial: true };
   let lastError = 999;
   const api = {
     Buffer,
@@ -70,6 +77,7 @@ async function securityNative({
     stderr: {},
     INVALID_HANDLE_VALUE: -1,
     ERROR_SUCCESS: 0,
+    ERROR_ACCESS_DENIED: 5,
     ERROR_INVALID_DATA: 13,
     ERROR_INVALID_SECURITY_DESCR: 1338,
     READ_CONTROL: 0x20000,
@@ -145,14 +153,31 @@ async function securityNative({
     memcmp: (left, right, size) =>
       Buffer.compare(left.subarray(0, size), right.subarray(0, size)),
     GetSecurityInfo(handle, kind, mask, owner, group, dacl, sacl, out) {
-      assert.equal(handle, registry ? 1 : 2);
+      assert.ok(handle === 1 || (!registry && handle === 2));
+      const open = opens.get(handle);
+      assert.ok(open, "Security queries require a live handle");
       assert.equal(kind, registry ? 4 : 1);
       assert.equal(mask, 1 | 2 | 4 | 8 | 16);
       assert.deepEqual([owner, group, dacl, sacl], [null, null, null, null]);
-      calls.push("descriptor");
-      out.value = sd;
+      assert.equal(out.value, null, "Each query starts without a descriptor");
+      calls.push(
+        handle === 1 && !registry ? "original-descriptor" : "descriptor",
+      );
+      const required = api.READ_CONTROL | api.ACCESS_SYSTEM_SECURITY;
+      let status = (open.access & required) === required ? 0 : 5;
+      if (fault === "original-descriptor" && handle === 1) status = 87;
+      if (fault === "descriptor" && (registry || handle === 2)) status = 5;
+      if (status !== 5 || registry || handle === 2 || partialDenied) {
+        const value = handle === 1 && !registry && status === 5 ? partial : sd;
+        assert.ok(
+          !descriptors.has(value),
+          "Do not overwrite a live descriptor",
+        );
+        descriptors.add(value);
+        out.value = value;
+      }
       lastError = 999;
-      return fault === "descriptor" ? 5 : 0;
+      return status;
     },
     IsValidSecurityDescriptor(value) {
       assert.equal(value, sd);
@@ -183,10 +208,12 @@ async function securityNative({
       return true;
     },
     LocalFree(value) {
-      assert.equal(value, sd);
-      calls.push("free");
+      assert.ok(descriptors.has(value), "Free only an owned live descriptor");
+      calls.push(value === partial ? "free-partial" : "free");
       lastError = 8;
-      return freeFailure ? value : null;
+      if (freeFailure) return value;
+      descriptors.delete(value);
+      return null;
     },
     fprintf(_stream, format, ...values) {
       diagnostics.push({ format, values });
@@ -207,7 +234,10 @@ async function securityNative({
     },
   };
   opens.set(1, {
-    access: api.READ_CONTROL | api.FILE_READ_ATTRIBUTES,
+    access:
+      api.READ_CONTROL |
+      api.FILE_READ_ATTRIBUTES |
+      (queryGranted ? api.ACCESS_SYSTEM_SECURITY : 0),
     identity: Buffer.alloc(24, 1),
   });
   if (deleteOpen) {
@@ -230,6 +260,7 @@ async function securityNative({
     calls,
     diagnostics,
     opens,
+    descriptors,
     sd,
     run: () =>
       writer
@@ -238,11 +269,25 @@ async function securityNative({
   };
 }
 
-test("Windows native security observers share existing DELETE opens with exact rights and complete observations", async () => {
+test("Windows native security observers use granted originals and strict compatible reopens", async () => {
+  const direct = await securityNative({
+    queryGranted: true,
+    fault: "reopen",
+    length: 65536,
+    deleteOpen: true,
+  });
+  assert.equal(direct.run(), direct.sd);
+  assert.deepEqual(direct.calls, [
+    "original-id",
+    "original-descriptor",
+    "valid",
+    "size",
+  ]);
   const read = await securityNative({ length: 65536, deleteOpen: true });
   assert.equal(read.run(), read.sd);
   assert.deepEqual(read.calls, [
     "original-id",
+    "original-descriptor",
     "reopen",
     "reopened-id",
     "descriptor",
@@ -259,15 +304,97 @@ test("Windows native security observers share existing DELETE opens with exact r
     "descriptor",
     "close",
   ]);
-  for (const f of [read, write]) {
+  for (const f of [direct, read, write]) {
     assert.deepEqual([...f.opens.keys()], [1, 3]);
     assert.equal(f.opens.get(3).access, 0x10000);
     assert.equal(f.opens.get(3).identity, f.opens.get(1).identity);
     assert.deepEqual(f.diagnostics, []);
+    assert.deepEqual([...f.descriptors], f === write ? [] : [f.sd]);
   }
   const registry = await securityNative({ registry: true });
   assert.equal(registry.run(), registry.sd);
   assert.deepEqual(registry.calls, ["descriptor", "valid", "size"]);
+  assert.deepEqual([...registry.opens.keys()], [1]);
+  assert.deepEqual([...registry.descriptors], [registry.sd]);
+});
+
+test("Windows native direct security refusals preserve status, validation and borrowed handles without fallback", async () => {
+  for (const [fault, error, inspected] of [
+    ["original-descriptor", 87, []],
+    ["valid", 1338, ["valid"]],
+    ["size", 13, ["valid", "size"]],
+  ]) {
+    const f = await securityNative({
+      queryGranted: true,
+      fault,
+      length: fault === "size" ? 65537 : 64,
+      freeFailure: fault === "original-descriptor",
+      deleteOpen: true,
+    });
+    assert.throws(f.run, (cause) => cause.guard.error === error);
+    assert.deepEqual(f.calls, [
+      "original-id",
+      "original-descriptor",
+      ...inspected,
+      "free",
+    ]);
+    assert.deepEqual([...f.opens.keys()], [1, 3]);
+    assert.deepEqual(
+      [...f.descriptors],
+      fault === "original-descriptor" ? [f.sd] : [],
+    );
+    if (fault === "original-descriptor") {
+      const cleanup = f.diagnostics.find((item) =>
+        item.format.startsWith("native-windows-security-cleanup:"),
+      );
+      assert.deepEqual(cleanup.values, [8]);
+    }
+  }
+  const registry = await securityNative({
+    registry: true,
+    fault: "descriptor",
+  });
+  assert.throws(registry.run, (cause) => cause.guard.error === 5);
+  assert.deepEqual(registry.calls, ["descriptor", "free"]);
+  assert.deepEqual([...registry.opens.keys()], [1]);
+  assert.equal(registry.descriptors.size, 0);
+});
+
+test("Windows native denied security queries release partial descriptors before fallback or stop on cleanup failure", async () => {
+  const read = await securityNative({ partialDenied: true });
+  assert.equal(read.run(), read.sd);
+  assert.deepEqual(read.calls, [
+    "original-id",
+    "original-descriptor",
+    "free-partial",
+    "reopen",
+    "reopened-id",
+    "descriptor",
+    "valid",
+    "size",
+    "close",
+  ]);
+  assert.deepEqual([...read.opens.keys()], [1]);
+  assert.deepEqual([...read.descriptors], [read.sd]);
+  const refused = await securityNative({
+    partialDenied: true,
+    freeFailure: true,
+  });
+  assert.throws(refused.run, (cause) => cause.guard.error === 5);
+  assert.deepEqual(refused.calls, [
+    "original-id",
+    "original-descriptor",
+    "free-partial",
+  ]);
+  assert.deepEqual([...refused.opens.keys()], [1]);
+  const primary = refused.diagnostics.find((item) =>
+    item.format.startsWith("native-windows-security:"),
+  );
+  assert.deepEqual(primary.values, ["security-read-descriptor", "win32", 5]);
+  const cleanup = refused.diagnostics.find((item) =>
+    item.format.startsWith("native-windows-security-cleanup:"),
+  );
+  assert.deepEqual(cleanup.values, [8]);
 });
 
 test("Windows native security failures keep distinct API, identity and descriptor causes through partial cleanup", async () => {
@@ -348,7 +475,14 @@ test("Windows native security failures keep distinct API, identity and descripto
         assert.equal(cause.guard.error, error);
         return true;
       });
-      assert.deepEqual(f.calls, calls);
+      assert.deepEqual(
+        f.calls,
+        writer || fault === "original-id"
+          ? calls
+          : [calls[0], "original-descriptor", ...calls.slice(1)],
+      );
+      assert.ok(f.opens.has(1), "Failures must preserve the borrowed handle");
+      assert.equal(f.descriptors.size, 0);
       const primary = f.diagnostics.find((item) =>
         item.format.startsWith("native-windows-security:"),
       );
