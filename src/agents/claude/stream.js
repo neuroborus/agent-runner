@@ -12,11 +12,17 @@ const DELTA_FIELDS = new Map([
 const identifier = (value) =>
   typeof value === "string" && value.length > 0 && value.length <= 512;
 
-export function createClaudeStream(onProgress, protocolError) {
+export function createClaudeStream(
+  onProgress,
+  protocolError,
+  observations,
+  selectedSession,
+) {
   const progress = createTurnProgress(onProgress);
   const decoder = new TextDecoder("utf-8", { fatal: true });
   const blocks = new Map();
   const commands = new Set();
+  const tasks = new Set();
   let sessionId;
   let messageId;
   let buffer = "";
@@ -27,6 +33,13 @@ export function createClaudeStream(onProgress, protocolError) {
   let finished = false;
 
   function observe(record) {
+    const matchedObservations =
+      (selectedSession?.mode === "continue" &&
+        record.session_id !== selectedSession.id) ||
+      (selectedSession?.mode === "fork" &&
+        record.session_id === selectedSession.id)
+        ? undefined
+        : observations;
     if (record.type === "result") {
       if (payload !== null) invalid = true;
       if (sessionId !== undefined && record.session_id !== sessionId)
@@ -37,8 +50,10 @@ export function createClaudeStream(onProgress, protocolError) {
         SESSION_ID.test(record.session_id ?? "") &&
         typeof record.is_error === "boolean" &&
         typeof record.subtype === "string"
-      )
+      ) {
         progress.semantic();
+        matchedObservations?.result(record);
+      }
       return;
     }
     if (!SESSION_ID.test(record.session_id ?? "")) return;
@@ -62,11 +77,24 @@ export function createClaudeStream(onProgress, protocolError) {
     if (sessionId === undefined || invalid || payload !== null) return;
     if (record.type === "system") {
       if (
+        record.subtype === "compact_boundary" &&
+        identifier(record.uuid) &&
+        isRecord(record.compact_metadata) &&
+        ["auto", "manual"].includes(record.compact_metadata.trigger) &&
+        Number.isSafeInteger(record.compact_metadata.pre_tokens) &&
+        record.compact_metadata.pre_tokens >= 0
+      )
+        matchedObservations?.compact(record.uuid);
+      if (
         record.subtype === "task_started" &&
         record.task_type === "local_bash" &&
         identifier(record.task_id) &&
         commands.has(record.tool_use_id)
       ) {
+        if (matchedObservations && tasks.size < 16_384)
+          tasks.add(record.task_id);
+        else if (!tasks.has(record.task_id))
+          matchedObservations?.incompleteFacts();
         progress.start(JSON.stringify(["task", record.task_id]));
       } else if (
         record.subtype === "task_notification" &&
@@ -74,6 +102,10 @@ export function createClaudeStream(onProgress, protocolError) {
         ["completed", "failed", "stopped"].includes(record.status)
       ) {
         progress.complete(JSON.stringify(["task", record.task_id]));
+        if (tasks.has(record.task_id))
+          matchedObservations?.command(
+            JSON.stringify(["task", record.task_id]),
+          );
       }
       return;
     }
@@ -186,6 +218,10 @@ export function createClaudeStream(onProgress, protocolError) {
             Array.isArray(block.content))
         ) {
           progress.complete(JSON.stringify(["tool", block.tool_use_id]));
+          if (commands.has(block.tool_use_id))
+            matchedObservations?.command(
+              JSON.stringify(["tool", block.tool_use_id]),
+            );
         }
       }
     }

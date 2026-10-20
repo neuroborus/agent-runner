@@ -108,3 +108,5 @@ export {
 } from "./registry.js";
 
 export const BACKEND_IDS = PROVIDER_REGISTRY.ids;
+
+export { normalizeProviderObservation } from "./observations.js";

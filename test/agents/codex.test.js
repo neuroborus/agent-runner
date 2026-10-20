@@ -211,6 +211,7 @@ function createFixture({
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
+  onClose,
   version = "0.147.0",
 } = {}) {
   const executeCalls = [];
@@ -417,6 +418,7 @@ function createFixture({
         ).then(() => callback(), callback);
       },
       final(callback) {
+        onClose?.(send, (source) => stdout.write(source));
         callback();
         if (!retainedOwnedContainment) close();
       },
@@ -487,6 +489,188 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
+  const entered = Promise.withResolvers();
+  const observations = [];
+  let lateUsage;
+  const fixture = createFixture({
+    onClose: (send) => send(lateUsage),
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        entered.resolve(message);
+        return { pending: true };
+      }
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(request({ onObservation: true })),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  const running = fixture.adapter.run(
+    request({ onObservation: (value) => observations.push(value) }),
+  );
+  const message = await entered.promise;
+  const { send } = fixture.processes[0];
+  const threadId = message.params.threadId;
+  const turnId = "observed-turn";
+  const usage = (outputTokens, overrides = {}) => ({
+    method: "thread/tokenUsage/updated",
+    params: {
+      threadId,
+      turnId,
+      tokenUsage: {
+        last: {
+          inputTokens: 10,
+          cachedInputTokens: 4,
+          outputTokens,
+          reasoningOutputTokens: 2,
+          totalTokens: 10 + outputTokens,
+        },
+        total: {
+          inputTokens: 100,
+          cachedInputTokens: 40,
+          outputTokens: 30,
+          reasoningOutputTokens: 20,
+          totalTokens: 130,
+        },
+        modelContextWindow: 1000,
+      },
+      ...overrides,
+    },
+  });
+  lateUsage = usage(6);
+  send(usage(3));
+  send(usage(99, { turnId: "stale-turn" }));
+  send({ id: message.id, result: { turn: { id: turnId } } });
+  const item = {
+    id: "command",
+    type: "commandExecution",
+    command: "private-command",
+    status: "completed",
+  };
+  for (let index = 0; index < 2; index++)
+    send({ method: "item/completed", params: { threadId, turnId, item } });
+  send(completedTurn(threadId, turnId));
+  send(usage(4));
+  send(usage(90, { threadId: "unrelated-thread" }));
+  send(usage(Number.MAX_SAFE_INTEGER + 1));
+  const stale = usage(5);
+  stale.params.tokenUsage.total.outputTokens = 29;
+  send(stale);
+  assert.equal((await running).output, "done");
+  assert.equal(observations.length, 1);
+  const observed = observations[0];
+  assert.equal(observed.last.outputTokens, 6);
+  assert.equal(observed.cumulative.outputTokens, 30);
+  assert.equal(observed.cumulative.reasoningOutputTokens, 20);
+  assert.equal(observed.last.cacheWriteInputTokens, null);
+  assert.equal(observed.commandCompletions, 1);
+  assert.equal(observed.accounting, "reported");
+  assert.equal(observed.contextCapacity, 1000);
+  assert.doesNotMatch(
+    JSON.stringify(observations),
+    /observed-turn|private-command|thread-0/u,
+  );
+  const invalidClose = createFixture({ onClose: (send) => send(null) });
+  await assert.rejects(
+    invalidClose.adapter.run(
+      request({
+        onObservation() {
+          throw new Error("private-observer-error");
+        },
+      }),
+    ),
+    (error) => {
+      assert.equal(error.code, "ERR_CODEX_PROTOCOL");
+      assert.equal(error.message, "Codex emitted an invalid protocol message.");
+      return true;
+    },
+  );
+});
+
+test("contains late shutdown frames and preserves the first protocol failure", async () => {
+  const serverRequest = { id: 99, method: "unexpected/request", params: {} };
+  for (const [frames, items, expectedCode] of [
+    [[serverRequest], [], "ERR_CODEX_PROTOCOL"],
+    [[null, serverRequest], [], "ERR_CODEX_PROTOCOL"],
+    [["private-native-usage\n", serverRequest], [], "ERR_CODEX_PROTOCOL"],
+    [
+      [serverRequest],
+      [{ type: "subAgentActivity", kind: "spawned" }],
+      "ERR_CODEX_ISOLATION",
+    ],
+  ]) {
+    const escaped = [];
+    const events = [];
+    const observations = [];
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start")
+          return {
+            result: { turn: { id: "turn" } },
+            notification: [
+              {
+                method: "item/started",
+                params: {
+                  threadId: message.params.threadId,
+                  turnId: "turn",
+                  item: {
+                    id: "command",
+                    type: "commandExecution",
+                    command: "inspect",
+                    status: "inProgress",
+                  },
+                },
+              },
+              completedTurn(message.params.threadId, "turn", "done", items),
+            ],
+          };
+      },
+      onClose(send, sendRaw) {
+        for (const frame of frames) {
+          try {
+            if (typeof frame === "string") sendRaw(frame);
+            else send(frame);
+          } catch (cause) {
+            escaped.push(cause);
+          }
+        }
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "workspace-write",
+          onProgress: (value) => events.push(value),
+          onObservation(value) {
+            observations.push(value);
+            throw new Error("private-observer-error");
+          },
+        }),
+      ),
+      (error) => {
+        assert.equal(error.code, expectedCode);
+        if (frames[0] === null)
+          assert.equal(
+            error.message,
+            "Codex emitted an invalid protocol message.",
+          );
+        if (typeof frames[0] === "string") {
+          assert.equal(error.message, "Codex emitted invalid JSONL.");
+          assert.equal(error.cause, undefined);
+        }
+        return true;
+      },
+    );
+    assert.deepEqual(escaped, []);
+    assert.equal(events.at(-1).activeCommands, 0);
+    assert.equal(observations[0].commandCompletions, 0);
+    assert.equal(fixture.processes.length, 1);
+    assert.ok(fixture.processes[0].killCalls() > 0);
+    assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  }
+});
 
 test("reports only correlated Codex semantic and overlapping command progress", async () => {
   const entered = Promise.withResolvers();
@@ -618,6 +802,7 @@ test("reports only correlated Codex semantic and overlapping command progress", 
 
 test("retires Codex command activity before the existing fresh recovery", async () => {
   const events = [];
+  const observations = [];
   const fixture = createFixture({
     handle({ message, processIndex }) {
       if (message.method !== "turn/start" || processIndex !== 0) return;
@@ -644,7 +829,22 @@ test("retires Codex command activity before the existing fresh recovery", async 
     },
   });
   await fixture.adapter.run(
-    request({ onProgress: (event) => events.push(event) }),
+    request({
+      onProgress: (event) => events.push(event),
+      onObservation: (value) => observations.push(value),
+    }),
+  );
+  assert.deepEqual(
+    observations.map(({ attempt, kind, accounting, commandCompletions }) => [
+      attempt,
+      kind,
+      accounting,
+      commandCompletions,
+    ]),
+    [
+      [1, "primary", "missing", 0],
+      [2, "recovery", "missing", 0],
+    ],
   );
   assert.equal(fixture.processes.length, 2);
   assert.deepEqual(
@@ -659,9 +859,14 @@ test("retires Codex command activity before the existing fresh recovery", async 
 });
 
 test("redacts Codex retirement observer errors without replacing provider failures", async (t) => {
-  for (const failed of [false, true])
+  for (const [observer, failed] of [
+    ["onProgress", false],
+    ["onProgress", true],
+    ["onObservation", false],
+    ["onObservation", true],
+  ])
     await t.test(
-      failed ? "provider failure" : "successful result",
+      `${observer}: ${failed ? "provider failure" : "successful result"}`,
       async () => {
         const fixture = createFixture({
           handle({ message }) {
@@ -695,8 +900,11 @@ test("redacts Codex retirement observer errors without replacing provider failur
         await assert.rejects(
           fixture.adapter.run(
             request({
-              onProgress({ kind }) {
-                if (kind === "local-command-completed")
+              [observer]({ kind }) {
+                if (
+                  observer === "onObservation" ||
+                  kind === "local-command-completed"
+                )
                   throw new Error("private-observer-error");
               },
             }),
@@ -1006,12 +1214,23 @@ test(
     const failure = Object.assign(new Error("owned completion failed"), {
       code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     });
-    const fixture = createFixture({ ownedCompletionFailure: failure });
+    const fixture = createFixture({
+      ownedCompletionFailure: failure,
+      onClose(send) {
+        send(null);
+        send({ id: 99, method: "unexpected/request", params: {} });
+      },
+    });
     const registrations = [];
 
     await assert.rejects(
       fixture.adapter.run(
-        request({ onProcess: async (pid) => registrations.push(pid) }),
+        request({
+          onProcess: async (pid) => registrations.push(pid),
+          onObservation() {
+            throw new Error("private-observer-error");
+          },
+        }),
       ),
       (cause) => cause === failure,
     );
@@ -4373,6 +4592,7 @@ test("returns commit-executor failures for Git-state verification", async () => 
 
 test("hydrates summarized compaction and retries a full context once", async () => {
   let turns = 0;
+  const observations = [];
   const fixture = createFixture({
     handle({ message }) {
       if (message.method === "thread/compact/start") {
@@ -4440,10 +4660,25 @@ test("hydrates summarized compaction and retries a full context once", async () 
       access: "workspace-write",
       prompt: "Continue from the current session.",
       recoveryPrompt: "Inspect the complete durable request.",
+      onObservation: (value) => observations.push(value),
     }),
   );
 
   assert.equal(result.output, "Recovered.");
+  assert.deepEqual(
+    observations.map(({ attempt, turn, kind, outcome, compactions }) => [
+      attempt,
+      turn,
+      kind,
+      outcome,
+      compactions,
+    ]),
+    [
+      [1, 1, "primary", "failed", 0],
+      [1, 2, "compaction", "completed", 1],
+      [1, 3, "recovery", "completed", 0],
+    ],
+  );
   assert.equal(fixture.processes.length, 1);
   assert.deepEqual(
     fixture.processes[0].messages
@@ -4477,6 +4712,87 @@ test("hydrates summarized compaction and retries a full context once", async () 
       fixture.workspaceStorages[0].rootPath,
     ],
   ]);
+});
+
+test("retains failed compaction usage without successful compaction evidence", async () => {
+  for (const status of ["failed", "interrupted"]) {
+    const observations = [];
+    let lateUsage;
+    const usage = (threadId, turnId, outputTokens) => {
+      const snapshot = {
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        outputTokens,
+        reasoningOutputTokens: 2,
+        totalTokens: 10 + outputTokens,
+      };
+      return {
+        method: "thread/tokenUsage/updated",
+        params: {
+          threadId,
+          turnId,
+          tokenUsage: { last: snapshot, total: snapshot },
+        },
+      };
+    };
+    const fixture = createFixture({
+      onClose(send) {
+        send(lateUsage);
+        send(completedTurn(lateUsage.params.threadId, "compact"));
+        send(lateUsage);
+      },
+      handle({ message }) {
+        const threadId = message.params.threadId;
+        if (message.method === "turn/start")
+          return {
+            result: { turn: { id: "full" } },
+            notification: failedTurn(threadId, "full", {
+              codexErrorInfo: "contextWindowExceeded",
+            }),
+          };
+        if (message.method === "thread/compact/start") {
+          const completion = failedTurn(threadId, "compact", {});
+          completion.params.turn.status = status;
+          lateUsage = usage(threadId, "compact", 6);
+          return {
+            result: {},
+            notification: [
+              {
+                method: "turn/started",
+                params: {
+                  threadId,
+                  turn: { id: "foreign", status: "inProgress", items: [] },
+                },
+              },
+              usage(threadId, "foreign", 100),
+              usage(threadId, "compact", 5),
+              completion,
+            ],
+          };
+        }
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          access: "workspace-write",
+          onFreshSession: () => false,
+          onObservation: (value) => observations.push(value),
+        }),
+      ),
+      hasCode("ERR_CODEX_CONTEXT_RECOVERY_FAILED"),
+    );
+    assert.equal(observations.length, 2);
+    const compact = observations[1];
+    assert.equal(compact.kind, "compaction");
+    assert.equal(compact.outcome, "failed");
+    assert.equal(compact.accounting, "incomplete");
+    assert.equal(compact.last.outputTokens, 6);
+    assert.equal(compact.cumulative.outputTokens, 6);
+    assert.equal(compact.compactions, 0);
+    assert.equal(fixture.processes.length, 1);
+    assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+  }
 });
 
 test("reconstructs a fresh turn when compaction cannot free the context", async () => {

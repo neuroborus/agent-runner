@@ -31,6 +31,7 @@ import {
 import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 import { createClaudeStream } from "./stream.js";
+import { createClaudeObservations } from "./observations.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -1492,19 +1493,26 @@ export function createClaudeAdapter(options = {}) {
     ]);
   }
 
-  async function runAttempt(request, { recovery, session } = {}) {
+  async function runAttempt(request, { recovery, session, attempt } = {}) {
     request.signal?.throwIfAborted();
     const gitDirectories = await gitMetadataDirectories(request);
     const selectedSession = session === undefined ? request.session : session;
     const isolationPolicy = isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
+    const observations = createClaudeObservations(
+      request.onObservation,
+      attempt,
+      recovery,
+    );
     const stream = createClaudeStream(
       request.onProgress,
       () =>
         new ClaudeAdapterError("Claude returned an invalid JSON stream.", {
           code: "ERR_CLAUDE_PROTOCOL",
         }),
+      observations,
+      selectedSession,
     );
     let processRetired = true;
     let primaryError;
@@ -1692,6 +1700,14 @@ export function createClaudeAdapter(options = {}) {
           throw primaryError ?? cause;
         }
       }
+      try {
+        observations?.seal(primaryError === undefined);
+      } catch {
+        if (primaryError === undefined)
+          throw new ClaudeAdapterError("Claude observation observer failed.", {
+            code: "ERR_CLAUDE_PROTOCOL",
+          });
+      }
     }
   }
 
@@ -1740,6 +1756,9 @@ export function createClaudeAdapter(options = {}) {
 
   async function run(value) {
     const request = normalizeRequest(value);
+    let attempt = 0;
+    const observedAttempt = (options = {}) =>
+      runAttempt(request, { ...options, attempt: ++attempt });
     if (
       request.session !== undefined &&
       !SESSION_ID_PATTERN.test(request.session.id)
@@ -1761,7 +1780,7 @@ export function createClaudeAdapter(options = {}) {
     }
     let result;
     try {
-      result = await runAttempt(request);
+      result = await observedAttempt();
     } catch (cause) {
       if (request.signal?.aborted) {
         if (request.access === "local-commit") {
@@ -1824,7 +1843,7 @@ export function createClaudeAdapter(options = {}) {
         }
         if (sessionId !== undefined) {
           try {
-            return await runAttempt(request, {
+            return await observedAttempt({
               recovery: "compact",
               session: { id: sessionId, mode: "continue" },
             });
@@ -1851,7 +1870,7 @@ export function createClaudeAdapter(options = {}) {
         }
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           recovery: "fresh",
           session: null,
         });
@@ -1861,7 +1880,7 @@ export function createClaudeAdapter(options = {}) {
       ) {
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           recovery: "fresh",
           session: null,
         });

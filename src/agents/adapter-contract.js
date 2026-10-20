@@ -23,6 +23,7 @@ const REQUEST_FIELDS = Object.freeze([
   "signal",
   "onProcess",
   "onProgress",
+  "onObservation",
   "onCommitExecution",
   "onFreshSession",
   "onResource",
@@ -700,6 +701,8 @@ export function createAdapterContract({
         typeof value.onCommitExecution !== "function") ||
       (value.onProgress !== undefined &&
         typeof value.onProgress !== "function") ||
+      (value.onObservation !== undefined &&
+        typeof value.onObservation !== "function") ||
       (value.onResource !== undefined &&
         typeof value.onResource !== "function") ||
       (value.storageForbiddenPaths !== undefined &&
@@ -756,6 +759,9 @@ export function createAdapterContract({
       ...(value.onProgress === undefined
         ? {}
         : { onProgress: value.onProgress }),
+      ...(value.onObservation === undefined
+        ? {}
+        : { onObservation: value.onObservation }),
       ...(value.onResource === undefined
         ? {}
         : { onResource: value.onResource }),

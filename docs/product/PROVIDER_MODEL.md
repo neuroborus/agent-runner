@@ -406,6 +406,15 @@ provider branches to pipeline policy.
 
 ## Provider inactivity
 
+Adapters optionally report bounded numeric usage and payload-free command and
+compaction facts through the public agent boundary. Native correlation stays
+private; missing values and incomplete terminal accounting remain explicit.
+These observations change no workflow, progress, retry, configuration, or public
+CLI/MCP projection. The [runtime contract](../ARCHITECTURE.md#agent-context-recovery)
+owns snapshot scopes, inclusion rules, bounds, and provider mappings. The
+inspected Codex public protocol exposes no numeric generation-budget control;
+model output ceilings do not establish the effective Codex service limit.
+
 Adapters await the runner's `onFreshSession` reservation before native fresh
 fallback; a false result preserves the original failure. After validated
 local-commit readiness they await `onCommitExecution` before any constrained

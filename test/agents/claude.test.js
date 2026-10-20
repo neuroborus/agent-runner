@@ -723,6 +723,7 @@ test("streams Claude progress before completion without exposing payloads or los
   const entered = Promise.withResolvers();
   const release = Promise.withResolvers();
   const events = [];
+  const observations = [];
   const fixture = createFixture({
     async handle({ call }) {
       if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
@@ -735,11 +736,16 @@ test("streams Claude progress before completion without exposing payloads or los
     fixture.adapter.run(request({ onProgress: true })),
     hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
   );
+  await assert.rejects(
+    fixture.adapter.run(request({ onObservation: true })),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
   const running = fixture.adapter.run(
     request({
       schema: STRICT_SCHEMA,
       session: { id: FRESH_SESSION, mode: "continue" },
       onProgress: (event) => events.push(event),
+      onObservation: (value) => observations.push(value),
     }),
   );
   t.after(async () => {
@@ -757,6 +763,13 @@ test("streams Claude progress before completion without exposing payloads or los
       ),
     );
   send({ type: "system", subtype: "init" });
+  for (let index = 0; index < 2; index++)
+    send({
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: "compaction",
+      compact_metadata: { trigger: "auto", pre_tokens: 100 },
+    });
   const partial = (event) => send({ type: "stream_event", event });
   partial({
     type: "message_start",
@@ -870,12 +883,39 @@ test("streams Claude progress before completion without exposing payloads or los
     task_id: "background",
     status: "completed",
   });
-  send(result({ structured: { ok: true }, output: "done🙂" }));
+  send(
+    result({
+      structured: { ok: true },
+      output: "done🙂",
+      usage: {
+        input_tokens: 10,
+        cache_read_input_tokens: 40,
+        cache_creation_input_tokens: 5,
+        output_tokens: 30,
+      },
+      modelUsage: { "test-model": { contextWindow: 1000 } },
+    }),
+  );
   release.resolve();
   const response = await running;
   assert.equal(response.output, "done🙂");
   assert.deepEqual(response.structured, { ok: true });
   assert.equal(response.sessionId, FRESH_SESSION);
+  assert.equal(observations[0].commandCompletions, 3);
+  assert.equal(observations[0].compactions, 1);
+  assert.equal(observations[0].accounting, "reported");
+  assert.deepEqual(observations[0].cumulative, {
+    inputTokens: 10,
+    cachedInputTokens: 40,
+    cacheWriteInputTokens: 5,
+    outputTokens: 30,
+    reasoningOutputTokens: null,
+    totalTokens: null,
+  });
+  assert.equal(observations[0].inputIncludesCached, false);
+  assert.equal(observations[0].cumulativeScope, "attempt");
+  assert.equal(observations[0].last, null);
+  assert.equal(observations[0].contextCapacity, 1000);
   assert.deepEqual(
     events
       .filter(({ kind }) => kind.startsWith("local-command-"))
@@ -1004,9 +1044,14 @@ test("Claude streaming preserves permission precedence and retires unfinished co
 });
 
 test("redacts Claude retirement observer errors without replacing provider failures", async (t) => {
-  for (const failed of [false, true])
+  for (const [observer, failed] of [
+    ["onProgress", false],
+    ["onProgress", true],
+    ["onObservation", false],
+    ["onObservation", true],
+  ])
     await t.test(
-      failed ? "provider failure" : "successful result",
+      `${observer}: ${failed ? "provider failure" : "successful result"}`,
       async () => {
         const fixture = createFixture({
           handle({ call }) {
@@ -1040,8 +1085,11 @@ test("redacts Claude retirement observer errors without replacing provider failu
         await assert.rejects(
           fixture.adapter.run(
             request({
-              onProgress({ kind }) {
-                if (kind === "local-command-completed")
+              [observer]({ kind }) {
+                if (
+                  observer === "onObservation" ||
+                  kind === "local-command-completed"
+                )
                   throw new Error("private-observer-error");
               },
             }),
@@ -3689,6 +3737,51 @@ test("fails instead of replacing an unavailable fork source", async () => {
     },
   );
   assert.equal(turnCalls(fixture).length, 1);
+});
+
+test("rejects Claude observations outside the selected session lineage", async () => {
+  for (const mode of ["continue", "fork"]) {
+    const observations = [];
+    const sessionId = mode === "continue" ? FRESH_SESSION : SOURCE_SESSION;
+    const fixture = createFixture({
+      handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        return {
+          stdout: [
+            { type: "system", subtype: "init", session_id: sessionId },
+            {
+              type: "system",
+              subtype: "compact_boundary",
+              uuid: "compaction",
+              session_id: sessionId,
+              compact_metadata: { trigger: "auto", pre_tokens: 100 },
+            },
+            result({
+              sessionId,
+              usage: { input_tokens: 10, output_tokens: 5 },
+            }),
+          ]
+            .map((record) => JSON.stringify(record))
+            .join("\n"),
+          stderr: "",
+        };
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          session: { id: SOURCE_SESSION, mode },
+          onObservation: (value) => observations.push(value),
+        }),
+      ),
+      hasCode("ERR_CLAUDE_PROTOCOL"),
+    );
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].accounting, "missing");
+    assert.equal(observations[0].cumulative, null);
+    assert.equal(observations[0].compactions, 0);
+  }
 });
 
 test("retries a compacted context and then reconstructs fresh", async () => {

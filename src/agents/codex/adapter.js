@@ -20,6 +20,7 @@ import {
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
 import { createCodexProgress } from "./progress.js";
+import { createCodexObservations } from "./observations.js";
 import { codexAvailabilityEvidence } from "./availability.js";
 import { MAX_HTTP_ERROR_BYTES, parseHttpError } from "./http-error.js";
 import {
@@ -1202,6 +1203,7 @@ async function compactThread(client, threadId) {
       (params) => isRecord(params) && params.threadId === threadId,
     );
     const notificationTurn = assertCompletedTurnEnvelope(completion, threadId);
+    client.selectCompaction(threadId, notificationTurn.id);
     const turn = await resolveCompletedTurn(
       client,
       completion,
@@ -1218,6 +1220,7 @@ async function compactThread(client, threadId) {
         code: "ERR_CODEX_CONTEXT_RECOVERY_FAILED",
       });
     }
+    client.confirmCompaction(threadId, turn.id);
   } catch (cause) {
     if (isAuthenticationRequiredError(cause)) throw cause;
     throw new CodexAdapterError("Codex context compaction failed.", {
@@ -1831,7 +1834,10 @@ export function createCodexAdapter(options = {}) {
     }
   }
 
-  async function runAttempt(request, { fresh = false, recovery = false } = {}) {
+  async function runAttempt(
+    request,
+    { fresh = false, recovery = false, attempt } = {},
+  ) {
     request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
     try {
@@ -1867,12 +1873,18 @@ export function createCodexAdapter(options = {}) {
             });
       ownedFailureSignal?.catch(() => {});
       const progress = createCodexProgress(request.onProgress);
+      const observations = createCodexObservations(
+        request.onObservation,
+        attempt,
+        recovery,
+      );
       const client = createCodexAppServerClient(
         child,
         CodexAdapterError,
         request.signal,
         (error, method) => classifyRequestError(error, method, request),
         progress,
+        observations,
       );
       let result;
       let operationFailed = false;
@@ -1931,19 +1943,18 @@ export function createCodexAdapter(options = {}) {
         operationFailed = true;
         throw cause;
       } finally {
-        let retired = false;
         try {
           await client.close({
             retainProcess: child.ownedContainmentRetained === true,
           });
-          retired = child.ownedContainmentRetained !== true;
         } catch (cause) {
           if (!operationFailed) {
+            operationFailed = true;
             throw cause;
           }
         } finally {
           await ownedCompletion;
-          if (retired) {
+          if (client.exited && child.ownedContainmentRetained !== true) {
             try {
               progress.retire();
             } catch {
@@ -1952,6 +1963,17 @@ export function createCodexAdapter(options = {}) {
                   code: "ERR_CODEX_PROTOCOL",
                 });
             }
+          }
+          try {
+            observations?.seal();
+          } catch {
+            if (!operationFailed)
+              throw new CodexAdapterError(
+                "Codex observation observer failed.",
+                {
+                  code: "ERR_CODEX_PROTOCOL",
+                },
+              );
           }
         }
       }
@@ -1963,6 +1985,9 @@ export function createCodexAdapter(options = {}) {
 
   async function run(value) {
     const request = normalizeRequest(value);
+    let attempt = 0;
+    const observedAttempt = (options = {}) =>
+      runAttempt(request, { ...options, attempt: ++attempt });
     try {
       assertCodexSchema(outputSchemaFor(request), CodexAdapterError);
       await assertCapabilities(request);
@@ -1977,7 +2002,7 @@ export function createCodexAdapter(options = {}) {
     }
     let result;
     try {
-      result = await runAttempt(request);
+      result = await observedAttempt();
     } catch (cause) {
       if (request.signal?.aborted) {
         if (request.access === "local-commit") {
@@ -2024,7 +2049,7 @@ export function createCodexAdapter(options = {}) {
       ) {
         if ((await request.onFreshSession?.()) === false) throw cause;
         request.signal?.throwIfAborted();
-        result = await runAttempt(request, {
+        result = await observedAttempt({
           fresh: true,
           recovery: "fresh",
         });

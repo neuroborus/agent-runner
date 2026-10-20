@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-20
+
+- **Provider observations preserve accounting uncertainty.** Optional adapter
+  observations report bounded numeric snapshots and payload-free completion and
+  compaction facts with private attempt/turn correlation. Last and cumulative
+  snapshots remain separate, inclusive subsets are not added twice, and absent
+  or incomplete terminal usage stays explicit. This diagnostic foundation adds
+  no workflow persistence, budget setting, or output-capacity claim: the
+  inspected Codex public protocol has no numeric generation-budget field.
+  Failed compaction retains correlated usage without confirming success, and
+  late shutdown frames remain inside bounded protocol cleanup while established
+  safety failures retain precedence.
+
 ## 2026-09-30
 
 - **Tracked content remains isolated from unrelated project context.** The
