@@ -987,6 +987,15 @@ command bounds.
 Post-ready fragmented broker refusals survive later watcher and cleanup failures
 through command results and the final report. Invalid, incomplete or oversized
 carriers supply no native evidence; earlier transport failures keep precedence.
+Actual command-child bodies exercise API-specific errors, named nonce/count/content,
+denial and acknowledgement guards, successful inspection/edit/denial controls and
+partial closure without replacing the first refusal. Controlled original-reader
+transcripts cover fragmented child stderr, malformed framing/carriers, bounds,
+premature stream closure, validated child/broker arrival precedence and separate
+cleanup causes. They preserve `permitted-control` through later phases and both
+proved and uncertain retirement within the unchanged deadlines. These portable
+cases neither identify the original control refusal nor supply native acceptance;
+they add no slow-tier assignment.
 Actual spawn/admission/census bodies retain ownership before launch cleanup and
 require birth, termination, signaling and zero exit status before releasing the
 original process/thread slots and querying the Job. The caller retains the child

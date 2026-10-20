@@ -677,15 +677,29 @@ static void command_probe_output(PROCESS_INFORMATION p,const char *event) {
   if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));command_output=command_error=NULL;
 }
 static void command_case(int argc,WCHAR **argv) {
-  need(argc==8 && wcslen(argv[5])==32); HANDLE pipe=CreateFileW(argv[2],GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);need(pipe!=INVALID_HANDLE_VALUE);DWORD count;char nonceBytes[33];
-  need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[5],-1,nonceBytes,33,NULL,NULL)==33 && WriteFile(pipe,nonceBytes,32,&count,NULL)&&count==32);char ackValue;need(ReadFile(pipe,&ackValue,1,&count,NULL)&&count==1&&ackValue=='R');
-  DWORD rights[2]={PROCESS_DUP_HANDLE,PROCESS_TERMINATE};for(unsigned i=0;i<2;i++){SetLastError(0);HANDLE authority=OpenProcess(rights[i],FALSE,(DWORD)number(argv[7]));need(!authority&&GetLastError()==ERROR_ACCESS_DENIED);}
+  invariant(argc==8,"command-case-arguments");invariant(wcslen(argv[5])==32,"command-case-nonce");
+  HANDLE pipe=CreateFileW(argv[2],GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);win32_check(pipe!=INVALID_HANDLE_VALUE,"command-case-pipe-open");DWORD count;char nonceBytes[33];
+  int encoded=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[5],-1,nonceBytes,33,NULL,NULL);win32_check(encoded!=0,"command-case-nonce-encode");invariant(encoded==33,"command-case-nonce-size");
+  win32_check(WriteFile(pipe,nonceBytes,32,&count,NULL),"command-case-ready-write");invariant(count==32,"command-case-ready-write-size");
+  char ackValue;win32_check(ReadFile(pipe,&ackValue,1,&count,NULL),"command-case-ready-read");invariant(count==1,"command-case-ready-read-size");invariant(ackValue=='R',"command-case-ready-ack");
+  DWORD rights[2]={PROCESS_DUP_HANDLE,PROCESS_TERMINATE};for(unsigned i=0;i<2;i++){
+    const char *operation=i?"command-case-broker-terminate":"command-case-broker-duplicate";
+    SetLastError(0);HANDLE authority=OpenProcess(rights[i],FALSE,(DWORD)number(argv[7]));DWORD error=GetLastError();
+    if(authority){remember(operation,"invariant",0);close_handle(authority,"process-close");failure(126);}
+    invariant(error==ERROR_ACCESS_DENIED,operation);
+  }
   BOOL inspect=!wcscmp(argv[4],L"inspect");HANDLE target=CreateFileW(argv[3],inspect?GENERIC_READ:GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
-  if(inspect){char bytes[33]={0};need(target!=INVALID_HANDLE_VALUE&&ReadFile(target,bytes,32,&count,NULL)&&count==32&&!memcmp(bytes,nonceBytes,32));printf("%s",bytes);}
-  else if(target!=INVALID_HANDLE_VALUE){need(WriteFile(target,nonceBytes,32,&count,NULL)&&count==32&&WriteFile(target,"-edited",7,&count,NULL)&&count==7&&SetEndOfFile(target)&&FlushFileBuffers(target));printf("attempt:written");}
-  else {need(GetLastError()==ERROR_ACCESS_DENIED);printf("attempt:denied");} if(target!=INVALID_HANDLE_VALUE)need(CloseHandle(target));need(!fflush(stdout));
-  HANDLE marker=CreateFileW(argv[6],GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);char bytes[32];need(marker!=INVALID_HANDLE_VALUE&&ReadFile(marker,bytes,32,&count,NULL)&&count==32&&CloseHandle(marker));
-  need(WriteFile(pipe,nonceBytes,32,&count,NULL)&&count==32&&ReadFile(pipe,&ackValue,1,&count,NULL)&&count==1&&ackValue=='F'&&CloseHandle(pipe));
+  DWORD targetError=GetLastError();
+  if(inspect){char bytes[33]={0};SetLastError(targetError);win32_check(target!=INVALID_HANDLE_VALUE,"command-case-target-open");
+    win32_check(ReadFile(target,bytes,32,&count,NULL),"command-case-target-read");invariant(count==32,"command-case-target-read-size");invariant(!memcmp(bytes,nonceBytes,32),"command-case-target-nonce");printf("%s",bytes);}
+  else if(target!=INVALID_HANDLE_VALUE){win32_check(WriteFile(target,nonceBytes,32,&count,NULL),"command-case-target-write");invariant(count==32,"command-case-target-write-size");
+    win32_check(WriteFile(target,"-edited",7,&count,NULL),"command-case-edit-write");invariant(count==7,"command-case-edit-size");win32_check(SetEndOfFile(target),"command-case-target-truncate");win32_check(FlushFileBuffers(target),"command-case-target-flush");printf("attempt:written");}
+  else {SetLastError(targetError);win32_check(targetError==ERROR_ACCESS_DENIED,"command-case-target-open");printf("attempt:denied");}
+  if(target!=INVALID_HANDLE_VALUE)win32_check(CloseHandle(target),"command-case-target-close");invariant(!fflush(stdout),"command-case-output");
+  HANDLE marker=CreateFileW(argv[6],GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,0,NULL);char bytes[32];win32_check(marker!=INVALID_HANDLE_VALUE,"command-case-marker-open");
+  win32_check(ReadFile(marker,bytes,32,&count,NULL),"command-case-marker-read");invariant(count==32,"command-case-marker-size");win32_check(CloseHandle(marker),"command-case-marker-close");
+  win32_check(WriteFile(pipe,nonceBytes,32,&count,NULL),"command-case-finish-write");invariant(count==32,"command-case-finish-write-size");
+  win32_check(ReadFile(pipe,&ackValue,1,&count,NULL),"command-case-finish-read");invariant(count==1,"command-case-finish-read-size");invariant(ackValue=='F',"command-case-finish-ack");win32_check(CloseHandle(pipe),"command-case-pipe-close");
 }
 static void command_retire_domain(void);
 struct command_gate_read { BOOL connect, ok; char bytes[32]; };
@@ -927,7 +941,7 @@ static int command_main(int argc,WCHAR **argv) {
     else if(!strcmp(line,"T")){need(command_client&&WriteFile(command_gate,"R",1,&count,NULL)&&count==1);puts("{\"event\":\"T\"}");}
     else if(!strcmp(line,"F"))command_case_observe(TRUE);
     else if(!strcmp(line,"U")){need(command_client&&WriteFile(command_gate,"F",1,&count,NULL)&&count==1&&FlushFileBuffers(command_gate)&&DisconnectNamedPipe(command_gate)&&CloseHandle(command_client));command_client=NULL;
-      DWORD controlCode=0;if(command_control){HANDLE child=command_processes[command_count-1];need(WaitForSingleObject(child,10000)==WAIT_OBJECT_0&&GetExitCodeProcess(child,&controlCode));command_pump(&command_output,"probe-output");if(command_input)need(CloseHandle(command_input));if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));command_input=command_saved_input;command_output=command_saved_output;command_error=command_saved_error;command_control=FALSE;command_control_completed=controlCode==0;}printf("{\"event\":\"U\",\"exitCode\":%lu}\n",controlCode);}
+      DWORD controlCode=0;if(command_control){HANDLE child=command_processes[command_count-1];need(WaitForSingleObject(child,10000)==WAIT_OBJECT_0&&GetExitCodeProcess(child,&controlCode));command_pump(&command_output,"probe-output");command_pump(&command_error,"probe-stderr");if(command_input)need(CloseHandle(command_input));if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));command_input=command_saved_input;command_output=command_saved_output;command_error=command_saved_error;command_control=FALSE;command_control_completed=controlCode==0;}printf("{\"event\":\"U\",\"exitCode\":%lu}\n",controlCode);}
     else if(!strcmp(line,"C")){need(command_setup_verified&&server.hProcess&&!command_server_released&&!command_control_verified&&!command_control);command_control=TRUE;command_observed.audit[0]=5;command_saved_input=command_input;command_saved_output=command_output;command_saved_error=command_error;command_input=command_output=command_error=NULL;command_action=2;need(swprintf_s(arguments,16384,L"\"%ls\" command-case \"%ls\" \"%ls\" outside %ls \"%ls\" %lu",command_helper,command_pipe,command_paths[2],nonce,command_paths[3],GetCurrentProcessId())>0);PROCESS_INFORMATION control=command_spawn(arguments,root);need(ResumeThread(control.hThread)==1);puts("{\"event\":\"C\"}");}
     else if(!strcmp(line,"X")){need(command_control_completed&&command_target_seen&&command_marker_seen&&!command_server_released&&!command_control_verified);command_reset(2);command_control_verified=TRUE;command_observed.audit[0]=6;command_observed.audit[8]=1;puts("{\"event\":\"X\"}");}
     else if(!strcmp(line,"D"))command_retire_domain();

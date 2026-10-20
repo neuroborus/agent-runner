@@ -3044,6 +3044,20 @@ capture, readiness and retirement guards retain immediate API errors separately
 from predicates, close held resources independently and reverse impersonation.
 Neither missing audit delivery nor a diagnostic supplies admission or settlement.
 
+The command child names native pipe/file/encoding failures separately from nonce,
+byte-count/content, broker-access-denial and acknowledgement invariants. Unexpected
+broker authority is closed without replacing the original control refusal.
+Control `probe-stderr` fragments retain the same 4096-byte diagnostic bound and
+strict parser; the existing U completion pumps the child's final stderr before
+closing its pipes. Otherwise failure collection waits for the drained broker
+transcript. Partial, malformed, oversized or prematurely closed carriers remain
+explicitly invalid. A validated earlier child refusal can remain primary through
+later broker failure, with broker completion and cleanup causes retained
+separately. The known originating phase, including `permitted-control`, survives
+cleanup and asynchronous closure. C/N/T controls, broker protection, audit joins
+and independent restoration remain required. These attribution repairs select no
+underlying control API or handshake fix and establish no Windows native acceptance.
+
 Pull subscriptions use initially nonsignaled manual-reset notification events.
 `command_capture` alone owns readiness waits, enumeration and checked reset:
 nonblocking pumps return without `EvtNext` when not ready; terminal delivery

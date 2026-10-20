@@ -450,7 +450,11 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-intent-set command-intent-wait command-broker-open command-broker-token-duplicate command-broker-token-query
     command-broker-file-duplicate command-broker-job-duplicate command-broker-job-query
     command-capture-next command-capture-reset command-capture-render command-capture-bookmark command-bookmark-render
-    command-owner-read command-cleanup-begin command-retirement-event command-retirement-terminate`
+    command-owner-read command-cleanup-begin command-retirement-event command-retirement-terminate
+    command-case-pipe-open command-case-nonce-encode command-case-ready-write command-case-ready-read
+    command-case-target-open command-case-target-read command-case-target-write command-case-edit-write
+    command-case-target-truncate command-case-target-flush command-case-target-close command-case-marker-open
+    command-case-marker-read command-case-marker-close command-case-finish-write command-case-finish-read command-case-pipe-close`
       .split(/\s+/u)
       .map((operation) => [operation, ["win32"]]),
   ),
@@ -464,7 +468,11 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-launch-state command-attribute-allocation command-launch-bound command-broker-arguments command-broker-nonce
     command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation
-    command-ready-output command-owner-bound command-coverage-state command-deadline command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records`
+    command-ready-output command-owner-bound command-coverage-state command-deadline command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records
+    command-case-arguments command-case-nonce command-case-nonce-size command-case-ready-write-size command-case-ready-read-size command-case-ready-ack
+    command-case-broker-duplicate command-case-broker-terminate command-case-target-read-size command-case-target-nonce
+    command-case-target-write-size command-case-edit-size command-case-output command-case-marker-size
+    command-case-finish-write-size command-case-finish-read-size command-case-finish-ack`
       .split(/\s+/u)
       .map((operation) => [operation, ["invariant"]]),
   ),

@@ -1163,7 +1163,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     closed,
     reading,
     failed,
+    phase = "broker-setup",
+    failurePhase,
     brokerDiagnosticFirst,
+    brokerDiagnosticPhase,
     prepared,
     decoder,
     observationSignal,
@@ -1189,6 +1192,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     errorOutput = new PassThrough(),
     input = new PassThrough();
   let probeOutput = "",
+    controlStderr = null,
+    controlStderrInvalid = false,
+    controlDiagnosticFirst,
+    controlBeforeBroker,
+    controlExitCode,
+    controlError,
     bytes = 0;
   const nativeEnvironment = () => ({
     ...prepared.environment,
@@ -1201,10 +1210,43 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       ),
     ),
   });
+  const controlFailure = () => {
+    if (controlError) return controlError;
+    if (
+      controlStderr === null ||
+      (!controlStderr.length && !controlStderrInvalid && !controlExitCode)
+    )
+      return null;
+    const diagnosis = controlStderrInvalid
+      ? null
+      : windowsFeasibilityDiagnostics(controlStderr);
+    const error = Object.assign(new Error("Native control child failed"), {
+      code: controlExitCode,
+      stderr: controlStderr,
+      nativeDiagnosticInvalid:
+        controlStderrInvalid || (controlStderr.length > 0 && !diagnosis),
+    });
+    error.feasibilityCause = windowsFeasibilityCause(
+      "permitted-control",
+      error,
+    );
+    if (diagnosis?.cleanup) {
+      const { operation, domain, value } = diagnosis.cleanup;
+      error.feasibilityCleanup = {
+        code: "cleanup-unobserved",
+        detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+      };
+    }
+    controlError = error;
+    return error;
+  };
   const fail = (error) => {
     nativeException("windows-command-broker", error);
     if (retiring) retirementFailure ??= error;
-    failed ??= error;
+    if (!failed) {
+      failed = error;
+      failurePhase = phase;
+    }
     for (const [key, entry] of pending)
       if (!["D", "S"].includes(key)) {
         entry.reject(failed);
@@ -1318,6 +1360,44 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       if (broker) {
         await closed;
         await reading.catch(fail);
+        // U closes the control pipes after its final pump. Otherwise collect
+        // the complete broker transcript, never a merely complete-looking prefix.
+        if (controlStderr !== null) {
+          controlStderrInvalid ||=
+            controlExitCode === undefined && !broker.stdout.readableEnded;
+          const child = controlFailure();
+          if (child && failed !== child) {
+            if (failed) {
+              failed.controlCompletion = {
+                code: controlExitCode,
+                stderr: controlStderr,
+                nativeDiagnosticInvalid: child.nativeDiagnosticInvalid,
+                feasibilityCause: child.feasibilityCause,
+                feasibilityCleanup: child.feasibilityCleanup,
+              };
+              child.brokerCompletion = failed.brokerCompletion ?? {
+                code: failed.code,
+                signal: failed.signal,
+                stderr: failed.stderr,
+                nativeDiagnosticInvalid: failed.nativeDiagnosticInvalid,
+                feasibilityCause: failed.feasibilityCause,
+              };
+              child.feasibilityCleanup ??= failed.feasibilityCleanup;
+            }
+            if (
+              !failed ||
+              (controlDiagnosticFirst &&
+                !child.nativeDiagnosticInvalid &&
+                (controlBeforeBroker ||
+                  !brokerDiagnosticFirst ||
+                  failed.nativeDiagnosticInvalid))
+            ) {
+              child.cause = failed;
+              failed = child;
+              failurePhase = "permitted-control";
+            }
+          }
+        }
       }
       return failed;
     },
@@ -1449,8 +1529,13 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                   incomplete || (brokerStderr.length > 0 && !diagnosis),
               },
             );
+            const origin =
+              diagnosis && brokerDiagnosticFirst
+                ? (brokerDiagnosticPhase ?? failurePhase ?? phase)
+                : (failurePhase ?? brokerDiagnosticPhase ?? phase);
+            const brokerCause = windowsFeasibilityCause(origin, error);
             error.feasibilityCause = windowsFeasibilityCause(
-              "broker-setup",
+              origin,
               diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
             );
             if (diagnosis?.cleanup) {
@@ -1467,10 +1552,22 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 signal: killed,
                 stderr: brokerStderr,
                 nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+                feasibilityCause: brokerCause,
               };
             // Arrival order is only a candidate. The complete bounded carrier and
             // real close facts must validate before it can outrank a later failure.
-            if (diagnosis && brokerDiagnosticFirst) failed = error;
+            // Keep an already retained, valid earlier child as the original cause.
+            if (
+              diagnosis &&
+              brokerDiagnosticFirst &&
+              !(
+                controlError &&
+                first === controlError &&
+                controlBeforeBroker &&
+                !controlError.nativeDiagnosticInvalid
+              )
+            )
+              failed = error;
             if (
               code !== 0 ||
               killed ||
@@ -1492,8 +1589,10 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         broker.stdout.on("error", fail);
         observeNativeProcess("win32/feasibility-command-effects.js", broker);
         broker.stderr.on("data", (v) => {
-          if (v.length && brokerDiagnosticFirst === undefined)
+          if (v.length && brokerDiagnosticFirst === undefined) {
             brokerDiagnosticFirst = !failed;
+            brokerDiagnosticPhase = phase;
+          }
           if (!brokerStderrInvalid) {
             if (brokerStderr.length + v.length <= 4096)
               brokerStderr = Buffer.concat([brokerStderr, v]);
@@ -1511,22 +1610,30 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           fail(error);
         });
         reading = (async () => {
-          for await (const line of createInterface({
+          const lines = createInterface({
             input: broker.stdout,
             crlfDelay: Infinity,
-          })) {
+          });
+          broker.stdout.once("close", () => {
+            if (!broker.stdout.readableEnded)
+              fail(new Error("Native broker output closed before EOF"));
+            lines.close();
+          });
+          for await (const line of lines) {
+            let frame;
             try {
               need(line.length <= 600000);
               bytes += Buffer.byteLength(line);
               need(bytes <= 33554432);
-              const frame = JSON.parse(line);
+              frame = JSON.parse(line);
               if (
                 failed &&
                 !["D", "S"].includes(frame.event) &&
                 !(
                   setupVerified &&
                   ["audit", "capture-end"].includes(frame.event)
-                )
+                ) &&
+                !(frame.event === "probe-stderr" && controlStderr !== null)
               )
                 continue;
               if (frame.event === "audit") {
@@ -1552,6 +1659,20 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 if (frame.event === "probe-output") {
                   probeOutput += raw.toString("utf8");
                   need(probeOutput.length <= 4096);
+                } else if (
+                  frame.event === "probe-stderr" &&
+                  controlStderr !== null
+                ) {
+                  controlDiagnosticFirst ??= !failed;
+                  controlBeforeBroker ??= brokerDiagnosticFirst === undefined;
+                  if (!controlStderrInvalid) {
+                    if (controlStderr.length + raw.length <= 4096)
+                      controlStderr = Buffer.concat([controlStderr, raw]);
+                    else {
+                      controlStderrInvalid = true;
+                      controlStderr = Buffer.alloc(0);
+                    }
+                  }
                 } else if (frame.event !== "probe-stderr")
                   (frame.event === "rpc" ? rpc : errorOutput).write(raw);
               } else if (["rpc-end", "stderr-end"].includes(frame.event))
@@ -1567,6 +1688,14 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 header.writeUInt32LE(raw.length, 12);
                 await decoder.push(Buffer.concat([header, raw]));
               } else {
+                if (frame.event === "U" && controlStderr !== null) {
+                  need(
+                    Number.isInteger(frame.exitCode) &&
+                      frame.exitCode >= 0 &&
+                      frame.exitCode <= 0xffffffff,
+                  );
+                  controlExitCode = frame.exitCode;
+                }
                 if (frame.event === "ready")
                   await decoder.push(Buffer.alloc(4));
                 if (frame.event === "B") {
@@ -1583,6 +1712,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 entry.resolve(frame);
               }
             } catch (error) {
+              if (
+                controlStderr !== null &&
+                (!frame || frame.event === "probe-stderr")
+              )
+                controlStderrInvalid = true;
               nativeException(
                 "win32/feasibility-command-effects.js:exception",
                 error,
@@ -1778,6 +1912,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       }
     },
     async schema(value) {
+      phase = "installed-schema";
       need(setupVerified);
       probeOutput = "";
       need(
@@ -1802,6 +1937,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       };
     },
     async arm(value, signal) {
+      phase = "capture-admission";
       need((await readdir(value.home)).length === 0);
       const admitted = await call("A");
       const independent = await verifier(admitted, "provider", signal);
@@ -1832,16 +1968,20 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     },
     release: () => call("R"),
     async control(value, signal) {
+      phase = "permitted-control";
+      controlStderr = Buffer.alloc(0);
       need(setupVerified && serverAdmission && !controlVerified);
       start = await call("B");
       probeOutput = "";
       await call("C");
-      const observed = await observation({ action: "outside" }, signal),
-        reply = {
-          exitCode: observed.controlExitCode,
-          stdout: probeOutput,
-          stderr: "",
-        };
+      const observed = await observation({ action: "outside" }, signal);
+      const child = controlFailure();
+      if (child) throw child;
+      const reply = {
+        exitCode: observed.controlExitCode,
+        stdout: probeOutput,
+        stderr: "",
+      };
       assessWindowsCommandObservation(
         {
           action: "outside",
@@ -1863,11 +2003,13 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       return { observation: observed, reply };
     },
     async begin(value, spec) {
+      phase = "command-observation";
       start = await call("B");
       await call(`K ${["inspect", "edit", "outside"].indexOf(spec.action)}`);
     },
     observe: (value, spec, signal) => observation(spec, signal),
     async retire(value, signal) {
+      if (!failed) phase = "command-close";
       retiring = true;
       cleanupDeadline = performance.now() + 30000;
       value ??= prepared;

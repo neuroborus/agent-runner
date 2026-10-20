@@ -917,6 +917,8 @@ test("actual effects require the assessed real control and restored target befor
     ),
     program = new Script(`(async () => {
       let failed, closing = false, setupVerified = true, controlVerified = false, start, probeOutput = "";
+      let phase, controlStderr = null, controlStderrInvalid = false, controlError, controlExitCode;
+      ${source.slice(source.indexOf("const controlFailure = () =>"), source.indexOf("const fail = (error) =>"))}
       const pending = new Map(), observationSignal = signal;
       const broker = { stdin: { writable: true, write(frame) {
         const key = frame.trim(); calls.push(key);
@@ -947,6 +949,9 @@ test("actual effects require the assessed real control and restored target befor
     const calls = [],
       resetFailure = new Error("Owned control target reset failed"),
       result = await program.runInNewContext({
+        Buffer,
+        windowsFeasibilityCause,
+        windowsFeasibilityDiagnostics,
         need: assert.ok,
         calls,
         value: prepared,
@@ -3945,7 +3950,284 @@ test("provider hashes alone admit the pinned image and every live reader selects
   assert.equal(calls.length, 2);
 });
 
-async function brokerCloseBoundary() {
+test("actual command-case guards attribute native calls and control invariants without changing successful controls", async () => {
+  const [source, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/win32/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const body = (text, name) => {
+    const match = new RegExp(
+      `static [^\\n]+ ${name}\\([^\\n]*\\) \\{`,
+      "u",
+    ).exec(text);
+    assert.ok(match, name);
+    const start = match.index + match[0].length;
+    let depth = 1;
+    for (let i = start; i < text.length; i++) {
+      if (text[i] === "{") depth++;
+      if (text[i] === "}" && !--depth) return text.slice(start, i);
+    }
+    assert.fail(`Unclosed native function: ${name}`);
+  };
+  // Keep the actual control flow and API-specific checks; project C buffers,
+  // output pointers and local declarations only. No native tool runs here.
+  const project = (text) =>
+    text
+      .replace(
+        "DWORD rights[2]={PROCESS_DUP_HANDLE,PROCESS_TERMINATE};",
+        "const rights=[PROCESS_DUP_HANDLE,PROCESS_TERMINATE];",
+      )
+      .replace(
+        /char (nonceBytes|bytes)\[(\d+)\](?:=\{0\})?;/gu,
+        (_, name, size) => `const ${name}=Buffer.alloc(${size});`,
+      )
+      .replace("char ackValue;", "let ackValue;")
+      .replace("const char *operation=", "const operation=")
+      .replaceAll("&count", "{set value(v){count=v}}")
+      .replaceAll("&ackValue", "{set value(v){ackValue=v}}")
+      .replaceAll("(DWORD)", "")
+      .replace(/\bL(?=")/gu, "")
+      .replace(/\b(?:HANDLE|BOOL|DWORD|int|unsigned) /gu, "let ");
+  const program = new Script(`
+    function invariant_value(ok,operation,value){${project(body(helper, "invariant_value"))}}
+    function invariant(ok,operation){${body(helper, "invariant")}}
+    function win32_check(ok,operation){${project(body(helper, "win32_check"))}}
+    function close_handle(handle,operation){${project(body(helper, "close_handle"))}}
+    (function(argc,argv){${project(body(source, "command_case"))}})`);
+  const cases = [
+    ["arguments", "edit", "invariant"],
+    ["nonce", "edit", "invariant"],
+    ["nonce-size", "edit", "invariant"],
+    ["ready-write-size", "edit", "invariant"],
+    ["ready-read-size", "edit", "invariant"],
+    ["ready-ack", "edit", "invariant"],
+    ["broker-duplicate", "edit", "invariant"],
+    ["broker-terminate", "edit", "invariant"],
+    ["broker-duplicate-error", "edit", "invariant"],
+    ["broker-duplicate-close", "edit", "invariant"],
+    ["target-read-size", "inspect", "invariant"],
+    ["target-nonce", "inspect", "invariant"],
+    ["target-write-size", "edit", "invariant"],
+    ["edit-size", "edit", "invariant"],
+    ["target-denial", "outside", "win32"],
+    ["output", "edit", "invariant"],
+    ["marker-size", "edit", "invariant"],
+    ["finish-write-size", "edit", "invariant"],
+    ["finish-read-size", "edit", "invariant"],
+    ["finish-ack", "edit", "invariant"],
+    ...[
+      "pipe-open",
+      "nonce-encode",
+      "ready-write",
+      "ready-read",
+      "target-write",
+      "edit-write",
+      "target-truncate",
+      "target-flush",
+      "target-close",
+      "marker-open",
+      "marker-read",
+      "marker-close",
+      "finish-write",
+      "finish-read",
+      "pipe-close",
+    ].map((fault) => [fault, "edit", "win32"]),
+    ["target-open", "inspect", "win32"],
+    ["target-read", "inspect", "win32"],
+  ];
+  for (const [fault, mode, domain] of [
+    [null, "inspect"],
+    [null, "edit"],
+    [null, "outside"],
+    ...cases,
+  ]) {
+    let first,
+      lastError = 0,
+      pipeWrites = 0,
+      pipeReads = 0;
+    const calls = [],
+      cleanup = [],
+      output = [],
+      brokerRights = [],
+      nonce = "a".repeat(32);
+    const call = (operation, value = true) => {
+      calls.push(operation);
+      lastError = 5;
+      return fault === operation ? false : value;
+    };
+    const api = {
+      Buffer,
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      stdout: {},
+      INVALID_HANDLE_VALUE: -1,
+      GENERIC_READ: 0x80000000,
+      GENERIC_WRITE: 0x40000000,
+      FILE_SHARE_READ: 1,
+      FILE_SHARE_WRITE: 2,
+      FILE_SHARE_DELETE: 4,
+      OPEN_EXISTING: 3,
+      FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      PROCESS_DUP_HANDLE: 64,
+      PROCESS_TERMINATE: 1,
+      ERROR_ACCESS_DENIED: 5,
+      CP_UTF8: 65001,
+      WC_ERR_INVALID_CHARS: 128,
+      wcslen: (value) => value.length,
+      wcscmp: (a, b) => Number(a !== b),
+      number: Number,
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      remember: (...value) => {
+        first ??= value;
+      },
+      cleanup_error: (...value) => cleanup.push(value),
+      failure: (code) => {
+        lastError = 999;
+        throw Object.assign(new Error("Native control refusal"), { code });
+      },
+      CreateFileW(name, access, sharing, _security, creation, flags) {
+        const operation = name === "pipe" ? "pipe-open" : `${name}-open`;
+        assert.equal(creation, 3);
+        if (name === "target") {
+          assert.equal(sharing, 7);
+          assert.equal(flags, 0x200000);
+        }
+        if (!call(operation)) return -1;
+        if (name === "target" && mode === "outside") {
+          lastError = fault === "target-denial" ? 87 : 5;
+          return -1;
+        }
+        return name;
+      },
+      WideCharToMultiByte(_page, _flags, value, _length, target) {
+        target.write(value);
+        return !call("nonce-encode") ? 0 : fault === "nonce-size" ? 32 : 33;
+      },
+      WriteFile(handle, value, size, count) {
+        const operation =
+          handle === "pipe"
+            ? ++pipeWrites === 1
+              ? "ready-write"
+              : "finish-write"
+            : typeof value === "string"
+              ? "edit-write"
+              : "target-write";
+        count.value =
+          fault ===
+          (operation === "edit-write" ? "edit-size" : `${operation}-size`)
+            ? size - 1
+            : size;
+        return call(operation);
+      },
+      ReadFile(handle, target, size, count) {
+        const operation =
+          handle === "pipe"
+            ? ++pipeReads === 1
+              ? "ready-read"
+              : "finish-read"
+            : `${handle}-read`;
+        count.value =
+          fault ===
+          (operation === "marker-read" ? "marker-size" : `${operation}-size`)
+            ? size - 1
+            : size;
+        if (handle === "pipe")
+          target.value =
+            fault === (pipeReads === 1 ? "ready-ack" : "finish-ack")
+              ? "!"
+              : pipeReads === 1
+                ? "R"
+                : "F";
+        else {
+          target.write(nonce);
+          if (fault === "target-nonce" && handle === "target") target[0]++;
+        }
+        return call(operation);
+      },
+      OpenProcess(right, inherit, pid) {
+        assert.equal(inherit, false);
+        assert.equal(pid, 99);
+        brokerRights.push(right);
+        const operation =
+          right === 64 ? "broker-duplicate" : "broker-terminate";
+        call(operation);
+        lastError = fault === `${operation}-error` ? 87 : 5;
+        return fault === operation || fault === `${operation}-close`
+          ? "unexpected-authority"
+          : null;
+      },
+      CloseHandle: (handle) =>
+        handle === "unexpected-authority"
+          ? ((lastError = 6), fault !== "broker-duplicate-close")
+          : call(`${handle}-close`),
+      SetEndOfFile: () => call("target-truncate"),
+      FlushFileBuffers: () => call("target-flush"),
+      memcmp: (a, b, size) =>
+        Buffer.compare(a.subarray(0, size), b.subarray(0, size)),
+      printf: (format, value) =>
+        output.push(
+          format === "%s" ? value.subarray(0, 32).toString() : format,
+        ),
+      fflush: () => (fault === "output" ? 1 : 0),
+    };
+    const run = () =>
+      program.runInNewContext(api)(fault === "arguments" ? 7 : 8, [
+        "helper",
+        "command-case",
+        "pipe",
+        "target",
+        mode,
+        fault === "nonce" ? "short" : nonce,
+        "marker",
+        "99",
+      ]);
+    if (!fault) {
+      run();
+      assert.deepEqual(brokerRights, [64, 1]);
+      assert.equal(first, undefined);
+      assert.deepEqual(output, [
+        mode === "inspect"
+          ? nonce
+          : mode === "outside"
+            ? "attempt:denied"
+            : "attempt:written",
+      ]);
+      continue;
+    }
+    assert.throws(run, { code: 126 });
+    const operation = `command-case-${fault === "target-denial" ? "target-open" : fault.replace(/-(error|close)$/u, (match) => (fault.startsWith("broker-") ? "" : match))}`;
+    assert.deepEqual(first, [
+      operation,
+      domain,
+      fault === "target-denial" ? 87 : domain === "win32" ? 5 : 0,
+    ]);
+    const carrier = `native-windows: operation=${first[0]} domain=${first[1]} value=${first[2]}\n`;
+    assert.ok(windowsFeasibilityDiagnostics(carrier), fault);
+    assert.equal(
+      windowsFeasibilityDiagnostics(
+        carrier
+          .replace(
+            `domain=${domain}`,
+            `domain=${domain === "win32" ? "invariant" : "win32"}`,
+          )
+          .replace(/value=0/u, "value=5"),
+      ),
+      null,
+      fault,
+    );
+    assert.deepEqual(
+      cleanup,
+      fault === "broker-duplicate-close" ? [["process-close", "win32", 6]] : [],
+    );
+  }
+});
+
+async function brokerCloseBoundary({ control = false, read = false } = {}) {
   const source = await readFile(
     new URL(
       "../ci/native/win32/feasibility-command-effects.js",
@@ -3958,22 +4240,28 @@ async function brokerCloseBoundary() {
       source.indexOf("async setup("),
     ),
     end = source.indexOf("reading = (async", start),
-    failureStart = source.indexOf("const fail = (error) =>"),
+    failureStart = source.indexOf("const controlFailure = () =>"),
     failureEnd = source.indexOf("const call =", failureStart);
   assert.ok(
     start >= 0 && end > start && failureStart >= 0 && failureEnd > failureStart,
   );
   const boundary = new Script(`(() => {
-    let closed, failed, brokerDiagnosticFirst, retiring = false, retirementFailure, bytes = 0, reading = Promise.resolve();
+    let closed, failed, brokerDiagnosticFirst, brokerDiagnosticPhase, retiring = false, retirementFailure, bytes = 0, reading = Promise.resolve();
+    let phase = ${JSON.stringify(control ? "permitted-control" : "broker-setup")}, failurePhase,
+      controlStderr = ${control ? "Buffer.alloc(0)" : "null"}, controlStderrInvalid = false,
+      controlDiagnosticFirst, controlBeforeBroker, controlExitCode, controlError;
     const pending = new Map();
     ${source.slice(failureStart, failureEnd)}
     ${source.slice(start, end)}
+    ${read ? source.slice(end, source.indexOf("reading.catch(fail);", end) + "reading.catch(fail);".length) : ""}
     const effects = {${source.slice(source.indexOf("retainFailure: fail,"), source.indexOf("prepare(nonce, components, signal)"))}};
     return { closed, pending, outcome: ready.catch(error => error), failure: () => failed,
-      retainFailure: effects.retainFailure, collectFailure: effects.failure };
+      retainFailure: effects.retainFailure, collectFailure: effects.failure,
+      controlFailure, reading: () => reading, setPhase: value => {phase=value;} };
   })()`);
   return () => {
     const broker = new EventEmitter(),
+      diagnosticEvents = new EventEmitter(),
       raw = [],
       rpc = new PassThrough(),
       errorOutput = new PassThrough();
@@ -3987,11 +4275,16 @@ async function brokerCloseBoundary() {
       errorOutput,
       windowsFeasibilityCause,
       windowsFeasibilityDiagnostics,
+      createInterface,
+      need: assert.ok,
+      setupVerified: true,
+      nativeDiagnostic: (event) => diagnosticEvents.emit(event),
+      decoder: { push: async () => {} },
       nativeException: () => {},
       observeNativeProcess: (owner, child) =>
         child.stderr.on("data", (chunk) => raw.push(chunk)),
     });
-    return { ...result, broker, rpc, errorOutput, raw };
+    return { ...result, broker, rpc, errorOutput, raw, diagnosticEvents };
   };
 }
 
@@ -4270,6 +4563,231 @@ test("post-ready invalid broker carriers and earlier transport rejection cannot 
       carrier !== diagnostic,
     );
     assert.equal(first.feasibilityCause, undefined);
+  }
+});
+
+test("fragmented control diagnostics retain the permitted-control phase and original cause through broker cleanup", async () => {
+  const open = await brokerCloseBoundary({ control: true, read: true });
+  for (const independent of [false, true]) {
+    const f = open(),
+      original = Object.assign(new Error("Control observation failed"), {
+        code: 126,
+      }),
+      primary =
+        "native-windows: operation=command-case-ready-read domain=win32 value=5\n",
+      cleanup =
+        "native-windows-cleanup: operation=pipe-close domain=win32 value=7\n",
+      secondary =
+        "native-windows: operation=command-retirement-event domain=win32 value=8\n";
+    const run = fixture(({ effects }) => {
+      const retire = effects.retire;
+      effects.retainFailure = f.retainFailure;
+      effects.failure = f.collectFailure;
+      effects.control = async () => {
+        const bytes = Buffer.from(primary + cleanup);
+        for (const raw of [
+          bytes.subarray(0, 9),
+          bytes.subarray(9, 71),
+          bytes.subarray(71),
+        ])
+          f.broker.stdout.write(
+            JSON.stringify({
+              event: "probe-stderr",
+              hex: raw.toString("hex"),
+            }) + "\n",
+          );
+        f.broker.stdout.end();
+        await f.reading();
+        assert.equal(
+          f.failure(),
+          undefined,
+          "A child prefix is not completion or retirement",
+        );
+        throw original;
+      };
+      effects.retire = async () => {
+        f.setPhase("broker-setup"); // A later owner cannot relabel the first failure.
+        f.broker.stderr.write(
+          secondary +
+            "native-windows-cleanup: operation=file-close domain=win32 value=6\n",
+        );
+        const ended = once(f.broker.stderr, "end");
+        f.broker.stderr.end();
+        await ended;
+        f.broker.emit("close", 126, null);
+        if (independent) return retire();
+        throw new Error("Independent retirement remains unproved");
+      };
+    });
+    const result = await run.run(),
+      first = await f.collectFailure();
+    assert.notEqual(first, original);
+    assert.equal(first.cause, original);
+    assert.deepEqual(first.stderr, Buffer.from(primary + cleanup));
+    assert.match(result.cause.detail, /permitted-control/u);
+    assert.match(
+      result.cause.detail,
+      /command-case-ready-read failed \(win32=5\)/u,
+    );
+    assert.doesNotMatch(
+      result.cause.detail,
+      /broker-setup|retirement-event|file-close/u,
+    );
+    assert.match(
+      first.brokerCompletion.feasibilityCause.detail,
+      /permitted-control/u,
+    );
+    assert.match(
+      first.brokerCompletion.feasibilityCause.detail,
+      /command-retirement-event failed/u,
+    );
+    assert.match(
+      first.feasibilityCleanup.detail,
+      /pipe-close failed \(win32=7\)/u,
+    );
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.cleanup.status, independent ? "PASS" : "UNCERTAIN");
+    if (!independent)
+      assert.deepEqual(result.cleanup.cause, first.feasibilityCleanup);
+    assert.deepEqual(run.deadlines, [120000, 30000]);
+    assert.deepEqual(run.requests, []);
+  }
+});
+
+test("control and broker carriers keep validated arrival precedence and their originating phase", async () => {
+  const open = await brokerCloseBoundary({ control: true, read: true });
+  for (const [
+    brokerFirst,
+    brokerValid,
+    childValid,
+    laterTransport,
+    retainedControl,
+  ] of [
+    [false, true, true],
+    [true, true, true],
+    [true, false, true],
+    [false, true, false],
+    [true, true, true, true],
+    [false, true, true, false, true],
+    [true, true, true, false, true],
+    [false, true, false, false, true],
+  ]) {
+    const f = open(),
+      child =
+        "native-windows: operation=command-case-ready-read domain=win32 value=5\n",
+      broker =
+        "native-windows: operation=command-retirement-event domain=win32 value=6\n" +
+        (brokerValid ? "" : "invalid\n");
+    if (brokerFirst) f.broker.stderr.write(broker);
+    if (laterTransport) {
+      f.setPhase("command-observation");
+      f.retainFailure(
+        Object.assign(new Error("Later transport failure"), { code: "EPIPE" }),
+      );
+    }
+    if (retainedControl) f.pending.set("U", { resolve() {}, reject() {} });
+    f.broker.stdout.end(
+      JSON.stringify({
+        event: "probe-stderr",
+        hex: Buffer.from(childValid ? child : child.trimEnd()).toString("hex"),
+      }) +
+        "\n" +
+        (retainedControl ? '{"event":"U","exitCode":126}\n' : ""),
+    );
+    await f.reading();
+    if (!brokerFirst) f.broker.stderr.write(broker);
+    const original = retainedControl ? f.controlFailure() : null;
+    if (original) f.retainFailure(original);
+    f.setPhase("command-close");
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    const error = await f.collectFailure(),
+      childWins = childValid && (!brokerFirst || !brokerValid);
+    assert.match(error.feasibilityCause.detail, /permitted-control/u);
+    assert.ok(
+      error.feasibilityCause.detail.includes(
+        childWins
+          ? "command-case-ready-read failed"
+          : "command-retirement-event failed",
+      ),
+    );
+    assert.equal(
+      childWins
+        ? error.brokerCompletion.nativeDiagnosticInvalid
+        : error.controlCompletion.nativeDiagnosticInvalid,
+      childWins ? !brokerValid : !childValid,
+    );
+    if (retainedControl) {
+      assert.equal(error === original, childWins);
+      const seen = new Set();
+      for (let cause = error; cause; cause = cause.cause) {
+        assert.ok(
+          !seen.has(cause),
+          "Child and broker causes must remain acyclic",
+        );
+        seen.add(cause);
+      }
+    }
+  }
+});
+
+test("control carriers reject partial, malformed, oversized and incomplete transcripts without replacing earlier failures", async () => {
+  const open = await brokerCloseBoundary({ control: true, read: true }),
+    diagnostic =
+      "native-windows: operation=command-case-target-read domain=win32 value=5\n";
+  for (const [carrier, earlier, incomplete, framing] of [
+    [diagnostic.trimEnd(), false, false],
+    [diagnostic + "other\n", false, false],
+    [diagnostic + "x".repeat(4096), false, false],
+    [
+      diagnostic.replace("command-case-target-read", "unknown-seam"),
+      false,
+      false,
+    ],
+    [diagnostic.replace("win32", "invariant"), false, false],
+    [diagnostic, true, false],
+    [diagnostic, false, true],
+    [diagnostic, false, false, "hex"],
+    [diagnostic, false, false, "json"],
+  ]) {
+    const f = open(),
+      first = Object.assign(new Error("Original transport refusal"), {
+        code: "EPIPE",
+      });
+    if (earlier) f.retainFailure(first);
+    const parsed = incomplete
+      ? once(f.diagnosticEvents, "windows-command:probe-stderr")
+      : null;
+    const bytes = Buffer.from(carrier);
+    for (let offset = 0; offset < bytes.length; offset += 1024)
+      f.broker.stdout.write(
+        JSON.stringify({
+          event: "probe-stderr",
+          hex: bytes.subarray(offset, offset + 1024).toString("hex"),
+        }) + "\n",
+      );
+    if (framing)
+      f.broker.stdout.write(
+        framing === "hex" ? '{"event":"probe-stderr","hex":"zz"}\n' : "{\n",
+      );
+    if (incomplete) {
+      await parsed;
+      f.retainFailure(first);
+      f.broker.stdout.destroy();
+    } else f.broker.stdout.end();
+    await f.reading();
+    const retained = f.failure() ?? first;
+    if (!earlier) f.retainFailure(first);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    assert.equal(await f.collectFailure(), retained);
+    assert.equal(retained.controlCompletion.nativeDiagnosticInvalid, !earlier);
+    assert.ok(retained.controlCompletion.stderr.length <= 4096);
+    assert.equal(retained.feasibilityCause, undefined);
   }
 });
 
@@ -6710,6 +7228,7 @@ test("actual failed broker reader retains admitted terminal capture and records 
     failureEnd = source.indexOf("const call =", failureStart),
     program = new Script(`(async () => {
       let failed = primary, retiring = true, retirementFailure, reading, bytes = 0;
+      let controlStderr = null, controlExitCode, phase = "command-observation", failurePhase;
       ${source.slice(failureStart, failureEnd)}
       ${source.slice(start, end)}
       await reading;
