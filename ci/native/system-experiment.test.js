@@ -169,10 +169,18 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       platform,
       sourceSha256: H,
       provisioningSha256: H,
-      policy: { launch: {}, policy: { kind: "synthetic" } },
+      policy: {
+        launch: {},
+        policy:
+          platform === "win32"
+            ? { kind: "synthetic", authority: "system-only" }
+            : { kind: "synthetic" },
+      },
       bindings: [],
     },
   }));
+  if (fault === "binding-context") bindings[0].context.runId = "2";
+  if (fault === "binding-field") bindings[0].extra = true;
   const preparation = {
     purpose: "experiment",
     prepared: {
@@ -276,6 +284,7 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
         nativeEventSha256: H,
       },
     });
+    return actual;
   };
   const options = {
     platform,
@@ -302,11 +311,11 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       },
       prepare: async (recipe, settings) => {
         events.push("prepare:" + recipe.id);
-        await policy(settings);
+        const prepared = await policy(settings);
         return {
           purpose: "experiment",
           independent: true,
-          templateSha256: observationDigest(settings.policyBinding.template),
+          templateSha256: fault === "template" ? H : prepared.templateSha256,
           effects: {
             observe: async () => ({
               purpose: "experiment",
@@ -1732,6 +1741,9 @@ test("native, policy, held-runtime and retirement failures stop admission and ca
       "cleanup",
       "emergency",
       "native",
+      ...(platform === "win32"
+        ? ["template", "binding-context", "binding-field"]
+        : []),
     ]) {
       const f = fixture(platform, fault);
       if (fault === "native") delete f.options.runCase;
@@ -1740,9 +1752,11 @@ test("native, policy, held-runtime and retirement failures stop admission and ca
       assert.equal(job.cases.at(-1).status, "FAIL");
       assert.equal(
         job.cases.length,
-        ["native", "cleanup"].includes(fault) ? 2 : 1,
+        ["native", "cleanup", "template"].includes(fault) ? 2 : 1,
       );
       assert.equal(f.failures.length, 1);
+      if (fault === "binding-field") assert.ok(!f.events.includes("build"));
+      if (fault === "template") assert.ok(!f.events.includes("case:release"));
       assert.ok(!f.events.includes("prepare:ownership.literal"));
       await assert.rejects(f.run(job, "/synthetic", f.options));
       if (fault === "cleanup") {

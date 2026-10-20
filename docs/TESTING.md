@@ -462,7 +462,9 @@ process retirement and policy restoration.
 The explicit harness also registers `ci/native/system-experiment.test.js`.
 Pure injected Darwin/Windows entry coverage checks declared recipe order, the
 build recipe without check IDs, all 23 checks, write-ahead admission, purpose-bound
-policy verification and fresh runtime inventory. Missing/substituted observations,
+policy verification and fresh runtime inventory. Noncanonical Windows parameter
+order crosses the normalizing policy producer; wrong templates, context and unknown
+binding fields still refuse. Missing/substituted observations,
 native failure and uncertain/emergency retirement stop later cases. Controlled
 deadline acknowledgements fence late completion; retirement-only recovery preserves
 FAIL and cannot restart the loop. Delayed policy publication cannot overwrite the
@@ -1823,6 +1825,11 @@ observer's process and task retirement, admission fencing, registry removal and
 one cached finish without recompilation. The same fixture retains its original
 closed-receipt and failed-recovery refusals; reviewed build, deadline, latched
 failure, cleanup cancellation and live-reader coverage remain in this suite.
+The binding regression carries an actual raw Windows builder template through
+`createWindowsExperimentSystemEffects` and the shared experiment controller.
+It checks the independently produced canonical template digest and policy receipt,
+then deliberately refuses before native case assertions and verifies real independent
+settlement. It neither echoes the consumer's digest nor supplies native PASS.
 This regression belongs to the existing explicit native harness, adds no slow
 tier and establishes no matching Windows CI or native acceptance.
 The real experiment open/close and preparation catch also use that raw fixture.

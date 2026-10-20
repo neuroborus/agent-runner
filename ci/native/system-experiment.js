@@ -207,7 +207,9 @@ export async function runSystemExperimentProofs(
         );
         requireObservation(active && !signal.aborted);
         effects ??= owner.createEffects(job, loaded.preparation, options);
-        const binding = owner.binding(loaded.preparation, recipe.id),
+        const binding = normalizeExperimentPolicyBinding(
+            owner.binding(loaded.preparation, recipe.id),
+          ),
           policy = {
             policyBinding: binding,
             recordPolicy: (proof) => recordPolicy(binding, proof),

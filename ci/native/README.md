@@ -871,7 +871,11 @@ with no check IDs. The private `system-experiment.js` ledger records version-7
 intent before effects, verifies actual purpose-bound policy receipts and joins a
 fresh complete held runtime read for each recipe. Darwin's build policy uses the
 completed-build/output observers; Windows likewise reads actual completed
-images without compiler-domain claims. Only the native owners' fully asserted `OBSERVED` records can supply
+images without compiler-domain claims. Before build or preparation, the shared
+ledger strictly normalizes the complete experiment policy binding, so effects,
+policy receipts and template comparisons consume the same canonical template
+and context. General observation hashing and historical receipts remain unchanged.
+Only the native owners' fully asserted `OBSERVED` records can supply
 check observations. All 23 system checks remain required.
 
 Execution, receipt publication and independent settlement have separate bounds.

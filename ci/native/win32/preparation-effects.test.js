@@ -25,6 +25,7 @@ import {
   materializeNativePolicy,
   nativePackageReviewDigest,
   nativePackageInput,
+  normalizeExperimentPolicyBinding,
   normalizeGitExtraction,
   normalizeNativePackageReview,
   NATIVE_EFFECT_CLASSES,
@@ -33,6 +34,7 @@ import {
 import {
   createWindowsBuildEffects,
   createWindowsSystemEffects,
+  runWindowsExperimentProofs,
   normalizeWindowsPreparation,
   WINDOWS_HELPER_NAMES,
   WINDOWS_BUILD_TOOLS,
@@ -4267,6 +4269,132 @@ test("Windows experiment partial preparation settles only its matching owner and
         }
       }
     }
+});
+
+test("Windows raw experiment bindings cross the normalizing factory and shared preparation gate", async () => {
+  const f = experimentBootstrapFixture();
+  f.bootstrapOptions.binding = {
+    candidateSha,
+    platform: "win32",
+    repository: f.job.repository,
+    runId: f.job.runId,
+    runAttempt: f.job.runAttempt,
+    checkoutSha: candidateSha,
+    image: "windows-2025",
+    osBuild: "10.0.26100",
+    architecture: "x64",
+    nodeVersion: "v24.21.0",
+    workflow: "native-poc",
+    jobId: "1",
+  };
+  await assert.rejects(f.runBootstrap(), (error) => error.cause === f.reached);
+  f.prepared = f.bootstrap;
+  f.manifest.windowsPreparation.bootstrap = f.prepared.bootstrap;
+  f.accessNative = (operation, args) =>
+    operation === "prepare-experiment-volume"
+      ? {
+          identity: f.rawFileId(
+            Buffer.from(args[0], "hex").toString("utf16le"),
+          ),
+          distinctVolume: true,
+        }
+      : undefined;
+  f.disappearObservers = true;
+  const options = {
+      ...f.options,
+      ...f.bootstrapOptions,
+      bootstrap: async () => f.prepared,
+      open: openWindowsExperimentNative,
+      readInstalled: async (file) => f.files.get(file),
+      read: async (file) => f.files.get(file),
+    },
+    { job, preparation } = await prepareWindowsExperiment(
+      f.job,
+      directory,
+      async () => {},
+      options,
+    ),
+    raw = preparation.system.bindings.find(
+      ({ id }) => id === "release",
+    ).policyBinding,
+    original = structuredClone(raw),
+    normalized = normalizeExperimentPolicyBinding(raw),
+    expected = observationDigest(normalized.template),
+    declaration = preparation.system.cases.find(({ id }) => id === "release");
+  assert.equal(
+    raw.context.jobBindingSha256,
+    observationDigest(job.preparation.expected.binding),
+    "the CI job binding must match before testing policy parameter order",
+  );
+  assert.deepEqual(Object.keys(raw.template.policy.policy), [
+    "kind",
+    "authority",
+    "accountSid",
+    "restrictingSid",
+    "inventorySha256",
+  ]);
+  assert.notEqual(observationDigest(raw.template), expected);
+  f.manifest.windowsPreparation.cases = preparation.system.cases;
+  installOperationNativeFixture(
+    f,
+    declaration.bindings.input,
+    JSON.parse(f.files.get(declaration.bindings.operations.expectation.path)),
+  );
+  const boundary = new Error(
+      "Controlled stop after the shared preparation gate",
+    ),
+    failures = [],
+    commands = f.commands.length;
+  let preparedCases = 0;
+  const result = await withNativeDiagnostics(
+    () =>
+      runWindowsExperimentProofs(job, directory, {
+        ...options,
+        now: () => 0,
+        persist: async () => {},
+        load: async (current) => ({
+          job: current,
+          preparation,
+          runtime: job.preparation.observed.components,
+        }),
+        runCase: async (_, recipe, prepared, effects, policy) => {
+          assert.equal(recipe.id, "release");
+          assert.equal(prepared.templateSha256, expected);
+          assert.deepEqual(policy.policyBinding, normalized);
+          assert.equal(policy.hasReceipt(), true);
+          preparedCases++;
+          // Native assertions are outside this binding regression. Refuse here
+          // and exercise the real factory's independent settlement unchanged.
+          throw boundary;
+        },
+        onFailure: async (_, cause) => failures.push(cause),
+      }),
+    () => {},
+  );
+  assert.equal(preparedCases, 1);
+  assert.deepEqual(failures, [boundary]);
+  assert.equal(result.failure, "probe-failed");
+  assert.deepEqual(
+    result.cases.map(({ id, status }) => [id, status]),
+    [
+      ["build", "PASS"],
+      ["release", "FAIL"],
+    ],
+  );
+  assert.equal(result.cases[1].policy.independent, true);
+  assert.equal(result.cases[1].policy.effective, true);
+  for (const entry of result.cases)
+    for (const effect of Object.values(entry.effects))
+      if (effect.admission === "possible")
+        assert.deepEqual(effect.settlement, {
+          status: "RETIRED",
+          independent: true,
+          emergencyCleanup: false,
+        });
+  assert.deepEqual(raw, original);
+  assert.equal(f.commands.length, commands, "verification must not rebuild");
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every((actor) => actor.retired));
 });
 
 test("Windows experiment build settlement and cold consumers join original custody without replay", async () => {
