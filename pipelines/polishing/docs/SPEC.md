@@ -479,6 +479,11 @@ reconstruction outside source forks before the next failure propagates. Explicit
 overload uses the runner's durable availability policy. Turn-item policy, protocol, and isolation
 auditing and the model-reroute guard take precedence, and native error details
 are discarded; the adapter owns recognition and recovery.
+Recognized native output exhaustion remains a terminal failure with the shared
+`output_exhausted` disposition and bypasses replay, compaction, availability,
+quota, and output-correction recovery. The
+[provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
+owns its recognition and evidence limits.
 Claude classifies structured permission denials, HTTP status, result subtype,
 and terminal reason before consulting a bounded native-text slice. Only finite
 allowlisted backend, capability, configuration, usage, provider, expected-tool

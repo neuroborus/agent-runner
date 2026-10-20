@@ -2541,12 +2541,12 @@ outcome, and no started effects. A commit checkpoint additionally requires
 validated `commitExecutor: "not_started"` proof. Possible workspace changes still
 require repository reconciliation; ambiguous outcomes cannot carry this evidence.
 
-The same exact record may instead carry the finite optional
-`disposition: "authentication_required"`. The contract accepts it only for a
-terminal rejected response without started effect, process outcome, or
-availability evidence. It is not an availability reason and does not collapse
-authorization, permission, usage-limit, malformed-request, or ambiguous-effect
-failures into authentication.
+The same exact record may instead carry the finite optional `disposition`,
+either `authentication_required` or `output_exhausted`. The contract accepts it
+only for a terminal rejected response without started-effect evidence, process
+outcome, or availability evidence. These dispositions remain separate from
+availability, authorization, permission, usage-limit, malformed-request, and
+ambiguous-effect classifications.
 
 Provider-private availability recognition maps explicit offline, DNS, refused or
 reset connections, timeouts, overload, and model-busy errors. Both adapters map
@@ -2574,7 +2574,26 @@ pipelines consume the backend-neutral recoverable failure. Other allowlisted
 backend, capability, configuration, usage, and provider failures use the same
 durable pause path.
 
-Codex App Server `other` failures use bounded native HTTP error recognition
+Codex recognizes output exhaustion only from the exact native message
+`Incomplete response returned, reason: max_output_tokens` in a failed
+completion whose `codexErrorInfo` is the unit `other` variant. App Server
+`turn/start` request errors qualify with the same exact message, a server-error
+RPC code (`-32603` or `-32000`), and the standard exact `code`, `message`, and
+optional opaque `data` shape. Other variants, variant payloads, additional
+details, RPC data, tool output, malformed or oversized messages, and prose
+lookalikes cannot establish exhaustion. Protocol validation and reported-item
+auditing precede completion classification. The adapter emits only fixed
+`ERR_CODEX_OUTPUT_EXHAUSTED`, `turn_output_exhausted`,
+`disposition: "output_exhausted"`, and `Codex response output was exhausted.`
+diagnostics with terminal retry eligibility. This bypasses automatic fresh
+replay, availability and quota recovery, structured-output correction, and
+compaction; only explicit native context-window exhaustion invokes compaction.
+Source forks remain isolated and rejected local-commit readiness retains
+`commitExecutor: "not_started"`. Native evidence is discarded. The incomplete
+reason establishes neither a numeric output ceiling nor context utilization,
+and does not complete missing or incomplete usage accounting.
+
+Other Codex App Server `other` failures use bounded native HTTP error recognition
 before opaque recovery. A complete `unexpected status` wrapper with an
 allowlisted non-transient client status and a parsed JSON `error` envelope
 becomes terminal `ERR_CODEX_TURN_FAILED` / `turn_bad_request`, with the fixed
@@ -2603,9 +2622,10 @@ ID, payload, or credential material. Claude and future providers remain
 unchanged until their descriptors own an equivalent bounded classifier.
 Opaque failures retain `turn_other`; the native `serverOverloaded` variant maps
 to `turn_server_overloaded`. Both classes are recoverable after the turn-item
-audit unless a validated client envelope rejects the request. Explicit native
-transport/server availability is recoverable after the same audit. Neither
-path retains native messages, variant payloads, additional details, or causes.
+audit unless output exhaustion is recognized or a validated client envelope
+rejects the request. Explicit native transport/server availability is
+recoverable after the same audit. Neither path retains native messages,
+variant payloads, additional details, or causes.
 Completion notifications and hydrated turns accept only `completed`, `failed`,
 and `interrupted` statuses before failure classification. For these failures,
 the existing item audit and explicit-model reroute guard still reject policy,

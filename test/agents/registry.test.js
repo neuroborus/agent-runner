@@ -18,6 +18,7 @@ import {
   normalizeAdapterFailure,
   normalizeClientAttribution,
   normalizeFailureRecord,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
 } from "../../src/agents/index.js";
 import {
@@ -361,53 +362,58 @@ test("availability evidence is finite, redacted, and excludes uncertain commit e
   }
 });
 
-test("authentication-required disposition is finite, terminal, and redacted", () => {
-  assert.deepEqual(FAILURE_DISPOSITIONS, [AUTHENTICATION_REQUIRED_DISPOSITION]);
-  assert.ok(Object.isFrozen(FAILURE_DISPOSITIONS));
-  const base = {
-    failureClass: "adapter_failure",
-    checkpoint: "turn",
-    outcome: "rejected",
-    effect: "possible",
-    retry: "terminal",
-    disposition: AUTHENTICATION_REQUIRED_DISPOSITION,
-  };
-  assert.deepEqual(normalizeFailureRecord(base), base);
-
-  const sensitiveMarker = "DO_NOT_RETAIN_AUTHENTICATION_PAYLOAD";
-  const providers = createProviderRegistry([
-    {
-      ...PROVIDER_REGISTRY.list()[0],
-      id: "authentication-test",
-      failures: { classes: new Set(), classify: () => base },
-    },
+test("failure dispositions are finite, terminal, and redacted", () => {
+  assert.deepEqual(FAILURE_DISPOSITIONS, [
+    AUTHENTICATION_REQUIRED_DISPOSITION,
+    OUTPUT_EXHAUSTED_DISPOSITION,
   ]);
-  const normalized = normalizeAdapterFailure(
-    "authentication-test",
-    {
-      credential: sensitiveMarker,
-      message: sensitiveMarker,
-      requestId: sensitiveMarker,
-      url: sensitiveMarker,
-    },
-    providers,
-  );
-  assert.deepEqual(normalized.failure, base);
-  assert.ok(Object.isFrozen(normalized.failure));
-  assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+  assert.ok(Object.isFrozen(FAILURE_DISPOSITIONS));
+  for (const disposition of FAILURE_DISPOSITIONS) {
+    const base = {
+      failureClass: "adapter_failure",
+      checkpoint: "turn",
+      outcome: "rejected",
+      effect: "possible",
+      retry: "terminal",
+      disposition,
+    };
+    assert.deepEqual(normalizeFailureRecord(base), base);
 
-  for (const invalid of [
-    ...[null, undefined, "native_authentication_error", {}, true].map(
-      (disposition) => ({ ...base, disposition }),
-    ),
-    { ...base, outcome: "ambiguous" },
-    { ...base, outcome: "not_started", effect: "none" },
-    { ...base, effect: "started" },
-    { ...base, retry: "transient" },
-    { ...base, availabilityReason: "transport_unavailable" },
-    { ...base, processOutcome: { exitCode: 1 } },
-  ]) {
-    assert.throws(() => normalizeFailureRecord(invalid), TypeError);
+    const sensitiveMarker = "DO_NOT_RETAIN_PROVIDER_PAYLOAD";
+    const providers = createProviderRegistry([
+      {
+        ...PROVIDER_REGISTRY.list()[0],
+        id: "disposition-test",
+        failures: { classes: new Set(), classify: () => base },
+      },
+    ]);
+    const normalized = normalizeAdapterFailure(
+      "disposition-test",
+      {
+        credential: sensitiveMarker,
+        message: sensitiveMarker,
+        requestId: sensitiveMarker,
+        url: sensitiveMarker,
+      },
+      providers,
+    );
+    assert.deepEqual(normalized.failure, base);
+    assert.ok(Object.isFrozen(normalized.failure));
+    assert.doesNotMatch(JSON.stringify(normalized), /DO_NOT_RETAIN/u);
+
+    for (const invalid of [
+      ...[null, undefined, "native_authentication_error", {}, true].map(
+        (disposition) => ({ ...base, disposition }),
+      ),
+      { ...base, outcome: "ambiguous" },
+      { ...base, outcome: "not_started", effect: "none" },
+      { ...base, effect: "started" },
+      { ...base, retry: "transient" },
+      { ...base, availabilityReason: "transport_unavailable" },
+      { ...base, processOutcome: { exitCode: 1 } },
+    ]) {
+      assert.throws(() => normalizeFailureRecord(invalid), TypeError);
+    }
   }
 });
 

@@ -827,6 +827,13 @@ Failed or interrupted results and unavailable usage remain unknown or incomplete
 No prompt, reasoning, transcript, tool output, secret, native identifier, or
 arbitrary provider error is retained in these diagnostics.
 
+Codex response incompleteness with the recognized native `max_output_tokens`
+reason fails with fixed output-exhaustion diagnostics. It triggers no automatic
+fresh replay, availability or quota recovery, or output correction. That reason
+alone establishes neither a numeric output ceiling nor context utilization.
+See the [provider model](docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
+for the recognition and safety boundaries.
+
 An action-free resume also recovers a nonterminal, nonpaused persisted active
 turn after its execution owner is lost. Recovery retains the active marker
 through input and repository reconciliation, replaces it when the complete

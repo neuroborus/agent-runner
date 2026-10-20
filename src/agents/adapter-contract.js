@@ -69,8 +69,10 @@ export const AVAILABILITY_REASONS = Object.freeze([
   "server_unavailable",
 ]);
 export const AUTHENTICATION_REQUIRED_DISPOSITION = "authentication_required";
+export const OUTPUT_EXHAUSTED_DISPOSITION = "output_exhausted";
 export const FAILURE_DISPOSITIONS = Object.freeze([
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  OUTPUT_EXHAUSTED_DISPOSITION,
 ]);
 export const PROVIDER_NEUTRAL_LAUNCH_FAILURE_CLASSES = Object.freeze([
   "launch_process_exited",

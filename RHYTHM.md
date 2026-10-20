@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-20
 
+- **Native output exhaustion never triggers unchanged replay.** Codex recognizes
+  the bounded native response-incomplete reason `max_output_tokens` at supported
+  completion and turn-start error boundaries. Fixed redacted diagnostics and
+  the terminal provider-neutral `output_exhausted` disposition keep it out of
+  fresh-session, availability, quota, and structured-output correction paths.
+  Protocol validation and reported-item auditing retain precedence, as does
+  commit-executor safety. The reason supplies no numeric ceiling or context
+  utilization evidence and cannot complete missing usage accounting.
+
 - **Output-pressure diagnostics preserve evidence boundaries.** Runner, CLI,
   MCP status/wait, and bounded activity expose correlated attempt evidence and
   measured supplied-payload bytes separately from provider token snapshots.

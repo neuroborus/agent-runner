@@ -257,11 +257,11 @@ Adapters classify native failures into one finite provider-neutral control
 surface. Each record contains exactly a failure class, checkpoint, outcome,
 effect evidence, and retry eligibility, plus optional commit-executor proof,
 finite provider-neutral `availabilityReason`, and an optional process outcome
-with only an exit code or signal. The optional finite `disposition` currently
-admits only `authentication_required`. It marks a terminal rejected response
-with no started effect and cannot coexist with availability or process-outcome
-evidence; it remains separate from authorization, permission, usage-limit,
-malformed-request, and ambiguous-effect classifications.
+with only an exit code or signal. The optional finite `disposition` admits
+`authentication_required` and `output_exhausted`. Each marks a terminal rejected
+response without started-effect evidence and cannot coexist with availability
+or process-outcome evidence. Authentication remains separate from authorization,
+permission, usage-limit, malformed-request, and ambiguous-effect classifications.
 `commitExecutor: "not_started"` is valid only at the `commit` checkpoint with
 `none` or `possible` effect evidence; it is invalid with `started` evidence or
 at any other checkpoint. The shared checkpoints are `probe`, `spawn`,
@@ -337,7 +337,18 @@ declarations do not replace deterministic pipeline validation: both
 plan-execution terminal roles still reject duplicate finalization finding IDs,
 out-of-bounds or non-member IDs, and IDs outside rejected terminal results.
 
-Codex refines native `other` failures only when bounded, validated HTTP status
+Codex recognizes the exact native response-incomplete diagnostic for
+`max_output_tokens` in failed `other` completions and supported `turn/start`
+server-error responses. It emits terminal `ERR_CODEX_OUTPUT_EXHAUSTED` /
+`turn_output_exhausted` with provider-neutral `disposition: "output_exhausted"`
+and a fixed safe message. Reported-item auditing retains precedence. This failure
+starts no automatic fresh replay, context compaction, availability or quota
+recovery, or structured-output correction. Local-commit readiness still proves
+that the executor never started. The incomplete reason alone proves neither a
+numeric output ceiling nor context utilization; missing and incomplete usage
+remain explicit. Native text, tool output, and additional details are not retained.
+
+Codex also refines native `other` failures when bounded, validated HTTP status
 and structured error-envelope evidence identify a non-transient client error.
 For example, HTTP 400 `invalid_request_error` / `invalid_json_schema` becomes
 terminal `ERR_CODEX_TURN_FAILED` with `turn_bad_request`, a fixed message, and
@@ -374,11 +385,12 @@ one-shot authorization can be retired and the `COMMIT` checkpoint resumed.
 
 The remaining Codex `turn_other` and the explicit native `serverOverloaded`
 variant, normalized as `turn_server_overloaded`, are recoverable provider
-failures unless a validated client envelope rejects the request. Native
-transport/server failures with explicit availability evidence are also
-recoverable. The adapter audits reported turn items first so policy, protocol, and
-isolation violations retain precedence. An ordinary non-commit request without availability evidence uses the
-existing single fresh reconstruction from its complete persisted recovery
+failures unless output exhaustion is recognized or a validated client envelope
+rejects the request. Native transport/server failures with explicit availability
+evidence are also recoverable. The adapter audits reported turn items first so
+policy, protocol, and isolation violations retain precedence. An ordinary
+non-commit request without availability evidence uses the existing single fresh
+reconstruction from its complete persisted recovery
 context and the observed workspace. A second failure returns to the pipeline
 without another adapter retry and pauses as `backend_unavailable` at the safe
 checkpoint when it remains recoverable. Writable workflows first reconcile safe

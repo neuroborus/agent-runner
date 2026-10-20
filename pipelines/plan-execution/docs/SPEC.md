@@ -1187,6 +1187,11 @@ Local-commit readiness failures remain pre-effect rejections and never replay
 the executor. Recognition and redaction belong to the adapter as specified in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
 state migration is needed.
+Recognized native output exhaustion remains a terminal failure with the shared
+`output_exhausted` disposition and bypasses replay, compaction, availability,
+quota, and output-correction recovery. The
+[provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
+owns its recognition and evidence limits.
 
 Worker:
 

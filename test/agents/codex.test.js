@@ -20,6 +20,7 @@ import {
 import {
   AgentBoundaryError,
   AUTHENTICATION_REQUIRED_DISPOSITION,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
 } from "../../src/agents/index.js";
@@ -2048,8 +2049,16 @@ test("rejects an incorrect workspace shell-environment projection", async () => 
 });
 
 test("rejects substitution of an explicit model", async (t) => {
-  for (const status of ["completed", "failed"]) {
-    await t.test(status, async () => {
+  for (const [name, status, nativeMessage] of [
+    ["completed", "completed"],
+    ["client rejection", "failed", httpClientErrorMessage()],
+    [
+      "output exhaustion",
+      "failed",
+      "Incomplete response returned, reason: max_output_tokens",
+    ],
+  ]) {
+    await t.test(name, async () => {
       const fixture = createFixture({
         handle({ message }) {
           if (message.method === "turn/start") {
@@ -2070,7 +2079,7 @@ test("rejects substitution of an explicit model", async (t) => {
                 status === "completed"
                   ? completedTurn(message.params.threadId, turnId)
                   : failedTurn(message.params.threadId, turnId, {
-                      message: httpClientErrorMessage(),
+                      message: nativeMessage,
                       codexErrorInfo: "other",
                     }),
               ],
@@ -3375,7 +3384,8 @@ test("rejects invalid terminal turn statuses without recovery", async (t) => {
             }
             const turnId = "invalid-status-turn";
             const notification = failedTurn(message.params.threadId, turnId, {
-              message: httpClientErrorMessage(),
+              message:
+                "Incomplete response returned, reason: max_output_tokens",
               codexErrorInfo: "other",
             });
             notification.params.turn.status = status;
@@ -3683,6 +3693,349 @@ test("Codex turn-start availability preserves RPC rejection precedence", async (
       assert.doesNotMatch(JSON.stringify(error), /DO_NOT_RETAIN/u);
       return true;
     });
+  }
+});
+
+test("classifies native output exhaustion without replay or output correction", async (t) => {
+  const nativeMessage =
+    "Incomplete response returned, reason: max_output_tokens";
+  for (const [name, access, mode, rpcCode] of [
+    ["failed read-only", "read-only", "fresh"],
+    ["failed writable continuation", "workspace-write", "continue"],
+    ["failed source fork", "read-only", "fork"],
+    ["failed commit readiness", "local-commit", "fresh"],
+    ["turn-start internal error", "read-only", "fresh", -32603],
+    ["turn-start server error", "workspace-write", "fresh", -32000],
+    ["turn-start commit readiness", "local-commit", "fresh", -32603],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== "turn/start") return;
+          if (rpcCode !== undefined)
+            return {
+              error: {
+                code: rpcCode,
+                message: nativeMessage,
+                data: { private: "DO_NOT_RETAIN_REQUEST_DATA" },
+              },
+            };
+          const completion = failedTurn(
+            message.params.threadId,
+            "exhausted-turn",
+            {
+              codexErrorInfo: "other",
+              message: nativeMessage,
+              additionalDetails: "DO_NOT_RETAIN_ADDITIONAL_DETAILS",
+            },
+            [{ type: "agentMessage", text: '{"ok":' }],
+          );
+          const usage = {
+            inputTokens: 10,
+            cachedInputTokens: 4,
+            outputTokens: 5,
+            reasoningOutputTokens: 2,
+            totalTokens: 15,
+          };
+          return {
+            result: { turn: { id: "exhausted-turn" } },
+            notification:
+              mode === "continue"
+                ? [
+                    completion,
+                    {
+                      method: "thread/tokenUsage/updated",
+                      params: {
+                        threadId: message.params.threadId,
+                        turnId: "exhausted-turn",
+                        tokenUsage: { last: usage, total: usage },
+                      },
+                    },
+                  ]
+                : completion,
+          };
+        },
+      });
+      const observations = [];
+      let freshReservations = 0;
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            access,
+            ...(access === "local-commit" ? {} : { schema: STRICT_SCHEMA }),
+            onObservation: (value) => observations.push(value),
+            onFreshSession: () => freshReservations++,
+            ...(mode === "fresh"
+              ? {}
+              : { session: { mode, id: "source-thread" } }),
+            ...(access === "local-commit"
+              ? {
+                  authorizationId: "authorization-1",
+                  commit: {
+                    expectedHead: EXPECTED_HEAD,
+                    message: "fix(test): preserve commit safety",
+                  },
+                }
+              : {}),
+          }),
+        ),
+        (error) => {
+          assert.ok(
+            hasDiagnostic(
+              "ERR_CODEX_OUTPUT_EXHAUSTED",
+              "turn_output_exhausted",
+            )(error),
+          );
+          assert.equal(error.message, "Codex response output was exhausted.");
+          const normalized = normalizeAdapterFailure("codex", error);
+          assert.deepEqual(normalized.failure, {
+            failureClass: "turn_output_exhausted",
+            checkpoint: access === "local-commit" ? "commit" : "turn",
+            outcome: "rejected",
+            effect: access === "local-commit" ? "none" : "possible",
+            retry: "terminal",
+            disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+            ...(access === "local-commit"
+              ? { commitExecutor: "not_started" }
+              : {}),
+          });
+          for (const failure of [error, normalized]) {
+            assert.equal(failure.recoverable, false);
+            assert.equal(failure.ambiguous, false);
+            assert.equal(failure.failureClass, undefined);
+            assert.equal(failure.cause, undefined);
+            assert.doesNotMatch(
+              JSON.stringify({ ...failure, message: failure.message }),
+              /max_output_tokens|DO_NOT_RETAIN|source-thread|exhausted-turn/u,
+            );
+          }
+          return true;
+        },
+      );
+      assert.equal(freshReservations, 0);
+      assert.equal(fixture.processes.length, 1);
+      assert.deepEqual(
+        fixture.processes[0].messages
+          .filter(
+            ({ method }) =>
+              method.startsWith("thread/") || method === "turn/start",
+          )
+          .map(({ method }) => method),
+        [
+          mode === "fresh"
+            ? "thread/start"
+            : `thread/${mode === "continue" ? "resume" : "fork"}`,
+          "turn/start",
+        ],
+      );
+      assert.equal(
+        fixture.executeCalls.filter(({ file }) => file === "git").length,
+        0,
+      );
+      if (rpcCode === undefined) {
+        assert.equal(observations.length, 1);
+        assert.equal(observations[0].outcome, "failed");
+        assert.equal(
+          observations[0].accounting,
+          mode === "continue" ? "incomplete" : "missing",
+        );
+        assert.equal(
+          observations[0].last?.outputTokens ?? null,
+          mode === "continue" ? 5 : null,
+        );
+        assert.equal(observations[0].contextCapacity, null);
+      }
+    });
+  }
+});
+
+test("output exhaustion requires exact native evidence at supported boundaries", async (t) => {
+  const nativeMessage =
+    "Incomplete response returned, reason: max_output_tokens";
+  for (const [name, nativeError, method = "turn/start", rpcCode] of [
+    [
+      "noncanonical incomplete wording",
+      { message: "Response incomplete, incomplete reason: max_output_tokens" },
+    ],
+    [
+      "noncanonical incomplete wording in request error",
+      { message: "Response incomplete, incomplete reason: max_output_tokens" },
+      "turn/start",
+      -32603,
+    ],
+    [
+      "different reason",
+      { message: nativeMessage.replace("max_output_tokens", "content_filter") },
+    ],
+    ["prose lookalike", { message: `Tool reported: ${nativeMessage}` }],
+    ["trailing whitespace", { message: `${nativeMessage} ` }],
+    [
+      "case mismatch",
+      { message: nativeMessage.replace("Incomplete", "incomplete") },
+    ],
+    ["oversized", { message: `${nativeMessage}${" ".repeat(16_384)}` }],
+    ["non-string", { message: { reason: "max_output_tokens" } }],
+    [
+      "additional details only",
+      { message: "opaque", additionalDetails: nativeMessage },
+    ],
+    [
+      "contradictory variant",
+      { message: nativeMessage, codexErrorInfo: "usageLimitExceeded" },
+    ],
+    [
+      "unknown variant",
+      { message: nativeMessage, codexErrorInfo: "responseIncomplete" },
+    ],
+    [
+      "invented exhaustion variant",
+      { message: nativeMessage, codexErrorInfo: "outputExhausted" },
+    ],
+    ["missing variant", { message: nativeMessage, codexErrorInfo: undefined }],
+    [
+      "non-native other payload",
+      {
+        message: nativeMessage,
+        codexErrorInfo: { other: { httpStatusCode: 429 } },
+      },
+    ],
+    [
+      "request protocol error",
+      { message: nativeMessage },
+      "turn/start",
+      -32602,
+    ],
+    ["request client error", { message: nativeMessage }, "turn/start", 400],
+    [
+      "request prose lookalike",
+      { message: `Tool reported: ${nativeMessage}` },
+      "turn/start",
+      -32603,
+    ],
+    [
+      "oversized request error",
+      { message: `${nativeMessage}${" ".repeat(16_384)}` },
+      "turn/start",
+      -32000,
+    ],
+    [
+      "malformed request error",
+      { message: nativeMessage, unexpected: true },
+      "turn/start",
+      -32603,
+    ],
+    [
+      "request data only",
+      { message: "opaque", data: { message: nativeMessage } },
+      "turn/start",
+      -32603,
+    ],
+    ["session request", { message: nativeMessage }, "thread/start", -32603],
+  ]) {
+    await t.test(name, async () => {
+      const fixture = createFixture({
+        handle({ message }) {
+          if (message.method !== method) return;
+          if (rpcCode !== undefined)
+            return { error: { code: rpcCode, ...nativeError } };
+          return {
+            result: { turn: { id: "opaque-turn" } },
+            notification: failedTurn(
+              message.params.threadId,
+              "opaque-turn",
+              {
+                codexErrorInfo: "other",
+                ...nativeError,
+              },
+              [
+                {
+                  type: "commandExecution",
+                  command: "node --version",
+                  status: "completed",
+                  aggregatedOutput: nativeMessage,
+                },
+              ],
+            ),
+          };
+        },
+      });
+      await assert.rejects(fixture.adapter.run(request()), (error) => {
+        const failure = normalizeAdapterFailure("codex", error).failure;
+        assert.notEqual(failure.disposition, OUTPUT_EXHAUSTED_DISPOSITION);
+        assert.notEqual(failure.failureClass, "turn_output_exhausted");
+        return true;
+      });
+    });
+  }
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start")
+        return {
+          result: { turn: { id: "tool-turn" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "tool-turn",
+            "done",
+            [
+              {
+                type: "commandExecution",
+                command: "node --version",
+                status: "completed",
+                aggregatedOutput: nativeMessage,
+              },
+            ],
+          ),
+        };
+    },
+  });
+  assert.equal((await fixture.adapter.run(request())).output, "done");
+});
+
+test("output exhaustion cannot hide reported policy or protocol violations", async () => {
+  for (const [item, code] of [
+    [{ type: "subAgentActivity" }, "ERR_CODEX_ISOLATION"],
+    [
+      {
+        type: "commandExecution",
+        command: "git push origin main",
+        status: "completed",
+      },
+      "ERR_CODEX_REMOTE_WRITE_ATTEMPT",
+    ],
+    [
+      { type: "fileChange", changes: [], status: "completed" },
+      "ERR_CODEX_READ_ONLY_POLICY",
+    ],
+    [
+      {
+        type: "commandExecution",
+        command: "node --version",
+        status: "inProgress",
+      },
+      "ERR_CODEX_PROTOCOL",
+    ],
+    [null, "ERR_CODEX_PROTOCOL"],
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start")
+          return {
+            result: { turn: { id: "exhausted-turn" } },
+            notification: failedTurn(
+              message.params.threadId,
+              "exhausted-turn",
+              {
+                codexErrorInfo: "other",
+                message:
+                  "Incomplete response returned, reason: max_output_tokens",
+              },
+              [item],
+            ),
+          };
+      },
+    });
+    await assert.rejects(fixture.adapter.run(request()), hasCode(code));
+    assert.equal(fixture.processes.length, 1);
   }
 });
 

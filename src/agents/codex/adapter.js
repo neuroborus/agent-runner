@@ -16,6 +16,7 @@ import {
   isRecord,
   isolateGitEnvironment,
   normalizeClientAttribution,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
 } from "../adapter-contract.js";
 import { createCodexAppServerClient } from "./app-server.js";
@@ -77,6 +78,7 @@ const RECOVERABLE_TURN_DIAGNOSTICS = new Set([
   TERMINAL_TURN_DIAGNOSTICS.other,
   TERMINAL_TURN_DIAGNOSTICS.serverOverloaded,
 ]);
+const OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS = "turn_output_exhausted";
 const CLIENT_ERROR_STATUSES = new Map([
   [400, "Bad Request"],
   [401, "Unauthorized"],
@@ -101,6 +103,7 @@ const AUTHENTICATION_ERROR_CODES = new Set(["invalid_api_key"]);
 const REQUEST_ERROR_FIELDS = new Set(["code", "message", "data"]);
 const CODEX_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
+  OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS,
   ...Object.values(CAPABILITY_DIAGNOSTICS),
   ...Object.values(TERMINAL_TURN_DIAGNOSTICS),
   "isolation_command_host",
@@ -989,6 +992,20 @@ function authenticationRequiredError() {
   });
 }
 
+// The native unit `other` variant carries this exact response-incomplete
+// diagnostic. Tool output, additional details, and arbitrary prose are not proof.
+function isOutputExhaustionMessage(message) {
+  return message === "Incomplete response returned, reason: max_output_tokens";
+}
+
+function outputExhaustedError() {
+  return new CodexAdapterError("Codex response output was exhausted.", {
+    code: "ERR_CODEX_OUTPUT_EXHAUSTED",
+    diagnosticClass: OUTPUT_EXHAUSTED_DIAGNOSTIC_CLASS,
+    disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+  });
+}
+
 function isStructuredRequestError(error) {
   return (
     isRecord(error) &&
@@ -1030,6 +1047,14 @@ function isEffortRejection(message) {
 }
 
 function classifyRequestError(error, method, request) {
+  if (
+    method === "turn/start" &&
+    isStructuredRequestError(error) &&
+    [-32603, -32000].includes(error.code) &&
+    isOutputExhaustionMessage(error.message)
+  ) {
+    return outputExhaustedError();
+  }
   if (
     request.effort !== undefined &&
     ["turn/start", "thread/start", "thread/resume", "thread/fork"].includes(
@@ -1299,8 +1324,14 @@ async function runTurn(
       RECOVERABLE_TURN_DIAGNOSTICS.has(diagnosticClass) ||
       Object.hasOwn(availability, "status");
     if (canRefine) {
-      // Native availability cannot hide policy, protocol, or isolation violations.
+      // Native refinement cannot hide policy, protocol, or isolation violations.
       auditItems(turn.items, request);
+    }
+    if (
+      turn.error?.codexErrorInfo === "other" &&
+      isOutputExhaustionMessage(turn.error.message)
+    ) {
+      throw outputExhaustedError();
     }
     const parsedRejection =
       canRefine && structuredClientError(turn.error?.message);
