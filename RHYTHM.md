@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-20
 
+- **Output-exhausted checkpoints pause after reconciliation.** Each pipeline
+  preserves accepted progress and the suspended role/checkpoint behind explicit
+  retry. Execution and polishing settle safe partial writes, stale-gate resets,
+  and once-only correction charging with the pause. Consumed commits remain
+  verification-only; validated not-started proof and unchanged Git verification
+  are required to retire an unused authorization. Envelope version 20 separates
+  reconstruction provenance from proven expiry so generic and legacy markers
+  cannot invent timeout evidence or enlarge recovery allowances.
+
 - **Native output exhaustion never triggers unchanged replay.** Codex recognizes
   the bounded native response-incomplete reason `max_output_tokens` at supported
   completion and turn-start error boundaries. Fixed redacted diagnostics and

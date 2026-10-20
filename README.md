@@ -797,6 +797,9 @@ live supervision and replacement-owner recovery. Version 14 adds the owner's
 control-group identity so an inaccessible same-user process can be excluded
 only when it is proven to belong elsewhere. Legacy states migrate with no new
 authority and remain compatibility-blocked when that evidence is needed.
+Version 20 separates generic reconstruction provenance from proven inactivity
+expiry. Legacy markers grant no timeout proof or additional recovery allowance;
+CLI/MCP expose `expiryProven` alongside recovery status.
 Version 17 adds the frozen provider inactivity timeout, its fingerprint, and a
 nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
@@ -828,7 +831,12 @@ No prompt, reasoning, transcript, tool output, secret, native identifier, or
 arbitrary provider error is retained in these diagnostics.
 
 Codex response incompleteness with the recognized native `max_output_tokens`
-reason fails with fixed output-exhaustion diagnostics. It triggers no automatic
+reason pauses as `output_exhausted` after repository reconciliation, retaining
+the suspended role/checkpoint, safe partial progress, and correction accounting.
+Use the offered explicit resume or start a new run with smaller work units if
+exhaustion repeats. Consumed commit effects recover through verification only;
+replacing an unused authorization requires validated not-started proof and Git
+verification. It triggers no automatic
 fresh replay, availability or quota recovery, or output correction. That reason
 alone establishes neither a numeric output ceiling nor context utilization.
 See the [provider model](docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)

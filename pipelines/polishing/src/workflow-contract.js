@@ -288,6 +288,17 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  output_exhausted: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "POLISH",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "REVIEW",
+    "CONFIRM",
+    "RESOLVE_FINDINGS",
+  ]),
   authentication_required: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -4978,6 +4989,7 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -4993,6 +5005,27 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Polishing pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "output_exhausted" &&
+      (!hasExactFields(run.pause, [
+        "reason",
+        "code",
+        "resumeState",
+        "role",
+        "checkpoint",
+      ]) ||
+        run.pause.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        !Object.hasOwn(run.roles, run.pause.role) ||
+        typeof run.pause.checkpoint !== "string" ||
+        typeof run.pause.resumeState !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(run.pause.checkpoint) ||
+        !run.pause.checkpoint.startsWith(
+          `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
+        ) ||
+        (state.settings.mode === "lazy" && run.pause.role !== "worker"))
+    ) {
+      throw workflowError("Invalid output-exhaustion pause.");
     }
     if (
       run.pause.reason === "authentication_required" &&

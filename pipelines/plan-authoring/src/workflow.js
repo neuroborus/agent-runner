@@ -268,7 +268,7 @@ export async function runPlanAuthoring({
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
   const clarificationPath = join(run.taskPath, "clarifications.md");
   const planPath = join(run.taskPath, "plan.md");
 
@@ -305,7 +305,10 @@ export async function runPlanAuthoring({
   }
 
   async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...pipelineState(),
@@ -313,7 +316,7 @@ export async function runPlanAuthoring({
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { reason, ...details },
         publicActivity: activity(
           "runner",
@@ -323,7 +326,7 @@ export async function runPlanAuthoring({
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -629,24 +632,33 @@ export async function runPlanAuthoring({
       await runtime.git.assertUnchanged(pipelineState().repositoryBaseline);
       repositoryReconciled = true;
       if (
-        runtime.authentication?.eligible(agentError) &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        runtime.outputExhaustion?.eligible(agentError) ||
+        (runtime.authentication?.eligible(agentError) &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             authoringPolicy(pipelineState().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: pipelineState().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
           hasPossibleSourceForkEffect
             ? {
@@ -663,7 +675,7 @@ export async function runPlanAuthoring({
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
@@ -1246,6 +1258,7 @@ ${JSON.stringify(
       } else if (
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "lazy_output_invalid",
         ].includes(currentRun.pause.reason)
@@ -1852,7 +1865,7 @@ ${findingPrompt(pipelineState())}`,
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
+      dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
         cause?.code,
       )

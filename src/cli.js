@@ -235,7 +235,7 @@ function runSummary({ directoryPath, run }) {
   const inactivity = projectInactivityRecovery(run);
   if (inactivity !== null)
     lines.push(
-      `Provider inactivity: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
+      `Provider ${inactivity.expiryProven === false ? "reconstruction" : "inactivity"}: ${inactivity.role} ${inactivity.checkpoint}; ${inactivity.status}; attempt ${inactivity.attempt} of 2`,
     );
   const retry = projectAvailabilityRetry(run);
   const observations = projectObservations(run);

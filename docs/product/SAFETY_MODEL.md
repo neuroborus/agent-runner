@@ -432,6 +432,12 @@ restart cannot replenish that allowance, and reconstruction never repeats a
 source fork. Partial writes invalidate prior approvals and preserve charged
 correction accounting. Recovery evidence clears only with a returned response
 and matching reconciliation. Persistence failure grants no retry authority.
+Reconstruction provenance alone, including legacy markers, proves no inactivity.
+Output exhaustion requires a reconciled durable pause and explicit retry; it
+cannot authorize automatic writable replay. Safe partial content, invalidated
+gates, and charged corrections settle atomically with that pause. Commit effects
+remain verification-only unless validated not-started proof and Git verification
+retire an unused authorization.
 
 Only validated semantic progress resets inactivity. Owned overlapping commands
 suspend it until all complete; transport traffic and process liveness do not.

@@ -348,6 +348,12 @@ that the executor never started. The incomplete reason alone proves neither a
 numeric output ceiling nor context utilization; missing and incomplete usage
 remain explicit. Native text, tool output, and additional details are not retained.
 
+Pipelines own the durable `output_exhausted` pause after reconciliation. It
+retains accepted progress and bounded role/checkpoint evidence, never partial
+provider output. Explicit operator retry preserves source-fork isolation and
+correction accounting. A consumed commit remains verification-only unless
+validated not-started proof and Git verification retire its unused authorization.
+
 Codex also refines native `other` failures when bounded, validated HTTP status
 and structured error-envelope evidence identify a non-transient client error.
 For example, HTTP 400 `invalid_request_error` / `invalid_json_schema` becomes
@@ -459,6 +465,10 @@ pipeline then reconciles read-only safety or safe partial writes and corrections
 One fresh reconstruction is shared with existing native fresh fallback, reserved
 durably before launch, and never replenished by restart. It uses the same logical
 role and complete durable request without reforking the supplied source.
+Common-envelope version 20 records a distinct nullable expiry revision. Generic
+fresh fallback and legacy reconstruction markers consume the shared allowance
+without proving inactivity; `expiryProven` makes this distinction public. They
+cannot grant timeout-specific recovery or relax correction budgets.
 Repeated inactivity enters resumable `backend_unavailable` with the fixed
 `ERR_PROVIDER_INACTIVE` code. An explicit offered resume makes one attempt;
 it does not grant another automatic retry. Only a returned response and matching

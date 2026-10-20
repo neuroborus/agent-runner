@@ -5,6 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import {
   inspectOwnedSessionProcesses,
+  OUTPUT_EXHAUSTED_DISPOSITION,
   PROVIDER_REGISTRY,
   terminateOwnedProcess,
 } from "../agents/index.js";
@@ -38,6 +39,7 @@ import {
   rejectUnknownFields,
   RunnerError,
 } from "./input.js";
+import { createDispositionPolicy } from "./dispositions.js";
 import { createAuthenticationPolicy } from "./authentication.js";
 import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
@@ -361,6 +363,10 @@ export function createRunner(options = {}) {
   ) {
     let providerResponseRole = null;
     const authentication = createAuthenticationPolicy({ providers });
+    const outputExhaustion = createDispositionPolicy({
+      providers,
+      disposition: OUTPUT_EXHAUSTED_DISPOSITION,
+    });
     const availability =
       monitor === undefined
         ? undefined
@@ -415,6 +421,7 @@ export function createRunner(options = {}) {
     }
     return Object.freeze({
       authentication,
+      outputExhaustion,
       availability,
       inactivity,
       adapters:
@@ -448,7 +455,10 @@ export function createRunner(options = {}) {
                       providerResponseRole = role;
                       return response;
                     } catch (cause) {
-                      if (authentication.eligible(cause)) {
+                      if (
+                        authentication.eligible(cause) ||
+                        outputExhaustion.eligible(cause)
+                      ) {
                         providerResponseRole = role;
                       }
                       // Keep stronger provider failures intact while preventing

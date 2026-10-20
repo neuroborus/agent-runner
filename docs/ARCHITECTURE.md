@@ -1093,7 +1093,7 @@ suspend the deadline. Settlement drains timer persistence before returning.
 Before aborting an inactive provider, the run store durably journals the bounded
 `inactivity/expired` activity and `inactivityRecovery`: exactly `role`,
 `checkpoint`, `attempt` (1 or 2), `status` (`expired` or `reconstructing`),
-`reconstructionRevision` (null before attempt 2), `configurationFingerprint`,
+`reconstructionRevision` (null before attempt 2), `expiryRevision`, `configurationFingerprint`,
 and the observed `contentFingerprint`. The state store records expiry while ownership is still active without advancing
 the pipeline or changing other run fields. The marker
 is separate from availability episodes and contains no native payloads or tool
@@ -1128,8 +1128,17 @@ validated `commitExecutor: "not_started"` evidence and Git verification retire
 the consumed authorization. Possible effects, policy failures, usage limits,
 authentication requirements, and operator stops retain their precedence.
 
+Common-envelope version 20 adds nullable `expiryRevision`, journaled only by an
+actual watchdog expiry. Generic reconstruction consumes `reconstructionRevision`
+without proving timeout. Versions 17–19 normalize missing expiry proof to null;
+leased migration preserves the consumed allowance without inventing timeout
+history. Proven expiry is required for inactivity retry and timeout-specific
+correction allowances. An interrupted consumed reconstruction without expiry
+proof uses `ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED` and explicit recovery.
+
 CLI status and MCP `inactivityRecovery` expose only role, checkpoint, attempt,
-and status. Bounded `expired`, `reconstructing`, and `recovered` activity uses
+status, and `expiryProven`. Unproven activity and CLI state say reconstruction
+rather than inactivity. Bounded `expired`, `reconstructing`, and `recovered` activity uses
 the existing journal/projection transport. Client disconnect or canceled waits
 change observation only; they cannot cancel or reset the watchdog.
 
@@ -2592,6 +2601,21 @@ Source forks remain isolated and rejected local-commit readiness retains
 `commitExecutor: "not_started"`. Native evidence is discarded. The incomplete
 reason establishes neither a numeric output ceiling nor context utilization,
 and does not complete missing or incomplete usage accounting.
+
+Each pipeline consumes normalized output exhaustion through its own durable
+`output_exhausted` pause after process/resource retirement and repository safety
+checks. Its closed pause retains only the fixed `ERR_OUTPUT_EXHAUSTED` code,
+resume state, role, and complete logical checkpoint. CLI/MCP project bounded
+checkpoint evidence and explicit retry or new-run guidance. Exhaustion supersedes
+availability backoff without authorizing replay, compaction, or output correction.
+Execution and polishing preserve safe partial writes, invalidate affected gates,
+and persist charged correction work atomically with the pause. Explicit retry
+reconstructs the saved request without reforking a possibly created source child
+or replenishing recovery allowances. Compatibility-named authentication source-
+fork markers also protect this rejected disposition. Consumed commits remain
+verification-only; only validated not-started proof plus unchanged Git
+verification can retire an unused authorization. Pipeline specifications own the
+exact recovery and gate policies.
 
 Other Codex App Server `other` failures use bounded native HTTP error recognition
 before opaque recovery. A complete `unexpected status` wrapper with an

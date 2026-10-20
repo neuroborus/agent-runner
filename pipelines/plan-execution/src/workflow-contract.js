@@ -349,6 +349,18 @@ const EDIT_PAUSE_REASONS = Object.freeze({
   "proactive-clarification": "proactive_clarification",
 });
 const PAUSE_RESUME_STATES = Object.freeze({
+  output_exhausted: Object.freeze([
+    "CLARIFY",
+    "BOOTSTRAP",
+    "IMPLEMENT",
+    "FINALIZE",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "CONFIRM",
+    "REVIEW",
+    "RESOLVE_FINDINGS",
+    "COMMIT",
+  ]),
   authentication_required: Object.freeze([
     "CLARIFY",
     "BOOTSTRAP",
@@ -3951,6 +3963,9 @@ function normalizePendingCommit(value) {
     const hasAuthentication =
       isRecord(value.preEffectRejection) &&
       Object.hasOwn(value.preEffectRejection, "authentication");
+    const hasOutputExhaustion =
+      isRecord(value.preEffectRejection) &&
+      Object.hasOwn(value.preEffectRejection, "outputExhaustion");
     assertExactFields(
       value.preEffectRejection,
       [
@@ -3958,6 +3973,7 @@ function normalizePendingCommit(value) {
         "recoverable",
         ...(hasAvailability ? ["availability"] : []),
         ...(hasAuthentication ? ["authentication"] : []),
+        ...(hasOutputExhaustion ? ["outputExhaustion"] : []),
       ],
       "Plan-execution pre-effect rejection",
     );
@@ -3965,7 +3981,8 @@ function normalizePendingCommit(value) {
       value.status !== "consumed" ||
       !DIAGNOSTIC_CODE_PATTERN.test(value.preEffectRejection.code) ||
       typeof value.preEffectRejection.recoverable !== "boolean" ||
-      (hasAvailability && hasAuthentication)
+      [hasAvailability, hasAuthentication, hasOutputExhaustion].filter(Boolean)
+        .length > 1
     ) {
       throw workflowError("Plan-execution pre-effect rejection is invalid.");
     }
@@ -3987,6 +4004,22 @@ function normalizePendingCommit(value) {
         ].includes(proof.reason)
       ) {
         throw workflowError("Commit availability proof is invalid.");
+      }
+    }
+    if (hasOutputExhaustion) {
+      const proof = value.preEffectRejection.outputExhaustion;
+      assertExactFields(
+        proof,
+        ["disposition", "commitExecutor"],
+        "Commit output exhaustion proof",
+      );
+      if (
+        value.preEffectRejection.recoverable ||
+        value.preEffectRejection.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        proof.disposition !== "output_exhausted" ||
+        proof.commitExecutor !== "not_started"
+      ) {
+        throw workflowError("Commit output exhaustion proof is invalid.");
       }
     }
     const authentication = value.preEffectRejection.authentication;
@@ -5721,6 +5754,7 @@ export function assertRun(run) {
       (state.preflightComplete &&
         [
           "authentication_required",
+          "output_exhausted",
           "backend_unavailable",
           "confirmation_output_invalid",
           "environment_blocked",
@@ -5738,6 +5772,31 @@ export function assertRun(run) {
       (requiresResumeState && !hasResumeState)
     ) {
       throw workflowError("Plan-execution pause resume state is invalid.");
+    }
+    if (
+      run.pause.reason === "output_exhausted" &&
+      (!hasExactFields(run.pause, [
+        "reason",
+        "code",
+        "resumeState",
+        "role",
+        "checkpoint",
+      ]) ||
+        run.pause.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        !Object.hasOwn(run.roles, run.pause.role) ||
+        typeof run.pause.checkpoint !== "string" ||
+        typeof run.pause.resumeState !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(run.pause.checkpoint) ||
+        (!run.pause.checkpoint.startsWith(
+          `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
+        ) &&
+          !run.pause.checkpoint.startsWith("plan-context:read-only:")) ||
+        (run.pause.resumeState === "COMMIT" &&
+          (run.pause.role !== "worker" ||
+            run.pause.checkpoint !== `commit:${state.currentStep}`)) ||
+        (state.settings.mode === "lazy" && run.pause.role !== "worker"))
+    ) {
+      throw workflowError("Invalid output-exhaustion pause.");
     }
     if (
       run.pause.reason === "authentication_required" &&
@@ -5760,7 +5819,11 @@ export function assertRun(run) {
     }
     const consumedCommitPause =
       state.pendingCommit?.status === "consumed" &&
-      ["commit_failed", "commit_contract_violated"].includes(run.pause.reason);
+      [
+        "commit_failed",
+        "commit_contract_violated",
+        "output_exhausted",
+      ].includes(run.pause.reason);
     const retiredCommitPause =
       state.pendingCommit === null &&
       run.pause.reason === "commit_failed" &&

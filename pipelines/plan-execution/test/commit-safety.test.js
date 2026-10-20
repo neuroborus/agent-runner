@@ -3,6 +3,10 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
 import { normalizeAdapterFailure } from "../../../src/agents/index.js";
 import {
   attachAuthentication,
@@ -913,3 +917,116 @@ test("requires Reviewer acceptance for planned validation-infrastructure changes
     "Reviewer field validationChange violated matches-finalization-change.",
   ]);
 });
+
+for (const [proof, effect] of [
+  [true, "possible"],
+  [false, "possible"],
+  [false, "none"],
+]) {
+  test(`output-exhausted commit (${effect}) ${proof ? "retires proven unused authorization" : "retains unproven authorization for verification only"}`, async (t) => {
+    let reject = true;
+    let interruptProofPublication = proof;
+    let interruptVerification = proof;
+    let interruptPausePublication = proof;
+    const fixture = await createFixture(t, {
+      onTransition(_run, patch) {
+        if (
+          interruptProofPublication &&
+          patch.pipelineState.pendingCommit?.preEffectRejection
+            ?.outputExhaustion !== undefined
+        ) {
+          interruptProofPublication = false;
+          throw Object.assign(new Error("Proof publication interrupted"), {
+            code: "ERR_FAKE_PROOF_PUBLICATION",
+          });
+        }
+        if (
+          interruptPausePublication &&
+          patch.pause?.reason === "output_exhausted" &&
+          patch.pipelineState.pendingCommit === null
+        ) {
+          interruptPausePublication = false;
+          throw Object.assign(new Error("Pause publication interrupted"), {
+            code: "ERR_FAKE_PAUSE_PUBLICATION",
+          });
+        }
+      },
+      onCommitVerify() {
+        if (interruptVerification) {
+          interruptVerification = false;
+          throw Object.assign(new Error("Interrupted verification"), {
+            code: "ERR_FAKE_COMMIT_VERIFICATION",
+          });
+        }
+      },
+      onRoleRun(_role, request) {
+        if (request.access === "local-commit" && reject) {
+          reject = false;
+          throw outputExhaustion({ commit: true, proof, effect });
+        }
+      },
+    });
+    attachOutputExhaustion(fixture);
+    let first;
+    if (proof) {
+      await assert.rejects(fixture.run(), {
+        code: "ERR_FAKE_PROOF_PUBLICATION",
+      });
+      first = fixture.currentRun;
+    } else {
+      first = await fixture.run();
+    }
+    assert.equal(
+      fixture.calls.worker.filter(({ access }) => access === "local-commit")
+        .length,
+      1,
+    );
+    assert.equal(first.pipelineState.pendingCommit.status, "consumed");
+    if (proof) {
+      const pending = first.pipelineState.pendingCommit;
+      assert.deepEqual(pending.preEffectRejection.outputExhaustion, {
+        disposition: "output_exhausted",
+        commitExecutor: "not_started",
+      });
+      const invalid = structuredClone(first);
+      invalid.pipelineState.pendingCommit.preEffectRejection.outputExhaustion.commitExecutor =
+        "started";
+      assert.throws(() => planExecutionPipeline.workflow.validateRun(invalid));
+      const verificationPaused = await fixture.run();
+      assert.equal(verificationPaused.pause.reason, "commit_failed");
+      assert.deepEqual(
+        verificationPaused.pipelineState.pendingCommit.preEffectRejection,
+        pending.preEffectRejection,
+      );
+      await assert.rejects(fixture.run(), {
+        code: "ERR_FAKE_PAUSE_PUBLICATION",
+      });
+      const paused = fixture.currentRun;
+      assert.equal(paused.pause.reason, "output_exhausted");
+      assert.equal(paused.pause.checkpoint, "commit:1");
+      assert.equal(paused.pipelineState.pendingCommit, null);
+      const completed = await fixture.run();
+      assert.equal(completed.pipelineState.workflowState, "DONE");
+      assert.deepEqual(
+        fixture.calls.worker
+          .filter(({ access }) => access === "local-commit")
+          .map(({ authorizationId }) => authorizationId),
+        ["commit-1", "commit-2"],
+      );
+    } else {
+      assert.equal(first.pause.reason, "output_exhausted");
+      assert.equal(first.pipelineState.pendingCommit.preEffectRejection, null);
+      const second = await fixture.run();
+      assert.equal(second.pipelineState.pendingCommit.status, "consumed");
+      assert.deepEqual(
+        second.pipelineState.pendingCommit.authorization,
+        first.pipelineState.pendingCommit.authorization,
+      );
+      assert.equal(
+        fixture.calls.worker.filter(({ access }) => access === "local-commit")
+          .length,
+        1,
+      );
+    }
+  });
+}

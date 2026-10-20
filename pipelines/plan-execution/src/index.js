@@ -143,6 +143,7 @@ const TASK_INPUTS = Object.freeze({
 });
 const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -173,6 +174,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_canceled: "The operator canceled this run; it cannot resume.",
   arbiter_cannot_resolve:
     "The Arbiter could not resolve the current blocking dispute.",
+  output_exhausted:
+    "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
     "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
@@ -306,6 +309,12 @@ function publicFinalizationIssueIds(run) {
 }
 
 function publicEvidence(pause, finalizationIssueIds) {
+  if (pause.reason === "output_exhausted") {
+    return Object.freeze([
+      `Suspended role: ${pause.role}.`,
+      `Suspended checkpoint: ${pause.checkpoint}.`,
+    ]);
+  }
   if (finalizationIssueIds.length > 0) {
     return Object.freeze(
       finalizationIssueIds.map(
@@ -600,6 +609,7 @@ function validateResumeAction(run, action) {
         (!state.preflightComplete ||
           ([
             "authentication_required",
+            "output_exhausted",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",

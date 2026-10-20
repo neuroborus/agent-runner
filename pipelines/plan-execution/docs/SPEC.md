@@ -1188,7 +1188,7 @@ the executor. Recognition and redaction belong to the adapter as specified in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md); no pipeline branch or
 state migration is needed.
 Recognized native output exhaustion remains a terminal failure with the shared
-`output_exhausted` disposition and bypasses replay, compaction, availability,
+`output_exhausted` disposition and bypasses automatic replay, compaction, availability,
 quota, and output-correction recovery. The
 [provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
 owns its recognition and evidence limits.
@@ -3905,6 +3905,51 @@ scaffolding. Read-only mutation, containment failure, and ambiguous consumed
 effects keep their existing precedence. Only bounded environment class/stage
 and trusted command identity/outcome evidence may be retained, not diagnostics.
 
+## Output-exhausted checkpoints
+
+The pipeline consumes only the normalized `output_exhausted` disposition after
+process/resource retirement and repository reconciliation. It enters
+`WAITING_FOR_USER` with the exact closed pause `{ reason: "output_exhausted",
+code: "ERR_OUTPUT_EXHAUSTED", resumeState, role, checkpoint }`. The checkpoint
+is the complete logical phase/access/checkpoint key, not a native identifier.
+CLI/MCP expose a bounded explanation, suspended-role/checkpoint evidence, and
+one explicit null resume action. Repeated exhaustion pauses again; it never
+starts writable replay, backoff, compaction, or malformed-output correction.
+An operator may explicitly retry the saved checkpoint or start a new run with
+smaller work units; retry does not replenish automatic recovery allowances.
+
+An exhausted read-only narrative review retains its `plan-context` checkpoint.
+Resume reconstructs the unaccepted producing result read-only and reviews it
+again under the same recovery allowance; no provider result is retained merely
+to reconstruct that turn. Prerequisite reconstruction and narrative review
+share one reserved recovery attempt only for the immediate transition from a
+successful prerequisite to its review. Failed prerequisite or review retries
+reserve the normal bounded allowance. The prerequisite response does not clear
+the consumed allowance; only a returned narrative-review response with matching
+repository reconciliation clears it.
+
+Accepted progress, findings, pending correction attempts, and session lineage
+survive. Possible source-fork effects retain the existing compatibility-named
+`authenticationSourceForkRecovery` role/context marker; only no-effect evidence
+may restore an unused lazy fork. Safety, ownership, authentication, review,
+and ordinary availability policies retain their separate precedence.
+
+Safe partial writes, affected gate invalidation, correction accounting, active-
+turn retirement, and the exhaustion pause are persisted together. Content-changing
+check/fix and finding-resolution work is charged once across explicit retries;
+repairs require candidate convergence and fresh dependent gate evidence. A failed
+finalization preserves its safe content without accepting a finalization result;
+terminal confirmation remains distinct and read-only.
+
+At `COMMIT`, a validated not-started executor proof is persisted as
+`preEffectRejection.outputExhaustion: { disposition: "output_exhausted",
+commitExecutor: "not_started" }` with the fixed code before Git verification.
+Only unchanged verification proving no commit retires that authorization and
+exposes explicit retry at `commit:<step>`. Interruption retains both authorization
+and proof for verification-only recovery. Without proof, the consumed authorization
+survives the exhaustion pause and resume performs verification only. A completed
+valid commit settles normally; contract violations retain their blocking policy.
+
 ## Provider inactivity recovery
 
 The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
@@ -3922,6 +3967,12 @@ boundary before requesting a fresh reconstruction. It retains the same logical
 checkpoint and complete durable prompt, never reforks the source, and preserves
 partial-content correction accounting while invalidating stale approvals.
 Native fresh fallback and inactivity share one durably consumed allowance.
+Common-envelope version 20 distinguishes `reconstructionRevision` from proven
+`expiryRevision`. Generic and legacy reconstruction markers consume the same
+allowance but establish no timeout proof and cannot relax correction budgets.
+Public recovery adds `expiryProven`; unproven reconstruction is labeled as such.
+An interrupted consumed reconstruction without expiry proof pauses with
+`ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED`, rather than claiming inactivity.
 Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
 Restart preserves the allowance; an offered explicit resume attempts the same
 checkpoint once without replenishing automatic recovery. A returned provider

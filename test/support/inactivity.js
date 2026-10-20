@@ -27,10 +27,9 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
   let fire;
   let responseRole;
   const events = [];
-  const coordinator = createInactivityCoordinator({
+  const coordinatorOptions = {
     runId: fixture.currentRun.runId,
     lease: {},
-    initialRun: fixture.currentRun,
     git: runtime.git,
     monitor: {
       async check() {},
@@ -79,6 +78,11 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
         const next = await transition({
           inactivityRecovery: {
             ...recovery,
+            expiryRevision:
+              kind === "expired"
+                ? fixture.currentRun.revision + 1
+                : (fixture.currentRun.inactivityRecovery?.expiryRevision ??
+                  null),
             reconstructionRevision:
               kind === "reconstructing"
                 ? fixture.currentRun.revision + 1
@@ -96,7 +100,13 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
         return transition({ ...patch, inactivityRecovery: null });
       },
     },
-  });
+  };
+  const createCoordinator = () =>
+    createInactivityCoordinator({
+      ...coordinatorOptions,
+      initialRun: fixture.currentRun,
+    });
+  let coordinator = createCoordinator();
   runtime.inactivity = coordinator;
   async function complete(options) {
     if (responseRole === undefined) return;
@@ -120,6 +130,10 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
   }
   return {
     events,
+    restart() {
+      coordinator = createCoordinator();
+      runtime.inactivity = coordinator;
+    },
     expire(request, { commit = false } = {}) {
       return new Promise((resolve, reject) => {
         request.signal.addEventListener(

@@ -763,6 +763,44 @@ test("persists bounded agent turns until owner-checked reconciliation", async (t
   assert.equal(activities.cursor, finished.revision);
 });
 
+test("version 19 journals remain readable across the expiry-proof migration", async (t) => {
+  const { created, store } = await createFixture(t);
+  await created.lease.release();
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = JSON.parse(await readFile(statePath, "utf8"));
+  legacy.schemaVersion = 19;
+  legacy.runtimeCompatibility.runStateVersion = 19;
+  const event = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  event.schemaVersion = 19;
+  event.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(event)}\n`);
+  const loaded = await store.loadRun(legacy.runId);
+  const lease = await store.acquireRunLease(legacy.runId);
+  try {
+    const migrated = await store.migrateRun(
+      lease,
+      {
+        pipelineState: loaded.pipelineState,
+        pipelineStateVersion: loaded.pipelineStateVersion,
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "migrated",
+          message: "Migrated expiry proof.",
+        },
+      },
+    );
+    assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(await store.loadRun(legacy.runId), migrated);
+  } finally {
+    await lease.release();
+  }
+});
+
 test("migrates a legacy run envelope as one leased journal transition", async (t) => {
   const { created, stateRoot, store } = await createFixture(t);
   await created.lease.release();

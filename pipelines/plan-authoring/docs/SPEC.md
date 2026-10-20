@@ -492,7 +492,7 @@ overload uses the runner's durable availability policy. Turn-item policy, protoc
 auditing and the model-reroute guard take precedence, and native error details
 are discarded; the adapter owns recognition and recovery.
 Recognized native output exhaustion remains a terminal failure with the shared
-`output_exhausted` disposition and bypasses replay, compaction, availability,
+`output_exhausted` disposition and bypasses automatic replay, compaction, availability,
 quota, and output-correction recovery. The
 [provider model](../../../docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
 owns its recognition and evidence limits.
@@ -742,6 +742,30 @@ scaffolding. Read-only mutation, containment failure, and ambiguous consumed
 effects keep their existing precedence. Only bounded environment class/stage
 and trusted command identity/outcome evidence may be retained, not diagnostics.
 
+## Output-exhausted checkpoints
+
+The pipeline consumes only the normalized `output_exhausted` disposition after
+process/resource retirement and repository reconciliation. It enters
+`WAITING_FOR_USER` with the exact closed pause `{ reason: "output_exhausted",
+code: "ERR_OUTPUT_EXHAUSTED", resumeState, role, checkpoint }`. The checkpoint
+is the complete logical phase/access/checkpoint key, not a native identifier.
+CLI/MCP expose a bounded explanation, suspended-role/checkpoint evidence, and
+one explicit null resume action. Repeated exhaustion pauses again; it never
+starts writable replay, backoff, compaction, or malformed-output correction.
+An operator may explicitly retry the saved checkpoint or start a new run with
+smaller work units; retry does not replenish automatic recovery allowances.
+
+Accepted progress, findings, pending correction attempts, and session lineage
+survive. Possible source-fork effects retain the existing compatibility-named
+`authenticationSourceForkRecovery` role/context marker; only no-effect evidence
+may restore an unused lazy fork. Safety, ownership, authentication, review,
+and ordinary availability policies retain their separate precedence.
+
+Every turn remains repository-read-only. The inspected repository must be
+unchanged before pausing; a mutation takes the existing safety-failure path.
+Accepted drafts and correction attempts survive without accepting partial output
+as a replacement draft or consuming an output-correction attempt.
+
 ## Provider inactivity recovery
 
 The common [inactivity contract](../../../docs/ARCHITECTURE.md#provider-inactivity-deadlines)
@@ -759,6 +783,12 @@ boundary before requesting a fresh reconstruction. It retains the same logical
 checkpoint and complete durable prompt, never reforks the source, and preserves
 partial-content correction accounting while invalidating stale approvals.
 Native fresh fallback and inactivity share one durably consumed allowance.
+Common-envelope version 20 distinguishes `reconstructionRevision` from proven
+`expiryRevision`. Generic and legacy reconstruction markers consume the same
+allowance but establish no timeout proof and cannot relax correction budgets.
+Public recovery adds `expiryProven`; unproven reconstruction is labeled as such.
+An interrupted consumed reconstruction without expiry proof pauses with
+`ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED`, rather than claiming inactivity.
 Repeated expiry pauses as `backend_unavailable` / `ERR_PROVIDER_INACTIVE`.
 Restart preserves the allowance; an offered explicit resume attempts the same
 checkpoint once without replenishing automatic recovery. A returned provider

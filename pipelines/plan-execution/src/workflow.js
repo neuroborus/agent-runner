@@ -158,6 +158,7 @@ const INPUT_DRIFT_ERROR_CODES = new Set([
 ]);
 const RETRYABLE_PAUSE_REASONS = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "confirmation_output_invalid",
@@ -769,7 +770,7 @@ export async function runPlanExecution({
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
   let legacyRecoveryPersistence = false;
   let commitCheckpointSettlement = false;
   // Journal publication can succeed before its caller observes completion.
@@ -934,8 +935,16 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return currentRun;
   }
 
-  async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+  async function pause(
+    reason,
+    details = {},
+    pipelineStatePatch = {},
+    options = {},
+  ) {
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...state(),
@@ -943,7 +952,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        ...options,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -953,7 +963,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1006,13 +1016,18 @@ Include every listed command exactly once in requiredChecks with its actual cano
       );
       return currentRun;
     }
+    const outputExhausted =
+      rejection.outputExhaustion?.disposition === "output_exhausted";
     const authenticationRequired =
       rejection.authentication?.disposition === "authentication_required";
-    const reason = authenticationRequired
-      ? "authentication_required"
-      : rejection.recoverable
-        ? "backend_unavailable"
-        : "commit_failed";
+    const reason = outputExhausted
+      ? "output_exhausted"
+      : authenticationRequired
+        ? "authentication_required"
+        : rejection.recoverable
+          ? "backend_unavailable"
+          : "commit_failed";
+    dispositionPausePersistence = outputExhausted || authenticationRequired;
     await transition(
       {
         ...state(),
@@ -1022,10 +1037,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
       {
         pause: {
           reason,
-          code: authenticationRequired
-            ? "ERR_AUTHENTICATION_REQUIRED"
-            : rejection.code,
+          code: outputExhausted
+            ? "ERR_OUTPUT_EXHAUSTED"
+            : authenticationRequired
+              ? "ERR_AUTHENTICATION_REQUIRED"
+              : rejection.code,
           resumeState: "COMMIT",
+          ...(outputExhausted
+            ? { role: "worker", checkpoint: `commit:${state().currentStep}` }
+            : {}),
         },
         publicActivity: activity(
           "runner",
@@ -1035,6 +1055,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ),
       },
     );
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1501,12 +1522,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     return (
       turn.phase === "resolve-findings" &&
-      (
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
-      ((
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
+      retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1586,6 +1607,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       const changedCorrection =
         changedLazyCheck ||
         (interruptedTurn.phase === "resolve-findings" && contentChanged);
+      const charged = changedLazyCheck
+        ? current.availabilityCorrectionCharged ||
+          current.pendingLazyCorrection?.fixRoundCharged
+        : current.pendingCorrection;
       if (
         !isDeepStrictEqual(reconciledRepository, current.repositoryBaseline)
       ) {
@@ -1603,6 +1628,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
                   findings: [],
                   reviewReconsideration: [],
                   ...(changedCorrection ? { pendingCorrection: true } : {}),
+                  ...(changedLazyCheck
+                    ? markPendingLazyCorrectionCharged(current)
+                    : {}),
                 }
               : {}),
           },
@@ -1610,9 +1638,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ? {
                 nextCounters: {
                   ...counters(),
-                  fixRounds:
-                    counters().fixRounds +
-                    (changedLazyCheck || !current.pendingCorrection ? 1 : 0),
+                  fixRounds: counters().fixRounds + (charged ? 0 : 1),
                 },
               }
             : {},
@@ -1636,7 +1662,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
-            currentRun.inactivityRecovery == null &&
+            currentRun.inactivityRecovery?.expiryRevision == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
@@ -1644,7 +1670,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
             currentRun.availabilityRetry != null ||
-            currentRun.inactivityRecovery != null,
+            currentRun.inactivityRecovery?.expiryRevision != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1653,7 +1679,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ...counters(),
             fixRounds:
               counters().fixRounds +
-              (current.availabilityCorrectionCharged ? 0 : 1),
+              (current.availabilityCorrectionCharged ||
+              current.pendingLazyCorrection?.fixRoundCharged
+                ? 0
+                : 1),
           },
         },
       );
@@ -1670,7 +1699,21 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return true;
   }
 
+  let resumedOutputCheckpoint =
+    currentRun.pause?.reason === "output_exhausted"
+      ? currentRun.pause.checkpoint
+      : null;
+  function retryCheckpointEvidence() {
+    return resumedOutputCheckpoint === null
+      ? (currentRun.availabilityRetry ??
+          (currentRun.inactivityRecovery?.expiryRevision != null
+            ? currentRun.inactivityRecovery
+            : null))
+      : { checkpoint: resumedOutputCheckpoint };
+  }
+
   const availabilityRetry = Symbol("availability-retry");
+  let narrativeRecovery = null;
   async function runRole(role, schema, buildPrompt, options) {
     for (;;) {
       const result = await runRoleAttempt(role, schema, buildPrompt, options);
@@ -1740,7 +1783,27 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
     const context = durableContext(evidenceContext, recoveryContext);
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
-    const availabilityCheckpoint = `${turn.phase}:${access}:${checkpoint}`;
+    // Narrative review has no accepted result yet. Rebuild its read-only
+    // producing turn under the same recovery allowance before reviewing again.
+    const narrativeCheckpoint = `plan-context:read-only:${checkpoint}`;
+    const reconstructingNarrative =
+      !contextReview &&
+      access === "read-only" &&
+      [currentRun.availabilityRetry, currentRun.inactivityRecovery].some(
+        (recovery) =>
+          recovery?.role === role &&
+          recovery.checkpoint === narrativeCheckpoint,
+      );
+    const availabilityCheckpoint = reconstructingNarrative
+      ? narrativeCheckpoint
+      : `${turn.phase}:${access}:${checkpoint}`;
+    const continuingNarrativeRecovery =
+      contextReview &&
+      narrativeRecovery?.role === role &&
+      narrativeRecovery.checkpoint === availabilityCheckpoint;
+    // Only the immediate review after a successful prerequisite shares its
+    // reservation. Failed prerequisite or review retries reserve normally.
+    narrativeRecovery = null;
     if (retrying && runtime.availability !== undefined) {
       currentRun = await runtime.availability.before({
         role,
@@ -1748,7 +1811,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         repository: turnSnapshot,
       });
     }
-    if (runtime.inactivity !== undefined) {
+    if (runtime.inactivity !== undefined && !continuingNarrativeRecovery) {
       currentRun = await runtime.inactivity.before({
         role,
         checkpoint: availabilityCheckpoint,
@@ -1759,7 +1822,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
       .reverse()
       .find((child) => child.role === role);
     const selectedSession =
-      contextReview && !recovering && latestSession?.contextKey === contextKey
+      contextReview &&
+      (!recovering || continuingNarrativeRecovery) &&
+      latestSession?.contextKey === contextKey
         ? {
             session: { id: latestSession.sessionId, mode: "continue" },
             previousSession: latestSession.sessionId,
@@ -1835,6 +1900,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
+    let outputExhausted = false;
+    let exhaustedWorkspace;
+    async function persistReconciledWorkspace(nextState, options = {}) {
+      if (outputExhausted) {
+        exhaustedWorkspace = { state: nextState, options };
+      } else {
+        await transition(nextState, options);
+      }
+    }
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1861,6 +1935,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
+        outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
       let nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1897,7 +1972,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           changedLazyCheck ||
           !isDeepStrictEqual(nextRepositoryBaseline, baseline)
         ) {
-          await transition(
+          await persistReconciledWorkspace(
             changedCorrection || changedLazyCheck
               ? {
                   ...current,
@@ -1914,12 +1989,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
                     current.availabilityCorrectionCharged ||
                     ((availabilityFailure ||
                       authenticationFailure ||
+                      outputExhausted ||
                       inactivityFailure) &&
                       changedLazyCheck) ||
-                    (authenticationFailure && changedCorrection),
+                    ((authenticationFailure || outputExhausted) &&
+                      changedCorrection),
                   reviewReconsideration: [],
                   ...(availabilityFailure ||
                   authenticationFailure ||
+                  outputExhausted ||
                   inactivityFailure
                     ? {
                         workflowState: current.workflowState,
@@ -1970,7 +2048,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
                       ...counters(),
                       fixRounds:
                         counters().fixRounds +
-                        (current.availabilityCorrectionCharged ? 0 : 1),
+                        (current.availabilityCorrectionCharged ||
+                        current.pendingLazyCorrection?.fixRoundCharged
+                          ? 0
+                          : 1),
                     },
                   }
                 : {},
@@ -1979,46 +2060,61 @@ Include every listed command exactly once in requiredChecks with its actual cano
       }
       repositoryReconciled = true;
       if (
-        authenticationFailure &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        outputExhausted ||
+        (authenticationFailure &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             executionPolicy(state().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: state().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          {
+            ...exhaustedWorkspace?.state,
+            ...(hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {}),
+          },
+          exhaustedWorkspace?.options,
         );
         return null;
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
         currentRun = await runtime.finishAgentTurn(turn, {
-          repositoryReconciled,
+          // Rebuilding the prerequisite does not complete narrative recovery.
+          repositoryReconciled:
+            repositoryReconciled && !reconstructingNarrative,
         });
         assertRun(currentRun);
       }
@@ -2072,6 +2168,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           )
         : invalidRoleOutput(`${role} returned no response.`, outputContext);
     }
+    resumedOutputCheckpoint = null;
     await recordSession(role, response.sessionId, previousSession, contextKey);
     if (state().authenticationSourceForkRecovery !== null) {
       await transition({
@@ -2089,6 +2186,9 @@ Include every listed command exactly once in requiredChecks with its actual cano
             `${role} returned no structured result.`,
             outputContext,
           );
+    }
+    if (reconstructingNarrative) {
+      narrativeRecovery = { role, checkpoint: availabilityCheckpoint };
     }
     return response.structured;
   }
@@ -2503,11 +2603,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
 
   function markPendingLazyCorrectionCharged(current) {
     const pending = current.pendingLazyCorrection;
-    if (
-      pending === null ||
-      pending.phase !== "CHECK_AND_FIX" ||
-      pending.fixRoundCharged
-    ) {
+    if (pending === null || pending.phase !== "CHECK_AND_FIX") {
       return {};
     }
     return {
@@ -5119,7 +5215,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -5135,7 +5231,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -5149,7 +5245,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -6665,9 +6761,7 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = (
-      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-    )?.checkpoint;
+    const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -7079,16 +7173,22 @@ ${step.subject}`),
       }
       const availability = runtime.availability?.preEffect(agentError);
       const authentication = runtime.authentication?.preEffect(agentError);
+      const outputExhaustion = runtime.outputExhaustion?.preEffect(agentError);
       const preEffectRejection =
-        agentError?.effectStarted === false
+        agentError?.effectStarted === false &&
+        (runtime.outputExhaustion?.eligible(agentError) !== true ||
+          outputExhaustion != null)
           ? Object.freeze({
               code:
-                authentication === null || authentication === undefined
-                  ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
-                  : "ERR_AUTHENTICATION_REQUIRED",
+                outputExhaustion != null
+                  ? "ERR_OUTPUT_EXHAUSTED"
+                  : authentication === null || authentication === undefined
+                    ? diagnosticCode(agentError, "ERR_COMMIT_ADAPTER_REJECTED")
+                    : "ERR_AUTHENTICATION_REQUIRED",
               recoverable: agentError?.recoverable === true,
               ...(availability == null ? {} : { availability }),
               ...(authentication == null ? {} : { authentication }),
+              ...(outputExhaustion == null ? {} : { outputExhaustion }),
             })
           : null;
       pendingCommit = {
@@ -7097,6 +7197,7 @@ ${step.subject}`),
         preEffectRejection,
       };
       if (preEffectRejection !== null) {
+        commitAuthorizationPersistence = true;
         await transition(
           { ...state(), pendingCommit },
           {
@@ -7108,6 +7209,7 @@ ${step.subject}`),
             ),
           },
         );
+        commitAuthorizationPersistence = false;
       }
     }
 
@@ -7142,7 +7244,10 @@ ${step.subject}`),
             return true;
           }
         }
-        if (pendingCommit.preEffectRejection.authentication !== undefined) {
+        if (
+          pendingCommit.preEffectRejection.authentication !== undefined ||
+          pendingCommit.preEffectRejection.outputExhaustion !== undefined
+        ) {
           await pausePreEffectCommitRejection(pendingCommit.preEffectRejection);
           return false;
         }
@@ -7164,12 +7269,30 @@ ${step.subject}`),
         return false;
       }
       const contractViolation = cause?.code === "ERR_COMMIT_CONTRACT_VIOLATED";
+      const exhausted =
+        !contractViolation &&
+        runtime.outputExhaustion?.eligible(agentError) === true;
       await pause(
-        contractViolation ? "commit_contract_violated" : "commit_failed",
+        exhausted
+          ? "output_exhausted"
+          : contractViolation
+            ? "commit_contract_violated"
+            : "commit_failed",
         {
-          code: diagnosticCode(cause, "ERR_COMMIT_FAILED"),
-          ...(Array.isArray(cause?.changes) ? { changes: cause.changes } : {}),
-          ...(agentError === undefined
+          code: exhausted
+            ? "ERR_OUTPUT_EXHAUSTED"
+            : diagnosticCode(cause, "ERR_COMMIT_FAILED"),
+          ...(exhausted
+            ? {
+                resumeState: "COMMIT",
+                role: "worker",
+                checkpoint: availabilityCheckpoint,
+              }
+            : {}),
+          ...(!exhausted && Array.isArray(cause?.changes)
+            ? { changes: cause.changes }
+            : {}),
+          ...(exhausted || agentError === undefined
             ? {}
             : {
                 adapterCode: diagnosticCode(
@@ -7353,7 +7476,8 @@ ${step.subject}`),
             : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
-              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              ? current.availabilityCorrectionCharged ||
+                current.pendingLazyCorrection?.fixRoundCharged === true
               : current.pendingCorrection;
           await transition(
             {
@@ -7423,6 +7547,7 @@ ${step.subject}`),
         (!state().preflightComplete ||
           ([
             "authentication_required",
+            "output_exhausted",
             "backend_unavailable",
             "bootstrap_disagreement",
             "confirmation_output_invalid",
@@ -7762,7 +7887,7 @@ ${step.subject}`),
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
+      dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
         cause?.code,
       )

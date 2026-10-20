@@ -18,6 +18,7 @@ import { main } from "../src/cli.js";
 import { parseRunnerConfiguration } from "../src/config/index.js";
 import { createMcpControlPlane } from "../src/mcp/index.js";
 import { createRunner } from "../src/runner/index.js";
+import { createDispositionPolicy } from "../src/runner/dispositions.js";
 import { createAuthenticationPolicy } from "../src/runner/authentication.js";
 import { RunnerError } from "../src/runner/input.js";
 import { probeRequiredRoles, roleAdapters } from "../src/runner/roles.js";
@@ -540,6 +541,7 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     attempt: 2,
     status: "expired",
     reconstructionRevision: 23,
+    expiryRevision: 24,
     configurationFingerprint: "DO_NOT_PROJECT_INACTIVITY_BINDING",
     contentFingerprint: "DO_NOT_PROJECT_INACTIVITY_CONTENT",
   };
@@ -593,6 +595,7 @@ test("CLI and MCP project the same persisted launch recovery", async () => {
     checkpoint: "implement:workspace-write:1",
     attempt: 2,
     status: "expired",
+    expiryProven: true,
   });
   assert.match(
     output,
@@ -874,4 +877,46 @@ test("a late failed source fork retains availability eligibility without authori
       return true;
     },
   );
+});
+
+test("output-exhaustion policy rejects raw causes and contradictory commit proof", () => {
+  const policy = createDispositionPolicy({
+    providers: PROVIDER_REGISTRY,
+    disposition: "output_exhausted",
+  });
+  const record = {
+    failureClass: "turn_output_exhausted",
+    checkpoint: "commit",
+    outcome: "rejected",
+    effect: "possible",
+    retry: "terminal",
+    disposition: "output_exhausted",
+    commitExecutor: "not_started",
+  };
+  const cause = new AgentBoundaryError(
+    { code: "ERR_CODEX_OUTPUT_EXHAUSTED" },
+    record,
+  );
+  assert.equal(policy.eligible(cause), true);
+  assert.deepEqual(policy.preEffect(cause), {
+    disposition: "output_exhausted",
+    commitExecutor: "not_started",
+  });
+  assert.equal(
+    policy.eligible({ failure: record, effectStarted: false }),
+    false,
+  );
+  for (const override of [
+    { effect: "started" },
+    { retry: "transient" },
+    { checkpoint: "turn" },
+    { process: { exitCode: 1 } },
+  ]) {
+    const invalid = Object.assign(Object.create(AgentBoundaryError.prototype), {
+      failure: { ...record, ...override },
+      effectStarted: false,
+    });
+    assert.equal(policy.eligible(invalid), false);
+    assert.equal(policy.preEffect(invalid), null);
+  }
 });

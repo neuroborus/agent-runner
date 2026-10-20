@@ -65,12 +65,23 @@ All three pipelines retry eligible explicit provider availability failures after
 repository reconciliation. Delays double to the ceiling and repeat there without
 an attempt quota. A successful provider response resets the episode, even when
 subsequent output validation rejects that response. A normalized authentication-
-required response instead retires the superseded episode before its distinct
-operator pause. CLI/MCP activity and
+required or output-exhausted response instead retires the superseded episode
+before its distinct operator pause. CLI/MCP activity and
 status expose the saved role, checkpoint, normalized reason, attempt, delay, and
 deadline. Stops interrupt the wait under the same exclusive owner. Foreground
 CLI owner loss needs resume; detached MCP work survives client wait cancellation,
 timeout, and disconnect. Resuming an overdue deadline permits one attempt.
+
+Output exhaustion instead pauses as `output_exhausted` with the fixed
+`ERR_OUTPUT_EXHAUSTED` code and the exact suspended role/checkpoint. Safe partial
+progress and correction accounting survive; affected approvals are invalidated.
+CLI/MCP offer explicit resume of that checkpoint or guidance to start a new run
+with smaller work units if exhaustion repeats. No writable replay, availability
+backoff, or output correction starts automatically. Commit recovery verifies the
+consumed effect first; replacing an unused authorization requires validated
+not-started proof and unchanged Git verification. Public recovery distinguishes
+proven inactivity from generic reconstruction with `expiryProven`; legacy
+reconstruction markers prove no timeout and grant no new allowance.
 
 The separate `authentication_required` disposition never enters that retry
 policy. After repository reconciliation, every pipeline pauses durably at its

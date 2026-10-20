@@ -16,6 +16,11 @@ import { promisify } from "node:util";
 import test from "node:test";
 
 import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+
+import {
   createPlanAuthoringState,
   migratePlanAuthoringStateV1,
   migratePlanAuthoringStateV2,
@@ -3171,4 +3176,41 @@ test("authoring resumes a failed source fork with a fresh same-role request and 
     1,
   );
   assert.equal(run.counters.correctionRounds, 0);
+});
+
+test("output exhaustion preserves the authoring checkpoint across interrupted pause settlement", async (t) => {
+  let failures = 2;
+  const fixture = await createFixture(t, {
+    sourceSession: SOURCE_SESSION,
+    onRoleRun(role) {
+      if (role === "planner" && failures-- > 0) throw outputExhaustion();
+    },
+  });
+  attachOutputExhaustion(fixture);
+  interruptAuthenticationSettlement(fixture);
+  await assert.rejects(fixture.run(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const first = fixture.currentRun;
+  assert.equal(first.pause.reason, "output_exhausted");
+  assert.equal(first.pause.resumeState, "CLARIFY");
+  assert.equal(first.pause.role, "planner");
+  assert.match(first.pause.checkpoint, /^clarify:read-only:/u);
+  assert.equal(first.activeTurn, null);
+  const invalid = structuredClone(first);
+  invalid.pause.providerMessage = "Untrusted diagnostic";
+  assert.throws(() => planAuthoringPipeline.workflow.validateRun(invalid));
+  const second = await fixture.run();
+  assert.deepEqual(second.pause, first.pause);
+  assert.deepEqual(second.counters, first.counters);
+  const publicPause = planAuthoringPipeline.projections.pause(second);
+  assert.equal(publicPause.reason, "output_exhausted");
+  assert.deepEqual(publicPause.nextActions, [{ type: "resume", action: null }]);
+  assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  assert.equal(
+    fixture.calls.planner
+      .slice(0, 3)
+      .filter(({ session }) => session?.mode === "fork").length,
+    1,
+  );
 });

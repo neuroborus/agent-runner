@@ -140,6 +140,7 @@ const INVALID_BOOTSTRAP_PATH_CODES = new Set([
 ]);
 const RETRYABLE_CHECKPOINT_PAUSES = new Set([
   "authentication_required",
+  "output_exhausted",
   "backend_unavailable",
   "bootstrap_disagreement",
   "environment_blocked",
@@ -567,7 +568,7 @@ export async function runPolishing({
   let interruptedRepositoryReconciled = false;
   let failedSourceForkLaunchRecovery = false;
   // A published pause must survive an interrupted persistence response.
-  let authenticationPausePersistence = false;
+  let dispositionPausePersistence = false;
 
   function state() {
     return normalizePipelineState(currentRun.pipelineState);
@@ -778,8 +779,16 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     return currentRun;
   }
 
-  async function pause(reason, details = {}, pipelineStatePatch = {}) {
-    authenticationPausePersistence = reason === "authentication_required";
+  async function pause(
+    reason,
+    details = {},
+    pipelineStatePatch = {},
+    options = {},
+  ) {
+    dispositionPausePersistence = [
+      "authentication_required",
+      "output_exhausted",
+    ].includes(reason);
     await transition(
       {
         ...state(),
@@ -787,7 +796,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         workflowState: "WAITING_FOR_USER",
       },
       {
-        nextActiveTurn: authenticationPausePersistence ? null : undefined,
+        ...options,
+        nextActiveTurn: dispositionPausePersistence ? null : undefined,
         pause: { ...details, reason },
         publicActivity: activity(
           "runner",
@@ -797,7 +807,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ),
       },
     );
-    authenticationPausePersistence = false;
+    dispositionPausePersistence = false;
     return currentRun;
   }
 
@@ -1167,12 +1177,12 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     }
     return (
       turn.phase === "resolve-findings" &&
-      (
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:read-only:") !== true &&
-      ((
-        currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-      )?.checkpoint.startsWith("resolve-findings:workspace-write:") ||
+      retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:read-only:",
+      ) !== true &&
+      (retryCheckpointEvidence()?.checkpoint.startsWith(
+        "resolve-findings:workspace-write:",
+      ) ||
         state().availabilityCorrectionCharged ||
         counters().fixRounds < fixBudget())
     );
@@ -1245,7 +1255,8 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         ["check-and-fix", "resolve-findings"].includes(interruptedTurn.phase);
       const charged =
         interruptedTurn.phase === "check-and-fix"
-          ? current.pendingLazyCorrection?.fixRoundCharged
+          ? current.availabilityCorrectionCharged ||
+            current.pendingLazyCorrection?.fixRoundCharged
           : current.pendingCorrection;
       await transition(
         {
@@ -1296,7 +1307,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
               : current.findings,
           findings:
             currentRun.availabilityRetry == null &&
-            currentRun.inactivityRecovery == null &&
+            currentRun.inactivityRecovery?.expiryRevision == null &&
             !current.availabilityCorrectionCharged
               ? []
               : current.findings,
@@ -1304,7 +1315,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
           availabilityCorrectionCharged:
             current.availabilityCorrectionCharged ||
             currentRun.availabilityRetry != null ||
-            currentRun.inactivityRecovery != null,
+            currentRun.inactivityRecovery?.expiryRevision != null,
           reviewReconsideration: [],
           ...markPendingLazyCorrectionCharged(current),
         },
@@ -1331,6 +1342,19 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       interruptedRepositoryReconciled = false;
     }
     return true;
+  }
+
+  let resumedOutputCheckpoint =
+    currentRun.pause?.reason === "output_exhausted"
+      ? currentRun.pause.checkpoint
+      : null;
+  function retryCheckpointEvidence() {
+    return resumedOutputCheckpoint === null
+      ? (currentRun.availabilityRetry ??
+          (currentRun.inactivityRecovery?.expiryRevision != null
+            ? currentRun.inactivityRecovery
+            : null))
+      : { checkpoint: resumedOutputCheckpoint };
   }
 
   const availabilityRetry = Symbol("availability-retry");
@@ -1474,6 +1498,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
     let inactivityFailure = false;
     let availabilityFailure = false;
     let authenticationFailure = false;
+    let outputExhausted = false;
+    let exhaustedWorkspace;
+    async function persistReconciledWorkspace(nextState, options = {}) {
+      if (outputExhausted) {
+        exhaustedWorkspace = { state: nextState, options };
+      } else {
+        await transition(nextState, options);
+      }
+    }
     currentRun = await runtime.startAgentTurn(
       turn,
       consumeSourceFork
@@ -1501,6 +1534,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
         availabilityFailure = runtime.availability?.eligible(cause) === true;
         authenticationFailure =
           runtime.authentication?.eligible(cause) === true;
+        outputExhausted = runtime.outputExhaustion?.eligible(cause) === true;
       }
       nextRepositoryBaseline = baseline;
       if (access === "read-only") {
@@ -1543,7 +1577,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             contentChanged && current.workflowState === "RESOLVE_FINDINGS";
           const contentChangingLazyCheck =
             contentChanged && current.workflowState === "CHECK_AND_FIX";
-          await transition(
+          await persistReconciledWorkspace(
             contentChangingCorrection || contentChangingLazyCheck
               ? {
                   ...current,
@@ -1562,12 +1596,15 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
                     current.availabilityCorrectionCharged ||
                     ((availabilityFailure ||
                       authenticationFailure ||
+                      outputExhausted ||
                       inactivityFailure) &&
                       contentChangingLazyCheck) ||
-                    (authenticationFailure && contentChangingCorrection),
+                    ((authenticationFailure || outputExhausted) &&
+                      contentChangingCorrection),
                   reviewReconsideration: [],
                   ...(availabilityFailure ||
                   authenticationFailure ||
+                  outputExhausted ||
                   inactivityFailure
                     ? {
                         workflowState: current.workflowState,
@@ -1638,41 +1675,54 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
       }
       repositoryReconciled = true;
       if (
-        authenticationFailure &&
-        agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS
+        outputExhausted ||
+        (authenticationFailure &&
+          agentError?.failureClass !== STRUCTURED_OUTPUT_FAILURE_CLASS)
       ) {
         // A fresh recovery failure cannot disprove an earlier unrecorded fork.
         const hasPossibleSourceForkEffect =
           (request.session?.mode === "fork" &&
-            runtime.authentication.hasPossibleEffect(agentError)) ||
+            (runtime.outputExhaustion?.eligible(agentError)
+              ? runtime.outputExhaustion
+              : runtime.authentication
+            ).hasPossibleEffect(agentError)) ||
           (recovering &&
             polishingPolicy(state().settings).primarySessionScope ===
               "checkpoint" &&
             role !== "arbiter" &&
             currentRun.sessionLineage.source !== null &&
             latestSession?.contextKey !== contextKey);
+        const exhausted =
+          runtime.outputExhaustion?.eligible(agentError) === true;
         await pause(
-          "authentication_required",
+          exhausted ? "output_exhausted" : "authentication_required",
           {
-            code: "ERR_AUTHENTICATION_REQUIRED",
+            code: exhausted
+              ? "ERR_OUTPUT_EXHAUSTED"
+              : "ERR_AUTHENTICATION_REQUIRED",
             resumeState: state().workflowState,
+            ...(exhausted ? { role, checkpoint: availabilityCheckpoint } : {}),
           },
-          hasPossibleSourceForkEffect
-            ? {
-                authenticationSourceForkRecovery: Object.freeze({
-                  role,
-                  contextKey,
-                }),
-              }
-            : consumeSourceFork
-              ? { lazySourceForkConsumed: false }
-              : {},
+          {
+            ...exhaustedWorkspace?.state,
+            ...(hasPossibleSourceForkEffect
+              ? {
+                  authenticationSourceForkRecovery: Object.freeze({
+                    role,
+                    contextKey,
+                  }),
+                }
+              : consumeSourceFork
+                ? { lazySourceForkConsumed: false }
+                : {}),
+          },
+          exhaustedWorkspace?.options,
         );
         return null;
       }
     } finally {
       if (
-        !authenticationPausePersistence &&
+        !dispositionPausePersistence &&
         currentRun.activeTurn != null &&
         !isOwnershipFailure(agentError)
       ) {
@@ -1729,6 +1779,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
             outputContext,
           );
     }
+    resumedOutputCheckpoint = null;
     await recordSession(
       role,
       response.sessionId,
@@ -2075,11 +2126,7 @@ Include every listed command exactly once in requiredChecks. Do not execute thes
 
   function markPendingLazyCorrectionCharged(current) {
     const pending = current.pendingLazyCorrection;
-    if (
-      pending === null ||
-      pending.phase !== "CHECK_AND_FIX" ||
-      pending.fixRoundCharged
-    ) {
+    if (pending === null || pending.phase !== "CHECK_AND_FIX") {
       return {};
     }
     return {
@@ -4538,7 +4585,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     let current = state();
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       counters().fixRounds >= fixBudget()
@@ -4554,7 +4601,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     );
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       stableFindingIds.length > 0
@@ -4568,7 +4615,7 @@ ${JSON.stringify(current.finalizationResult, null, 2)}`;
     }
     if (
       currentRun.availabilityRetry == null &&
-      currentRun.inactivityRecovery == null &&
+      currentRun.inactivityRecovery?.expiryRevision == null &&
       !current.availabilityCorrectionCharged &&
       current.pendingLazyCorrection === null &&
       current.blockedSinceStagnation >= current.settings.stagnationWindowRounds
@@ -5975,9 +6022,7 @@ ${JSON.stringify(
       }
       return arbitrateStagnation();
     }
-    const retryCheckpoint = (
-      currentRun.availabilityRetry ?? currentRun.inactivityRecovery
-    )?.checkpoint;
+    const retryCheckpoint = retryCheckpointEvidence()?.checkpoint;
     const budgetExhausted =
       retryCheckpoint?.startsWith("resolve-findings:read-only:") === true ||
       (retryCheckpoint?.startsWith("resolve-findings:workspace-write:") !==
@@ -6234,7 +6279,8 @@ ${JSON.stringify(priorFindingDecisions(blockers.map(({ id }) => id)), null, 2)}`
             : candidateCheckpoint(current.settings);
           const alreadyCharged =
             interruptedTurn?.phase === "check-and-fix"
-              ? current.pendingLazyCorrection?.fixRoundCharged === true
+              ? current.availabilityCorrectionCharged ||
+                current.pendingLazyCorrection?.fixRoundCharged === true
               : current.pendingCorrection;
           await transition(
             {
@@ -6606,7 +6652,7 @@ ${evidence}`,
     }
   } catch (cause) {
     if (
-      authenticationPausePersistence ||
+      dispositionPausePersistence ||
       ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
         cause?.code,
       )

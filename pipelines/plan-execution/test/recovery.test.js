@@ -4,14 +4,25 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  attachOutputExhaustion,
+  outputExhaustion,
+} from "../../../test/support/output-exhaustion.js";
+import { attachInactivity } from "../../../test/support/inactivity.js";
+import {
+  attachAvailability,
+  availabilityFailure,
+} from "../../../test/support/availability.js";
+
+import {
   AgentBoundaryError,
   normalizeAdapterFailure,
   normalizeFailureRecord,
 } from "../../../src/agents/index.js";
-import { planExecutionPipeline } from "../src/index.js";
+import { planExecutionPipeline, runPlanExecution } from "../src/index.js";
 import {
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
+  CLARIFICATION_SCHEMA,
   CLEAN_CONFIRM_SCHEMA,
   FINALIZATION_SCHEMA,
   FINDING_RESOLUTION_SCHEMA,
@@ -1817,3 +1828,373 @@ for (const mode of ["independent", "lazy"]) {
     }
   }
 }
+
+for (const phase of ["prerequisite", "review"]) {
+  test(`interrupted narrative availability recovery bounds repeated ${phase} inactivity`, async (t) => {
+    let reviewAttempts = 0;
+    let expiries = 0;
+    let interrupt = true;
+    let expire = false;
+    let inactivity;
+    function expireAttempt(request) {
+      expiries++;
+      assert.ok(expiries <= 2, "Recovery retry is bounded.");
+      return inactivity.expire(request);
+    }
+    const fixture = await createFixture(t, {
+      worker: [
+        clarificationReady(),
+        clarificationReady(),
+        ...(phase === "review" ? [clarificationReady()] : []),
+        bootstrapReady("Worker"),
+        reconciliationResolved(),
+      ],
+      onContextReview(_role, request) {
+        if (++reviewAttempts === 1) throw availabilityFailure();
+        if (expire && phase === "review") return expireAttempt(request);
+      },
+      onRoleRun(_role, request) {
+        if (
+          expire &&
+          phase === "prerequisite" &&
+          request.schema === CLARIFICATION_SCHEMA
+        ) {
+          return expireAttempt(request);
+        }
+      },
+    });
+    attachAvailability(fixture, {
+      onWait() {
+        if (interrupt) {
+          interrupt = false;
+          throw new Error("Availability wait interrupted");
+        }
+      },
+    });
+    inactivity = await attachInactivity(fixture);
+    await assert.rejects(fixture.run(), { code: "ERR_AVAILABILITY_RECOVERY" });
+    assert.match(
+      fixture.currentRun.availabilityRetry.checkpoint,
+      /^plan-context:read-only:/u,
+    );
+    inactivity.restart();
+    expire = true;
+
+    const paused = await fixture.run();
+
+    assert.equal(paused.pause.reason, "backend_unavailable");
+    assert.equal(paused.pause.code, "ERR_PROVIDER_INACTIVE");
+    assert.equal(expiries, 2);
+    assert.equal(reviewAttempts, phase === "prerequisite" ? 1 : 3);
+    assert.equal(paused.activeTurn, null);
+    assert.equal(paused.inactivityRecovery.attempt, 2);
+    assert.ok(paused.inactivityRecovery.reconstructionRevision > 0);
+    assert.ok(paused.inactivityRecovery.expiryRevision > 0);
+    assert.match(
+      paused.inactivityRecovery.checkpoint,
+      /^plan-context:read-only:/u,
+    );
+    expire = false;
+    inactivity.restart();
+    assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+    assert.equal(fixture.currentRun.inactivityRecovery, null);
+  });
+}
+
+test("narrative review retains its consumed recovery allowance across repeated output exhaustion", async (t) => {
+  let reviewAttempts = 0;
+  const fixture = await createFixture(t, {
+    worker: [
+      clarificationReady(),
+      clarificationReady(),
+      clarificationReady(),
+      bootstrapReady("Worker"),
+      reconciliationResolved(),
+    ],
+    async onContextReview(_role, request) {
+      if (reviewAttempts < 3) {
+        reviewAttempts++;
+        assert.equal(request.session?.mode, "continue");
+        assert.equal(await request.onFreshSession(), reviewAttempts === 1);
+        if (reviewAttempts < 3) throw outputExhaustion();
+      }
+    },
+  });
+  attachOutputExhaustion(fixture);
+  const inactivity = await attachInactivity(fixture);
+  const paused = await fixture.run();
+  assert.equal(paused.pause.reason, "output_exhausted");
+  assert.equal(paused.pause.resumeState, "CLARIFY");
+  assert.match(paused.pause.checkpoint, /^plan-context:read-only:/u);
+  assert.equal(paused.activeTurn, null);
+  assert.equal(fixture.calls.worker.length, 1);
+  assert.equal(paused.inactivityRecovery.expiryRevision, null);
+  assert.equal(paused.inactivityRecovery.attempt, 2);
+  inactivity.restart();
+  const repeated = await fixture.run();
+  assert.equal(reviewAttempts, 2);
+  assert.deepEqual(repeated.pause, paused.pause);
+  assert.equal(fixture.calls.worker.length, 2);
+  assert.equal(repeated.inactivityRecovery.expiryRevision, null);
+  assert.equal(repeated.inactivityRecovery.attempt, 2);
+  inactivity.restart();
+  assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  assert.equal(reviewAttempts, 3);
+  assert.equal(fixture.currentRun.inactivityRecovery, null);
+});
+
+for (const checkpoint of ["IMPLEMENT", "FINALIZE", "CONFIRM"]) {
+  test(`output exhaustion pauses ${checkpoint} without replay and preserves progress`, async (t) => {
+    let failures = 0;
+    const fixture = await createFixture(t, {
+      async onRoleRun(_role, request) {
+        const matches =
+          checkpoint === "IMPLEMENT"
+            ? request.schema === IMPLEMENTATION_SCHEMA
+            : checkpoint === "FINALIZE"
+              ? request.schema === FINALIZATION_SCHEMA
+              : request.schema === REVIEW_SCHEMA;
+        if (matches && failures < 2) {
+          failures++;
+          if (request.access === "workspace-write") {
+            await writeFile(
+              join(request.cwd, "partial.txt"),
+              `Progress ${failures}\n`,
+            );
+          }
+          throw outputExhaustion();
+        }
+      },
+    });
+    attachOutputExhaustion(fixture);
+    const first = await fixture.run();
+    assert.equal(failures, 1);
+    assert.equal(first.pause.reason, "output_exhausted");
+    assert.equal(first.pause.resumeState, checkpoint);
+    assert.equal(first.activeTurn, null);
+    assert.equal(first.pipelineState.pendingCommit, null);
+    assert.equal(first.pipelineState.reviewedFingerprint, null);
+    const second = await fixture.run();
+    assert.equal(failures, 2);
+    assert.deepEqual(second.pause, first.pause);
+    assert.deepEqual(second.counters, first.counters);
+    if (checkpoint !== "CONFIRM") {
+      assert.equal(
+        await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+        "Progress 2\n",
+      );
+      assert.equal(second.pipelineState.finalizationResult, null);
+    } else {
+      assert.equal(second.pipelineState.finalizationResult.status, "PASS");
+    }
+    const pause = planExecutionPipeline.projections.pause(second);
+    assert.deepEqual(pause.nextActions, [{ type: "resume", action: null }]);
+    assert.equal(pause.evidence.length, 2);
+    assert.equal((await fixture.run()).pipelineState.workflowState, "DONE");
+  });
+}
+
+test("combined output-exhausted check/fix charges partial corrections once", async (t) => {
+  let failures = 0;
+  let publicationInterrupted = false;
+  const fixture = await createFixture(t, {
+    mode: "combined",
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    onTransition(_run, patch) {
+      if (
+        patch.pause?.reason === "output_exhausted" &&
+        !publicationInterrupted
+      ) {
+        publicationInterrupted = true;
+        throw Object.assign(new Error("Pause publication interrupted"), {
+          code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+        });
+      }
+    },
+    workWorker: [
+      implementationCompleted(),
+      checkAndFix(),
+      cleanConfirmation(),
+      finalizationPassed(),
+    ],
+    async onRoleRun(_role, request) {
+      if (request.schema === CHECK_AND_FIX_SCHEMA && failures < 2) {
+        failures++;
+        await writeFile(
+          join(request.cwd, "partial.txt"),
+          `Correction ${failures}\n`,
+        );
+        throw outputExhaustion();
+      }
+    },
+  });
+  attachOutputExhaustion(fixture);
+  await assert.rejects(fixture.run(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const first = fixture.currentRun;
+  const second = await fixture.run();
+  for (const run of [first, second]) {
+    assert.equal(run.pause.reason, "output_exhausted");
+    assert.equal(run.pause.resumeState, "CHECK_AND_FIX");
+    assert.equal(run.counters.fixRounds, 1);
+    assert.equal(run.activeTurn, null);
+    assert.equal(run.pipelineState.candidateConfirmationFingerprint, null);
+    assert.equal(run.pipelineState.candidateReviewedFingerprint, null);
+    assert.equal(run.pipelineState.finalizationResult, null);
+  }
+  await fixture.runtime.transition({
+    pipelineState: {
+      ...second.pipelineState,
+      workflowState: "CHECK_AND_FIX",
+    },
+    pause: null,
+  });
+  await fixture.runtime.startAgentTurn({
+    role: "worker",
+    phase: "check-and-fix",
+  });
+  await writeFile(join(fixture.projectPath, "partial.txt"), "Stopped repair\n");
+  const calls = fixture.calls.worker.length;
+  const stopped = await runPlanExecution({
+    run: fixture.currentRun,
+    runtime: fixture.runtime,
+    operatorStop: true,
+  });
+  assert.equal(stopped.counters.fixRounds, 1);
+  assert.equal(fixture.calls.worker.length, calls);
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+});
+
+for (const recovery of ["paused", "interrupted", "validation-migration"]) {
+  test(`output exhaustion preserves a malformed check/fix charge at the one-round boundary (${recovery})`, async (t) => {
+    const processLoss = new Error("Process stopped before reconciliation.");
+    let processStopped = false;
+    let attempts = 0;
+    const fixture = await createFixture(t, {
+      mode: "combined",
+      modeSettings: { maxFixRoundsPerStep: 1 },
+      workWorker: [
+        implementationCompleted(),
+        { ...checkAndFix("CHANGED"), unexpected: "rejected" },
+        ...(recovery === "validation-migration"
+          ? [bootstrapReady("Migrating Worker"), reconciliationResolved()]
+          : []),
+        checkAndFix(),
+        cleanConfirmation(),
+        finalizationPassed(),
+      ],
+      workReviewer:
+        recovery === "validation-migration"
+          ? [bootstrapReady("Migrating Reviewer"), reviewApproved()]
+          : [reviewApproved()],
+      async onRoleRun(_role, request) {
+        if (request.schema !== CHECK_AND_FIX_SCHEMA || ++attempts > 2) return;
+        await writeFile(
+          join(request.cwd, "partial.txt"),
+          `Correction ${attempts}\n`,
+        );
+        if (attempts === 2) {
+          assert.equal(fixture.currentRun.counters.fixRounds, 1);
+          assert.equal(
+            fixture.currentRun.pipelineState.pendingLazyCorrection
+              .fixRoundCharged,
+            true,
+          );
+          processStopped = recovery !== "paused";
+          throw outputExhaustion();
+        }
+      },
+    });
+    attachOutputExhaustion(fixture);
+    for (const [owner, method] of [
+      [fixture.runtime.git, "snapshot"],
+      [fixture.runtime, "transition"],
+      [fixture.runtime, "finishAgentTurn"],
+    ]) {
+      const operation = owner[method].bind(owner);
+      owner[method] = (...args) => {
+        if (processStopped) throw processLoss;
+        return operation(...args);
+      };
+    }
+
+    if (recovery !== "paused") {
+      await assert.rejects(fixture.run(), (cause) => cause === processLoss);
+      assert.deepEqual(fixture.currentRun.activeTurn, {
+        role: "worker",
+        phase: "check-and-fix",
+      });
+      processStopped = false;
+      if (recovery === "validation-migration") {
+        fixture.persistPipelineState({
+          ...fixture.currentRun.pipelineState,
+          validationMigrationPending: true,
+          validationScopeLegacy: true,
+          validationSchedule: null,
+          workerValidation: null,
+          reviewerValidation: null,
+        });
+      }
+    } else {
+      const paused = await fixture.run();
+      assert.equal(paused.pause.reason, "output_exhausted");
+      assert.equal(paused.pause.resumeState, "CHECK_AND_FIX");
+      assert.equal(paused.activeTurn, null);
+      assert.equal(paused.pipelineState.candidateConfirmationFingerprint, null);
+      assert.equal(paused.pipelineState.candidateReviewedFingerprint, null);
+      assert.equal(paused.pipelineState.finalizationResult, null);
+    }
+    assert.equal(fixture.currentRun.counters.fixRounds, 1);
+    assert.equal(
+      await readFile(join(fixture.projectPath, "partial.txt"), "utf8"),
+      "Correction 2\n",
+    );
+    const completed = await fixture.run();
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(completed.counters.fixRounds, 1);
+  });
+}
+
+test("output exhaustion retries the charged finding fix at the correction boundary", async (t) => {
+  let failures = 0;
+  const fixture = await createFixture(t, {
+    modeSettings: { maxFixRoundsPerStep: 1 },
+    workReviewer: [reviewFindings("R1"), reviewApproved()],
+    workWorker: [
+      implementationCompleted(),
+      resolution({ id: "R1", decision: "FIX" }),
+      finalizationPassed(),
+    ],
+    async onRoleRun(_role, request) {
+      if (request.schema === FINDING_RESOLUTION_SCHEMA) {
+        assert.equal(request.access, "workspace-write");
+        if (failures < 2) {
+          failures++;
+          await writeFile(
+            join(request.cwd, "partial.txt"),
+            `Repair ${failures}\n`,
+          );
+          throw outputExhaustion();
+        }
+      }
+    },
+  });
+  attachOutputExhaustion(fixture);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const paused = await fixture.run();
+    assert.equal(paused.pause.reason, "output_exhausted");
+    assert.equal(paused.pause.resumeState, "RESOLVE_FINDINGS");
+    assert.equal(paused.counters.fixRounds, 1);
+    assert.equal(paused.pipelineState.finalizationResult, null);
+  }
+  const completed = await fixture.run();
+  assert.equal(completed.pipelineState.workflowState, "DONE");
+  assert.equal(completed.counters.fixRounds, 1);
+});

@@ -1489,9 +1489,32 @@ export function assertRun(run) {
       checkpointAllowed(pipelineState.settings, run.pause.resumeState);
     const resumableRetry = [
       "authentication_required",
+      "output_exhausted",
       "backend_unavailable",
       "lazy_output_invalid",
     ].includes(run.pause.reason);
+    if (
+      run.pause.reason === "output_exhausted" &&
+      (!hasExactFields(run.pause, [
+        "reason",
+        "code",
+        "resumeState",
+        "role",
+        "checkpoint",
+      ]) ||
+        run.pause.code !== "ERR_OUTPUT_EXHAUSTED" ||
+        !Object.hasOwn(run.roles, run.pause.role) ||
+        typeof run.pause.checkpoint !== "string" ||
+        typeof run.pause.resumeState !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9:._-]{0,127}$/u.test(run.pause.checkpoint) ||
+        !run.pause.checkpoint.startsWith(
+          `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:read-only:`,
+        ) ||
+        (pipelineState.settings.mode === "lazy" &&
+          run.pause.role !== "planner"))
+    ) {
+      throw workflowError("Invalid output-exhaustion pause.");
+    }
     if (
       run.pause.reason === "authentication_required" &&
       (!hasExactFields(run.pause, ["reason", "code", "resumeState"]) ||

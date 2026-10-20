@@ -142,8 +142,9 @@ export function createInactivityCoordinator({
   return Object.freeze({
     async pending() {
       // A journal append may have succeeded before publication threw.
-      pending = (await runStore.loadRun(runId)).inactivityRecovery !== null;
-      return pending;
+      const recovery = (await runStore.loadRun(runId)).inactivityRecovery;
+      pending = recovery !== null;
+      return recovery?.expiryRevision != null;
     },
     eligible: (cause) =>
       cause?.code === "ERR_PROVIDER_INACTIVE" && cause.recoverable === true,
@@ -173,7 +174,7 @@ export function createInactivityCoordinator({
       // Backoff can continue after a new availability failure, but a stale
       // episode cannot replenish a reconstruction lost with its owner.
       if (
-        recovery.attempt === 2 &&
+        (recovery.attempt === 2 || recovery.expiryRevision == null) &&
         !manualRetry &&
         !(
           recovery.status === "reconstructing" &&
@@ -183,7 +184,15 @@ export function createInactivityCoordinator({
             recovery.reconstructionRevision
         )
       )
-        throw inactive();
+        throw recovery.expiryRevision != null
+          ? inactive()
+          : Object.assign(
+              new RunnerError(
+                "Provider reconstruction allowance was consumed.",
+                { code: "ERR_PROVIDER_RECONSTRUCTION_EXHAUSTED" },
+              ),
+              { recoverable: true },
+            );
       manualRetry = false;
       return record(
         { ...recovery, attempt: 2, status: "reconstructing" },
@@ -203,7 +212,10 @@ export function createInactivityCoordinator({
           "Inactivity recovery requires retired ownership.",
           { code: "ERR_INACTIVITY_RECOVERY" },
         );
-      return run.inactivityRecovery?.attempt === 1;
+      return (
+        run.inactivityRecovery?.attempt === 1 &&
+        run.inactivityRecovery.expiryRevision != null
+      );
     },
     async invoke(role, operation, request) {
       const run = await runStore.loadRun(runId);

@@ -1313,6 +1313,10 @@ export function createRunStore({
           ...state,
           inactivityRecovery: {
             ...recovery,
+            expiryRevision:
+              kind === "expired"
+                ? state.revision + 1
+                : (state.inactivityRecovery?.expiryRevision ?? null),
             reconstructionRevision:
               kind === "reconstructing"
                 ? state.revision + 1

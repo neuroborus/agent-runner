@@ -75,6 +75,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   operator_paused:
     "The operator paused this run; resume restores its checkpoint and any existing blockers.",
   operator_canceled: "The operator canceled this run; it cannot resume.",
+  output_exhausted:
+    "The provider exhausted its response output. Progress was preserved; explicitly resume the suspended checkpoint, or start a new run with smaller work units if exhaustion repeats.",
   authentication_required:
     "Provider authentication is required; reauthenticate, then resume the same checkpoint.",
   backend_unavailable: "The selected backend is temporarily unavailable.",
@@ -116,6 +118,12 @@ function publicExplanation(pause, fallback) {
 }
 
 function publicEvidence(run) {
+  if (run.pause.reason === "output_exhausted") {
+    return Object.freeze([
+      `Suspended role: ${run.pause.role}.`,
+      `Suspended checkpoint: ${run.pause.checkpoint}.`,
+    ]);
+  }
   const diagnostics = run.pipelineState.pendingLazyCorrection?.diagnostics;
   return Object.freeze(
     run.pause.reason === "lazy_output_invalid" && Array.isArray(diagnostics)
@@ -142,6 +150,7 @@ function publicResumeState(run) {
   return run.pipelineState.workflowState === "WAITING_FOR_USER" &&
     [
       "authentication_required",
+      "output_exhausted",
       "backend_unavailable",
       "lazy_output_invalid",
     ].includes(run.pause.reason) &&
@@ -257,6 +266,7 @@ function validateResumeAction(run, action) {
     (run.pipelineState.pendingEdit === null &&
       ![
         "authentication_required",
+        "output_exhausted",
         "backend_unavailable",
         "lazy_output_invalid",
       ].includes(run.pause?.reason)) ||

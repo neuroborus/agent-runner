@@ -12,7 +12,7 @@ import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { normalizeObservationState } from "./observations.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 19;
+export const RUN_STATE_SCHEMA_VERSION = 20;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -46,6 +46,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   16,
   17,
   18,
+  19,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
