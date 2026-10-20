@@ -48,8 +48,26 @@ test("Windows effective composition joins independently approved bindings to act
   );
   assert.ok(reads > f.objects.length);
 });
-test("Windows expected manifests cannot manufacture native access, MIC, object identities or coverage", async () => {
+test("Windows expected manifests cannot manufacture token authority, native access, MIC, object identities or coverage", async () => {
   for (const change of [
+    (f) => {
+      f.token.userSid = "S-1-5-21-1-2-3-1004";
+    },
+    (f) => {
+      f.token.enabledGroups.push("S-1-5-32-544");
+    },
+    (f) => {
+      f.token.privileges.push("0000000000000014");
+    },
+    (f) => {
+      f.token.restrictedSids = [];
+    },
+    (f) => {
+      f.token.integritySid = "S-1-16-8192";
+    },
+    (f) => {
+      delete f.token.primary;
+    },
     (f) => {
       delete f.options.binding;
     },

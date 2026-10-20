@@ -5,6 +5,24 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-20 — Admit ordinary Windows accounts through effective authority
+
+Ordinary experiment account readback no longer gates admission on the coarse
+NetAPI `USER_PRIV_USER` label. Exact recorded principal, empty local groups,
+creation flags, assigned rights, successful queries and checked user-buffer
+release remain mandatory. Existing independent restricted-token observations
+require disabled groups, removed privileges, the exact restricting SID and low
+integrity; effective-policy readers still prove actual access before release.
+These native proofs cover the removed label's authority purpose. Reviewed
+admission and account creation settings remain strict and unchanged.
+
+Protected account records still authorize adoption and partial cleanup without a
+live payload token. Missing authority or retirement evidence retains refusal and
+custody. Portable regressions distinguish metadata variation from actual authority
+changes and cleanup failures; they infer no observed numeric privilege value or
+native acceptance. Windows socket attribution, audit delivery and independent
+retirement still require fresh matching native workflow evidence.
+
 ## 2026-10-20 — Prove closed experiment Windows custody without live originals
 
 Protected original intent, close, birth and result receipts now select explicit

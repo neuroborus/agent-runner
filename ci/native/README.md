@@ -7044,14 +7044,27 @@ match them and the approved template's `policy.endpoints`. Account intent withou
 retirement deletes only an unchanged owned account after an empty never-used Job,
 then independently proves account/rights/Job absence and closes the case reader,
 observer and receipt custodian. Missing reads or cancelled cleanup retain custody.
-Account readback keeps the exact `USER_PRIV_USER` and
-`UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD` predicate requested at
+Reviewed account readback keeps the exact `USER_PRIV_USER` predicate requested at
 [creation](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netuseradd).
+Only ordinary `NATIVE_CI_EXPERIMENT` account admission ignores that coarse
+privilege label. Both paths still require successful queries, a present user
+buffer, the exact recorded SID, empty local-group membership, the exact
+`UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD` flags and all five assigned
+rights. Creation flags, groups, rights and credentials are unchanged.
+Before ordinary payload admission, the retained independent token readers require
+the exact principal, no enabled groups or remaining privileges, the single exact
+restricting SID, low integrity, session zero and primary nonvirtualized token
+semantics without the write-restricted read escape. Existing effective-policy
+readers still prove actual ACL/MIC and access behavior. These observations cover
+the authority purpose of the omitted metadata label; incomplete evidence still
+refuses payload release. Protected-record adoption and partial retirement retain
+the account-only SID/group/rights checks before a payload exists or after it
+retires; neither manufactures a live token observation.
 [NetUserGetInfo](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/nf-lmaccess-netusergetinfo)
 returns its own NetAPI status; [USER_INFO_1](https://learn.microsoft.com/en-us/windows/win32/api/lmaccess/ns-lmaccess-user_info_1)
 defines the level-one privilege and flags. On refusal, bounded
 `native-windows-account` diagnostics report status, buffer presence, whether numeric
-fields were sampled, actual privilege/flags and their exact expected values.
+fields were sampled, actual privilege/flags and their requested creation values.
 Every returned buffer is released before the separate admission checks;
 [NetApiBufferFree](https://learn.microsoft.com/en-us/windows/win32/api/lmapibuf/nf-lmapibuf-netapibufferfree)
 failure has its own cleanup diagnostic. The existing guard receives the API's
@@ -7059,7 +7072,8 @@ status, `ERROR_INVALID_DATA` for invalid readback, or a sole release failure's
 status, preserving the original refusal across cleanup and diagnostic writes.
 No name, SID, credential or account structure is logged. The prior compound
 failure did not identify the failed native value; fresh matching Windows CI
-must supply it. No flag change or functional account repair is inferred.
+must supply it. No numeric privilege value, flag change or native acceptance is
+inferred from this ordinary admission change.
 The private `win32/case-effects.js` owner now composes literal/storage and every
 fixed ownership case without `ownerEffects` callbacks. An independently approved
 `windows-ownership` policy describes the six held objects, exact dual-SID masks,

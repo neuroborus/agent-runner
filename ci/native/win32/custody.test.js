@@ -4437,7 +4437,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
   assert.deepEqual(fallback, ["open", ["custody-reader.c", 274, 87]]);
 });
 
-test("Windows account readback retains exact NetAPI, buffer, privilege and flag refusals through release", async () => {
+test("Windows account readback distinguishes ordinary metadata variation from reviewed privilege and authority refusals", async () => {
   const [account, custody, launcher] = await Promise.all(
     ["account.h", "custody.h", "launcher.c"].map((file) =>
       readFile(new URL(file, import.meta.url), "utf8"),
@@ -4449,8 +4449,12 @@ test("Windows account readback retains exact NetAPI, buffer, privilege and flag 
     ),
     end = account.indexOf("  LSA_OBJECT_ATTRIBUTES attributes", start);
   assert.ok(start > 0 && end > start);
-  const project = (source) =>
+  const project = (source, experiment = false) =>
     source
+      .replace(
+        /#ifndef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu,
+        (_, reviewed) => (experiment ? "" : reviewed),
+      )
       .replace("USER_INFO_1 *user = NULL", "let user = NULL")
       .replace("(BYTE **)&user", "{set value(v){user=v}}")
       .replace(/\(unsigned\)(present|sampled)\b/gu, "Number($1)")
@@ -4459,9 +4463,11 @@ test("Windows account readback retains exact NetAPI, buffer, privilege and flag 
       .replaceAll("->", ".")
       .replace(/^#(?:ifdef|endif).*$/gmu, "");
   const expectedFlags = 0x10201;
-  for (const [owner, source] of [
-    ["custody", custody],
-    ["launcher", launcher],
+  for (const [owner, source, experiment] of [
+    ["custody", custody, false],
+    ["custody", custody, true],
+    ["launcher", launcher, false],
+    ["launcher", launcher, true],
   ]) {
     const guard = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
       source,
@@ -4470,14 +4476,17 @@ test("Windows account readback retains exact NetAPI, buffer, privilege and flag 
     const program = new Script(`
       function need_at(ok,file,line){${project(guard)}}
       function need(ok){need_at(!!ok,"account.h",17);}
-      (name)=>{${project(account.slice(start, end))}}
+      (name)=>{${project(account.slice(start, end), experiment)}}
     `);
     for (const [options, expectedError, predicate] of [
       [{}, null],
       [{ status: 5, present: false }, 5, "status"],
       [{ status: 234 }, 234, "status"],
       [{ present: false }, 13, "buffer"],
-      [{ privilege: 2 }, 13, "privilege"],
+      [{ privilege: 2 }, experiment ? null : 13, "privilege"],
+      [{ privilege: 0 }, experiment ? null : 13, "privilege"],
+      [{ privilege: 0xffffffff }, experiment ? null : 13, "privilege"],
+      [{ privilege: 2, release: 87 }, experiment ? 87 : 13, "release"],
       [{ flags: expectedFlags + 0x80000000 }, 13, "flags"],
       [{ release: 87 }, 87, "release"],
       [{ status: 5, release: 87 }, 5, "status"],
@@ -4629,6 +4638,146 @@ test("Windows account readback retains exact NetAPI, buffer, privilege and flag 
         if (options.release)
           assert.deepEqual(diagnostics[1].values, [87], predicate);
       }
+  }
+});
+
+test("Windows account-only adoption and retirement retain exact principal, group and rights checks without a child token", async () => {
+  const source = await readFile(new URL("account.h", import.meta.url), "utf8"),
+    body = /static void account_check\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const start = body.indexOf("  USER_INFO_1 *user = NULL;"),
+    end = body.indexOf("  LSA_OBJECT_ATTRIBUTES attributes", start);
+  assert.ok(start > 0 && end > start);
+  // The preceding regression owns NetAPI metadata/release and both build modes.
+  // Execute the remaining account authority guards with no child/token APIs.
+  const project = (body.slice(0, start) + body.slice(end))
+      .replace("BYTE sid[SECURITY_MAX_SID_SIZE];", "const sid = {};")
+      .replace("wchar_t domain[256], *text;", "const domain = []; let text;")
+      .replace("LOCALGROUP_USERS_INFO_0 *groups;", "let groups;")
+      .replace(
+        "LSA_OBJECT_ATTRIBUTES attributes = {0};",
+        "const attributes = {};",
+      )
+      .replace("LSA_UNICODE_STRING *rights;", "let rights;")
+      .replace("&attributes", "attributes")
+      .replace(
+        /const wchar_t \*approved\[\] = \{([^;]+)\}/u,
+        "const approved = [$1]",
+      )
+      .replace("(BYTE **)&groups", "&groups")
+      .replace(
+        /&(sidSize|domainSize|type|text|groups|count|total|policy|rights|number)\b/gu,
+        (_, name) => `{set value(v){${name}=v}}`,
+      )
+      .replace(/sizeof\(\w+\)/gu, "1")
+      .replace(/\b(\d+)U\b/gu, "$1")
+      .replace(/\b(?:DWORD|SID_NAME_USE|LSA_HANDLE|ULONG|unsigned) /gu, "let ")
+      .replaceAll('L"', '"'),
+    program = new Script(`(name, expected)=>{${project}}`),
+    expected = "S-1-5-21-1-2-3-1001",
+    approved = [
+      "SeBatchLogonRight",
+      "SeDenyInteractiveLogonRight",
+      "SeDenyRemoteInteractiveLogonRight",
+      "SeDenyNetworkLogonRight",
+      "SeDenyServiceLogonRight",
+    ];
+  for (const options of [
+    {},
+    { sid: "S-1-5-21-1-2-3-1002" },
+    { type: 2 },
+    { groupStatus: 5 },
+    { count: 1 },
+    { total: 1 },
+    { rightsStatus: 5 },
+    { rights: approved.slice(1) },
+    { rights: [...approved.slice(0, 4), "SeDebugPrivilege"] },
+    { rights: [...approved.slice(0, 4), approved[0]] },
+  ]) {
+    const reads = [],
+      rights = (options.rights ?? approved).map((name) => ({
+        Buffer: name,
+        Length: name.length,
+      })),
+      api = {
+        NULL: null,
+        SECURITY_MAX_SID_SIZE: 68,
+        MAX_PREFERRED_LENGTH: -1,
+        SidTypeUser: 1,
+        NERR_Success: 0,
+        POLICY_LOOKUP_NAMES: 1,
+        need(ok) {
+          assert.ok(ok, "Account authority refused");
+        },
+        LookupAccountNameW(server, name, sid, size, domain, domainSize, type) {
+          assert.equal(name, "fixture-account");
+          reads.push("principal");
+          sid.text = options.sid ?? expected;
+          type.value = options.type ?? 1;
+          return true;
+        },
+        ConvertSidToStringSidW(sid, text) {
+          text.value = sid.text;
+          return true;
+        },
+        wcscmp: (a, b) => Number(a !== b),
+        wcslen: (text) => text.length,
+        wcsncmp: (a, b, size) => Number(a.slice(0, size) !== b.slice(0, size)),
+        LocalFree() {},
+        NetUserGetLocalGroups(
+          server,
+          name,
+          level,
+          flags,
+          groups,
+          maximum,
+          count,
+          total,
+        ) {
+          reads.push("groups");
+          groups.value = [];
+          count.value = options.count ?? 0;
+          total.value = options.total ?? 0;
+          return options.groupStatus ?? 0;
+        },
+        NetApiBufferFree() {
+          reads.push("group-release");
+          return 0;
+        },
+        LsaOpenPolicy(server, attributes, access, policy) {
+          policy.value = 1;
+          return 0;
+        },
+        LsaEnumerateAccountRights(policy, sid, output, count) {
+          reads.push("rights");
+          output.value = rights;
+          count.value = rights.length;
+          return options.rightsStatus ?? 0;
+        },
+        LsaFreeMemory(value) {
+          assert.equal(value, rights);
+          reads.push("rights-release");
+        },
+        LsaClose() {
+          reads.push("policy-close");
+        },
+      },
+      run = () => program.runInNewContext(api)("fixture-account", expected);
+    if (Object.keys(options).length)
+      assert.throws(run, /Account authority refused/u);
+    else {
+      run();
+      assert.deepEqual(reads, [
+        "principal",
+        "groups",
+        "group-release",
+        "rights",
+        "rights-release",
+        "policy-close",
+      ]);
+    }
   }
 });
 

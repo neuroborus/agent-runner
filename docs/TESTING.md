@@ -1234,16 +1234,23 @@ Narrow native source guards protect returned-status APIs, attribute sizing,
 held executable checks, first-cause capture before cleanup, distinct stdio handles,
 child-required inheritance and serialized stderr forwarding with owned joins.
 The Windows custody suite executes the account readback and both native guard
-bodies with injected NetAPI calls. It rejects API failure, a missing success
-buffer, privilege/flag mismatch and failed buffer release, preserves the first
-refusal alongside cleanup status, and keeps diagnostic write failures independent.
+bodies with injected NetAPI calls for ordinary and reviewed builds. Ordinary
+metadata-label variation succeeds silently; reviewed privilege mismatch, API
+failure, a missing success buffer, wrong flags and failed buffer release still
+refuse admission. Mixed label/release failures preserve the correct first
+refusal alongside cleanup status, and keep diagnostic write failures independent.
 Failed queries never expose unsampled fields; only the two numeric fields are read
 before each returned buffer's single release. Valid admission remains silent.
+Account-only native guard fixtures reject wrong SIDs, nonempty groups and missing,
+duplicate or unexpected rights without a child/token API. Effective-policy
+regressions separately reject wrong token principals, enabled groups, remaining
+privileges, missing restricting SIDs, elevated integrity and malformed token data;
+existing actual-access and interrupted-cleanup refusals remain in force.
 Existing interrupted-provisioning coverage retains possible account effects until
 independent original-domain cleanup is proved. These cases infer no native account
 value or flag repair and never log credentials or whole account structures.
-These fast cases
-invoke no Windows process or compiler and add no slow or native-harness check.
+These portable cases invoke no Windows process or compiler and leave the required
+check inventory and slow-tier assignments unchanged.
 Actual compilation, diagnostic delivery, confined Git behavior, token/image
 admission and independent cleanup remain pending fresh matching Windows
 observations from both workflows. Portable passing results are not native

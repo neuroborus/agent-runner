@@ -133,7 +133,11 @@ static void account_check(const wchar_t *name, const wchar_t *expected) {
   NET_API_STATUS released = user ? NetApiBufferFree(user) : NERR_Success;
   DWORD failure = status;
   if (status == NERR_Success)
-    failure = !present || privilege != USER_PRIV_USER || flags != expectedFlags ? ERROR_INVALID_DATA : released;
+    failure = !present ||
+#ifndef NATIVE_CI_EXPERIMENT
+      privilege != USER_PRIV_USER ||
+#endif
+      flags != expectedFlags ? ERROR_INVALID_DATA : released;
   if (failure != NERR_Success) {
     fprintf(stderr, "native-windows-account: status=%lu present=%u sampled=%u privilege=%lu flags=%lu expected-privilege=%lu expected-flags=%lu\n",
       status, (unsigned)present, (unsigned)sampled, privilege, flags, (DWORD)USER_PRIV_USER, expectedFlags);
@@ -143,7 +147,11 @@ static void account_check(const wchar_t *name, const wchar_t *expected) {
   }
   need(status == NERR_Success);
   need(present);
+#ifndef NATIVE_CI_EXPERIMENT
+  /* Ordinary admission instead requires the independently read restricted
+   * token and effective policy before release; adoption/retirement need no child. */
   need(privilege == USER_PRIV_USER);
+#endif
   need(flags == expectedFlags);
   need(released == NERR_Success);
   LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights; ULONG number;

@@ -2184,8 +2184,15 @@ setup, complete external authority policy and suspended payload admission each
 have a parked acknowledgement barrier; protected receipts and independent native
 token, Job-object, creation-time, image/parser, policy and storage reads precede
 release. Account/setup APIs belong to that launcher; WFP and verifier helpers have
-separately bound stable identities and source pins. Literal UCRT fixture output
-joins actual UTF-16 arguments to the private native image/current directory.
+separately bound stable identities and source pins.
+Only ordinary experiment account admission omits the NetAPI privilege label;
+reviewed admission retains it. Exact SID, empty groups, flags, assigned rights and
+checked user-buffer release remain required. Independent restricted-token and
+effective-policy observations supply the retained authority proof before payload
+release. Protected-record adoption and partial retirement need account-only checks,
+including before creation or after retirement of a payload, without a live child
+token requirement. Literal UCRT fixture output joins actual UTF-16 arguments to
+the private native image/current directory.
 Missing SDK/loader/policy/observer/retirement inputs retain BLOCKED; faults retain
 all reservations and never infer retirement from exit or Job-handle closure.
 The inspected Codex creation-time attribute precedent confers no approval of its
