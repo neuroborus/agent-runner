@@ -1683,11 +1683,20 @@ independent payload retirement, observer drain and retirement, and fresh reads
 of unchanged baseline or exactly owned per-user policy and SACL changes.
 The effective suite also executes the actual native security-reader/writer and
 custody failure bodies with injected APIs. It checks identity-query reopen rights,
-complete security selectors, borrowed registry handles, separate native/status
-and invariant refusals, volume/file-ID substitution, descriptor bounds and partial
-handle/descriptor release. Close, free and diagnostic failures cannot replace the
+compatible read/write/delete sharing with a live DELETE-granted open on the same
+object, unchanged observer desired access without DELETE, and temporary-only
+closure while source and control handles remain live. Injected reopening refuses
+incompatible sharing, so reverting either temporary sharing mask makes the
+existing success regression fail. This models sharing compatibility without
+changing original protective handles or control-handle access and sharing.
+Existing cases retain complete security selectors, borrowed registry handles,
+separate native/status and invariant refusals, volume/file-ID substitution,
+descriptor bounds and partial handle/descriptor release. Close, free and
+diagnostic failures cannot replace the
 original error; no failed close is retried. These fixtures run no Windows API or
-compiler and add no slow-tier requirement.
+compiler and add no slow-tier requirement. Their injected sharing refusal does
+not identify the historical compound error5 cause, establish an observed native
+error32, or confer Windows acceptance. Fresh original Windows CI remains necessary.
 Their focused commands are `node ci/native/win32/effective.test.js` and
 `node ci/native/win32/audit.test.js`. Harness discovery includes both without
 removing existing coverage. They perform no native build, audit mutation, task

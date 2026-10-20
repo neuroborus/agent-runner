@@ -9897,22 +9897,33 @@ route/flow/callout/precedence view. Missing coverage cannot become inferred flag
 
 Both native security reopen masks include `FILE_READ_ATTRIBUTES` for their
 `FileIdInfo` queries. These rights belong to temporary trusted observer handles;
-payload grants remain unchanged. Original identity, reopening, reopened identity,
-same-object comparison, descriptor read/write and close failures have separate
+payload grants remain unchanged. Both temporary reopens share read, write and
+delete access so they can coexist with a live DELETE-granted control open on the
+same object. `FILE_SHARE_DELETE` accommodates existing access; it does not grant
+`DELETE` to either observer. Original protective handles retain their existing
+access and sharing restrictions, and control-handle access and sharing remain
+unchanged. Original identity, reopening, reopened identity, same-object
+comparison, descriptor read/write and close failures have separate
 call sites and finite diagnostics. Win32 errors are saved immediately;
 `GetSecurityInfo` and `SetSecurityInfo` use their returned status codes. Identity
 and descriptor invariants remain distinct from API failures. Partial failures
 release temporary handles and returned descriptors before entering the existing
 custody failure owner, retaining the first cause and separate cleanup diagnostics.
-No-follow flags, no-delete sharing and complete owner/group/DACL/label/SACL reads
-remain required. The historical compound error does not identify its failed
-subcall; portable regressions establish no matching Windows native acceptance.
+No-follow flags, original protective no-delete sharing and complete
+owner/group/DACL/label/SACL reads remain required. The existing injected fixture
+exercises both actual security bodies while a DELETE-granted open remains live
+on the same object, refusing incompatible temporary sharing. The historical
+compound error does not identify its failed subcall; this sharing correction
+does not attribute that failure or claim an observed native error32. Portable
+regressions establish no matching Windows native acceptance; fresh original
+Windows CI remains necessary.
 
 The sealed plan distinguishes immutable `data` from explicitly reviewed
 `mutable` leaves. Only mutable leaves permit shared writes while their handles
 remain held; images, helpers, SDK and immutable data keep their existing sharing
-restrictions. No held leaf or ancestor permits shared deletion. Held directories
-omit DELETE access so subsequent ancestor reads can preserve that restriction.
+restrictions. Original protective leaf and ancestor handles prohibit shared
+deletion. Held directories omit DELETE access so subsequent ancestor reads can
+preserve that restriction.
 Barrier reads require settled writers, stable native identities/metadata and
 actual bytes; empty files have an observed empty digest. Bounded no-follow tree and ancestor
 reads supply protected Git configuration, refs, pointer, content and metadata

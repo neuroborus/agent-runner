@@ -24,6 +24,7 @@ async function securityNative({
   freeFailure,
   registry = false,
   length = 64,
+  deleteOpen = false,
 } = {}) {
   const [source, custody] = await Promise.all(
     ["effective-reader.h", "custody.h"].map((name) =>
@@ -58,6 +59,7 @@ async function securityNative({
   const calls = [],
     diagnostics = [],
     guards = [],
+    opens = new Map(),
     sd = { descriptor: true };
   let lastError = 999;
   const api = {
@@ -72,10 +74,12 @@ async function securityNative({
     ERROR_INVALID_SECURITY_DESCR: 1338,
     READ_CONTROL: 0x20000,
     WRITE_DAC: 0x40000,
+    DELETE: 0x10000,
     ACCESS_SYSTEM_SECURITY: 0x1000000,
     FILE_READ_ATTRIBUTES: 0x80,
     FILE_SHARE_READ: 1,
     FILE_SHARE_WRITE: 2,
+    FILE_SHARE_DELETE: 4,
     FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
     FILE_FLAG_BACKUP_SEMANTICS: 0x2000000,
     SE_FILE_OBJECT: 1,
@@ -94,10 +98,12 @@ async function securityNative({
       assert.equal(size, 24);
       const operation = handle === 1 ? "original-id" : "reopened-id";
       assert.ok(handle === 1 || handle === 2);
+      const open = opens.get(handle);
+      assert.ok(open, "Identity queries require a live handle");
       calls.push(operation);
       lastError = handle === 1 ? 5 : 87;
       if (fault === operation) return false;
-      target.fill(1);
+      open.identity.copy(target);
       if (handle === 2 && fault === "volume") target[0]++;
       if (handle === 2 && fault === "file-id") target[23]++;
       return true;
@@ -105,6 +111,8 @@ async function securityNative({
     FileIdInfo: "FileIdInfo",
     ReOpenFile(handle, access, sharing, flags) {
       assert.equal(handle, 1);
+      const original = opens.get(handle);
+      assert.ok(original, "The borrowed source must remain live");
       assert.equal(
         access,
         api.READ_CONTROL |
@@ -112,14 +120,27 @@ async function securityNative({
           api.FILE_READ_ATTRIBUTES |
           (writer ? api.WRITE_DAC : 0),
       );
-      assert.equal(sharing, api.FILE_SHARE_READ | api.FILE_SHARE_WRITE);
       assert.equal(
         flags,
         api.FILE_FLAG_OPEN_REPARSE_POINT | api.FILE_FLAG_BACKUP_SEMANTICS,
       );
       calls.push("reopen");
       lastError = 32;
-      return fault === "reopen" ? -1 : 2;
+      // Sharing must accommodate DELETE already granted to another live open
+      // of this object, even though the observer requests no DELETE access.
+      const incompatible = [...opens.values()].some(
+        (open) =>
+          open.identity.equals(original.identity) &&
+          (open.access & api.DELETE) !== 0 &&
+          (sharing & api.FILE_SHARE_DELETE) === 0,
+      );
+      if (fault === "reopen" || incompatible) return -1;
+      assert.equal(
+        sharing,
+        api.FILE_SHARE_READ | api.FILE_SHARE_WRITE | api.FILE_SHARE_DELETE,
+      );
+      opens.set(2, { access, identity: original.identity });
+      return 2;
     },
     memcmp: (left, right, size) =>
       Buffer.compare(left.subarray(0, size), right.subarray(0, size)),
@@ -153,10 +174,13 @@ async function securityNative({
       return fault === "descriptor" ? 87 : 0;
     },
     CloseHandle(handle) {
-      assert.equal(handle, 2, "Never close the original held object");
+      assert.equal(handle, 2, "Never close borrowed source or control handles");
+      assert.ok(opens.has(handle), "Close only a live temporary handle");
       calls.push("close");
       lastError = 6;
-      return !(closeFailure || fault === "close");
+      if (closeFailure || fault === "close") return false;
+      opens.delete(handle);
+      return true;
     },
     LocalFree(value) {
       assert.equal(value, sd);
@@ -182,6 +206,13 @@ async function securityNative({
       });
     },
   };
+  opens.set(1, {
+    access: api.READ_CONTROL | api.FILE_READ_ATTRIBUTES,
+    identity: Buffer.alloc(24, 1),
+  });
+  if (deleteOpen) {
+    opens.set(3, { access: api.DELETE, identity: opens.get(1).identity });
+  }
   const native = new Script(
     [
       project(custody, "need_at", "ok,file,line"),
@@ -198,6 +229,7 @@ async function securityNative({
   return {
     calls,
     diagnostics,
+    opens,
     sd,
     run: () =>
       writer
@@ -206,8 +238,8 @@ async function securityNative({
   };
 }
 
-test("Windows native security handles request identity-query rights and retain complete observations", async () => {
-  const read = await securityNative({ length: 65536 });
+test("Windows native security observers share existing DELETE opens with exact rights and complete observations", async () => {
+  const read = await securityNative({ length: 65536, deleteOpen: true });
   assert.equal(read.run(), read.sd);
   assert.deepEqual(read.calls, [
     "original-id",
@@ -218,7 +250,7 @@ test("Windows native security handles request identity-query rights and retain c
     "size",
     "close",
   ]);
-  const write = await securityNative({ writer: true });
+  const write = await securityNative({ writer: true, deleteOpen: true });
   write.run();
   assert.deepEqual(write.calls, [
     "original-id",
@@ -227,6 +259,12 @@ test("Windows native security handles request identity-query rights and retain c
     "descriptor",
     "close",
   ]);
+  for (const f of [read, write]) {
+    assert.deepEqual([...f.opens.keys()], [1, 3]);
+    assert.equal(f.opens.get(3).access, 0x10000);
+    assert.equal(f.opens.get(3).identity, f.opens.get(1).identity);
+    assert.deepEqual(f.diagnostics, []);
+  }
   const registry = await securityNative({ registry: true });
   assert.equal(registry.run(), registry.sd);
   assert.deepEqual(registry.calls, ["descriptor", "valid", "size"]);

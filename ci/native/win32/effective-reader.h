@@ -65,7 +65,7 @@ static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
     FILE_ID_INFO before, after;
     BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
     if (!read) file_security_failure("security-read-original-id", TRUE, error, temporary, NULL, __LINE__);
-    temporary = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+    temporary = ReOpenFile(file, READ_CONTROL | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
       FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
     if (temporary == INVALID_HANDLE_VALUE) file_security_failure("security-read-reopen", TRUE, error, temporary, NULL, __LINE__);
     actual = temporary;
@@ -90,7 +90,7 @@ static void set_file_security(HANDLE file, SECURITY_INFORMATION info, PACL dacl,
   BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
   if (!read) file_security_failure("security-write-original-id", TRUE, error, INVALID_HANDLE_VALUE, NULL, __LINE__);
   HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES,
-    FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
+    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
   if (writer == INVALID_HANDLE_VALUE) file_security_failure("security-write-reopen", TRUE, error, writer, NULL, __LINE__);
   read = GetFileInformationByHandleEx(writer, FileIdInfo, &after, sizeof(after)); error = GetLastError();
   if (!read) file_security_failure("security-write-reopened-id", TRUE, error, writer, NULL, __LINE__);
