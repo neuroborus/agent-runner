@@ -3821,6 +3821,388 @@ test("failure collection uses the original cleanup deadline and retains the firs
   assert.deepEqual(f.deadlines, [120000, 30000]);
 });
 
+test("original gate audit queries retain installed ACEs and effective subject facts without admitting delivery", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  // Project C storage and output pointers; execute the query and writer bodies.
+  const project = (text) =>
+    text
+      .replace(
+        "LONGLONG status[9]={-1,-1,-1,-1,-1,-1,-1,-1,-1}, total=-1;",
+        "const status=Array(9).fill(-1);let total=-1;",
+      )
+      .replace(
+        "struct command_gate_observation value={0};",
+        "const value={entries:Array.from({length:8},()=>({sid:{text:''}})),sid:{text:''},status:[]};",
+      )
+      .replace("ACL_SIZE_INFORMATION size={0};", "const size={};")
+      .replace("TOKEN_STATISTICS stats={0};", "const stats={};")
+      .replace(
+        "union {TOKEN_USER user;BYTE bytes[sizeof(TOKEN_USER)+SECURITY_MAX_SID_SIZE];} subject={0};char sid[184]={0};",
+        "const subject={user:{User:{}}},sid={text:''};",
+      )
+      .replace("SYSTEM_AUDIT_ACE *audit=(void *)ace;", "const audit=ace;")
+      .replace(
+        "((SID *)&audit->SidStart)->SubAuthorityCount",
+        "audit.SidStart.SubAuthorityCount",
+      )
+      .replaceAll("&audit->SidStart", "audit.SidStart")
+      .replaceAll(
+        "&policy->AuditSubCategoryGuid",
+        "policy.AuditSubCategoryGuid",
+      )
+      .replace("offsetof(SYSTEM_AUDIT_ACE,SidStart)", "8")
+      .replace(
+        "const struct command_gate_observation *value=&command_gate_observed;",
+        "const value=command_gate_observed;",
+      )
+      .replace("ACE_HEADER *ace=NULL", "let ace=NULL")
+      .replace(
+        /sizeof\((status|sid|subject|TOKEN_USER|stats|size)\)/gu,
+        (_, name) =>
+          ({
+            status: 72,
+            sid: 184,
+            subject: 88,
+            TOKEN_USER: 16,
+            stats: 56,
+            size: 16,
+          })[name],
+      )
+      .replace(/\(void \*\*\)/gu, "")
+      .replace(
+        /(?<!&)&(sd|present|sacl|def|ace|token|used|policy|encoded)\b/gu,
+        (_, name) => `v=>${name}=v`,
+      )
+      .replace(
+        /(?<!&)&(subject|stats|size|command_category|diagnosticOutputLock)\b/gu,
+        "$1",
+      )
+      .replaceAll("->", ".")
+      .replaceAll(".sid[0]", ".sid.text")
+      .replace(/\((?:DWORD|unsigned)\)/gu, "")
+      .replace(
+        /\b(?:DWORD|BOOL|PSECURITY_DESCRIPTOR|PACL|HANDLE|AUDIT_POLICY_INFORMATION|LPSTR|size_t|unsigned)\s+\*?/gu,
+        "let ",
+      );
+  const program =
+    new Script(`function command_gate_sid(sid,text){${project(body("command_gate_sid"))}}
+    function query(api,originalError){${project(body("command_gate_audit"))}}
+    function command_gate_audit_write(output){${project(body("command_gate_audit_write"))}}
+    function fail(){${project(body("command_observe_failure"))}}
+    ({query,write:command_gate_audit_write,fail})`);
+  for (const fault of [
+    null,
+    "sacl",
+    "sacl-read",
+    "acl",
+    "ace",
+    "unsupported",
+    "sid",
+    "token",
+    "subject",
+    "subject-short",
+    "stats",
+    "stats-short",
+    "policy",
+    "policy-mismatch",
+    "close",
+    "truncated",
+  ]) {
+    let lastError = 5,
+      output = "",
+      queries = 0;
+    const remembered = [],
+      closed = [],
+      freed = [],
+      cleanup = [];
+    const api = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      ERROR_INVALID_SID: 1337,
+      ERROR_INSUFFICIENT_BUFFER: 122,
+      SE_FILE_OBJECT: 1,
+      SACL_SECURITY_INFORMATION: 8,
+      AclSizeInformation: 2,
+      SYSTEM_AUDIT_ACE_TYPE: 2,
+      TOKEN_QUERY: 8,
+      TokenUser: 1,
+      TokenStatistics: 10,
+      TokenImpersonation: 2,
+      command_files: [0, 1, 2, 3],
+      command_prerequisite_cleanup_failed: false,
+      command_category: "file-system",
+      command_gate_observed: { observed: false },
+      command_observed: {
+        active: true,
+        pid: 43,
+        thread: 44,
+        birth: 90,
+        status: Array(10).fill(-1),
+        held: [0, 0],
+        members: [],
+        memberCount: 0,
+        audit: [0, -1, 0, 0, 0, 0, 0, 0, 0],
+      },
+      diagnosticOutputLock: {},
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      stderr: {},
+      GetLastError: () => lastError,
+      SetLastError: (v) => {
+        lastError = v;
+      },
+      GetCurrentThread: () => 42,
+      GetSecurityInfo(file, kind, mask, owner, group, dacl, sacl, out) {
+        assert.deepEqual(
+          [file, kind, mask, owner, group, dacl, sacl],
+          [3, 1, 8, null, null, null, null],
+        );
+        queries++;
+        lastError = 5;
+        if (fault === "sacl") return 5;
+        out("descriptor");
+        return 0;
+      },
+      GetSecurityDescriptorSacl(sd, present, sacl, def) {
+        assert.equal(sd, "descriptor");
+        lastError = 87;
+        if (fault === "sacl-read") return false;
+        present(true);
+        sacl("installed");
+        def(false);
+        return true;
+      },
+      GetAclInformation(sacl, size) {
+        assert.equal(sacl, "installed");
+        lastError = 5;
+        if (fault === "acl") return false;
+        size.AceCount = fault === "truncated" ? 9 : 1;
+        return true;
+      },
+      GetAce(sacl, index, out) {
+        assert.equal(sacl, "installed");
+        lastError = 6;
+        if (fault === "ace") return false;
+        out({
+          AceType: fault === "unsupported" ? 7 : 2,
+          AceFlags: 192,
+          AceSize: 32,
+          Mask: 3,
+          SidStart: { SubAuthorityCount: 4, text: "S-1-5-21-1" },
+        });
+        return true;
+      },
+      GetSidLengthRequired: () => 24,
+      IsValidSid: () => true,
+      ConvertSidToStringSidA(sid, out) {
+        lastError = 87;
+        if (fault === "sid") return false;
+        out(sid.text);
+        return true;
+      },
+      OpenThreadToken(thread, access, self, out) {
+        assert.deepEqual([thread, access, self], [42, 8, true]);
+        lastError = 1008;
+        if (fault === "token") return false;
+        out(7);
+        return true;
+      },
+      GetTokenInformation(token, kind, value, size, used) {
+        assert.equal(token, 7);
+        if (
+          (kind === 1 && fault === "subject") ||
+          (kind === 10 && fault === "stats")
+        ) {
+          lastError = 5;
+          return false;
+        }
+        if (kind === 1) {
+          assert.equal(size, 88);
+          value.user.User.Sid = { text: "S-1-5-21-1" };
+          used(fault === "subject-short" ? 8 : 40);
+        } else {
+          assert.equal(kind, 10);
+          assert.equal(size, 56);
+          Object.assign(value, {
+            AuthenticationId: { HighPart: 0, LowPart: 1 },
+            TokenType: 2,
+            ImpersonationLevel: 2,
+          });
+          used(fault === "stats-short" ? 8 : 56);
+        }
+        return true;
+      },
+      AuditComputeEffectivePolicyByToken(token, category, count, out) {
+        assert.deepEqual([token, category, count], [7, "file-system", 1]);
+        lastError = 5;
+        if (fault === "policy") return false;
+        out({
+          AuditSubCategoryGuid:
+            fault === "policy-mismatch" ? "other" : "file-system",
+          AuditingInformation: 3,
+        });
+        return true;
+      },
+      IsEqualGUID: (a, b) => a === b,
+      CloseHandle: (token) => {
+        closed.push(token);
+        lastError = 6;
+        return fault !== "close";
+      },
+      LocalFree: (value) => {
+        freed.push(value);
+        lastError = 91;
+      },
+      AuditFree: (value) => {
+        freed.push(value);
+        lastError = 92;
+      },
+      cleanup_error: (...cause) => cleanup.push(cause),
+      remember: (...cause) => remembered.push(cause),
+      strlen: (value) => value.length,
+      memcpy: (target, value) => {
+        if (Array.isArray(target)) target.push(...value);
+        else target.text = typeof value === "string" ? value : value.text;
+      },
+      fprintf(stream, format, ...args) {
+        let i = 0;
+        output += format.replace(/%(?:08)?(?:ll|l)?[usdx]/gu, (match) => {
+          const value = args[i++];
+          return match.endsWith("x")
+            ? value.toString(16).padStart(8, "0")
+            : String(value?.text ?? value);
+        });
+        lastError = 90;
+      },
+      fputs: (text) => {
+        output += text;
+      },
+      fputc: (char) => {
+        output += char;
+      },
+      fflush: () => {},
+    };
+    const run = program.runInNewContext(api);
+    run.write(api.stderr);
+    assert.equal(output, "null");
+    output = "";
+    run.query("ReadFile", 5);
+    assert.equal(lastError, 5);
+    assert.equal(output, "");
+    run.query("ReadFile", 0);
+    assert.equal(queries, 1); // The original query is not replayed at retirement.
+    run.write(api.stderr);
+    const value = JSON.parse(output);
+    assert.equal(value.api, "ReadFile");
+    assert.equal(value.error, 5);
+    assert.equal(value.caller, "command_gate_read");
+    assert.ok(output.length < 2500);
+    assert.deepEqual(closed, fault === "token" ? [] : [7]);
+    assert.equal(freed.includes("descriptor"), fault !== "sacl");
+    assert.deepEqual(
+      cleanup,
+      fault === "close" ? [["command-token-close", "win32", 6]] : [],
+    );
+    assert.deepEqual(remembered, cleanup);
+    assert.equal(api.command_prerequisite_cleanup_failed, fault === "close");
+    assert.equal(
+      value.present,
+      ["sacl", "sacl-read"].includes(fault) ? null : true,
+    );
+    assert.equal(
+      value.aceCount,
+      ["sacl", "sacl-read", "acl"].includes(fault)
+        ? -1
+        : fault === "truncated"
+          ? 9
+          : 1,
+    );
+    assert.equal(value.truncated, fault === "truncated");
+    if (!["sacl", "sacl-read", "acl"].includes(fault)) {
+      assert.equal(value.aces.length, fault === "truncated" ? 8 : 1);
+      assert.equal(
+        value.aces[0][1],
+        fault === "ace"
+          ? 6
+          : fault === "sid"
+            ? 87
+            : fault === "unsupported"
+              ? -1
+              : 0,
+      );
+      if (!["ace", "sid", "unsupported"].includes(fault))
+        assert.deepEqual(value.aces[0].slice(2), [2, 192, 3, "S-1-5-21-1"]);
+    }
+    assert.equal(
+      value.subject,
+      ["token", "subject", "subject-short", "sid"].includes(fault)
+        ? null
+        : "S-1-5-21-1",
+    );
+    assert.equal(
+      value.logon,
+      ["token", "stats", "stats-short"].includes(fault)
+        ? null
+        : "00000000:00000001",
+    );
+    assert.equal(
+      value.policy,
+      ["token", "policy", "policy-mismatch"].includes(fault) ? null : 3,
+    );
+    assert.equal(value.status[0], fault === "sacl" ? 5 : 0);
+    assert.equal(value.status[3], fault === "token" ? 1008 : 0);
+    const refusal =
+      "native-windows: operation=command-gate-read domain=win32 value=5\n";
+    output = "";
+    run.fail();
+    assert.ok(Buffer.byteLength(refusal + output) < 4096);
+    assert.deepEqual(windowsFeasibilityDiagnostics(refusal + output).failure, {
+      operation: "command-gate-read",
+      domain: "win32",
+      value: 5,
+    });
+    for (const observation of [
+      "native-windows-command: gate-audit=" + JSON.stringify(value) + "\n",
+      "native-windows-command: gate-audit={bad metadata}\n",
+    ])
+      assert.deepEqual(
+        windowsFeasibilityDiagnostics(observation + refusal).failure,
+        { operation: "command-gate-read", domain: "win32", value: 5 },
+      );
+    const prepared = {
+      nonce: "a".repeat(32),
+      observer: identity,
+      gateFile: "C:\\fixture\\gate",
+    };
+    for (const gate of [value, { ...value, unexpected: true }]) {
+      const observed = await brokerCapture(prepared);
+      observed.control.delivered = false;
+      observed.control.prerequisites = { policy: {}, channel: {}, gate };
+      assert.throws(
+        () => windowsCommandBrokerCoverage(prepared, observed),
+        (error) => {
+          assert.equal(error.code, 78);
+          assert.deepEqual(
+            error.brokerCoverage.control.prerequisites.gate,
+            gate.unexpected ? null : value,
+          );
+          return true;
+        },
+      );
+    }
+  }
+});
+
 async function commandGateReadProgram() {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
@@ -3854,6 +4236,7 @@ test("actual gate-read source captures the first API cause before independent ha
     "close",
     "revert",
     "read-cleanup",
+    "query-close",
     "encoding",
     "nonce",
   ]) {
@@ -3884,11 +4267,23 @@ test("actual gate-read source captures the first API cause before independent ha
       command_broker_token: 7,
       command_gate_bytes: 0,
       command_files: [0, 0, 0, 8],
+      command_prerequisite_cleanup_failed: false,
       command_paths: [null, null, null, "C:\\fixture\\gate"],
       command_ids: [0, 0, 0, "original"],
       nonce: "n".repeat(32),
       GetLastError: () => lastError,
       ImpersonateLoggedOnUser: () => true,
+      command_gate_audit: (operation, error) => {
+        assert.equal(owned.impersonating, true);
+        if (mode.startsWith("read"))
+          assert.deepEqual(first, ["command-gate-read", "win32", error]);
+        events.push("gate-query");
+        if (mode === "query-close") {
+          api.command_prerequisite_cleanup_failed = true;
+          remember("command-token-close", "win32", 6);
+        }
+        lastError = 91;
+      },
       CreateFileW: (...args) => {
         assert.deepEqual(args, [
           "C:\\fixture\\gate",
@@ -4082,6 +4477,8 @@ test("actual admission releases the checked child before a complete Job census w
     };
     const api = {
       command_observed: observed,
+      command_gate_observed: { observed: false },
+      command_gate_audit_write: () => {},
       admission: { hProcess: 41, hThread: 42, dwProcessId: 43, dwThreadId: 44 },
       command_processes: [41],
       command_threads: [42],
@@ -7379,6 +7776,7 @@ test("actual bounded coverage control distinguishes absent delivery from a deliv
       command_delivery_query: () => assert.equal(delivered, false),
       command_policy_query: () => assert.equal(delivered, false),
       command_channel_observe: () => assert.equal(delivered, false),
+      command_gate_audit_write: () => assert.equal(delivered, false),
       putchar: () => {},
       fputs: () => {},
       puts: () => {},
@@ -7575,6 +7973,7 @@ test("production coverage joins a fresh audited open to native capture and rejec
           putchar: () => {},
           command_policy_query: () => {},
           command_channel_observe: () => {},
+          command_gate_audit_write: () => {},
           command_policy_equal: () => calls.push("system-baseline"),
           command_principal_exists: () => policy,
           WaitForSingleObject: (event, timeout) =>
@@ -7679,6 +8078,8 @@ test("production coverage joins a fresh audited open to native capture and rejec
           GetSystemTimePreciseAsFileTime: () => {},
           command_bound: () => assert.ok(clock < 10000),
           command_gate_read: () => gate.program.runInNewContext(api),
+          command_gate_audit: () =>
+            assert.equal(impersonated, "held-primary-token"),
           command_capture: (timeout) => {
             pump(timeout);
             clock += 5000;

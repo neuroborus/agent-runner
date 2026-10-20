@@ -596,6 +596,11 @@ export function windowsFeasibilityDiagnostics(output) {
   )
     return null;
   let lines = text.replace(/\r\n/gu, "\n").slice(0, -1).split("\n");
+  // Optional gate-query output has no cause or acceptance authority. Keep the
+  // strict original refusal even when this separately bounded metadata is bad.
+  lines = lines.filter(
+    (line) => !line.startsWith("native-windows-command: gate-audit="),
+  );
   const observations = lines.filter((line) =>
     line.startsWith("native-windows-command: state="),
   );
@@ -1931,7 +1936,13 @@ export function windowsFeasibilityHelperSession(
             else if (isCwdLine(prefix)) cwdObservation.incomplete();
             else if (isTcpLine(prefix)) tcpObservation.incomplete();
             else if (isWfpLine(prefix)) wfpObservation.incomplete();
-            else refuseDiagnostic("diagnostic-bound");
+            // Socket input queries are ordinary diagnostics, never carriers.
+            else if (
+              !prefix
+                .toString("ascii")
+                .startsWith("native-windows-socket-input:")
+            )
+              refuseDiagnostic("diagnostic-bound");
           }
           diagnosticPending = Buffer.alloc(0);
           discardingDiagnosticLine = end < 0;
@@ -1947,6 +1958,7 @@ export function windowsFeasibilityHelperSession(
         const line = diagnosticPending;
         diagnosticPending = Buffer.alloc(0);
         const text = line.toString("utf8");
+        if (text.startsWith("native-windows-socket-input:")) continue;
         if (isImageLine(line)) {
           imageBinding.consume(line);
           continue;
@@ -2016,6 +2028,7 @@ export function windowsFeasibilityHelperSession(
         WFP_PREFIX,
         "native-windows-output: ",
         "native-windows-output-end: ",
+        "native-windows-socket-input: ",
       ].some(
         (prefix) => prefix.startsWith(fragment) || fragment.startsWith(prefix),
       );
@@ -2146,6 +2159,12 @@ export function windowsFeasibilityHelperSession(
         wfpObservation.incomplete();
         diagnosticPending = Buffer.alloc(0);
       }
+      if (
+        diagnosticPending
+          .toString("ascii")
+          .startsWith("native-windows-socket-input:")
+      )
+        diagnosticPending = Buffer.alloc(0);
       wfpObservation.close();
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;

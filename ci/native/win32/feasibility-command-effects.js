@@ -141,6 +141,52 @@ function commandSystemPolicy(read) {
     ? { ...value }
     : { available: false, value: null };
 }
+function commandGateObservation(value) {
+  const optional = (v) => v === null || diagnosticStatus(v);
+  const status = (v) => v === -1 || diagnosticStatus(v);
+  const sid = (v) =>
+    v === null ||
+    (typeof v === "string" &&
+      v.length < 184 &&
+      /^S-[0-9]+(?:-[0-9]+)+$/u.test(v));
+  return diagnosticShape(
+    value,
+    "aceCount,aces,api,caller,error,level,logon,policy,present,status,subject,tokenType,truncated",
+  ) &&
+    value.caller === "command_gate_read" &&
+    ["ReadFile", "CreateFileW", "identity"].includes(value.api) &&
+    diagnosticStatus(value.error) &&
+    Array.isArray(value.status) &&
+    value.status.length === 9 &&
+    value.status.every(status) &&
+    Number.isInteger(value.aceCount) &&
+    value.aceCount >= -1 &&
+    value.aceCount <= 65535 &&
+    typeof value.truncated === "boolean" &&
+    value.truncated === value.aceCount > 8 &&
+    Array.isArray(value.aces) &&
+    value.aces.length === Math.min(Math.max(value.aceCount, 0), 8) &&
+    value.aces.every(
+      (ace, i) =>
+        Array.isArray(ace) &&
+        ace.length === 6 &&
+        ace[0] === i &&
+        ace.slice(1, 5).every(status) &&
+        ace[2] <= 255 &&
+        ace[3] <= 255 &&
+        sid(ace[5]),
+    ) &&
+    (value.present === null || typeof value.present === "boolean") &&
+    sid(value.subject) &&
+    (value.logon === null ||
+      (typeof value.logon === "string" &&
+        /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(value.logon))) &&
+    [null, 1, 2].includes(value.tokenType) &&
+    [null, 0, 1, 2, 3].includes(value.level) &&
+    optional(value.policy)
+    ? structuredClone(value)
+    : null;
+}
 /** Optional carriers are never admission evidence. Invalid carriers become
  * unknown without replacing the original missing-delivery cause. */
 function commandPrerequisites(
@@ -151,7 +197,11 @@ function commandPrerequisites(
   query,
   authenticationId,
 ) {
-  if (!diagnosticShape(value, "channel,policy")) return null;
+  if (
+    !diagnosticShape(value, "channel,policy") &&
+    !diagnosticShape(value, "channel,gate,policy")
+  )
+    return null;
   const stamp = (v) =>
     typeof v === "string" &&
     /^[1-9][0-9]{0,19}$/u.test(v) &&
@@ -249,6 +299,9 @@ function commandPrerequisites(
   return {
     policy: policy ? structuredClone(p) : null,
     channel: channel ? { ...c } : null,
+    ...(Object.hasOwn(value, "gate")
+      ? { gate: commandGateObservation(value.gate) }
+      : {}),
   };
 }
 /** Fixed operation labels explain local admission failures even when no native

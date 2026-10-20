@@ -541,6 +541,11 @@ preserve the original cause. The same caller coverage samples the effective
 thread-token type/impersonation level and the original socket's query-only QoS
 status, including unsupported/short replies. Malformed new metadata stays
 incomplete without replacing `10022`; failed-query byte counts remain unknown.
+The same fixture executes the original socket's exclusive-address query at the
+failed transfer boundary, including failed and short replies. Its ordinary raw
+diagnostic preserves the original caller/error and leaves the transfer/control
+grammar and bounds intact; existing assertions retain one original duplication,
+no original import/connect/receipt, checked independent closure and both controls.
 Both fresh unbound duplication refusals
 can remain `10022` with imports unattempted and independent source closure.
 Coverage runs every source/destination failure for both read/edit roles and
@@ -851,6 +856,17 @@ cannot reuse that budget. Historical matches and incomplete diagnostics still
 refuse probes and preserve independent restoration and separate cleanup failure.
 These focused portable fixtures add no slow-tier requirement and establish no
 Windows event generation, native XPath/SDK acceptance or hosted audit delivery.
+The gate audit fixture executes the actual query and writer bodies with injected
+installed SACL and effective thread-token APIs. It covers native failures, short
+token reads, unsupported ACE layouts, explicit truncation and independent token
+closure, retaining saved errors even when later queries or cleanup change them.
+The original gate-read fixture verifies sampling while still impersonating and
+after the original read failure is latched. Cached facts appear only in refused
+coverage diagnostics or fatal native output; successful broker output stays
+unchanged and retirement does not replay queries. Optional malformed facts cannot
+replace the missing-delivery refusal, admit empty or mismatched records, or
+change the original 4656/4663 joins. These fast fixtures establish neither a
+socket-transfer repair nor an audit-delivery repair and add no slow-tier check.
 The same actual-body fixtures cover original setter start/completion binding and
 immediate-error preservation, File System snapshot projection, and a separate
 installation-to-control 4912 query. They exercise principal/logon/target/GUID

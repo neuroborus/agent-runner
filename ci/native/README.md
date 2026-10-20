@@ -1186,6 +1186,18 @@ field is the exact 112-byte public numeric/GUID/catalog/chain prefix of
 as lowercase hex in the checked Windows x64 SDK layout. Provider-private storage
 and protocol-name text are excluded.
 
+One additional query reads `SO_EXCLUSIVEADDRUSE` on the original failed socket,
+before its closure. Ordinary `native-windows-socket-input` diagnostics name
+`wfp_transfer` and `WSADuplicateSocketW`, preserve the saved original error and
+report the option's native status, returned size and value. Failed or short reads
+leave the value unavailable. This supplements the existing construction,
+provider/catalog/chain, zero flags, nonblocking/bind, QoS and token observations;
+the self/destination controls and their grammar remain unchanged. This line
+stays outside the 2-KiB transfer/control carrier and has no receipt authority.
+An unexplained 10022 identifies neither supervisor access error 5 nor a universal
+AppContainer prohibition. No supervisor duplication right, removed exclusive
+option, new process, transfer retry or extended deadline follows from it.
+
 These finite observations share the unchanged 2 KiB TCP capture budget and have
 no admission authority. Malformed, missing or failed diagnostic output remains
 incomplete/unavailable evidence; it cannot replace the original failure. Every
@@ -2992,6 +3004,30 @@ file and parent handles remain held; the opened file ID must match before its
 single 32-byte nonce read. Checked closure and impersonation reversion remain
 independent. A completed read without original subscription delivery still blocks;
 the empty original-interval diagnostic query identifies no more specific cause.
+The original impersonated gate read now caches query-only producer inputs once:
+the installed held gate SACL's presence and ACE count, at most eight ACEs with
+type/flags and supported audit-ACE mask/SID, and the actual thread token's user
+SID, authentication ID, token type/impersonation level and effective File System
+policy bits. Each query retains its immediate native status; `-1` statuses and
+`null` values distinguish unattempted, short or unsupported facts. More than
+eight ACEs explicitly marks truncation. The token handle is closed independently
+and queries restore the caller's last error. A refused token close keeps its
+separate cleanup cause and blocks after the gate handle and impersonation have
+received their independent settlement attempts. No policy setter is added.
+The nine status slots name, in order, `GetSecurityInfo`,
+`GetSecurityDescriptorSacl`, `GetAclInformation`, `OpenThreadToken`,
+`GetTokenInformation(TokenUser)`, subject SID conversion,
+`GetTokenInformation(TokenStatistics)`, `AuditComputeEffectivePolicyByToken`
+and token `CloseHandle`. Each ACE row contains index, query/conversion status,
+type, flags, mask and SID; unsupported layouts leave mask/SID unavailable.
+On missing delivery these facts accompany existing policy/channel prerequisites
+in the diagnostic `P` receipt; fatal native refusal emits the same cached facts
+through ordinary stderr before cleanup. Successful delivery emits no extra
+carrier, and retirement does not repeat the queries. Missing or malformed optional
+facts stay unavailable without replacing the original refusal. Neither these
+queries nor a completed gate read substitute for nonempty subscription delivery
+and the original subject/object/time joins. The missing-delivery cause remains
+open until fresh matching Windows evidence supports a functional repair.
 The finite decoder additionally requires a delivered Security 4663 success with
 matching PID, principal/logon, read access and fresh acknowledged window, while
 independent before/after reads preserve the original file/DACL/bytes and token.

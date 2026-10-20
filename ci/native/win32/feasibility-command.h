@@ -62,6 +62,13 @@ static struct {
   ULONGLONG birth;
   LONGLONG status[10], audit[9];
 } command_observed;
+static struct command_gate_observation {
+  BOOL observed,present,statsRead,policyRead;
+  LONGLONG status[9],total;
+  struct { LONGLONG status,type,flags,mask;char sid[184]; } entries[8];
+  unsigned count;char sid[184];TOKEN_STATISTICS stats;DWORD policyBits,error;const char *api;
+} command_gate_observed;
+static void command_gate_audit_write(FILE *output);
 static void command_observe_failure(void) {
   if (!command_observed.active) return;
   DWORD saved = GetLastError();
@@ -73,6 +80,7 @@ static void command_observe_failure(void) {
   fputs("],\"audit\":[", stderr);
   for (unsigned i=0;i<9;i++) fprintf(stderr, "%s%lld", i?",":"", command_observed.audit[i]);
   fputs("]}\n", stderr); fflush(stderr);
+  if(command_gate_observed.observed){fputs("native-windows-command: gate-audit=",stderr);command_gate_audit_write(stderr);fputc('\n',stderr);fflush(stderr);}
   ReleaseSRWLockExclusive(&diagnosticOutputLock); SetLastError(saved);
 }
 static void command_available(BOOL ok, const char *operation) {
@@ -517,6 +525,74 @@ static void command_capture(DWORD timeout) {
       if(!updated)remember("command-capture-bookmark","win32",error);BOOL closed=command_event_close(&events[i]);if(!updated||!closed)failure(126); }
   }
 }
+/* Query the installed producer inputs once at the original impersonated read.
+ * This bounded ordinary output never supplies subscription-delivery evidence. */
+static DWORD command_gate_sid(PSID sid, char text[184]) {
+  if (!IsValidSid(sid)) return ERROR_INVALID_SID;
+  LPSTR encoded=NULL;BOOL converted=ConvertSidToStringSidA(sid,&encoded);
+  DWORD error=converted?ERROR_SUCCESS:GetLastError();
+  if(converted){size_t length=strlen(encoded);if(length<184)memcpy(text,encoded,length+1);else error=ERROR_INSUFFICIENT_BUFFER;}
+  if(encoded)LocalFree(encoded);return error;
+}
+static void command_gate_audit(const char *api, DWORD originalError) {
+  if(command_gate_observed.observed)return;
+  DWORD saved=GetLastError();
+  LONGLONG status[9]={-1,-1,-1,-1,-1,-1,-1,-1,-1}, total=-1;
+  struct command_gate_observation value={0};unsigned count=0;
+  PSECURITY_DESCRIPTOR sd=NULL;PACL sacl=NULL;BOOL present=FALSE,def=FALSE;
+  status[0]=GetSecurityInfo(command_files[3],SE_FILE_OBJECT,SACL_SECURITY_INFORMATION,NULL,NULL,NULL,NULL,&sd);
+  if(!status[0]){
+    BOOL read=GetSecurityDescriptorSacl(sd,&present,&sacl,&def);status[1]=read?ERROR_SUCCESS:GetLastError();
+    if(read){total=0;if(present&&sacl){ACL_SIZE_INFORMATION size={0};
+      read=GetAclInformation(sacl,&size,sizeof(size),AclSizeInformation);status[2]=read?ERROR_SUCCESS:GetLastError();
+      if(read){total=size.AceCount;count=size.AceCount<8?size.AceCount:8;
+        for(unsigned i=0;i<count;i++){value.entries[i].type=value.entries[i].flags=value.entries[i].mask=-1;ACE_HEADER *ace=NULL;
+          read=GetAce(sacl,i,(void **)&ace);value.entries[i].status=read?ERROR_SUCCESS:GetLastError();
+          if(read){value.entries[i].type=ace->AceType;value.entries[i].flags=ace->AceFlags;
+            if(ace->AceType==SYSTEM_AUDIT_ACE_TYPE){SYSTEM_AUDIT_ACE *audit=(void *)ace;
+              DWORD offset=(DWORD)offsetof(SYSTEM_AUDIT_ACE,SidStart);
+              if(ace->AceSize<offset+8||GetSidLengthRequired(((SID *)&audit->SidStart)->SubAuthorityCount)>ace->AceSize-offset)value.entries[i].status=ERROR_INVALID_SID;
+              else{value.entries[i].mask=audit->Mask;value.entries[i].status=command_gate_sid(&audit->SidStart,value.entries[i].sid);}
+            }else value.entries[i].status=-1; /* Unsupported ACE layout remains unknown. */
+          }
+        }
+      }else total=-1;
+    }}
+  }
+  if(sd)LocalFree(sd);
+  HANDLE token=NULL;DWORD used=0;TOKEN_STATISTICS stats={0};BOOL statsRead=FALSE;
+  union {TOKEN_USER user;BYTE bytes[sizeof(TOKEN_USER)+SECURITY_MAX_SID_SIZE];} subject={0};char sid[184]={0};
+  DWORD policyBits=0;BOOL policyRead=FALSE;AUDIT_POLICY_INFORMATION *policy=NULL;
+  BOOL opened=OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&token);status[3]=opened?ERROR_SUCCESS:GetLastError();
+  if(opened){
+    BOOL read=GetTokenInformation(token,TokenUser,&subject,sizeof(subject),&used);status[4]=read?ERROR_SUCCESS:GetLastError();
+    if(read&&used>=sizeof(TOKEN_USER)&&used<=sizeof(subject))status[5]=command_gate_sid(subject.user.User.Sid,sid);
+    used=0;read=GetTokenInformation(token,TokenStatistics,&stats,sizeof(stats),&used);status[6]=read?ERROR_SUCCESS:GetLastError();statsRead=read&&used==sizeof(stats);
+    read=AuditComputeEffectivePolicyByToken(token,&command_category,1,&policy);status[7]=read?ERROR_SUCCESS:GetLastError();
+    if(read&&policy&&IsEqualGUID(&policy->AuditSubCategoryGuid,&command_category)){policyRead=TRUE;policyBits=policy->AuditingInformation;}
+    if(policy)AuditFree(policy);
+    BOOL closed=CloseHandle(token);DWORD error=closed?ERROR_SUCCESS:GetLastError();status[8]=error;
+    if(!closed){command_prerequisite_cleanup_failed=TRUE;remember("command-token-close","win32",error);cleanup_error("command-token-close","win32",error);}
+  }
+  value.observed=TRUE;value.present=present;value.total=total;value.count=count;
+  memcpy(value.status,status,sizeof(status));memcpy(value.sid,sid,sizeof(sid));
+  value.stats=stats;value.statsRead=statsRead;value.policyBits=policyBits;value.policyRead=policyRead;
+  value.api=api;value.error=originalError;command_gate_observed=value;SetLastError(saved);
+}
+static void command_gate_audit_write(FILE *output) {
+  const struct command_gate_observation *value=&command_gate_observed;if(!value->observed){fputs("null",output);return;}
+  fprintf(output,"{\"caller\":\"command_gate_read\",\"api\":\"%s\",\"error\":%lu,\"status\":[",value->api,value->error);
+  for(unsigned i=0;i<9;i++)fprintf(output,"%s%lld",i?",":"",value->status[i]);
+  fprintf(output,"],\"aceCount\":%lld,\"truncated\":%s,\"aces\":[",value->total,value->total>8?"true":"false");
+  for(unsigned i=0;i<value->count;i++){if(i)fputc(',',output);fprintf(output,"[%u,%lld,%lld,%lld,%lld,",i,value->entries[i].status,value->entries[i].type,value->entries[i].flags,value->entries[i].mask);
+    if(value->entries[i].sid[0])fprintf(output,"\"%s\"",value->entries[i].sid);else fputs("null",output);fputc(']',output);}
+  fprintf(output,"],\"present\":%s,\"subject\":",value->status[1]==0?(value->present?"true":"false"):"null");if(value->sid[0])fprintf(output,"\"%s\"",value->sid);else fputs("null",output);
+  fputs(",\"logon\":",output);if(value->statsRead)fprintf(output,"\"%08lx:%08lx\"",(DWORD)value->stats.AuthenticationId.HighPart,value->stats.AuthenticationId.LowPart);else fputs("null",output);
+  fputs(",\"tokenType\":",output);if(value->statsRead)fprintf(output,"%u",(unsigned)value->stats.TokenType);else fputs("null",output);
+  fputs(",\"level\":",output);if(value->statsRead&&value->stats.TokenType==TokenImpersonation)fprintf(output,"%u",(unsigned)value->stats.ImpersonationLevel);else fputs("null",output);
+  fputs(",\"policy\":",output);if(value->policyRead)fprintf(output,"%lu",value->policyBits);else fputs("null",output);
+  fputc('}',output);
+}
 static void command_gate_read(void) {
   /* Request a fresh pathname access check against the installed SACL under the
    * exact queried token. Keep the original handles held and reject a different
@@ -524,13 +600,14 @@ static void command_gate_read(void) {
   win32_check(ImpersonateLoggedOnUser(command_broker_token),"command-gate-impersonate");command_preflight_owned.impersonating=TRUE;
   command_preflight_owned.gateRead=CreateFileW(command_paths[3],GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
   DWORD error=command_preflight_owned.gateRead==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
-  if(command_preflight_owned.gateRead==INVALID_HANDLE_VALUE){remember("command-gate-open","win32",error);failure(126);}
+  if(command_preflight_owned.gateRead==INVALID_HANDLE_VALUE){remember("command-gate-open","win32",error);command_gate_audit("CreateFileW",error);failure(126);}
   char id[50],bytes[32],expected[33];DWORD count=0;fileid(command_preflight_owned.gateRead,id);
   BOOL matched=!strcmp(id,command_ids[3]);if(!matched)remember("command-gate-identity","invariant",0);
   BOOL read=FALSE;if(matched){read=ReadFile(command_preflight_owned.gateRead,bytes,32,&count,NULL);error=read?ERROR_SUCCESS:GetLastError();
     if(!read)remember("command-gate-read","win32",error);else if(count!=32)remember("command-gate-size","invariant",0);}
+  command_gate_audit(matched?"ReadFile":"identity",matched?error:ERROR_SUCCESS);
   BOOL closed=release_handle(&command_preflight_owned.gateRead,"file-close");BOOL reverted=command_revert();
-  if(!matched||!read||count!=32||!closed||!reverted)failure(126);
+  if(!matched||!read||count!=32||!closed||!reverted||command_prerequisite_cleanup_failed)failure(126);
   int length=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL);win32_check(length!=0,"command-gate-nonce-encode");
   invariant(length==33&&!memcmp(bytes,expected,32),"command-gate-nonce");
   command_gate_bytes=count;
@@ -763,7 +840,7 @@ static void command_coverage_control(void) {
   while(!command_coverage_seen&&GetTickCount64()-started<10000){command_bound();command_capture(1);}
   command_probing=FALSE;GetSystemTimePreciseAsFileTime(&last);ULONGLONG elapsed=GetTickCount64()-started;
   printf("{\"event\":\"P\",\"delivered\":%s,\"startRecords\":%u,\"endRecords\":%u,\"elapsedMs\":%llu,\"query\":",command_coverage_seen?"true":"false",records,command_records,elapsed);
-  if(command_coverage_seen)fputs("null",stdout);else {command_delivery_query(first,last);fputs(",\"prerequisites\":{\"policy\":",stdout);command_policy_query(last);fputs(",\"channel\":",stdout);command_channel_observe();putchar('}');}puts("}");
+  if(command_coverage_seen)fputs("null",stdout);else {command_delivery_query(first,last);fputs(",\"prerequisites\":{\"policy\":",stdout);command_policy_query(last);fputs(",\"channel\":",stdout);command_channel_observe();fputs(",\"gate\":",stdout);command_gate_audit_write(stdout);putchar('}');}puts("}");
 }
 static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }

@@ -7044,6 +7044,15 @@ test("original TCP caller retains source duplication failures and bounded prereq
   );
   const observation = native(body("socket_transfer_observe"))
     .replace(
+      "let exclusive = FALSE; int exclusiveSize = sizeof(exclusive);",
+      "const exclusive = {value:false}, exclusiveSize = {value:4};",
+    )
+    .replaceAll("sizeof(exclusive)", "4")
+    .replaceAll("exclusiveSize ==", "exclusiveSize.value ==")
+    .replaceAll('"%d", exclusiveSize)', '"%d", exclusiveSize.value)')
+    .replaceAll('"%u", exclusive)', '"%u", exclusive.value)')
+    .replace("int exclusiveResult", "const exclusiveResult")
+    .replace(
       "struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};",
       "const source = tokenObservation(), destination = tokenObservation();",
     )
@@ -7238,6 +7247,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
       "effective-token",
       "qos-unavailable",
       "qos-short",
+      "exclusive-unavailable",
+      "exclusive-short",
       "diagnostic-close",
       "diagnostic-output",
       "diagnostic-form",
@@ -7282,6 +7293,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       order = [],
       primary = [],
       launcherPrimary = [],
+      optionObservations = [],
       cleanup = [],
       saved = new Map(),
       acknowledgments = new Map();
@@ -7418,6 +7430,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
       );
       for (let end; (end = output.indexOf("\n")) >= 0;) {
         const line = output.slice(0, end + 1);
+        if (line.startsWith("native-windows-socket-input:"))
+          optionObservations.push(line);
         output = output.slice(end + 1);
         if (line.startsWith(context.SOCKET_PREFIX)) {
           const input = Buffer.from(line);
@@ -7736,8 +7750,15 @@ test("original TCP caller retains source duplication failures and bounded prereq
         assert.ok([17, 73, 81, 83, 91, 93].includes(socket));
         assert.equal(level, 0xffff);
         if (option === context.SO_EXCLUSIVEADDRUSE) {
-          assert.equal(socket, 93);
-          actual.value = true;
+          assert.ok([17, 93].includes(socket));
+          if (socket === 17) {
+            assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
+            assert.equal(size.value, 4);
+            size.value = fault === "exclusive-short" ? 1 : 4;
+            lastError = 10042;
+            if (fault === "exclusive-unavailable") return -1;
+          }
+          actual.value = socket === 17 ? 1 : true;
           return 0;
         }
         assert.equal(option, 0x2005);
@@ -8157,6 +8178,20 @@ test("original TCP caller retains source duplication failures and bounded prereq
         1,
       );
       if (failsTransfer) {
+        assert.equal(optionObservations.length, 1);
+        assert.match(
+          optionObservations[0],
+          /caller=wfp_transfer api=WSADuplicateSocketW error=10022 option=SO_EXCLUSIVEADDRUSE/u,
+        );
+        assert.ok(
+          optionObservations[0].includes(
+            fault === "exclusive-unavailable"
+              ? "status=10042 size=unavailable value=unavailable"
+              : fault === "exclusive-short"
+                ? "status=0 size=1 value=unavailable"
+                : "status=0 size=4 value=1",
+          ),
+        );
         assert.equal(order.includes("import"), false);
         assert.equal(context.attempted, false);
         assert.equal(saved.has(`${mode}-tcp-intent`), false);
