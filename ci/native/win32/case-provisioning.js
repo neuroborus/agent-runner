@@ -1020,25 +1020,54 @@ export function createWindowsCaseProvisioning(state, options) {
           !current.caseEffectsPossible &&
           current.reader,
       );
-      await current.reader.beginCleanup({ signal });
-      const account = current.account
-          ? await current.reader.retireCase(current.custodySlot)
-          : await current.reader.retirePartialCase(),
+      options.fenceAdmission?.();
+      const failures = [];
+      let account, custody, files;
+      try {
+        await current.reader.beginCleanup({ signal });
+        // No account command is possible before the setup acknowledgement.
+        // close() owns the distinct bound X/helper-retirement/D lifecycle.
+        if (current.admission)
+          account = current.account
+            ? await current.reader.retireCase(current.custodySlot)
+            : await current.reader.retirePartialCase();
+        else requireObservation(!current.account);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
         custody = await current.reader.close();
-      requireObservation(
-        custody.status === "RETIRED" &&
-          custody.independent &&
-          custody.closed &&
-          custody.taskRemoved,
-      );
-      const files = closeFiles ? await options.settleFiles() : null;
-      requireObservation(
-        !closeFiles ||
-          (files?.status === "RETIRED" &&
-            files.independent &&
-            files.noLiveMembers &&
-            files.taskRemoved),
-      );
+        requireObservation(
+          custody.status === "RETIRED" &&
+            custody.independent &&
+            custody.closed &&
+            custody.taskRemoved &&
+            (current.admission || custody.preSetup === true),
+        );
+      } catch (error) {
+        failures.push(error);
+      }
+      if (closeFiles) {
+        try {
+          files = await options.settleFiles();
+          requireObservation(
+            files?.status === "RETIRED" &&
+              files.independent &&
+              files.noLiveMembers &&
+              files.taskRemoved,
+          );
+        } catch (error) {
+          failures.push(error);
+        }
+      }
+      if (failures.length)
+        throw new AggregateError(
+          failures,
+          "Windows partial case settlement failed",
+          {
+            cause: failures[0],
+          },
+        );
       current.retired = true;
       return {
         status: "RETIRED",

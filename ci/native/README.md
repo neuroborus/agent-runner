@@ -9654,11 +9654,32 @@ it never kills by PID or name. Task removal requires its protected registration,
 exact unchanged task hash, zero instances and independently retired held owners.
 Explicit observer-drain or absent-lane evidence remains mandatory for audit setup.
 
+Ordinary experiment settlement retains its active owner when preparation throws
+before returning a case. Only the exact active recipe and execution may reach
+that owner without a prepared object; completed preparation still requires the
+original returned object. The preparation failure remains separate from account,
+custody and observer settlement failures. Cleanup fences further admissions and
+attempts each acquired owner, including independently owned preparation files.
+
+Original process/Job custody is acquired while the parked helper and bridge are
+still alive. Before setup authorization, the existing preparation observer binds
+the original identities and task instance before X, independently verifies the
+helper-retirement acknowledgement, then verifies D/task removal and bridge exit.
+No account command or normal setup completion is invented for this partial path.
+The dependent reader remains registered until its proof permits separate observer
+retirement; an observer failure retains settlement even after reader closure.
+
 Ordinary experiment recovery selects acknowledged closed originals before any
-live PID retention. Matching protected observer birth/result records, or an
-admitted case reader's finish acknowledgement and independent task-retirement
-record, permit reuse of the build cold-custody lane. The original case ledger
-supplies child births; no second inventory or control protocol is introduced.
+live PID retention. Matching protected observer birth/result records, or a
+complete ordered case closure, permit reuse of the build cold-custody lane.
+Normal closure requires parked/admitted identities, finish intent, the matching
+sequenced finish command and acknowledgement, and final task-removal proof.
+Pre-setup closure instead requires its bound abort, helper-retirement and final
+task-removal acknowledgements with the original helper/bridge births, task hash,
+process DACL and instance; it cannot contain setup work or normal finish records.
+Missing, duplicated, reordered or substituted acknowledgements retain exclusion.
+The original case ledger supplies child births; no second inventory or control
+protocol is introduced.
 A fresh bootstrap/source/plan read rejoins candidate/build pins, file identities
 and protected parents without opening final helpers. Complete process censuses
 surround two reads of every original Job slot, compiler/controlling Job and owned

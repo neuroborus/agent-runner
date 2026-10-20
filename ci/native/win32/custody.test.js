@@ -6651,6 +6651,10 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
     "observer-only",
     "missing-ack",
     "duplicate-ack",
+    "missing-finish",
+    "finish-order",
+    "admission-order",
+    "finish-sequence",
     "task-binding",
     "birth-binding",
     "observer-result",
@@ -6707,6 +6711,14 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
         { phase: "task-register-possible", bridge, taskSha256: "a".repeat(64) },
         { phase: "task-run-possible", bridge, taskSha256: hash },
         {
+          phase: "task-parked",
+          helper: f.helper,
+          bridge,
+          taskSha256: hash,
+          processDaclSha256: hash,
+          instance: { ...instance, enginePid: f.helper.pid },
+        },
+        {
           phase: "admitted",
           helper: f.helper,
           verifier: f.verifier,
@@ -6720,6 +6732,11 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
           helper: f.helper,
           verifier: f.verifier,
           nativeEventSha256: hash,
+        },
+        {
+          phase: "finish",
+          commandSequence: 12,
+          argumentsSha256: observationDigest([]),
         },
         {
           phase: "finish-acknowledged",
@@ -6739,8 +6756,22 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
     if (fault !== "observer-only") k.states.clear();
     else records.pop();
     k.state.absent = fault !== "task";
-    if (fault === "missing-ack") records.splice(7, 1);
-    if (fault === "duplicate-ack") records.splice(7, 0, { ...records[7] });
+    const acknowledgement = records.findIndex(
+        (record) => record.phase === "finish-acknowledged",
+      ),
+      command = records.findIndex((record) => record.phase === "finish");
+    if (fault === "missing-ack") records.splice(acknowledgement, 1);
+    if (fault === "duplicate-ack")
+      records.splice(acknowledgement, 0, { ...records[acknowledgement] });
+    if (fault === "missing-finish") records.splice(command, 1);
+    if (fault === "finish-order")
+      [records[command], records[acknowledgement]] = [
+        records[acknowledgement],
+        records[command],
+      ];
+    if (fault === "admission-order")
+      [records[1], records[3]] = [records[3], records[1]];
+    if (fault === "finish-sequence") records[command].commandSequence++;
     if (fault === "task-binding") records.at(-1).taskSha256 = "e".repeat(64);
     if (fault === "birth-binding")
       records.at(-1).helper = { ...f.helper, creationTime: "999" };
@@ -6850,6 +6881,156 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
           .some(({ operation }) => operation === "verify-cold-jobs"),
       );
     }
+  }
+});
+
+test("Windows experiment cold recovery requires the bound pre-setup abort lifecycle instead of completed setup", async () => {
+  for (const fault of [
+    null,
+    "admitted",
+    "admitted-verifier",
+    "missing-bound",
+    "missing-abort",
+    "missing-helper-ack",
+    "missing-retired",
+    "duplicate",
+    "order",
+    "finish",
+    "setup",
+    "helper",
+    "bridge",
+    "task",
+    "instance",
+    "verifier",
+    "error-87",
+  ]) {
+    const f = fixture();
+    f.input.purpose = "experiment";
+    f.input.context.executionId = "ownership.literal";
+    f.input.bindingSha256 = f.input.reviewSha256;
+    delete f.input.reviewSha256;
+    f.input.sources.push({
+      path: "C:\\Fixture\\Sealed\\experiment.h",
+      sha256: hash,
+    });
+    const k = verificationFixture(f),
+      bridge = identity(10, runnerSid),
+      parked = {
+        helper: f.helper,
+        bridge,
+        taskSha256: hash,
+        processDaclSha256: hash,
+        instance: { ...instance, enginePid: f.helper.pid },
+      },
+      records = [
+        { phase: "task-register-possible", bridge, taskSha256: hash },
+        { phase: "task-run-possible", bridge, taskSha256: hash },
+        { phase: "task-parked", ...parked },
+        {
+          phase: "pre-setup-bound",
+          ...parked,
+          verifier: f.verifier,
+          nativeEventSha256: hash,
+        },
+        { phase: "pre-setup-abort-possible", ...parked },
+        {
+          phase: "pre-setup-helper-retired",
+          ...parked,
+          nativeEventSha256: hash,
+        },
+        {
+          phase: "retired",
+          ...parked,
+          nativeEventSha256: hash,
+          preSetup: true,
+        },
+      ];
+    k.states.clear();
+    k.state.absent = true;
+    if (["admitted", "admitted-verifier"].includes(fault))
+      records.splice(3, 0, {
+        phase: "admitted",
+        helper: f.helper,
+        verifier: fault === "admitted-verifier" ? f.helper : f.verifier,
+        taskSha256: hash,
+        nativeEventSha256: hash,
+      });
+    const missing = {
+      "missing-bound": 3,
+      "missing-abort": 4,
+      "missing-helper-ack": 5,
+      "missing-retired": 6,
+    }[fault];
+    if (missing !== undefined) records.splice(missing, 1);
+    if (fault === "duplicate") records.splice(5, 0, { ...records[5] });
+    if (fault === "order") [records[3], records[4]] = [records[4], records[3]];
+    if (fault === "finish")
+      records.splice(5, 0, {
+        phase: "finish-acknowledged",
+        helper: f.helper,
+        commandSequence: 1,
+        nativeEventSha256: hash,
+      });
+    if (fault === "setup") records.splice(5, 0, { phase: "case-account" });
+    if (fault === "helper")
+      records[5].helper = { ...f.helper, creationTime: "999" };
+    if (fault === "bridge")
+      records[5].bridge = { ...bridge, creationTime: "999" };
+    if (fault === "task") records[6].taskSha256 = "e".repeat(64);
+    if (fault === "instance")
+      records[5].instance = { ...instance, enginePid: 999 };
+    if (fault === "verifier") records[3].verifier = f.helper;
+    const refused = Object.assign(
+      new Error("Original pre-setup census refused"),
+      { code: 87 },
+    );
+    k.state.damage = (operation, frame) => {
+      if (fault === "error-87" && operation === "verify-cold-process")
+        throw refused;
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    const recover = () => k.verifier.recoverCase(f.input, records);
+    if (fault && fault !== "admitted") {
+      let original;
+      await assert.rejects(
+        recover,
+        (cause) => {
+          original = cause;
+          if (fault === "error-87") assert.equal(cause, refused);
+          return true;
+        },
+        fault,
+      );
+      const count = k.events.length;
+      k.state.damage = null;
+      await assert.rejects(recover, (cause) => cause === original);
+      assert.equal(
+        k.events.length,
+        count,
+        "Missing acknowledgements cannot retry through cold success",
+      );
+    } else {
+      const proof = await recover();
+      assert.equal(proof.status, "RETIRED");
+      assert.equal(proof.noLiveMembers, true);
+      assert.equal(proof.taskRemoved, true);
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-process")
+          .length,
+        4,
+      );
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-cold-jobs")
+          .length,
+        4,
+      );
+      assert.equal(
+        k.events.filter(({ operation }) => operation === "verify-case-recover")
+          .length,
+        2,
+      );
+    }
+    assert.ok(!k.events.some(({ operation }) => operation === "verify-retain"));
   }
 });
 

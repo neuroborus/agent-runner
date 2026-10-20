@@ -2215,7 +2215,22 @@ from bounded protected ledgers and independently approved bootstrap assets,
 without successful preparation or final helper outputs. Durable recovery intent
 fences fresh admissions. Retained case owners attempt retirement before evidence
 validation; case and build cleanup remain independently attempted, and the first
-failure survives. Fresh observers rejoin native receipt parts, creator/worker
+failure survives. The ordinary experiment wrapper retains the active owner when
+preparation throws before returning a case, requiring the same recipe and
+execution for settlement. Successful preparation still requires object identity.
+Original preparation and separate settlement failures remain distinguishable.
+Partial case cleanup fences admissions, attempts acquired account/custody owners
+and independently settles their preparation observer.
+The observer acquires original process/Job custody before helper exit. A parked
+pre-setup refusal uses its bound abort/helper-retirement/task-removal lifecycle,
+without claiming setup completion. Cold recovery selects this lane only from its
+complete ordered acknowledgements and exact original births, task hash, DACL and
+task instance. Normal closure instead requires the full ordered admission,
+sequenced finish command/acknowledgement and final task-removal chain. Incomplete
+chains retain live custody requirements; a refused live read cannot fall back to
+cold success. Both lanes still require fresh complete process/Job censuses and
+independent observer retirement.
+Fresh observers rejoin native receipt parts, creator/worker
 births, original object/security baselines and exact task registrations. Held
 process/Job reads, complete principal/peer census and fresh account/rights,
 registry/WFP and task observations establish settlement; old receipts supply

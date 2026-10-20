@@ -3894,7 +3894,7 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
       ).status,
       "OBSERVED",
     );
-    const settlements = await system.settle(recipe, prepared, {
+    const settlementSettings = {
       signal: new AbortController().signal,
       execution: {
         id: recipe.id,
@@ -3905,7 +3905,16 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
           ]),
         ),
       },
-    });
+    };
+    await assert.rejects(
+      system.settle(recipe, { ...prepared }, settlementSettings),
+    );
+    await assert.rejects(system.settle(recipe, null, settlementSettings));
+    const settlements = await system.settle(
+      recipe,
+      prepared,
+      settlementSettings,
+    );
     assert.ok(
       Object.values(settlements).every(
         (entry) => !entry || entry.settlement.status === "RETIRED",
@@ -4025,6 +4034,239 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
       assert.equal((await native.settleFiles()).status, "RETIRED");
     }
   }
+});
+
+test("Windows experiment partial preparation settles only its matching owner and keeps observer failure separate", async () => {
+  for (const stage of ["pre-setup", "account"])
+    for (const observerFailure of [false, true]) {
+      const f = experimentBootstrapFixture();
+      Object.assign(f.bootstrapOptions.binding, {
+        candidateSha,
+        platform: "win32",
+        repository: f.job.repository,
+        runId: f.job.runId,
+        runAttempt: f.job.runAttempt,
+        image: "windows-2025",
+        architecture: "x64",
+        workflow: "native-poc",
+        jobId: "1",
+      });
+      await assert.rejects(
+        f.runBootstrap(),
+        (error) => error.cause === f.reached,
+      );
+      f.prepared = f.bootstrap;
+      f.manifest.windowsPreparation.bootstrap = f.prepared.bootstrap;
+      f.accessNative = (operation, args) =>
+        operation === "prepare-experiment-volume"
+          ? {
+              identity: f.rawFileId(
+                Buffer.from(args[0], "hex").toString("utf16le"),
+              ),
+              distinctVolume: true,
+            }
+          : undefined;
+      f.disappearObservers = true;
+      const options = {
+          ...f.options,
+          ...f.bootstrapOptions,
+          signal: new AbortController().signal,
+          bootstrap: async () => f.prepared,
+          open: openWindowsExperimentNative,
+          readInstalled: async (file) => f.files.get(file),
+          read: async (file) => f.files.get(file),
+        },
+        { job, preparation } = await prepareWindowsExperiment(
+          f.job,
+          directory,
+          async () => {},
+          options,
+        ),
+        input = windowsExperimentSystemInput(job, preparation),
+        recipe = windowsSystemRecipes().find(
+          ({ id }) => id === "ownership.literal",
+        ),
+        declared = input.manifest.windowsPreparation.cases.find(
+          ({ id }) => id === recipe.id,
+        ),
+        primary = new Error("Case preparation did not return"),
+        secondary = new Error("Independent case observer did not retire");
+      f.manifest.windowsPreparation.cases =
+        input.manifest.windowsPreparation.cases;
+      f.preSetupRejected = stage === "pre-setup";
+      if (stage === "account")
+        options.bindResources = async () => {
+          throw primary;
+        };
+      const open = options.openPreparation;
+      options.openPreparation = async (file, args, settings) => {
+        const channel = await open(file, args, settings);
+        if (!observerFailure || args[4] !== declared.custody.plan.path)
+          return channel;
+        return {
+          ...channel,
+          async send(frame) {
+            if (frame.startsWith("finish ")) throw secondary;
+            return channel.send(frame);
+          },
+        };
+      };
+      f.beforeRawCommand = (operation) => {
+        if (operation === "verify-retain") {
+          const pid = Number(f.rawEvents.at(-1).split(" ")[2]);
+          assert.equal(
+            f.actors.get(pid)?.retired,
+            false,
+            "Independent custody must be acquired before original exit",
+          );
+        }
+      };
+      const owners = new Map(),
+        system = createWindowsExperimentSystemEffects(
+          job,
+          preparation,
+          options,
+          owners,
+        ),
+        settings = {
+          signal: new AbortController().signal,
+          execution: {
+            id: recipe.id,
+            effects: Object.fromEntries(
+              NATIVE_EFFECT_CLASSES.map((effect) => [
+                effect,
+                { admission: "possible" },
+              ]),
+            ),
+          },
+        };
+      let original;
+      await assert.rejects(
+        system.prepare(recipe, {
+          signal: options.signal,
+          policyBinding: preparation.system.bindings.find(
+            ({ id }) => id === recipe.id,
+          ).policyBinding,
+          recordPolicy: async () => {},
+        }),
+        (cause) => {
+          original = cause;
+          if (stage === "account") assert.equal(cause, primary);
+          else assert.equal(cause.admission.predicates.unique, false);
+          return true;
+        },
+      );
+      assert.equal(system.cause, original);
+      const before = f.rawEvents.length;
+      await assert.rejects(
+        system.settle(
+          { ...recipe, deadlineMs: recipe.deadlineMs + 1 },
+          null,
+          settings,
+        ),
+      );
+      await assert.rejects(system.settle(recipe, {}, settings));
+      await assert.rejects(
+        system.settle(recipe, null, {
+          ...settings,
+          execution: { ...settings.execution, id: "files.private" },
+        }),
+      );
+      assert.equal(
+        f.rawEvents.length,
+        before,
+        "A foreign case cannot reach the retained owner",
+      );
+      const diagnostics = [],
+        settlements = await withNativeDiagnostics(
+          () => system.settle(recipe, null, settings),
+          (_, value) => diagnostics.push(value),
+        );
+      assert.ok(
+        Object.values(settlements).every(
+          (entry) =>
+            entry.settlement.status ===
+            (observerFailure ? "RETAINED" : "RETIRED"),
+        ),
+      );
+      assert.equal(
+        system.cause,
+        original,
+        "Settlement cannot replace preparation failure",
+      );
+      if (observerFailure)
+        assert.ok(
+          diagnostics.some((value) =>
+            value.exception?.errors?.includes(secondary),
+          ),
+        );
+      else {
+        assert.equal(f.rawTasks.size, 0);
+        assert.ok([...f.actors.values()].every((actor) => actor.retired));
+      }
+      const records = [...f.files]
+        .filter(([name]) =>
+          name.startsWith(path.join(directory, `windows-case-${recipe.id}-`)),
+        )
+        .map(([, bytes]) => JSON.parse(bytes))
+        .filter((record) => record.phase === "custody")
+        .map(({ record }) => record);
+      assert.ok(
+        records.some(
+          (record) =>
+            record.phase === "retired" &&
+            (stage !== "pre-setup" || record.preSetup === true),
+        ),
+      );
+      if (stage === "pre-setup") {
+        assert.ok(
+          records.some((record) => record.phase === "pre-setup-helper-retired"),
+        );
+        assert.ok(
+          !records.some((record) => record.phase === "finish-acknowledged"),
+        );
+        assert.equal(f.accounts.size, 0);
+      } else
+        assert.ok([...f.accounts.values()].every((account) => account.retired));
+      assert.equal(
+        f.commands.filter(
+          ({ file, args }) => file === f.compiler && args[0] !== "/Bv",
+        ).length,
+        13,
+      );
+      if (stage === "pre-setup" && !observerFailure) {
+        for (const pid of f.actors.keys()) {
+          f.actors.delete(pid);
+          f.rawJobs.delete(pid);
+          f.rawCompilerJobs.delete(pid);
+        }
+        const native = windowsPreparationOptions(input, options, new Map()),
+          state = windowsPreparationContext(input, native);
+        try {
+          const { records } = await readWindowsRecoveryRecords(state),
+            before = f.rawEvents.length,
+            proof = await recoverWindowsCases(
+              state,
+              options,
+              records,
+              new Map(),
+              () => assert.fail("Pre-setup closure cannot replay a live owner"),
+              {},
+              settings.signal,
+            );
+          assert.equal(proof.status, "RETIRED");
+          const events = f.rawEvents.slice(before);
+          assert.ok(
+            events.some((frame) => frame.startsWith("verify-cold-process ")),
+          );
+          assert.ok(
+            !events.some((frame) => frame.startsWith("verify-retain ")),
+          );
+        } finally {
+          assert.equal((await native.settleFiles()).status, "RETIRED");
+        }
+      }
+    }
 });
 
 test("Windows experiment build settlement and cold consumers join original custody without replay", async () => {

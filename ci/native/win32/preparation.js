@@ -801,6 +801,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
               ].find((pin) => pin.path === file)?.sha256,
             })
           ).bytes,
+        preSetupVerifier: () => custodyFiles.preSetupVerifier(),
         ...options.readerOptions,
         ...settings,
         admissionClosed: () => files.admissionClosed,

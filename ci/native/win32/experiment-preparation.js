@@ -644,7 +644,7 @@ export function createWindowsExperimentSystemEffects(
   owners = new Map(),
 ) {
   const input = windowsExperimentSystemInput(job, preparation);
-  let current, activeId, preparedCase, cause;
+  let current, activeId, activeRecipe, preparedCase, preparationFailed, cause;
   const create = () => {
     const key = observationDigest({
         context: input.manifest.windowsPreparation.bootstrap.context,
@@ -682,9 +682,18 @@ export function createWindowsExperimentSystemEffects(
     },
     build: (request) => begin("build").build(request),
     async prepare(recipe, settings) {
-      preparedCase = await begin(recipe.id).prepare(recipe, settings);
-      preparedCase.purpose = "experiment";
-      return preparedCase;
+      const owner = begin(recipe.id);
+      activeRecipe = observationDigest(recipe);
+      preparationFailed = false;
+      try {
+        preparedCase = await owner.prepare(recipe, settings);
+        preparedCase.purpose = "experiment";
+        return preparedCase;
+      } catch (error) {
+        preparationFailed = true;
+        cause ??= error;
+        throw error;
+      }
     },
     literal: (...args) => {
       requireObservation(current);
@@ -698,7 +707,12 @@ export function createWindowsExperimentSystemEffects(
       requireObservation(
         current &&
           activeId === recipe.id &&
-          (recipe.id === "build" || prepared === preparedCase),
+          settings?.execution?.id === recipe.id &&
+          (recipe.id === "build" ||
+            (observationDigest(recipe) === activeRecipe &&
+              (preparedCase
+                ? prepared === preparedCase
+                : preparationFailed && prepared == null))),
       );
       const result = await current.settle(recipe, prepared, settings);
       if (
@@ -712,7 +726,9 @@ export function createWindowsExperimentSystemEffects(
       ) {
         current = null;
         activeId = null;
+        activeRecipe = null;
         preparedCase = null;
+        preparationFailed = false;
       }
       return result;
     },
@@ -723,7 +739,9 @@ export function createWindowsExperimentSystemEffects(
       if (retired(result)) {
         current = null;
         activeId = null;
+        activeRecipe = null;
         preparedCase = null;
+        preparationFailed = false;
       }
       return result;
     },

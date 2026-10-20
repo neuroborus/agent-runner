@@ -822,9 +822,6 @@ export function createWindowsCustodyVerifier(
         ),
         run = records.find((record) => record.phase === "task-run-possible"),
         admitted = records.find((record) => record.phase === "admitted");
-      // A possible run without an independently acknowledged birth remains
-      // excluded; no PID/name guess or missing final output can settle it.
-      requireWindows(!run || admitted);
       if (registered)
         identities.push(normalizeWindowsIdentity(registered.bridge));
       if (admitted) identities.push(systemIdentity(admitted.helper));
@@ -833,60 +830,128 @@ export function createWindowsCustodyVerifier(
           (record) => record.phase === "finish-acknowledged",
         ),
         finish = records.find((record) => record.phase === "finish-possible");
-      if (
-        original.purpose === "experiment" &&
-        completed &&
-        !completed.preSetup
-      ) {
+      if (original.purpose === "experiment" && completed) {
+        const preSetup = completed.preSetup === true,
+          phases = preSetup
+            ? [
+                "task-register-possible",
+                "task-run-possible",
+                "task-parked",
+                "pre-setup-bound",
+                "pre-setup-abort-possible",
+                "pre-setup-helper-retired",
+                "retired",
+              ]
+            : [
+                "task-register-possible",
+                "task-run-possible",
+                "task-parked",
+                "admitted",
+                "finish-possible",
+                "finish",
+                "finish-acknowledged",
+                "retired",
+              ],
+          lifecycle = phases.map((phase) =>
+            records.find((record) => record.phase === phase),
+          );
         requireWindows(
           registered &&
             run &&
-            admitted &&
-            acknowledged &&
-            finish &&
-            [
-              "task-register-possible",
-              "task-run-possible",
-              "admitted",
-              "finish-possible",
-              "finish-acknowledged",
-              "retired",
-            ].every(
+            (preSetup || completed.preSetup === undefined) &&
+            phases.every(
               (phase) =>
                 records.filter((record) => record.phase === phase).length === 1,
             ) &&
-            records.indexOf(finish) < records.indexOf(acknowledged) &&
-            records.indexOf(acknowledged) < records.indexOf(completed) &&
+            lifecycle.every(
+              (record, index) =>
+                record &&
+                (!index ||
+                  records.indexOf(lifecycle[index - 1]) <
+                    records.indexOf(record)),
+            ) &&
             sameWindowsIdentity(run.bridge, registered.bridge) &&
             hash(registered.taskSha256) &&
-            [run, completed].every(
-              (record) => record.taskSha256 === admitted.taskSha256,
-            ) &&
-            [finish, acknowledged, completed].every(
-              (record) =>
-                sameWindowsIdentity(record.helper, admitted.helper) &&
-                hash(record.nativeEventSha256),
-            ) &&
-            finish.nativeEventSha256 === acknowledged.nativeEventSha256 &&
-            sameWindowsIdentity(finish.verifier, admitted.verifier) &&
-            sameWindowsIdentity(completed.verifier, admitted.verifier) &&
-            integer(acknowledged.commandSequence, 32768) &&
-            acknowledged.commandSequence > 0,
+            hash(run.taskSha256),
         );
+        let helper;
+        if (preSetup) {
+          const [, , parked, bound, abort, stopped] = lifecycle;
+          helper = systemIdentity(parked.helper);
+          const instance = windowsTaskInstance(parked.instance);
+          requireWindows(
+            records.every(
+              (record) =>
+                !Object.hasOwn(record, "commandSequence") &&
+                (phases.includes(record.phase) ||
+                  [
+                    "task-possible",
+                    "admitted",
+                    "uncertain",
+                    "cleanup",
+                  ].includes(record.phase)),
+            ) &&
+              (!admitted ||
+                (records.filter((record) => record.phase === "admitted")
+                  .length === 1 &&
+                  records.indexOf(parked) < records.indexOf(admitted) &&
+                  records.indexOf(admitted) < records.indexOf(bound) &&
+                  sameWindowsIdentity(admitted.helper, helper) &&
+                  sameWindowsIdentity(admitted.verifier, bound.verifier) &&
+                  hash(admitted.nativeEventSha256) &&
+                  admitted.taskSha256 === run.taskSha256)) &&
+              systemIdentity(bound.verifier).pid !== helper.pid &&
+              hash(parked.processDaclSha256) &&
+              [parked, bound, abort, stopped, completed].every(
+                (record) =>
+                  sameWindowsIdentity(record.helper, helper) &&
+                  sameWindowsIdentity(record.bridge, registered.bridge) &&
+                  record.taskSha256 === run.taskSha256 &&
+                  record.processDaclSha256 === parked.processDaclSha256 &&
+                  same(windowsTaskInstance(record.instance), instance),
+              ) &&
+              [bound, stopped, completed].every((record) =>
+                hash(record.nativeEventSha256),
+              ),
+          );
+          identities.push(helper);
+        } else {
+          const parked = lifecycle[2],
+            command = lifecycle[5];
+          helper = systemIdentity(admitted.helper);
+          requireWindows(
+            !records.some((record) => record.phase.startsWith("pre-setup-")) &&
+              sameWindowsIdentity(parked.helper, helper) &&
+              sameWindowsIdentity(parked.bridge, registered.bridge) &&
+              hash(parked.processDaclSha256) &&
+              windowsTaskInstance(parked.instance) &&
+              [run, parked, completed].every(
+                (record) => record.taskSha256 === admitted.taskSha256,
+              ) &&
+              command.commandSequence === acknowledged.commandSequence &&
+              command.argumentsSha256 === observationDigest([]) &&
+              [finish, acknowledged, completed].every(
+                (record) =>
+                  sameWindowsIdentity(record.helper, admitted.helper) &&
+                  hash(record.nativeEventSha256),
+              ) &&
+              finish.nativeEventSha256 === acknowledged.nativeEventSha256 &&
+              sameWindowsIdentity(finish.verifier, admitted.verifier) &&
+              sameWindowsIdentity(completed.verifier, admitted.verifier) &&
+              integer(acknowledged.commandSequence, 32768) &&
+              acknowledged.commandSequence > 0,
+          );
+        }
         closedOwners.push({
           nonce: original.nonce,
-          identities: [admitted.helper, registered.bridge],
-          taskSha256: admitted.taskSha256,
-          receiptsSha256: observationDigest({
-            registered,
-            run,
-            admitted,
-            finish,
-            acknowledged,
-            completed,
-          }),
+          identities: [helper, registered.bridge],
+          taskSha256: run.taskSha256,
+          receiptsSha256: observationDigest(lifecycle),
         });
       }
+      // A run without a complete admission or bound pre-setup close remains
+      // excluded. A later exit cannot choose a different retirement lane.
+      requireWindows(!run || admitted || closedOwners.length > 0);
       const starts = records.filter(
           (record) => record.phase === "helper-start",
         ),

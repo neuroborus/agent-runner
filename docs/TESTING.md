@@ -1673,6 +1673,12 @@ It also covers hidden-task GUID/state/engine and birth joins, matching-digest
 zero-instance rejection, durable pre-setup abort receipts and fresh verification
 without clearing admission failure. Lost replies, live Jobs and exit 124 retain
 separate causes; independent task settlement precedes outer observer release.
+Ordinary experiment cold recovery distinguishes the ordered normal finish chain
+from the bound pre-setup abort/helper-retirement chain. Injected records reject
+missing, duplicated or reordered acknowledgements, mixed setup/abort lifecycles,
+substituted helper/bridge births, task hashes, instances and verifiers. Fresh
+process/Job censuses and task removal remain required after either chain; error
+87 and a failed live retention call cannot authorize a different recovery lane.
 The same suite now executes the repository verifier and prerequisite recovery
 using raw framed native replies and filesystem bytes, without supplying verifier
 verdict callbacks. It covers original process/token and transferred-object joins,
@@ -1867,6 +1873,14 @@ lost-finish, bridge-exit, emergency-retirement and bounded-cancellation coverage
 remains active; no command or trust verification is replayed. These portable
 cases retain the selected native harness and add no slow-tier assignment or
 native acceptance claim.
+The preparation fixture also fails ordinary case preparation before it returns,
+both before setup and after account acquisition. Settlement must reach the exact
+retained recipe/execution owner, reject substituted completed objects, and acquire
+independent original-process custody before exit. It preserves all thirteen
+successful helper builds and separately injects case-observer retirement failure:
+closed reader custody cannot erase the original preparation cause or prove the
+observer retired. These cases use the existing portable suites and introduce no
+additional validation command or native acceptance claim.
 Distinct regressions reject unsigned/source/output substitution, publication changes
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers
