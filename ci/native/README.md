@@ -6988,6 +6988,22 @@ cleanup before returning evidence or releasing dependencies. Its completion alon
 stored RETIRED and OpenProcess error 87 supply no original-domain proof. Reviewed
 and live-held recovery remain strict; a failed live retain never selects this lane.
 
+Build settlement hands outstanding preparation-file custody to its live cleanup
+signal before asking that owner to finish. The system controller has already
+aborted the build's work signal after verification; successful verification does
+not dispose the ordinary experiment's file observer. The ordinary system factory
+and preparation-options proxy share the same owner for `beginVerification`,
+`beginCleanup` and `settleFiles`. Settlement awaits that owner's cleanup handoff,
+which fences admission and preserves dependent readers, the original deadline and
+latched failures. Reviewed verification that already settled its file custody
+reuses that cached result without another handoff or finish. Cancellation remains
+bounded by the supplied cleanup signal; no finish is replayed and no compiler is
+restarted. Normal settlement does not enter recovery merely because the completed
+work signal was aborted. Recovery retains the separate closed-original and
+live-retained lanes above; no error-based fallback is added. Portable signal
+handoff coverage supplies no Windows build, original-domain retirement or 38-case
+acceptance evidence.
+
 Experiment recovery accounts for the producer's exact
 `windows-experiment-selector.json` as metadata, separately from effect-intent
 receipts. When present, the protected receipt reader validates its closed

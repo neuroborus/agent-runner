@@ -3817,7 +3817,7 @@ test("Windows default experiment bootstrap admits installed links and binds priv
   }
 });
 
-test("Windows experiment cold consumers join complete native identities across publication order and retain cleanup", async () => {
+test("Windows experiment build settlement and cold consumers join original custody without replay", async () => {
   const f = experimentBootstrapFixture();
   Object.assign(f.bootstrapOptions.binding, {
     candidateSha,
@@ -3897,6 +3897,79 @@ test("Windows experiment cold consumers join complete native identities across p
     }
   }
   const beforeCold = f.commands.length;
+  const work = new AbortController(),
+    cleanup = new AbortController(),
+    buildOwners = new Map(),
+    system = createWindowsExperimentSystemEffects(
+      job,
+      preparation,
+      options,
+      buildOwners,
+    ),
+    policyProofs = [],
+    built = await system.build({
+      candidateSha,
+      signal: work.signal,
+      policyBinding: preparation.system.bindings.find(
+        ({ id }) => id === "build",
+      ).policyBinding,
+      recordPolicy: (proof) => policyProofs.push(proof),
+    });
+  assert.equal(built.status, "OBSERVED");
+  assert.equal(built.purpose, "experiment");
+  assert.equal(built.independent, true);
+  assert.equal(policyProofs.length, 1);
+  assert.equal(buildOwners.size, 1);
+  const files = [...buildOwners.values()][0],
+    buildObserver = files.verification,
+    beforeSettlement = f.rawEvents.length;
+  assert.equal(files.admissionClosed, false);
+  assert.equal(f.rawTasks.has(buildObserver.input.nonce), true);
+  assert.equal(f.actors.get(buildObserver.identity.pid).retired, false);
+  work.abort();
+  // Follow the controller's real phase boundary. Only system settlement may
+  // hand this owner's work signal to cleanup; the fixture supplies no handoff.
+  const settled = await system.settle({ id: "build" }, null, {
+    signal: cleanup.signal,
+    execution: {
+      id: "build",
+      effects: Object.fromEntries(
+        NATIVE_EFFECT_CLASSES.map((effect) => [
+          effect,
+          {
+            admission: ["builds", "policy"].includes(effect)
+              ? "possible"
+              : "not-started",
+          },
+        ]),
+      ),
+    },
+  });
+  for (const [effect, receipt] of Object.entries(settled)) {
+    if (!["builds", "policy"].includes(effect)) assert.equal(receipt, null);
+    else
+      assert.deepEqual(receipt.settlement, {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+      });
+  }
+  assert.equal(files.admissionClosed, true);
+  assert.equal(buildOwners.size, 0);
+  assertSettled();
+  const custody = await files.settleFiles();
+  assert.equal(custody.status, "RETIRED");
+  assert.equal(custody.noLiveMembers, true);
+  assert.equal(custody.taskRemoved, true);
+  assert.equal(await files.settleFiles(), custody);
+  assert.equal(
+    f.rawEvents
+      .slice(beforeSettlement)
+      .filter((frame) => frame.startsWith("finish ")).length,
+    1,
+    "settlement must consume the original observer finish exactly once",
+  );
+  assert.equal(f.commands.length, beforeCold, "verification must not rebuild");
   for (const consume of consumers) {
     const start = f.rawEvents.length;
     await consume();

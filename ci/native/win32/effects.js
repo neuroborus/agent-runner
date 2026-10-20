@@ -1193,7 +1193,11 @@ export function createWindowsSystemEffects(
               retired(buildSettlement) &&
               (bootstrap == null || retired(bootstrap)),
           );
-          const custody = buildCustody ?? (await options.settleFiles?.());
+          let custody = buildCustody;
+          if (custody == null) {
+            await options.beginCleanup?.(signal);
+            custody = await options.settleFiles?.();
+          }
           requireObservation(
             custody == null ||
               (retired(custody) &&

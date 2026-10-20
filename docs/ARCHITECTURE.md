@@ -158,6 +158,17 @@ neither a trust remedy nor original retirement. The removed experiment compiler
 admission's earlier sequence-2 failure remains historical evidence; pipe error
 109 supplies no trust diagnosis or original-owner retirement. Retained native
 image/launch trust guards still require matching Windows evidence.
+Windows build settlement awaits the existing preparation-file cleanup handoff
+before finishing any outstanding file custody. The ordinary experiment wrapper
+forwards its distinct cleanup signal through the preparation-options proxy to
+the same owner used by build verification. This joins cleanup after the controller
+aborts the completed work signal, without clearing an earlier failure or renewing
+the original observer deadline. The handoff fences admission and preserves reader
+dependencies and bounded cancellation. Already settled reviewed build custody
+uses its cached result; successful normal cleanup neither recompiles nor replays
+a finish. Recovery remains separate: validated closed originals select cold
+verification before live retention, and failed live retention supplies no cold
+success or retirement proof.
 Windows experiment closure fences admission and coalesces original reader and
 file-observer settlement. Its separate 30-second cleanup signal interrupts IPC
 through queued reader work, task acknowledgement and bridge completion without

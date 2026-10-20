@@ -1673,6 +1673,18 @@ thirteen compiles, and rejoin prepared bytes and settle the build case without
 another compiler or bootstrap.
 Signal handoff coverage ends preparation before verification and preserves the
 original observer deadline, cancellation checks and first transport failure.
+The existing ordinary preparation-to-cold-consumer fixture also calls the real
+`createWindowsExperimentSystemEffects` factory through its preparation-options
+proxy. It successfully verifies the build and independently reads its policy,
+aborts that work signal, then supplies a distinct live cleanup signal only to
+system settlement. It never calls `beginCleanup` itself or replaces the file
+owner. Assertions require independent build/policy settlement, the original file
+observer's process and task retirement, admission fencing, registry removal and
+one cached finish without recompilation. The same fixture retains its original
+closed-receipt and failed-recovery refusals; reviewed build, deadline, latched
+failure, cleanup cancellation and live-reader coverage remain in this suite.
+This regression belongs to the existing explicit native harness, adds no slow
+tier and establishes no matching Windows CI or native acceptance.
 The real experiment open/close and preparation catch also use that raw fixture.
 The fast experiment suite exercises the actual preparation registry rather than
 extracting the changing close method from source. Parked-admission closure is
