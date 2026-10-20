@@ -814,9 +814,18 @@ The mapping covers all installed events in the fixed selected audit classes,
 including Git open variants, without widening that class selection.
 Root-only bootstrap assets supply selectors, disposable data-only Git repositories
 and the cross-volume control image; they confer no independent proof. The sealed
-native readers verify their actual held bytes. `experiment-cases.js` derives the
-complete finite inventory from `darwinSystemRecipes`, reusing the existing
-ownership, access, file and Git owners. It creates no configurable recipe language.
+native readers verify their actual held bytes. Blank-image acquisition uses
+`hdiutil create -size 16m -fs HFSX -volname native-poc-control -o FILE` at the
+private staging path, then publishes the image root-only and verifies its held
+bytes and SHA-256. Blank creation omits `-format UDRW`: that option requires a
+source folder or device and rejects this creation API. Acquisition failure still
+attempts to close and independently retire the original preparation observer,
+preserves the original cause and leaves whole preparation unsuccessful. File cases
+retain real read-only mounting, alias controls, identity-bound detach and independent
+removal; the creation-vector regression establishes no matching macOS acceptance.
+`experiment-cases.js` derives the complete finite inventory from
+`darwinSystemRecipes`, reusing the existing ownership, access, file and Git owners.
+It creates no configurable recipe language.
 Observed ACL and installed PF digests come from native reads after the fixed policy
 writer and exclusive lease, with concrete policy decisions and independent
 restoration still required. Reviewed pins remain mandatory.

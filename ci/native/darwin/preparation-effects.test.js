@@ -9762,12 +9762,14 @@ test("Darwin preparation recovery preserves failure and cannot settle admitted c
   }
 });
 
-async function installedCaseAcquisition(format) {
-  let selectedGit = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
-    changedIdentity = false,
-    changeOnRead = false,
-    interfaceReads = 0;
-  const f = experimentBuildFixture(),
+async function installedCaseAcquisitionFixture(format) {
+  const state = {
+      selectedGit: "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
+      changedIdentity: false,
+      changeOnRead: false,
+      interfaceReads: 0,
+    },
+    f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
       f.job,
       directory,
@@ -9850,7 +9852,7 @@ async function installedCaseAcquisition(format) {
           const leaf =
               records.has(file) ||
               [
-                selectedGit,
+                state.selectedGit,
                 "/sbin/pfctl",
                 "/usr/bin/hdiutil",
                 "/usr/bin/log",
@@ -9862,7 +9864,7 @@ async function installedCaseAcquisition(format) {
             isDirectory: () => !leaf,
             isSymbolicLink: () => false,
             dev: number(1),
-            ino: number(changedIdentity && leaf ? 2 : 1),
+            ino: number(state.changedIdentity && leaf ? 2 : 1),
             uid: number(501),
             gid: number(20),
             mode: number(leaf ? 0o666 : 0o777),
@@ -9883,7 +9885,7 @@ async function installedCaseAcquisition(format) {
               const data = await read(file),
                 chunk = data.subarray(position, position + Math.min(length, 7));
               chunk.copy(buffer, offset);
-              if (changeOnRead) changedIdentity = true;
+              if (state.changeOnRead) state.changedIdentity = true;
               return { bytesRead: chunk.length };
             },
             close: async () => {},
@@ -9892,7 +9894,7 @@ async function installedCaseAcquisition(format) {
         writeFile: async (file, value) => records.set(file, Buffer.from(value)),
       },
       networkInterfaces: () => {
-        interfaceReads++;
+        state.interfaceReads++;
         return {
           fixture: [
             { internal: true, family: "IPv6", address: "::1", scopeid: 0 },
@@ -9922,7 +9924,7 @@ async function installedCaseAcquisition(format) {
         if (file === "/usr/bin/sudo" && args.includes("/usr/bin/install"))
           records.set(args.at(-1), Buffer.from(await read(args.at(-2))));
         return {
-          stdout: file === "/usr/bin/xcrun" ? selectedGit + "\n" : "",
+          stdout: file === "/usr/bin/xcrun" ? state.selectedGit + "\n" : "",
           stderr: file === "/usr/bin/codesign" ? `CDHash=${cdhash}\n` : "",
         };
       },
@@ -9947,9 +9949,44 @@ async function installedCaseAcquisition(format) {
     format === "thin"
       ? f.image
       : Buffer.concat([Buffer.from("cafebabe00000002", "hex"), bytes]);
-  records.set(selectedGit, gitBytes);
+  records.set(state.selectedGit, gitBytes);
   records.set("/usr/lib/dyld", custody.loaderBytes);
   await custody.reader.start();
+  return {
+    state,
+    built,
+    headerPath,
+    recordHeaderPath,
+    recordSource,
+    records,
+    commands,
+    pins,
+    read,
+    options,
+    custody,
+    reader,
+    persist,
+    gitBytes,
+  };
+}
+
+async function installedCaseAcquisition(format) {
+  const {
+    state,
+    built,
+    headerPath,
+    recordHeaderPath,
+    recordSource,
+    records,
+    commands,
+    pins,
+    read,
+    options,
+    custody,
+    reader,
+    persist,
+    gitBytes,
+  } = await installedCaseAcquisitionFixture(format);
   const acquired = await acquireDarwinExperimentInputs(
     built.prepared,
     built.build,
@@ -9958,7 +9995,7 @@ async function installedCaseAcquisition(format) {
     options,
   );
   assert.equal(
-    interfaceReads,
+    state.interfaceReads,
     1,
     "both families must use one interface snapshot",
   );
@@ -9996,13 +10033,13 @@ async function installedCaseAcquisition(format) {
     ),
   );
   assert.equal(acquired.inputs.classes, 1);
-  assert.equal(acquired.inputs.git.path, selectedGit);
+  assert.equal(acquired.inputs.git.path, state.selectedGit);
   assert.equal(Object.hasOwn(acquired.inputs.git, "macho"), format === "thin");
   assert.equal(acquired.inputs.git.cdhash, cdhash);
   assert.ok(
     pins.some(
       ([file, pin, signature]) =>
-        file === selectedGit &&
+        file === state.selectedGit &&
         pin === digest(gitBytes) &&
         signature === cdhash,
     ),
@@ -10069,7 +10106,7 @@ async function installedCaseAcquisition(format) {
       native.put(upload.path, Buffer.from(upload.hex, "hex"), 0o400);
     for (const source of declared.custody.sources)
       native.put(source.path, bytes);
-    native.put(selectedGit, gitBytes, 0o755, 501);
+    native.put(state.selectedGit, gitBytes, 0o755, 501);
     const effects = createDarwinSystemEffects(native.input, native.options),
       recipe = darwinSystemRecipes().find(({ id }) => id === declared.id),
       prepared = await effects.prepare(recipe, {
@@ -10448,11 +10485,11 @@ async function installedCaseAcquisition(format) {
     }
     records.set(recordHeaderPath, Buffer.from(recordSource));
   }
-  records.set(selectedGit, Buffer.alloc(bytes.length));
+  records.set(state.selectedGit, Buffer.alloc(bytes.length));
   await assert.rejects(
-    reader.readBuildInput(selectedGit, acquired.inputs.git.sha256),
+    reader.readBuildInput(state.selectedGit, acquired.inputs.git.sha256),
   );
-  records.set(selectedGit, gitBytes);
+  records.set(state.selectedGit, gitBytes);
   for (const failure of ["build-signature", "native-signature"]) {
     const invalidSignature = darwinCustodyFixture({
       purpose: "experiment",
@@ -10535,7 +10572,7 @@ async function installedCaseAcquisition(format) {
       .slice(before)
       .every(([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file)),
   );
-  selectedGit = "/unrelated/git";
+  state.selectedGit = "/unrelated/git";
   await assert.rejects(
     acquireDarwinExperimentInputs(
       built.prepared,
@@ -10561,8 +10598,8 @@ async function installedCaseAcquisition(format) {
       throw new Error("Diagnostic sink failure");
     },
   );
-  selectedGit = acquired.inputs.git.path;
-  changeOnRead = true;
+  state.selectedGit = acquired.inputs.git.path;
+  state.changeOnRead = true;
   const diagnostics = [];
   await withNativeDiagnostics(
     () =>
@@ -10580,14 +10617,146 @@ async function installedCaseAcquisition(format) {
         diagnostics.push(value.exception);
     },
   );
-  assert.equal(diagnostics[0].canonical, selectedGit);
+  assert.equal(diagnostics[0].canonical, state.selectedGit);
   assert.equal(diagnostics[0].sampled.stable, false);
   assert.equal(diagnostics[0].sampled.recheck, null);
   assert.equal(diagnostics[0].stat.uid, 501);
-  changeOnRead = false;
-  changedIdentity = false;
+  state.changeOnRead = false;
+  state.changedIdentity = false;
   await custody.reader.close();
 }
+
+test("Darwin blank control image retains its exact creation vector and preparation cleanup on failure", async (t) => {
+  const { built, records, commands, pins, options, custody, reader, persist } =
+      await installedCaseAcquisitionFixture("thin"),
+    source = path.join(built.prepared.directory, "case-inputs/control.dmg"),
+    target = path.join(
+      built.prepared.sourceDirectory,
+      "experiment-control.dmg",
+    ),
+    image = Buffer.from("private blank control image"),
+    args = [
+      "create",
+      "-size",
+      "16m",
+      "-fs",
+      "HFSX",
+      "-volname",
+      "native-poc-control",
+      "-o",
+      source,
+    ],
+    command = options.command,
+    events = [];
+  t.after(() => custody.reader.close());
+  let failure;
+  options.command = async (file, actual, settings) => {
+    const result = await command(file, actual, settings);
+    if (file === "/usr/bin/hdiutil") {
+      assert.deepEqual(actual, args);
+      if (failure) {
+        events.push("creation-failed");
+        throw failure;
+      }
+      records.set(source, image);
+    }
+    return result;
+  };
+  const acquired = await acquireDarwinExperimentInputs(
+    built.prepared,
+    built.build,
+    reader,
+    persist,
+    options,
+  );
+  assert.deepEqual(acquired.inputs.volume, {
+    path: target,
+    sha256: digest(image),
+  });
+  assert.deepEqual(records.get(target), image);
+  assert.ok(
+    pins.some(([file, pin]) => file === target && pin === digest(image)),
+  );
+  assert.equal(
+    commands.filter(([file]) => file === "/usr/bin/hdiutil").length,
+    1,
+  );
+
+  const primary = experimentBuildFixture(),
+    createReader = primary.options.createReader,
+    closed = [],
+    before = commands.length;
+  let acquiring = false;
+  failure = new Error("Original blank-image creation failure");
+  records.delete(source);
+  records.delete(target);
+  primary.options.fs.readFile = primary.options.readReceipt;
+  primary.options.createReader = (...parameters) => {
+    const observer = createReader(...parameters);
+    return {
+      ...observer,
+      async close() {
+        const result = await observer.close();
+        if (acquiring) {
+          closed.push(result);
+          events.push("observer-retired");
+        }
+        return result;
+      },
+    };
+  };
+  primary.options.acquireCases = (prepared, build, observer, journal) => {
+    acquiring = true;
+    return acquireDarwinExperimentInputs(
+      prepared,
+      build,
+      observer,
+      async (record) => {
+        await journal(record);
+        await persist(record);
+      },
+      options,
+    );
+  };
+  await assert.rejects(
+    prepareDarwinExperiment(
+      primary.job,
+      directory,
+      primary.persist,
+      primary.options,
+    ),
+    (cause) => cause === failure,
+  );
+  assert.deepEqual(events, ["creation-failed", "observer-retired"]);
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].status, "RETIRED");
+  assert.equal(closed[0].independent, true);
+  assert.equal(closed[0].emergencyCleanup, false);
+  assert.equal(closed[0].closed, true);
+  assert.notEqual(closed[0].helper.pid, closed[0].verifier.pid);
+  assert.ok(
+    [...primary.files].some(
+      ([file, value]) =>
+        /\/darwin-bootstrap-[0-9]+-result\.json$/u.test(file) &&
+        observationDigest(value) ===
+          observationDigest({ purpose: "experiment", ...closed[0] }),
+    ),
+  );
+  assert.deepEqual(commands.slice(before).at(-1), ["/usr/bin/hdiutil", args]);
+  assert.equal(records.has(target), false);
+  assert.equal(primary.jobs.at(-1).failure, "preparation-failed");
+  assert.equal(primary.jobs.at(-1).preparation, null);
+  assert.equal(
+    primary.jobs.at(-1).preparationEffects.settlement.status,
+    "RETAINED",
+  );
+  assert.equal(
+    primary.files.has(
+      path.join(directory, "darwin-experiment-preparation.json"),
+    ),
+    false,
+  );
+});
 
 for (const format of ["thin", "universal"])
   test(`Darwin ${format} installed Git crosses acquisition, case custody and native operations`, () =>

@@ -543,8 +543,6 @@ export async function acquireDarwinExperimentInputs(
     "HFSX",
     "-volname",
     "native-poc-control",
-    "-format",
-    "UDRW",
     "-o",
     volumeSource,
   ]);
