@@ -176,22 +176,330 @@ export function darwinCommandCleanupArguments(value, final, parents) {
     value.parentIdentities[index === 2 ? 0 : 1],
   ]);
 }
+function commandDeadline() {
+  return Object.assign(new Error("Command deadline"), {
+    code: "ERR_FEASIBILITY_DEADLINE",
+  });
+}
+
+function commandWait(promise, signal) {
+  if (signal.aborted) return Promise.reject(commandDeadline());
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(commandDeadline());
+    signal.addEventListener("abort", abort, { once: true });
+    promise
+      .then(resolve, reject)
+      .finally(() => signal.removeEventListener("abort", abort));
+  });
+}
+
+/** Keep the original stream and native custody through cancellation. A rejected
+ * request, closed stream or reaped broker supplies no independent retirement. */
+export function observeDarwinCommandBroker(
+  broker,
+  value,
+  { signal, decoder, tokens, admittedSessions },
+) {
+  const pending = new Map(),
+    rpc = new PassThrough(),
+    errorOutput = new PassThrough(),
+    input = new PassThrough();
+  let failed,
+    captureFailure,
+    captureFinished = false,
+    stopping = false,
+    admissionsClosed = false,
+    interrupted = false,
+    exit,
+    total = 0;
+  const interrupt = () => {
+    if (interrupted || exit) return;
+    interrupted = true;
+    try {
+      // sudo forwards this to the held helper. Its existing non-restarting
+      // signal handler enters bounded native failure settlement.
+      broker.kill("SIGTERM");
+    } catch (error) {
+      try {
+        nativeException("darwin-command-cancellation", error);
+      } catch {
+        /* Diagnostics cannot replace the original cancellation. */
+      }
+    }
+  };
+  const fail = (error, capture = true) => {
+    const pendingWork = [...pending.values()].some(
+      (entry) => !entry.settlement,
+    );
+    failed ??= error;
+    if (capture) captureFailure ??= error;
+    admissionsClosed = true;
+    for (const entry of [...pending.values()])
+      if (!entry.settlement) entry.reject(failed);
+    if (capture || pendingWork) interrupt();
+    try {
+      nativeException("darwin-command-broker", error);
+    } catch {
+      /* Keep settling original custody if the diagnostic sink fails. */
+    }
+  };
+  const abortWork = () => fail(commandDeadline(), false),
+    fence = () => {
+      admissionsClosed = true;
+      signal.removeEventListener("abort", abortWork);
+    },
+    send = (frame) => {
+      need(broker.stdin.writable && !broker.stdin.destroyed && !exit);
+      try {
+        broker.stdin.write(frame, (error) => {
+          if (error) fail(error);
+        });
+      } catch (error) {
+        fail(error);
+        throw error;
+      }
+    },
+    request = (operation, active, settlement = false) => {
+      if (active.aborted) return Promise.reject(commandDeadline());
+      need(!pending.has(operation));
+      return new Promise((resolve, reject) => {
+        const settle = (fn, result) => {
+            if (pending.get(operation) !== entry) return;
+            pending.delete(operation);
+            active.removeEventListener("abort", abort);
+            fn(result);
+          },
+          abort = () => {
+            if (settlement) {
+              entry.reject(commandDeadline());
+              interrupt();
+            } else abortWork();
+          },
+          entry = {
+            settlement,
+            resolve: (result) => settle(resolve, result),
+            reject: (error) => settle(reject, error),
+          };
+        pending.set(operation, entry);
+        active.addEventListener("abort", abort, { once: true });
+      });
+    },
+    call = async (operation, active = signal) => {
+      const settlement = ["D", "S"].includes(operation);
+      if (operation === "D") fence();
+      if (!settlement) {
+        if (failed) throw failed;
+        need(!admissionsClosed && active === signal);
+      }
+      if (active.aborted) throw commandDeadline();
+      need(broker.stdin.writable && !broker.stdin.destroyed && !exit);
+      const response = request(operation, active, settlement);
+      try {
+        send(operation + "\n");
+      } catch (error) {
+        pending.get(operation)?.reject(error);
+      }
+      return response;
+    };
+  input.on("data", (chunk) => {
+    if (signal.aborted || admissionsClosed || failed || chunk.length > 65536) {
+      fail(new Error("Command transport closed"));
+      return;
+    }
+    try {
+      send("J " + chunk.toString("hex") + "\n");
+    } catch (error) {
+      fail(error);
+    }
+  });
+  input.on("end", () => {
+    if (!failed && !admissionsClosed) {
+      try {
+        send("E\n");
+      } catch (error) {
+        fail(error);
+      }
+    }
+  });
+  broker.on("error", fail);
+  broker.stdin.on("error", fail);
+  broker.stdout.on("error", fail);
+  broker.stderr.on("error", fail);
+  input.on("error", fail);
+  rpc.on("error", fail);
+  errorOutput.on("error", fail);
+  const closed = new Promise((resolve) =>
+    broker.once("close", (code, signal) => {
+      exit = { code, signal };
+      fence();
+      resolve(exit);
+    }),
+  );
+  observeNativeProcess("darwin/feasibility-command-effects.js", broker);
+  broker.stderr.on("data", (bytes) => {
+    total += bytes.length;
+    if (total > 8388608) fail(new Error("Native capture exceeded bound"));
+  });
+  const ready = request("ready", signal);
+  ready.catch(() => {});
+  signal.addEventListener("abort", abortWork, { once: true });
+  if (signal.aborted) abortWork();
+  const observation = (async () => {
+    try {
+      for await (const line of createInterface({
+        input: broker.stdout,
+        crlfDelay: Infinity,
+      })) {
+        try {
+          need(line.length <= 524288);
+          total += Buffer.byteLength(line);
+          const frame = JSON.parse(line);
+          if (
+            captureFailure &&
+            !["ready", "D", "S", "custody"].includes(frame.event)
+          )
+            continue;
+          need(captureFailure || total <= 33554432);
+          if (frame.event === "audit") {
+            need(/^(?:[a-f0-9]{2}){18,65536}$/u.test(frame.hex));
+            const bytes = Buffer.from(frame.hex, "hex"),
+              header = Buffer.alloc(4);
+            header.writeUInt32BE(bytes.length);
+            tokens.set(digest(bytes), frame.tokens);
+            await decoder.push(Buffer.concat([header, bytes]));
+          } else if (frame.event === "barrier") {
+            const bytes = Buffer.alloc(16);
+            [
+              0xfffffffe,
+              frame.sequence,
+              frame.seconds,
+              frame.milliseconds,
+            ].forEach((v, i) => bytes.writeUInt32BE(v, i * 4));
+            await decoder.push(bytes);
+            const entry = pending.get("B");
+            need(entry || failed);
+            entry?.resolve(decoder.acknowledgement(frame.sequence));
+          } else if (["rpc-end", "stderr-end"].includes(frame.event)) {
+            (frame.event === "rpc-end" ? rpc : errorOutput).end();
+          } else if (["rpc", "stderr"].includes(frame.event)) {
+            need(/^(?:[a-f0-9]{2}){1,65536}$/u.test(frame.hex));
+            const bytes = Buffer.from(frame.hex, "hex");
+            nativeDiagnostic(`darwin-command:${frame.event}`, {
+              [frame.event === "stderr" ? "stderr" : "stdout"]: bytes,
+            });
+            const output = frame.event === "rpc" ? rpc : errorOutput;
+            need(!output.writableEnded);
+            output.write(bytes);
+          } else if (frame.event === "capture-end") {
+            const bytes = Buffer.alloc(12);
+            [0xffffffff, frame.bytes, frame.records].forEach((v, i) =>
+              bytes.writeUInt32BE(v, i * 4),
+            );
+            await decoder.push(bytes);
+            captureFinished = true;
+          } else if (frame.event === "custody") {
+            need(
+              frame.sessionHeld === true &&
+                Number.isInteger(frame.identity.asid) &&
+                frame.identity.asid > 0 &&
+                admittedSessions.size < 16 &&
+                !admittedSessions.has(frame.identity.asid),
+            );
+            admittedSessions.add(frame.identity.asid);
+          } else {
+            if (frame.event === "ready") {
+              need(!value.observer);
+              value.observer = normalizeDarwinIdentity(frame.identity);
+              need(
+                ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
+                  (key) => value.observer[key] === 0,
+                ) && frame.imageSha256 === value.helperSha256,
+              );
+              await decoder.push(Buffer.alloc(4));
+            }
+            const entry = pending.get(frame.event);
+            need(
+              entry ||
+                (failed &&
+                  ["ready", "V", "G", "A", "R", "C", "N", "F"].includes(
+                    frame.event,
+                  )),
+            );
+            if (frame.event === "S") stopping = true;
+            entry?.resolve(frame);
+          }
+        } catch (error) {
+          fail(error);
+        }
+      }
+      if (!stopping)
+        throw new Error("Native observation stream closed before settlement");
+    } catch (error) {
+      fail(error);
+      throw error;
+    }
+  })();
+  observation.catch(() => {});
+  // A close event can precede asynchronous decoding of its last custody frame.
+  // Drain that same reader before rejecting requests lacking a final response.
+  closed.then(async () => {
+    try {
+      await observation;
+    } catch {
+      /* Capture failure remains latched. */
+    }
+    rpc.end();
+    errorOutput.end();
+    for (const entry of [...pending.values()])
+      entry.reject(Object.assign(new Error("Native custody closed"), exit));
+  });
+  return {
+    ready,
+    closed,
+    observation,
+    call,
+    cancel: (error) => fail(error, false),
+    send(frame) {
+      if (failed) throw failed;
+      need(!admissionsClosed && !signal.aborted);
+      send(frame);
+    },
+    transport: { input, output: rpc, errorOutput },
+    get captureFailure() {
+      return captureFailure;
+    },
+    get captureFinished() {
+      return captureFinished;
+    },
+    async close(active) {
+      let failure, result;
+      try {
+        await call("S", active);
+      } catch (error) {
+        failure = error;
+      }
+      try {
+        result = await commandWait(closed, active);
+        await commandWait(observation, active);
+      } catch (error) {
+        failure ??= error;
+      }
+      if (failure) throw failure;
+      return result;
+    },
+  };
+}
+
 export function createDarwinCommandEffects(dispatch, inputs) {
   let root,
     helper,
     broker,
-    closed,
+    command,
     decoder,
     sequence = 0,
     prepared,
-    failed,
-    active = false,
-    captureFinished,
-    observation,
-    observationSignal,
-    admissionsClosed = false;
-  const pending = new Map(),
-    tokens = new Map(),
+    active = false;
+  const tokens = new Map(),
     admittedSessions = new Set();
   const nativeArgs = (args, environment = env) => [
     "-n",
@@ -208,31 +516,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       timeout: 10000,
       maxBuffer: 1048576,
     });
-  const call = (operation) => {
-    const settlement = ["D", "S"].includes(operation);
-    need(
-      (!failed || settlement) &&
-        broker?.stdin.writable &&
-        !broker.stdin.destroyed &&
-        !pending.has(operation),
-    );
-    if (!settlement) need(!admissionsClosed && !observationSignal.aborted);
-    if (operation === "D") admissionsClosed = true;
-    return new Promise((resolve, reject) => {
-      pending.set(operation, { resolve, reject, settlement });
-      broker.stdin.write(operation + "\n");
-    });
-  };
-  const fail = (error) => {
-    nativeException("darwin-command-broker", error);
-    failed ??= error;
-    for (const [key, entry] of pending) {
-      if (!entry.settlement) {
-        entry.reject(failed);
-        pending.delete(key);
-      }
-    }
-  };
+  const call = (operation, signal) => command.call(operation, signal);
   const snapshots = async (signal) =>
     JSON.parse(
       (
@@ -428,9 +712,9 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       );
       return prepared;
     },
+    cancel: (error) => command?.cancel(error),
     async schema(value, signal) {
       signal.throwIfAborted();
-      observationSignal = signal;
       const codex = inputs.packages.codex;
       broker = spawn(
         "/usr/bin/sudo",
@@ -450,144 +734,17 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         { env, stdio: ["pipe", "pipe", "pipe"] },
       );
       active = true;
-      const rpc = new PassThrough(),
-        errorOutput = new PassThrough(),
-        input = new PassThrough();
-      input.on("data", (chunk) => {
-        if (
-          signal.aborted ||
-          admissionsClosed ||
-          failed ||
-          chunk.length > 65536
-        ) {
-          fail(new Error("Command transport closed"));
-          return;
-        }
-        broker.stdin.write("J " + chunk.toString("hex") + "\n");
+      command = observeDarwinCommandBroker(broker, value, {
+        signal,
+        decoder,
+        tokens,
+        admittedSessions,
       });
-      input.on("end", () => {
-        if (!failed && !admissionsClosed) broker.stdin.write("E\n");
-      });
-      value.transport = { input, output: rpc, errorOutput };
-      broker.on("error", fail);
-      broker.stdin.on("error", fail);
-      closed = new Promise((resolve) =>
-        broker.once("close", (code, signal) => {
-          resolve({ code, signal });
-          rpc.end();
-          errorOutput.end();
-          for (const entry of pending.values())
-            entry.reject(
-              Object.assign(new Error("Native custody closed"), {
-                code,
-                signal,
-              }),
-            );
-          pending.clear();
-        }),
-      );
-      let total = 0;
-      observeNativeProcess("darwin/feasibility-command-effects.js", broker);
-      broker.stderr.on("data", (bytes) => {
-        total += bytes.length;
-        if (total > 8388608) fail(new Error("Native capture exceeded bound"));
-      });
-      const ready = new Promise((resolve, reject) =>
-        pending.set("ready", { resolve, reject }),
-      );
-      observation = (async () => {
-        for await (const line of createInterface({
-          input: broker.stdout,
-          crlfDelay: Infinity,
-        })) {
-          try {
-            need(line.length <= 524288);
-            total += Buffer.byteLength(line);
-            const frame = JSON.parse(line);
-            if (failed && !["D", "S", "custody"].includes(frame.event))
-              continue;
-            need(failed || total <= 33554432);
-            if (frame.event === "audit") {
-              need(/^(?:[a-f0-9]{2}){18,65536}$/u.test(frame.hex));
-              const bytes = Buffer.from(frame.hex, "hex"),
-                header = Buffer.alloc(4);
-              header.writeUInt32BE(bytes.length);
-              tokens.set(digest(bytes), frame.tokens);
-              await decoder.push(Buffer.concat([header, bytes]));
-            } else if (frame.event === "barrier") {
-              const bytes = Buffer.alloc(16);
-              [
-                0xfffffffe,
-                frame.sequence,
-                frame.seconds,
-                frame.milliseconds,
-              ].forEach((v, i) => bytes.writeUInt32BE(v, i * 4));
-              await decoder.push(bytes);
-              const entry = pending.get("B");
-              need(entry);
-              pending.delete("B");
-              entry.resolve(decoder.acknowledgement(frame.sequence));
-            } else if (
-              frame.event === "rpc-end" ||
-              frame.event === "stderr-end"
-            ) {
-              (frame.event === "rpc-end" ? rpc : errorOutput).end();
-            } else if (frame.event === "rpc" || frame.event === "stderr") {
-              need(/^(?:[a-f0-9]{2}){1,65536}$/u.test(frame.hex));
-              nativeDiagnostic(`darwin-command:${frame.event}`, {
-                [frame.event === "stderr" ? "stderr" : "stdout"]: Buffer.from(
-                  frame.hex,
-                  "hex",
-                ),
-              });
-              (frame.event === "rpc" ? rpc : errorOutput).write(
-                Buffer.from(frame.hex, "hex"),
-              );
-            } else if (frame.event === "capture-end") {
-              const bytes = Buffer.alloc(12);
-              [0xffffffff, frame.bytes, frame.records].forEach((v, i) =>
-                bytes.writeUInt32BE(v, i * 4),
-              );
-              await decoder.push(bytes);
-              captureFinished = true;
-            } else if (frame.event === "custody") {
-              need(
-                frame.sessionHeld === true &&
-                  Number.isInteger(frame.identity.asid) &&
-                  frame.identity.asid > 0 &&
-                  admittedSessions.size < 16 &&
-                  !admittedSessions.has(frame.identity.asid),
-              );
-              admittedSessions.add(frame.identity.asid);
-            } else {
-              if (frame.event === "ready") {
-                value.observer = normalizeDarwinIdentity(frame.identity);
-                need(
-                  ["uid", "ruid", "svuid", "gid", "rgid", "svgid"].every(
-                    (key) => value.observer[key] === 0,
-                  ) && frame.imageSha256 === value.helperSha256,
-                );
-                await decoder.push(Buffer.alloc(4));
-              }
-              const entry = pending.get(frame.event);
-              need(entry);
-              pending.delete(frame.event);
-              entry.resolve(frame);
-            }
-          } catch (error) {
-            nativeException(
-              "darwin/feasibility-command-effects.js:exception",
-              error,
-            );
-            fail(error);
-          }
-        }
-      })();
-      observation.catch(fail);
-      await ready;
-      const version = await call("V");
+      value.transport = command.transport;
+      await command.ready;
+      const version = await call("V", signal);
       need(version.stdout === "codex-cli 0.160.0\n" && version.exitCode === 0);
-      need((await call("G")).exitCode === 0);
+      need((await call("G", signal)).exitCode === 0);
       const readSchema = async (name) => {
         const file = path.join(root, "schema/v2", name),
           st = await lstat(file);
@@ -638,10 +795,8 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       };
     },
     async begin(value, spec) {
-      need(!failed);
       sequence = (await call("B")).sequence;
-      need(!observationSignal.aborted && !admissionsClosed);
-      broker.stdin.write(`K ${spec.action}\n`);
+      command.send(`K ${spec.action}\n`);
     },
     async observe(value, spec) {
       const admitted = await call("N"),
@@ -668,33 +823,13 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       // external all-UID kernel inventory, then retire the observer itself.
       let exit;
       const settled = await settleDarwinCommandCustody(admittedSessions, {
-        retireDomain: () => call("D"),
+        retireDomain: () => call("D", signal),
         verifySession: async (asid) =>
           JSON.parse(
             (await native(["command-verify", String(asid)], signal)).stdout,
           ),
         closeObserver: async () => {
-          let failure;
-          try {
-            await call("S");
-          } catch (error) {
-            nativeException(
-              "darwin/feasibility-command-effects.js:exception",
-              error,
-            );
-            failure = error;
-          }
-          try {
-            exit = await closed;
-            await observation;
-          } catch (error) {
-            nativeException(
-              "darwin/feasibility-command-effects.js:exception",
-              error,
-            );
-            failure ??= error;
-          }
-          if (failure) throw failure;
+          exit = await command.close(signal);
         },
         verifyObserver: async () => {
           const verifier = JSON.parse(
@@ -714,7 +849,11 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         },
       });
       try {
-        need(!failed && captureFinished && tokens.size === 0);
+        need(
+          !command.captureFailure &&
+            command.captureFinished &&
+            tokens.size === 0,
+        );
         decoder.finish(exit);
       } catch (error) {
         nativeException(

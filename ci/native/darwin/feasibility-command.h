@@ -23,6 +23,9 @@ static mach_port_t command_rights[16];
 static au_asid_t command_sessions[16];
 static pid_t command_wrappers[16];
 static pid_t command_server_wrapper;
+/* Own the unreleased fork even before its audit session can be acquired. */
+static int command_release = -1;
+static pid_t command_pending_wrapper = -1;
 static bool command_server_clean;
 static unsigned command_count, command_records, command_bytes, command_barriers;
 static uint64_t command_latest_record_time, command_previous_barrier_time;
@@ -93,8 +96,16 @@ static void command_failure(void) {
   command_failing=true; command_admissions_closed=true;
   if(!command_cleanup_started){command_cleanup_started=true;command_expired=0;alarm(30);}
   if(command_in>=0) {close(command_in);command_in=-1;}
+  if(command_release>=0) {
+    if(close(command_release)) remember_cleanup("command-launch-close","errno",errno);
+    else command_release=-1;}
   for(unsigned pass=0;pass<2000 && !command_expired;pass++) {
     bool empty=true;
+    if(command_pending_wrapper>0) {
+      int status;pid_t reaped=waitpid(command_pending_wrapper,&status,WNOHANG);
+      if(reaped==command_pending_wrapper) command_pending_wrapper=-1;
+      else {empty=false;if(reaped<0 && errno!=EINTR)remember_cleanup("command-launch-reap","errno",errno);}
+    }
     for(unsigned i=0;i<command_count;i++) {
       int status;(void)waitpid(command_wrappers[i],&status,WNOHANG);
       if(command_members(command_sessions[i],pass>=100)) empty=false;
@@ -248,6 +259,7 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   need(command_count<16 && !command_expired && !command_admissions_closed); int input[2],output[2],errors[2],birth[2],release[2];
   command_native(pipe(input), == 0);command_native(pipe(output), == 0);command_native(pipe(errors), == 0);
   command_native(pipe(birth), == 0);command_native(pipe(release), == 0);
+  command_release=release[1];
   pid_t wrapper=fork();int fork_error=errno;command_observed(wrapper>=0, wrapper, fork_error);
   if(!wrapper){close(input[1]);close(output[0]);close(errors[0]);close(birth[0]);close(release[1]);
     auditinfo_addr_t audit={0};audit.ai_auid=command_uid;audit.ai_asid=AU_ASSIGN_ASID;audit.ai_termid.at_type=AU_IPv4;
@@ -269,16 +281,18 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
     pid_t child;command_native(posix_spawn(&child,args[0],&files,&attributes,args,environment), == 0);command_native(write(birth[1],&child,sizeof(child)), == sizeof(child));
     close(birth[1]);close(input[0]);close(output[1]);close(errors[1]);int status;command_native(waitpid(child,&status,0), == child);_exit(WIFEXITED(status)?WEXITSTATUS(status):126);
   }
+  command_pending_wrapper=wrapper;
   close(input[0]);close(output[1]);close(errors[1]);close(birth[1]);close(release[0]);char byte;command_native(read(birth[0],&byte,1), == 1);need(byte=='W');
   struct identity owner;need(inspect(wrapper,&owner));need(owner.token.val[0]==command_uid&&owner.token.val[1]==command_uid&&owner.token.val[2]==command_gid&&owner.token.val[6]>0);
   command_native(audit_session_port(owner.token.val[6],&command_rights[command_count]), == 0);need(command_rights[command_count]!=MACH_PORT_NULL);
   command_sessions[command_count]=owner.token.val[6];command_wrappers[command_count++]=wrapper;
+  command_pending_wrapper=-1;
   command_image_identity(owner,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,wrapper), == 1);
   /* libproc requires a positive signal. SIGCONT checks permission on this exact
    * launcher without satisfying its private P gate or spawning provider code. */
   command_continue(owner);need(live(owner));
   printf("{\"event\":\"custody\",\"identity\":");emit_identity(owner);puts(",\"sessionHeld\":true}");
-  command_native(write(release[1],"P",1), == 1);command_native(close(release[1]), == 0);pid_t child;
+  command_native(write(release[1],"P",1), == 1);command_native(close(release[1]), == 0);command_release=-1;pid_t child;
   command_native(read(birth[0],&child,sizeof(child)), == sizeof(child));command_native(close(birth[0]), == 0);
   struct identity identity;need(inspect(child,&identity));need(identity.token.val[0]==command_uid&&identity.token.val[1]==command_uid&&identity.token.val[2]==command_gid&&identity.token.val[6]==owner.token.val[6]);
   command_image_identity(identity,args[0],!strcmp(args[0],command_image)?command_image_hash:command_helper_hash);

@@ -150,6 +150,7 @@ export {
 export {
   darwinCommandEnvironment,
   darwinCommandFileObservation,
+  observeDarwinCommandBroker,
   settleDarwinCommandCustody,
   darwinCommandCleanupArguments,
 } from "./feasibility-command-effects.js";

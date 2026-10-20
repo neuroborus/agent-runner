@@ -2787,6 +2787,24 @@ policy permits fixture writes but denies network. A separate outside-write contr
 must actually succeed under it; an enclosing denial cannot prove Codex's stock
 command sandbox.
 
+The existing broker reader now owns pending requests through operation cancellation
+and closure. The traced path is ready, V/G, launcher birth and held-session custody,
+private P release, suspended spawn and identity-checked resume, then capture/reap.
+The 120-second operation signal rejects pending work, fences further admission and
+interrupts pending native requests through the existing native failure owner.
+Native failure retains an unreleased P gate and its original direct fork for
+closure and bounded reaping before session acquisition; it never signals an
+unbound PID. D/S requests and observer
+closure instead use the distinct 30-second cleanup signal. Cancellation does not
+discard the shared reader, late ready/custody frames, original session rights or
+the first operation failure. Broker closure drains that reader before rejecting
+unanswered requests, and every cleanup wait remains bounded. Expiration retains
+uncertainty. Only complete native settlement, fresh session/domain and observer
+retirement, closed capture and unchanged sentinels can prove cleanup; readiness,
+an aborted JavaScript wait or stream closure cannot. This repairs the demonstrated
+controller cancellation gap, not the unidentified cause of the saved V/G stall.
+Fresh matching macOS evidence remains necessary for native command acceptance.
+
 Six fixed nonce-backed inspection, edit and outside-write cases under read-only
 and workspace-write join acknowledged native windows to task/audit identities,
 signed helper bytes, live policy, permitted/denied BSM open records and held
@@ -3517,7 +3535,12 @@ name whose complete type is exactly `MACH_PORT_TYPE_DEAD_NAME`. Pinned
 use `ipc_port_copy_send_mqueue`, which can return a dead port; the
 [Mach port contract](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/mach/port.h)
 distinguishes that sentinel from an allocated dead name. Neither carries live
-authority. Every allocated name must pass `mach_port_type`; query failures
+authority. Current XNU's
+[`task_for_pid`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_proc.c)
+consults the target task's access port during caller authorization after the
+POSIX/MAC checks. The getter copy alone is not direct task authority, and the
+inherited endpoint remains unidentified. Every allocated name must pass
+`mach_port_type`; query failures
 stop the owned child without an unverified-name release and are never treated
 as absent rights. Checked deallocation releases only an inspected send,
 send-once or dead-name reference, including a rejected live reference; it does
@@ -3529,7 +3552,7 @@ replacing the first authority refusal. Null/dead sentinels allocate no
 name to release. All remaining descriptor, bootstrap, registered-port,
 exception and foreign-name sanitation still precedes the original payload exec.
 The slot is never blindly overwritten: XNU refuses replacement of an already
-valid task-access port, and live or unknown authority cannot reach payload exec
+valid task-access port, and a live or unknown endpoint cannot reach payload exec
 without a separately source-supported confined launch correction.
 The original observed `type=0x10000/query=0` is a live send right and retains the
 pre-exec `fault-access-authority` refusal. Bounded lifecycle observations now
@@ -3566,7 +3589,7 @@ valid slot, and `ipc_task_reset` does not clear it. Public
 provide credential reset and descriptor-close controls, not a task-access-slot
 reset. The existing deny-default sandbox and its installed-state query neither
 identify the inherited endpoint nor prove that delegated work is confined.
-The saved lifecycle reads already show live authority before the child's
+The saved lifecycle reads already show a live inherited slot before the child's
 credential transition; copied-reference release cannot establish its absence.
 No supported confined launch
 or endpoint ownership has been established. The smallest missing authority fact

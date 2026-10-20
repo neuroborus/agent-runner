@@ -815,6 +815,16 @@ cleanup are required; PID/group exit alone cannot pass. Missing privileges or
 interfaces remain BLOCKED before effects, and emergency or uncertain settlement
 prevents further provider admission. This supplies no full observer approvals or
 arbitrary Darwin domain recovery; native behavior remains externally unverified.
+The existing Darwin command-effects owner keeps one broker reader through work
+cancellation and cleanup. Pending work uses the operation signal; cancellation
+fences admission and signals the original native failure owner. Its unreleased
+fork gate and direct-child ownership remain available before session acquisition.
+D/S and stream/observer closure use the separate cleanup signal without replacing
+the reader or dropping late custody. Broker exit settles unanswered requests only
+after the reader drains; bounded cleanup expiration retains original ownership
+and uncertainty. Work failure remains separate from capture or retirement failure.
+Fresh complete session/domain verification and independent observer retirement
+remain mandatory. The saved V/G stall has no established native remedy.
 Windows adds a separate finite command controller and effects owner, using the
 shared installed-schema client with the release-supported default buffered cap
 and independent client bounds. Installed compiler/SDK and linker discovery,
@@ -2086,7 +2096,10 @@ audit session for an externally reserved non-login UID/GID, drops real/effective
 saved credentials, installs a reviewed Seatbelt profile and sanitizes inherited
 descriptors and Mach rights. An ordinary host port is required because SIP
 prevents clearing that special slot; privileged/unknown host or uncleared
-task-access authority blocks launch. Root custody acquires the new session's
+task-access endpoint blocks launch. XNU uses the target task's access port during
+caller authorization; releasing a getter reference does not clear the slot or
+identify its endpoint. The live/unknown-endpoint refusal remains mandatory.
+Root custody acquires the new session's
 send right only after fork, and is tracked separately by stable native identity.
 The feasibility fault owner retains partial pipes and its direct child before
 failure, reports original pre-exec exits separately from control-channel closure,

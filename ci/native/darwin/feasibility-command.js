@@ -308,6 +308,7 @@ export async function runDarwinFeasibilityCommand(
       sentinelsAfterSha256: prepared.sentinelSha256,
     };
   } catch (error) {
+    effects.cancel?.(error);
     nativeException("darwin-model-free-command", error);
     const routeUnavailable = error.code === "ERR_FEASIBILITY_ROUTE_UNAVAILABLE";
     const cause =

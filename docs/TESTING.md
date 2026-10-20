@@ -369,6 +369,14 @@ error and keeps a separate cleanup cause. These fast fixtures preserve exit
 semantics and never classify exit 78 alone as an environmental explanation.
 Both task-access confinement and model-free command feasibility remain open
 until fresh matching native evidence establishes their functional causes.
+Event-driven in-memory broker streams now cover ready followed by an unanswered
+V, cancellation during an acquired launch, late custody after cancellation,
+closure without retirement evidence, and separate cleanup deadline/observer
+failures. They exercise the existing effects owner and controller with unchanged
+120/30-second signals, independent settlement readers and the original failure
+preserved. An actual-body native failure fixture closes the unreleased P gate and
+reaps only its original fork. These portable tests add no native invocation or
+slow-tier assignment and establish no native acceptance of the V/G stall.
 
 The original fault transport matrix also injects pre-exec live-authority refusal
 for both fault roles. An original exit delivered alongside admission must retain

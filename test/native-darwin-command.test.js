@@ -3,11 +3,14 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
+import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import {
   runDarwinFeasibilityCommand,
   darwinCommandEnvironment,
   darwinCommandFileObservation,
   settleDarwinCommandCustody,
+  observeDarwinCommandBroker,
   darwinCommandCleanupArguments,
   createDarwinAuditDecoder,
 } from "../ci/native/darwin/index.js";
@@ -138,6 +141,8 @@ function commandGuards(header, helper, body, caller, options = {}) {
       command_cleanup_started: false,
       command_expired: 0,
       command_in: -1,
+      command_release: -1,
+      command_pending_wrapper: -1,
       command_count: 0,
       command_wrappers: [],
       command_sessions: [],
@@ -1602,4 +1607,289 @@ test("Darwin observation and partial-failure settlement have separate enforced d
   });
   assert.equal((await g.run()).cleanup.status, "UNCERTAIN");
   assert.equal(g.calls.includes("finish"), false);
+});
+
+async function commandBrokerFixture(t, signal, respond = () => {}) {
+  const broker = new EventEmitter(),
+    sent = [],
+    signals = [],
+    requests = new EventEmitter(),
+    sessions = new Set(),
+    value = { helperSha256: PIN };
+  let finished = false;
+  const frame = (value) => broker.stdout.write(JSON.stringify(value) + "\n"),
+    finish = () => {
+      if (finished) return;
+      finished = true;
+      broker.stdin.end();
+      broker.stdout.end();
+      broker.stderr.end();
+      broker.emit("close", 0, null);
+    };
+  broker.stdout = new PassThrough();
+  broker.stderr = new PassThrough();
+  broker.stdin = new Writable({
+    write(bytes, encoding, callback) {
+      const operation = bytes.toString().trim();
+      sent.push(operation);
+      requests.emit(operation);
+      respond(operation, { frame, finish });
+      callback();
+    },
+  });
+  broker.kill = (signal) => {
+    signals.push(signal);
+    return true;
+  };
+  const owner = observeDarwinCommandBroker(broker, value, {
+    signal,
+    tokens: new Map(),
+    admittedSessions: sessions,
+    decoder: { push: async () => {} },
+  });
+  t.after(async () => {
+    finish();
+    await Promise.allSettled([owner.closed, owner.observation]);
+  });
+  frame({
+    event: "ready",
+    imageSha256: PIN,
+    identity: {
+      ...identity,
+      uid: 0,
+      gid: 0,
+      ruid: 0,
+      rgid: 0,
+      svuid: 0,
+      svgid: 0,
+    },
+  });
+  await owner.ready;
+  return {
+    owner,
+    frame,
+    finish,
+    sent,
+    signals,
+    sessions,
+    when: (operation) =>
+      sent.includes(operation)
+        ? Promise.resolve()
+        : new Promise((resolve) => requests.once(operation, resolve)),
+  };
+}
+
+test("Darwin ready broker cancels an unanswered V without cancelling independent settlement", async (t) => {
+  const work = new AbortController(),
+    cleanup = new AbortController(),
+    f = await commandBrokerFixture(
+      t,
+      work.signal,
+      (operation, { frame, finish }) => {
+        if (operation === "D") {
+          // The native owner acquired this session before cancellation reached JS.
+          frame({
+            event: "custody",
+            sessionHeld: true,
+            identity: { asid: 19 },
+          });
+          frame({
+            event: "D",
+            empty: true,
+            emergency: false,
+            serverClean: true,
+            sessions: [19],
+          });
+        }
+        if (operation === "S") {
+          frame({ event: "capture-end", bytes: 0, records: 0 });
+          frame({ event: "S" });
+          finish();
+        }
+      },
+    ),
+    version = assert.rejects(f.owner.call("V"), {
+      code: "ERR_FEASIBILITY_DEADLINE",
+    });
+  await f.when("V");
+  work.abort();
+  await version;
+  await assert.rejects(f.owner.call("G"), { code: "ERR_FEASIBILITY_DEADLINE" });
+  const observed = [],
+    settled = await settleDarwinCommandCustody(f.sessions, {
+      retireDomain: () => f.owner.call("D", cleanup.signal),
+      verifySession: async (asid) => {
+        observed.push(asid);
+        return { empty: true };
+      },
+      closeObserver: () => f.owner.close(cleanup.signal),
+      verifyObserver: async () => {
+        observed.push("observer");
+        return { status: "RETIRED" };
+      },
+    });
+  assert.deepEqual(f.sent, ["V", "D", "S"]);
+  assert.deepEqual(f.signals, ["SIGTERM"]);
+  assert.deepEqual(observed, [19, "observer"]);
+  assert.deepEqual([...f.sessions], [19]);
+  assert.equal(settled.retired.length, 1);
+  assert.equal(f.owner.captureFinished, true);
+  assert.equal(f.owner.captureFailure, undefined);
+});
+
+test("Darwin acquired launch keeps late custody after cancellation and rejects closure as retirement", async (t) => {
+  const work = new AbortController(),
+    cleanup = new AbortController(),
+    f = await commandBrokerFixture(t, work.signal),
+    held = Promise.withResolvers(),
+    add = f.sessions.add.bind(f.sessions);
+  f.sessions.add = (asid) => {
+    const result = add(asid);
+    held.resolve();
+    return result;
+  };
+  let original;
+  const launch = assert.rejects(f.owner.call("A"), (error) => {
+    original = error;
+    return error.code === "ERR_FEASIBILITY_DEADLINE";
+  });
+  f.frame({ event: "custody", sessionHeld: true, identity: { asid: 17 } });
+  await held.promise;
+  work.abort();
+  await launch;
+  f.frame({ event: "custody", sessionHeld: true, identity: { asid: 18 } });
+  f.frame({ event: "A", identity, sessionHeld: true, imageSha256: PIN });
+  const observed = [],
+    settlement = assert.rejects(
+      settleDarwinCommandCustody(f.sessions, {
+        retireDomain: () => f.owner.call("D", cleanup.signal),
+        verifySession: async () =>
+          assert.fail("A closed broker supplies no domain proof"),
+        closeObserver: () => f.owner.close(cleanup.signal),
+        verifyObserver: async () => {
+          observed.push("observer");
+          return { status: "RETIRED" };
+        },
+      }),
+      (error) =>
+        error !== original && error.message === "Native custody closed",
+    );
+  await f.when("D");
+  f.finish();
+  await settlement;
+  assert.deepEqual([...f.sessions], [17, 18]);
+  assert.deepEqual(observed, ["observer"]);
+  assert.equal(f.owner.captureFinished, false);
+  assert.ok(f.owner.captureFailure);
+  await assert.rejects(f.owner.call("R"));
+});
+
+test("Darwin broker cancellation preserves its primary deadline through separate cleanup failures", async (t) => {
+  for (const failure of ["deadline", "observer"]) {
+    let broker;
+    const settled = Promise.withResolvers(),
+      f = fixture(({ effects, calls }) => {
+        effects.schema = async (value, signal) => {
+          broker = await commandBrokerFixture(
+            t,
+            signal,
+            (operation, { frame, finish }) => {
+              if (operation === "V") queueMicrotask(() => f.signals[0].abort());
+              if (operation === "D") {
+                if (failure === "deadline")
+                  queueMicrotask(() => f.signals[1].abort());
+                else
+                  frame({
+                    event: "D",
+                    empty: true,
+                    emergency: false,
+                    serverClean: true,
+                    sessions: [],
+                  });
+              }
+              if (operation === "S") {
+                frame({ event: "capture-end", bytes: 0, records: 0 });
+                frame({ event: "S" });
+                finish();
+              }
+            },
+          );
+          return broker.owner.call("V", signal);
+        };
+        effects.cancel = (error) => broker.owner.cancel(error);
+        effects.retire = async (value, signal) => {
+          calls.push("retire");
+          try {
+            await settleDarwinCommandCustody(broker.sessions, {
+              retireDomain: () => broker.owner.call("D", signal),
+              verifySession: async () => assert.fail("No session was acquired"),
+              closeObserver: () => broker.owner.close(signal),
+              verifyObserver: async () => {
+                throw new Error("Independent observer unavailable");
+              },
+            });
+          } finally {
+            settled.resolve();
+          }
+        };
+      }),
+      result = await f.run();
+    await settled.promise;
+    assert.equal(result.status, "FAIL");
+    assert.equal(result.cause.code, "deadline");
+    assert.equal(result.cleanup.status, "UNCERTAIN");
+    assert.equal(result.cleanup.cause.code, "cleanup-unobserved");
+    assert.deepEqual(f.durations, [120000, 30000]);
+    assert.equal(f.calls.includes("finish"), false);
+    if (failure === "deadline") {
+      broker.frame({
+        event: "custody",
+        sessionHeld: true,
+        identity: { asid: 21 },
+      });
+      broker.finish();
+      await broker.owner.observation.catch(() => {});
+      assert.deepEqual([...broker.sessions], [21]);
+    }
+  }
+});
+
+test("Darwin native cancellation closes an unreleased launch gate and reaps its original fork", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const calls = [],
+    f = commandGuards(header, helper, "command_failure();", "command_failure", {
+      context: {
+        command_prerequisite: false,
+        command_release: 41,
+        command_pending_wrapper: 51,
+      },
+    });
+  let reaped = false;
+  Object.assign(f.context, {
+    close: (fd) => {
+      calls.push(["close", fd]);
+      return 0;
+    },
+    waitpid: (pid) => {
+      calls.push(["wait", pid]);
+      return reaped ? pid : 0;
+    },
+    poll: () => {
+      reaped = true;
+      return 0;
+    },
+  });
+  f.run();
+  assert.deepEqual(calls, [
+    ["close", 41],
+    ["wait", 51],
+    ["wait", 51],
+  ]);
+  assert.equal(f.context.command_release, -1);
+  assert.equal(f.context.command_pending_wrapper, -1);
+  assert.equal(f.context.command_admissions_closed, true);
 });

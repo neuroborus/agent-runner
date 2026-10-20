@@ -214,8 +214,10 @@ static void domain_sanitize(void) {
   domain_mach(mach_port_kobject(self,host,&type,&address), "fault-host-kind"); invariant(type == 3, "fault-host-kind");
   domain_mach(mach_port_deallocate(self,host), "fault-host-release");
   domain_mach(task_get_special_port(self,TASK_ACCESS_PORT,&access), "fault-access-port");
-  /* XNU's copy_send_mqueue can return a dead sentinel or a right that dies
-   * before inspection. Neither delegates work; live or unknown rights block exec.
+  /* XNU consults the target task's access port when authorizing task_for_pid.
+   * This inherited endpoint is unidentified; releasing a getter copy does not
+   * clear its slot. copy_send_mqueue can return a dead sentinel or a right that
+   * dies before inspection. Live or unknown rights still block exec.
    * The task-access slot cannot be overwritten while its port is valid. */
   mach_port_type_t access_type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
   kern_return_t access_query = KERN_SUCCESS;
