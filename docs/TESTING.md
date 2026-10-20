@@ -343,11 +343,26 @@ supplies no success or retirement evidence. Custodian lifecycle fixtures execute
 the actual observation body with failed getters, absent/dead values, live send
 references, unavailable type queries and refused releases. They verify one checked
 release per valid getter copy, no endpoint contact and unchanged errno. The
-original child fixture checks its separate payload observation and unchanged live
-authority refusal. The custody caller fixture forwards fragmented raw lifecycle
-and malformed metadata while preserving the original authority failure and separate
+same matrix includes the forked child's observation after its alarm and before
+audit-session or credential transitions. The original child fixture executes
+that observation and its separate payload read, retaining live-authority refusal.
+Unavailable child getter/type facts stay distinct from the authoritative payload
+check; a failed child copied-reference release stops before the audit transition
+and retains its cleanup cause. The custody caller fixture forwards fragmented
+raw lifecycle and malformed metadata while preserving the original authority failure and separate
 release cause, including when the raw diagnostic sink throws. These portable
 fixtures run no native compiler or macOS tool and add no slow-tier assignment.
+
+`test/native-darwin-command.test.js` additionally executes the actual finite
+command guard, failure and cleanup bodies with injected native calls. Audit-pipe
+open/query/selection failures retain exact caller/guard, return value and saved
+errno, including when diagnostics or cleanup change errno. Initial guards retain
+their entry order; session-escape and membership refusals stop before previously
+short-circuited operations. A later retirement refusal cannot replace the first
+error and keeps a separate cleanup cause. These fast fixtures preserve exit
+semantics and never classify exit 78 alone as an environmental explanation.
+Both task-access confinement and model-free command feasibility remain open
+until fresh matching native evidence establishes their functional causes.
 
 The original fault transport matrix also injects pre-exec live-authority refusal
 for both fault roles. An original exit delivered alongside admission must retain

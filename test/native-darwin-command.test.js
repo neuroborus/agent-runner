@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import {
   runDarwinFeasibilityCommand,
   darwinCommandEnvironment,
@@ -27,6 +29,544 @@ const identity = {
   startSeconds: 90,
   startMicroseconds: 1,
 };
+
+// Execute the native guards and failure owner; project only C representations
+// and header-local macros. Native APIs remain injected, never macOS tools.
+function commandGuards(header, helper, body, caller, options = {}) {
+  const extract = (source, name) =>
+      new RegExp(
+        `static [^\\n]+ ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)?.[1],
+    project = (value) =>
+      value
+        .replace(/^#(?:ifdef|endif).*$/gmu, "")
+        .replace("pid_t pids[4096];", "const pids=[];")
+        .replace(
+          "struct proc_bsdinfo before, after;",
+          "const before={}, after={};",
+        )
+        .replace(
+          "auditpinfo_addr_t a={.ap_pid=pids[i]}, b={.ap_pid=pids[i]};",
+          "const a={ap_pid:pids[i]}, b={ap_pid:pids[i]};",
+        )
+        .replace("struct identity member;", "const member={token:{val:[]}};")
+        .replace("au_mask_t empty={0,0};", "const empty={};")
+        .replace(
+          "struct auditpipe_ioctl_preselect choice={0};",
+          "const choice={aip_mask:{}};",
+        )
+        .replace(/sizeof\(pids\)/gu, "4096")
+        .replace(/sizeof\((?:pid_t|before|after|a|b|member|attempt)\)/gu, "1")
+        .replace(
+          /&(low|high|size)\b/gu,
+          (_, name) => `{set value(v){${name}=v}}`,
+        )
+        .replace(/&foreign\b/gu, "{set value(v){foreign=v}}")
+        .replace(
+          /&(before|after|a|b|member|queue|mode|empty|choice|status|attempt)\b/gu,
+          "$1",
+        )
+        .replace(/\((?:int|unsigned|void)\)/gu, "")
+        .replace(/\blong long /gu, "let ")
+        .replace(
+          /\b(?:unsigned|int|bool|uid_t|au_asid_t|mach_port_t) /gu,
+          "let ",
+        )
+        .replace(
+          /command_native\(([^;]+), (== [^;]+)\)/gu,
+          (_, call, comparison) =>
+            `command_native(()=>(${call}),value=>value ${comparison},${JSON.stringify(call + " " + comparison)})`,
+        )
+        .replace(
+          /command_observed\(([^;]+), ([^,;]+), ([^,;]+)\)/gu,
+          (_, ok, result, error) =>
+            `command_observed(!!(${ok}),${result},${error},${JSON.stringify(ok)})`,
+        )
+        .replace(
+          /\bneed\(([^;]+)\);/gu,
+          (_, guard) => `need(!!(${guard}),${JSON.stringify(guard)});`,
+        );
+  const diagnostics = [],
+    calls = [],
+    reports = [],
+    context = {
+      errno: 0,
+      stderr: {},
+      NULL: null,
+      EACCES: 13,
+      ENOENT: 2,
+      ENOTSUP: 45,
+      WNOHANG: 1,
+      __func__: caller,
+      __LINE__: 1,
+      failed_operation: null,
+      failed_domain: null,
+      failed_value: 0,
+      cleanup_operation: null,
+      cleanup_domain: null,
+      cleanup_value: 0,
+      resource_uncertain: false,
+      admitted_effects: true,
+      prerequisite_mode: false,
+      prerequisite_child: -1,
+      command_prerequisite: true,
+      command_failing: false,
+      command_owner: 42,
+      command_admissions_closed: false,
+      command_cleanup_started: false,
+      command_expired: 0,
+      command_in: -1,
+      command_count: 0,
+      command_wrappers: [],
+      command_sessions: [],
+      strcmp: (a, b) => Number(a !== b),
+      getpid: () => 42,
+      getuid: () => 0,
+      settle_prerequisite() {},
+      settle_bundle() {
+        context.errno = 90;
+      },
+      settle_fault() {},
+      settle_domain() {
+        if (options.cleanup)
+          context.remember_cleanup("fixture-close", "errno", 16);
+      },
+      alarm: () => 0,
+      close: () => 0,
+      waitpid: () => 0,
+      poll: () => 0,
+      fprintf(_stream, format, ...values) {
+        if (format.startsWith("native-darwin-command-guard:"))
+          diagnostics.push(values);
+        else reports.push(values);
+        context.errno = 91;
+      },
+      fflush() {
+        context.errno = 92;
+      },
+      _exit(code) {
+        throw Object.assign(new Error("Native refusal"), {
+          code,
+          operation: context.failed_operation,
+          kind: context.failed_domain,
+          value: context.failed_value,
+          cleanup: context.cleanup_operation && [
+            context.cleanup_operation,
+            context.cleanup_domain,
+            context.cleanup_value,
+          ],
+        });
+      },
+    };
+  Object.assign(context, options.context);
+  const owners = [
+    [helper, "remember", "operation,domain,value"],
+    [helper, "remember_cleanup", "operation,domain,value"],
+    [helper, "failure", "code"],
+    [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
+    [header, "command_failure", ""],
+  ];
+  const declarations = owners
+    .map(([source, name, args]) => {
+      const native = extract(source, name);
+      assert.ok(native, name);
+      return `function ${name}(${args}){${project(native)}}`;
+    })
+    .join("\n");
+  const macros = header.replace(/\\\n/gu, "\n"),
+    needMacro = /#define need\(ok\) ([^\n]+)/u.exec(macros)?.[1],
+    observedMacro =
+      /#define command_observed\(ok, result, error\)\s+([^\n]+)/u.exec(
+        macros,
+      )?.[1],
+    nativeMacro =
+      /#define command_native\(call, comparison\) do \{([\s\S]*?)\} while \(0\)/u.exec(
+        macros,
+      )?.[1];
+  assert.ok(needMacro && observedMacro && nativeMacro);
+  const macroFunctions = `
+    function need(ok,guard){${needMacro.replace("#ok", "guard")};}
+    function command_observed(ok,result,error,guard){${observedMacro.replace("#ok", "guard")};}
+    function command_native(call,compare,guard){${project(
+      nativeMacro
+        .replace("(call)", "call()")
+        .replace("native_result comparison", "compare(native_result)")
+        .replace('#call " " #comparison', "guard"),
+    )}}
+  `;
+  const script =
+    new Script(`${declarations}\n${macroFunctions}\nObject.assign(globalThis,{remember_cleanup,command_guard_at});
+    (...args)=>{${project(body)}}`);
+  return {
+    run: script.runInNewContext(context),
+    context,
+    diagnostics,
+    calls,
+    reports,
+  };
+}
+
+test("Darwin command audit prerequisites retain exact native guards through cleanup", async () => {
+  const [header, helper] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(
+          new URL(`../ci/native/darwin/${name}`, import.meta.url),
+          "utf8",
+        ),
+      ),
+    ),
+    body = /static int command_pipe\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(body);
+  const operations = [
+    "GET_QLIMIT_MIN",
+    "GET_QLIMIT_MAX",
+    "GET_MAXAUDITDATA",
+    "SET_QLIMIT",
+    "SET_PRESELECT_MODE",
+    "SET_PRESELECT_FLAGS",
+    "SET_PRESELECT_NAFLAGS",
+    "SET_PRESELECT_AUID",
+    "FLUSH",
+  ].map((name) => `AUDITPIPE_${name}`);
+  for (const fault of [null, "open", ...operations, "queue"]) {
+    const f = commandGuards(
+        header,
+        helper,
+        `const classes=1,uid=501,select=true;${body}`,
+        "command_pipe",
+        { cleanup: !!fault },
+      ),
+      context = {
+        O_RDONLY: 0,
+        O_NONBLOCK: 1,
+        O_CLOEXEC: 2,
+        AUDITPIPE_PRESELECT_MODE_LOCAL: 1,
+      };
+    for (const operation of operations) context[operation] = operation;
+    Object.assign(f.context, context, {
+      open() {
+        f.calls.push("open");
+        f.context.errno = fault === "open" ? 13 : 0;
+        return fault === "open" ? -1 : 7;
+      },
+      ioctl(fd, operation, target) {
+        assert.equal(fd, 7);
+        f.calls.push(operation);
+        f.context.errno = operation === fault ? 5 : 0;
+        if (operation === fault) return -1;
+        if (operation === operations[0])
+          target.value = fault === "queue" ? 2048 : 1;
+        if (operation === operations[1]) target.value = 4096;
+        if (operation === operations[2]) target.value = 65536;
+        return 0;
+      },
+    });
+    if (!fault) {
+      assert.equal(f.run(), 7);
+      assert.deepEqual(f.calls, ["open", ...operations]);
+      continue;
+    }
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 78);
+      assert.equal(error.operation, "helper-invariant");
+      assert.equal(
+        error.value,
+        fault === "open" ? 13 : fault === "queue" ? 0 : 5,
+      );
+      assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+      return true;
+    });
+    const [caller, line, guard, result, error] = f.diagnostics[0];
+    assert.equal(caller, "command_pipe");
+    assert.ok(line > 0);
+    assert.ok(
+      guard.includes(
+        fault === "open"
+          ? "open(/dev/auditpipe)"
+          : fault === "queue"
+            ? "queue>=low"
+            : fault,
+      ),
+    );
+    assert.equal(result, fault === "queue" ? 0 : -1);
+    assert.equal(error, fault === "open" ? 13 : fault === "queue" ? 0 : 5);
+    assert.deepEqual(
+      f.calls,
+      fault === "open"
+        ? ["open"]
+        : fault === "queue"
+          ? ["open", ...operations.slice(0, 2)]
+          : ["open", ...operations.slice(0, operations.indexOf(fault) + 1)],
+    );
+    assert.equal(
+      f.reports[0][2],
+      fault === "open" ? 13 : fault === "queue" ? 0 : 5,
+    );
+  }
+});
+
+test("Darwin command initial guards preserve prerequisite entry order and session refusals", async () => {
+  const [header, helper] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(
+          new URL(`../ci/native/darwin/${name}`, import.meta.url),
+          "utf8",
+        ),
+      ),
+    ),
+    start = header.indexOf("  uid_t real_uid=getuid()"),
+    end = header.indexOf('  if(!strcmp(argv[1],"command-observe"))', start),
+    checks = [
+      "getuid",
+      "geteuid",
+      "audit_signal",
+      "feasibility_sandbox_available",
+    ];
+  assert.ok(
+    start > header.indexOf('if(!strcmp(argv[1],"command-case"))') &&
+      end > start,
+  );
+  assert.ok(
+    header.indexOf("command_prerequisite=!strcmp", end) >
+      header.indexOf('"command-verify"', end),
+  );
+  for (const fault of [null, ...checks]) {
+    const f = commandGuards(
+      header,
+      helper,
+      header.slice(start, end),
+      "command_entry",
+      { context: { command_prerequisite: false, command_owner: 0 } },
+    );
+    Object.assign(f.context, {
+      getuid() {
+        f.calls.push("getuid");
+        return fault === "getuid" ? 501 : 0;
+      },
+      geteuid() {
+        f.calls.push("geteuid");
+        return fault === "geteuid" ? 501 : 0;
+      },
+      audit_signal: fault === "audit_signal" ? null : () => 0,
+      sandbox_binding: {},
+      feasibility_sandbox_available() {
+        f.calls.push("feasibility_sandbox_available");
+        return fault !== "feasibility_sandbox_available";
+      },
+    });
+    if (!fault) {
+      f.run();
+      assert.deepEqual(f.calls, [
+        "getuid",
+        "geteuid",
+        "feasibility_sandbox_available",
+      ]);
+      continue;
+    }
+    assert.throws(f.run, { code: 78 });
+    assert.equal(f.diagnostics[0][0], "command_entry");
+    assert.ok(f.diagnostics[0][2].includes(fault));
+    assert.deepEqual(
+      f.calls,
+      fault === "getuid"
+        ? ["getuid"]
+        : fault === "feasibility_sandbox_available"
+          ? ["getuid", "geteuid", "feasibility_sandbox_available"]
+          : ["getuid", "geteuid"],
+    );
+  }
+  const escapeStart = header.indexOf("      errno=0;int changed=setaudit_addr"),
+    escapeEnd = header.indexOf("      char byte;", escapeStart);
+  assert.ok(escapeStart > start && escapeEnd > escapeStart);
+  for (const fault of [null, "session", "foreign-status", "foreign-slot"]) {
+    const f = commandGuards(
+      header,
+      helper,
+      header.slice(escapeStart, escapeEnd),
+      "command_entry",
+      { cleanup: !!fault },
+    );
+    Object.assign(f.context, {
+      EPERM: 1,
+      MACH_PORT_NULL: 0,
+      attempt: {},
+      parent: { token: { val: [0, 0, 0, 0, 0, 0, 3] } },
+      setaudit_addr() {
+        f.calls.push("setaudit_addr");
+        f.context.errno = fault === "session" ? 0 : 1;
+        return fault === "session" ? 0 : -1;
+      },
+      audit_session_port(asid, target) {
+        assert.equal(asid, 3);
+        f.calls.push("audit_session_port");
+        target.value = fault === "foreign-slot" ? 200 : 0;
+        f.context.errno = 0;
+        return fault === "foreign-status" ? 0 : 5;
+      },
+    });
+    if (!fault) {
+      f.run();
+      assert.deepEqual(f.calls, ["setaudit_addr", "audit_session_port"]);
+      continue;
+    }
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 78);
+      assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+      return true;
+    });
+    assert.deepEqual(
+      f.calls,
+      fault === "session"
+        ? ["setaudit_addr"]
+        : ["setaudit_addr", "audit_session_port"],
+    );
+    assert.equal(f.diagnostics[0][0], "command_entry");
+    assert.ok(
+      f.diagnostics[0][2].includes(
+        fault === "session"
+          ? "changed==-1"
+          : fault === "foreign-status"
+            ? "acquired!=0"
+            : "foreign==MACH_PORT_NULL",
+      ),
+    );
+  }
+});
+
+test("Darwin command membership errors stop at their native call and preserve the first cleanup cause", async () => {
+  const [header, helper] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(
+          new URL(`../ci/native/darwin/${name}`, import.meta.url),
+          "utf8",
+        ),
+      ),
+    ),
+    body = /static unsigned command_members\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1],
+    operations = [
+      "list",
+      "bsd-before",
+      "audit-before",
+      "bsd-after",
+      "audit-after",
+      "inspect",
+    ];
+  assert.ok(body);
+  for (const fault of [null, ...operations]) {
+    const f = commandGuards(
+      header,
+      helper,
+      `const asid=55,signal_members=false;${body}`,
+      "command_members",
+      { cleanup: !!fault, context: { command_prerequisite: false } },
+    );
+    let bsds = 0,
+      audits = 0;
+    const sample = (name) => {
+      f.calls.push(name);
+      f.context.errno = fault === name ? 5 : 0;
+      return fault !== name;
+    };
+    Object.assign(f.context, {
+      PROC_ALL_PIDS: 1,
+      PROC_PIDTBSDINFO: 2,
+      A_GETPINFO_ADDR: 3,
+      SZOMB: 5,
+      proc_listpids(_kind, _unused, pids) {
+        pids.push(42);
+        return sample("list") ? 1 : 0;
+      },
+      proc_pidinfo(pid, _kind, _unused, value) {
+        assert.equal(pid, 42);
+        if (!sample(bsds++ ? "bsd-after" : "bsd-before")) return 0;
+        Object.assign(value, {
+          pbi_start_tvsec: 90,
+          pbi_start_tvusec: 1,
+          pbi_uid: 501,
+          pbi_status: 1,
+        });
+        return 1;
+      },
+      auditon(_kind, value) {
+        if (!sample(audits++ ? "audit-after" : "audit-before")) return -1;
+        Object.assign(value, { ap_asid: 55, ap_auid: 501 });
+        return 0;
+      },
+      inspect(pid, value) {
+        assert.equal(pid, 42);
+        value.token.val[6] = 55;
+        return sample("inspect");
+      },
+    });
+    if (!fault) {
+      assert.equal(f.run(), 1);
+      assert.deepEqual(f.calls, operations);
+      continue;
+    }
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 126);
+      assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+      return true;
+    });
+    assert.deepEqual(
+      f.calls,
+      operations.slice(0, operations.indexOf(fault) + 1),
+    );
+    assert.equal(f.diagnostics[0][0], "command_members");
+    if (fault !== "inspect") assert.equal(f.diagnostics[0][4], 5);
+  }
+  const f = commandGuards(
+    header,
+    helper,
+    "command_native(ioctl(7,AUDITPIPE_FLUSH,NULL), == 0);",
+    "command_pipe",
+    {
+      context: {
+        command_prerequisite: false,
+        command_count: 1,
+        command_sessions: [55],
+        command_wrappers: [42],
+      },
+    },
+  );
+  Object.assign(f.context, {
+    AUDITPIPE_FLUSH: 1,
+    ioctl() {
+      f.context.errno = 5;
+      return -1;
+    },
+    command_members() {
+      f.context.command_guard_at(
+        false,
+        "command_members",
+        2,
+        "auditon",
+        "errno",
+        -1,
+        13,
+        126,
+      );
+    },
+  });
+  assert.throws(f.run, (error) => {
+    assert.equal(error.code, 126);
+    assert.equal(error.value, 5);
+    assert.deepEqual(error.cleanup, ["helper-invariant", "errno", 13]);
+    return true;
+  });
+  assert.equal(f.diagnostics.length, 2);
+  assert.deepEqual(
+    f.reports
+      .filter((values) => values[0] === "helper-invariant")
+      .map((values) => values[2]),
+    [5, 5, 13],
+  );
+});
 function fixture(change = () => {}) {
   const calls = [],
     requests = [],

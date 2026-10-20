@@ -2716,6 +2716,15 @@ identities and actual source digests, including the command header when enabled.
 The command file and FIFO readers pass their held stat snapshots to the shared
 ACL inspection. Portable source and injected fixtures establish neither actual
 SDK compilation nor native admission; both variants still require matching macOS CI.
+The finite command header reports each refused guard's exact caller, source line
+and expression through ordinary diagnostics. Split native checks retain the
+immediate return value and errno before another API or cleanup can overwrite them,
+including audit-pipe prerequisites, launch admission, session-escape controls,
+all-UID membership and retirement. They preserve API order and short circuits;
+unreached calls are not sampled. The existing failure owner keeps its first cause
+and a separate cleanup cause, with unchanged prerequisite initialization and exit
+semantics. Exit 78 alone identifies no environmental cause. These diagnostics do
+not repair model-free command feasibility or supply native acceptance.
 The native broker arms capture first, holds each launcher's audit-session right
 before it can spawn a suspended Codex child, and independently checks live image,
 credentials and effective Seatbelt policy before release. The enclosing admission
@@ -3394,15 +3403,20 @@ without a separately source-supported confined launch correction.
 The original observed `type=0x10000/query=0` is a live send right and retains the
 pre-exec `fault-access-authority` refusal. Bounded lifecycle observations now
 separate `custodian-entry` before sealed reexec, `custodian-fork` after reexec and
-audit-session setup, and the existing unprivileged `payload` sanitation read.
+audit-session setup, `child-fork` in the forked child after its existing alarm and
+before audit-session or credential transitions, and the existing unprivileged
+`payload` sanitation read.
 They retain PID/parent, real/effective credentials, getter/type status, local name
 and reference-release status; `-1` denotes an unattempted query or release.
 Failed getter/type reads do not establish absence or a usable queried type.
-The two custodian observations query only their own public task-access slot.
+The two custodian observations and the child observation query only their own
+public task-access slot.
 Each successful getter's valid copied send reference is released once, even if
 its optional type query is unavailable; a failed release blocks and retains its
 independent cleanup cause. Failed getters allocate no reference. Original child
 sanitation keeps its stricter inspected-name release and refusal behavior.
+The child observation localizes inheritance; releasing its getter copy cannot
+clear the source task slot or establish a safe confined launch.
 Local names cannot establish endpoint identity across observations or prove
 confinement. No endpoint is contacted and no setter or extra launch is tried.
 The existing JS custody caller forwards custodian stderr through the ordinary CI

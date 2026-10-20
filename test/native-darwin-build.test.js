@@ -4257,7 +4257,7 @@ test("Darwin custodian lifecycle observations balance their own public getter re
       },
     };
     const observe = script.runInNewContext(context);
-    for (const phase of ["custodian-entry", "custodian-fork"]) {
+    for (const phase of ["custodian-entry", "custodian-fork", "child-fork"]) {
       if (options.release) assert.throws(() => observe(phase), { value: 15 });
       else observe(phase);
       assert.equal(context.errno, 9);
@@ -4265,13 +4265,13 @@ test("Darwin custodian lifecycle observations balance their own public getter re
     const valid = options.access === 200 && !options.get;
     assert.deepEqual(
       calls,
-      Array(2)
+      Array(3)
         .fill(valid ? ["get", "query", "release"] : ["get"])
         .flat(),
     );
     assert.deepEqual(
       observations,
-      ["custodian-entry", "custodian-fork"].map((phase) => [
+      ["custodian-entry", "custodian-fork", "child-fork"].map((phase) => [
         phase,
         options.get ?? 0,
         options.access ?? 0,
@@ -4287,18 +4287,24 @@ test("Darwin custodian lifecycle observations balance their own public getter re
     assert.deepEqual(
       cleanup,
       options.release
-        ? Array(2).fill(["fault-access-release", "mach", 15])
+        ? Array(3).fill(["fault-access-release", "mach", 15])
         : [],
     );
   }
   const entry = source.indexOf('domain_access_observe("custodian-entry")'),
     reexec = source.indexOf("execv(domain_helper, argv)"),
-    beforeFork = source.indexOf('domain_access_observe("custodian-fork")');
+    beforeFork = source.indexOf('domain_access_observe("custodian-fork")'),
+    fork = source.indexOf("pid_t child = fork()", beforeFork),
+    child = source.indexOf('domain_access_observe("child-fork")', fork);
   assert.ok(
     entry > 0 &&
       entry < reexec &&
       reexec < beforeFork &&
-      beforeFork < source.indexOf("pid_t child = fork()"),
+      beforeFork < fork &&
+      fork < source.indexOf("alarm(20)", fork) &&
+      source.indexOf("alarm(20)", fork) < child &&
+      child < source.indexOf("audit_fresh(domain_record.uid)", child) &&
+      child < source.indexOf("setuid(domain_record.uid)", child),
   );
 });
 
@@ -4315,7 +4321,11 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       source.indexOf("static void domain_start("),
     ),
     end = source.indexOf("\n  }\n  domain_child = child;", start);
-  assert.ok(sanitation && start > 0 && end > start);
+  const observation =
+    /static void domain_access_observe\(const char \*phase\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(sanitation && observation && start > 0 && end > start);
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
   const translate = (body) =>
@@ -4348,6 +4358,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
         "let ",
       );
   const script = new Script(`
+    function domain_access_observe(phase) {${translate(observation)}}
     function domain_sanitize() {${translate(sanitation)}}
     () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
   `);
@@ -4361,6 +4372,20 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     ["null", {}],
     ["dead sentinel", { access: DEAD }],
     ["allocated dead name", { access: 200, rights: DEAD_NAME }],
+    ["child getter refused", { childGet: 5 }],
+    [
+      "child query refused",
+      { access: 200, rights: SEND, childQuery: 15 },
+      "fault-access-authority",
+      0,
+    ],
+    [
+      "child release refused",
+      { access: 200, rights: SEND, childRelease: 15 },
+      "fault-access-release",
+      15,
+      15,
+    ],
     ["live send", { access: 200, rights: SEND }, "fault-access-authority", 0],
     [
       "live send/receive",
@@ -4434,7 +4459,8 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       originalBirth = { pid: 42 },
       domain = { uid: 90001, gid: 90002 };
     let first,
-      replies = 0;
+      replies = 0,
+      observing = true;
     const context = {
       errno: 0,
       stderr: {},
@@ -4543,9 +4569,11 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       mach_thread_self: () => 102,
       task_get_special_port(self, which, target) {
         assert.equal(self, 101);
-        calls.push(["get", which]);
+        if (which === 1) observing = false;
+        calls.push([observing ? "observe-get" : "get", which]);
+        if (observing && options.childGet) return options.childGet;
         target.value = which === 1 ? 103 : (options.access ?? 0);
-        return which === 2 ? (options.get ?? 0) : 0;
+        return which === 2 && !observing ? (options.get ?? 0) : 0;
       },
       mach_port_kobject(_self, _host, type, address) {
         type.value = options.host ?? 3;
@@ -4555,18 +4583,22 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       mach_port_type(self, name, target) {
         assert.equal(self, 101);
         assert.equal(name, 200);
-        calls.push(["type", name]);
-        if (!options.query) target.value = options.rights ?? DEAD_NAME;
-        return options.query ?? 0;
+        calls.push([observing ? "observe-type" : "type", name]);
+        const error = observing ? options.childQuery : options.query;
+        if (!error)
+          target.value = observing ? SEND : (options.rights ?? DEAD_NAME);
+        return error ?? 0;
       },
       mach_port_deallocate(_self, name) {
-        if (name === 200)
+        if (name === 200 && !observing)
           assert.ok(
             !options.noRelease,
             "No getter reference was proved for deallocation",
           );
-        calls.push(["release", name]);
-        return name === 200 ? (options.release ?? 0) : 0;
+        calls.push([observing ? "observe-release" : "release", name]);
+        return name === 200
+          ? ((observing ? options.childRelease : options.release) ?? 0)
+          : 0;
       },
       task_set_special_port(_self, which, port) {
         calls.push(["clear", which, port]);
@@ -4625,6 +4657,11 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       !operation,
       label,
     );
+    assert.equal(
+      calls.some(([op]) => op === "audit"),
+      !options.childRelease,
+      label,
+    );
     assert.deepEqual(
       cleanup,
       cleanupValue === undefined
@@ -4644,26 +4681,50 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       calls.some(([op, which]) => op === "get" && which === 2) && !options.get;
     assert.deepEqual(
       lifecycle,
-      got
-        ? [
-            [
-              "payload",
-              0,
-              options.access ?? 0,
-              options.access === DEAD
-                ? DEAD_NAME
-                : options.query
-                  ? 0
-                  : (options.rights ??
-                    (options.access === 200 ? DEAD_NAME : 0)),
-              queried ? (options.query ?? 0) : -1,
-              released ? (options.release ?? 0) : -1,
-            ],
-          ]
-        : [],
+      [
+        [
+          "child-fork",
+          options.childGet ?? 0,
+          options.childGet ? 0 : (options.access ?? 0),
+          options.childGet
+            ? 0
+            : options.access === DEAD
+              ? DEAD_NAME
+              : options.access === 200 && !options.childQuery
+                ? SEND
+                : 0,
+          options.access === 200 && !options.childGet
+            ? (options.childQuery ?? 0)
+            : -1,
+          options.access === 200 && !options.childGet
+            ? (options.childRelease ?? 0)
+            : -1,
+        ],
+        ...(got
+          ? [
+              [
+                "payload",
+                0,
+                options.access ?? 0,
+                options.access === DEAD
+                  ? DEAD_NAME
+                  : options.query
+                    ? 0
+                    : (options.rights ??
+                      (options.access === 200 ? DEAD_NAME : 0)),
+                queried ? (options.query ?? 0) : -1,
+                released ? (options.release ?? 0) : -1,
+              ],
+            ]
+          : []),
+      ],
       label,
     );
-    assert.equal(queried, options.access === 200 && !options.get, label);
+    assert.equal(
+      queried,
+      options.access === 200 && !options.get && !options.childRelease,
+      label,
+    );
     assert.equal(
       released,
       queried && !options.query && !options.noRelease,
@@ -4731,7 +4792,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       assert.ok(calls.some(([op, fd]) => op === "close" && fd === 3));
       assert.ok(calls.some(([op, fd]) => op === "close" && fd === 4));
     }
-    if (options.access && !options.get)
+    if (options.access && !options.get && !options.childRelease)
       assert.deepEqual(
         diagnostics,
         [

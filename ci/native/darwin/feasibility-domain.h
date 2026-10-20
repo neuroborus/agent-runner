@@ -437,7 +437,8 @@ static void domain_start(int argc, char **argv) {
   domain_access_observe("custodian-fork");
   pid_t child = fork(); posix_check(child, "fault-fork");
   if (!child) {
-    alarm(20); posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
+    alarm(20); domain_access_observe("child-fork");
+    posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
     struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}; posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
     posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");
     struct identity birth = fault_inspect(getpid()); domain_io(write(ready[1], &birth, sizeof(birth)), sizeof(birth), "fault-birth-write");
