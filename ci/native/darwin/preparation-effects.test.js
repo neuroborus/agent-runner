@@ -9732,7 +9732,8 @@ test("Darwin preparation recovery preserves failure and cannot settle admitted c
 async function installedCaseAcquisition(format) {
   let selectedGit = "/Applications/Fixture.app/Contents/Developer/usr/bin/git",
     changedIdentity = false,
-    changeOnRead = false;
+    changeOnRead = false,
+    interfaceReads = 0;
   const f = experimentBuildFixture(),
     built = await prepareDarwinExperimentBuild(
       f.job,
@@ -9857,12 +9858,27 @@ async function installedCaseAcquisition(format) {
         },
         writeFile: async (file, value) => records.set(file, Buffer.from(value)),
       },
-      networkInterfaces: () => ({
-        fixture: [
-          { internal: false, family: "IPv4", address: "192.0.2.1" },
-          { internal: false, family: "IPv6", address: "2001:db8::1" },
-        ],
-      }),
+      networkInterfaces: () => {
+        interfaceReads++;
+        return {
+          fixture: [
+            { internal: true, family: "IPv6", address: "::1", scopeid: 0 },
+            {
+              internal: false,
+              family: "IPv6",
+              address: "fe80::1",
+              scopeid: 7,
+            },
+            { internal: false, family: "IPv4", address: "192.0.2.1" },
+            {
+              internal: false,
+              family: "IPv6",
+              address: "2001:db8::1",
+              scopeid: 0,
+            },
+          ],
+        };
+      },
       command: async (file, args) => {
         assert.equal(journal.at(-1).phase, "case-input-command-possible");
         commands.push([file, args]);
@@ -9904,6 +9920,15 @@ async function installedCaseAcquisition(format) {
     persist,
     options,
   );
+  assert.equal(
+    interfaceReads,
+    1,
+    "both families must use one interface snapshot",
+  );
+  assert.deepEqual(acquired.inputs.addresses, {
+    inet: "192.0.2.1",
+    inet6: "2001:db8::1",
+  });
   assert.equal(Object.hasOwn(acquired.inputs.events, "mach"), false);
   assert.equal(acquired.inputs.mach.source, "unified-log-mach-v1");
   assert.equal(acquired.inputs.mach.tool.path, "/usr/bin/log");
@@ -10039,6 +10064,19 @@ async function installedCaseAcquisition(format) {
       acquired.inputs.mach.tool.sha256,
     );
     assert.equal(record.attempts[13].event, null);
+    assert.equal(record.attempts.length, 39);
+    for (const [id, target] of [
+      ["host-network-inet-tcp", "192.0.2.1"],
+      ["host-network-inet-udp", "192.0.2.1"],
+      ["host-network-inet6-tcp", "2001:db8::1"],
+      ["host-network-inet6-udp", "2001:db8::1"],
+      ["host-loopback-inet-tcp", "127.0.0.1"],
+      ["host-loopback-inet6-tcp", "::1"],
+    ])
+      assert.equal(
+        record.attempts.find((attempt) => attempt.id === id).target,
+        target,
+      );
     // Retain the separate portable BSM transcript model. The acquired Mach
     // source/tool crosses the existing full access and original-retirement path;
     // synthetic BSM tokens establish no installed/native acceptance.
@@ -10057,6 +10095,7 @@ async function installedCaseAcquisition(format) {
     const result = await runDarwinAccessCase(prepared.input, prepared.effects);
     assert.equal(result.status, "OBSERVED");
     assert.equal(result.nativeEvidence.denials.length, 33);
+    assert.equal(result.nativeEvidence.loopback.length, 4);
     assert.ok(native.events.includes("access-mach-log-run"));
     assert.equal(
       settled(
@@ -10087,6 +10126,98 @@ async function installedCaseAcquisition(format) {
         pin,
       );
   if (format === "thin") {
+    const networkSnapshot = options.networkInterfaces,
+      ipv4 = { internal: false, family: "IPv4", address: "192.0.2.1" },
+      ipv6 = {
+        internal: false,
+        family: "IPv6",
+        address: "2001:db8::1",
+        scopeid: 0,
+      },
+      excluded = [
+        { internal: true, family: "IPv6", address: "::1", scopeid: 0 },
+        { internal: false, family: "IPv6", address: "fe80::1", scopeid: 7 },
+        { internal: false, family: "IPv6", address: "FEBF::2", scopeid: 0 },
+        { internal: false, family: "IPv6", address: "2001:db8::2", scopeid: 4 },
+        {
+          internal: false,
+          family: "IPv6",
+          address: "2001:db8::3%fixture",
+          scopeid: 0,
+        },
+      ];
+    for (const [family, inventory] of [
+      ["IPv4", { external: [ipv6] }],
+      ["IPv6", { external: [ipv4] }],
+      ["IPv6", { external: [ipv4], excluded }],
+    ]) {
+      const diagnostics = [],
+        before = commands.length;
+      let reads = 0,
+        refusal;
+      options.networkInterfaces = () => {
+        reads++;
+        return inventory;
+      };
+      const acquire = () =>
+        acquireDarwinExperimentInputs(
+          built.prepared,
+          built.build,
+          reader,
+          persist,
+          options,
+        );
+      await withNativeDiagnostics(
+        () =>
+          assert.rejects(acquire, (cause) => {
+            refusal = cause;
+            return cause.message === "Unverified native tool observation";
+          }),
+        (owner, value) => {
+          if (owner === "darwin-experiment-addresses")
+            diagnostics.push(value.exception);
+        },
+      );
+      assert.equal(reads, 1);
+      assert.equal(diagnostics.length, 1);
+      assert.equal(diagnostics[0].requiredFamily, family);
+      assert.deepEqual(diagnostics[0].interfaces[0], {
+        name: "external",
+        family: family === "IPv4" ? "IPv6" : "IPv4",
+        address: family === "IPv4" ? "2001:db8::1" : "192.0.2.1",
+        internal: false,
+        scopeId: family === "IPv4" ? 0 : null,
+        exclusions: ["family-mismatch"],
+      });
+      if (inventory.excluded) {
+        assert.deepEqual(
+          diagnostics[0].interfaces.slice(1),
+          excluded.map((entry, i) => ({
+            name: "excluded",
+            family: "IPv6",
+            address: entry.address,
+            internal: entry.internal,
+            scopeId: entry.scopeid,
+            exclusions: [i === 0 ? "internal" : "unsupported-ipv6-scope"],
+          })),
+        );
+      }
+      await withNativeDiagnostics(
+        () =>
+          assert.rejects(acquire, (cause) => cause.message === refusal.message),
+        () => {
+          throw new Error("Diagnostic sink failure");
+        },
+      );
+      assert.ok(
+        commands
+          .slice(before)
+          .every(
+            ([file]) => !["/usr/bin/sudo", "/usr/bin/hdiutil"].includes(file),
+          ),
+      );
+    }
+    options.networkInterfaces = networkSnapshot;
     const producer = "AUDIT_HEADER_VERSION_OPENBSM",
       define = (value) => `#define ${producer} ${value}\n`,
       leaf = `#define ${producer}11 11\n`,

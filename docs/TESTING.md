@@ -247,6 +247,18 @@ declarations before PF/volume setup. Quoted string and character comment markers
 cannot hide duplicate declarations. Existing decoder cases reject Solaris and
 other mismatched captured versions. These public excerpts explain the contract;
 they are not an exact hosted-header match or native acceptance evidence.
+The same installed-input acquisition fixture requires one interface snapshot for
+both address families and retains successful thin/universal acquisition. Missing
+IPv4, missing IPv6 and internal/scoped-only IPv6 inventories must refuse before
+PF/volume setup while reporting the failed family and all named candidates with
+addresses, internal flags, scope IDs and exclusions. Scoped cases include
+link-local addresses across `fe80::/10`, nonzero scope IDs and zone-qualified
+literals. A throwing diagnostic sink cannot replace the original refusal.
+The existing case consumer additionally asserts all 39 attempts, distinct
+family-bound host-network and loopback targets, 33 denials and four echoes.
+These synthetic reads and injected commands run through the existing native
+harness without a slow-tier addition or host networking changes. Missing-family
+diagnostics supply neither a hosted acquisition repair nor native acceptance.
 The fixtures produce versioned experiment Mach records and carry
 the installed log source/tool into the retained access observation and retirement
 route. The existing portable BSM transcript model and all-profile coverage remain

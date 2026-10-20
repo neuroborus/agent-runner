@@ -781,6 +781,20 @@ preparation, including the ordinary workflow's explicit experiment dispatch.
 
 `experiment-inputs.js` obtains installed Git/PF/disk-tool images, loader bytes,
 SDK audit declarations, actual audit event/class mappings and host addresses.
+Address acquisition snapshots the observed interface inventory once for both
+required families. A missing eligible IPv4 or IPv6 address emits ordinary
+`darwin-experiment-addresses` diagnostics before refusing acquisition: the failed
+family, every interface name, address, family, internal flag, scope ID and
+selection exclusions. An absent scope ID remains unavailable, distinct from zero.
+Internal and mismatched-family candidates stay excluded. IPv6 link-local
+addresses, zone-qualified literals and nonzero scope IDs remain unsupported:
+`access-fixture.c` uses `inet_pton` and supplies no `sin6_scope_id`. Observations
+do not admit a scoped address, invent a fallback or relabel loopback. The selected
+host addresses still feed the family-bound host-network denials, separately from
+loopback controls, with all 39 attempts, 33 denials and four native echoes required.
+No interface or host network configuration changes. This localizes the missing
+family; actual hosted acquisition remains unresolved until fresh observations
+support a specific repair. Diagnostics establish no native acceptance.
 The audit version comes from the producer-selected `AUDIT_HEADER_VERSION_OPENBSM`
 in the held installed `audit_record.h`: a positive byte-sized decimal literal or
 one version-named OpenBSM alias with a matching literal. Beyond the ordinary

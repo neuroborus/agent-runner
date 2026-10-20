@@ -41,7 +41,8 @@ test("the Linux proof entry initializes directly with unchanged bounds", async (
        const system = await import(process.argv[2]);
        const ci = await import(process.argv[3]);
        const { systemJobBounds } = await import(process.argv[4]);
-       process.stdout.write(JSON.stringify({
+       const { writeSync } = await import("node:fs");
+       writeSync(process.stdout.fd, JSON.stringify({
          buildMs: proof.LINUX_FILE_PROOF_BUILD_MS,
          systemBounds: system.LINUX_SYSTEM_BOUNDS,
          systemProbeMs: system.LINUX_SYSTEM_PROBE_MS,

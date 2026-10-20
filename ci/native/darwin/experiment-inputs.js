@@ -377,7 +377,18 @@ export async function acquireDarwinExperimentInputs(
     // in the admitted classes needs its SDK-joined declaration for decoding.
     used = events.filter((entry) => entry.classes & classes),
     headerVersion = openBsmHeaderVersion(recordHeader.bytes);
-  const audit = {
+  const interfaces = Object.entries(
+      (options.networkInterfaces ?? networkInterfaces)(),
+    ).flatMap(([name, entries]) =>
+      (entries ?? []).map(({ family, address, internal, scopeid }) => ({
+        name,
+        family,
+        address,
+        internal,
+        scopeId: scopeid ?? null,
+      })),
+    ),
+    audit = {
       sdkSha256: build.sdk.sha256,
       abiSha256: observationDigest(build.abi),
       headerVersion,
@@ -389,17 +400,34 @@ export async function acquireDarwinExperimentInputs(
         ["inet", "IPv4"],
         ["inet6", "IPv6"],
       ].map(([kind, family]) => {
-        const value = Object.values(
-          (options.networkInterfaces ?? networkInterfaces)(),
-        )
-          .flat()
-          .find(
-            (entry) =>
-              !entry.internal &&
-              entry.family === family &&
-              !entry.address.startsWith("fe80:"),
-          );
-        requireObservation(value);
+        const candidates = interfaces.map((entry) => ({
+            ...entry,
+            exclusions: [
+              ...(entry.family !== family ? ["family-mismatch"] : []),
+              ...(entry.internal ? ["internal"] : []),
+              // access-fixture.c uses inet_pton without a sockaddr scope ID.
+              ...(entry.family === "IPv6" &&
+              ((entry.scopeId !== null && entry.scopeId !== 0) ||
+                entry.address.includes("%") ||
+                /^fe[89ab][0-9a-f]:/iu.test(entry.address))
+                ? ["unsupported-ipv6-scope"]
+                : []),
+            ],
+          })),
+          value = candidates.find((entry) => entry.exclusions.length === 0);
+        try {
+          requireObservation(value);
+        } catch (cause) {
+          try {
+            nativeException("darwin-experiment-addresses", {
+              requiredFamily: family,
+              interfaces: candidates,
+            });
+          } catch {
+            /* Diagnostics cannot replace the original refusal. */
+          }
+          throw cause;
+        }
         return [kind, value.address];
       }),
     );
