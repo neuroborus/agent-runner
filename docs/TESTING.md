@@ -1730,6 +1730,15 @@ exclude only the numbered preparation journal family from retirement evidence;
 malformed names and experiment journals in reviewed inventories remain failures.
 Indexed preparation and cold/recovery coverage also retains the actual producer
 names, first-cause preservation and independent non-emergency retirement.
+PF acquisition coverage sends the real installed-input producer's two reads
+through the custody command journal and into build cold loading. It preserves
+separate native command and contiguous journal sequences, rejects malformed
+request shapes, sequence bounds, unrelated PF phases and reviewed build use,
+and exercises a lost second reply. Fresh recovery independently checks original
+processes and domains without repeating acquisition or inventing completed
+preparation. Existing substitution and unavailable/live-retirement cases retain
+their separate guarantees. These injected regressions add no native execution
+or durable slow-tier requirement.
 The complete aggregate fixture retains all 109 uploads and 78 hosted command
 observations, neutral CI-shaped paths and compiler diagnostics. Its serialization
 exceeds one MiB and must pass the actual aggregate writer, normal loader and

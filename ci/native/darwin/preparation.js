@@ -857,11 +857,24 @@ function darwinBuildRecoveryInventory(state, records) {
             "root-retired",
             "compiler-policy",
             ...(state.manifest.purpose === "experiment"
-              ? ["signature", "macho", "build", "build-input"]
+              ? ["signature", "macho", "build", "build-input", "pf-read"]
               : []),
           ].includes(entry.phase),
       ),
     );
+    for (const { record: entry } of custody.filter(
+      ({ record }) => record.phase === "pf-read",
+    )) {
+      observationObject(entry.request, ["sequence", "arguments"]);
+      // Native commands count independently of the surrounding custody journal.
+      requireObservation(
+        Number.isSafeInteger(entry.request.sequence) &&
+          entry.request.sequence > 0 &&
+          entry.request.sequence <= 32768 &&
+          Array.isArray(entry.request.arguments) &&
+          entry.request.arguments.length === 0,
+      );
+    }
     requireObservation(
       admitted &&
         admitted[bindingKey(state.manifest)] ===

@@ -6471,6 +6471,14 @@ final command completion nor final helper outputs and launches no compiler or
 signer. Missing launch identities or
 surviving effects retain custody. Case recovery uses its repository-owned provisioning/family composition
 described below; historical injected case contracts remain distinct. The build owner fences further work with its original failure.
+Experiment build custody also admits the two argument-free `pf-read` requests
+emitted by installed-input acquisition. Each request has exactly a bounded
+positive native command sequence and an empty argument array. That counter is
+separate from the contiguous custody journal sequence. Purpose, binding,
+context and request digests remain mandatory; reviewed builds, malformed PF
+requests and unrelated PF phases remain refused. A recorded read intent supplies
+no observation or retirement proof, including after a lost reply. Fresh process
+and original-domain absence still govern recovery.
 Case custody intents and original independently admitted helper/verifier identities
 remain in that same recovery inventory, including a missing setup acknowledgement.
 The private `darwin/case-recovery.js` composition joins the full protected record

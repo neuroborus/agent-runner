@@ -64,11 +64,16 @@ import { bindDarwinMachAccess, darwinMachLogArguments } from "./mach-access.js";
 import { darwinAccessPreparation } from "./access-effects.js";
 import { prepareDarwinExperimentCases } from "./experiment-cases.js";
 import { darwinExperimentBuildBinding } from "./experiment-preparation.js";
-import { darwinPreparationContext } from "./preparation.js";
+import {
+  darwinPreparationContext,
+  darwinBuildRecords,
+  recoverDarwinBuild,
+} from "./preparation.js";
 import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
+import { createDarwinCustodyReader } from "./custody.js";
 import { fixture as darwinCustodyFixture } from "./custody.test.js";
 import {
   prepareDarwinExperimentBuild,
@@ -10122,6 +10127,277 @@ async function installedCaseAcquisitionFixture(format) {
     gitBytes,
   };
 }
+
+async function experimentPfAcquisitionFixture() {
+  const f = experimentBuildFixture(),
+    acquisition = await installedCaseAcquisitionFixture("thin"),
+    native = buildTranscripts(true),
+    write = f.options.fs.writeFile;
+  // Keep hosted compilation and installed-input reads in their existing fixtures.
+  // PF requests and their bootstrap journal use the production custody producer.
+  native.put(f.prepared.bootstrap.reader.path, bytes, 0o555);
+  f.options.fs.writeFile = async (file, value, settings) => {
+    await write(file, value, settings);
+    native.put(file, value, 0o400, 1001);
+  };
+  const built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    recoveryOptions = {
+      ...f.options,
+      createReader: (input, settings) =>
+        createDarwinCustodyReader(input, {
+          ...native.options.readerOptions,
+          ...settings,
+          verifyAssets: async () => {},
+        }),
+    },
+    state = darwinPreparationContext(
+      darwinExperimentBuildInput(built.prepared, built.job, directory),
+      recoveryOptions,
+    ),
+    { reader, sequence } = await state.bootstrap();
+  let journalSequence = 0;
+  return {
+    ...f,
+    acquisition,
+    built,
+    native,
+    state,
+    recoveryOptions,
+    custodyRecords: () =>
+      [...f.files.entries()]
+        .filter(([name]) =>
+          path
+            .basename(name)
+            .startsWith(`darwin-bootstrap-${sequence}-custody-`),
+        )
+        .sort(([, a], [, b]) => a.sequence - b.sequence),
+    acquire: () =>
+      acquireDarwinExperimentInputs(
+        built.prepared,
+        built.build,
+        { ...acquisition.reader, pf: () => reader.pf() },
+        async (record) => {
+          await state.write(
+            `darwin-experiment-input-${journalSequence++}.json`,
+            record,
+          );
+          await acquisition.persist(record);
+        },
+        acquisition.options,
+      ),
+  };
+}
+
+test("Darwin acquired PF requests cold-load through their original custody journal", async (t) => {
+  const f = await experimentPfAcquisitionFixture();
+  t.after(() => f.acquisition.custody.reader.close());
+  const acquired = await f.acquire(),
+    closed = await f.state.releaseBootstrap(),
+    records = f.custodyRecords(),
+    reads = records.filter(([, record]) => record.phase === "pf-read");
+  assert.equal(closed.status, "RETIRED");
+  assert.equal(closed.independent, true);
+  assert.equal(closed.emergencyCleanup, false);
+  assert.equal(f.native.processes.size, 0);
+  assert.equal(acquired.inputs.pf.active, false);
+  assert.deepEqual(
+    reads.map(([, record]) => record.request),
+    [
+      { sequence: 1, arguments: [] },
+      { sequence: 2, arguments: [] },
+    ],
+  );
+  for (const [index, [file, record]] of records.entries()) {
+    assert.ok(file.endsWith(`custody-${index}.json`));
+    assert.equal(record.sequence, index);
+    assert.equal(record.requestSha256, observationDigest(record.request));
+    assert.equal(record.purpose, "experiment");
+    assert.equal(
+      record.bindingSha256,
+      f.built.prepared.bootstrap.bindingSha256,
+    );
+    assert.deepEqual(record.context, f.built.prepared.bootstrap.context);
+  }
+  assert.ok(
+    reads.every(([, record]) => record.sequence !== record.request.sequence),
+  );
+  const before = f.events.filter(
+    (event) => event === "original-retirement",
+  ).length;
+  f.options.acquire = () => assert.fail("Cold loading cannot reacquire inputs");
+  const loaded = await loadDarwinExperimentBuild(
+    f.built.job,
+    directory,
+    f.options,
+  );
+  assert.deepEqual(loaded.build, f.built.build);
+  assert.ok(
+    f.events.filter((event) => event === "original-retirement").length > before,
+  );
+  assert.equal(
+    f.native.events.filter((event) => event === "pf-read").length,
+    2,
+  );
+});
+
+test("Darwin build recovery rejects malformed PF requests and unrelated phases", async (t) => {
+  const f = await experimentPfAcquisitionFixture();
+  t.after(() => f.acquisition.custody.reader.close());
+  await f.acquire();
+  await f.state.releaseBootstrap();
+  const [file, original] = f
+    .custodyRecords()
+    .find(([, record]) => record.phase === "pf-read");
+  for (const [label, mutate] of [
+    [
+      "arguments",
+      (entry) => {
+        entry.request.arguments = ["unexpected"];
+      },
+    ],
+    [
+      "missing arguments",
+      (entry) => {
+        delete entry.request.arguments;
+      },
+    ],
+    [
+      "non-array arguments",
+      (entry) => {
+        entry.request.arguments = { length: 0 };
+      },
+    ],
+    [
+      "null request",
+      (entry) => {
+        entry.request = null;
+      },
+    ],
+    [
+      "missing sequence",
+      (entry) => {
+        delete entry.request.sequence;
+      },
+    ],
+    [
+      "zero sequence",
+      (entry) => {
+        entry.request.sequence = 0;
+      },
+    ],
+    [
+      "sequence overflow",
+      (entry) => {
+        entry.request.sequence = 32769;
+      },
+    ],
+    [
+      "fractional sequence",
+      (entry) => {
+        entry.request.sequence = 1.5;
+      },
+    ],
+    [
+      "string sequence",
+      (entry) => {
+        entry.request.sequence = "1";
+      },
+    ],
+    [
+      "extra request field",
+      (entry) => {
+        entry.request.extra = true;
+      },
+    ],
+    [
+      "PF write",
+      (entry) => {
+        entry.phase = "pf-write";
+      },
+    ],
+    [
+      "PF recovery",
+      (entry) => {
+        entry.phase = "pf-recover";
+      },
+    ],
+    [
+      "journal gap",
+      (entry) => {
+        entry.sequence++;
+      },
+    ],
+  ]) {
+    const changed = structuredClone(original);
+    mutate(changed);
+    changed.requestSha256 = observationDigest(changed.request);
+    f.files.set(file, changed);
+    await assert.rejects(
+      loadDarwinExperimentBuild(f.built.job, directory, f.options),
+      /Unverified/,
+      label,
+    );
+    f.files.set(file, original);
+  }
+  const reviewed = buildTranscripts(),
+    state = darwinPreparationContext(reviewed.input, reviewed.options),
+    { reader } = await state.bootstrap();
+  await reader.pf();
+  await state.releaseBootstrap();
+  const records = await darwinBuildRecords(state),
+    before = reviewed.events.length;
+  await assert.rejects(recoverDarwinBuild(state, records), /Unverified/);
+  assert.equal(reviewed.events.length, before);
+  assert.equal(reviewed.processes.size, 0);
+});
+
+test("Darwin interrupted PF acquisition preserves its cause and independently recovers original custody", async (t) => {
+  const f = await experimentPfAcquisitionFixture(),
+    original = new Error("Original PF acquisition acknowledgement lost");
+  t.after(() => f.acquisition.custody.reader.close());
+  let reads = 0;
+  f.native.operationFrames((name) => {
+    if (name === "pf-read" && ++reads === 2) throw original;
+  });
+  await assert.rejects(f.acquire(), (cause) => cause === original);
+  assert.equal(reads, 2);
+  await assert.rejects(f.state.releaseBootstrap(), /Unverified/);
+  const admitted = f
+      .custodyRecords()
+      .find(([, record]) => record.phase === "admitted")[1],
+    failed = { ...f.built.job, failure: "preparation-failed" },
+    before = f.native.events.length,
+    recovered = await recoverDarwinExperimentBuild(
+      failed,
+      directory,
+      f.persist,
+      f.recoveryOptions,
+    );
+  assert.equal(recovered.failure, failed.failure);
+  assert.equal(recovered.preparation, null);
+  assert.equal(recovered.preparationEffects.settlement.status, "RETIRED");
+  assert.equal(recovered.preparationEffects.settlement.independent, true);
+  assert.equal(recovered.preparationEffects.settlement.emergencyCleanup, false);
+  const recovery = f.native.events.slice(before);
+  for (const subject of Object.values(admitted.subjects))
+    assert.ok(recovery.includes(`probe:${subject.pid}`));
+  assert.ok(recovery.includes("root-retired"));
+  assert.equal(reads, 2, "Recovery cannot repeat acquisition");
+  assert.equal(f.native.processes.size, 0);
+  assert.equal(
+    f.native.events.some((event) => event.startsWith("tool:")),
+    false,
+  );
+  assert.equal(
+    f.files.has(path.join(directory, "darwin-experiment-preparation.json")),
+    false,
+  );
+});
 
 async function installedCaseAcquisition(format) {
   const {
