@@ -124,8 +124,28 @@ static void account_check(const wchar_t *name, const wchar_t *expected) {
   LOCALGROUP_USERS_INFO_0 *groups; DWORD count, total;
   need(NetUserGetLocalGroups(NULL, name, 0, 0, (BYTE **)&groups, MAX_PREFERRED_LENGTH, &count, &total) == NERR_Success && count == 0 && total == 0);
   if (groups) NetApiBufferFree(groups);
-  USER_INFO_1 *user; need(NetUserGetInfo(NULL, name, 1, (BYTE **)&user) == NERR_Success && user->usri1_priv == USER_PRIV_USER &&
-    user->usri1_flags == (UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD)); NetApiBufferFree(user);
+  USER_INFO_1 *user = NULL; NET_API_STATUS status = NetUserGetInfo(NULL, name, 1, (BYTE **)&user);
+  bool present = user != NULL, sampled = status == NERR_Success && present;
+  DWORD privilege = sampled ? user->usri1_priv : 0, flags = sampled ? user->usri1_flags : 0;
+  DWORD expectedFlags = UF_SCRIPT | UF_NORMAL_ACCOUNT | UF_DONT_EXPIRE_PASSWD;
+  /* NetAPI returns its own status. Snapshot only these numeric fields before
+   * releasing every returned buffer, including one accompanying a refusal. */
+  NET_API_STATUS released = user ? NetApiBufferFree(user) : NERR_Success;
+  DWORD failure = status;
+  if (status == NERR_Success)
+    failure = !present || privilege != USER_PRIV_USER || flags != expectedFlags ? ERROR_INVALID_DATA : released;
+  if (failure != NERR_Success) {
+    fprintf(stderr, "native-windows-account: status=%lu present=%u sampled=%u privilege=%lu flags=%lu expected-privilege=%lu expected-flags=%lu\n",
+      status, (unsigned)present, (unsigned)sampled, privilege, flags, (DWORD)USER_PRIV_USER, expectedFlags);
+    if (released != NERR_Success)
+      fprintf(stderr, "native-windows-account-cleanup: operation=NetApiBufferFree status=%lu\n", released);
+    fflush(stderr); SetLastError(failure);
+  }
+  need(status == NERR_Success);
+  need(present);
+  need(privilege == USER_PRIV_USER);
+  need(flags == expectedFlags);
+  need(released == NERR_Success);
   LSA_OBJECT_ATTRIBUTES attributes = {0}; attributes.Length = sizeof(attributes); LSA_HANDLE policy; LSA_UNICODE_STRING *rights; ULONG number;
   need(LsaOpenPolicy(NULL, &attributes, POLICY_LOOKUP_NAMES, &policy) == 0 && LsaEnumerateAccountRights(policy, sid, &rights, &number) == 0 && number == 5);
   const wchar_t *approved[] = {L"SeBatchLogonRight", L"SeDenyInteractiveLogonRight", L"SeDenyRemoteInteractiveLogonRight", L"SeDenyNetworkLogonRight", L"SeDenyServiceLogonRight"};

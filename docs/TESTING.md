@@ -1225,6 +1225,15 @@ failures retain their facts separately from failed owned-handle closure.
 Narrow native source guards protect returned-status APIs, attribute sizing,
 held executable checks, first-cause capture before cleanup, distinct stdio handles,
 child-required inheritance and serialized stderr forwarding with owned joins.
+The Windows custody suite executes the account readback and both native guard
+bodies with injected NetAPI calls. It rejects API failure, a missing success
+buffer, privilege/flag mismatch and failed buffer release, preserves the first
+refusal alongside cleanup status, and keeps diagnostic write failures independent.
+Failed queries never expose unsampled fields; only the two numeric fields are read
+before each returned buffer's single release. Valid admission remains silent.
+Existing interrupted-provisioning coverage retains possible account effects until
+independent original-domain cleanup is proved. These cases infer no native account
+value or flag repair and never log credentials or whole account structures.
 These fast cases
 invoke no Windows process or compiler and add no slow or native-harness check.
 Actual compilation, diagnostic delivery, confined Git behavior, token/image

@@ -4437,6 +4437,201 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
   assert.deepEqual(fallback, ["open", ["custody-reader.c", 274, 87]]);
 });
 
+test("Windows account readback retains exact NetAPI, buffer, privilege and flag refusals through release", async () => {
+  const [account, custody, launcher] = await Promise.all(
+    ["account.h", "custody.h", "launcher.c"].map((file) =>
+      readFile(new URL(file, import.meta.url), "utf8"),
+    ),
+  );
+  const start = account.indexOf(
+      "  USER_INFO_1 *user = NULL;",
+      account.indexOf("static void account_check("),
+    ),
+    end = account.indexOf("  LSA_OBJECT_ATTRIBUTES attributes", start);
+  assert.ok(start > 0 && end > start);
+  const project = (source) =>
+    source
+      .replace("USER_INFO_1 *user = NULL", "let user = NULL")
+      .replace("(BYTE **)&user", "{set value(v){user=v}}")
+      .replace(/\(unsigned\)(present|sampled)\b/gu, "Number($1)")
+      .replace(/\((?:unsigned|DWORD)\)/gu, "")
+      .replace(/\b(?:NET_API_STATUS|DWORD|bool) /gu, "let ")
+      .replaceAll("->", ".")
+      .replace(/^#(?:ifdef|endif).*$/gmu, "");
+  const expectedFlags = 0x10201;
+  for (const [owner, source] of [
+    ["custody", custody],
+    ["launcher", launcher],
+  ]) {
+    const guard = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+    assert.ok(guard);
+    const program = new Script(`
+      function need_at(ok,file,line){${project(guard)}}
+      function need(ok){need_at(!!ok,"account.h",17);}
+      (name)=>{${project(account.slice(start, end))}}
+    `);
+    for (const [options, expectedError, predicate] of [
+      [{}, null],
+      [{ status: 5, present: false }, 5, "status"],
+      [{ status: 234 }, 234, "status"],
+      [{ present: false }, 13, "buffer"],
+      [{ privilege: 2 }, 13, "privilege"],
+      [{ flags: expectedFlags + 0x80000000 }, 13, "flags"],
+      [{ release: 87 }, 87, "release"],
+      [{ status: 5, release: 87 }, 5, "status"],
+      [{ flags: 1, release: 87 }, 13, "flags"],
+    ])
+      for (const diagnosticFailure of [false, true]) {
+        const calls = [],
+          diagnostics = [],
+          guards = [],
+          inspected = [];
+        let lastError = 0,
+          freed = false;
+        const present = options.present !== false,
+          sampled = !options.status && present;
+        const user = {};
+        for (const key of [
+          "usri1_priv",
+          "usri1_flags",
+          "usri1_password",
+          "usri1_name",
+        ])
+          Object.defineProperty(user, key, {
+            get() {
+              assert.ok(
+                sampled && !freed,
+                "Only successful live numeric fields may be read",
+              );
+              assert.ok(
+                ["usri1_priv", "usri1_flags"].includes(key),
+                "Credentials and account structures are never read for diagnostics",
+              );
+              inspected.push(key);
+              return key === "usri1_priv"
+                ? (options.privilege ?? 1)
+                : (options.flags ?? expectedFlags);
+            },
+          });
+        const api = {
+          NULL: null,
+          stderr: {},
+          NERR_Success: 0,
+          USER_PRIV_USER: 1,
+          UF_SCRIPT: 1,
+          UF_NORMAL_ACCOUNT: 0x200,
+          UF_DONT_EXPIRE_PASSWD: 0x10000,
+          ERROR_INVALID_DATA: 13,
+          NetUserGetInfo(server, name, level, output) {
+            assert.deepEqual(
+              [server, name, level],
+              [null, "fixture-account", 1],
+            );
+            calls.push("query");
+            output.value = present ? user : null;
+            lastError = 0; // NetAPI status is independent of GetLastError.
+            return options.status ?? 0;
+          },
+          NetApiBufferFree(value) {
+            assert.equal(value, user);
+            assert.equal(freed, false);
+            calls.push("release");
+            freed = true;
+            lastError = 99;
+            return options.release ?? 0;
+          },
+          GetLastError() {
+            return lastError;
+          },
+          SetLastError(value) {
+            lastError = value;
+          },
+          fprintf(_stream, format, ...values) {
+            diagnostics.push({ format, values });
+            assert.ok(
+              values.every((value) => Number.isInteger(value)),
+              "Only bounded numeric facts enter diagnostics",
+            );
+            let index = 0;
+            const text = format.replace(/%(?:lu|u)/gu, () =>
+              String(values[index++]),
+            );
+            assert.ok(Buffer.byteLength(text) < 384);
+            lastError = 100;
+            return diagnosticFailure ? -1 : text.length;
+          },
+          fflush() {
+            lastError = 101;
+            return diagnosticFailure ? -1 : 0;
+          },
+          NATIVE_CUSTODY_FAILURE(_file, _line, error) {
+            guards.push(error);
+            lastError = 102;
+          },
+          stop_job(code) {
+            assert.equal(code, 126);
+            calls.push("stop-job");
+          },
+          ExitProcess(code) {
+            throw Object.assign(new Error("Account admission refused"), {
+              code,
+            });
+          },
+        };
+        // The existing generic guard has a string file argument; account-specific
+        // observations above must remain numeric, even on diagnostic I/O failure.
+        const write = api.fprintf;
+        api.fprintf = (stream, format, ...values) => {
+          if (format.startsWith("native-windows-guard:")) {
+            assert.equal(values[0], "account.h");
+            guards.push(values[2]);
+            lastError = 103;
+            return diagnosticFailure ? -1 : 0;
+          }
+          return write(stream, format, ...values);
+        };
+        const run = () => program.runInNewContext(api)("fixture-account");
+        if (expectedError === null) run();
+        else assert.throws(run, { code: 126 });
+        assert.deepEqual(
+          inspected,
+          sampled ? ["usri1_priv", "usri1_flags"] : [],
+        );
+        assert.deepEqual(calls, [
+          "query",
+          ...(present ? ["release"] : []),
+          ...(expectedError !== null && owner === "launcher"
+            ? ["stop-job"]
+            : []),
+        ]);
+        assert.deepEqual(
+          guards,
+          expectedError === null
+            ? []
+            : Array(owner === "custody" ? 2 : 1).fill(expectedError),
+        );
+        assert.equal(
+          diagnostics.length,
+          expectedError === null ? 0 : options.release ? 2 : 1,
+        );
+        if (expectedError === null) continue;
+        assert.deepEqual(diagnostics[0].values, [
+          options.status ?? 0,
+          Number(present),
+          Number(sampled),
+          sampled ? (options.privilege ?? 1) : 0,
+          sampled ? (options.flags ?? expectedFlags) : 0,
+          1,
+          expectedFlags,
+        ]);
+        if (options.release)
+          assert.deepEqual(diagnostics[1].values, [87], predicate);
+      }
+  }
+});
+
 test("Windows open, guard and scheduler HRESULT diagnostics retain independent original and cleanup failures", async () => {
   const chunks = [],
     inputPath = "C:\\Fixture SDK\\Windows.h",
