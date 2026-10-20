@@ -146,21 +146,64 @@ static void stable_identity(struct entry *value) {
       current.st_birthtimespec.tv_sec == before.st_birthtimespec.tv_sec && current.st_birthtimespec.tv_nsec == before.st_birthtimespec.tv_nsec);
   } else { same_stat(value->stat, current); same_stat(value->stat, named); }
 }
+static void build_guard(void) {
+  struct stat root, parent, named; char canonical[PATH_MAX];
+  need(realpath(report_path, canonical) && !strcmp(report_path, canonical) &&
+    realpath(build_path, canonical) && !strcmp(build_path, canonical));
+  need(build_root >= 0 && build_parent >= 0 && !fstat(build_root, &root) && !lstat(build_path, &named) &&
+    S_ISDIR(root.st_mode) && root.st_dev == build_identity.st_dev && root.st_ino == build_identity.st_ino &&
+    root.st_birthtimespec.tv_sec == build_identity.st_birthtimespec.tv_sec && root.st_birthtimespec.tv_nsec == build_identity.st_birthtimespec.tv_nsec &&
+    root.st_uid == 0 && root.st_gid == 0 && ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0555));
+  same_stat(root, named);
+  need(!fstat(build_parent, &parent) && !lstat(report_path, &named) && S_ISDIR(parent.st_mode) &&
+    parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
+    parent.st_birthtimespec.tv_sec == report_identity.st_birthtimespec.tv_sec && parent.st_birthtimespec.tv_nsec == report_identity.st_birthtimespec.tv_nsec &&
+    parent.st_uid == report_identity.st_uid && parent.st_gid == report_identity.st_gid && (parent.st_mode & 07777) == 0700);
+  same_stat(parent, named);
+  need(!fstatat(build_parent, "platform-build", &named, AT_SYMLINK_NOFOLLOW)); same_stat(root, named);
+  no_acl(build_root); no_acl(build_parent);
+}
+static void build_root_open(const char *name);
+/* A declared direct child joins the already approved root, never a pathname
+ * prefix or a generic exemption for user-owned ancestors. */
+static bool build_entry(struct entry *value) {
+  if (!case_mode && !preparation_mode) return false;
+  bool directory = !strcmp(value->kind, "directory");
+  if (!directory && strcmp(value->kind, "helper") && strcmp(value->kind, "image") && strcmp(value->kind, "data")) return false;
+  char name[PATH_MAX]; need(strlen(value->path) < sizeof(name)); strcpy(name, value->path);
+  char *leaf = strrchr(name, '/'); need(leaf && leaf != name);
+  if (!directory) *leaf = 0;
+  leaf = strrchr(name, '/');
+  if (!leaf || strcmp(leaf + 1, "platform-build")) return false;
+  unsigned approved = 0;
+  for (unsigned i = 0; i < count; i++)
+    if (!strcmp(entries[i].kind, "directory") && !strcmp(entries[i].path, name)) approved++;
+  if (!approved) return false;
+  need(approved == 1);
+  if (preparation_mode) {
+    char expected[PATH_MAX]; need(snprintf(expected, sizeof(expected), "%s/platform-build", report_path) < sizeof(expected));
+    need(!strcmp(name, expected));
+  }
+  if (!directory) need(strlen(value->pin) == 64 && strspn(value->pin, "0123456789abcdef") == 64);
+  if (build_root < 0) build_root_open(name); else need(!strcmp(name, build_path));
+  return true;
+}
+static void entry_ancestors(struct entry *value) {
+  if (!build_entry(value)) { ancestors(value->path); return; }
+  build_guard();
+  char canonical[PATH_MAX]; need(realpath(value->path, canonical) && !strcmp(value->path, canonical));
+  if (!strcmp(value->kind, "directory")) return;
+  need((build_identity.st_mode & 07777) == 0555);
+  const char *leaf = strrchr(value->path, '/'); struct stat held, named;
+  need(leaf && !fstatat(build_root, leaf + 1, &held, AT_SYMLINK_NOFOLLOW) && !lstat(value->path, &named));
+  same_stat(held, named);
+  need(S_ISREG(held.st_mode) && held.st_uid == 0 && held.st_gid == 0 && held.st_nlink == 1 && !(held.st_mode & 06022));
+  if (value->fd >= 0) { same_stat(value->stat, held); no_acl(value->fd); }
+}
 static void stable(struct entry *value) {
   stable_identity(value);
-  if (!strcmp(value->kind, "build")) {
-    struct stat root, parent, named; char canonical[PATH_MAX];
-    need(realpath(report_path, canonical) && !strcmp(report_path, canonical) &&
-      realpath(build_path, canonical) && !strcmp(build_path, canonical));
-    need(build_root >= 0 && build_parent >= 0 && !fstat(build_root, &root) && !lstat(build_path, &named) &&
-      root.st_dev == build_identity.st_dev && root.st_ino == build_identity.st_ino && root.st_uid == 0 && root.st_gid == 0 &&
-      ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0555));
-    same_stat(root, named);
-    need(!fstat(build_parent, &parent) && !lstat(report_path, &named) &&
-      parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
-      parent.st_uid == report_identity.st_uid && (parent.st_mode & 07777) == 0700);
-    same_stat(parent, named); no_acl(build_root); no_acl(build_parent);
-  } else if (case_mode && !strncmp(value->path, case_path, strlen(case_path)) &&
+  if (!strcmp(value->kind, "build")) build_guard();
+  else if (case_mode && !strncmp(value->path, case_path, strlen(case_path)) &&
     (!value->path[strlen(case_path)] || value->path[strlen(case_path)] == '/')) {
     for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && S_ISDIR(entries[i].stat.st_mode) &&
       !strncmp(entries[i].path, case_path, strlen(case_path))) {
@@ -170,7 +213,7 @@ static void stable(struct entry *value) {
       same_stat(held, named); no_acl(entries[i].fd);
     }
   } else if (experiment_installed_path(value->path) && S_ISREG(value->stat.st_mode)) need(installed_input(value->path, &value->stat));
-  else ancestors(value->path);
+  else entry_ancestors(value);
 }
 static void read_at(int fd, void *out, size_t n, uint64_t offset) {
   need(offset <= INT64_MAX && bytes_read + n <= 2147483648ULL); bytes_read += n;
@@ -355,17 +398,17 @@ static void plan(const char *path, const char *pin) {
     need(!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority") || !strcmp(entry->kind, "image") || !strcmp(entry->kind, "data") || !strcmp(entry->kind, "cache") || !strcmp(entry->kind, "helper"));
     need((!strcmp(entry->kind, "directory") || !strcmp(entry->kind, "authority")) ? !strcmp(entry->pin, "-") : strlen(entry->pin) == 64 && strspn(entry->pin, "0123456789abcdef") == 64);
     decode(encoded, entry->path, sizeof(entry->path));
-    const char *leaf = strrchr(entry->path, '/');
-    bool private_case = case_mode && !strncmp(entry->path, case_path, strlen(case_path)) &&
-      (!entry->path[strlen(case_path)] || entry->path[strlen(case_path)] == '/');
-    char prepared_path[PATH_MAX]; need(snprintf(prepared_path,sizeof(prepared_path),"%s/platform-build",report_path) < sizeof(prepared_path));
-    bool prepared = preparation_mode && !strncmp(entry->path,prepared_path,strlen(prepared_path)) &&
-      (!entry->path[strlen(prepared_path)] || entry->path[strlen(prepared_path)] == '/');
-    if (!private_case && !prepared && !((build_mode || case_mode) && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) ancestors(entry->path);
     entry->fd = -1;
     for (unsigned i = 0; i < count; i++) need(strcmp(entries[i].path, entry->path)); count++;
   }
   need(count); free(bytes);
+  /* The approved root may follow its pinned consumers in the plan. */
+  for (unsigned i = 0; i < count; i++) {
+    struct entry *entry = &entries[i]; const char *leaf = strrchr(entry->path, '/');
+    bool private_case = case_mode && !strncmp(entry->path, case_path, strlen(case_path)) &&
+      (!entry->path[strlen(case_path)] || entry->path[strlen(case_path)] == '/');
+    if (!private_case && !(build_mode && !strcmp(entry->kind, "directory") && leaf && !strcmp(leaf + 1, "platform-build"))) entry_ancestors(entry);
+  }
 }
 /* Compiler descendants share a fresh root audit session. Observe its complete
  * kernel membership; reaping the compiler alone cannot retire that domain. */
@@ -386,7 +429,7 @@ static void root_domain(pid_t pid, unsigned asid, unsigned version) {
     unsigned found;
     for (found = 0; found < count; found++) if (!strcmp(entries[found].kind, "helper") && !strcmp(entries[found].path, image)) break;
     if (found == count) { char owner_image[PATH_MAX]; need(proc_pidpath(getpid(), owner_image, sizeof(owner_image)) > 0 && !strcmp(image, owner_image)); }
-    struct stat stat; ancestors(image);
+    struct stat stat; if (found < count) entry_ancestors(&entries[found]); else ancestors(image);
     need(!lstat(image, &stat) && !(stat.st_mode & 06022));
     if (found < count) free(file(image, case_mode ? stat.st_gid : 0, stat.st_mode & 07777, 536870912, entries[found].pin, &stat));
     need(!audit_session_port(asid, &sessions[session_count]) && sessions[session_count] != MACH_PORT_NULL);
@@ -2514,7 +2557,7 @@ int main(int argc, char **argv) {
       need(_mh_execute_header.sizeofcmds <= 1048576); macho((const unsigned char *)&_mh_execute_header, sizeof(_mh_execute_header) + _mh_execute_header.sizeofcmds); putchar('}');
     } else if (!strcmp(tokens[0], "open")) {
       need(n == 3); unsigned index = number(tokens[2]); need(index < count); struct entry *entry = &entries[index]; need(entry->fd < 0);
-      bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); ancestors(entry->path);
+      bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); entry_ancestors(entry);
       entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
       bool hosted = !authority && !dir && experiment_installed_path(entry->path), sampled = false, directory_entry = false;
       const char *predicate = "open";

@@ -6419,6 +6419,17 @@ mode-`0700` report ancestors without gaining write authority. Each subsequent
 admitted `provisionBuild` reseals the build directory to mode `0700`; failed or
 unsettled commands do not publish outputs.
 
+Generated helper admission waits for the complete pinned custody plan, since
+the declared `platform-build` root may follow its image entries. Case and
+preparation readers join that exact canonical root and its private report parent
+read-only. Admission and consuming reads reuse held descriptors, original
+directory birth identities, UID/GID/mode and empty ACL checks, and join each
+declared direct child through the held root to its named and pinned file.
+Root/file replacement, wrong bindings and unrelated ancestry remain refusals;
+a pathname prefix alone supplies no admission. These reads never reseal the
+directory or apply generic root-owned ancestry above the approved root.
+Installed-input classification and private-case guards remain unchanged.
+
 Each command uses a fresh root audit session. The separately admitted reader pins
 that session and enumerates its actual kernel membership across all UIDs.
 The sealed entry announces its original helper birth after joining the protected

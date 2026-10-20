@@ -1153,6 +1153,418 @@ test("Darwin native receipt guards bound the aggregate separately without broade
   }
 });
 
+test("Darwin generated custody joins the real build producer and consuming guards beneath a private report parent", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    header = await readFile(new URL("custody.h", import.meta.url), "utf8");
+  const functions = [
+    ["installed_cache_path", "name"],
+    ["installed_input_path", "name"],
+    ["experiment_installed_path", "name"],
+    ["is_bootstrap_parent", "name, st"],
+    ["same_stat", "a, b"],
+    ["ancestors", "path"],
+    ["stable_identity", "value"],
+    ["build_guard", ""],
+    ["build_entry", "value"],
+    ["entry_ancestors", "value"],
+    ["stable", "value"],
+    ["slot", "text"],
+    ["build_directory", "encoded"],
+    ["build_root_open", "name"],
+  ];
+  const project = (body) =>
+    body
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/gu,
+        (_, experiment) => experiment,
+      )
+      .replace(
+        "unsigned char bytes[65536];",
+        "const bytes = Buffer.alloc(65536);",
+      )
+      .replace("char *end;", "const end = {};")
+      .replaceAll("!*end", "!end.value")
+      .replaceAll("*tokens[3]", "tokens[3][0]")
+      .replace(
+        "struct entry value = {.fd = build_root};",
+        "const value = {fd: build_root, kind: {}, path: {}};",
+      )
+      .replace(/struct stat (\w+) = value->stat;/gu, "const $1 = value.stat;")
+      .replace(
+        /struct stat ([\w, ]+);/gu,
+        (_, names) =>
+          `const ${names
+            .split(", ")
+            .map((name) => `${name} = {}`)
+            .join(", ")};`,
+      )
+      .replace(
+        /char (\w+)\[(?:PATH_MAX|\d+)\](?:, (\w+)\[PATH_MAX\])?;/gu,
+        (_, a, b) => `const ${a} = {}${b ? `, ${b} = {}` : ""};`,
+      )
+      .replace(/struct entry \*(\w+) = /gu, "const $1 = ")
+      .replace(/(?:const )?char \*(\w+)/gu, "let $1")
+      .replaceAll("->", ".")
+      .replace(/&(entries\[index\]|value\.stat|\w+)/gu, "$1")
+      .replace(/\*(leaf|slash|parent) = 0/gu, "$1.truncate()")
+      .replace(/\b(leaf|slash|parent|base) \+ 1\b/gu, "$1.next")
+      .replace("slash != name", "slash.index !== 0")
+      .replace("slash == name", "slash.index === 0")
+      .replace("leaf != name", "leaf.index !== 0")
+      .replaceAll("sizeof(bytes)", "65536")
+      .replace(/sizeof\([^)]+\)/gu, "4096")
+      .replace(/\b(?:unsigned|bool|int|size_t|uint64_t) /gu, "let ")
+      .replace(/\(uint64_t\)/gu, "")
+      .replace(/\b0([0-7]{2,})\b/gu, "0o$1");
+  const declarations = functions.map(([name, args]) => {
+    const body = new RegExp(
+      `static [^\\n]+ \\*?${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(
+      name.startsWith("installed_") ||
+        name === "experiment_installed_path" ||
+        name === "is_bootstrap_parent"
+        ? header
+        : source,
+    )?.[1];
+    assert.ok(body, name);
+    return `function ${name}(${args}) {${project(body)}}`;
+  });
+  const start = source.indexOf('    } else if (!strcmp(tokens[0], "open")) {'),
+    end = source.indexOf(
+      '    } else if (!strcmp(tokens[0], "case-directory"))',
+      start,
+    ),
+    open = source.slice(source.indexOf("\n", start) + 1, end),
+    plan = /static void plan\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)[1],
+    admissionStart = plan.indexOf("  need(count); free(bytes);"),
+    admission = plan.slice(
+      admissionStart + "  need(count); free(bytes);".length,
+    ),
+    readStart = source.indexOf('    } else if (!strcmp(tokens[0], "read")) {'),
+    readEnd = source.indexOf(
+      '    } else if (!strcmp(tokens[0], "signature"))',
+      readStart,
+    ),
+    read = source.slice(source.indexOf("\n", readStart) + 1, readEnd);
+  assert.ok(start > 0 && end > start);
+  assert.ok(admissionStart > 0 && readStart > 0 && readEnd > readStart);
+  const script = new Script(
+    `${declarations.join("\n")} ({build_directory, ancestors, stable, slot, admitPlan() {${project(admission)}}, openEntry() {${project(open)}}, readEntry() {${project(read)}}});`,
+  );
+  const bytes = Buffer.from("generated helper bytes"),
+    output = "/fixture/report/platform-build",
+    file = output + "/launcher",
+    text = (value) => (typeof value === "string" ? value : value.value),
+    metadata = (ino, uid, gid, mode, size = 64) => ({
+      st_dev: 1,
+      st_ino: ino,
+      st_uid: uid,
+      st_gid: gid,
+      st_mode: mode,
+      st_nlink: (mode & 0o170000) === 0o40000 ? 2 : 1,
+      st_size: size,
+      st_birthtimespec: { tv_sec: ino, tv_nsec: 0 },
+      st_mtimespec: { tv_sec: 1, tv_nsec: 0 },
+      st_ctimespec: { tv_sec: 1, tv_nsec: 0 },
+    });
+  const fixture = () => {
+    const events = [],
+      nodes = new Map(),
+      held = new Map();
+    nodes.set("/fixture", { stat: metadata(1, 0, 0, 0o40755) });
+    const parent = {
+      stat: metadata(2, 1001, 20, 0o40700),
+      children: new Map(),
+    };
+    nodes.set("/fixture/report", parent);
+    let nextFd = 1;
+    const env = {
+      build_root: -1,
+      build_parent: -1,
+      build_path: {},
+      report_path: {},
+      build_identity: {},
+      report_identity: {},
+      case_mode: false,
+      preparation_mode: false,
+      case_path: "/private/var/run/native-poc/cases/fixture",
+      count: 1,
+      entries: [{ kind: "directory", path: output, pin: "-", fd: -1 }],
+      n: 3,
+      tokens: ["open", "1", "0"],
+      encoded: output,
+      errno: 0,
+      ENOENT: 2,
+      Buffer,
+      build_mode: false,
+      O_RDONLY: 1,
+      O_DIRECTORY: 2,
+      O_NOFOLLOW: 4,
+      O_CLOEXEC: 8,
+      O_NONBLOCK: 16,
+      AT_SYMLINK_NOFOLLOW: 32,
+      NULL: null,
+      stderr: {},
+      stdout: {},
+      INT64_MAX: Number.MAX_SAFE_INTEGER,
+      need(ok) {
+        if (!ok) throw new Error("Native bound custody refused");
+      },
+      number: Number,
+      strtoull(value, end) {
+        end.value = "";
+        return Number(value);
+      },
+      S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
+      S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+      installed_input: () =>
+        assert.fail("Generated helpers are never installed inputs"),
+      decode: (value, out) => {
+        out.value = text(value);
+      },
+      strcpy: (out, value) => {
+        out.value = text(value);
+      },
+      strlen: (value) => text(value).length,
+      strspn: (value) => /^[a-f0-9]*/u.exec(text(value))[0].length,
+      strcmp: (a, b) => Number(text(a) !== text(b)),
+      strncmp: (a, b, size) =>
+        Number(text(a).slice(0, size) !== text(b).slice(0, size)),
+      strstr: (value, part) => text(value).includes(part),
+      strrchr(value) {
+        const index = text(value).lastIndexOf("/");
+        return index < 0
+          ? null
+          : {
+              index,
+              next: text(value).slice(index + 1),
+              truncate() {
+                value.value = text(value).slice(0, index);
+              },
+            };
+      },
+      snprintf(out, maximum, format, value) {
+        out.value = format.replace("%s", text(value));
+        return out.value.length;
+      },
+      realpath(value, out) {
+        out.value = nodes.get(text(value))?.canonical ?? text(value);
+        return nodes.has(text(value));
+      },
+      open(value, flags) {
+        assert.ok(flags & env.O_NOFOLLOW);
+        const node = nodes.get(text(value));
+        if (!node) return -1;
+        const fd = nextFd++;
+        held.set(fd, node);
+        return fd;
+      },
+      openat(fd, name, flags) {
+        assert.equal(held.get(fd), parent);
+        assert.equal(name, "platform-build");
+        return env.open(output, flags);
+      },
+      fstat(fd, out) {
+        const node = held.get(fd);
+        if (!node) return -1;
+        Object.assign(out, structuredClone(node.stat));
+        return 0;
+      },
+      lstat(value, out) {
+        const node = nodes.get(text(value));
+        if (!node) return -1;
+        Object.assign(out, structuredClone(node.stat));
+        return 0;
+      },
+      fstatat(fd, name, out, flags) {
+        assert.equal(flags, env.AT_SYMLINK_NOFOLLOW);
+        const node = held.get(fd)?.children?.get(text(name));
+        if (!node) {
+          env.errno = env.ENOENT;
+          return -1;
+        }
+        Object.assign(out, structuredClone(node.stat));
+        return 0;
+      },
+      mkdirat(fd, name, mode) {
+        assert.equal(held.get(fd), parent);
+        assert.equal(name, "platform-build");
+        const root = {
+          stat: metadata(3, 0, 20, 0o40000 | mode),
+          children: new Map(),
+        };
+        parent.children.set(name, root);
+        nodes.set(output, root);
+        return 0;
+      },
+      no_acl(fd) {
+        events.push("acl");
+        env.need(!held.get(fd).acl);
+      },
+      fchown(fd, uid, gid) {
+        events.push("chown");
+        Object.assign(held.get(fd).stat, { st_uid: uid, st_gid: gid });
+        return 0;
+      },
+      fchmod(fd, mode) {
+        events.push("chmod");
+        held.get(fd).stat.st_mode = 0o40000 | mode;
+        return 0;
+      },
+      sha_range(fd, offset, size, out) {
+        out.value = digest(held.get(fd).bytes.subarray(offset, offset + size));
+      },
+      read_at(fd, out, size, offset) {
+        held.get(fd).bytes.copy(out, 0, offset, offset + size);
+      },
+      hex(value, size, out) {
+        out.value = value.subarray(0, size).toString("hex");
+      },
+      printf(format, value) {
+        if (format === '{"hex":"%s"}') env.lastRead = text(value);
+      },
+      identity() {},
+      fprintf() {},
+      fflush() {},
+      input_refusal() {},
+    };
+    const native = script.runInNewContext(env);
+    native.build_directory(output);
+    assert.deepEqual(
+      events.filter((name) => name !== "acl"),
+      ["chown", "chmod"],
+    );
+    const root = nodes.get(output);
+    root.stat.st_mode = 0o40555;
+    const image = { stat: metadata(4, 0, 0, 0o100555, bytes.length), bytes };
+    root.children.set("launcher", image);
+    nodes.set(file, image);
+    // A new consumer joins the published root without inheriting or resealing it.
+    held.clear();
+    env.build_root = env.build_parent = -1;
+    env.build_identity = {};
+    env.report_identity = {};
+    env.build_path = {};
+    env.report_path = {};
+    env.case_mode = true;
+    env.entries = [
+      { kind: "image", path: file, pin: digest(bytes), fd: -1, stat: {} },
+      env.entries[0],
+    ];
+    env.count = 2;
+    events.length = 0;
+    return { env, native, nodes, root, parent, image, events };
+  };
+  const admitted = fixture();
+  // This unchanged generic route reproduces the original successful-lstat refusal.
+  assert.throws(
+    () => admitted.native.ancestors(file),
+    /Native bound custody refused/u,
+  );
+  admitted.native.admitPlan();
+  admitted.native.openEntry();
+  assert.equal(admitted.native.slot("0").path, file);
+  admitted.env.n = 5;
+  admitted.env.tokens = ["read", "2", "0", "0", String(bytes.length)];
+  admitted.native.readEntry();
+  assert.equal(admitted.env.lastRead, bytes.toString("hex"));
+  assert.deepEqual(
+    admitted.events.filter((name) => name !== "acl"),
+    [],
+  );
+  const replaced = fixture();
+  replaced.native.admitPlan();
+  const replacement = {
+    ...replaced.root,
+    stat: { ...replaced.root.stat, st_ino: 30 },
+  };
+  replaced.nodes.set(output, replacement);
+  replaced.parent.children.set("platform-build", replacement);
+  assert.throws(
+    () => replaced.native.openEntry(),
+    /Native bound custody refused/u,
+  );
+  const preparation = fixture();
+  preparation.env.case_mode = false;
+  preparation.env.preparation_mode = true;
+  preparation.env.report_path.value = "/fixture/report";
+  preparation.native.admitPlan();
+  preparation.native.openEntry();
+  assert.equal(preparation.native.slot("0").path, file);
+  assert.deepEqual(
+    preparation.events.filter((name) => name !== "acl"),
+    [],
+  );
+  for (const fault of [
+    "root",
+    "file",
+    "parent-birth",
+    "root-birth",
+    "root-acl",
+    "file-acl",
+  ]) {
+    const f = fixture();
+    f.native.openEntry();
+    if (fault === "root") {
+      const replacement = { ...f.root, stat: { ...f.root.stat, st_ino: 30 } };
+      f.nodes.set(output, replacement);
+      f.parent.children.set("platform-build", replacement);
+    } else if (fault === "file") {
+      const replacement = { ...f.image, stat: { ...f.image.stat, st_ino: 40 } };
+      f.nodes.set(file, replacement);
+      f.root.children.set("launcher", replacement);
+    } else if (fault === "parent-birth")
+      f.parent.stat.st_birthtimespec.tv_sec++;
+    else if (fault === "root-birth") f.root.stat.st_birthtimespec.tv_sec++;
+    else if (fault === "root-acl") f.root.acl = true;
+    else f.image.acl = true;
+    assert.throws(
+      () => f.native.slot("0"),
+      /Native bound custody refused/u,
+      fault,
+    );
+  }
+  for (const fault of [
+    "wrong-root",
+    "wrong-pin",
+    "unrelated",
+    "prefix",
+    "alias",
+    "writable",
+    "links",
+    "preparation-binding",
+  ]) {
+    const f = fixture();
+    if (fault === "wrong-root") f.env.entries[1].path += "-other";
+    else if (fault === "wrong-pin") f.env.entries[0].pin = "e".repeat(64);
+    else if (fault === "unrelated") {
+      f.env.entries[0].path = "/fixture/report/launcher";
+      f.nodes.set(f.env.entries[0].path, f.image);
+    } else if (fault === "prefix") {
+      const other = output + "-other";
+      f.env.entries[0].path = other + "/launcher";
+      f.nodes.set(other, { stat: { ...f.root.stat, st_ino: 30 } });
+      f.nodes.set(f.env.entries[0].path, f.image);
+    } else if (fault === "alias") f.image.canonical = "/fixture/other/launcher";
+    else if (fault === "writable") f.root.stat.st_mode = 0o40777;
+    else if (fault === "links") f.image.stat.st_nlink = 2;
+    else {
+      f.env.case_mode = false;
+      f.env.preparation_mode = true;
+      f.env.report_path.value = "/fixture/wrong-report";
+    }
+    assert.throws(
+      () => f.native.openEntry(),
+      /Native bound custody refused/u,
+      fault,
+    );
+  }
+});
+
 test("Darwin native installed, build and helper-slot guards distinguish hosted files from private inputs", async () => {
   const reader = await readFile(
       new URL("custody-reader.c", import.meta.url),

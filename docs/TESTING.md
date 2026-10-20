@@ -1647,7 +1647,16 @@ The included `ci/native/darwin/custody.test.js` injects private root transport a
 independent process/file observations. It protects source/intent/setup ordering,
 substitution and malformed-frame rejection, held-object lifetime, descriptor
 transfer, cancellation during admission, bounded pending completion and independent
-closure. Its focused invocation is
+closure. A source-driven custody fixture executes the actual build-directory
+producer, read-only root join, complete-plan admission and open/read/stability
+guards with injected filesystem calls. Its private user-owned report parent
+reproduces the generic ancestry refusal before the bound join succeeds. Root/file
+replacement, birth changes, ACLs, wrong pins/bindings and unrelated ancestry still
+refuse, and consuming reads cannot chown or reseal the root. The existing raw-IPC
+preparation fixture also retains the declared root across pinned generated-source
+reads and private case copies, alongside original-failure and independent
+retirement coverage. These portable regressions run no Darwin binary and add no
+validation command or durable slow-tier requirement. Its focused invocation is
 `node ci/native/darwin/custody.test.js`; it performs no elevation, native build,
 installation or system/provider probe. Darwin SDK compilation and actual native
 custody remain dedicated external CI evidence.

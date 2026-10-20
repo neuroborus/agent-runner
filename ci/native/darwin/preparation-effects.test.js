@@ -3097,7 +3097,8 @@ function buildTranscripts(experiment = false, complete = false) {
     const sessions = new Set();
     let auditKey,
       reserved = false,
-      fenced = false;
+      fenced = false,
+      reportRoot;
     return {
       receive: async () => {
         assert.ok(queue.length);
@@ -3113,6 +3114,11 @@ function buildTranscripts(experiment = false, complete = false) {
             assert.equal(report.path, output);
             assert.equal(directories.get(report.path).uid, 0);
             assert.equal(directories.get(path.dirname(report.path)).uid, 1001);
+            assert.equal(
+              directories.get(path.dirname(report.path)).mode,
+              0o700,
+            );
+            reportRoot = snapshot(report.path, true);
           }
           queue.push({
             ...(entry.purpose === "experiment"
@@ -3811,6 +3817,15 @@ function buildTranscripts(experiment = false, complete = false) {
             value.descriptors.push({ fd: 3, type: "socket" });
         } else if (name === "open") {
           const file = planEntries[Number(args[0])].path;
+          if (path.dirname(file) === output) {
+            assert.deepEqual(snapshot(output, true), reportRoot);
+            assert.equal(reportRoot.mode, 0o555);
+            assert.equal(
+              digest(files.get(file).bytes),
+              planEntries[Number(args[0])].pin,
+            );
+            events.push("bound-source:" + file);
+          }
           value = snapshot(file, directories.has(file));
           held.set(args[0], {
             file,
@@ -4998,7 +5013,12 @@ function buildBinding(f) {
     context: context("build"),
   };
 }
-function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
+function caseBinding(
+  f,
+  id = "ownership.literal",
+  ownershipEffects = false,
+  { generated = false } = {},
+) {
   const experiment = f.manifest.purpose === "experiment",
     bindingContext = context(id),
     root =
@@ -5156,7 +5176,10 @@ function caseBinding(f, id = "ownership.literal", ownershipEffects = false) {
       }
   const assets = ["case-launcher", "case-payload", "case-policy"].map(
     (name, i) => {
-      const path = sourceDirectory + "/" + name,
+      const path =
+          generated && i < 2
+            ? output + "/" + ["launcher", "argv-fixture"][i]
+            : sourceDirectory + "/" + name,
         data = i === 2 ? policyBytes : f.image;
       f.put(path, data, i === 2 ? 0o444 : 0o555);
       return { path, sha256: digest(data) };
@@ -5923,7 +5946,7 @@ test("Darwin additional compiler authority and missing parked observations withh
 
 test("fixed Darwin entry provisions bound private custody using only filesystem and native IPC", async () => {
   const f = buildTranscripts(),
-    binding = caseBinding(f),
+    binding = caseBinding(f, "ownership.literal", false, { generated: true }),
     effects = await prepareTranscripts(f),
     recipe = darwinSystemRecipes().find(({ id }) => id === "ownership.literal"),
     work = new AbortController();
@@ -5938,6 +5961,16 @@ test("fixed Darwin entry provisions bound private custody using only filesystem 
   );
   assert.equal(f.events.filter((name) => name === "case-directory").length, 4);
   assert.equal(f.events.filter((name) => name === "case-copy").length, 3);
+  assert.deepEqual(
+    [
+      ...new Set(
+        f.events
+          .filter((name) => name.startsWith("bound-source:"))
+          .map((name) => path.basename(name)),
+      ),
+    ].sort(),
+    ["argv-fixture", "launcher"],
+  );
   work.abort();
   assert.equal(
     settled(
