@@ -1221,9 +1221,15 @@ before its closure. Ordinary `native-windows-socket-input` diagnostics name
 `wfp_transfer` and `WSADuplicateSocketW`, preserve the saved original error and
 report the option's native status, returned size and value. Failed or short reads
 leave the value unavailable. This supplements the existing construction,
-provider/catalog/chain, zero flags, nonblocking/bind, QoS and token observations;
-the self/destination controls and their grammar remain unchanged. This line
-stays outside the 2-KiB transfer/control carrier and has no receipt authority.
+provider/catalog/chain, zero flags, nonblocking/bind, QoS and token observations.
+At that same failure boundary, one `OpenProcess(PROCESS_DUP_HANDLE)` against the
+current PID tests self-process access under the current effective token. Its
+separate raw line retains the saved Winsock cause, PID, requested access and
+immediate open status; close status is unavailable when open fails. Every
+acquired handle receives an independently checked close, with failure recorded
+separately from the original cause. The self/destination controls and their
+grammar remain unchanged. Both raw lines stay outside the 2-KiB transfer/control
+carrier and have no receipt authority.
 An unexplained 10022 identifies neither supervisor access error 5 nor a universal
 AppContainer prohibition. No supervisor duplication right, removed exclusive
 option, new process, transfer retry or extended deadline follows from it.
@@ -2570,8 +2576,15 @@ returned events, resets, successful selected bookmarks, terminal read bytes and
 control acknowledgment. These cache existing operations only, without additional gate
 I/O or policy changes. The strict caller retains the raw record within its
 existing 4 KiB failure bound; malformed metadata cannot supply a cause or proof.
-The counters accompany fatal native refusals within the existing bound; they
-never satisfy control delivery or terminal retirement proof.
+The counters accompany fatal native refusals within the existing bound. A separate
+`delivery` line retains the installed Security channel, query and flags, the last
+wait result and immediate wait/enumeration errors (`-1` when unattempted), scanned
+and selected record/byte counts, expected PID/action and held target/marker IDs,
+and the sampled target/marker, setup/control and retirement state. The existing
+10-second marker deadline refuses as `command-marker-barrier`; no wait, query or
+deadline changes. These original facts distinguish missing subscription output
+from delivered rows that fail target/marker selection without choosing a cause.
+Neither diagnostic record satisfies control delivery or terminal retirement proof.
 The command subscription filters the original principal, file type and event
 classes, retaining loss/clear events. A native case-insensitive filter forwards
 only the original four held names, and unrelated rows consume the same limits.

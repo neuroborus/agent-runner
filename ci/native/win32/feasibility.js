@@ -468,7 +468,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-launch-state command-attribute-allocation command-launch-bound command-broker-arguments command-broker-nonce
     command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation
-    command-ready-output command-owner-bound command-coverage-state command-deadline command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records
+    command-ready-output command-owner-bound command-coverage-state command-deadline command-marker-barrier command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records
     command-case-arguments command-case-nonce command-case-nonce-size command-case-ready-write-size command-case-ready-read-size command-case-ready-ack
     command-case-target-read-size command-case-target-nonce
     command-case-target-write-size command-case-edit-size command-case-output command-case-marker-size
@@ -605,10 +605,12 @@ export function windowsFeasibilityDiagnostics(output) {
   )
     return null;
   let lines = text.replace(/\r\n/gu, "\n").slice(0, -1).split("\n");
-  // Optional gate-query output has no cause or acceptance authority. Keep the
+  // Optional original-call output has no cause or acceptance authority. Keep the
   // strict original refusal even when this separately bounded metadata is bad.
   lines = lines.filter(
-    (line) => !line.startsWith("native-windows-command: gate-audit="),
+    (line) =>
+      !line.startsWith("native-windows-command: gate-audit=") &&
+      !line.startsWith("native-windows-command: delivery "),
   );
   const observations = lines.filter((line) =>
     line.startsWith("native-windows-command: state="),

@@ -865,6 +865,31 @@ test("native subscription and capture retain case-variant real control names thr
     capture.capture();
     assert.equal(capture.api.command_target_seen, !substitute);
     assert.equal(capture.api.command_marker_seen, !substitute);
+    if (substitute) {
+      assert.throws(
+        () => capture.api.command_barrier(),
+        (code) => code === 126,
+      );
+      assert.deepEqual(capture.api.first, [
+        "command-marker-barrier",
+        "invariant",
+        0,
+      ]);
+      assert.match(
+        capture.output(),
+        /scanned=2 scanned-bytes=16 selected=1 selected-bytes=8/u,
+      );
+      assert.match(capture.output(), /target-seen=0 marker-seen=0/u);
+    } else {
+      capture.api.command_barrier();
+      assert.deepEqual(JSON.parse(capture.replies()), {
+        event: "B",
+        sequence: 1,
+        time: "90",
+        records: 2,
+      });
+      assert.equal(capture.output(), "");
+    }
     const decoded = await decodedCommandCapture(
       capture.projected.map((index) => rows[index]),
     );
@@ -5024,6 +5049,14 @@ test("failure collection uses the original cleanup deadline and retains the firs
 });
 
 test("original gate audit queries retain installed ACEs and effective subject facts without admitting delivery", async () => {
+  const capture = commandCaptureFixture(await commandCaptureProgram());
+  capture.api.command_observe_failure();
+  const delivery =
+    capture
+      .output()
+      .split("\n")
+      .find((line) => line.startsWith("native-windows-command: delivery ")) +
+    "\n";
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
@@ -5367,6 +5400,7 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       "native-windows: operation=command-gate-read domain=win32 value=5\n";
     output = "";
     run.fail();
+    output += delivery;
     assert.ok(Buffer.byteLength(refusal + output) < 4096);
     assert.deepEqual(windowsFeasibilityDiagnostics(refusal + output).failure, {
       operation: "command-gate-read",
@@ -6122,6 +6156,19 @@ async function commandCaptureProgram() {
   const preflight = body(source, "command_preflight_close").split(
     "if (!command_preflight_owned.active) return ok;",
   )[0];
+  const barrier = source
+    .slice(
+      source.indexOf("static void command_barrier(void)"),
+      source.indexOf("static void command_pump("),
+    )
+    .replace("static void command_barrier(void)", "function command_barrier()")
+    .replace("ULONGLONG wait", "let wait")
+    .replace("FILETIME ft;", "const ft={};")
+    .replace(
+      "ULARGE_INTEGER time;",
+      "const time={get QuadPart(){return this.LowPart+this.HighPart*0x100000000;}};",
+    )
+    .replaceAll("&ft", "ft");
   const dispatch = new Script(`
     function close_handle(handle,operation) {${translate(body(helper, "close_handle"))}}
     function release_handle(slot,operation) {${translate(body(helper, "release_handle"))}}
@@ -6129,6 +6176,9 @@ async function commandCaptureProgram() {
     function command_capture_close() {${translate(body(source, "command_capture_close"))}}
     function command_preflight_close(keepBroker) {${translate(preflight)} return ok;}
     function command_capture(timeout) {${translate(capture)}}
+    function command_observe_failure() {${translate(body(source, "command_observe_failure")).replaceAll("&diagnosticOutputLock", "diagnosticOutputLock")}}
+    function command_audit_query(query,interval) {${body(source, "command_audit_query").replace(/\bL(?=")/gu, "")}}
+    ${barrier}
   `);
   const creations = source.match(
     /command_(?:preflight_owned\.event|event)=CreateEventW\([^;]+\);/gu,
@@ -6141,6 +6191,14 @@ async function commandCaptureProgram() {
       .find((line) => line.trim().startsWith("if(command_case_pid&&process"));
   return {
     dispatch,
+    subscribe: new Script(
+      source
+        .match(/command_subscription=EvtSubscribe\([^;]+\);/u)[0]
+        .replace(/\bL(?=")/gu, ""),
+    ),
+    subscriptionFlags: new Script(
+      `command_subscription_flags=${/static const DWORD command_subscription_flags = ([^;]+);/u.exec(source)[1]};`,
+    ),
     createEvents: new Script(creations.join("\n")),
     source,
     selection: new Script(
@@ -6165,7 +6223,23 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     queue = [];
   let signaled = false,
     lastError = 0,
-    emptyCount = 0;
+    emptyCount = 0,
+    clockRead = 0,
+    output = "",
+    replies = "";
+  const format = (text, args) => {
+    let index = 0;
+    return text.replace(/%(?:ll|l)?[uds]/gu, (specifier) => {
+      const value = args[index++];
+      return String(
+        specifier.endsWith("s")
+          ? (value?.text ?? value)
+          : typeof value === "boolean"
+            ? Number(value)
+            : value,
+      );
+    });
+  };
   const ref = (object, key) => ({
     get value() {
       return object[key];
@@ -6187,7 +6261,38 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     INVALID_HANDLE_VALUE: -1,
     EvtRenderEventXml: 1,
     command_preflight_owned: { active: false, capture: Array(16).fill(null) },
-    command_observed: { audit: Array(9).fill(0) },
+    command_observed: {
+      active: true,
+      pid: 43,
+      thread: 44,
+      birth: 90,
+      status: Array(10).fill(-1),
+      held: [0, 0],
+      members: [],
+      memberCount: 0,
+      audit: [5, 0, 0, 0, 0, 0, 0, 0, 1],
+    },
+    command_gate_observed: { observed: false },
+    command_subscription_query: { text: "" },
+    command_subscription_flags: 0,
+    EvtSubscribeToFutureEvents: 1,
+    EvtSubscribeStrict: 0x10000,
+    userText: "S-1-5-21-1",
+    command_capture_wait: -1,
+    command_capture_wait_error: -1,
+    command_next_error: -1,
+    command_case_pid: 43,
+    command_action: 2,
+    command_ids: ["inspect-id", "edit-id", "outside-id", "marker-id"],
+    command_target_seen: false,
+    command_marker_seen: false,
+    command_setup_verified: true,
+    command_control: true,
+    command_control_completed: true,
+    command_control_verified: false,
+    command_closing: false,
+    command_retirement_seen: false,
+    command_barriers: 0,
     command_subscription: "subscription",
     command_bookmark: "bookmark",
     command_event: "notification",
@@ -6206,6 +6311,13 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     },
     cleanup_error: (...cause) => cleanup.push(cause),
     failure: (code) => {
+      const saved = lastError;
+      api.command_observe_failure();
+      assert.equal(
+        lastError,
+        saved,
+        "diagnostic writes preserve the original API error",
+      );
       api.command_preflight_close(false);
       throw code;
     },
@@ -6224,6 +6336,43 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     command_protection_close: () => true,
     command_broker_events_close: () => true,
     command_revert: () => true,
+    command_bound: () => {},
+    GetTickCount64: () => [0, 9999, 10000][clockRead++] ?? 10000,
+    GetSystemTimePreciseAsFileTime: (value) =>
+      Object.assign(value, { dwLowDateTime: 90, dwHighDateTime: 0 }),
+    swprintf_s: (buffer, size, text, ...args) => {
+      assert.equal(size, 2048);
+      buffer.text = format(text, args);
+      return buffer.text.length;
+    },
+    EvtSubscribe: (
+      session,
+      signal,
+      channel,
+      query,
+      bookmark,
+      context,
+      callback,
+      flags,
+    ) => {
+      assert.deepEqual(
+        [session, signal, channel, bookmark, context, callback, flags],
+        [null, "notification", "Security", null, null, null, 0x10001],
+      );
+      assert.equal(query, api.command_subscription_query);
+      return "subscription";
+    },
+    diagnosticOutputLock: {},
+    AcquireSRWLockExclusive: () => {},
+    ReleaseSRWLockExclusive: () => {},
+    stderr: {},
+    fprintf: (_stream, text, ...args) => {
+      output += format(text, args);
+      lastError = 90;
+    },
+    fputs: (text) => (output += text),
+    fflush: () => {},
+    printf: (text, ...args) => (replies += format(text, args)),
     WaitForSingleObject: (event, timeout) => {
       assert.equal(event, "notification");
       calls.push(["wait", timeout]);
@@ -6321,12 +6470,17 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
   };
   api.globals = api;
   program.dispatch.runInNewContext(api);
+  program.subscriptionFlags.runInNewContext(api);
+  api.command_audit_query(api.command_subscription_query, "");
+  program.subscribe.runInNewContext(api);
   return {
     api,
     calls,
     closed,
     projected,
     cleanup,
+    output: () => output,
+    replies: () => replies,
     notify: (...batches) => {
       queue.push(...batches);
       signaled = true;
@@ -6363,6 +6517,60 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
     ["wait", 1],
     ["wait", 10],
   ]);
+  const missing = commandCaptureFixture(program);
+  assert.throws(
+    () => missing.api.command_barrier(),
+    (code) => code === 126,
+  );
+  assert.deepEqual(missing.api.first, [
+    "command-marker-barrier",
+    "invariant",
+    0,
+  ]);
+  assert.deepEqual(
+    missing.calls.filter(([name]) => name === "wait"),
+    [
+      ["wait", 0],
+      ["wait", 10],
+      ["wait", 0],
+    ],
+  );
+  assert.equal(missing.replies(), "");
+  const refusal =
+      "native-windows: operation=command-marker-barrier domain=invariant value=0\n",
+    delivery = missing.output();
+  assert.ok(Buffer.byteLength(refusal + delivery) < 4096);
+  assert.ok(
+    delivery.includes(
+      `channel=Security flags=65537 query=${missing.api.command_subscription_query.text} wait=258 wait-error=0 next-error=-1`,
+    ),
+  );
+  assert.match(
+    delivery,
+    /scanned=0 scanned-bytes=0 selected=0 selected-bytes=0 pid=43 action=2 target-id=outside-id marker-id=marker-id target-seen=0 marker-seen=0 setup=1 control=1 control-completed=1 control-verified=0 closing=0 retirement-seen=0\n/u,
+  );
+  assert.deepEqual(windowsFeasibilityDiagnostics(refusal + delivery).failure, {
+    operation: "command-marker-barrier",
+    domain: "invariant",
+    value: 0,
+  });
+  assert.equal(windowsFeasibilityDiagnostics(delivery), null);
+  assert.equal(
+    windowsFeasibilityDiagnostics(
+      refusal.replace("domain=invariant", "domain=win32"),
+    ),
+    null,
+  );
+  assert.deepEqual(
+    windowsFeasibilityDiagnostics(
+      refusal + "native-windows-command: delivery malformed\n",
+    ).failure,
+    {
+      operation: "command-marker-barrier",
+      domain: "invariant",
+      value: 0,
+    },
+  );
   f.notify(["a", "b"], ["c"]);
   f.capture();
   assert.deepEqual(f.projected, ["a", "b", "c"]);
@@ -6458,6 +6666,21 @@ test("actual capture failures retain immediate causes and independently retire e
       fault,
     );
     assert.deepEqual(f.api.first, [operation, domain, value], fault);
+    assert.equal(
+      f.api.command_capture_wait,
+      fault === "wait" ? 0xffffffff : fault === "wait-result" ? 0x80 : 0,
+    );
+    assert.equal(f.api.command_capture_wait_error, fault === "wait" ? 5 : 0);
+    assert.equal(
+      f.api.command_next_error,
+      fault.startsWith("wait")
+        ? -1
+        : fault.includes("next")
+          ? 4317
+          : fault === "reset"
+            ? 259
+            : 0,
+    );
     assert.deepEqual(
       f.closed,
       [

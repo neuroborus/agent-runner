@@ -38,6 +38,9 @@ static ULONGLONG command_retirement_from;
 static char command_null_hash[65];
 static PACL command_sacls[4];
 static EVT_HANDLE command_subscription, command_bookmark;
+static WCHAR command_subscription_query[2048];
+static const DWORD command_subscription_flags = EvtSubscribeToFutureEvents|EvtSubscribeStrict;
+static LONGLONG command_capture_wait = -1, command_capture_wait_error = -1, command_next_error = -1;
 static HANDLE command_event;
 static GUID command_category = {0x0cce921d,0x69ae,0x11d9,{0xbe,0xd3,0x50,0x50,0x54,0x50,0x30,0x30}};
 static GUID *command_categories;
@@ -80,6 +83,14 @@ static void command_observe_failure(void) {
   fputs("],\"audit\":[", stderr);
   for (unsigned i=0;i<9;i++) fprintf(stderr, "%s%lld", i?",":"", command_observed.audit[i]);
   fputs("]}\n", stderr); fflush(stderr);
+  if(command_observed.audit[0]>=2){
+    fprintf(stderr,"native-windows-command: delivery channel=Security flags=%lu query=%ls wait=%lld wait-error=%lld next-error=%lld scanned=%u scanned-bytes=%u selected=%u selected-bytes=%u pid=%lu action=%u target-id=%s marker-id=%s target-seen=%u marker-seen=%u setup=%u control=%u control-completed=%u control-verified=%u closing=%u retirement-seen=%u\n",
+      command_subscription_flags,command_subscription_query,command_capture_wait,command_capture_wait_error,command_next_error,
+      command_scanned,command_scanned_bytes,command_records,command_bytes,command_case_pid,command_action,
+      command_action<3?command_ids[command_action]:"unavailable",command_ids[3],!!command_target_seen,!!command_marker_seen,!!command_setup_verified,
+      !!command_control,!!command_control_completed,!!command_control_verified,!!command_closing,!!command_retirement_seen);
+    fflush(stderr);
+  }
   if(command_gate_observed.observed){fputs("native-windows-command: gate-audit=",stderr);command_gate_audit_write(stderr);fputc('\n',stderr);fflush(stderr);}
   ReleaseSRWLockExclusive(&diagnosticOutputLock); SetLastError(saved);
 }
@@ -501,13 +512,15 @@ static BOOL command_audit_project(BYTE *bytes, DWORD length) {
 }
 static void command_capture(DWORD timeout) {
   DWORD waited=WaitForSingleObject(command_event,timeout);
-  if(waited==WAIT_FAILED)win32_check(FALSE,"command-capture-wait");
+  DWORD waitError=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;command_capture_wait=waited;command_capture_wait_error=waitError;
+  if(waited==WAIT_FAILED){SetLastError(waitError);win32_check(FALSE,"command-capture-wait");}
   invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-capture-wait");
   if(waited==WAIT_TIMEOUT)return;
   command_observed.audit[2]++;
   BOOL rearmed=FALSE;
   for(;;){ EVT_HANDLE *events=command_preflight_owned.capture; DWORD count=0;
     BOOL next=EvtNext(command_subscription,16,events,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+    command_next_error=error;
     command_observed.audit[3]++;command_observed.audit[4]+=next?count:0;
     if(!next){
       if(error!=ERROR_NO_MORE_ITEMS){remember("command-capture-next","win32",error);failure(126);}
@@ -623,7 +636,7 @@ static void command_installation(void) {
   last.LowPart=command_install_to.dwLowDateTime;last.HighPart=command_install_to.dwHighDateTime;
   printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"error\":%lu}",first.QuadPart,last.QuadPart,command_install_error);
 }
-static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();need(GetTickCount64()-wait<10000);command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
+static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();invariant(GetTickCount64()-wait<10000,"command-marker-barrier");command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }
 static void command_pump(HANDLE *pipe,const char *event) {
   if(!*pipe)return; DWORD available=0; if(!PeekNamedPipe(*pipe,NULL,0,NULL,&available,NULL)){need(GetLastError()==ERROR_BROKEN_PIPE);need(CloseHandle(*pipe));*pipe=NULL;if(!strcmp(event,"rpc")||!strcmp(event,"stderr"))printf("{\"event\":\"%s-end\"}\n",event);return;}
@@ -915,8 +928,8 @@ static int command_main(int argc,WCHAR **argv) {
   BOOL childClosed=command_child_close(0);admission.hProcess=admission.hThread=NULL;if(!childClosed)failure(126);
   BOOL pipesClosed=TRUE;if(!release_handle(&command_input,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_output,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_error,"pipe-close"))pipesClosed=FALSE;if(!pipesClosed)failure(126);
   command_observed.census=TRUE;DWORD admissionMembers=command_members(ownedJob);command_observed.census=FALSE;invariant(!admissionMembers,"command-admission-members");command_observed.audit[0]=1;
-  command_files_prepare();command_observed.audit[0]=2;WCHAR query[2048];command_audit_query(query,L"");
-  command_subscription=EvtSubscribe(NULL,command_event,L"Security",query,NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
+  command_files_prepare();command_observed.audit[0]=2;command_audit_query(command_subscription_query,L"");
+  command_subscription=EvtSubscribe(NULL,command_event,L"Security",command_subscription_query,NULL,NULL,NULL,command_subscription_flags);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
   PSECURITY_DESCRIPTOR gateSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GRGW;;;WD)",SDDL_REVISION_1,&gateSd,NULL),"command-gate-descriptor");SECURITY_ATTRIBUTES gateSa={sizeof(gateSa),gateSd,FALSE};
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
   printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);fputs("\"fileSystem\":",stdout);command_system_observation();printf(",\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);

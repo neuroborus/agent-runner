@@ -1219,7 +1219,7 @@ static void socket_token_write(const struct socket_token_observation *value) {
   fprintf(stderr, ",\"restricted\":%s}", value->status[0] || value->status[3] ? "null" : value->restricted ? "true" : "false");
 }
 /* Observe the original failed call without a second transfer or new payload
- * rights. These query-only reads cannot diagnose which parameter caused 10022.
+ * rights. These diagnostic reads cannot diagnose which parameter caused 10022.
  * Close every acquired diagnostic handle before writing optional output. */
 static void socket_transfer_observe(SOCKET socket, const struct socket_offer *offer, DWORD error) {
   struct socket_token_observation source = {{-1, -1, -1, -1, -1}}, destination = {{-1, -1, -1, -1, -1}};
@@ -1245,6 +1245,15 @@ static void socket_transfer_observe(SOCKET socket, const struct socket_offer *of
   }
   socket_token_observe(GetCurrentProcess(), &source, FALSE);
   socket_token_observe(GetCurrentProcess(), &effective, TRUE);
+  /* Identity controls do not test current-token access to the self process
+   * object. Probe only the documented duplication right, never the observer. */
+  DWORD selfPid = GetCurrentProcessId();
+  HANDLE self = OpenProcess(PROCESS_DUP_HANDLE, FALSE, selfPid);
+  DWORD selfStatus = self ? 0 : GetLastError(); LONGLONG selfClose = -1;
+  if (self) {
+    BOOL closed = CloseHandle(self); DWORD closeError = closed ? 0 : GetLastError(); selfClose = closeError;
+    if (!closed) cleanup_error("observer-diagnostic-process-close", "win32", closeError);
+  }
   fprintf(stderr, "native-windows-socket-input: caller=wfp_transfer api=WSADuplicateSocketW error=%lu option=SO_EXCLUSIVEADDRUSE status=%lu size=",
     error, exclusiveStatus);
   if (!exclusiveStatus) fprintf(stderr, "%d", exclusiveSize); else fputs("unavailable", stderr);
@@ -1252,6 +1261,9 @@ static void socket_transfer_observe(SOCKET socket, const struct socket_offer *of
   if (!exclusiveStatus && exclusiveSize == sizeof(exclusive)) fprintf(stderr, "%u", (unsigned)exclusive);
   else fputs("unavailable", stderr);
   fputc('\n', stderr); fflush(stderr);
+  fprintf(stderr, "native-windows-socket-input: caller=wfp_transfer api=OpenProcess original-error=%lu pid=%lu access=%lu status=%lu close=",
+    error, selfPid, (DWORD)PROCESS_DUP_HANDLE, selfStatus);
+  socket_status(selfClose); fputc('\n', stderr); fflush(stderr);
   fprintf(stderr, TCP_PREFIX " transfer={\"error\":%lu,\"winsock\":[%u,%u],\"creationFlags\":0,\"destination\":{\"pid\":%lu,\"access\":%lu,\"status\":[%lu,",
     error, (unsigned)socketVersion, (unsigned)socketHighVersion, offer->target.pid, (DWORD)PROCESS_QUERY_LIMITED_INFORMATION, openStatus);
   socket_status(timeStatus); fputc(',', stderr); socket_status(closeStatus);

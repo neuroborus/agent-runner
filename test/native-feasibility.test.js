@@ -7238,6 +7238,8 @@ test("original TCP caller retains source duplication failures and bounded prereq
     [
       null,
       "10022",
+      "self-open",
+      "self-close",
       "destination-open",
       "destination-time",
       "token-open",
@@ -7568,6 +7570,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
       TokenImpersonation: 2,
       TokenIsAppContainer: 29,
       PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
+      PROCESS_DUP_HANDLE: 0x40,
       SOCKET_PREFIX: "native-windows-socket: ",
       SOCKET_CONTROL_PREFIX: "native-windows-socket-control: ",
       TCP_PREFIX: "native-windows-tcp:",
@@ -7848,6 +7851,18 @@ test("original TCP caller retains source duplication failures and bounded prereq
       DuplicateHandle: () =>
         assert.fail("Application socket copying is forbidden"),
       OpenProcess(access, inherit, pid) {
+        if (access === context.PROCESS_DUP_HANDLE) {
+          assert.deepEqual([access, inherit, pid], [0x40, false, 43]);
+          assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
+          assert.equal(
+            inLauncher,
+            false,
+            "the original effective token opens only itself",
+          );
+          order.push("self-open");
+          lastError = 5;
+          return fault === "self-open" ? null : 71;
+        }
         assert.deepEqual([access, inherit, pid], [0x1000, false, 41]);
         assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
         order.push("destination-open");
@@ -7906,10 +7921,13 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return token === 143;
       },
       CloseHandle(handle) {
-        assert.ok([61, 141, 143, 144, 161].includes(handle));
+        assert.ok([61, 71, 141, 143, 144, 161].includes(handle));
         order.push(`handle-close:${handle}`);
         lastError = 6;
-        return fault !== "diagnostic-close";
+        return (
+          fault !== "diagnostic-close" &&
+          !(handle === 71 && fault === "self-close")
+        );
       },
       closesocket(socket) {
         assert.ok([17, 73, 81, 83, 91, 93].includes(socket));
@@ -8178,7 +8196,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
         1,
       );
       if (failsTransfer) {
-        assert.equal(optionObservations.length, 1);
+        assert.equal(optionObservations.length, 2);
         assert.match(
           optionObservations[0],
           /caller=wfp_transfer api=WSADuplicateSocketW error=10022 option=SO_EXCLUSIVEADDRUSE/u,
@@ -8192,6 +8210,21 @@ test("original TCP caller retains source duplication failures and bounded prereq
                 : "status=0 size=4 value=1",
           ),
         );
+        assert.equal(
+          optionObservations[1],
+          `native-windows-socket-input: caller=wfp_transfer api=OpenProcess original-error=10022 pid=43 access=64 status=${fault === "self-open" ? 5 : 0} close=${fault === "self-open" ? "null" : ["self-close", "diagnostic-close"].includes(fault) ? 6 : 0}\n`,
+        );
+        assert.equal(order.filter((value) => value === "self-open").length, 1);
+        assert.equal(
+          order.filter((value) => value === "handle-close:71").length,
+          fault === "self-open" ? 0 : 1,
+        );
+        if (fault === "self-close")
+          assert.deepEqual(cleanup[0], [
+            "observer-diagnostic-process-close",
+            "win32",
+            6,
+          ]);
         assert.equal(order.includes("import"), false);
         assert.equal(context.attempted, false);
         assert.equal(saved.has(`${mode}-tcp-intent`), false);
@@ -8331,7 +8364,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
         }
       }
       if (fault === "diagnostic-close") {
-        for (const handle of [61, 143, 161])
+        for (const handle of [61, 71, 143, 161])
           assert.ok(order.includes(`handle-close:${handle}`));
         assert.deepEqual(
           cleanup.map((value) => value[0]),
@@ -8339,6 +8372,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
             "observer-diagnostic-token-close",
             "observer-diagnostic-process-close",
             "observer-diagnostic-token-close",
+            "observer-diagnostic-process-close",
             "observer-diagnostic-token-close",
           ],
         );

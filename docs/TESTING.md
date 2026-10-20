@@ -583,8 +583,12 @@ incomplete without replacing `10022`; failed-query byte counts remain unknown.
 The same fixture executes the original socket's exclusive-address query at the
 failed transfer boundary, including failed and short replies. Its ordinary raw
 diagnostic preserves the original caller/error and leaves the transfer/control
-grammar and bounds intact; existing assertions retain one original duplication,
-no original import/connect/receipt, checked independent closure and both controls.
+grammar and bounds intact. The same failure owner tests current-token
+`PROCESS_DUP_HANDLE` access to the current PID, with self-open success, denial
+and independently failed closure retaining the original `10022`. Its separate
+raw observation does not grant observer access. Existing assertions retain one
+original duplication, no original import/connect/receipt, checked independent
+closure and both controls.
 Both fresh unbound duplication refusals
 can remain `10022` with imports unattempted and independent source closure.
 Coverage runs every source/destination failure for both read/edit roles and
@@ -1042,6 +1046,13 @@ also check the cached notification, drain, reset, bookmark and control counters
 without adding gate I/O or policy changes. Missing delivery carries the counters
 through its existing diagnostic query even without a native fatal error; malformed
 counters are rejected and valid counters cannot satisfy subscription delivery.
+The existing capture/control fixtures execute the actual 10-second barrier with
+a controlled clock: empty delivery and delivered but unselected target rows
+refuse as `command-marker-barrier`, while the genuine target/marker pair retains
+its barrier reply. Original failure output includes the installed query/channel/
+flags, immediate wait/enumeration outcomes and expected PID/action/held IDs and
+marker state. Diagnostic writes preserve the original API error; optional raw
+metadata cannot supply a cause or proof or change the 4-KiB carrier bound.
 Source-executed gate/retirement regressions protect immediate error capture,
 independent closure and impersonation reversal within the existing deadlines.
 Controlled capture APIs execute the actual notification, enumeration, rendering,
