@@ -122,7 +122,18 @@ static void ancestors(const char *path) {
   need(strlen(path) < sizeof(name)); strcpy(name, path);
   char *slash = strrchr(name, '/'); need(slash && slash != name); *slash = 0;
   for (;;) {
-    need(!lstat(name, &st) && is_bootstrap_parent(path, &st));
+    errno = 0; int result = lstat(name, &st), error = errno;
+    bool sampled = result == 0, ok = sampled && is_bootstrap_parent(path, &st);
+    if (!ok) {
+      /* A successful sample supplies metadata, never an API-error explanation. */
+      int primary_error = sampled ? 0 : error; errno = primary_error;
+      input_refusal(path, "ancestors-input", NULL);
+      input_refusal(name, sampled ? "is_bootstrap_parent" : "lstat", sampled ? &st : NULL);
+      fprintf(stderr, "native-darwin-ancestor: operation=lstat return=%d errno=%d error-kind=%s\n",
+        result, error, sampled ? "none" : error ? "errno" : "unavailable");
+      fflush(stderr); errno = primary_error;
+    }
+    need(ok);
     slash = strrchr(name, '/'); if (slash == name) break; need(slash); *slash = 0;
   }
 }

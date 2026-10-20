@@ -88,6 +88,172 @@ test("Darwin hosted ancestry is scoped to installed paths and experiment purpose
   }
 });
 
+test("Darwin ancestry refusals retain the original input, sampled parent and API outcome", async () => {
+  const [header, reader] = await Promise.all(
+    ["custody.h", "custody-reader.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const extract = (source, name) => {
+    const body = new RegExp(
+      `static [^\\n]+ ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+    assert.ok(body, name);
+    return body;
+  };
+  // Keep the native ancestry, predicate and refusal bodies; translate only C
+  // storage, pointer syntax and declarations for the injected samples.
+  const script = new Script(`
+    function input_refusal(name, predicate, st) {${extract(
+      header,
+      "input_refusal",
+    )
+      .replace(
+        "int error = errno; size_t size = strlen(name); char encoded[PATH_MAX*2+1] = {0};",
+        "const error = errno, size = strlen(name), encoded = Buffer.alloc(PATH_MAX*2+1);",
+      )
+      .replaceAll("(const unsigned char *)", "")
+      .replace(/\((?:intmax_t|uintmax_t)\)/gu, "")
+      .replaceAll("st->", "st.")}}
+    function is_bootstrap_parent(name, st) {${extract(header, "is_bootstrap_parent").replaceAll("st->", "st.").replaceAll("022", "0o22")}}
+    function guard(ok, file, line) {${extract(header, "need_at").replace("int error", "const error")}}
+    function ancestors(path) {${extract(reader, "ancestors")
+      .replace(
+        "char name[PATH_MAX], canonical[PATH_MAX]; struct stat st;",
+        "const name = Buffer.alloc(PATH_MAX), canonical = Buffer.alloc(PATH_MAX), st = {};",
+      )
+      .replace("char *slash", "let slash")
+      .replaceAll("*slash = 0", "name[slash] = 0")
+      .replaceAll("slash == name", "slash === 0")
+      .replaceAll("slash != name", "slash !== 0")
+      .replaceAll("sizeof(name)", "PATH_MAX")
+      .replaceAll("&st", "st")
+      .replace(/\b(?:int|bool) /gu, "let ")}}
+    ({ ancestors, guard });
+  `);
+  for (const fault of [null, "api", "unavailable", "metadata", "write"]) {
+    const input = "/fixture/held/payload",
+      calls = [],
+      records = [],
+      metadata = {
+        st_dev: 1,
+        st_ino: 2,
+        st_uid: 0,
+        st_gid: 0,
+        st_mode: 0o40755,
+        st_nlink: 2,
+        st_size: 64,
+      };
+    const text = (value) =>
+      Buffer.isBuffer(value)
+        ? value
+            .subarray(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0))
+            .toString()
+        : value;
+    let predicates = 0;
+    const context = {
+      Buffer,
+      PATH_MAX: 1024,
+      NULL: null,
+      stderr: {},
+      errno: 77,
+      realpath(name, out) {
+        out.write(name);
+        return out;
+      },
+      strcmp: (a, b) => Number(text(a) !== text(b)),
+      strlen: (value) => text(value).length,
+      strcpy: (out, value) => out.write(value),
+      strrchr(value, separator) {
+        const at = text(value).lastIndexOf(separator);
+        return at < 0 ? null : at;
+      },
+      lstat(name, out) {
+        assert.equal(context.errno, 0, "each API sample clears stale errno");
+        calls.push(text(name));
+        const failing = text(name) === "/fixture" && fault;
+        context.errno =
+          failing && fault === "api"
+            ? 13
+            : failing && fault === "unavailable"
+              ? 0
+              : 44;
+        if (failing && ["api", "unavailable"].includes(fault)) return -1;
+        Object.assign(out, metadata, failing ? { st_uid: 501 } : {});
+        return 0;
+      },
+      S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
+      experiment_installed_path(name) {
+        assert.equal(name, input, "classification retains the original input");
+        predicates++;
+        return false;
+      },
+      hex(bytes, size, out) {
+        out.write(Buffer.from(bytes).subarray(0, size).toString("hex"));
+        context.errno = 97;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, context.stderr);
+        records.push({ format, values: values.map(text) });
+        context.errno = 99;
+        return fault === "write" ? -1 : 1;
+      },
+      fflush() {
+        context.errno = 98;
+        return fault === "write" ? -1 : 0;
+      },
+      _exit(code) {
+        throw Object.assign(new Error("refusal"), { code });
+      },
+    };
+    const { ancestors, guard } = script.runInNewContext(context);
+    context.need = (ok) => guard(ok, "fixture", 1);
+    if (fault) assert.throws(() => ancestors(input), { code: 126 });
+    else ancestors(input);
+    assert.deepEqual(calls, ["/fixture/held", "/fixture"]);
+    assert.equal(predicates, ["api", "unavailable"].includes(fault) ? 1 : 2);
+    if (!fault) {
+      assert.deepEqual(records, []);
+      continue;
+    }
+    const api = ["api", "unavailable"].includes(fault),
+      error = fault === "api" ? 13 : 0;
+    assert.deepEqual(records[0].values, [
+      "ancestors-input",
+      input.length,
+      Buffer.from(input).toString("hex"),
+      error,
+    ]);
+    assert.deepEqual(records[1].values, [
+      api ? "lstat" : "is_bootstrap_parent",
+      8,
+      Buffer.from("/fixture").toString("hex"),
+      error,
+    ]);
+    const sampled = records.find(({ format }) =>
+      format.startsWith("native-darwin-input-stat:"),
+    );
+    assert.equal(
+      Boolean(sampled),
+      !api,
+      "failed lstat never supplies metadata",
+    );
+    if (sampled)
+      assert.deepEqual(sampled.values, [1, 2, 501, 0, 0o40755, 2, 64]);
+    assert.deepEqual(records.at(-2).values, [
+      api ? -1 : 0,
+      api ? error : 44,
+      api ? (error ? "errno" : "unavailable") : "none",
+    ]);
+    assert.deepEqual(
+      records.at(-1).values,
+      ["fixture", 1, error],
+      "diagnostic writes preserve the primary refusal",
+    );
+  }
+});
+
 test("Darwin SDK guard samples each original predicate once and preserves refusal errno", async () => {
   const source = await readFile(new URL("build-helper.c", SOURCE), "utf8"),
     start = source.indexOf("  char canonical[PATH_MAX]; struct stat stat;"),

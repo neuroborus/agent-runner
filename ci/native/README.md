@@ -562,7 +562,11 @@ Original protocol evidence placed the first ancestor refusal after the first
 The inspected object was the selected installed cache, not the compiled source
 filename printed by the guard. The original output did not retain the selected
 canonical cache pathname or the particular failing ancestor; no hosted-home
-path or parent metadata is inferred from that diagnostic. Fresh matching CI
+path or parent metadata is inferred from that diagnostic. The existing input
+refusal owner now retains the original input and actual sampled parent separately,
+the immediate `lstat` outcome and error availability, or the sampled metadata and
+unchanged `is_bootstrap_parent(path, &st)` refusal. Successful-call errno is not an
+API failure; diagnostic writes preserve the primary refusal. Fresh matching CI
 must establish native results and independent original-owner retirement.
 The later original cache failure reached the `cache_text` version/path predicate
 inside `dyld_shared_cache_iterate_text`; its diagnostic does not establish which
@@ -2788,7 +2792,11 @@ all-UID membership and retirement. They preserve API order and short circuits;
 unreached calls are not sampled. The existing failure owner keeps its first cause
 and a separate cleanup cause, with unchanged prerequisite initialization and exit
 semantics. Exit 78 alone identifies no environmental cause. These diagnostics do
-not repair model-free command feasibility or supply native acceptance.
+not repair model-free command feasibility or supply native acceptance. Bounded
+version/schema capture forwards original child stderr bytes through the existing
+private diagnostic channel before later read, wait or probe refusal, preserving
+errno across diagnostic writes. V/G exit replies and the subsequent strict schema
+refusal retain their original meaning; no reply grammar or settlement rule changes.
 Each command audit pipe explicitly enables driver nonblocking mode with checked
 `FIONBIO` immediately after opening. The matched
 [XNU audit driver](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_pipe.c)

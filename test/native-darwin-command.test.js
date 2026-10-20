@@ -15,6 +15,7 @@ import {
   createDarwinAuditDecoder,
 } from "../ci/native/darwin/index.js";
 import { feasibilityCommandParameters } from "../ci/native/providers/index.js";
+import { withNativeDiagnostics } from "../ci/native/index.js";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex"),
   PIN = sha("fixture");
@@ -106,7 +107,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "let ",
         )
         .replace(
-          /command_native\(([^;]+), ((?:==|!=) [^;]+)\)/gu,
+          /command_native\(([^;]+), ((?:==|!=|>=|<=) [^;]+)\)/gu,
           (_, call, comparison) =>
             `command_native(()=>(${call}),value=>value ${comparison},${JSON.stringify(call + " " + comparison)})`,
         )
@@ -2044,6 +2045,228 @@ test("Darwin observation and partial-failure settlement have separate enforced d
   assert.equal(g.calls.includes("finish"), false);
 });
 
+function commandCaptureFixture(
+  header,
+  helper,
+  { exitCode = 126, readError = 0, diagnosticFailure = false } = {},
+) {
+  const native =
+    /static void command_capture\(const char \*event\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(native);
+  const body = native
+    .replace(
+      "unsigned char output[65536],errors[65536];",
+      "const output=Buffer.alloc(65536),errors=Buffer.alloc(65536);",
+    )
+    .replace(
+      "int fds[]={command_out,command_err};",
+      "const fds=[command_out,command_err];",
+    )
+    .replace(
+      "struct pollfd p[]={{fds[0],POLLIN,0},{fds[1],POLLIN,0}};",
+      "const p=[{fd:fds[0],revents:0},{fd:fds[1],revents:0}];",
+    )
+    .replace(
+      "(i?errors:output)+(i?err:used)",
+      "(i?errors:output).subarray(i?err:used)",
+    )
+    .replaceAll("errors+err", "errors.subarray(err)")
+    .replace("&status", "{set value(v){status=v}}")
+    .replace("output[i]=='\\n'", "output[i]===10")
+    .replace("output[i]!='\"'", "output[i]!==34")
+    .replace("output[i]!='\\\\'", "output[i]!==92");
+  const errors = Buffer.from("fixture child refusal\n\0detail\n"),
+    writes = [],
+    output = [],
+    streams = new Map([
+      [3, [Buffer.from("codex-cli 0.160.0\n")]],
+      [
+        4,
+        [
+          errors.subarray(0, 8),
+          errors.subarray(8),
+          ...(readError ? [{ error: readError }] : []),
+        ],
+      ],
+    ]);
+  const f = commandGuards(
+    header,
+    helper,
+    `const event=args[0];${body}`,
+    "command_capture",
+    {
+      cleanup: true,
+      context: {
+        Buffer,
+        POLLIN: 1,
+        POLLHUP: 2,
+        command_prerequisite: false,
+        command_owner: 0,
+        command_out: 3,
+        command_err: 4,
+        command_in: 5,
+        command_count: 1,
+        command_wrappers: [9],
+      },
+    },
+  );
+  Object.assign(f.context, {
+    command_poll() {
+      if (f.calls.length) assert.equal(f.context.errno, 17);
+      f.calls.push("poll");
+    },
+    poll(descriptors) {
+      descriptors.forEach((value) => {
+        value.revents = value.fd < 0 ? 0 : 1;
+      });
+      return 1;
+    },
+    read(fd, target, capacity) {
+      assert.equal(target.length, capacity);
+      const chunk = streams.get(fd).shift();
+      f.context.errno = chunk?.error ?? 17;
+      if (chunk?.error) return -1;
+      if (!chunk) return 0;
+      assert.ok(chunk.length <= capacity);
+      chunk.copy(target);
+      return chunk.length;
+    },
+    fwrite(bytes, size, count, stream) {
+      assert.equal(stream, f.context.stderr);
+      assert.equal(size, 1);
+      assert.equal(f.context.errno, 17);
+      writes.push(Buffer.from(bytes.subarray(0, count)));
+      f.context.errno = 28;
+      return diagnosticFailure ? 0 : count;
+    },
+    fflush() {
+      f.context.errno = 29;
+      return diagnosticFailure ? -1 : 0;
+    },
+    waitpid(pid, status, flags) {
+      assert.equal(pid, 9);
+      assert.equal(flags, 0);
+      f.calls.push("wait");
+      status.value = exitCode;
+      return pid;
+    },
+    WIFEXITED: () => true,
+    WEXITSTATUS: (status) => status,
+    printf(format, ...values) {
+      let at = 0;
+      output.push(format.replace(/%[sd]/gu, () => String(values[at++])));
+    },
+    putchar: (byte) => output.push(String.fromCharCode(byte)),
+    puts: (value) => output.push(value + "\n"),
+    close(fd) {
+      f.calls.push("close:" + fd);
+      return 0;
+    },
+  });
+  return { ...f, errors, writes, output };
+}
+
+test("Darwin capture preserves original child bytes and V/G outcomes through schema refusal", async (t) => {
+  const [header, helper, effects] = await Promise.all(
+    [
+      "feasibility-command.h",
+      "feasibility-helper.c",
+      "feasibility-command-effects.js",
+    ].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = effects.indexOf(
+      '      const version = await call("V", signal);',
+    ),
+    end = effects.indexOf("      const readSchema =", start),
+    need = /const need = \(value\) => \{[\s\S]*?\n\};/u.exec(effects)?.[0];
+  assert.ok(start >= 0 && end > start && need);
+  const schema = new Script(
+    `${need}\n(async()=>{${effects.slice(start, end)}})`,
+  );
+  for (const failed of ["V", "G"]) {
+    const diagnostics = [],
+      replies = [],
+      captures = new Map();
+    for (const operation of ["V", "G"]) {
+      const capture = commandCaptureFixture(header, helper, {
+        exitCode: operation === failed ? 126 : 0,
+      });
+      capture.run(operation);
+      const bytes = Buffer.concat(capture.writes),
+        reply = JSON.parse(capture.output.join(""));
+      assert.deepEqual(bytes, capture.errors);
+      assert.equal(reply.exitCode, operation === failed ? 126 : 0);
+      captures.set(operation, { bytes, reply });
+    }
+    await withNativeDiagnostics(
+      async () => {
+        const signal = new AbortController().signal;
+        const f = await commandBrokerFixture(
+          t,
+          signal,
+          (operation, { frame, finish }) => {
+            if (["V", "G"].includes(operation)) {
+              const { bytes, reply } = captures.get(operation);
+              replies.push(reply);
+              f.broker.stderr.write(bytes);
+              frame(reply);
+            }
+            if (operation === "S") {
+              frame({ event: "capture-end", bytes: 0, records: 0 });
+              frame({ event: "S" });
+              finish();
+            }
+          },
+        );
+        try {
+          await assert.rejects(
+            schema.runInNewContext({
+              signal,
+              call: (...args) => f.owner.call(...args),
+            })(),
+            /Incomplete native command observation/u,
+          );
+        } finally {
+          await f.owner.close(signal);
+        }
+        assert.deepEqual(f.sent, failed === "V" ? ["V", "S"] : ["V", "G", "S"]);
+        assert.equal(f.owner.captureFailure, undefined);
+      },
+      (_owner, value) => {
+        if (value.stderr) diagnostics.push(Buffer.from(value.stderr));
+      },
+    );
+    assert.equal(replies.at(-1).event, failed);
+    assert.equal(replies.at(-1).exitCode, 126);
+    assert.deepEqual(
+      Buffer.concat(diagnostics),
+      Buffer.from("fixture child refusal\n\0detail\n".repeat(replies.length)),
+    );
+  }
+  for (const options of [{ readError: 5 }, { diagnosticFailure: true }]) {
+    const f = commandCaptureFixture(header, helper, options);
+    if (options.readError)
+      assert.throws(
+        () => f.run("V"),
+        (error) => {
+          assert.equal(error.kind, "errno");
+          assert.equal(error.value, 5);
+          assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+          return true;
+        },
+      );
+    else {
+      f.run("V");
+      assert.equal(JSON.parse(f.output.join("")).exitCode, 126);
+    }
+    assert.deepEqual(Buffer.concat(f.writes), f.errors);
+  }
+});
+
 async function commandBrokerFixture(t, signal, respond = () => {}) {
   const broker = new EventEmitter(),
     sent = [],
@@ -2101,6 +2324,7 @@ async function commandBrokerFixture(t, signal, respond = () => {}) {
   });
   await owner.ready;
   return {
+    broker,
     owner,
     frame,
     finish,

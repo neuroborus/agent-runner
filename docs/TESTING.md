@@ -360,10 +360,14 @@ release cause, including when the raw diagnostic sink throws. These portable
 fixtures run no native compiler or macOS tool and add no slow-tier assignment.
 
 `test/native-darwin-command.test.js` additionally executes the actual finite
-command guard, failure and cleanup bodies with injected native calls. Audit-pipe
-open/query/selection failures retain exact caller/guard, return value and saved
-errno, including when diagnostics or cleanup change errno. Checked `FIONBIO`
-success and failure protect the audit driver's explicit nonblocking initialization
+command guard, failure and cleanup bodies with injected native calls. Capture
+fixtures forward exact child stderr bytes, including split binary chunks,
+through the existing broker diagnostics before V/G exit and schema refusal.
+Read and diagnostic-write failures preserve the original outcome. Live task-access
+cancellation refusal, owner-loss fences and independent cleanup coverage remain
+unchanged. Audit-pipe open/query/selection failures retain exact caller/guard,
+return value and saved errno, including when diagnostics or cleanup change errno.
+Checked `FIONBIO` success and failure protect the audit driver's explicit nonblocking initialization
 before its selection queries. Actual drain bodies cover empty nonblocking drains
 returning to command input, EINTR before and after expiry, native read/EOF failures
 and sustained separate/coalesced records reaching expiry. Split headers and records
@@ -1443,6 +1447,10 @@ ownership/modes only in experiment builds; private helper/case roots, tools,
 near-miss names, non-directories and reviewed inputs retain their refusals.
 Shared custody regressions exercise held cache reads under hosted ancestry,
 rejecting canonical-path, parent/leaf identity, ownership and content substitution.
+The actual ancestry body also distinguishes original `lstat` failure, unavailable
+API errno and sampled metadata refusal, retaining both input and parent paths.
+Injected diagnostic writes cannot replace the primary error; the installed-input
+classifier and held-image/root checks remain unchanged.
 Ordinary preparation and cold loading instead bind existing helper bytes without
 cache selection, acquisition or recompilation. These cases add no native
 tool, framework, slow-tier assignment or native acceptance claim.

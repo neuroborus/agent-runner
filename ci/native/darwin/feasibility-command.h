@@ -331,7 +331,13 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
 static void command_capture(const char *event) {
   unsigned char output[65536],errors[65536];size_t used=0,err=0;int fds[]={command_out,command_err};
   while(fds[0]>=0||fds[1]>=0){command_poll();struct pollfd p[]={{fds[0],POLLIN,0},{fds[1],POLLIN,0}};command_native(poll(p,2,10), >= 0);
-    for(unsigned i=0;i<2;i++)if(p[i].revents&(POLLIN|POLLHUP)){ssize_t n=read(fds[i],(i?errors:output)+(i?err:used),65536-(i?err:used));int read_error=errno;command_observed(n>=0, n, read_error);if(!n){close(fds[i]);fds[i]=-1;}else{if(i)err+=(size_t)n;else used+=(size_t)n;need(used+err<65536);}}}
+    for(unsigned i=0;i<2;i++)if(p[i].revents&(POLLIN|POLLHUP)){ssize_t n=read(fds[i],(i?errors:output)+(i?err:used),65536-(i?err:used));int read_error=errno;command_observed(n>=0, n, read_error);if(!n){close(fds[i]);fds[i]=-1;}else{
+      if(i){
+        /* Forward original bytes before any later read, wait or probe refusal.
+         * Diagnostic writes cannot replace the captured operation's errno. */
+        int error=errno;(void)fwrite(errors+err,1,(size_t)n,stderr);(void)fflush(stderr);errno=error;
+        err+=(size_t)n;
+      }else used+=(size_t)n;need(used+err<65536);}}}
   int status;command_native(waitpid(command_wrappers[command_count-1],&status,0), == command_wrappers[command_count-1]);need(WIFEXITED(status));
   if(event) printf("{\"event\":\"%s\",\"exitCode\":%d,\"stdout\":\"",event,WEXITSTATUS(status));
   /* The only accepted version text has no JSON escapes except its newline. */
