@@ -362,11 +362,22 @@ fixtures run no native compiler or macOS tool and add no slow-tier assignment.
 `test/native-darwin-command.test.js` additionally executes the actual finite
 command guard, failure and cleanup bodies with injected native calls. Audit-pipe
 open/query/selection failures retain exact caller/guard, return value and saved
-errno, including when diagnostics or cleanup change errno. Initial guards retain
-their entry order; session-escape and membership refusals stop before previously
-short-circuited operations. A later retirement refusal cannot replace the first
-error and keeps a separate cleanup cause. These fast fixtures preserve exit
-semantics and never classify exit 78 alone as an environmental explanation.
+errno, including when diagnostics or cleanup change errno. Checked `FIONBIO`
+success and failure protect the audit driver's explicit nonblocking initialization
+before its selection queries. Actual drain bodies cover empty nonblocking drains
+returning to command input, EINTR before and after expiry, native read/EOF failures
+and sustained separate/coalesced records reaching expiry. Split headers and records
+survive empty drains without dropped tails; malformed headers/lengths, 64-KiB
+record overflow, eight-MiB total overflow and 4096-record exhaustion refuse
+admission through the existing owner. Barriers cannot acknowledge an unfinished
+tail; explicit terminal capture cannot close or emit completion for one. The
+per-record libbsm decoder remains independently required, and these fixtures
+supply no native token or matching-host acceptance.
+Initial guards retain their entry order; session-escape and membership refusals
+stop before previously short-circuited operations. A later retirement refusal
+cannot replace the first error and keeps a separate cleanup cause. These fast
+fixtures preserve exit semantics and never classify exit 78 alone as an
+environmental explanation.
 Both task-access confinement and model-free command feasibility remain open
 until fresh matching native evidence establishes their functional causes.
 Event-driven in-memory broker streams now cover ready followed by an unanswered

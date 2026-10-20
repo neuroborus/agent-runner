@@ -28,6 +28,8 @@ static int command_release = -1;
 static pid_t command_pending_wrapper = -1;
 static bool command_server_clean;
 static unsigned command_count, command_records, command_bytes, command_barriers;
+static unsigned char command_audit_bytes[65536];
+static size_t command_pending;
 static uint64_t command_latest_record_time, command_previous_barrier_time;
 static struct identity command_case_identity;
 static int command_action = -1;
@@ -177,6 +179,8 @@ static int command_pipe(unsigned classes, uid_t uid, bool select) {
   int fd=open("/dev/auditpipe",O_RDONLY|O_NONBLOCK|O_CLOEXEC), error=errno;
   command_guard_at(fd>=0, __func__, __LINE__, "open(/dev/auditpipe)", "errno", fd, error,
     error==EACCES || error==ENOENT || error==ENOTSUP ? 78 : 126);
+  /* XNU's audit driver ignores O_NONBLOCK at open; FIONBIO sets its per-pipe bit. */
+  int nonblocking=1;command_native(ioctl(fd,FIONBIO,&nonblocking), == 0);
   unsigned low,high,size,queue=1024; int mode=AUDITPIPE_PRESELECT_MODE_LOCAL; au_mask_t empty={0,0};
   command_native(ioctl(fd,AUDITPIPE_GET_QLIMIT_MIN,&low), == 0);
   command_native(ioctl(fd,AUDITPIPE_GET_QLIMIT_MAX,&high), == 0); need(queue>=low && queue<=high);
@@ -231,9 +235,29 @@ static void command_record(unsigned char *bytes, size_t size) {
   }
 }
 static void command_drain(void) {
-  command_health(); unsigned char bytes[65536];
-  for(;;){ssize_t n=read(command_audit,bytes,sizeof(bytes));if(n<0 && errno==EINTR)continue;if(n<0 && errno==EAGAIN)break;
-    int read_error=errno;command_observed(n>0, n, read_error);need(++command_records<=4096 && (uint64_t)command_bytes+(uint64_t)n<=8388608);command_bytes+=(unsigned)n;command_record(bytes,(size_t)n);memset(bytes,0,(size_t)n);}
+  command_health();
+  for(;;){
+    need(!command_expired && command_pending<sizeof(command_audit_bytes));
+    ssize_t n=read(command_audit,command_audit_bytes+command_pending,sizeof(command_audit_bytes)-command_pending);
+    int read_error=errno;
+    if(n<0 && read_error==EINTR){need(!command_expired);continue;}
+    if(n<0 && read_error==EAGAIN)break;
+    command_observed(n>0, n, read_error);
+    need((size_t)n<=sizeof(command_audit_bytes)-command_pending && (uint64_t)command_bytes+(uint64_t)n<=8388608);
+    command_bytes+=(unsigned)n;command_pending+=(size_t)n;
+    /* Audit reads may split or coalesce BSM records. Preserve the unfinished tail
+     * across empty drains and pass only complete, bounded records to libbsm. */
+    size_t offset=0;
+    while(command_pending-offset>=5){
+      need(!command_expired);unsigned char *bytes=command_audit_bytes+offset;
+      need(bytes[0]==AUT_HEADER32 || bytes[0]==AUT_HEADER64 || bytes[0]==AUT_HEADER32_EX || bytes[0]==AUT_HEADER64_EX);
+      uint32_t size=command_u32(bytes+1);need(size>=18 && size<=sizeof(command_audit_bytes));
+      if(command_pending-offset<size)break;
+      need(++command_records<=4096);command_record(bytes,size);offset+=size;
+    }
+    if(offset){command_pending-=offset;memmove(command_audit_bytes,command_audit_bytes+offset,command_pending);
+      memset(command_audit_bytes+command_pending,0,offset);}
+  }
   command_health();
 }
 static void command_poll(void) {struct pollfd fd={command_audit,POLLIN,0};need(!command_expired);command_native(poll(&fd,1,10), >= 0);command_drain();}
@@ -246,7 +270,7 @@ static uint64_t command_clock(struct timeval *time) {
 static void command_barrier(void) {
   struct timeval time;uint64_t stamp;
   for(;;){command_drain();stamp=command_clock(&time);
-    if(stamp>command_latest_record_time&&stamp>command_previous_barrier_time)break;command_poll();}
+    if(!command_pending&&stamp>command_latest_record_time&&stamp>command_previous_barrier_time)break;command_poll();}
   need(++command_barriers<=256);command_previous_barrier_time=stamp;
   printf("{\"event\":\"barrier\",\"sequence\":%u,\"seconds\":%u,\"milliseconds\":%u}\n",command_barriers,(unsigned)time.tv_sec,(unsigned)(time.tv_usec/1000));
   /* The next release/operation cannot share the acknowledged start tick. */
@@ -432,7 +456,7 @@ static int command_entry(int argc,char **argv) {
       if(reaped>0&&reaped==command_server_wrapper)command_server_clean=WIFEXITED(status)&&WEXITSTATUS(status)==0;if(command_members(command_sessions[i],false))empty=false;}
       if(!empty && pass==100){emergency=true;for(unsigned i=0;i<command_count;i++)(void)command_members(command_sessions[i],true);}if(!empty)command_poll();}
       need(empty);printf("{\"event\":\"D\",\"empty\":true,\"emergency\":%s,\"serverClean\":%s,\"sessions\":[",emergency?"true":"false",!command_server_wrapper||command_server_clean?"true":"false");for(unsigned i=0;i<command_count;i++)printf("%s%u",i?",":"",command_sessions[i]);puts("]}");}
-    else if(!strcmp(line,"S")){for(unsigned i=0;i<command_count;i++)command_native(command_members(command_sessions[i],false), == 0);command_drain();command_native(close(command_audit), == 0);
+    else if(!strcmp(line,"S")){for(unsigned i=0;i<command_count;i++)command_native(command_members(command_sessions[i],false), == 0);command_drain();need(!command_pending);command_native(close(command_audit), == 0);
       printf("{\"event\":\"capture-end\",\"bytes\":%u,\"records\":%u}\n",command_bytes,command_records);
       for(unsigned i=0;i<command_count;i++)command_native(mach_port_deallocate(mach_task_self(),command_rights[i]), == KERN_SUCCESS);puts("{\"event\":\"S\"}");stopping=true;}
     else need(0);

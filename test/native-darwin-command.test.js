@@ -60,19 +60,32 @@ function commandGuards(header, helper, body, caller, options = {}) {
         )
         .replace("struct proc_bsdinfo bsd;", "const bsd={};")
         .replace("char byte;", "let byte;")
+        .replace("struct timeval time;", "const time={};")
+        .replaceAll("&time", "time")
         .replace("au_mask_t empty={0,0};", "const empty={};")
         .replace(
           "struct auditpipe_ioctl_preselect choice={0};",
           "const choice={aip_mask:{}};",
         )
         .replace(/sizeof\(pids\)/gu, "4096")
+        .replaceAll("sizeof(command_audit_bytes)", "65536")
+        .replaceAll(
+          "command_audit_bytes+command_pending",
+          "command_audit_bytes.subarray(command_pending)",
+        )
+        .replaceAll(
+          "command_audit_bytes+offset",
+          "command_audit_bytes.subarray(offset)",
+        )
+        .replace("unsigned char *bytes=", "const bytes=")
+        .replace("bytes+1", "bytes.subarray(1)")
         .replace(
           /sizeof\((?:pid_t|before|after|a|b|member|attempt|bsd|actual.token)\)/gu,
           "1",
         )
         .replace(
-          /&(low|high|size)\b/gu,
-          (_, name) => `{set value(v){${name}=v}}`,
+          /&(low|high|size|nonblocking)\b/gu,
+          (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
         )
         .replace(/&foreign\b/gu, "{set value(v){foreign=v}}")
         .replace(/&right\b/gu, "{set value(v){right=v}}")
@@ -86,10 +99,10 @@ function commandGuards(header, helper, body, caller, options = {}) {
           /&(before|after|a|b|member|queue|mode|empty|choice|status|attempt)\b/gu,
           "$1",
         )
-        .replace(/\((?:int|unsigned|void)\)/gu, "")
+        .replace(/\((?:int|unsigned|void|size_t|uint64_t)\)/gu, "")
         .replace(/\blong long /gu, "let ")
         .replace(
-          /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t) /gu,
+          /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t|ssize_t|size_t|uint32_t|uint64_t) /gu,
           "let ",
         )
         .replace(
@@ -192,6 +205,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [helper, "failure", "code"],
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
+    ...(options.audit ? [[header, "command_drain", ""]] : []),
     ...(options.lifecycle
       ? [
           [helper, "live", "expected"],
@@ -588,16 +602,19 @@ test("Darwin command audit prerequisites retain exact native guards through clea
     )?.[1];
   assert.ok(body);
   const operations = [
-    "GET_QLIMIT_MIN",
-    "GET_QLIMIT_MAX",
-    "GET_MAXAUDITDATA",
-    "SET_QLIMIT",
-    "SET_PRESELECT_MODE",
-    "SET_PRESELECT_FLAGS",
-    "SET_PRESELECT_NAFLAGS",
-    "SET_PRESELECT_AUID",
-    "FLUSH",
-  ].map((name) => `AUDITPIPE_${name}`);
+    "FIONBIO",
+    ...[
+      "GET_QLIMIT_MIN",
+      "GET_QLIMIT_MAX",
+      "GET_MAXAUDITDATA",
+      "SET_QLIMIT",
+      "SET_PRESELECT_MODE",
+      "SET_PRESELECT_FLAGS",
+      "SET_PRESELECT_NAFLAGS",
+      "SET_PRESELECT_AUID",
+      "FLUSH",
+    ].map((name) => `AUDITPIPE_${name}`),
+  ];
   for (const fault of [null, "open", ...operations, "queue"]) {
     const f = commandGuards(
         header,
@@ -624,10 +641,11 @@ test("Darwin command audit prerequisites retain exact native guards through clea
         f.calls.push(operation);
         f.context.errno = operation === fault ? 5 : 0;
         if (operation === fault) return -1;
-        if (operation === operations[0])
+        if (operation === "FIONBIO") assert.equal(target.value, 1);
+        if (operation === "AUDITPIPE_GET_QLIMIT_MIN")
           target.value = fault === "queue" ? 2048 : 1;
-        if (operation === operations[1]) target.value = 4096;
-        if (operation === operations[2]) target.value = 65536;
+        if (operation === "AUDITPIPE_GET_QLIMIT_MAX") target.value = 4096;
+        if (operation === "AUDITPIPE_GET_MAXAUDITDATA") target.value = 65536;
         return 0;
       },
     });
@@ -665,13 +683,244 @@ test("Darwin command audit prerequisites retain exact native guards through clea
       fault === "open"
         ? ["open"]
         : fault === "queue"
-          ? ["open", ...operations.slice(0, 2)]
+          ? ["open", ...operations.slice(0, 3)]
           : ["open", ...operations.slice(0, operations.indexOf(fault) + 1)],
     );
     assert.equal(
       f.reports[0][2],
       fault === "open" ? 13 : fault === "queue" ? 0 : 5,
     );
+  }
+});
+
+function commandDrainFixture(
+  header,
+  helper,
+  chunks = [],
+  body = "command_drain();stdin();",
+) {
+  const f = commandGuards(header, helper, body, "command_drain", {
+    audit: true,
+    cleanup: true,
+    context: { command_prerequisite: false, command_owner: 0 },
+  });
+  f.chunks = [...chunks];
+  f.records = [];
+  Object.assign(f.context, {
+    EAGAIN: 35,
+    AUT_HEADER32: 0x14,
+    AUT_HEADER64: 0x74,
+    AUT_HEADER32_EX: 0x15,
+    AUT_HEADER64_EX: 0x79,
+    command_audit: 7,
+    command_audit_bytes: Buffer.alloc(65536),
+    command_pending: 0,
+    command_bytes: 0,
+    command_records: 0,
+    command_rights: [],
+    KERN_SUCCESS: 0,
+    stopping: false,
+    command_health: () => f.calls.push("health"),
+    command_u32: (bytes) => bytes.readUInt32BE(0),
+    read(fd, target, capacity) {
+      assert.equal(fd, 7);
+      assert.equal(target.length, capacity);
+      f.calls.push("read");
+      const chunk = f.chunks.shift() ?? { error: 35 };
+      if (!Buffer.isBuffer(chunk)) {
+        f.context.errno = chunk.error;
+        if (chunk.expired) f.context.command_expired = 1;
+        return chunk.error ? -1 : 0;
+      }
+      const size = Math.min(chunk.length, capacity);
+      chunk.copy(target, 0, 0, size);
+      if (size < chunk.length) f.chunks.unshift(chunk.subarray(size));
+      return size;
+    },
+    command_record(bytes, size) {
+      // The unchanged libbsm token decoder is separate from this stream fixture.
+      assert.equal(bytes.readUInt32BE(1), size);
+      f.records.push(Buffer.from(bytes.subarray(0, size)));
+      f.onRecord?.();
+    },
+    memmove: (target, source, size) => source.copy(target, 0, 0, size),
+    memset: (target, value, size) => target.fill(value, 0, size),
+    stdin: () => f.calls.push("stdin"),
+    close(fd) {
+      assert.equal(fd, 7);
+      f.calls.push("close");
+      return 0;
+    },
+    printf: (format) =>
+      f.calls.push(format.includes('"barrier"') ? "barrier" : "capture-end"),
+    puts: () => f.calls.push("S"),
+  });
+  return f;
+}
+
+test("Darwin command empty drains permit stdin and EINTR retries stop at expiry with their original cause", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const empty = commandDrainFixture(header, helper);
+  empty.run();
+  assert.deepEqual(empty.calls, ["health", "read", "health", "stdin"]);
+  assert.equal(empty.context.command_records, 0);
+  assert.equal(empty.context.command_bytes, 0);
+  const retry = commandDrainFixture(header, helper, [{ error: 4 }]);
+  retry.run();
+  assert.deepEqual(retry.calls, ["health", "read", "read", "health", "stdin"]);
+  for (const fault of ["expired", "interrupted", "read", "eof"]) {
+    const f = commandDrainFixture(header, helper, [
+      {
+        error: fault === "interrupted" ? 4 : fault === "read" ? 5 : 0,
+        expired: fault === "interrupted",
+      },
+    ]);
+    if (fault === "expired") f.context.command_expired = 1;
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 126);
+      assert.equal(
+        error.kind,
+        fault === "read" ? "errno" : fault === "eof" ? "status" : "invariant",
+      );
+      assert.equal(error.value, fault === "read" ? 5 : 0);
+      assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+      return true;
+    });
+    assert.equal(
+      f.calls.filter((call) => call === "read").length,
+      fault === "expired" ? 0 : 1,
+    );
+    assert.equal(f.calls.includes("stdin"), false);
+  }
+});
+
+test("Darwin command drain retains split and coalesced BSM records, bounds and incomplete terminal tails", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const record = (type = 0x14, size = 68) => {
+    const bytes = Buffer.alloc(size);
+    bytes[0] = type;
+    bytes.writeUInt32BE(size, 1);
+    return bytes;
+  };
+  const records = [record(), record(0x74), record(0x15), record(0x79)],
+    joined = Buffer.concat(records),
+    f = commandDrainFixture(header, helper, [joined.subarray(0, 3)]);
+  f.run();
+  assert.equal(f.context.command_pending, 3);
+  assert.equal(f.records.length, 0);
+  f.chunks.push(joined.subarray(3, 2 * 68 + 7));
+  f.run();
+  assert.deepEqual(f.records, records.slice(0, 2));
+  assert.equal(f.context.command_pending, 7);
+  f.chunks.push(joined.subarray(2 * 68 + 7));
+  f.run();
+  assert.deepEqual(f.records, records);
+  assert.equal(f.context.command_pending, 0);
+  assert.equal(f.context.command_records, 4);
+  assert.equal(f.context.command_bytes, joined.length);
+  for (const coalesced of [false, true]) {
+    const f = commandDrainFixture(
+      header,
+      helper,
+      coalesced ? [joined] : records,
+    );
+    f.onRecord = () => {
+      if (f.records.length === 2) f.context.command_expired = 1;
+    };
+    assert.throws(f.run, { code: 126 });
+    assert.deepEqual(f.records, records.slice(0, 2));
+    assert.equal(
+      f.calls.filter((call) => call === "read").length,
+      coalesced ? 1 : 2,
+    );
+  }
+  for (const mutate of [
+    (bytes) => {
+      bytes[0] = 0;
+    },
+    (bytes) => bytes.writeUInt32BE(17, 1),
+    (bytes) => bytes.writeUInt32BE(65537, 1),
+  ]) {
+    const bytes = record();
+    mutate(bytes);
+    const f = commandDrainFixture(header, helper, [bytes]);
+    assert.throws(f.run, { code: 126 });
+    assert.equal(f.records.length, 0);
+  }
+  const maximum = commandDrainFixture(header, helper, [record(0x14, 65536)]);
+  maximum.run();
+  assert.equal(maximum.context.command_pending, 0);
+  assert.equal(maximum.records[0].length, 65536);
+  for (const limit of ["records", "bytes"]) {
+    const f = commandDrainFixture(header, helper, [
+      Buffer.concat(records.slice(0, 2)),
+    ]);
+    if (limit === "records") f.context.command_records = 4095;
+    else f.context.command_bytes = 8388608 - 2 * 68 + 1;
+    assert.throws(f.run, { code: 126 });
+    assert.equal(f.records.length, limit === "records" ? 1 : 0);
+  }
+  const start = header.indexOf('else if(!strcmp(line,"S")){'),
+    end = header.indexOf("\n    else need(0);", start),
+    terminal = header
+      .slice(start + 'else if(!strcmp(line,"S")){'.length, end)
+      .trim()
+      .slice(0, -1);
+  assert.ok(start > 0 && end > start);
+  for (const incomplete of [false, true]) {
+    const f = commandDrainFixture(
+      header,
+      helper,
+      incomplete ? [joined.subarray(0, 3)] : [joined],
+      terminal,
+    );
+    if (incomplete) {
+      assert.throws(f.run, { code: 126 });
+      assert.equal(f.calls.includes("close"), false);
+      assert.equal(f.calls.includes("capture-end"), false);
+    } else {
+      f.run();
+      assert.equal(f.context.stopping, true);
+      assert.deepEqual(f.calls.slice(-3), ["close", "capture-end", "S"]);
+    }
+  }
+  const barrier = /static void command_barrier\(void\) \{([\s\S]*?)\n\}/u.exec(
+    header,
+  )?.[1];
+  assert.ok(barrier);
+  for (const incomplete of [false, true]) {
+    const f = commandDrainFixture(
+      header,
+      helper,
+      incomplete ? [joined.subarray(0, 3)] : [],
+      barrier,
+    );
+    let stamp = 100;
+    Object.assign(f.context, {
+      command_barriers: 0,
+      command_latest_record_time: 0,
+      command_previous_barrier_time: 0,
+      command_clock: () => ++stamp,
+      command_poll() {
+        if (incomplete) f.context.command_expired = 1;
+      },
+    });
+    if (incomplete) {
+      assert.throws(f.run, { code: 126 });
+      assert.equal(f.calls.includes("barrier"), false);
+    } else {
+      f.run();
+      assert.equal(f.context.command_barriers, 1);
+      assert.equal(f.calls.includes("barrier"), true);
+    }
   }
 });
 

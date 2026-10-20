@@ -2785,6 +2785,19 @@ unreached calls are not sampled. The existing failure owner keeps its first caus
 and a separate cleanup cause, with unchanged prerequisite initialization and exit
 semantics. Exit 78 alone identifies no environmental cause. These diagnostics do
 not repair model-free command feasibility or supply native acceptance.
+Each command audit pipe explicitly enables driver nonblocking mode with checked
+`FIONBIO` immediately after opening. The matched
+[XNU audit driver](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_pipe.c)
+ignores the open flags for that state. Empty drains return to command input;
+they supply no capture-completion or retirement evidence. The drain checks its
+existing deadline before reads, EINTR retries and each complete record. A bounded
+64-KiB buffer retains partial headers and records across drains and separates
+coalesced records before the unchanged libbsm token decoder. The existing
+eight-MiB byte and 4096-record limits remain. Barriers wait for complete framing;
+terminal capture refuses any unfinished tail before closing its pipe and emitting
+completion. Native failures still use the original failure/cleanup owner and
+separate observer settlement, with the existing 120/30-second deadlines. Portable
+regressions establish no matching-host command acceptance.
 The native broker arms capture first, holds each launcher's audit-session right
 before it can spawn a suspended Codex child, and independently checks live image,
 credentials and effective Seatbelt policy before release. The enclosing admission
