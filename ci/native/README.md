@@ -1208,14 +1208,25 @@ no admission authority. Malformed, missing or failed diagnostic output remains
 incomplete/unavailable evidence; it cannot replace the original failure. Every
 acquired diagnostic handle receives an independent close attempt before output;
 failed diagnostic closure retains a separate cleanup cause. No process DACL,
-capability or payload grant changes. Application `DuplicateHandle` socket copying
-is rejected by its documented reference-accounting warning; API injection or
-successful `getsockopt` cannot establish safe native accounting.
-An original `10022` still fails before connect without a receipt. Neither a
-permission defect nor a catalog defect is established, and matching flags were
-already zero. The functional handoff repair remains outstanding pending original
-Windows CI evidence under the documented
-[Winsock sharing contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw).
+capability or payload grant changes.
+
+The public
+[WSADuplicateSocketW contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw)
+requires initialized Winsock, the original source descriptor and the intended
+destination PID; QoS-enabled sockets are unsupported. Its protocol information
+is for one consumption by that destination through
+[WSASocketW](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsasocketw),
+with source/import flags matching. The current source uses `WSASocketW` with
+flags zero, and import uses `FROM_PROTOCOL_INFO` with flags zero; the documented
+`WSA_FLAG_OVERLAPPED` requirement for a source created with `socket()` therefore
+supplies no correction here. Public provider/catalog/chain joins preserve the
+selected provider while destination-specific storage stays opaque, consistent
+with the [provider duplication contract](https://learn.microsoft.com/en-us/windows/win32/api/ws2spi/nc-ws2spi-lpwspduplicatesocket).
+Provider-internal handle duplication does not authorize application
+[DuplicateHandle socket copying](https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-duplicatehandle),
+which can disrupt Winsock reference accounting. Shared descriptors refer to
+the same socket and require independent closure; successful `getsockopt` alone
+does not establish that accounting.
 
 After that original refusal, each read/edit source attempts at most two fresh
 unbound controls within the remaining 5000 ms transaction budget. Both retain
@@ -1248,8 +1259,26 @@ while available or `WAIT_TIMEOUT` 258 after exhaustion. Import and closure
 uncertainty retain separate cleanup causes until independent original-domain
 retirement. The caller persists captured controls as diagnostic-only evidence;
 missing, malformed, repeated or oversized frames remain incomplete evidence.
-Comparing bound, unbound-destination and unbound-self outcomes neither identifies
-a sole internal `10022` cause nor proves functional repair or native acceptance.
+
+The saved original bound transfer and both unbound controls refused duplication
+with `WSAEINVAL` 10022, before destination import. The original negotiated/high
+Winsock versions were 2.2, and its complete `SIO_GET_QOS` read reported best-effort
+service in both directions with zero provider-buffer length. Those fields do not
+identify whether the documented QoS exclusion caused the refusal. The successful original
+`SO_EXCLUSIVEADDRUSE` read reported true; its
+[bind-ownership contract](https://learn.microsoft.com/en-us/windows/win32/winsock/so-exclusiveaddruse)
+does not establish a duplication prohibition or justify removing the option.
+The source's destination `PROCESS_QUERY_LIMITED_INFORMATION` open was denied;
+this diagnostic supplied no destination birth/token read, while the held
+launcher's own exact binding remains required. That observation does not identify
+the provider's failed operation or justify granting `PROCESS_DUP_HANDLE` on the
+held launcher. The self control also refused, so the destination difference
+alone does not isolate the cause. `WSAEINVAL` identifies an invalid parameter
+without identifying which prerequisite failed, and documented Windows Store
+support does not prove this exact AppContainer/provider path works. No supported
+functional correction is established by these observations. The original refusal
+still fails before connect without a receipt; original-socket transfer and native
+acceptance remain pending fresh matching Windows CI.
 
 The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native
@@ -3009,6 +3038,36 @@ file and parent handles remain held; the opened file ID must match before its
 single 32-byte nonce read. Checked closure and impersonation reversion remain
 independent. A completed read without original subscription delivery still blocks;
 the empty original-interval diagnostic query identifies no more specific cause.
+
+The producer uses
+[ImpersonateLoggedOnUser](https://learn.microsoft.com/en-us/windows/win32/api/securitybaseapi/nf-securitybaseapi-impersonateloggedonuser)
+with the broker's held primary token, opened for query and duplication, and
+performs the fresh gate open/read before reverting. The owned
+[per-user policy](https://learn.microsoft.com/en-us/windows/win32/api/ntsecapi/nf-ntsecapi-auditsetperuserpolicy)
+targets that user SID and includes File System success and failure auditing;
+the SACL audit ACE covers that SID's `FILE_READ_DATA | FILE_WRITE_DATA` with
+both success and failure flags. Per-user inclusion can add coverage beyond
+system policy; the documented
+[Administrators exception applies to exclusion](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-gpac/149ae116-a48f-4335-8cc8-c7e364f93dc0),
+so it supplies no administrator-suppression diagnosis. These contracts establish
+no existing-token refresh remedy. Policy installation bits and computed
+effective-policy bits have different meanings; successful queries are
+prerequisite observations, not event-generation proof.
+
+The original Security
+[pull subscription](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtsubscribe)
+starts before installation with `EvtSubscribeToFutureEvents | EvtSubscribeStrict`.
+Its fixed predicate selects loss/clear records plus failed
+[4656 handle requests](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4656)
+(`AuditFailure`, `0x0010000000000000`) and 4663 records for the exact subject SID
+and `ObjectType=File`. The decoder requires successful
+[4663 access use](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4663)
+(`AuditSuccess`, `0x0020000000000000`) for the gate read: a successful 4656
+handle request cannot replace actual `FILE_READ_DATA` use. Held-name joins are
+case-insensitive; exact principal/logon, broker PID/birth and fresh barrier
+time/record-count joins remain separate requirements. Historical query matches
+cannot satisfy this future-delivery contract.
+
 The original impersonated gate read now caches query-only producer inputs once:
 the installed held gate SACL's presence and ACE count, at most eight ACEs with
 type/flags and supported audit-ACE mask/SID, and the actual thread token's user
@@ -3031,8 +3090,17 @@ through ordinary stderr before cleanup. Successful delivery emits no extra
 carrier, and retirement does not repeat the queries. Missing or malformed optional
 facts stay unavailable without replacing the original refusal. Neither these
 queries nor a completed gate read substitute for nonempty subscription delivery
-and the original subject/object/time joins. The missing-delivery cause remains
-open until fresh matching Windows evidence supports a functional repair.
+and the original subject/object/time joins.
+
+Saved native observations show all nine query statuses succeeded and one
+supported audit ACE with flags `0xc0` and mask `0x3` matching the actual thread
+subject. The thread token had `SecurityImpersonation` level and effective
+success/failure policy bits `0x3`. The original gate read completed,
+but the subscription record window was empty and no event joined. These facts
+establish no producer/subscription mismatch or supported functional correction;
+the missing-delivery refusal continues to block provider launch pending fresh
+matching Windows evidence.
+
 The finite decoder additionally requires a delivered Security 4663 success with
 matching PID, principal/logon, read access and fresh acknowledged window, while
 independent before/after reads preserve the original file/DACL/bytes and token.
@@ -3115,6 +3183,9 @@ Empty original custody and unchanged sentinels precede observer/capture closure,
 watcher retirement, exact baseline restoration, independent restoration readback
 and fixture removal. Any failed cleanup predicate still withholds settlement;
 the primary refusal remains separate from cleanup causes.
+A retirement `lstat` returning `ENOENT` is diagnostic only until independent
+original-domain settlement authorizes closure; an absent path alone proves
+neither process/Job retirement nor audit restoration.
 A filtered medium-integrity server is suspended inside an unnamed, non-breakaway
 Job at creation with an explicit inherited-handle list. Independent native reads
 join its actual image, creation time, user/session, token and Job membership.
