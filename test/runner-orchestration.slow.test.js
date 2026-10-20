@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import test from "node:test";
 
 import {
@@ -35,14 +36,6 @@ import {
 async function rewriteRunAsLegacy(directoryPath) {
   const statePath = join(directoryPath, "state.json");
   const eventsPath = join(directoryPath, "events.jsonl");
-  const state = JSON.parse(await readFile(statePath, "utf8"));
-  state.schemaVersion = 1;
-  delete state.clientAttribution;
-  delete state.clientAttributionFingerprint;
-  delete state.providerPolicies;
-  delete state.runtimeCompatibility;
-  delete state.activeTurn;
-  for (const role of Object.values(state.roles)) delete role.effort;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -70,15 +63,31 @@ async function rewriteRunAsLegacy(directoryPath) {
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    delete event.state.observations;
     for (const role of Object.values(event.state.roles)) delete role.effort;
   }
+  const comparable = ({ revision, updatedAt, ...value }) => value;
+  const legacyEvents = events.filter(
+    (event, index) =>
+      index === 0 ||
+      event.activity !== null ||
+      !isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(event.state),
+      ),
+  );
+  legacyEvents.forEach((event, index) => {
+    event.revision = event.state.revision = index + 1;
+  });
+  const state = legacyEvents.at(-1).state;
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
     writeFile(
       eventsPath,
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      `${legacyEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     ),
   ]);
+  return state;
 }
 
 test("validates the canonical Git root before creating external state", async (t) => {
@@ -930,12 +939,12 @@ test("submits input previewed from a compatible legacy run", async (t) => {
     roleOverrides: {},
     sourceSession: null,
   });
-  await rewriteRunAsLegacy(paused.directoryPath);
+  const legacy = await rewriteRunAsLegacy(paused.directoryPath);
 
   const response = {
     runId: paused.run.runId,
     requestId: paused.run.pause.inputRequest.id,
-    expectedRevision: paused.run.revision,
+    expectedRevision: legacy.revision,
     answers: [{ questionId: "q1", answer: "Use behavior A exactly." }],
   };
   const preview = await runner.previewInput(response);
@@ -949,7 +958,7 @@ test("submits input previewed from a compatible legacy run", async (t) => {
   );
   const unchanged = await runner.status(paused.run.runId);
   assert.equal(unchanged.run.schemaVersion, 1);
-  assert.equal(unchanged.run.revision, paused.run.revision);
+  assert.equal(unchanged.run.revision, legacy.revision);
 
   const submitted = await runner.submitInput({
     ...response,
@@ -957,7 +966,7 @@ test("submits input previewed from a compatible legacy run", async (t) => {
   });
 
   assert.equal(submitted.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.equal(submitted.run.revision, paused.run.revision + 2);
+  assert.equal(submitted.run.revision, legacy.revision + 2);
   assert.equal(
     submitted.run.pause.inputResponse.transcriptHash,
     preview.responseHash,

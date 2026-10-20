@@ -109,6 +109,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
   });
 
   return Object.freeze({
+    persist: write,
     async wait(operation) {
       waiting = true;
       try {

@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import test from "node:test";
 
 import { Client } from "@modelcontextprotocol/client";
@@ -156,11 +156,6 @@ async function advanceMutatingStoredRun(store, runId, dispatch) {
 async function rewriteRunAsLegacy(directoryPath) {
   const statePath = join(directoryPath, "state.json");
   const eventsPath = join(directoryPath, "events.jsonl");
-  const state = JSON.parse(await readFile(statePath, "utf8"));
-  state.schemaVersion = 1;
-  delete state.providerPolicies;
-  delete state.runtimeCompatibility;
-  delete state.activeTurn;
   const events = (await readFile(eventsPath, "utf8"))
     .trimEnd()
     .split("\n")
@@ -186,12 +181,27 @@ async function rewriteRunAsLegacy(directoryPath) {
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;
+    delete event.state.observations;
   }
+  const comparable = ({ revision, updatedAt, ...value }) => value;
+  const legacyEvents = events.filter(
+    (event, index) =>
+      index === 0 ||
+      event.activity !== null ||
+      !isDeepStrictEqual(
+        comparable(events[index - 1].state),
+        comparable(event.state),
+      ),
+  );
+  legacyEvents.forEach((event, index) => {
+    event.revision = event.state.revision = index + 1;
+  });
+  const state = legacyEvents.at(-1).state;
   await Promise.all([
     writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`),
     writeFile(
       eventsPath,
-      `${events.map((event) => JSON.stringify(event)).join("\n")}\n`,
+      `${legacyEvents.map((event) => JSON.stringify(event)).join("\n")}\n`,
     ),
   ]);
 }
@@ -2400,7 +2410,7 @@ test("responds to pending input projected from a compatible legacy run", async (
   assert.deepEqual(launches, [paused.run.runId]);
   const persisted = await store.loadRun(paused.run.runId);
   assert.equal(persisted.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-  assert.equal(persisted.revision, paused.run.revision + 5);
+  assert.equal(persisted.revision, pendingInput.revision + 5);
   assert.equal(persisted.pause.inputResponse.requestId, pendingInput.id);
 });
 

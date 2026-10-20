@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
 import { assertRunId, RunStoreError } from "./validation.js";
+import { interruptObservations } from "./observations.js";
 
 const PREPARATION_FIELDS = new Map([
   [
@@ -13,6 +14,7 @@ const PREPARATION_FIELDS = new Map([
     ],
   ],
   ["runtime/provider-policy-recorded", ["providerPolicies"]],
+  ["runtime/observations-interrupted", ["observations"]],
   ["execution/stopped", ["executionProcess"]],
   ["execution/resource-recorded", ["executionResource"]],
   ["execution/resource-cleaned", ["executionResource"]],
@@ -27,6 +29,15 @@ export function isRecoveryPreparation(previous, event) {
     `${event.activity.phase}/${event.activity.kind}`,
   );
   if (fields === undefined) return false;
+  if (
+    event.activity.kind === "observations-interrupted" &&
+    (previous.observations?.attempts.at(-1).status !== "active" ||
+      !isDeepStrictEqual(
+        interruptObservations(previous.observations),
+        event.state.observations,
+      ))
+  )
+    return false;
   if (
     event.activity.kind === "resource-recorded" &&
     !(

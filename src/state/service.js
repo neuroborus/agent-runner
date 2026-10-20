@@ -31,6 +31,11 @@ import {
 import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
+import {
+  beginObservationAttempt,
+  interruptObservations,
+  recordObservations,
+} from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
 import { projectOperatorStop } from "./stop-projection.js";
@@ -593,6 +598,7 @@ export function createRunStore({
               : input.providerInactivityTimeoutMs,
           ),
           inactivityRecovery: null,
+          observations: null,
           availabilityRetry: null,
           providerPolicies:
             input.providerPolicies === undefined
@@ -887,7 +893,73 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       await journal.recover(runDirectory, snapshot);
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        interruptObservations(snapshot.state.observations),
+        {
+          actor: "runner",
+          phase: "runtime",
+          kind: "observations-interrupted",
+          message: "Interrupted attempt accounting remains incomplete.",
+        },
+      );
+    });
+  }
+
+  async function persistObservations(
+    runDirectory,
+    snapshot,
+    observations,
+    activity = null,
+  ) {
+    if (isDeepStrictEqual(snapshot.state.observations, observations))
       return deepFreeze(snapshot.state);
+    const next = normalizeRunState(
+      {
+        ...snapshot.state,
+        observations,
+        revision: snapshot.state.revision + 1,
+        updatedAt: timestamp(snapshot.state.updatedAt),
+      },
+      snapshot.state.runId,
+    );
+    await journal.appendTransition(runDirectory, next, snapshot, activity);
+    return deepFreeze(next);
+  }
+
+  async function startObservationAttempt(lease, identity) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        beginObservationAttempt(snapshot.state, identity),
+      );
+    });
+  }
+
+  async function recordObservationBatch(
+    lease,
+    identity,
+    records,
+    { status = "active", incomplete = false } = {},
+  ) {
+    return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
+      const snapshot = await loadSnapshot(runDirectory, record.runId);
+      // Terminal diagnostics may flush during a stop or process cleanup. This
+      // operation changes no workflow, process, retry, or effect authority.
+      return persistObservations(
+        runDirectory,
+        snapshot,
+        recordObservations(
+          snapshot.state,
+          identity,
+          records,
+          status,
+          incomplete,
+        ),
+      );
     });
   }
 
@@ -1413,6 +1485,7 @@ export function createRunStore({
         {
           ...snapshot.state,
           activeTurn: null,
+          observations: interruptObservations(snapshot.state.observations),
           revision: snapshot.state.revision + 1,
           updatedAt: timestamp(snapshot.state.updatedAt),
         },
@@ -1695,6 +1768,8 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    startObservationAttempt,
+    recordObservationBatch,
     recordExecutionResource,
     recordExecutionProcess,
     inspectExecutionProcess,

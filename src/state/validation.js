@@ -9,9 +9,10 @@ import {
 import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
+import { normalizeObservationState } from "./observations.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 17;
+export const RUN_STATE_SCHEMA_VERSION = 18;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -43,6 +44,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   14,
   15,
   16,
+  17,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -68,6 +70,7 @@ const STATE_FIELDS = new Set([
   "providerInactivityTimeoutMs",
   "providerInactivityFingerprint",
   "inactivityRecovery",
+  "observations",
   "availabilityPolicy",
   "availabilityRetry",
   "counters",
@@ -1176,8 +1179,9 @@ export function normalizeRunState(value, expectedRunId) {
       normalizeAvailabilityState({ ...value, roles }),
       normalizeInactivityState({ ...value, roles }),
     );
+    normalized.observations = normalizeObservationState({ ...value, roles });
   } catch {
-    fail("Run provider recovery policy or evidence is invalid.");
+    fail("Run provider recovery policy or observation evidence is invalid.");
   }
   assertSerializedSize(normalized, "run");
   return normalized;

@@ -1,5 +1,14 @@
+import { isDeepStrictEqual } from "node:util";
+
 import { createInactivityCoordinator } from "../../src/runner/inactivity.js";
-import { providerInactivityFingerprint } from "../../src/state/index.js";
+import {
+  providerInactivityFingerprint,
+  RUN_STATE_SCHEMA_VERSION,
+} from "../../src/state/index.js";
+import {
+  beginObservationAttempt,
+  recordObservations,
+} from "../../src/state/observations.js";
 
 // Use the real coordinator; only persistence and the clock are in memory.
 export async function attachInactivity(fixture, { onRecord } = {}) {
@@ -7,6 +16,8 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
   const transition = runtime.transition.bind(runtime);
   const finish = runtime.finishAgentTurn.bind(runtime);
   await transition({
+    schemaVersion: RUN_STATE_SCHEMA_VERSION,
+    observations: null,
     providerInactivityTimeoutMs: 100,
     providerInactivityFingerprint: providerInactivityFingerprint(100),
     inactivityRecovery: null,
@@ -21,7 +32,10 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
     lease: {},
     initialRun: fixture.currentRun,
     git: runtime.git,
-    monitor: { async check() {} },
+    monitor: {
+      async check() {},
+      persist: (write) => write(),
+    },
     timers: {
       setTimeout(callback) {
         fire = callback;
@@ -35,6 +49,23 @@ export async function attachInactivity(fixture, { onRecord } = {}) {
     runStore: {
       async loadRun() {
         return fixture.currentRun;
+      },
+      async startObservationAttempt(_lease, identity) {
+        return transition({
+          observations: beginObservationAttempt(fixture.currentRun, identity),
+        });
+      },
+      async recordObservationBatch(_lease, identity, records, options) {
+        const observations = recordObservations(
+          fixture.currentRun,
+          identity,
+          records,
+          options.status,
+          options.incomplete,
+        );
+        return isDeepStrictEqual(observations, fixture.currentRun.observations)
+          ? fixture.currentRun
+          : transition({ observations });
       },
       async recordInactivity(_lease, recovery, kind) {
         const next = await transition({

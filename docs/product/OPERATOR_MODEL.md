@@ -176,6 +176,15 @@ Run state lives under the user's OS state directory, outside both the target
 repository and task directory. Each transition is a complete write-ahead event
 followed by atomic current-state replacement. The human-readable progress file
 is derived and can be regenerated; the event journal remains authoritative.
+Bounded diagnostic observations retain the latest 32 runner attempts, identified
+by role and exact checkpoint, including failed and interrupted work. An omitted
+attempt count makes retention explicit. Native cumulative usage keeps its scope;
+snapshots are never summed into an invented attempt total, and unavailable
+counters stay unknown. Interrupted, failed, or unobserved terminal accounting
+remains incomplete. Legacy runs have absent observations until new attempts
+occur. Observation publication is coalesced at native fallback and terminal
+boundaries and uses the same write-ahead recovery; it grants no retry or effect
+permission and stores no prompts, transcripts, or native session identifiers.
 The common run envelope also holds one bounded provider-policy receipt slot per
 resolved role. Legacy state migrates before provider work and pins a role's
 first current receipt when that role is required; resume rejects policy drift

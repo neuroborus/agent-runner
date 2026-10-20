@@ -126,7 +126,10 @@ async function fixture(t, backend = "codex", storeOptions = {}) {
         assert.equal(value.contentFingerprint, repository.contentFingerprint);
       },
     },
-    monitor: { async check() {} },
+    monitor: {
+      async check() {},
+      persist: (write) => write(),
+    },
     publish: async (event) => activities.push(event),
   };
   const input = {
@@ -250,8 +253,53 @@ test("inactivity journals before abort, retains its one reconstruction across re
   }
 });
 
+test("observation startup persistence does not consume provider inactivity", async (t) => {
+  let f;
+  let inspectStart = false;
+  f = await fixture(t, "codex", {
+    async onTransitionBoundary(point) {
+      if (!inspectStart || point !== "event-appended") return;
+      const current = await f.store.loadRun(f.run.runId);
+      if (current.observations?.attempts.at(-1).status === "active") {
+        inspectStart = false;
+        f.timers.advance(100);
+      }
+    },
+  });
+  await f.coordinator.before(f.input);
+  await f.start();
+  inspectStart = true;
+  assert.equal(
+    await f.coordinator.invoke(
+      "worker",
+      async ({ signal }) => {
+        signal.throwIfAborted();
+        assert.equal(f.timers.size, 1);
+        return "response";
+      },
+      { access: "read-only" },
+    ),
+    "response",
+  );
+  assert.equal(inspectStart, false);
+  assert.equal(f.timers.size, 0);
+  assert.equal((await f.store.loadRun(f.run.runId)).inactivityRecovery, null);
+});
+
 test("a returned response clears recovery atomically with reconciled partial content", async (t) => {
-  const f = await fixture(t);
+  let f;
+  let inspectFlush = false;
+  f = await fixture(t, "codex", {
+    async onTransitionBoundary(point) {
+      if (!inspectFlush || point !== "event-appended") return;
+      const current = await f.store.loadRun(f.run.runId);
+      if (current.observations?.attempts.at(-1).status === "completed") {
+        inspectFlush = false;
+        // Terminal persistence must not let storage latency trigger a retry.
+        f.timers.advance(100);
+      }
+    },
+  });
   await f.coordinator.before(f.input);
   await f.start();
   await expire(f, f.coordinator);
@@ -259,11 +307,13 @@ test("a returned response clears recovery atomically with reconciled partial con
   await f.coordinator.before(f.input);
   await f.start();
   f.repository.contentFingerprint = "b".repeat(64);
+  inspectFlush = true;
   await f.coordinator.invoke(
     "worker",
     async () => ({ structured: { status: "COMPLETED" } }),
     { access: "workspace-write" },
   );
+  assert.equal(inspectFlush, false);
   assert.notEqual(
     (await f.store.loadRun(f.run.runId)).inactivityRecovery,
     null,
@@ -284,6 +334,16 @@ test("a returned response clears recovery atomically with reconciled partial con
     "b".repeat(64),
   );
   assert.equal(run.counters.fixRounds, 1);
+  assert.deepEqual(
+    run.observations.attempts.map(({ status }) => status),
+    ["interrupted", "completed"],
+  );
+  for (const attempt of run.observations.attempts) {
+    assert.equal(attempt.role, "worker");
+    assert.equal(attempt.checkpoint, f.input.checkpoint);
+    assert.equal(attempt.accounting, "incomplete");
+    assert.deepEqual(attempt.observations, []);
+  }
 });
 
 test("commit executor and operator stops cannot acquire an inactivity retry", async (t) => {
@@ -522,10 +582,18 @@ test("an expiry already being journaled wins over late progress and settlement",
   watch.progress({ kind: "semantic", activeCommands: 0 });
   assert.equal(timers.size, 0);
   const settled = watch.close();
+  let flushed = false;
+  const flushing = watch.suspend(() => {
+    assert.equal(aborted, true);
+    flushed = true;
+  });
   assert.equal(aborted, false);
+  assert.equal(flushed, false);
   persisted.resolve();
-  await settled;
+  await Promise.all([settled, flushing]);
   assert.equal(aborted, true);
+  assert.equal(flushed, true);
+  assert.equal(timers.size, 0);
 });
 
 test("recovery survives an interrupted attempt-2 launch and cannot be cleared without response", async (t) => {

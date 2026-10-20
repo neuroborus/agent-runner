@@ -1,5 +1,6 @@
 import { inactivityActivity } from "../state/index.js";
 import { RunnerError } from "./input.js";
+import { runObservedAttempt } from "./observations.js";
 
 const KINDS = new Set([
   "semantic",
@@ -28,13 +29,19 @@ export function createInactivityWatchdog({
   let pending;
   let stopped = false;
   let commands = 0;
+  let suspensions = 0;
   function disarm() {
     if (timer !== undefined) timers.clearTimeout(timer);
     timer = undefined;
   }
   function arm() {
     disarm();
-    if (!stopped && pending === undefined && commands === 0) {
+    if (
+      !stopped &&
+      pending === undefined &&
+      commands === 0 &&
+      suspensions === 0
+    ) {
       timer = timers.setTimeout(() => {
         timer = undefined;
         pending = Promise.resolve().then(expire);
@@ -45,6 +52,18 @@ export function createInactivityWatchdog({
   }
   arm();
   return Object.freeze({
+    async suspend(operation) {
+      suspensions++;
+      disarm();
+      try {
+        // An already observed deadline still owns its durable expiry.
+        await pending;
+        return await operation();
+      } finally {
+        suspensions--;
+        arm();
+      }
+    },
     progress(event) {
       if (
         stopped ||
@@ -238,8 +257,25 @@ export function createInactivityCoordinator({
       request.signal?.addEventListener("abort", stop, { once: true });
       let response;
       let failure;
+      const observedOperation = (value) =>
+        runObservedAttempt({
+          runStore,
+          lease,
+          role,
+          checkpoint,
+          persist: (write) => watchdog.suspend(() => monitor.persist(write)),
+          operation: async (attemptRequest) => {
+            try {
+              return await operation(attemptRequest);
+            } finally {
+              // Persistence latency after provider settlement is not inactivity.
+              await watchdog.close();
+            }
+          },
+          request: value,
+        });
       try {
-        response = await operation({
+        response = await observedOperation({
           ...request,
           signal,
           onProgress: watchdog.progress,

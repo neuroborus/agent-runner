@@ -907,6 +907,41 @@ reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
 
+Common run-envelope version 18 adds nullable `observations`. Legacy absence
+normalizes to `null` on lock-free reads; the existing leased runtime migration
+persists that absence without inventing usage or rewriting historical events.
+`src/state/observations.js` owns the closed version-1 observation record: the
+latest 32 runner attempts and a saturating count of omitted attempts. Each
+attempt binds its starting revision as its runner-owned ID to the exact role
+and checkpoint, with at most nine sealed native attempt/turn records. Replacement
+and recovery retain earlier facts and mark open attempts interrupted. Terminal
+attempts and accepted native records are immutable; stale callbacks and duplicate
+native ordinals cannot overwrite them. Journal continuity validates these rules.
+
+The runner batches synchronous adapter observations in a bounded map, flushing
+before native fresh-session fallback and at invocation termination, including
+failure and cancellation. Observation notifications never trigger state writes or
+timers. Unchanged batches do not publish revisions. Accepted batches
+use the existing leased write-ahead append before atomic snapshot replacement;
+recovery repairs interrupted publication and journals incomplete retirement.
+Observation persistence suspends provider inactivity timing without canceling an
+already observed deadline; terminal persistence runs after the watchdog closes.
+It shares the stop monitor's write queue with process and resource callbacks so
+diagnostics cannot contend with the owner's stop publication.
+Diagnostic writes may finish while process cleanup or a stop is pending, without
+changing workflow, correction, retry, process, or effect authority. Interrupted
+observation retirement alone qualifies as detached dispatch preparation only
+when all other state remains unchanged.
+
+Native `last` and `cumulative` snapshots, their scope and inclusion flags, and
+nullable counters remain unchanged; no snapshots or inclusive subsets are added
+together. Runner accounting is `reported` only for a completed invocation with
+nonempty, entirely reported evidence and no known incomplete facts; otherwise
+it is `incomplete`, including unobserved terminal attempts. This describes
+observed reporting, not complete historical token consumption. Batches contain
+only the normalized payload-free adapter contract. Persistence errors cannot
+replace an established provider, safety, ownership, or effect failure.
+
 The state service's internal `loadRunHistory` operation returns the run and
 complete validated events from one authoritative snapshot. It shares journal
 continuity, size, migration-envelope, and snapshot-consistency checks with

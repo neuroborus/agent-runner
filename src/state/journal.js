@@ -2,6 +2,7 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { assertInactivityContinuity } from "./inactivity.js";
+import { assertObservationContinuity } from "./observations.js";
 import { assertAvailabilityContinuity } from "./availability.js";
 import { publicDispatchActivity } from "./dispatch.js";
 import {
@@ -50,6 +51,7 @@ const VERSION_STATE_FIELDS = [
   "runtimeCompatibility",
 ];
 const TRANSITION_STATE_FIELDS = [
+  "observations",
   "availabilityRetry",
   "inactivityRecovery",
   "counters",
@@ -110,6 +112,7 @@ function normalizeEvent(value, runId, lineNumber) {
         14,
         15,
         16,
+        17,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -177,11 +180,15 @@ function assertEventContinuity(
   }
   if (
     events[0].state.inactivityRecovery !== null ||
-    events[0].state.availabilityRetry !== null
+    events[0].state.availabilityRetry !== null ||
+    events[0].state.observations !== null
   ) {
-    throw new RunStoreError("Initial run cannot contain provider recovery.", {
-      code: "ERR_INVALID_EVENT_LOG",
-    });
+    throw new RunStoreError(
+      "Initial run cannot contain provider recovery or observations.",
+      {
+        code: "ERR_INVALID_EVENT_LOG",
+      },
+    );
   }
 
   for (let index = startIndex; index < events.length; index += 1) {
@@ -190,6 +197,7 @@ function assertEventContinuity(
     try {
       assertAvailabilityContinuity(previousState, state);
       assertInactivityContinuity(previousState, state, events[index].activity);
+      assertObservationContinuity(previousState, state);
     } catch {
       throw new RunStoreError("Provider recovery history is inconsistent.", {
         code: "ERR_INVALID_EVENT_LOG",

@@ -374,7 +374,7 @@ test("legacy availability migration supplies only the default and no pending epi
       },
     );
     assert.equal(migrated.schemaVersion, RUN_STATE_SCHEMA_VERSION);
-    assert.equal(RUNTIME_COMPATIBILITY_TOKEN, "1:17");
+    assert.equal(RUNTIME_COMPATIBILITY_TOKEN, "1:18");
     for (const field of [
       "roles",
       "counters",

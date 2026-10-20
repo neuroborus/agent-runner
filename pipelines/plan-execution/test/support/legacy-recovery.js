@@ -383,8 +383,19 @@ export function removeUnchangedEvents(events) {
     )
       events.splice(index, 1);
   }
+  const attemptIds = new Map();
   events.forEach((event, index) => {
     event.revision = index + 1;
     event.state.revision = index + 1;
+    if (event.state.observations != null) {
+      event.state.observations = {
+        ...event.state.observations,
+        attempts: event.state.observations.attempts.map((attempt) => {
+          if (!attemptIds.has(attempt.id))
+            attemptIds.set(attempt.id, event.revision);
+          return { ...attempt, id: attemptIds.get(attempt.id) };
+        }),
+      };
+    }
   });
 }

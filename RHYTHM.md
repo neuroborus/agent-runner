@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-20
 
+- **Attempt evidence survives disposable provider context.** The state-owned
+  versioned observation envelope retains bounded failed and interrupted evidence
+  under runner-owned role/checkpoint identities. Fallback and terminal batches
+  share the leased write-ahead journal without notification-driven snapshot
+  churn. Native cumulative scopes, unknown counters, and inclusion rules stay
+  intact; missing or interrupted reporting never implies complete consumption.
+  Legacy absence remains explicit, and diagnostics confer no workflow authority.
+
 - **Provider observations preserve accounting uncertainty.** Optional adapter
   observations report bounded numeric snapshots and payload-free completion and
   compaction facts with private attempt/turn correlation. Last and cumulative
