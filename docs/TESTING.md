@@ -378,6 +378,14 @@ stop before previously short-circuited operations. A later retirement refusal
 cannot replace the first error and keeps a separate cleanup cause. These fast
 fixtures preserve exit semantics and never classify exit 78 alone as an
 environmental explanation.
+The same suite executes the actual command-image identity body with injected
+metadata, 8-KiB reads and SHA-256 calls. It streams the observed 260,633,072-byte
+provider length as counts without allocating or hashing a large fixture. Only
+the configured path/digest pair receives 512 MiB; helper overflow, provider
+overflow, wrong bindings, short/growing streams, digest mismatch, kernel-path
+substitution and held/named identity substitution remain refusals. Existing
+metadata and retirement coverage retains its separate guarantees. These
+portable cases add no native execution or slow-tier requirement.
 Both task-access confinement and model-free command feasibility remain open
 until fresh matching native evidence establishes their functional causes.
 Event-driven in-memory broker streams now cover ready followed by an unanswered

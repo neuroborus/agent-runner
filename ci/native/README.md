@@ -3024,6 +3024,15 @@ finalizer, admission and command-case readers retain the smaller bound. Complete
 reads, held-object binding and checked closure remain required; no image is
 buffered at its maximum size.
 
+Darwin's command-image identity check selects the same 512 MiB provider bound
+only when both the requested path and expected digest match the broker's
+configured Codex image. Helpers and other images retain 128 MiB. Streamed bytes
+cannot exceed the inspected positive file size, itself bounded by that selection,
+and must reach that exact size before full SHA-256 comparison. Kernel image/path,
+regular-file/link/owner/mode, held/named identity, live process, sandbox and
+independent retirement checks remain required. This admits the observed large
+provider representation without supplying matching-host native acceptance.
+
 Broker native stderr is retained separately from framed provider output, up to
 4096 bytes, and decoded only as a complete carrier at close through the existing
 strict Windows decoder with confirmed stderr EOF. Malformed, unterminated,

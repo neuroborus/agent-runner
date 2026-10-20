@@ -121,10 +121,15 @@ static void command_image_identity(struct identity value, const char *path, cons
   command_observed(length>0, length, path_error);need(!strcmp(actual,path));
   int fd=open(actual,O_RDONLY|O_NOFOLLOW|O_CLOEXEC), open_error=errno;struct stat before,after,named;unsigned char bytes[8192],sum[32];
   command_observed(fd>=0, fd, open_error);command_native(fstat(fd,&before), == 0);
+  uint64_t maximum=!strcmp(path,command_image)&&!strcmp(expected,command_image_hash)?536870912:134217728;
   need(S_ISREG(before.st_mode) && before.st_nlink==1 && before.st_uid==command_uid &&
-    before.st_size>0 && before.st_size<=134217728 && !(before.st_mode&022));
-  CC_SHA256_CTX context; command_native(CC_SHA256_Init(&context), != 0); ssize_t n; while((n=read(fd,bytes,sizeof(bytes)))>0) command_native(CC_SHA256_Update(&context,bytes,(CC_LONG)n), != 0);
-  int read_error=errno;command_observed(!n, n, read_error);command_native(CC_SHA256_Final(sum,&context), != 0);
+    before.st_size>0 && (uint64_t)before.st_size<=maximum && !(before.st_mode&022));
+  CC_SHA256_CTX context; command_native(CC_SHA256_Init(&context), != 0); uint64_t total=0;ssize_t n;
+  while((n=read(fd,bytes,sizeof(bytes)))>0) {
+    need((uint64_t)n<=(uint64_t)before.st_size-total);total+=(uint64_t)n;
+    command_native(CC_SHA256_Update(&context,bytes,(CC_LONG)n), != 0);
+  }
+  int read_error=errno;command_observed(!n, n, read_error);need(total==(uint64_t)before.st_size);command_native(CC_SHA256_Final(sum,&context), != 0);
   command_native(fstat(fd,&after), == 0);command_native(lstat(actual,&named), == 0);
   need(before.st_dev==after.st_dev && before.st_ino==after.st_ino && before.st_size==after.st_size &&
     before.st_mtimespec.tv_sec==after.st_mtimespec.tv_sec && before.st_mtimespec.tv_nsec==after.st_mtimespec.tv_nsec &&

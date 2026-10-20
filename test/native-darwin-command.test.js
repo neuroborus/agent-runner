@@ -106,7 +106,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "let ",
         )
         .replace(
-          /command_native\(([^;]+), (== [^;]+)\)/gu,
+          /command_native\(([^;]+), ((?:==|!=) [^;]+)\)/gu,
           (_, call, comparison) =>
             `command_native(()=>(${call}),value=>value ${comparison},${JSON.stringify(call + " " + comparison)})`,
         )
@@ -253,6 +253,192 @@ function commandGuards(header, helper, body, caller, options = {}) {
     reports,
   };
 }
+
+function commandImageFixture(header, helper, options = {}) {
+  const body =
+      /static void command_image_identity\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        header,
+      )?.[1],
+    metadata = {
+      st_mode: 0o100500,
+      st_nlink: 1,
+      st_uid: 501,
+      st_size: options.size ?? 8,
+      st_dev: 1,
+      st_ino: 2,
+      st_mtimespec: { tv_sec: 100, tv_nsec: 1 },
+    };
+  assert.ok(body);
+  const projected = body
+      .replace("char actual[4096];", 'const actual={value:""};')
+      .replace(
+        "struct stat before,after,named;",
+        "const before={},after={},named={};",
+      )
+      .replace(
+        "unsigned char bytes[8192],sum[32];",
+        "const bytes=Buffer.alloc(8192),sum=Buffer.alloc(32);",
+      )
+      .replace("CC_SHA256_CTX context;", "const context={};")
+      .replace("char hex[65];", 'const hex={value:""};')
+      .replaceAll("sizeof(actual)", "4096")
+      .replaceAll("sizeof(bytes)", "bytes.length")
+      .replaceAll(/&(before|after|named|context)\b/gu, "$1")
+      .replaceAll("(pid_t)", "")
+      .replaceAll("(CC_LONG)", "")
+      .replace(/\b0([0-7]{2,})\b/gu, "0o$1")
+      .replaceAll("hex+i*2", "({buffer:hex,offset:i*2})"),
+    f = commandGuards(
+      header,
+      helper,
+      `const value=nativeIdentity,path=selectedPath,expected=selectedDigest;${projected}`,
+      "command_image_identity",
+      { context: { command_prerequisite: false } },
+    ),
+    counters = { reads: 0, updates: 0, hashed: 0, closes: 0 },
+    text = (value) => value?.value ?? value;
+  let remaining = options.streamSize ?? metadata.st_size,
+    stats = 0;
+  Object.assign(f.context, {
+    Buffer,
+    nativeIdentity: { token: { val: [0, 0, 0, 0, 0, identity.pid] } },
+    selectedPath: options.path ?? "/fixture/codex",
+    selectedDigest: options.expected ?? PIN,
+    command_image: "/fixture/codex",
+    command_image_hash: PIN,
+    command_uid: 501,
+    O_RDONLY: 0,
+    O_NOFOLLOW: 1,
+    O_CLOEXEC: 2,
+    live(value) {
+      assert.equal(value.token.val[5], identity.pid);
+      f.calls.push("live");
+      return true;
+    },
+    proc_pidpath(pid, target, capacity) {
+      assert.equal(pid, identity.pid);
+      assert.equal(capacity, 4096);
+      target.value = options.kernelPath ?? f.context.selectedPath;
+      return target.value.length;
+    },
+    strcmp: (a, b) => Number(text(a) !== text(b)),
+    open(file, flags) {
+      assert.equal(text(file), f.context.selectedPath);
+      assert.equal(flags, 3);
+      f.calls.push("open");
+      return 7;
+    },
+    fstat(fd, target) {
+      assert.equal(fd, 7);
+      Object.assign(target, structuredClone(metadata));
+      if (++stats === 2 && options.substitution === "held") target.st_ino++;
+      return 0;
+    },
+    S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+    read(fd, target, capacity) {
+      assert.equal(fd, 7);
+      assert.equal(capacity, target.length);
+      counters.reads++;
+      const count = Math.min(capacity, remaining);
+      remaining -= count;
+      return count;
+    },
+    CC_SHA256_Init: () => 1,
+    CC_SHA256_Update(_context, buffer, count) {
+      assert.ok(count > 0 && count <= buffer.length);
+      counters.updates++;
+      counters.hashed += count;
+      return 1;
+    },
+    CC_SHA256_Final(sum) {
+      Buffer.from(options.actualDigest ?? f.context.selectedDigest, "hex").copy(
+        sum,
+      );
+      return 1;
+    },
+    lstat(file, target) {
+      assert.equal(text(file), f.context.selectedPath);
+      Object.assign(target, structuredClone(metadata));
+      if (options.substitution === "named") target.st_ino++;
+      return 0;
+    },
+    close(fd) {
+      assert.equal(fd, 7);
+      counters.closes++;
+      return 0;
+    },
+    snprintf(target, capacity, format, byte) {
+      assert.equal(capacity, 3);
+      assert.equal(format, "%02x");
+      assert.equal(target.offset, target.buffer.value.length);
+      target.buffer.value += byte.toString(16).padStart(2, "0");
+      return 2;
+    },
+  });
+  return { ...f, counters };
+}
+
+test("Darwin command image bounds admit only the configured pinned provider above the helper ceiling", async () => {
+  const [header, helper] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(
+          new URL(`../ci/native/darwin/${name}`, import.meta.url),
+          "utf8",
+        ),
+      ),
+    ),
+    size = 260633072,
+    provider = commandImageFixture(header, helper, { size });
+  // Stream counts model the retained image; hashing and the 8-KiB buffer stay small.
+  provider.run();
+  assert.equal(provider.counters.hashed, size);
+  assert.equal(provider.counters.updates, Math.ceil(size / 8192));
+  assert.equal(provider.counters.reads, Math.ceil(size / 8192) + 1);
+  assert.equal(provider.counters.closes, 1);
+  assert.deepEqual(provider.calls, ["live", "open", "live"]);
+  const helperImage = commandImageFixture(header, helper, {
+    path: "/fixture/helper",
+    expected: sha("helper"),
+  });
+  helperImage.run();
+  assert.equal(helperImage.counters.hashed, 8);
+  for (const options of [
+    { size: 536870913 },
+    { path: "/fixture/helper", size: 134217729 },
+    { path: "/fixture/other", size },
+    { expected: sha("different pin"), size },
+  ]) {
+    const f = commandImageFixture(header, helper, options);
+    assert.throws(f.run, (error) => error.code === 126);
+    assert.equal(f.counters.reads, 0);
+    assert.equal(f.counters.updates, 0);
+  }
+});
+
+test("Darwin command image streams retain complete hashes, kernel paths and held/named identity", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  for (const options of [
+    { streamSize: 9 },
+    { streamSize: 7 },
+    { actualDigest: sha("different bytes") },
+    { substitution: "held" },
+    { substitution: "named" },
+    { kernelPath: "/fixture/substitute" },
+  ]) {
+    const f = commandImageFixture(header, helper, options);
+    assert.throws(f.run, (error) => error.code === 126);
+    assert.equal(f.diagnostics[0][0], "command_image_identity");
+    if (options.actualDigest) {
+      assert.equal(f.counters.hashed, 8);
+      assert.equal(f.counters.closes, 1);
+    }
+    if (options.streamSize === 9) assert.equal(f.counters.updates, 0);
+  }
+});
 
 function commandSignalFixture(header, helper, body, options = {}) {
   const original = {
