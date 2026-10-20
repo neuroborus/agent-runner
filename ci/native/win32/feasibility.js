@@ -470,7 +470,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation
     command-ready-output command-owner-bound command-coverage-state command-deadline command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records
     command-case-arguments command-case-nonce command-case-nonce-size command-case-ready-write-size command-case-ready-read-size command-case-ready-ack
-    command-case-broker-duplicate command-case-broker-terminate command-case-target-read-size command-case-target-nonce
+    command-case-target-read-size command-case-target-nonce
     command-case-target-write-size command-case-edit-size command-case-output command-case-marker-size
     command-case-finish-write-size command-case-finish-read-size command-case-finish-ack`
       .split(/\s+/u)
@@ -485,6 +485,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   ),
   ...Object.fromEntries(
     `command-host-actions command-host-os command-null-control command-timer-wait
+    command-case-broker-duplicate command-case-broker-terminate
     command-protect-descriptor command-protect-owner command-protect-control command-protect-dacl command-protect-sacl command-fixture-sacl command-parent-tag command-file-tag command-file-dacl command-file-owner
     command-member-job command-child-job command-image-digest command-helper-digest command-build-sacl command-job-membership command-admission-wait
     command-capture-query command-capture-wait command-bookmark-query command-coverage-wait command-admission-status command-retirement-wait command-retirement-status`

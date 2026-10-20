@@ -2976,8 +2976,10 @@ Shared readers, strict stderr, rights and bounds remain unchanged. Labels prove 
 repair; fresh hosted evidence and independent retirement remain required.
 
 Held process, Job and intent/closed-event protection formats the complete fixed
-`O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)` template with `userText` in both slots
-through one shared constructor. Both private broker events receive that descriptor
+`O:%lsD:P(A;;GA;;;%ls)S:(ML;;NWNR;;;HI)` template through one shared constructor.
+The owner slot remains `userText`; protected processes grant Builtin
+Administrators (`S-1-5-32-544`), while Jobs and events retain the original-user
+grant. Both private broker events receive that descriptor
 at [CreateEventW](https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventw)
 creation through explicitly noninheritable `SECURITY_ATTRIBUTES`, preserving
 unnamed, manual-reset, initially nonsignaled behavior. Complete creation readbacks
@@ -2994,10 +2996,19 @@ owner change. The existing held handles retain their access and privileges;
 remain separate from process security limitations.
 Each application first reads the object's effective owner, then independently
 reads back owner/DACL/label through `command_protection_read`/`GetSecurityInfo`. Readiness
-requires the same owner, one noninheriting `userSid` allow ACE with `GENERIC_ALL`
-or its exact process/Job/event all-access mapping, the
+requires the same owner, one noninheriting allow ACE for the selected grantee
+with `GENERIC_ALL` or its exact process/Job/event all-access mapping, the
 [protected DACL control](https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-control),
 and exactly the high-integrity NWNR label. The owner can differ from the grantee.
+Process grants are checked as the well-known Administrators SID independently
+of owner equality. Elevated inspection and cold/emergency helpers retain access,
+as do trusted pre-held handles; no payload privilege is added. The filtered
+medium token cannot use its deny-only Administrators membership as an allow grant.
+The high label alone does not establish termination denial: every actual command
+case still attempts both `PROCESS_DUP_HANDLE` and `PROCESS_TERMINATE` against the
+broker, with unchanged controls and event joins. Unexpected acquired authority
+records an invariant failure before checked closure; an unexpected failed open
+retains its immediate Win32 error rather than replacing it with invariant zero.
 Every acquired descriptor receives independently checked cleanup, including
 refusal before readback; borrowed target handles are never closed by protection.
 Only successful conversion establishes ownership of its output.
@@ -3010,8 +3021,12 @@ constructed input and readback. Win32 values retain returned security-read
 status or immediate owner-extraction errors; invariant values 1/2/3 mean absent
 owner, invalid SID and unequal owner. NULL owners still refuse admission, and
 no SID value is published. These diagnostics infer neither setter execution nor
-the historical 1350 object or stage. Unsupported calls, failed reads and
-mismatches refuse admission. Portable coverage establishes neither a Windows SDK
+the historical 1350 object or stage. Protection conversion, descriptor queries,
+setters and event creation use the existing unsupported-error policy: errors
+50, 120 and 1314 retain their Win32 cause and exit 78; other API failures exit 126. Mismatches remain invariant refusals, and checked cleanup retains its
+separate cause. The diagnostic grammar admits Win32 causes only for the two
+affected broker-denial operations in addition to their invariant failures.
+Portable coverage establishes neither a Windows SDK
 build nor the original TCP10013 denial or production approval; matching hosted
 CI remains required.
 

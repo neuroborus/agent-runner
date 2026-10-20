@@ -866,6 +866,22 @@ held deletion handles and permitted command opens; it does not compile the helpe
 Native watcher transport tests retain pipe errors and require a complete retirement
 witness. Source checks protect live custody, the held NUL handle, audit-gate DACL
 protection against inherited workspace grants and saved ACL protection through restoration.
+The existing actual-body protection fixture checks the emitted process descriptor's
+Builtin Administrators grant separately from its owner, with the original-user
+grant retained for Jobs and both events. Generic and exactly mapped masks pass;
+original-user process grants, substituted grantees, foreign object masks and extra
+rights refuse admission. Owner, protected-DACL and high NWNR checks remain distinct.
+Injected protection conversion, owner/control/ACL queries, security reads, setters
+and event creation cover the existing 50/120/1314 unsupported policy and ordinary
+Win32 failures. Descriptor and event cleanup remain checked, including a primary
+unsupported setter refusal followed by a separate failed descriptor release.
+Actual command-case bodies still perform both broker authority attempts before
+target I/O. Unexpected duplicate or terminate handles remain invariant failures,
+with separately checked handle closure; unexpected failed opens retain their
+immediate Win32 cause. Successful inspect/edit/outside controls and event joins
+retain their existing coverage. Finite diagnostic tests reject unrelated domains
+and malformed values without weakening independent inspection or restoration.
+These portable cases run no Windows tool and add no slow-tier requirement.
 Bounded native transcripts distinguish verified setup from real command delivery.
 System-success-disabled cases still require both effective per-user outcomes and
 all original token/object/SACL joins. Setup admits only schema/version probes,
