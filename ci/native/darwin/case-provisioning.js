@@ -500,7 +500,8 @@ export function createDarwinCaseProvisioning(state, options) {
         root = rootFor(binding.context),
         nonce = observationDigest(binding.context).slice(0, 32);
       requireObservation(
-        request.candidateSha === state.job.candidateSha &&
+        (request.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
+          request.candidateSha === state.job.candidateSha &&
           request.uid === setup.uid &&
           request.gid === setup.gid &&
           request.nonce === nonce &&
@@ -654,8 +655,19 @@ export function createDarwinCaseProvisioning(state, options) {
       for (const endpoint of endpoints)
         await reader.provisionCaseEndpoint(endpoint);
       const actual = await reader.readCase();
+      const experiment = binding.purpose === "experiment";
+      observationObject(actual.accounts, [
+        "uidAccounts",
+        "primaryGroupMembers",
+        "gidGroups",
+      ]);
       requireObservation(
-        actual.uid === setup.uid &&
+        (actual.purpose ?? "reviewed") === (binding.purpose ?? "reviewed") &&
+          actual.accountVerified === !experiment &&
+          Object.values(actual.accounts).every(
+            (count) => count === (experiment ? 0 : 1),
+          ) &&
+          actual.uid === setup.uid &&
           actual.gid === setup.gid &&
           actual.objects.length === 7 &&
           new Set(actual.objects.map((item) => item.index)).size === 7 &&

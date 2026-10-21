@@ -2068,6 +2068,8 @@ export function fixture({
   inputData,
   loaderFormat,
   entries = [],
+  caseContextSha256,
+  caseRead,
 } = {}) {
   const loaderBytes = loaderFormat
     ? loaderImage(loaderFormat === "universal" ? "fat32-be" : loaderFormat)
@@ -2178,6 +2180,7 @@ export function fixture({
           value = object(Number(a));
         }
         if (op === "reservation") value = { held: true };
+        if (op === "case-read") value = structuredClone(caseRead);
         if (op === "pf-write") value = { pid: 50, settled: true };
         if (["process", "session"].includes(op)) {
           value = identity(Number(a));
@@ -2374,6 +2377,7 @@ export function fixture({
   };
   const reader = createDarwinCustodyReader(selectedInput, {
     entries,
+    caseContextSha256,
     runtime: {
       platform: "darwin",
       arch: "x64",
@@ -2404,6 +2408,431 @@ export function fixture({
     loaderBytes,
   };
 }
+test("Darwin native case admission censuses numeric identities without borrowing reviewed accounts", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    launcher = await readFile(new URL("launcher.c", import.meta.url), "utf8"),
+    start = source.indexOf("static struct case_accounts case_account(void) {"),
+    body = source.slice(start, source.indexOf("static bool git_path", start)),
+    wireStart = source.indexOf(
+      '  printf("{"',
+      source.indexOf("static void case_read(void)"),
+    ),
+    wire = source.slice(
+      wireStart,
+      source.indexOf("  unsigned emitted", wireStart),
+    ),
+    verifyStart = launcher.indexOf(
+      "    uid_t uid = number(argv[2]);",
+      launcher.indexOf('"--verify-inputs"'),
+    ),
+    verify = launcher.slice(
+      verifyStart,
+      launcher.indexOf("    struct stat image;", verifyStart),
+    );
+  assert.ok(
+    start > 0 &&
+      wireStart > 0 &&
+      verifyStart > 0 &&
+      body.includes("return accounts;"),
+  );
+  // Retain the native predicates and loops; translate only C declarations,
+  // conditional compilation and output pointers for injected libc coverage.
+  const project = (text, experiment) =>
+    text
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/gu,
+        (_, ordinary, reviewed) => (experiment ? ordinary : reviewed),
+      )
+      .replace(
+        /#ifndef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu,
+        (_, reviewed) => (experiment ? "" : reviewed),
+      )
+      .replace(
+        "static struct case_accounts case_account(void)",
+        "function case_account()",
+      )
+      .replace(
+        "struct case_accounts accounts = {0}",
+        "const accounts = {uid_accounts: 0, primary_members: 0, gid_groups: 0}",
+      )
+      .replace("char home[PATH_MAX]", "const home = []")
+      .replace(
+        "gid_t groups[2]; int count = 2",
+        "const groups = []; const count = {value: 2}",
+      )
+      .replaceAll("&count", "count")
+      .replaceAll("count == 1", "count.value == 1")
+      .replaceAll("sizeof(home)", "4096")
+      .replace(/\b0700\b/gu, "0o700")
+      .replace(/struct (?:passwd|group) \*/gu, "let ")
+      .replace(/const unsigned /gu, "const ")
+      .replace(/\b(?:unsigned|bool|int|uid_t|gid_t) /gu, "let ")
+      .replaceAll("->", ".");
+  const uid = 90001,
+    gid = 90002,
+    home = "/fixture/case/storage/work";
+  const account = () => ({
+    pw_uid: uid,
+    pw_gid: gid,
+    pw_name: "case-user",
+    pw_shell: "/usr/bin/false",
+    pw_passwd: "*",
+    pw_dir: home,
+  });
+  for (const experiment of [false, true]) {
+    const script = new Script(`${project(body, experiment)} case_account;`),
+      emit = new Script(
+        project(wire, experiment).replace(/"\s*\n\s*"/gu, '" + "'),
+      ),
+      verifier = new Script(`() => {${project(verify, experiment)}}`);
+    for (const fault of [
+      null,
+      "uid",
+      "uid-alias",
+      "primary",
+      "group",
+      "group-alias",
+      "passwd-error",
+      "group-error",
+      "passwd-bound",
+      "group-bound",
+      "reservation",
+      "missing",
+      "shell",
+      "password",
+      "home",
+      "members",
+      "supplementary",
+      "account-gid",
+      "group-id",
+      "census-gid",
+      "census-members",
+    ]) {
+      const pw = account(),
+        gr = { gr_gid: gid, gr_mem: [null] },
+        unrelated = { pw_uid: 501, pw_gid: 20 },
+        users = experiment ? [unrelated] : [unrelated, account()],
+        groups = experiment
+          ? [{ gr_gid: 20 }]
+          : [{ gr_gid: 20 }, { gr_gid: gid, gr_mem: [null] }],
+        events = [],
+        refusals = [];
+      if (fault === "uid") users.push({ ...account(), pw_gid: 20 });
+      if (fault === "uid-alias") users.push(account());
+      if (fault === "primary") users.push({ pw_uid: 502, pw_gid: gid });
+      if (fault === "group") groups.push({ gr_gid: gid, gr_mem: ["other"] });
+      if (fault === "group-alias") groups.push({ gr_gid: gid, gr_mem: [null] });
+      if (fault === "passwd-bound") users.push(...Array(4096).fill(unrelated));
+      if (fault === "group-bound")
+        groups.push(...Array(4096).fill({ gr_gid: 20 }));
+      if (fault === "shell") pw.pw_shell = "/bin/sh";
+      if (fault === "password") pw.pw_passwd = "unlocked";
+      if (fault === "home") pw.pw_dir = "/fixture/other";
+      if (fault === "account-gid") pw.pw_gid++;
+      if (fault === "group-id") gr.gr_gid++;
+      if (fault === "members") gr.gr_mem = ["other"];
+      if (!experiment && fault === "census-gid") users[1].pw_gid++;
+      if (!experiment && fault === "census-members")
+        groups[1].gr_mem = ["other"];
+      let userIndex = 0,
+        groupIndex = 0;
+      const env = {
+        subject_uid: uid,
+        subject_gid: gid,
+        case_path: "/fixture/case",
+        uid,
+        gid,
+        argv: [null, null, String(uid), String(gid), home],
+        errno: 0,
+        stderr: {},
+        number: Number,
+        reservation_guard() {
+          events.push("reservation");
+          assert.notEqual(fault, "reservation", "Case refused");
+        },
+        getpwuid() {
+          events.push("lookup-user");
+          return fault === "missing" ? null : pw;
+        },
+        getgrgid() {
+          events.push("lookup-group");
+          return gr;
+        },
+        snprintf(out, _size, _format, root) {
+          out[0] = root + "/storage/work";
+          return out[0].length;
+        },
+        strcmp: (a, b) =>
+          Number(
+            (Array.isArray(a) ? a[0] : a) !== (Array.isArray(b) ? b[0] : b),
+          ),
+        getgrouplist(_name, _gid, out, count) {
+          out[0] = gid;
+          count.value = fault === "supplementary" ? 2 : 1;
+          return 0;
+        },
+        setpwent() {
+          events.push("passwd-start");
+        },
+        getpwent() {
+          if (userIndex < users.length) return users[userIndex++];
+          env.errno = fault === "passwd-error" ? 5 : 0;
+          return null;
+        },
+        endpwent() {
+          events.push("passwd-end");
+        },
+        setgrent() {
+          events.push("group-start");
+        },
+        getgrent() {
+          if (groupIndex < groups.length) return groups[groupIndex++];
+          env.errno = fault === "group-error" ? 5 : 0;
+          return null;
+        },
+        endgrent() {
+          events.push("group-end");
+        },
+        fprintf(_fd, _format, ...counts) {
+          refusals.push(counts);
+        },
+        directory(file, actualUid, actualGid, mode) {
+          assert.deepEqual(
+            [file, actualUid, actualGid, mode],
+            [home, uid, gid, 0o700],
+          );
+          events.push("workspace");
+          return 9;
+        },
+        close(fd) {
+          assert.equal(fd, 9);
+          return 0;
+        },
+        need(ok) {
+          assert.ok(ok, "Case refused");
+        },
+      };
+      const read = script.runInNewContext(env),
+        reviewedFault = [
+          "missing",
+          "shell",
+          "password",
+          "home",
+          "members",
+          "supplementary",
+          "account-gid",
+          "group-id",
+          "census-gid",
+          "census-members",
+        ].includes(fault),
+        rejected = fault && (!reviewedFault || !experiment);
+      if (rejected)
+        assert.throws(read, /Case refused/, `${experiment}/${fault}`);
+      else {
+        const accounts = { ...read() };
+        assert.deepEqual(accounts, {
+          uid_accounts: experiment ? 0 : 1,
+          primary_members: experiment ? 0 : 1,
+          gid_groups: experiment ? 0 : 1,
+        });
+        assert.ok(
+          events.includes("passwd-end") && events.includes("group-end"),
+        );
+        let output;
+        emit.runInNewContext({
+          ...env,
+          accounts,
+          case_context: hash,
+          printf(format, ...args) {
+            output = format.replace(/%[su]/gu, () => String(args.shift()));
+          },
+        });
+        const actual = JSON.parse(output + '],"endpoints":[]}');
+        assert.deepEqual(actual, {
+          ...(experiment ? { purpose: "experiment" } : {}),
+          contextSha256: hash,
+          uid,
+          gid,
+          accountVerified: !experiment,
+          accounts: {
+            uidAccounts: accounts.uid_accounts,
+            primaryGroupMembers: accounts.primary_members,
+            gidGroups: accounts.gid_groups,
+          },
+          objects: [],
+          endpoints: [],
+        });
+      }
+      if (experiment)
+        assert.ok(!events.some((event) => event.startsWith("lookup-")));
+      if (experiment && ["uid", "primary", "group"].includes(fault))
+        assert.deepEqual(refusals[0], [
+          0,
+          Number(fault === "uid"),
+          Number(fault === "primary"),
+          Number(fault === "group"),
+        ]);
+      if (
+        [
+          null,
+          "missing",
+          "shell",
+          "password",
+          "home",
+          "members",
+          "account-gid",
+        ].includes(fault)
+      ) {
+        // The launch verifier checks the actual private workspace in experiment
+        // builds and retains every reviewed login predicate in reviewed builds.
+        const run = verifier.runInNewContext(env);
+        if (!experiment && fault) assert.throws(run, /Case refused/);
+        else run();
+      }
+    }
+  }
+});
+
+test("Darwin launcher numeric credentials retain primary-only groups and every saved identity check", async () => {
+  const launcher = await readFile(
+      new URL("launcher.c", import.meta.url),
+      "utf8",
+    ),
+    start = launcher.indexOf("    need(!setgroups(0, NULL));"),
+    drop = launcher.slice(start, launcher.indexOf("    char *error", start)),
+    credentials = /    need\(identity\.bsd\.pbi_uid == uid[\s\S]*?;\n/u.exec(
+      launcher,
+    )?.[0];
+  assert.ok(start > 0 && credentials);
+  const script = new Script(
+    `() => {${drop}
+    ${credentials}}`
+      .replace("gid_t only", "const only = {value: 0}")
+      .replaceAll("&only", "only")
+      .replaceAll("only == gid", "only.value == gid")
+      .replaceAll("&observed", "observed")
+      .replaceAll("NULL", "null")
+      .replaceAll("(unsigned)", ""),
+  );
+  for (const fault of [
+    null,
+    "setgroups",
+    "setgid",
+    "setuid",
+    "groups",
+    "primary",
+    "pbi_uid",
+    "pbi_ruid",
+    "pbi_svuid",
+    "pbi_gid",
+    "pbi_rgid",
+    "pbi_svgid",
+  ]) {
+    const uid = 90001,
+      gid = 90002,
+      events = [],
+      bsd = Object.fromEntries(
+        [
+          "pbi_uid",
+          "pbi_ruid",
+          "pbi_svuid",
+          "pbi_gid",
+          "pbi_rgid",
+          "pbi_svgid",
+        ].map((key) => [key, key.includes("uid") ? uid : gid]),
+      );
+    if (Object.hasOwn(bsd, fault)) bsd[fault] = 0;
+    const run = script.runInNewContext({
+      uid,
+      gid,
+      identity: { bsd, token: { val: [uid, 0, 0, 0, 0, 0, 17] } },
+      audit: { ai_asid: 17 },
+      observed: {},
+      RLIMIT_NPROC: 7,
+      setgroups(count, groups) {
+        assert.equal(count, 0);
+        assert.equal(groups, null);
+        events.push("setgroups");
+        return fault === "setgroups" ? -1 : 0;
+      },
+      setgid(value) {
+        assert.equal(value, gid);
+        events.push("setgid");
+        return fault === "setgid" ? -1 : 0;
+      },
+      setuid(value) {
+        assert.equal(value, uid);
+        events.push("setuid");
+        return fault === "setuid" ? -1 : 0;
+      },
+      getgroups(capacity, only) {
+        assert.equal(capacity, 1);
+        only.value = fault === "primary" ? 0 : gid;
+        return fault === "groups" ? -1 : 1;
+      },
+      getrlimit(_kind, observed) {
+        observed.rlim_cur = observed.rlim_max = 32;
+        return 0;
+      },
+      need(ok) {
+        assert.ok(ok, "Credential refusal");
+      },
+    });
+    if (fault) assert.throws(run, /Credential refusal/, fault);
+    else {
+      run();
+      assert.deepEqual(events, ["setgroups", "setgid", "setuid"]);
+    }
+  }
+});
+
+test("Darwin case reads bind numeric and reviewed censuses to the admitted purpose", async () => {
+  for (const purpose of ["experiment", "reviewed"]) {
+    const expected = purpose === "experiment" ? 0 : 1;
+    for (const fault of [
+      null,
+      "purpose",
+      "verification",
+      "uidAccounts",
+      "primaryGroupMembers",
+      "gidGroups",
+      "other-census",
+    ]) {
+      const caseRead = {
+        ...(purpose === "experiment" ? { purpose } : {}),
+        contextSha256: hash,
+        uid: 1001,
+        gid: 1002,
+        accountVerified: purpose === "reviewed",
+        accounts: {
+          uidAccounts: expected,
+          primaryGroupMembers: expected,
+          gidGroups: expected,
+        },
+        objects: [],
+        endpoints: [],
+      };
+      if (fault === "purpose") {
+        if (purpose === "experiment") delete caseRead.purpose;
+        else caseRead.purpose = "experiment";
+      }
+      if (fault === "verification")
+        caseRead.accountVerified = !caseRead.accountVerified;
+      if (Object.hasOwn(caseRead.accounts, fault)) caseRead.accounts[fault]++;
+      if (fault === "other-census")
+        for (const key of Object.keys(caseRead.accounts))
+          caseRead.accounts[key] = 1 - expected;
+      const f = fixture({ purpose, caseRead, caseContextSha256: hash });
+      await f.reader.start();
+      if (fault) await assert.rejects(f.reader.readCase());
+      else assert.deepEqual(await f.reader.readCase(), caseRead);
+    }
+  }
+});
+
 test("Darwin experiment build reads keep installed pins and held signatures separate from unsigned signing inputs", async () => {
   const value = fixture({ purpose: "experiment", build: true });
   await value.reader.start();

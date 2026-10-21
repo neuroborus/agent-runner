@@ -776,6 +776,25 @@ UID/GID/nonce/port values materialize only after native held resources and ident
 are independently observed; concrete policy is verified at the retained parked
 barriers. Experimental PF inputs and journals carry observed bindings rather than
 review/approval fields. Reviewed PF setup and protected promotion remain strict.
+
+Ordinary Darwin case declarations reserve numeric UID/GID values without creating
+directory-service accounts or groups. Under the existing pinned exclusive lease,
+the native reader completely enumerates accounts and groups, requiring zero UID
+accounts, zero primary members of the GID and zero groups for that GID. Any
+collision, enumeration error or exhausted 4,096-entry namespace bound refuses
+admission. The census is repeated at setup, case reads, launch and retirement;
+it cannot be replaced by expected declaration values or a successful lookup.
+Experiment `case-read` observations carry `purpose: experiment`, the actual three
+zero counts and `accountVerified: false`: they establish numeric exclusion, not
+verification of a login account. The JavaScript reader and provisioning owner
+derive those expectations from the admitted purpose and reject reviewed counts
+or purpose substitutions. The experiment launch verifier checks the actual
+reserved-UID/GID mode-0700 private workspace instead of requiring a login home.
+Real/effective/saved credentials, primary-only supplementary groups, immutable
+object/socket joins and independent retirement remain mandatory. Partial setup
+keeps its original custody and exclusion until independently observed cleanup;
+no directory-service mutation or new bootstrap service is introduced.
+
 PF purpose and fixed case recipes are snapshotted before asynchronous work;
 direct provisioning checks admission before starting fresh build observations,
 and overlapping preparation cannot start a second build observation.
@@ -6797,14 +6816,19 @@ ordinary plan ancestors remain root-owned. Asset hashes must match the concrete
 request; access profiles and rendered policy bytes must match the fixed native
 policy.
 
-External protected bootstrap supplies the root-owned mode-0711 `cases` parent
+For reviewed admission, external protected bootstrap supplies the root-owned
+mode-0711 `cases` parent
 and independently reserved non-login account and empty dedicated group. Native
 reads require a disabled password, `/usr/bin/false`, the exact context-bound
 workspace home and no supplementary group authority. Bounded native account and
 group enumeration must find exactly one account for the UID, one primary member
 for the GID and one group for the GID; aliases and shared primary groups cannot
-establish reservation. The sealed reader locks the existing pinned host-wide
-lease and independently requires UID absence. It then exclusively creates a
+establish reservation. Reviewed `case-read` retains `accountVerified: true` and
+requires all three actual counts to equal one; ordinary zero-count observations
+cannot satisfy it. The native account/home/password/shell/group predicates remain
+strict, with distinct refusal locations and bounded census counts on mismatch.
+The sealed reader locks the existing pinned host-wide lease and independently
+requires UID absence. It then exclusively creates a
 root:reserved-group mode-0710 context root, root:wheel
 mode-0700 custody, root:reserved-group mode-0710 storage and reserved-user/group
 mode-0700 workspace. Held no-follow parents, empty extended ACLs and native volume
@@ -8031,7 +8055,8 @@ never independent approval. The operator must independently approve that exact
 request and supply it through protected root custody. Supervisor/public research
 and host-observed hashes cannot supply expected pins or policy approval.
 
-In external setup, reserve a unique non-login account and dedicated empty group
+For reviewed admission, external setup must reserve a unique non-login account
+and dedicated empty group
 above ID 500, disable directory-service login/authentication, set UserShell to
 `/usr/bin/false`, and bind its home to the private workspace. Independently verify
 that the reservation excludes foreign processes, group membership and concurrent

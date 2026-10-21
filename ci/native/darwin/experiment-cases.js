@@ -144,6 +144,8 @@ export async function prepareDarwinExperimentCases(
                 : "ownership-fixture",
       ),
       launcher = helper("launcher"),
+      // These are reserved numeric credentials, not directory-service logins.
+      // The native reader must census both namespaces while holding exclusion.
       uid = 90001 + ordinal * 2,
       gid = uid + 1,
       request = {

@@ -603,25 +603,63 @@ static struct entry *unopened(const char *text) {
 }
 struct case_accounts { unsigned uid_accounts, primary_members, gid_groups; };
 static struct case_accounts case_account(void) {
+  reservation_guard();
+#ifndef NATIVE_CI_EXPERIMENT
   struct passwd *pw = getpwuid(subject_uid); struct group *gr = getgrgid(subject_gid);
   char home[PATH_MAX]; need(snprintf(home, sizeof(home), "%s/storage/work", case_path) < sizeof(home));
-  need(pw && gr && pw->pw_uid == subject_uid && pw->pw_gid == subject_gid && gr->gr_gid == subject_gid &&
-    !strcmp(pw->pw_shell, "/usr/bin/false") && !strcmp(pw->pw_passwd, "*") && !strcmp(pw->pw_dir, home) && gr->gr_mem && !gr->gr_mem[0]);
-  gid_t groups[2]; int count = 2; need(getgrouplist(pw->pw_name, subject_gid, groups, &count) >= 0 && count == 1 && groups[0] == subject_gid);
+  need(pw);
+  need(gr);
+  need(pw->pw_uid == subject_uid);
+  need(pw->pw_gid == subject_gid);
+  need(gr->gr_gid == subject_gid);
+  need(!strcmp(pw->pw_shell, "/usr/bin/false"));
+  need(!strcmp(pw->pw_passwd, "*"));
+  need(!strcmp(pw->pw_dir, home));
+  need(gr->gr_mem);
+  need(!gr->gr_mem[0]);
+  gid_t groups[2]; int count = 2;
+  need(getgrouplist(pw->pw_name, subject_gid, groups, &count) >= 0);
+  need(count == 1);
+  need(groups[0] == subject_gid);
+#endif
   /* gr_mem omits primary membership. Enumerate both namespaces so another
    * login or group alias cannot acquire the reserved numeric authority. */
   struct case_accounts accounts = {0}; setpwent();
   for (unsigned scanned = 0;; scanned++) {
     errno = 0; struct passwd *value = getpwent(); if (!value) { need(!errno); break; } need(scanned < 4096);
-    if (value->pw_uid == subject_uid) { need(value->pw_gid == subject_gid); accounts.uid_accounts++; }
-    if (value->pw_gid == subject_gid) { need(value->pw_uid == subject_uid); accounts.primary_members++; }
+    if (value->pw_uid == subject_uid) {
+#ifndef NATIVE_CI_EXPERIMENT
+      need(value->pw_gid == subject_gid);
+#endif
+      accounts.uid_accounts++;
+    }
+    if (value->pw_gid == subject_gid) {
+#ifndef NATIVE_CI_EXPERIMENT
+      need(value->pw_uid == subject_uid);
+#endif
+      accounts.primary_members++;
+    }
   } endpwent();
   setgrent();
   for (unsigned scanned = 0;; scanned++) {
     errno = 0; struct group *value = getgrent(); if (!value) { need(!errno); break; } need(scanned < 4096);
-    if (value->gr_gid == subject_gid) { need(value->gr_mem && !value->gr_mem[0]); accounts.gid_groups++; }
+    if (value->gr_gid == subject_gid) {
+#ifndef NATIVE_CI_EXPERIMENT
+      need(value->gr_mem && !value->gr_mem[0]);
+#endif
+      accounts.gid_groups++;
+    }
   } endgrent();
-  need(accounts.uid_accounts == 1 && accounts.primary_members == 1 && accounts.gid_groups == 1); return accounts;
+  const unsigned expected =
+#ifdef NATIVE_CI_EXPERIMENT
+    0;
+#else
+    1;
+#endif
+  bool exclusive = accounts.uid_accounts == expected && accounts.primary_members == expected && accounts.gid_groups == expected;
+  if (!exclusive) fprintf(stderr, "native-darwin-case-accounts expected=%u uidAccounts=%u primaryGroupMembers=%u gidGroups=%u\n",
+    expected, accounts.uid_accounts, accounts.primary_members, accounts.gid_groups);
+  need(exclusive); return accounts;
 }
 static bool git_path(const char *suffix, bool dir) {
   if (dir && (!strcmp(suffix, "/storage/hooks") || !strcmp(suffix, "/storage/control-hooks"))) return true;
@@ -1008,7 +1046,13 @@ static void case_endpoint(unsigned family, unsigned protocol, unsigned port) {
 }
 static void case_read(void) {
   need(case_mode && case_started); reservation_guard(); struct case_accounts accounts = case_account();
-  printf("{\"contextSha256\":\"%s\",\"uid\":%u,\"gid\":%u,\"accountVerified\":true,\"accounts\":{\"uidAccounts\":%u,\"primaryGroupMembers\":%u,\"gidGroups\":%u},\"objects\":[",
+  printf("{"
+#ifdef NATIVE_CI_EXPERIMENT
+    "\"purpose\":\"experiment\",\"accountVerified\":false,"
+#else
+    "\"accountVerified\":true,"
+#endif
+    "\"contextSha256\":\"%s\",\"uid\":%u,\"gid\":%u,\"accounts\":{\"uidAccounts\":%u,\"primaryGroupMembers\":%u,\"gidGroups\":%u},\"objects\":[",
     case_context, subject_uid, subject_gid, accounts.uid_accounts, accounts.primary_members, accounts.gid_groups);
   unsigned emitted = 0; for (unsigned i = 0; i < count; i++) if (entries[i].fd >= 0 && !strncmp(entries[i].path, case_path, strlen(case_path))) {
     stable(&entries[i]); no_acl(entries[i].fd); if (emitted++) putchar(','); printf("{\"index\":%u,\"object\":", i); identity(&entries[i]); putchar('}');

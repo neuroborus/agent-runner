@@ -1474,7 +1474,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     async readCase() {
       requireDarwin(options.caseContextSha256);
       const actual = await command("case-read");
+      const experiment = input.purpose === "experiment";
       observationObject(actual, [
+        ...Object.keys(purposeData(input)),
         "contextSha256",
         "uid",
         "gid",
@@ -1487,7 +1489,8 @@ export function createDarwinCustodyReader(value, options = {}) {
         actual.contextSha256 === options.caseContextSha256 &&
           actual.uid === domain.uid &&
           actual.gid === domain.gid &&
-          actual.accountVerified === true,
+          (actual.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
+          actual.accountVerified === !experiment,
       );
       observationObject(actual.accounts, [
         "uidAccounts",
@@ -1495,7 +1498,9 @@ export function createDarwinCustodyReader(value, options = {}) {
         "gidGroups",
       ]);
       requireDarwin(
-        Object.values(actual.accounts).every((count) => count === 1),
+        Object.values(actual.accounts).every(
+          (count) => count === (experiment ? 0 : 1),
+        ),
       );
       for (const item of observationList(actual.objects, 128)) {
         observationObject(item, ["index", "object"]);

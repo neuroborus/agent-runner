@@ -3910,12 +3910,17 @@ function buildTranscripts(experiment = false, complete = false) {
         } else if (name === "case-read") {
           if (caseFault === "missing") throw new Error("Case read unavailable");
           value = {
+            ...(experiment ? { purpose: "experiment" } : {}),
             contextSha256:
               caseFault === "context" ? "f".repeat(64) : argsForCase,
             uid: caseFault === "identity" ? uid + 2 : uid,
             gid,
-            accountVerified: true,
-            accounts: { uidAccounts: 1, primaryGroupMembers: 1, gidGroups: 1 },
+            accountVerified: !experiment,
+            accounts: {
+              uidAccounts: experiment ? 0 : 1,
+              primaryGroupMembers: experiment ? 0 : 1,
+              gidGroups: experiment ? 0 : 1,
+            },
             objects: [...held]
               .filter(
                 ([i]) =>
@@ -3930,7 +3935,15 @@ function buildTranscripts(experiment = false, complete = false) {
             endpoints,
           };
           if (caseFault === "authority") value.extraAuthority = true;
-          if (caseFault === "account") value.accountVerified = false;
+          if (caseFault === "account")
+            value.accountVerified = !value.accountVerified;
+          if (caseFault === "case-purpose") {
+            if (experiment) delete value.purpose;
+            else value.purpose = "experiment";
+          }
+          if (caseFault === "other-census")
+            for (const key of Object.keys(value.accounts))
+              value.accounts[key] = experiment ? 1 : 0;
           if (caseFault === "uid-alias") value.accounts.uidAccounts = 2;
           if (caseFault === "primary-group")
             value.accounts.primaryGroupMembers = 2;
@@ -5708,6 +5721,12 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
   for (const fault of [
     "missing",
     "context",
+    "account",
+    "case-purpose",
+    "other-census",
+    "uid-alias",
+    "primary-group",
+    "gid-alias",
     "subject-authority",
     "fresh-members-missing",
     "tcp-deadline",
@@ -5726,6 +5745,12 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
       [
         "missing",
         "context",
+        "account",
+        "case-purpose",
+        "other-census",
+        "uid-alias",
+        "primary-group",
+        "gid-alias",
         "subject-authority",
         "mach-control-timeout",
       ].includes(fault)
@@ -5992,6 +6017,8 @@ test("Darwin missing case reads, undeclared identities, extra authority and subs
     "authority",
     "context",
     "account",
+    "case-purpose",
+    "other-census",
     "uid-alias",
     "primary-group",
     "gid-alias",
@@ -6064,13 +6091,40 @@ test("Darwin access provisioning holds only approved exclusive loopback endpoint
 });
 
 test("Darwin partial case recovery rejoins protected births and objects without setup or compilation", async () => {
-  for (const fault of ["missing", "substituted", "surviving", "writer"]) {
-    const f = buildTranscripts(),
-      binding = caseBinding(f),
-      effects = await prepareTranscripts(f),
+  for (const [experiment, fault] of [
+    ...["missing", "substituted", "surviving", "writer"].map((fault) => [
+      false,
+      fault,
+    ]),
+    [true, "missing"],
+    [true, "writer"],
+  ]) {
+    const f = buildTranscripts(experiment),
+      binding = experiment
+        ? experimentCase(f, "ownership.literal")
+        : caseBinding(f),
+      createEffects = experiment
+        ? createDarwinSystemEffects
+        : createSystemEffects,
+      effects = experiment
+        ? createEffects(f.input, f.options)
+        : await prepareTranscripts(f),
       recipe = darwinSystemRecipes().find(
         ({ id }) => id === "ownership.literal",
       );
+    if (experiment) {
+      const build = darwinSystemRecipes().find(({ id }) => id === "build");
+      await effects.bootstrap();
+      assert.equal(
+        settled(
+          await effects.settle(build, null, {
+            signal: new AbortController().signal,
+            execution: execution(build),
+          }),
+        ).status,
+        "RETIRED",
+      );
+    }
     f.caseFault(fault === "writer" ? "writer" : "missing");
     await assert.rejects(
       effects.provision(recipe, {
@@ -6097,29 +6151,39 @@ test("Darwin partial case recovery rejoins protected births and objects without 
         directories: [],
       });
     }
-    const request = {
+    const preparation = experiment ? f.input.preparation : null,
+      request = {
         candidateSha,
         platform: "darwin",
         jobSha256: observationDigest(f.input.job),
-        preparationSha256: observationDigest(null),
+        preparationSha256: observationDigest(preparation),
       },
       before = f.events.filter((name) =>
         ["case-directory", "case-copy"].includes(name),
       ).length;
-    const recovered = await (
-      await createSystemEffects(f.input, f.options)
-    ).recover({ request, job: f.input.job, preparation: null });
+    const diagnostics = [],
+      recovered = await withNativeDiagnostics(
+        async () =>
+          (await createEffects(f.input, f.options)).recover({
+            request,
+            job: f.input.job,
+            preparation,
+          }),
+        (owner, value) =>
+          diagnostics.push(owner + ": " + value.exception?.stack),
+      );
     assert.equal(
       recovered.status,
       fault === "missing" ? "RETIRED" : "RETAINED",
+      `${experiment}/${fault}: ${diagnostics.join("\n")}`,
     );
     if (fault === "missing") {
       const resumed = await (
-        await createSystemEffects(f.input, f.options)
+        await createEffects(f.input, f.options)
       ).recover({
         request,
         job: f.input.job,
-        preparation: null,
+        preparation,
       });
       assert.equal(resumed.status, "RETIRED");
     }
@@ -6130,7 +6194,7 @@ test("Darwin partial case recovery rejoins protected births and objects without 
     );
     assert.equal(
       f.events.filter((name) => name.startsWith("tool:")).length,
-      22,
+      experiment ? 0 : 22,
     );
   }
 });

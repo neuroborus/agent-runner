@@ -265,9 +265,21 @@ int main(int argc, char **argv) {
     printf("{\"verifier\":"); emit(inspect(getpid())); puts("}"); fflush(stdout);
     need(command(0, 30000) == 'P');
     uid_t uid = number(argv[2]); gid_t gid = number(argv[3]); need(uid > 500 && gid > 500);
+#ifdef NATIVE_CI_EXPERIMENT
+    /* Numeric authority is censused under the case reader's held reservation;
+     * no directory-service login is created for an ordinary experiment. */
+    int workspace = directory(argv[4], uid, gid, 0700); need(!close(workspace));
+#else
     struct passwd *pw = getpwuid(uid); struct group *gr = getgrgid(gid);
-    need(pw && gr && pw->pw_gid == gid && !strcmp(pw->pw_shell, "/usr/bin/false") &&
-         !strcmp(pw->pw_passwd, "*") && !strcmp(pw->pw_dir, argv[4]) && gr->gr_mem && !gr->gr_mem[0]);
+    need(pw);
+    need(gr);
+    need(pw->pw_gid == gid);
+    need(!strcmp(pw->pw_shell, "/usr/bin/false"));
+    need(!strcmp(pw->pw_passwd, "*"));
+    need(!strcmp(pw->pw_dir, argv[4]));
+    need(gr->gr_mem);
+    need(!gr->gr_mem[0]);
+#endif
     struct stat image; unsigned char *bytes = file(argv[5], gid, 0550, maximum, argv[6], &image);
     need(image.st_size >= 32 && ((uint32_t *)bytes)[0] == 0xfeedfacf &&
          ((uint32_t *)bytes)[1] == 0x01000007 && ((uint32_t *)bytes)[3] == 2);
@@ -328,7 +340,9 @@ int main(int argc, char **argv) {
     need(!setrlimit(RLIMIT_NPROC, &limit));
     need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
          audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
-    need(!setgroups(0, NULL) && !setgid(gid) && !setuid(uid));
+    need(!setgroups(0, NULL));
+    need(!setgid(gid));
+    need(!setuid(uid));
     gid_t only; need(getgroups(1, &only) == 1 && only == gid);
     need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
