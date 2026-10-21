@@ -759,7 +759,7 @@ test("rejects staging-dependent validation commands while allowing HEAD checks",
 
 test("classifies oversized and unserializable bootstrap contracts", () => {
   const largePaths = Array.from(
-    { length: 32 },
+    { length: 256 },
     (_, index) => `${"😀".repeat(3_990)}-${index}`,
   );
   const cases = [
@@ -778,7 +778,7 @@ test("classifies oversized and unserializable bootstrap contracts", () => {
       (cause) => {
         assert.deepEqual(cause.diagnostic, {
           field: "result",
-          constraint: "maximum-256-kibibytes",
+          constraint: "maximum-2-mebibytes",
         });
         return true;
       },
@@ -842,7 +842,7 @@ test("migrates version-3 execution state with no consumed bootstrap corrections"
   assert.deepEqual(migrated.bootstrapCorrections, []);
   assert.equal(migrated.pendingBootstrapCorrection, null);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
-  assert.equal(planExecutionPipeline.stateVersion, 26);
+  assert.equal(planExecutionPipeline.stateVersion, 27);
   const legacyAuthenticationState = { ...current };
   delete legacyAuthenticationState.authenticationSourceForkRecovery;
   const authenticationMigration = planExecutionPipeline.migrations[25]({
@@ -1158,6 +1158,21 @@ test("migrates a consumed version-9 bootstrap diagnostic losslessly", async (t) 
 
   assert.deepEqual(migrated, completed.pipelineState);
   assert.doesNotThrow(() => normalizePipelineState(migrated));
+  const historicalDiagnostic = {
+    ...diagnostic,
+    field: "result",
+    constraint: "maximum-256-kibibytes",
+  };
+  const historical = migratePlanExecutionStateV9({
+    pipelineState: {
+      ...legacy,
+      bootstrapCorrections: [{ attempt: 1, ...historicalDiagnostic }],
+    },
+  });
+  assert.deepEqual(historical.bootstrapCorrections[0].diagnostics, [
+    historicalDiagnostic,
+  ]);
+  assert.doesNotThrow(() => normalizePipelineState(historical));
 });
 
 test("migrates version-10 review state without reconstructing rejected output", async (t) => {

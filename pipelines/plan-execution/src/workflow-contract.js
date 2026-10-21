@@ -170,7 +170,7 @@ export function resolveActiveRoles(settings) {
   return executionPolicy(settings).activeRoles;
 }
 
-const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
+const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_EXECUTION_OUTPUT";
 export const INVALID_EXECUTION_INPUT_CODE = "ERR_INVALID_EXECUTION_INPUT";
 const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
@@ -869,7 +869,10 @@ function assertExactOutputFields(value, fields, field = "result") {
   }
 }
 
-function assertStructuredResultSize(payload, diagnostic) {
+function assertStructuredResultSize(
+  payload,
+  diagnostic = outputConstraint("result", "maximum-2-mebibytes"),
+) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
@@ -1214,7 +1217,7 @@ export function normalizeBootstrapResultCandidate(
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, BOOTSTRAP_RESULT_FIELDS);
   if (
@@ -1378,7 +1381,7 @@ export function normalizeReconciliationResult(payload) {
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, RECONCILIATION_RESULT_FIELDS);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
@@ -1478,7 +1481,7 @@ export function normalizeBootstrapArbitration(payload) {
   }
   assertStructuredResultSize(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, ARBITRATION_RESULT_FIELDS);
   const rationale = normalizeText(
@@ -2555,10 +2558,7 @@ export function normalizeReviewResult(payload, previousFindings = []) {
       outputConstraint("status", "review-status"),
     );
   }
-  assertStructuredResultSize(
-    payload,
-    outputConstraint("result", "bounded-structured-result"),
-  );
+  assertStructuredResultSize(payload);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
     const diagnostics = [
       ...(!emptyArray(payload.findings)
@@ -3636,10 +3636,10 @@ function validateValidationSchedule(state, planSteps, validations) {
   const expected = deriveValidationSchedule(validations, planSteps.length);
   if (
     !isDeepStrictEqual(state.validationSchedule, expected) ||
-    expected.some(
-      ({ requiredChecks }) =>
-        requiredChecks.length === 0 ||
-        requiredChecks.length > MAX_VALIDATION_ITEMS,
+    expected.steps.some(
+      ({ commandIndexes }) =>
+        commandIndexes.length === 0 ||
+        commandIndexes.length > MAX_VALIDATION_ITEMS,
     ) ||
     validationCatalog(state).length > MAX_VALIDATION_ITEMS
   ) {
@@ -5508,7 +5508,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 26 ||
+    run.pipelineStateVersion !== 27 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

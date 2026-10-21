@@ -231,8 +231,9 @@ export const MAX_ITEMS = 32;
 export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
 export const MAX_OPTIONS = 16;
-const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
-export const MAX_DURABLE_RUN_BYTES = 960 * 1024;
+const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
+// Twelve result-sized slots cover retained inventories, gate copies, and metadata.
+export const MAX_DURABLE_RUN_BYTES = 24 * 1024 * 1024;
 export const MAX_DIAGNOSTIC_ITEMS = 32;
 export const MAX_DISPUTE_HISTORY_BYTES = 64 * 1024;
 export const MAX_DISPUTES_PER_FINDING = 5;
@@ -802,7 +803,10 @@ function assertExactOutputFields(value, fields, field = "result") {
   }
 }
 
-function assertStructuredResult(payload, diagnostic) {
+function assertStructuredResult(
+  payload,
+  diagnostic = outputConstraint("result", "maximum-2-mebibytes"),
+) {
   let serialized;
   try {
     serialized = JSON.stringify(payload);
@@ -1040,7 +1044,7 @@ export function normalizeBootstrapResult(
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   if (
@@ -1166,7 +1170,7 @@ export function normalizeReconciliationResult(payload) {
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   if (payload.status === "PRODUCT_DECISION_REQUIRED") {
@@ -1266,7 +1270,7 @@ export function normalizeBootstrapArbitration(payload) {
   }
   assertStructuredResult(
     payload,
-    outputConstraint("result", "maximum-256-kibibytes"),
+    outputConstraint("result", "maximum-2-mebibytes"),
   );
   assertExactOutputFields(payload, fields);
   const rationale = normalizeText(

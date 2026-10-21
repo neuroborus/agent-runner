@@ -79,7 +79,7 @@ const MAX_TEXT_LENGTH = 4_000;
 const MAX_PLAN_LENGTH = 100_000;
 const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
-const MAX_STRUCTURED_RESULT_BYTES = 256 * 1024;
+const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
 const INVALID_OUTPUT_CODE = "ERR_INVALID_PLAN_AUTHORING_OUTPUT";
 const OUTPUT_DIAGNOSTIC_FIELDS = Object.freeze([
   "role",
@@ -236,6 +236,7 @@ function assertStructuredResultSize(payload) {
     throw workflowError(
       "Structured role result is too large.",
       INVALID_OUTPUT_CODE,
+      { field: "result", constraint: "maximum-2-mebibytes" },
     );
   }
 }

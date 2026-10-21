@@ -10,19 +10,26 @@ export function deriveValidationSchedule(validations, stepCount) {
       for (const step of steps) commands.get(command).add(step);
     }
   }
-  return Array.from({ length: stepCount }, (_, index) => ({
-    step: index + 1,
-    requiredChecks: [...commands]
-      .filter(([, steps]) => steps.has(index + 1))
-      .map(([command], checkIndex) => ({ id: `C${checkIndex + 1}`, command })),
-  }));
+  return {
+    commands: [...commands.keys()],
+    steps: Array.from({ length: stepCount }, (_, index) => ({
+      step: index + 1,
+      commandIndexes: [...commands.values()].flatMap((steps, commandIndex) =>
+        steps.has(index + 1) ? [commandIndex] : [],
+      ),
+    })),
+  };
 }
 
 export function scheduledChecks(state, step = state.currentStep) {
-  return (
-    state.validationSchedule?.find((entry) => entry.step === step)
-      ?.requiredChecks ?? null
-  );
+  const schedule = state.validationSchedule;
+  const entry = schedule?.steps.find((entry) => entry.step === step);
+  return entry
+    ? entry.commandIndexes.map((commandIndex, checkIndex) => ({
+        id: `C${checkIndex + 1}`,
+        command: schedule.commands[commandIndex],
+      }))
+    : null;
 }
 
 export function validationCatalog(state) {
@@ -31,9 +38,8 @@ export function validationCatalog(state) {
     for (const check of validation?.requiredChecks ?? [])
       commands.add(check.command);
   }
-  for (const entry of state.validationSchedule ?? []) {
-    for (const check of entry.requiredChecks) commands.add(check.command);
-  }
+  for (const command of state.validationSchedule?.commands ?? [])
+    commands.add(command);
   for (const check of state.requiredChecks ?? []) commands.add(check.command);
   return [...commands];
 }

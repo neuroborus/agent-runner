@@ -409,6 +409,7 @@ export async function resolveRunArtifactPath(runDirectory, relativePath) {
     normalizedPath === ".." ||
     normalizedPath.startsWith(`..${sep}`) ||
     RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase()) ||
+    /^events-[0-9]+\.jsonl$/iu.test(topLevelPath) ||
     topLevelPath.toLowerCase().startsWith(".mutation-")
   ) {
     throw new RunStoreError("Run artifact path escapes its declared area.", {

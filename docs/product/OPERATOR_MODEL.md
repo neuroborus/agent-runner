@@ -187,6 +187,13 @@ Run state lives under the user's OS state directory, outside both the target
 repository and task directory. Each transition is a complete write-ahead event
 followed by atomic current-state replacement. The human-readable progress file
 is derived and can be regenerated; the event journal remains authoritative.
+Accepted structured results have 2 MiB of serialized UTF-8 headroom, with finite
+larger state and recovery containers. Journals roll over into bounded segments
+while retaining the complete authoritative history and crash-recovery ordering;
+capacity exhaustion preserves the last accepted state. See the exact
+[storage and result budgets](../ARCHITECTURE.md#structured-result-headroom).
+Public projections remain bounded and exclude private results. These byte
+limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified
 by role and exact checkpoint, including failed and interrupted work. An omitted
 attempt count makes retention explicit. Native cumulative usage keeps its scope;

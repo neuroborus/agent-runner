@@ -1,4 +1,10 @@
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+} from "./validation-schedule.js";
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
 import {
@@ -1351,11 +1357,31 @@ export function migratePlanExecutionStateV25(run) {
   });
 }
 
+export function migratePlanExecutionStateV26(run) {
+  const current = run.pipelineState;
+  if (current.validationSchedule === null) return Object.freeze({ ...current });
+  const validationSchedule = deriveValidationSchedule(
+    [current.workerValidation, current.reviewerValidation],
+    current.validationSchedule.length,
+  );
+  const expanded = validationSchedule.steps.map(({ step }) => ({
+    step,
+    requiredChecks: scheduledChecks({ validationSchedule }, step),
+  }));
+  if (!isDeepStrictEqual(current.validationSchedule, expanded)) {
+    throw new PlanExecutionWorkflowError(
+      "Legacy validation schedule does not preserve the accepted role assignments.",
+      { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
+    );
+  }
+  return Object.freeze({ ...current, validationSchedule });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 26,
+  stateVersion: 27,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1387,6 +1413,7 @@ export const planExecutionPipeline = Object.freeze({
       }),
     24: migratePlanExecutionStateV24,
     25: migratePlanExecutionStateV25,
+    26: migratePlanExecutionStateV26,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
@@ -1403,7 +1430,7 @@ export const planExecutionPipeline = Object.freeze({
     status: projectStatus,
   }),
   validateResumeAction,
-  prepareRecovery(run, history) {
+  async prepareRecovery(run, history) {
     const migrate = (historicalRun) => {
       let current = historicalRun;
       while (
@@ -1420,8 +1447,8 @@ export const planExecutionPipeline = Object.freeze({
       validateRun(current);
       return current;
     };
-    prepareLegacyConfirmationRecovery(run, history, migrate);
-    prepareImplementationRecovery(run, history, migrate);
+    await prepareLegacyConfirmationRecovery(run, history, migrate);
+    await prepareImplementationRecovery(run, history, migrate);
   },
   workflow: Object.freeze({
     createState: createPlanExecutionState,

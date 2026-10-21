@@ -122,7 +122,8 @@ const CLIENT_ATTRIBUTION_FIELDS = Object.freeze(["name", "title"]);
 const MAX_CLIENT_ATTRIBUTION_LENGTH = 256;
 const UNSAFE_CLIENT_ATTRIBUTION_PATTERN =
   /[\u0000-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/u;
-const MAX_PROMPT_BYTES = 1024 * 1024;
+// Complete recovery context includes accepted results and derived inventories.
+const MAX_PROMPT_BYTES = 32 * 1024 * 1024;
 const MAX_SCHEMA_BYTES = 1024 * 1024;
 const MAX_SCHEMA_DEPTH = 128;
 const SCHEMA_CHILD_KEYWORDS = Object.freeze([

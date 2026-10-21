@@ -13,6 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { largeFinalizationResult } from "../support/index.js";
+import { bootstrapReady } from "../../pipelines/plan-execution/test/support/index.js";
+import { normalizeBootstrapResult } from "../../pipelines/plan-execution/src/workflow-contract.js";
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+} from "../../pipelines/plan-execution/src/validation-schedule.js";
+
 import {
   clientAttributionFingerprint,
   DEFAULT_CLIENT_ATTRIBUTION,
@@ -71,6 +79,241 @@ async function createFixture(t, { taskInsideProject = false } = {}) {
   t.after(() => created.lease.release().catch(() => {}));
   return { created, projectPath, stateRoot, store, taskPath, workspace };
 }
+
+test("retains large result copies across journal rotation, interruption, and rejected publication", async (t) => {
+  const { created, projectPath, taskPath, stateRoot } = await createFixture(t);
+  await created.lease.release();
+  // Seed a pre-segmentation run, then interrupt its explicit migration before
+  // state replacement. The original journal must already reject old readers.
+  const statePath = join(created.directoryPath, "state.json");
+  const eventsPath = join(created.directoryPath, "events.jsonl");
+  const legacy = structuredClone(created.state);
+  legacy.schemaVersion = 20;
+  legacy.runtimeCompatibility.runStateVersion = 20;
+  const initialEvent = JSON.parse((await readFile(eventsPath, "utf8")).trim());
+  initialEvent.schemaVersion = 20;
+  initialEvent.state = legacy;
+  await writeFile(statePath, JSON.stringify(legacy));
+  await writeFile(eventsPath, `${JSON.stringify(initialEvent)}\n`);
+  let crash = false;
+  const store = createRunStore({
+    stateRoot,
+    onTransitionBoundary(boundary) {
+      if (crash && boundary === "event-appended") {
+        crash = false;
+        throw new Error("Interrupted publication.");
+      }
+    },
+  });
+  const lease = await store.acquireRunLease(created.state.runId);
+  t.after(() => lease.release().catch(() => {}));
+  const migrate = () =>
+    store.migrateRun(
+      lease,
+      {
+        pipelineState: legacy.pipelineState,
+        pipelineStateVersion: legacy.pipelineStateVersion,
+      },
+      {
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "migrated",
+          message: "Migrated journal capacity.",
+        },
+      },
+    );
+  const originalEvent = `${JSON.stringify(initialEvent)}\n`;
+  // JSON whitespace fills a valid legacy segment without enlarging its state.
+  await writeFile(
+    eventsPath,
+    " ".repeat(64 * 1024 * 1024 - Buffer.byteLength(originalEvent)) +
+      originalEvent,
+  );
+  await assert.rejects(migrate(), { code: "ERR_EVENT_LOG_LIMIT" });
+  assert.equal((await store.loadRun(created.state.runId)).revision, 1);
+  assert.ok(
+    !(await readdir(created.directoryPath)).includes("events-000001.jsonl"),
+  );
+  await writeFile(eventsPath, originalEvent);
+  crash = true;
+  await assert.rejects(migrate(), /Interrupted publication/u);
+  assert.equal(JSON.parse(await readFile(statePath, "utf8")).schemaVersion, 20);
+  const barrierEvents = (await readFile(eventsPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map(JSON.parse);
+  assert.deepEqual(
+    barrierEvents.map(({ schemaVersion }) => schemaVersion),
+    [20, 21],
+  );
+  assert.equal((await store.recoverRun(lease)).schemaVersion, 21);
+  const result = largeFinalizationResult("é");
+  const retained = {
+    workflowState: "FINALIZE",
+    results: Array(4).fill(result),
+    summary: "x".repeat(20_000),
+  };
+  for (let index = 1; index <= 7; index += 1) {
+    await store.transitionRun(lease, {
+      pipelineState: retained,
+      counters: { fixRounds: index },
+    });
+  }
+  const originalJournal = await readFile(
+    join(created.directoryPath, "events.jsonl"),
+  );
+  // A wait installs its watcher before its timeout. Observe registration
+  // before publishing the new segment, and reject timeout-only wakeups.
+  const waitReady = Promise.withResolvers();
+  const scheduleTimeout = globalThis.setTimeout;
+  let timedOut = false;
+  const timeoutMock = t.mock.method(
+    globalThis,
+    "setTimeout",
+    (callback, ...args) => {
+      const timer = scheduleTimeout(
+        () => {
+          timedOut = true;
+          callback();
+        },
+        ...args,
+      );
+      waitReady.resolve();
+      return timer;
+    },
+  );
+  const abort = new AbortController();
+  t.after(() => abort.abort());
+  const waiting = store.waitForRunChange(created.state.runId, {
+    afterRevision: 9,
+    timeoutMs: 30_000,
+    signal: abort.signal,
+  });
+  await waitReady.promise;
+  timeoutMock.mock.restore();
+  crash = true;
+  await assert.rejects(
+    store.transitionRun(lease, {
+      counters: { fixRounds: 8 },
+    }),
+    /Interrupted publication/u,
+  );
+  assert.equal((await waiting).revision, 10);
+  assert.equal(timedOut, false);
+  const segmentPath = join(created.directoryPath, "events-000001.jsonl");
+  const publishedSegment = await readFile(segmentPath);
+  assert.ok(originalJournal.length <= 64 * 1024 * 1024);
+  assert.ok(publishedSegment.length <= 64 * 1024 * 1024);
+  assert.ok(
+    originalJournal.length + publishedSegment.length > 64 * 1024 * 1024,
+  );
+  assert.deepEqual(
+    await readFile(join(created.directoryPath, "events.jsonl")),
+    originalJournal,
+  );
+  // A reader can recover the complete new segment before state replacement.
+  const reloaded = createRunStore({ stateRoot });
+  const history = await reloaded.loadRunHistory(created.state.runId);
+  assert.deepEqual(
+    history.events.map(({ revision }) => revision),
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+  );
+  assert.deepEqual(history.run.pipelineState, retained);
+  assert.equal(history.run.projectPath, projectPath);
+  assert.equal(history.run.taskPath, taskPath);
+  await appendFile(segmentPath, '{"revision":11');
+  const recovered = await store.recoverRun(lease);
+  assert.equal(recovered.revision, 10);
+  assert.deepEqual(await readFile(segmentPath), publishedSegment);
+  await assert.rejects(
+    store.transitionRun(lease, {
+      pipelineState: { ...retained, results: Array(17).fill(result) },
+    }),
+    { code: "ERR_INVALID_RUN_STATE" },
+  );
+  assert.equal((await store.loadRun(created.state.runId)).revision, 10);
+  assert.deepEqual(await readFile(segmentPath), publishedSegment);
+  // Missing, discontinuous, and incomplete sealed history fail closed.
+  await writeFile(
+    join(created.directoryPath, "events-000003.jsonl"),
+    publishedSegment,
+  );
+  await assert.rejects(store.loadRun(created.state.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+  await rm(join(created.directoryPath, "events-000003.jsonl"));
+  const discontinuous = JSON.parse(publishedSegment.toString("utf8"));
+  discontinuous.state.roles.worker.model = "other-model";
+  await writeFile(segmentPath, `${JSON.stringify(discontinuous)}\n`);
+  await assert.rejects(store.loadRun(created.state.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+  await writeFile(segmentPath, publishedSegment);
+  await appendFile(join(created.directoryPath, "events.jsonl"), "partial");
+  await assert.rejects(store.loadRun(created.state.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+});
+
+test("persists accepted large bootstrap inventories without repeating commands per step", async (t) => {
+  const { created, stateRoot } = await createFixture(t);
+  await created.lease.release();
+  const steps = Array.from({ length: 40 }, (_, index) => index + 1);
+  const validations = ["Worker", "Reviewer"].map((role) => {
+    const result = {
+      ...bootstrapReady(role, steps),
+      requiredChecks: Array.from({ length: 256 }, (_, index) => ({
+        id: `C${index + 1}`,
+        command: `node validation/${role.toLowerCase()}-${index}.js ${"x".repeat(2300)}`,
+        steps,
+      })),
+    };
+    assert.ok(Buffer.byteLength(JSON.stringify(result)) > 256 * 1024);
+    return normalizeBootstrapResult(result, role, steps.length);
+  });
+  const validationSchedule = deriveValidationSchedule(
+    validations,
+    steps.length,
+  );
+  const expanded = validationSchedule.steps.map(({ step }) => ({
+    step,
+    requiredChecks: scheduledChecks({ validationSchedule }, step),
+  }));
+  assert.ok(Buffer.byteLength(JSON.stringify(expanded)) > 32 * 1024 * 1024);
+  const retained = {
+    workflowState: "IMPLEMENT",
+    workerValidation: validations[0],
+    reviewerValidation: validations[1],
+    validationSchedule,
+    requiredChecks: scheduledChecks({ validationSchedule }, 1),
+  };
+  const store = createRunStore({
+    stateRoot,
+    onTransitionBoundary(boundary) {
+      if (boundary === "event-appended")
+        throw new Error("Interrupted publication.");
+    },
+  });
+  const lease = await store.acquireRunLease(created.state.runId);
+  t.after(() => lease.release().catch(() => {}));
+  await assert.rejects(
+    store.transitionRun(lease, { pipelineState: retained }),
+    /Interrupted publication/u,
+  );
+  const recovered = await store.recoverRun(lease);
+  const reloaded = await createRunStore({ stateRoot }).loadRun(
+    created.state.runId,
+  );
+  assert.deepEqual(recovered, reloaded);
+  assert.deepEqual(reloaded.pipelineState, retained);
+  for (const step of steps) {
+    assert.deepEqual(
+      scheduledChecks(reloaded.pipelineState, step),
+      expanded[step - 1].requiredChecks,
+    );
+  }
+});
 
 test("resolves the external state root and creates a complete run", async (t) => {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-root-"));
@@ -1318,6 +1561,9 @@ test("loads revision-bound private history without repairing files and rejects s
   assert.equal(history.events.length, 2);
   assert.deepEqual(history.events.at(-1).state, history.run);
   assert.ok(Object.isFrozen(history.events[0].state.pipelineState));
+  const streamed = await store.loadRunHistory(created.state.runId, {
+    stream: true,
+  });
   await assert.rejects(
     store.transitionRun(
       created.lease,
@@ -1344,6 +1590,13 @@ test("loads revision-bound private history without repairing files and rejects s
     (await store.loadRunHistory(created.state.runId)).run.revision,
     3,
   );
+  for (let replay = 0; replay < 2; replay += 1) {
+    const revisions = await Array.fromAsync(streamed.events, (event) => {
+      assert.ok(Object.isFrozen(event.state.pipelineState));
+      return event.revision;
+    });
+    assert.deepEqual(revisions, [1, 2]);
+  }
 });
 
 test("storage ownership rejects non-string identifiers without a transition", async (t) => {

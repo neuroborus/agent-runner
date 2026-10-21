@@ -38,6 +38,7 @@ import {
 } from "./gate-evidence.js";
 import {
   deriveValidationSchedule,
+  scheduledChecks,
   activeTrustedCommands,
   validationCatalog,
   validationEvidenceFingerprint,
@@ -2975,8 +2976,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
       parseCommitPlan(state().canonicalPlan).steps.length,
     );
     return {
-      requiredChecks:
-        validationSchedule[(state().currentStep ?? 1) - 1].requiredChecks,
+      requiredChecks: scheduledChecks(
+        { validationSchedule },
+        state().currentStep ?? 1,
+      ),
       validationSchedule,
       validationAmendment: null,
       validationScopeLegacy: false,
@@ -5127,7 +5130,7 @@ ${JSON.stringify(
   function confirmationValidationPrompt(current) {
     return `${establishedValidationPrompt(current)}
 
-Complete persisted plan-step schedule (an inventory amendment affects only the current step):
+Complete persisted plan-step schedule (commandIndexes are zero-based references into commands; an inventory amendment affects only the current step):
 ${JSON.stringify(current.validationSchedule)}
 Explicitly assess how any shared validation-infrastructure change affects future requirements. Preserve every future step's accepted assignments.
 

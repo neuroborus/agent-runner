@@ -642,7 +642,7 @@ export function createRunStore({
       await journal.appendTransition(
         runDirectory,
         state,
-        { events: [], hasPartialTail: false, validByteLength: 0 },
+        { lastEvent: null, hasPartialTail: false, validByteLength: 0 },
         activity,
       );
 
@@ -714,12 +714,24 @@ export function createRunStore({
     return deepFreeze((await loadSnapshot(runDirectory, runId)).state);
   }
 
-  // Internal runtime evidence: the run and complete validated journal come
-  // from one authoritative snapshot. Public projections must not return events.
-  async function loadRunHistory(runId) {
+  // Internal runtime evidence from one validated prefix. Runtime recovery uses
+  // replay rather than retaining complete historical state copies in memory.
+  async function loadRunHistory(runId, { stream = false } = {}) {
     const runDirectory = await getRunDirectory(runId);
     const snapshot = await loadSnapshot(runDirectory, runId);
-    return deepFreeze({ run: snapshot.state, events: snapshot.events });
+    const events = {
+      async *[Symbol.asyncIterator]() {
+        for await (const event of journal.replaySnapshot(
+          runDirectory,
+          snapshot,
+        ))
+          yield deepFreeze(event);
+      },
+    };
+    return deepFreeze({
+      run: snapshot.state,
+      events: stream ? events : await Array.fromAsync(events),
+    });
   }
 
   async function runIsLeased(runId) {
@@ -861,7 +873,8 @@ export function createRunStore({
               if (
                 ownershipChanged ||
                 filename === null ||
-                ["events.jsonl", "state.json"].includes(filename.toString())
+                filename.toString() === "state.json" ||
+                /^events(?:-[0-9]+)?\.jsonl$/u.test(filename.toString())
               ) {
                 void load();
               }
@@ -988,27 +1001,28 @@ export function createRunStore({
 
   async function inspectRecoveryDispatch(runId, value) {
     const dispatch = normalizeRecoveryDispatch(value);
-    const { events } = await loadRunHistory(runId);
-    const started = events.some(
-      (event) =>
-        event.revision === dispatch.expectedRevision + 1 &&
-        isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
-    );
-    const ready =
-      started &&
-      events.some(
-        (event) =>
-          event.revision > dispatch.expectedRevision &&
-          isDeepStrictEqual(event.activity, dispatchActivity(dispatch, true)),
-      );
-    const retryable =
-      started &&
-      !ready &&
-      events
-        .slice(dispatch.expectedRevision + 1)
-        .every((event) =>
-          isRecoveryPreparation(events[event.revision - 2].state, event),
+    const history = await loadRunHistory(runId, { stream: true });
+    let started = false;
+    let ready = false;
+    let retryable = true;
+    let previous = null;
+    for await (const event of history.events) {
+      if (event.revision === dispatch.expectedRevision + 1) {
+        started = isDeepStrictEqual(event.activity, dispatchActivity(dispatch));
+      }
+      if (event.revision > dispatch.expectedRevision) {
+        ready ||= isDeepStrictEqual(
+          event.activity,
+          dispatchActivity(dispatch, true),
         );
+      }
+      if (event.revision > dispatch.expectedRevision + 1) {
+        retryable &&= isRecoveryPreparation(previous, event);
+      }
+      previous = event.state;
+    }
+    ready &&= started;
+    retryable &&= started && !ready;
     return { started, ready, retryable };
   }
 
@@ -1016,11 +1030,22 @@ export function createRunStore({
     const dispatch = normalizeRecoveryDispatch(value);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
-      const started = snapshot.events.some(
-        (event) =>
-          event.revision === dispatch.expectedRevision + 1 &&
-          isDeepStrictEqual(event.activity, dispatchActivity(dispatch)),
-      );
+      let started = false;
+      let alreadyReady = false;
+      for await (const event of journal.replaySnapshot(
+        runDirectory,
+        snapshot,
+      )) {
+        if (event.revision === dispatch.expectedRevision + 1)
+          started = isDeepStrictEqual(
+            event.activity,
+            dispatchActivity(dispatch),
+          );
+        alreadyReady ||= isDeepStrictEqual(
+          event.activity,
+          dispatchActivity(dispatch, true),
+        );
+      }
       if (
         typeof ready !== "boolean" ||
         (ready
@@ -1042,13 +1067,7 @@ export function createRunStore({
         );
       }
       const activity = dispatchActivity(dispatch, ready);
-      if (
-        ready &&
-        snapshot.events.some((event) =>
-          isDeepStrictEqual(event.activity, activity),
-        )
-      )
-        return deepFreeze(snapshot.state);
+      if (ready && alreadyReady) return deepFreeze(snapshot.state);
       const next = normalizeRunState(
         {
           ...snapshot.state,
@@ -1607,8 +1626,8 @@ export function createRunStore({
     }
 
     const runDirectory = await getRunDirectory(runId);
-    const { events } = await loadSnapshot(runDirectory, runId);
-    if (afterRevision > events.at(-1).revision) {
+    const snapshot = await loadSnapshot(runDirectory, runId);
+    if (afterRevision > snapshot.state.revision) {
       throw new RunStoreError("Public activity cursor is ahead of the run.", {
         code: "ERR_INVALID_ACTIVITY_CURSOR",
       });
@@ -1616,7 +1635,7 @@ export function createRunStore({
     const activities = [];
     let cursor = afterRevision;
 
-    for (const event of events) {
+    for await (const event of journal.replaySnapshot(runDirectory, snapshot)) {
       if (event.revision <= afterRevision) {
         continue;
       }

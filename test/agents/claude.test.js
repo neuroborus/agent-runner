@@ -21,6 +21,7 @@ import { delimiter, dirname, isAbsolute, join, parse } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { createGitService } from "../../src/git/index.js";
+import { largeFinalizationResult } from "../support/index.js";
 
 import {
   CLAUDE_BACKEND_ID,
@@ -77,6 +78,7 @@ const STRICT_SCHEMA = Object.freeze({
   required: ["ok"],
   additionalProperties: false,
 });
+
 const COMMON_DENY_POLICY = [
   "Agent",
   "Task",
@@ -718,6 +720,31 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("preserves a two-mebibyte result through duplicated escaped stream envelopes", async () => {
+  const structured = largeFinalizationResult('"');
+  const output = JSON.stringify(structured);
+  const fixture = createFixture({
+    handle({ call }) {
+      if (call.file === "claude" && call.argumentsList.includes("-p")) {
+        assert.equal(call.options.input, output);
+        return {
+          stdout: JSON.stringify(result({ output, structured })),
+          stderr: "",
+        };
+      }
+    },
+  });
+  const response = await fixture.adapter.run(
+    request({
+      prompt: output,
+      recoveryPrompt: output,
+      schema: POLISHING_FINALIZATION_SCHEMA,
+    }),
+  );
+  assert.equal(response.output, output);
+  assert.deepEqual(response.structured, structured);
+});
 
 test("streams Claude progress before completion without exposing payloads or losing command nesting", async (t) => {
   const entered = Promise.withResolvers();

@@ -867,6 +867,7 @@ async function selectThread(client, request, fresh) {
       const result = await client.request("thread/fork", {
         ...options,
         threadId: request.session.id,
+        excludeTurns: true,
       });
       const threadId = assertThreadResponse(result);
       if (
@@ -898,6 +899,7 @@ async function selectThread(client, request, fresh) {
     const result = await client.request("thread/resume", {
       ...options,
       threadId: request.session.id,
+      excludeTurns: true,
     });
     const threadId = assertThreadResponse(result);
     if (threadId !== request.session.id) {
@@ -1138,9 +1140,13 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   }
   let response;
   try {
-    response = await client.request("thread/read", {
+    // This owner has just completed the latest turn. Hydrate only that turn:
+    // complete thread history can exceed the protocol cap after valid results.
+    response = await client.request("thread/turns/list", {
       threadId,
-      includeTurns: true,
+      limit: 1,
+      sortDirection: "desc",
+      itemsView: "full",
     });
   } catch (cause) {
     if (isAuthenticationRequiredError(cause)) throw cause;
@@ -1148,19 +1154,16 @@ async function resolveCompletedTurn(client, value, threadId, turnId) {
   }
   if (
     !isRecord(response) ||
-    !isRecord(response.thread) ||
-    response.thread.id !== threadId ||
-    !Array.isArray(response.thread.turns)
+    !Array.isArray(response.data) ||
+    response.data.length !== 1
   ) {
     throw invalidCompletedTurn();
   }
-  const matches = response.thread.turns.filter(
-    (candidate) => isRecord(candidate) && candidate.id === turnId,
+  return assertCompletedTurn(
+    { threadId, turn: response.data[0] },
+    threadId,
+    turnId,
   );
-  if (matches.length !== 1) {
-    throw invalidCompletedTurn();
-  }
-  return assertCompletedTurn({ threadId, turn: matches[0] }, threadId, turnId);
 }
 
 async function startTurn(client, request, threadId, prompt, workspaceStorage) {

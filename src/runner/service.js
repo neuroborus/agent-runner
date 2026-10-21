@@ -750,13 +750,15 @@ export function createRunner(options = {}) {
       pipeline.prepareRecovery !== undefined &&
       runStore.loadRunHistory
     ) {
-      const history = await runStore.loadRunHistory(run.runId);
+      const history = await runStore.loadRunHistory(run.runId, {
+        stream: true,
+      });
       if (!isDeepStrictEqual(history.run, run)) {
         throw new RunnerError("Run changed before recovery inspection.", {
           code: "ERR_RUN_REVISION_CHANGED",
         });
       }
-      pipeline.prepareRecovery(run, history);
+      await pipeline.prepareRecovery(run, history);
     }
     const settings = run.pipelineState.settings;
     if (!isRecord(settings)) {
@@ -818,13 +820,15 @@ export function createRunner(options = {}) {
     if (dispatch !== null)
       run = await runStore.recordRecoveryDispatch(lease, dispatch, true);
     if (pipeline.prepareRecovery !== undefined && runStore.loadRunHistory) {
-      const history = await runStore.loadRunHistory(run.runId);
+      const history = await runStore.loadRunHistory(run.runId, {
+        stream: true,
+      });
       if (!isDeepStrictEqual(history.run, run)) {
         throw new RunnerError("Run changed before checkpoint continuation.", {
           code: "ERR_RUN_REVISION_CHANGED",
         });
       }
-      pipeline.prepareRecovery(run, history);
+      await pipeline.prepareRecovery(run, history);
     }
     const monitor = createStopMonitor({
       runId: run.runId,
@@ -1561,12 +1565,12 @@ export function createRunner(options = {}) {
   async function status(runId) {
     assertNonEmptyString(runId, "runId");
     const history = runStore.loadRunHistory
-      ? await runStore.loadRunHistory(runId)
+      ? await runStore.loadRunHistory(runId, { stream: true })
       : { run: await runStore.loadRun(runId), events: [] };
     const { pipeline, run } = pipelineForRun(history.run, undefined, {
       allowMigration: true,
     });
-    pipeline.prepareRecovery?.(run, history);
+    await pipeline.prepareRecovery?.(run, history);
     return result(run);
   }
 

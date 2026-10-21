@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
+  appendFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -16,6 +17,8 @@ import {
   createRunStore,
   RUN_STATE_SCHEMA_VERSION,
 } from "../../src/state/index.js";
+
+import { executeFile, largeFinalizationResult } from "../support/index.js";
 
 const BOOT_A = "11111111-1111-4111-8111-111111111111";
 const BOOT_B = "22222222-2222-4222-8222-222222222222";
@@ -144,6 +147,91 @@ async function fixture(
   };
   return { ...created, store, storeOptions, projectPath, input };
 }
+
+test("replays many large journal segments under a bounded heap", async (t) => {
+  const f = await fixture(t);
+  await f.lease.release();
+  const pipelineState = {
+    ...f.state.pipelineState,
+    results: Array(4).fill(largeFinalizationResult()),
+  };
+  // Five 56 MiB segments hold 35 distinct 8 MiB snapshots. Eager replay
+  // cannot fit this history in the child's heap; one-segment replay can.
+  for (let index = 0; index < 35; index += 1) {
+    const state = {
+      ...f.state,
+      revision: index + 2,
+      updatedAt: new Date(
+        Date.parse(f.state.updatedAt) + index + 1,
+      ).toISOString(),
+      counters: { rounds: index + 1 },
+      pipelineState,
+    };
+    const segment = Math.floor(index / 7);
+    await appendFile(
+      join(
+        f.directoryPath,
+        segment === 0
+          ? "events.jsonl"
+          : `events-${String(segment).padStart(6, "0")}.jsonl`,
+      ),
+      `${JSON.stringify({
+        schemaVersion: state.schemaVersion,
+        revision: state.revision,
+        runId: state.runId,
+        recordedAt: state.updatedAt,
+        state,
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "recorded",
+          message: "Synthetic checkpoint.",
+        },
+      })}\n`,
+    );
+  }
+  const program = `
+    import assert from "node:assert/strict";
+    const { createRunStore } = await import(process.argv[1]);
+    const store = createRunStore({ stateRoot: process.argv[2] });
+    const runId = process.argv[3];
+    assert.equal((await store.loadRun(runId)).revision, 36);
+    const history = await store.loadRunHistory(runId, { stream: true });
+    assert.deepEqual(await Array.fromAsync(history.events, event => event.revision),
+      Array.from({ length: 36 }, (_, index) => index + 1));
+    const page = await store.readPublicActivity(runId, { afterRevision: 20, limit: 2 });
+    assert.deepEqual(page.activities.map(activity => activity.revision), [21, 22]);
+    assert.equal(page.cursor, 22);
+    const lease = await store.acquireRunLease(runId);
+    try {
+      assert.equal((await store.recoverRun(lease)).revision, 36);
+      assert.equal((await store.transitionRun(lease, { counters: { rounds: 36 } })).revision, 37);
+      assert.equal((await store.loadRun(runId)).pipelineState.results.length, 4);
+    } finally {
+      await lease.release();
+    }
+  `;
+  await executeFile(
+    process.execPath,
+    [
+      "--max-old-space-size=256",
+      "--input-type=module",
+      "-e",
+      program,
+      new URL("../../src/state/index.js", import.meta.url).href,
+      f.storeOptions.stateRoot,
+      f.state.runId,
+    ],
+    { cwd: f.directoryPath },
+  );
+  assert.equal((await f.store.loadRun(f.state.runId)).revision, 37);
+  assert.equal(
+    (await readdir(f.directoryPath)).filter((name) =>
+      /^events.*\.jsonl$/u.test(name),
+    ).length,
+    6,
+  );
+});
 
 function advancementOperations(f, activeTurn) {
   return [
@@ -1831,6 +1919,10 @@ test("deferred stop history rejects changed targets, timing, and settlement evid
   const originalEvents = await readFile(eventsPath, "utf8");
   const originalState = await readFile(statePath, "utf8");
   const changes = [
+    (events) => {
+      for (const event of events.slice(2))
+        event.state.stopRequest.acceptedRevision = 3;
+    },
     (events) => {
       events[2].state.stopRequest.targetBoundary.step = 2;
     },

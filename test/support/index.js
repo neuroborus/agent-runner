@@ -20,3 +20,9 @@ export {
 } from "./runner.js";
 
 export { attachInactivity } from "./inactivity.js";
+
+export {
+  largeFinalizationResult,
+  sizeEvidenceResult,
+  STRUCTURED_RESULT_BYTES,
+} from "./structured-results.js";

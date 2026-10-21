@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { migratePlanExecutionStateV22 } from "../src/index.js";
+import {
+  migratePlanExecutionStateV22,
+  migratePlanExecutionStateV26,
+} from "../src/index.js";
 import {
   BOOTSTRAP_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
@@ -11,7 +14,10 @@ import {
   normalizeBootstrapResult,
   normalizePipelineState,
 } from "../src/workflow-contract.js";
-import { deriveValidationSchedule } from "../src/validation-schedule.js";
+import {
+  deriveValidationSchedule,
+  scheduledChecks,
+} from "../src/validation-schedule.js";
 import {
   bootstrapReady,
   checkAndFix,
@@ -78,23 +84,13 @@ test("scoped discovery rejects missing, unordered, and out-of-plan applicability
   const reviewer = {
     requiredChecks: [check("C1", slow, [1]), check("C9", reviewerOnly, [2])],
   };
-  assert.deepEqual(deriveValidationSchedule([worker, reviewer], 2), [
-    {
-      step: 1,
-      requiredChecks: [
-        { id: "C1", command: fast },
-        { id: "C2", command: slow },
-      ],
-    },
-    {
-      step: 2,
-      requiredChecks: [
-        { id: "C1", command: fast },
-        { id: "C2", command: slow },
-        { id: "C3", command: reviewerOnly },
-      ],
-    },
-  ]);
+  assert.deepEqual(deriveValidationSchedule([worker, reviewer], 2), {
+    commands: [fast, slow, reviewerOnly],
+    steps: [
+      { step: 1, commandIndexes: [0, 1] },
+      { step: 2, commandIndexes: [0, 1, 2] },
+    ],
+  });
 });
 
 function discovery(role, independent, trustedValidation) {
@@ -292,10 +288,10 @@ for (const mode of ["independent", "lazy", "combined"]) {
 
     for (const corrupt of [
       (state) => {
-        state.validationSchedule[1].requiredChecks.pop();
+        state.validationSchedule.steps[1].commandIndexes.pop();
       },
       (state) => {
-        state.requiredChecks = state.validationSchedule[0].requiredChecks;
+        state.requiredChecks = scheduledChecks(state, 1);
       },
       (state) => {
         state.finalizationResult.step = 1;
@@ -312,6 +308,40 @@ for (const mode of ["independent", "lazy", "combined"]) {
       assert.throws(() => normalizePipelineState(invalid), {
         code: "ERR_INVALID_PLAN_EXECUTION_STATE",
       });
+    }
+    if (mode === "combined") {
+      const consumed = fixture.transitions.find(
+        ({ patch }) =>
+          patch?.pipelineState?.pendingCommit?.status === "consumed",
+      ).patch.pipelineState;
+      for (const compact of [completed.pipelineState, consumed]) {
+        const legacy = {
+          ...compact,
+          validationSchedule: compact.validationSchedule.steps.map(
+            ({ step }) => ({
+              step,
+              requiredChecks: scheduledChecks(compact, step),
+            }),
+          ),
+        };
+        assert.deepEqual(
+          migratePlanExecutionStateV26({ pipelineState: legacy }),
+          compact,
+        );
+        legacy.validationSchedule[1].requiredChecks.pop();
+        assert.throws(
+          () => migratePlanExecutionStateV26({ pipelineState: legacy }),
+          { code: "ERR_INVALID_PLAN_EXECUTION_STATE" },
+        );
+      }
+      const unestablished = {
+        ...completed.pipelineState,
+        validationSchedule: null,
+      };
+      assert.deepEqual(
+        migratePlanExecutionStateV26({ pipelineState: unestablished }),
+        unestablished,
+      );
     }
   });
 }
@@ -427,8 +457,8 @@ test("confirmed inventory amendments do not change the next persisted step", asy
   assert.deepEqual(inventories, [[fast], [fast]]);
   assert.equal(completed.pipelineState.validationAmendment, null);
   assert.ok(
-    completed.pipelineState.validationSchedule.every(
-      ({ requiredChecks }) => requiredChecks.length === 1,
+    completed.pipelineState.validationSchedule.steps.every(
+      ({ commandIndexes }) => commandIndexes.length === 1,
     ),
   );
   const accepted = fixture.transitions.find(

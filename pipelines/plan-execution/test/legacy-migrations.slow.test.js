@@ -104,7 +104,7 @@ test("legacy confirmation proof crosses authentic persisted migration history", 
     projected.pipelineState.candidateReviewResult.status,
     "APPROVED",
   );
-  planExecutionPipeline.prepareRecovery(projected, {
+  await planExecutionPipeline.prepareRecovery(projected, {
     run: unproven,
     events: [
       {

@@ -288,6 +288,15 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
   await store.writeRunArtifact(created.lease, "context/worker.md", "second\n");
 
   assert.equal(await readFile(artifactPath, "utf8"), "second\n");
+  await store.writeRunArtifact(
+    created.lease,
+    "events-summary.md",
+    "Summary only.\n",
+  );
+  assert.equal(
+    (await store.loadRun(created.state.runId)).revision,
+    created.state.revision,
+  );
   assert.deepEqual(await readdir(join(created.directoryPath, "context")), [
     "worker.md",
   ]);
@@ -301,6 +310,8 @@ test("writes only confined run artifacts with atomic replacement", async (t) => 
     "STATE.JSON",
     "./state.json",
     "events.jsonl",
+    "events-000001.jsonl",
+    "EVENTS-000001.JSONL",
     ".lease",
     "context/",
     "context\\",

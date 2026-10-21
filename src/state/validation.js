@@ -12,7 +12,7 @@ import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { normalizeObservationState } from "./observations.js";
 import { validStopTiming, validStopSettlement } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 20;
+export const RUN_STATE_SCHEMA_VERSION = 21;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -47,6 +47,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   17,
   18,
   19,
+  20,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -140,7 +141,8 @@ const FILE_IDENTITY_FIELDS = new Set([
   "changedNs",
 ]);
 const ANCESTOR_IDENTITY_FIELDS = new Set(["path", "device", "inode"]);
-const MAX_STATE_BYTES = 1024 * 1024;
+// Pipeline results can be retained in several inventories and gate records.
+const MAX_STATE_BYTES = 32 * 1024 * 1024;
 const MAX_JSON_DEPTH = 20;
 const MAX_COLLECTION_LENGTH = 10_000;
 const MAX_OBJECT_KEYS = 1_000;

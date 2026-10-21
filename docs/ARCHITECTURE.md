@@ -246,6 +246,49 @@ changes.
 The pipeline registry is static. V1 has no dynamic plugins, workflow DSL, or
 generic DAG executor.
 
+## Structured Result Headroom
+
+All three pipelines accept structured role results through exactly 2 MiB
+(2,097,152 bytes) of serialized UTF-8 JSON, rejecting one-byte overflow before
+acceptance. Semantic text, item, path, inventory, dispute, and correction bounds
+remain independent and unchanged. New size diagnostics use
+`maximum-2-mebibytes`; persisted `maximum-256-kibibytes` diagnostics remain valid
+historical evidence and are not rewritten.
+
+The common state envelope permits 32 MiB of compact serialized JSON. Polishing
+also enforces a 24 MiB whole-run budget: twelve result-sized slots accommodate
+both role inventories, derived catalogs, finalization and review copies, and
+bookkeeping, including common metadata. Both budgets apply to the complete run.
+These are finite aggregate safety ceilings, not permission to enlarge semantic fields or
+retain rejected output. Persisted evidence validates its individual fields and
+runner provenance without reapplying the raw-result ceiling to augmented copies.
+
+Adapter prompts and complete recovery prompts each permit 32 MiB so accepted
+results, derived inventories, and reconstruction context have enclosing
+headroom. Schema input remains capped at 1 MiB. Codex protocol lines and Claude
+stream lines retain their 16 MiB bounds, sufficient for JSON string escaping and
+Claude's duplicated text/structured terminal envelope; Claude retains its 64 MiB
+stream/process bound. Native protocol limits still apply to unrelated traffic.
+
+Codex hydrates a summarized or unloaded completion with one
+`thread/turns/list` request (`limit: 1`, descending, `itemsView: "full"`),
+requiring the exact completed turn ID and full terminal item view before
+acceptance or native failure refinement. Missing, mismatched, partial, or
+multiple turns fail closed without replay. The complete current turn remains
+subject to the existing protocol cap and item audit; prior results cannot
+inflate the response. Continuations and source forks request
+`excludeTurns: true`, preserving native context and fork lineage without
+returning history.
+These fields were verified against Codex CLI 0.163.0's model-free public
+`app-server generate-ts` contract; no pagination is added to `thread/read`.
+
+Runner context artifacts contain only summaries of at most 20,000 characters,
+so their 1 MiB cap remains sufficient. Configuration, clarification, and MCP
+action caps do not carry complete role results and remain unchanged. Public
+CLI/MCP projections retain their bounded summaries and diagnostics rather than
+exposing larger private results. Byte headroom is neither a token budget nor a
+native generation control; missing usage and incomplete accounting stay unknown.
+
 ## Runner Configuration
 
 The root runtime reads an optional `.agent-runner.json` from the Agent Runner
@@ -979,20 +1022,24 @@ Byte measurements and token snapshots are separate diagnostics, never capacity
 controls, consumption totals, progress, or permission to replay an effect.
 
 The state service's internal `loadRunHistory` operation returns the run and
-complete validated events from one authoritative snapshot. It shares journal
-continuity, size, migration-envelope, and snapshot-consistency checks with
-ordinary reads and preserves lock-free, non-repairing status semantics.
+complete validated events from one authoritative snapshot. Runtime callers use
+`stream: true` to replay that prefix as a repeatable asynchronous iterable;
+existing materialized inspection remains available for bounded histories.
+Replay shares journal continuity, size, migration-envelope, and
+snapshot-consistency checks with ordinary reads and preserves lock-free,
+non-repairing status semantics.
 Recovery still repairs incomplete tails and lagging snapshots only under the
 run lease. Optional expected-revision transitions reject stale evidence before
 appending anything.
 
 The runner supplies this private history to a pipeline's optional
-`prepareRecovery` descriptor operation. Plan execution binds legacy terminal
-confirmation eligibility to the inspected run object and revision; no history
-or recovery authorization is serialized into public run data. Status may
-project supported migrations in memory, while execution first persists the
-existing migration chain and obtains fresh history under both execution
-leases. Plan-execution resume revalidates canonical project and task boundaries
+asynchronous `prepareRecovery` descriptor operation. Proofs consume events
+incrementally and require the final replayed state to match the inspected run.
+Plan execution binds legacy terminal confirmation eligibility to the inspected
+run object and revision; no history or recovery authorization is serialized
+into public run data. Status may project supported migrations in memory, while
+execution first persists the existing migration chain and obtains fresh history
+under both execution leases. Plan-execution resume revalidates canonical project and task boundaries
 inside the worktree lease, including restart after a durable recovery transition.
 Pipeline policy validates actual candidate/finalization transitions and their
 intervening fingerprint lineage. A migrated terminal snapshot alone
@@ -1720,6 +1767,14 @@ its role evidence; only a confirmed current-step amendment may overlay the
 active inventory. Verified advancement clears that amendment and prior gates
 and selects the next schedule entry.
 
+State version 27 stores that schedule as one ordered `commands` catalog and
+per-step zero-based `commandIndexes`, expanding contiguous local check IDs only
+for the selected step. This prevents long commands from multiplying by the
+number of plan steps inside state and recovery prompts. The leased version-26
+migration verifies the complete legacy schedule against its immutable role
+assignments before replacing only its representation. It preserves amendments,
+gate evidence, counters, and prepared or consumed commit effects.
+
 Finalization records its active step and exact ordered checks; terminal
 confirmation hashes the complete canonical evidence tuple. Resume validates
 both bindings before reuse. Confirmation also sees future requirements when
@@ -1756,8 +1811,9 @@ Classification uses responsibility rather than filename heuristics.
 The Git validation-infrastructure fingerprint API accepts 512 paths; other Git
 path lists retain their 256-path bounds. Execution state version 16 and polishing
 state version 12 expand capacity with leased migrations preserving legacy 64/128
-evidence, budgets, completed commits and handoffs, and one-shot effects. Item,
-structured-output, and durable byte limits do not change. Expanded schemas
+evidence, budgets, completed commits and handoffs, and one-shot effects. Those
+capacity migrations left item and byte limits unchanged; current byte headroom
+is specified above. Expanded schemas
 retain strict Claude preflight and native sandbox restrictions. Only Claude's
 independently proved command-boundary policy sets `allowAllUnixSockets: true`
 so the authenticated launcher, rather than Claude's automatic command path,
@@ -3196,7 +3252,7 @@ occur. It never makes the consumed authorization replayable.
 
 Each state transition is a small write-ahead transaction:
 
-1. append and sync a complete `events.jsonl` record containing the next state;
+1. append and sync a complete journal record containing the next state;
 2. atomically replace `state.json` using a temporary file and rename;
 3. atomically regenerate the derived `progress.md` projection.
 
@@ -3204,6 +3260,40 @@ Revisions start at `1` and remain contiguous. Recovery ignores and removes only
 an incomplete final event fragment, rejects malformed durable records, advances
 a lagging `state.json` from the last complete event, and regenerates stale or
 missing progress. Valid event history is never discarded.
+
+Each journal segment has the same 64 MiB writer and reader ceiling. The initial
+segment remains `events.jsonl`; before an append would exceed its ceiling, the
+writer atomically publishes a complete first event in the next contiguous
+`events-000001.jsonl` segment (then `000002`, and so on). State replacement and
+progress publication follow that event, including at rollover. At most 1,024
+segments (64 GiB total headroom) are permitted; exhaustion rejects publication
+with `ERR_EVENT_LOG_LIMIT` while retaining the readable accepted history. No
+segment is compacted, overwritten during rollover, or discarded. The state cap
+leaves enough room for one complete event and metadata within a segment.
+Active waits observe segment publication as well as current-state replacement,
+including interruption between those two durable boundaries. Replay retains
+one bounded segment source, adjacent states, and the current stop's compact
+checkpoint/acceptance proof, rather than all historical snapshots. Public
+activity and recovery proofs scan the same validated prefix; derived progress
+is atomically streamed to disk. Replay memory therefore does not grow with the
+number of segments, and no authoritative record is removed to save memory.
+
+Lock-free readers discover an ordered segment prefix after reading current
+state, validate every revision and cross-segment transition, and reject missing,
+misnamed, oversized, or incomplete sealed segments. Only the last segment may
+have an incomplete tail; leased recovery truncates that tail and republishes
+lagging state and derived progress. Existing single-file journals load without
+migration of their records on read. Common-envelope version 21 and detached
+compatibility token `1:21` establish the segmented format. New runs begin with
+version 21 in the original journal; legacy runs require an explicit leased
+migration publishing a version-21 record there before rollover is permitted.
+Even if state replacement is interrupted, older readers reject that original
+journal instead of ignoring later segments and appending conflicting revisions.
+If the original segment lacks space for the migration record, publication fails
+with `ERR_EVENT_LOG_LIMIT` and retains the legacy history; migration cannot
+silently publish its barrier in a new segment. Readers reject segmented history
+without the original-segment barrier. Segment paths are reserved from
+run-artifact writes.
 
 Events may carry an optional bounded public activity record containing only
 `actor`, `phase`, `kind`, and a concise one-line `message`. Pipelines derive

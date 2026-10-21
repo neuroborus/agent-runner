@@ -6,6 +6,7 @@ import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 
+import { largeFinalizationResult } from "../support/index.js";
 import packageMetadata from "../../package.json" with { type: "json" };
 import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
 import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
@@ -1555,6 +1556,35 @@ test("normalizes app-server stdout failures", async () => {
   );
 });
 
+test("preserves a two-mebibyte result through escaped protocol envelopes and recovery context", async () => {
+  const structured = largeFinalizationResult('"');
+  const output = JSON.stringify(structured);
+  const fixture = createFixture({
+    handle({ message }) {
+      if (message.method === "turn/start") {
+        assert.equal(message.params.input[0].text, output);
+        return {
+          result: { turn: { id: "large-turn" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "large-turn",
+            output,
+          ),
+        };
+      }
+    },
+  });
+  const result = await fixture.adapter.run(
+    request({
+      prompt: output,
+      recoveryPrompt: output,
+      schema: planExecutionSchemas.FINALIZATION_SCHEMA,
+    }),
+  );
+  assert.equal(result.output, output);
+  assert.deepEqual(result.structured, structured);
+});
+
 test("runs a structured read-only turn with an explicit model", async () => {
   const fixture = createFixture({
     handle({ message }) {
@@ -1833,8 +1863,96 @@ test("accepts the protocol-default full completed-turn view", async () => {
   assert.equal((await fixture.adapter.run(request())).output, "done");
 });
 
+test("hydrates repeated large summarized results without reading accumulated history", async () => {
+  const structured = largeFinalizationResult();
+  const output = JSON.stringify(structured);
+  assert.equal(Buffer.byteLength(output), 2 * 1024 * 1024);
+  const history = [];
+  const fixture = createFixture({
+    handle({ message }) {
+      if (["thread/resume", "thread/fork"].includes(message.method)) {
+        const thread = {
+          id:
+            message.method === "thread/fork"
+              ? "child-thread"
+              : message.params.threadId,
+          ...(message.method === "thread/fork"
+            ? { forkedFromId: message.params.threadId }
+            : {}),
+          turns: message.params.excludeTurns ? [] : history,
+        };
+        return { result: { thread } };
+      }
+      if (message.method === "turn/start") {
+        const turnId = `large-turn-${history.length + 1}`;
+        history.push(
+          completedTurn(message.params.threadId, turnId, output).params.turn,
+        );
+        const notification = completedTurn(
+          message.params.threadId,
+          turnId,
+          "Summary.",
+        );
+        notification.params.turn.itemsView = "summary";
+        return { result: { turn: { id: turnId } }, notification };
+      }
+      if (message.method === "thread/read") {
+        return {
+          result: { thread: { id: message.params.threadId, turns: history } },
+        };
+      }
+      if (message.method === "thread/turns/list") {
+        assert.deepEqual(message.params, {
+          threadId: history.length === 9 ? "child-thread" : "large-thread",
+          limit: 1,
+          sortDirection: "desc",
+          itemsView: "full",
+        });
+        return {
+          result: {
+            data: history.slice(-1),
+            nextCursor: "older-turns",
+            backwardsCursor: null,
+          },
+        };
+      }
+      return undefined;
+    },
+  });
+
+  for (let index = 0; index < 9; index += 1) {
+    const result = await fixture.adapter.run(
+      request({
+        schema: planExecutionSchemas.FINALIZATION_SCHEMA,
+        session: {
+          mode: index === 8 ? "fork" : "continue",
+          id: "large-thread",
+        },
+      }),
+    );
+    assert.deepEqual(result.structured, structured);
+    assert.equal(
+      result.sessionId,
+      index === 8 ? "child-thread" : "large-thread",
+    );
+  }
+  assert.ok(
+    Buffer.byteLength(
+      JSON.stringify({ thread: { turns: history.slice(0, 8) } }),
+    ) >
+      16 * 1024 * 1024,
+  );
+  assert.equal(fixture.processes.length, 9);
+  assert.equal(
+    fixture.processes
+      .flatMap(({ messages }) => messages)
+      .filter(({ method }) => method === "thread/read").length,
+    0,
+  );
+});
+
 for (const itemsView of ["notLoaded", "summary"]) {
-  test(`hydrates a ${itemsView} completed turn from thread history`, async () => {
+  test(`hydrates a ${itemsView} completed turn with a bounded full-item read`, async () => {
     const turnId = `${itemsView}-turn`;
     const fixture = createFixture({
       handle({ message }) {
@@ -1853,19 +1971,20 @@ for (const itemsView of ["notLoaded", "summary"]) {
             notification,
           };
         }
-        if (message.method === "thread/read") {
+        if (message.method === "thread/turns/list") {
           assert.deepEqual(message.params, {
             threadId: "thread-0",
-            includeTurns: true,
+            limit: 1,
+            sortDirection: "desc",
+            itemsView: "full",
           });
           return {
             result: {
-              thread: {
-                id: "thread-0",
-                turns: [
-                  completedTurn("thread-0", turnId, "Hydrated.").params.turn,
-                ],
-              },
+              data: [
+                completedTurn("thread-0", turnId, "Hydrated.").params.turn,
+              ],
+              nextCursor: null,
+              backwardsCursor: null,
             },
           };
         }
@@ -1876,6 +1995,94 @@ for (const itemsView of ["notLoaded", "summary"]) {
     assert.equal((await fixture.adapter.run(request())).output, "Hydrated.");
   });
 }
+
+test("rejects missing, mismatched, excessive, or partial hydration without replay", async () => {
+  const full = completedTurn("thread-0", "hydrated-turn").params.turn;
+  for (const data of [
+    null,
+    [],
+    [null],
+    [{ ...full, id: "another-turn" }],
+    [full, full],
+    [{ ...full, itemsView: "summary" }],
+    [{ ...full, itemsView: "notLoaded" }],
+  ]) {
+    const fixture = createFixture({
+      handle({ message }) {
+        if (message.method === "turn/start") {
+          const notification = completedTurn(message.params.threadId, full.id);
+          notification.params.turn.itemsView = "summary";
+          return { result: { turn: { id: full.id } }, notification };
+        }
+        if (message.method === "thread/turns/list") {
+          return { result: { data, nextCursor: null, backwardsCursor: null } };
+        }
+        return undefined;
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(request({ access: "workspace-write" })),
+      hasCode("ERR_CODEX_PROTOCOL"),
+    );
+    assert.equal(fixture.processes.length, 1);
+    assert.equal(
+      fixture.processes[0].messages.filter(
+        ({ method }) => method === "turn/start",
+      ).length,
+      1,
+    );
+  }
+});
+
+test("audits full hydrated items before accepting output or refining native failures", async () => {
+  for (const [item, code, diagnosticClass] of [
+    [
+      { type: "subAgentActivity" },
+      "ERR_CODEX_ISOLATION",
+      "operation_multi_agent",
+    ],
+    [null, "ERR_CODEX_PROTOCOL", undefined],
+  ]) {
+    for (const failed of [false, true]) {
+      const fixture = createFixture({
+        handle({ message }) {
+          const turnId = "audited-turn";
+          if (message.method === "turn/start") {
+            const notification = failed
+              ? failedTurn(message.params.threadId, turnId, {
+                  codexErrorInfo: "other",
+                  message:
+                    "Incomplete response returned, reason: max_output_tokens",
+                })
+              : completedTurn(message.params.threadId, turnId);
+            notification.params.turn.itemsView = "summary";
+            return { result: { turn: { id: turnId } }, notification };
+          }
+          if (message.method === "thread/turns/list") {
+            const turn = failed
+              ? failedTurn(message.params.threadId, turnId, {
+                  codexErrorInfo: "other",
+                  message:
+                    "Incomplete response returned, reason: max_output_tokens",
+                }).params.turn
+              : completedTurn(message.params.threadId, turnId).params.turn;
+            // The unsafe item appears only in the full current-turn view.
+            turn.items.push(item);
+            return {
+              result: { data: [turn], nextCursor: null, backwardsCursor: null },
+            };
+          }
+          return undefined;
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(request()),
+        hasDiagnostic(code, diagnosticClass),
+      );
+      assert.equal(fixture.processes.length, 1);
+    }
+  }
+});
 
 test("rejects a null completed-turn view", async () => {
   const fixture = createFixture({
@@ -3378,7 +3585,7 @@ test("rejects invalid terminal turn statuses without recovery", async (t) => {
           handle({ message }) {
             if (
               message.method !== "turn/start" &&
-              !(hydrated && message.method === "thread/read")
+              !(hydrated && message.method === "thread/turns/list")
             ) {
               return undefined;
             }
@@ -3389,13 +3596,12 @@ test("rejects invalid terminal turn statuses without recovery", async (t) => {
               codexErrorInfo: "other",
             });
             notification.params.turn.status = status;
-            if (message.method === "thread/read") {
+            if (message.method === "thread/turns/list") {
               return {
                 result: {
-                  thread: {
-                    id: message.params.threadId,
-                    turns: [notification.params.turn],
-                  },
+                  data: [notification.params.turn],
+                  nextCursor: null,
+                  backwardsCursor: null,
                 },
               };
             }
@@ -4957,20 +5163,19 @@ test("hydrates summarized compaction and retries a full context once", async () 
         notification.params.turn.itemsView = "summary";
         return { result: {}, notification };
       }
-      if (message.method === "thread/read") {
+      if (message.method === "thread/turns/list") {
         return {
           result: {
-            thread: {
-              id: message.params.threadId,
-              turns: [
-                completedTurn(
-                  message.params.threadId,
-                  "compact-turn",
-                  "Compacted.",
-                  [{ type: "contextCompaction" }],
-                ).params.turn,
-              ],
-            },
+            data: [
+              completedTurn(
+                message.params.threadId,
+                "compact-turn",
+                "Compacted.",
+                [{ type: "contextCompaction" }],
+              ).params.turn,
+            ],
+            nextCursor: null,
+            backwardsCursor: null,
           },
         };
       }
@@ -5037,9 +5242,11 @@ test("hydrates summarized compaction and retries a full context once", async () 
     fixture.processes[0].messages
       .map(({ method }) => method)
       .filter((method) =>
-        ["turn/start", "thread/compact/start", "thread/read"].includes(method),
+        ["turn/start", "thread/compact/start", "thread/turns/list"].includes(
+          method,
+        ),
       ),
-    ["turn/start", "thread/compact/start", "thread/read", "turn/start"],
+    ["turn/start", "thread/compact/start", "thread/turns/list", "turn/start"],
   );
   const turnPrompts = fixture.processes[0].messages
     .filter(({ method }) => method === "turn/start")

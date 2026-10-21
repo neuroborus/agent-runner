@@ -1589,7 +1589,7 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
   const oversizedRun = { ...completed, pipelineState };
 
   assert.ok(Buffer.byteLength(JSON.stringify(oversizedRun)) > 1024 * 1024);
-  assert.throws(() => assertRun(oversizedRun), /durable size budget/u);
+  assert.doesNotThrow(() => assertRun(oversizedRun));
 
   const nearCapacityDetail = "n".repeat(3_500);
   const nearCapacityEvidence = "e".repeat(3_900);
@@ -1634,8 +1634,31 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
     workerSummary: "",
   };
   const targetBytes = MAX_DURABLE_RUN_BYTES - 256;
-  const baseBytes = Buffer.byteLength(
+  const paddedChildren = [...fixture.currentRun.sessionLineage.children];
+  const paddingChild = (index) => ({
+    role: "reviewer",
+    sessionId: `padding-${String(index).padStart(5, "0")}-${"界".repeat(1000)}`,
+  });
+  const sessionEntryBytes =
+    Buffer.byteLength(JSON.stringify(paddingChild(0))) + 1;
+  const initialBytes = Buffer.byteLength(
     JSON.stringify({ ...fixture.currentRun, pipelineState: nearCapacityBase }),
+  );
+  const childCount = Math.floor(
+    (targetBytes - initialBytes - 10_000) / sessionEntryBytes,
+  );
+  for (let index = 0; index < childCount; index += 1) {
+    paddedChildren.push(paddingChild(index));
+  }
+  const paddedRun = {
+    ...fixture.currentRun,
+    sessionLineage: {
+      ...fixture.currentRun.sessionLineage,
+      children: paddedChildren,
+    },
+  };
+  const baseBytes = Buffer.byteLength(
+    JSON.stringify({ ...paddedRun, pipelineState: nearCapacityBase }),
   );
   const paddingLength = targetBytes - baseBytes;
   assert.ok(paddingLength > 0 && paddingLength <= 20_000);
@@ -1644,7 +1667,7 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
     workerSummary: "w".repeat(paddingLength),
   };
   const nearCapacityRun = {
-    ...fixture.currentRun,
+    ...paddedRun,
     pipelineState: nearCapacityState,
   };
   assert.doesNotThrow(() => assertRun(nearCapacityRun));
@@ -1664,13 +1687,34 @@ test("rejects and refuses to recover inconsistent correction progress", async (t
     /durable size budget/u,
   );
 
-  await fixture.persistPipelineState(nearCapacityState);
-  const childrenBeforeArbitration = fixture.currentRun.sessionLineage.children;
-  await assert.rejects(fixture.run(), /durable size budget/u);
-  assert.deepEqual(
-    fixture.currentRun.sessionLineage.children,
-    childrenBeforeArbitration,
+  const retainedRun = fixture.currentRun;
+  const attemptedChildren = [];
+  await assert.rejects(
+    runPolishing({
+      run: nearCapacityRun,
+      runtime: {
+        ...fixture.runtime,
+        async startAgentTurn(activeTurn) {
+          return { ...nearCapacityRun, activeTurn };
+        },
+        async finishAgentTurn() {
+          return nearCapacityRun;
+        },
+        async recordChildSession(child) {
+          attemptedChildren.push(child);
+          throw new Error("Unexpected session publication.");
+        },
+        async transition(patch) {
+          assertRun({ ...nearCapacityRun, ...patch });
+          throw new Error("Unexpected transition.");
+        },
+      },
+      settings: SETTINGS,
+    }),
+    /durable size budget/u,
   );
+  assert.equal(attemptedChildren.length, 0);
+  assert.equal(fixture.currentRun, retainedRun);
 });
 
 test("preflights digit-boundary transition growth before persistence", async (t) => {
@@ -1715,17 +1759,20 @@ test("preflights digit-boundary transition growth before persistence", async (t)
   });
 
   let targetRun = buildTargetRun(".");
-  while (
-    MAX_DURABLE_RUN_BYTES - Buffer.byteLength(JSON.stringify(targetRun)) >
-    19_000
-  ) {
-    const prefix = `padding-${paddingChildren.length}-`;
-    paddingChildren.push({
-      role: "reviewer",
-      sessionId: `${prefix}${"s".repeat(1_024 - prefix.length)}`,
-    });
-    targetRun = buildTargetRun(".");
-  }
+  const paddingEntry = (index) => ({
+    role: "reviewer",
+    sessionId: `padding-${String(index).padStart(5, "0")}-${"界".repeat(1000)}`,
+  });
+  const entryBytes = Buffer.byteLength(JSON.stringify(paddingEntry(0))) + 1;
+  const count = Math.floor(
+    (MAX_DURABLE_RUN_BYTES -
+      Buffer.byteLength(JSON.stringify(targetRun)) -
+      10_000) /
+      entryBytes,
+  );
+  for (let index = 0; index < count; index += 1)
+    paddingChildren.push(paddingEntry(index));
+  targetRun = buildTargetRun(".");
   const remainingBytes =
     MAX_DURABLE_RUN_BYTES - Buffer.byteLength(JSON.stringify(targetRun));
   const resolvedSummary = "r".repeat(remainingBytes + 1);

@@ -32,21 +32,24 @@ export function implementationEvidence(state) {
   };
 }
 
-export function prepareImplementationRecovery(run, history, migrate) {
+export async function prepareImplementationRecovery(run, history, migrate) {
   recovered.delete(run);
   if (!run.pipelineState.implementationEvidenceLegacy) return;
   try {
     if (
-      !Array.isArray(history.events) ||
-      history.events.length === 0 ||
-      !isDeepStrictEqual(history.events.at(-1).state, history.run) ||
+      (!Array.isArray(history.events) &&
+        typeof history.events?.[Symbol.asyncIterator] !== "function") ||
       !isDeepStrictEqual(migrate(history.run), run)
     )
       return;
     const target = run.pipelineState;
     let evidence = null;
     let previous = null;
-    for (const [index, event] of history.events.entries()) {
+    let count = 0;
+    let lastEvent = null;
+    for await (const event of history.events) {
+      const index = count++;
+      lastEvent = event;
       if (
         event.revision !== index + 1 ||
         event.state.revision !== event.revision ||
@@ -110,6 +113,7 @@ export function prepareImplementationRecovery(run, history, migrate) {
       }
       previous = state;
     }
+    if (!isDeepStrictEqual(lastEvent?.state, history.run)) return;
     // A journal with no writable entry proves its clean baseline is original.
     if (
       evidence === null &&

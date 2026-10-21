@@ -202,6 +202,19 @@ asking for 100 entries, so a malformed or cyclic provider response cannot make
 discovery unbounded. These are protocol and safety bounds rather than user-work
 budgets, so they are intentionally not configuration settings.
 
+Structured role results have 2 MiB of serialized UTF-8 JSON headroom in every
+pipeline. This byte ceiling does not describe native output tokens, change
+model generation settings, or prove complete provider accounting. Adapter
+prompt/reconstruction and protocol envelopes accommodate accepted results and
+JSON escaping; the exact enclosing limits belong to
+[`ARCHITECTURE.md`](../ARCHITECTURE.md#structured-result-headroom). Semantic
+field limits and native failure classification remain independent.
+
+Codex reads only the complete current turn when hydrating a summarized
+completion and omits history from continuation and fork responses. Repeated
+accepted large results therefore do not accumulate into one protocol response;
+current-turn auditing and source-fork isolation remain mandatory.
+
 ## Normalized failures and recovery
 
 Provider requests may carry runner-owned abort and process-registration

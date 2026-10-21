@@ -504,6 +504,14 @@ Worker and never probes Reviewer or Arbiter.
 
 ## 6. Persistent State
 
+Each structured role result permits exactly 2 MiB (2,097,152 bytes) of
+serialized UTF-8 JSON; one-byte overflow is rejected. This is byte headroom,
+not a token budget. Semantic text, item, path, inventory, dispute, and correction
+bounds remain unchanged. New size diagnostics use `maximum-2-mebibytes` while
+historical `maximum-256-kibibytes` records remain valid. Rejected output is never
+retained. The root owns larger state/recovery containers and complete segmented
+journal recovery; see [the enclosing budgets](../../../docs/ARCHITECTURE.md#structured-result-headroom).
+
 Runner state must live outside both the task directory and target repository.
 
 Use an OS/user state directory, for example:
@@ -530,6 +538,7 @@ State layout:
 ├── .lease            # present only while a mutating owner is active
 ├── state.json
 ├── events.jsonl
+├── events-000001.jsonl # present after journal rollover; retain every segment
 ├── progress.md
 └── context/
     ├── worker.md
@@ -794,9 +803,11 @@ polling, daemon, or heartbeat. Same-host reads check owner process liveness
 immediately while exclusive acquisition and stale recovery retain their
 existing age threshold.
 
-### `events.jsonl`
+### Event journal
 
-Append-only machine-readable event history.
+Append-only machine-readable event history starts in `events.jsonl` and rolls
+over into contiguous segments under the root
+[journal contract](../../../docs/ARCHITECTURE.md#agent-context-recovery).
 
 Never rewrite previous events.
 
@@ -1958,13 +1969,21 @@ assigns contiguous `C1`-through-`Cn` IDs within each step. Reconciliation and
 arbitration cannot discard or reassign requirements. Infrastructure paths are
 deduplicated globally and fingerprinted by the runner.
 
-`validationSchedule` persists the complete ordered `{step, requiredChecks}`
-schedule and must equal the deterministic derivation from accepted role
-assignments. `requiredChecks` is the selected step's inventory. A confirmed
+`validationSchedule` persists one ordered `commands` catalog and a `steps` array
+of `{step, commandIndexes}` entries. Indexes are zero-based references into that
+catalog, so command text is retained once rather than repeated for every step.
+The schedule must equal the deterministic derivation from accepted role
+assignments. `requiredChecks` expands the selected step's inventory with its
+contiguous local check IDs. A confirmed
 `validationAmendment` records only that step, its amended inventory, and the
 confirming evidence fingerprint. It does not rewrite original role assignments
 or another step's schedule. Verified advancement clears the amendment and prior
 gates before selecting the next persisted inventory.
+
+State version 27 replaces the expanded schedule representation. Its leased
+version-26 migration verifies the old schedule against accepted role assignments
+before converting it, preserving all other evidence, amendments, correction
+accounting, and prepared or consumed effects. A null legacy schedule stays null.
 
 Each summary and inventory covers every substantive validation requirement but
 must not require staging, staged handoff, index mutation or inspection, an
@@ -2384,8 +2403,8 @@ Pipeline state version 16 expands inventory capacities to 256 per role and 512
 for aggregate evidence. Its leased version-15 migration preserves accepted
 64/128 inventories, finalization and review evidence, counters, terminal history,
 and consumed commit authorization without replaying effects or reloading
-configuration. Per-item and structured-output byte limits are unchanged; a
-count-valid result can still exceed the 256 KiB structured-result limit.
+configuration. Per-item and structured-output byte limits were unchanged by
+that migration; a count-valid result can still exceed the structured-result byte ceiling.
 
 Pipeline state version 15 adds `finalizationRecovery`, containing consumed
 `attempts`, explicit `additionalAttempts`, `required` and `pending` flags, and
@@ -3183,7 +3202,7 @@ the override resolves that blocker without changing the persisted Reviewer
 decision to `ACCEPTED`. The same applicable override is neither offered nor
 stored again.
 
-A user override must be explicitly recorded in `events.jsonl` and `progress.md`.
+A user override must be explicitly recorded in the event journal and `progress.md`.
 
 ---
 
@@ -3632,7 +3651,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 26 to
+74. every supported legacy version migrates through state version 27 to
     `independent` without reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.

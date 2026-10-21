@@ -141,6 +141,14 @@ than once.
 
 ## Persistent Run State
 
+Each structured role result permits exactly 2 MiB (2,097,152 bytes) of
+serialized UTF-8 JSON; one-byte overflow is rejected. This is byte headroom,
+not a token budget. Semantic text, item, path, inventory, dispute, and correction
+bounds remain unchanged. New size diagnostics use `maximum-2-mebibytes` while
+historical `maximum-256-kibibytes` records remain valid. Rejected output is never
+retained. The root owns larger state/recovery containers and complete segmented
+journal recovery; see [the enclosing budgets](../../../docs/ARCHITECTURE.md#structured-result-headroom).
+
 The root run store persists this pipeline outside the project and task
 directories using the common contract in
 [`docs/ARCHITECTURE.md`](../../../docs/ARCHITECTURE.md). Its versioned envelope

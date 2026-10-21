@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { readdir } from "node:fs/promises";
 import { isDeepStrictEqual } from "node:util";
 
 import { assertInactivityContinuity } from "./inactivity.js";
@@ -65,6 +66,13 @@ const TRANSITION_STATE_FIELDS = [
   "pipelineState",
 ];
 const MAX_EVENT_LOG_BYTES = 64 * 1024 * 1024;
+const MAX_EVENT_SEGMENTS = 1024;
+
+function eventFilename(index) {
+  return index === 0
+    ? EVENTS_FILENAME
+    : `events-${String(index).padStart(6, "0")}.jsonl`;
+}
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -115,6 +123,7 @@ function normalizeEvent(value, runId, lineNumber) {
         17,
         18,
         19,
+        20,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -170,20 +179,16 @@ function normalizeEvent(value, runId, lineNumber) {
   }
 }
 
-function assertEventContinuity(
-  events,
-  startIndex = 1,
-  resolveStopBoundary = null,
-) {
-  if (events[0].state.createdAt !== events[0].state.updatedAt) {
+function assertInitialEvent(event) {
+  if (event.state.createdAt !== event.state.updatedAt) {
     throw new RunStoreError("Initial event timestamps are inconsistent.", {
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
   if (
-    events[0].state.inactivityRecovery !== null ||
-    events[0].state.availabilityRetry !== null ||
-    events[0].state.observations !== null
+    event.state.inactivityRecovery !== null ||
+    event.state.availabilityRetry !== null ||
+    event.state.observations !== null
   ) {
     throw new RunStoreError(
       "Initial run cannot contain provider recovery or observations.",
@@ -192,75 +197,91 @@ function assertEventContinuity(
       },
     );
   }
-
-  for (let index = startIndex; index < events.length; index += 1) {
-    const previousState = events[index - 1].state;
-    const state = events[index].state;
-    try {
-      assertAvailabilityContinuity(previousState, state);
-      assertInactivityContinuity(previousState, state, events[index].activity);
-      assertObservationContinuity(previousState, state);
-    } catch {
-      throw new RunStoreError("Provider recovery history is inconsistent.", {
-        code: "ERR_INVALID_EVENT_LOG",
-      });
-    }
-    const previousChildren = previousState.sessionLineage.children;
-    const children = state.sessionLineage.children;
-    const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
-      (field) => !isDeepStrictEqual(state[field], previousState[field]),
-    );
-    const versionChanged = VERSION_STATE_FIELDS.some(
-      (field) => !isDeepStrictEqual(state[field], previousState[field]),
-    );
-    const migrationIsValid =
-      versionChanged &&
-      events[index].activity?.actor === "runner" &&
-      events[index].activity.phase === "runtime" &&
-      events[index].activity.kind === "migrated" &&
-      state.schemaVersion <= RUN_STATE_SCHEMA_VERSION &&
-      state.schemaVersion >= previousState.schemaVersion &&
-      state.pipelineStateVersion >= previousState.pipelineStateVersion &&
-      state.runtimeCompatibility?.runnerVersion ===
-        RUNTIME_COMPATIBILITY.runnerVersion &&
-      state.runtimeCompatibility?.runStateVersion === state.schemaVersion;
-    assertStopContinuity(events, index, migrationIsValid, resolveStopBoundary);
-    const lineageChanged =
-      state.sessionLineage.source !== previousState.sessionLineage.source ||
-      state.sessionLineage.sourceProfile !==
-        previousState.sessionLineage.sourceProfile ||
-      children.length < previousChildren.length ||
-      children.length > previousChildren.length + 1 ||
-      previousChildren.some(
-        (child, childIndex) => !isDeepStrictEqual(child, children[childIndex]),
-      );
-    const hasContentChange =
-      children.length > previousChildren.length ||
-      versionChanged ||
-      TRANSITION_STATE_FIELDS.some(
-        (field) => !isDeepStrictEqual(state[field], previousState[field]),
-      );
-
-    if (
-      (previousState.pipelineState.workflowState === "CANCELED" &&
-        state.pipelineState.workflowState !== "CANCELED") ||
-      immutableFieldChanged ||
-      (versionChanged && !migrationIsValid) ||
-      lineageChanged ||
-      state.updatedAt < previousState.updatedAt ||
-      (!hasContentChange && events[index].activity === null)
-    ) {
-      throw new RunStoreError(
-        `Event state continuity is invalid at line ${index + 1}.`,
-        { code: "ERR_INVALID_EVENT_LOG" },
-      );
-    }
-  }
 }
 
-function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
-  const current = events[index].state;
-  const previous = events[index - 1].state;
+function assertEventContinuity(
+  previous,
+  event,
+  stopProof,
+  resolveStopBoundary,
+) {
+  const previousState = previous.state;
+  const state = event.state;
+  try {
+    assertAvailabilityContinuity(previousState, state);
+    assertInactivityContinuity(previousState, state, event.activity);
+    assertObservationContinuity(previousState, state);
+  } catch {
+    throw new RunStoreError("Provider recovery history is inconsistent.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  }
+  const previousChildren = previousState.sessionLineage.children;
+  const children = state.sessionLineage.children;
+  const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
+    (field) => !isDeepStrictEqual(state[field], previousState[field]),
+  );
+  const versionChanged = VERSION_STATE_FIELDS.some(
+    (field) => !isDeepStrictEqual(state[field], previousState[field]),
+  );
+  const migrationIsValid =
+    versionChanged &&
+    event.activity?.actor === "runner" &&
+    event.activity.phase === "runtime" &&
+    event.activity.kind === "migrated" &&
+    state.schemaVersion <= RUN_STATE_SCHEMA_VERSION &&
+    state.schemaVersion >= previousState.schemaVersion &&
+    state.pipelineStateVersion >= previousState.pipelineStateVersion &&
+    state.runtimeCompatibility?.runnerVersion ===
+      RUNTIME_COMPATIBILITY.runnerVersion &&
+    state.runtimeCompatibility?.runStateVersion === state.schemaVersion;
+  const nextStopProof = assertStopContinuity(
+    previousState,
+    state,
+    migrationIsValid,
+    resolveStopBoundary,
+    stopProof,
+  );
+  const lineageChanged =
+    state.sessionLineage.source !== previousState.sessionLineage.source ||
+    state.sessionLineage.sourceProfile !==
+      previousState.sessionLineage.sourceProfile ||
+    children.length < previousChildren.length ||
+    children.length > previousChildren.length + 1 ||
+    previousChildren.some(
+      (child, childIndex) => !isDeepStrictEqual(child, children[childIndex]),
+    );
+  const hasContentChange =
+    children.length > previousChildren.length ||
+    versionChanged ||
+    TRANSITION_STATE_FIELDS.some(
+      (field) => !isDeepStrictEqual(state[field], previousState[field]),
+    );
+
+  if (
+    (previousState.pipelineState.workflowState === "CANCELED" &&
+      state.pipelineState.workflowState !== "CANCELED") ||
+    immutableFieldChanged ||
+    (versionChanged && !migrationIsValid) ||
+    lineageChanged ||
+    state.updatedAt < previousState.updatedAt ||
+    (!hasContentChange && event.activity === null)
+  ) {
+    throw new RunStoreError(
+      `Event state continuity is invalid at line ${event.revision}.`,
+      { code: "ERR_INVALID_EVENT_LOG" },
+    );
+  }
+  return nextStopProof;
+}
+
+function assertStopContinuity(
+  previous,
+  current,
+  migrating,
+  resolveStopBoundary,
+  proof,
+) {
   const stop = current.stopRequest;
   const prior = previous.stopRequest;
   const invalid = () => {
@@ -270,12 +291,26 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
   };
   if (stop === null) {
     if (prior !== null) invalid();
-    return;
+    return null;
   }
-  const checkpoint = events[stop.checkpoint.revision - 1]?.state;
-  const accepted = events[stop.acceptedRevision - 1]?.state.stopRequest;
+  // A new request names the immediately preceding checkpoint. Supersession
+  // retains that checkpoint; later transitions retain the accepted request.
+  const checkpoint =
+    stop.checkpoint.revision === previous.revision
+      ? {
+          revision: previous.revision,
+          workflowState: previous.pipelineState.workflowState,
+          activeTurn: previous.activeTurn,
+        }
+      : proof?.checkpoint;
+  const accepted =
+    prior?.requestId !== stop.requestId &&
+    stop.acceptedRevision === current.revision
+      ? stop
+      : proof?.accepted;
   if (
-    checkpoint?.pipelineState.workflowState !== stop.checkpoint.workflowState ||
+    checkpoint?.revision !== stop.checkpoint.revision ||
+    checkpoint.workflowState !== stop.checkpoint.workflowState ||
     !isDeepStrictEqual(checkpoint.activeTurn, stop.checkpoint.activeTurn) ||
     accepted?.requestId !== stop.requestId ||
     !isDeepStrictEqual(
@@ -310,7 +345,7 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
       !isDeepStrictEqual(previous.pipelineState, current.pipelineState)
     )
       invalid();
-    return;
+    return { checkpoint, accepted };
   }
   if (
     prior?.kind === "cancel_requested" ||
@@ -367,62 +402,130 @@ function assertStopContinuity(events, index, migrating, resolveStopBoundary) {
     ].some((field) => !isDeepStrictEqual(previous[field], current[field]))
   )
     invalid();
+  return { checkpoint, accepted };
 }
 
-async function readEvents(runDirectory, runId, resolveStopBoundary) {
-  const source = await readOptionalText(join(runDirectory, EVENTS_FILENAME));
-  if (source === null) {
-    throw new RunStoreError("Run event log is missing.", {
+async function* readEvents(
+  runDirectory,
+  runId,
+  resolveStopBoundary,
+  metadata = {},
+) {
+  const filenames = (await readdir(runDirectory)).filter(
+    (name) => name === EVENTS_FILENAME || /^events-[0-9]+\.jsonl$/iu.test(name),
+  );
+  // The original journal stays at its historical path; later segments are
+  // append-only and contiguous. No authoritative history is compacted away.
+  filenames.sort((a, b) =>
+    a === EVENTS_FILENAME ? -1 : b === EVENTS_FILENAME ? 1 : a < b ? -1 : 1,
+  );
+  if (
+    filenames.length === 0 ||
+    filenames.length > MAX_EVENT_SEGMENTS ||
+    filenames.some((name, index) => name !== eventFilename(index))
+  ) {
+    throw new RunStoreError("Run event segments are inconsistent.", {
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
-  if (Buffer.byteLength(source) > MAX_EVENT_LOG_BYTES) {
-    throw new RunStoreError("Run event log exceeds its size limit.", {
-      code: "ERR_INVALID_EVENT_LOG",
-    });
-  }
-
-  const hasPartialTail = !source.endsWith("\n");
-  const completeSource = hasPartialTail
-    ? source.slice(0, source.lastIndexOf("\n") + 1)
-    : source;
-  const lines = source.split("\n");
-  lines.pop();
-  if (lines.length === 0) {
-    throw new RunStoreError("Run event log has no complete records.", {
-      code: "ERR_INVALID_EVENT_LOG",
-    });
-  }
-
-  const events = lines.map((line, index) => {
-    if (line.length === 0) {
-      throw new RunStoreError(`Event line ${index + 1} is empty.`, {
+  let previous = null;
+  let stopProof = null;
+  let versionBarrier = false;
+  for (const [index, filename] of filenames.entries()) {
+    const source = await readOptionalText(join(runDirectory, filename));
+    if (source === null || Buffer.byteLength(source) > MAX_EVENT_LOG_BYTES) {
+      throw new RunStoreError(
+        "Run event log is missing or exceeds its size limit.",
+        {
+          code: "ERR_INVALID_EVENT_LOG",
+        },
+      );
+    }
+    const completeEnd = source.lastIndexOf("\n") + 1;
+    const hasPartialTail = completeEnd !== source.length;
+    if (index < filenames.length - 1 && hasPartialTail) {
+      throw new RunStoreError("A sealed event segment is incomplete.", {
         code: "ERR_INVALID_EVENT_LOG",
       });
     }
-    return normalizeEvent(
-      parseJson(line, `Event line ${index + 1}`, "ERR_INVALID_EVENT_LOG"),
-      runId,
-      index + 1,
-    );
-  });
-
-  for (const [index, event] of events.entries()) {
-    const expectedRevision = index + 1;
-    if (event.revision !== expectedRevision) {
-      throw new RunStoreError(
-        `Event revision must be ${expectedRevision}; received ${event.revision}.`,
-        { code: "ERR_INVALID_EVENT_LOG" },
-      );
+    if (completeEnd === 0) {
+      throw new RunStoreError("Run event log has no complete records.", {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
     }
+    // Parse and validate one snapshot at a time. Only this finite segment's
+    // source, the adjacent states, and the active stop proof survive a yield.
+    for (let start = 0; start < completeEnd;) {
+      const end = source.indexOf("\n", start);
+      const revision = (previous?.revision ?? 0) + 1;
+      const line = source.slice(start, end);
+      if (line.length === 0) {
+        throw new RunStoreError(`Event line ${revision} is empty.`, {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+      }
+      const event = normalizeEvent(
+        parseJson(line, `Event line ${revision}`, "ERR_INVALID_EVENT_LOG"),
+        runId,
+        revision,
+      );
+      if (event.revision !== revision) {
+        throw new RunStoreError(
+          `Event revision must be ${revision}; received ${event.revision}.`,
+          { code: "ERR_INVALID_EVENT_LOG" },
+        );
+      }
+      if (previous === null) assertInitialEvent(event);
+      else
+        stopProof = assertEventContinuity(
+          previous,
+          event,
+          stopProof,
+          resolveStopBoundary,
+        );
+      if (index === 0 && event.schemaVersion >= 21) versionBarrier = true;
+      previous = event;
+      start = end + 1;
+      yield event;
+    }
+    if (index === 0 && filenames.length > 1 && !versionBarrier) {
+      throw new RunStoreError("Segmented history lacks its version barrier.", {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
+    }
+    Object.assign(metadata, {
+      hasPartialTail,
+      validByteLength: Buffer.byteLength(source.slice(0, completeEnd)),
+      eventFilename: filename,
+      segmentCount: filenames.length,
+      versionBarrier,
+      stopProof,
+    });
   }
-  assertEventContinuity(events, 1, resolveStopBoundary);
+}
 
-  return {
-    events,
-    hasPartialTail,
-    validByteLength: Buffer.byteLength(completeSource),
-  };
+// Replays a validated snapshot's exact prefix. Later append-only publications
+// cannot change its meaning; inconsistent or replaced history grants no proof.
+async function* replaySnapshot(runDirectory, snapshot, resolveStopBoundary) {
+  for await (const event of readEvents(
+    runDirectory,
+    snapshot.state.runId,
+    resolveStopBoundary,
+  )) {
+    if (event.revision === snapshot.state.revision) {
+      if (!isDeepStrictEqual(event.state, snapshot.state)) {
+        throw new RunStoreError("Run changed during history replay.", {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+      }
+      yield event;
+      return;
+    }
+    yield event;
+  }
+  throw new RunStoreError("Run history ended before its snapshot.", {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
 }
 
 async function readStoredState(runDirectory, runId) {
@@ -449,52 +552,41 @@ async function readStoredState(runDirectory, runId) {
 
 async function loadSnapshot(runDirectory, runId, resolveStopBoundary) {
   const storedState = await readStoredState(runDirectory, runId);
-  const eventLog = await readEvents(runDirectory, runId, resolveStopBoundary);
-  const { events, hasPartialTail, validByteLength } = eventLog;
-  const lastEvent = events.at(-1);
-
-  if (storedState === null) {
-    return {
-      events,
-      hasPartialTail,
-      validByteLength,
-      state: lastEvent.state,
-      stateLagged: true,
-    };
+  const eventLog = {};
+  let lastEvent;
+  let storedStateMatched = storedState === null;
+  for await (const event of readEvents(
+    runDirectory,
+    runId,
+    resolveStopBoundary,
+    eventLog,
+  )) {
+    if (event.revision === storedState?.revision) {
+      storedStateMatched = isDeepStrictEqual(storedState, event.state);
+    }
+    lastEvent = event;
   }
-  if (storedState.revision > lastEvent.revision) {
+  if (storedState !== null && storedState.revision > lastEvent.revision) {
     throw new RunStoreError("Run state is ahead of its write-ahead log.", {
       code: "ERR_INVALID_RUN_STATE",
     });
   }
-
-  const matchingEvent = events[storedState.revision - 1];
-  if (!isDeepStrictEqual(storedState, matchingEvent?.state)) {
+  if (!storedStateMatched) {
     throw new RunStoreError("Run state does not match its write-ahead event.", {
       code: "ERR_INVALID_RUN_STATE",
     });
   }
-
   return {
-    events,
-    hasPartialTail,
-    validByteLength,
+    ...eventLog,
+    lastEvent,
     state: lastEvent.state,
-    stateLagged: storedState.revision < lastEvent.revision,
+    stateLagged:
+      storedState === null || storedState.revision < lastEvent.revision,
   };
 }
 
-function renderProgress(state, events) {
-  const activityLines = events
-    .filter((event) => event.activity !== null)
-    .map((event) => {
-      const { actor, kind, message, phase } = publicDispatchActivity(
-        event.activity,
-      );
-      return `- ${event.recordedAt} — ${actor}/${phase}/${kind}: ${message}`;
-    });
-
-  return [
+async function* renderProgress(state, events) {
+  yield [
     "# Agent Runner Progress",
     "",
     `Run: \`${state.runId}\``,
@@ -503,11 +595,18 @@ function renderProgress(state, events) {
     "",
     "## Activity",
     "",
-    ...(activityLines.length === 0
-      ? ["No public activity yet."]
-      : activityLines),
     "",
   ].join("\n");
+  let hasActivity = false;
+  for await (const event of events) {
+    if (event.activity === null) continue;
+    hasActivity = true;
+    const { actor, kind, message, phase } = publicDispatchActivity(
+      event.activity,
+    );
+    yield `- ${event.recordedAt} — ${actor}/${phase}/${kind}: ${message}\n`;
+  }
+  if (!hasActivity) yield "No public activity yet.\n";
 }
 
 async function writeState(runDirectory, state) {
@@ -520,7 +619,7 @@ async function writeState(runDirectory, state) {
 async function removePartialEventTail(runDirectory, snapshot) {
   if (snapshot.hasPartialTail) {
     await truncateDurableFile(
-      join(runDirectory, EVENTS_FILENAME),
+      join(runDirectory, snapshot.eventFilename ?? EVENTS_FILENAME),
       snapshot.validByteLength,
     );
   }
@@ -541,33 +640,51 @@ export function createStateJournal({
       state,
       activity,
     };
-    const nextEvents = [...snapshot.events, event];
-    if (snapshot.events.length > 0)
+    if (snapshot.lastEvent != null)
       assertEventContinuity(
-        nextEvents,
-        snapshot.events.length,
+        snapshot.lastEvent,
+        event,
+        snapshot.stopProof,
         resolveStopBoundary,
       );
     const serializedEvent = JSON.stringify(event);
+    const eventBytes = Buffer.byteLength(serializedEvent) + 1;
+    const rotate = snapshot.validByteLength + eventBytes > MAX_EVENT_LOG_BYTES;
+    const segmentCount = snapshot.segmentCount ?? 1;
+    // A legacy reader must reject the original journal before any event can
+    // be published in a path it cannot discover, even if state.json lags.
     if (
-      snapshot.validByteLength + Buffer.byteLength(serializedEvent) + 1 >
-      MAX_EVENT_LOG_BYTES
+      eventBytes > MAX_EVENT_LOG_BYTES ||
+      (rotate &&
+        (segmentCount >= MAX_EVENT_SEGMENTS || !snapshot.versionBarrier))
     ) {
       throw new RunStoreError("Run event log exceeds its size limit.", {
         code: "ERR_EVENT_LOG_LIMIT",
       });
     }
 
-    await appendDurableLine(
-      join(runDirectory, EVENTS_FILENAME),
-      serializedEvent,
-    );
+    if (rotate) {
+      // Publish a complete first record atomically before state replacement.
+      // Readers can observe either prefix without a missing or partial segment.
+      await atomicWriteFile(
+        join(runDirectory, eventFilename(segmentCount)),
+        `${serializedEvent}\n`,
+      );
+    } else {
+      await appendDurableLine(
+        join(runDirectory, snapshot.eventFilename ?? EVENTS_FILENAME),
+        serializedEvent,
+      );
+    }
     await onTransitionBoundary("event-appended");
     await writeState(runDirectory, state);
     await onTransitionBoundary("state-replaced");
     await atomicWriteFile(
       join(runDirectory, PROGRESS_FILENAME),
-      renderProgress(state, nextEvents),
+      renderProgress(
+        state,
+        replaySnapshot(runDirectory, { state }, resolveStopBoundary),
+      ),
     );
     await onTransitionBoundary("progress-replaced");
   }
@@ -578,17 +695,21 @@ export function createStateJournal({
       await writeState(runDirectory, snapshot.state);
     }
 
-    const expectedProgress = renderProgress(snapshot.state, snapshot.events);
-    const progressPath = join(runDirectory, PROGRESS_FILENAME);
-    if ((await readOptionalText(progressPath)) !== expectedProgress) {
-      await atomicWriteFile(progressPath, expectedProgress);
-    }
+    await atomicWriteFile(
+      join(runDirectory, PROGRESS_FILENAME),
+      renderProgress(
+        snapshot.state,
+        replaySnapshot(runDirectory, snapshot, resolveStopBoundary),
+      ),
+    );
   }
 
   return Object.freeze({
     appendTransition,
     loadSnapshot: (directory, runId) =>
       loadSnapshot(directory, runId, resolveStopBoundary),
+    replaySnapshot: (directory, snapshot) =>
+      replaySnapshot(directory, snapshot, resolveStopBoundary),
     recover,
   });
 }

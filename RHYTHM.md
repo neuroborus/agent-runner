@@ -5,6 +5,27 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21
+
+- **Structured results have two mebibytes of byte headroom.** All pipelines
+  accept exactly 2,097,152 serialized UTF-8 bytes while retaining semantic
+  bounds and historical diagnostics. Larger finite state and recovery containers
+  accommodate retained evidence copies. The journal rolls over at 64 MiB per
+  segment, preserving every revision, write-ahead ordering, and lock-free crash
+  recovery instead of exhausting a single file after a few large snapshots.
+  Incremental replay and streamed progress keep status, recovery proofs, and
+  appends from retaining every historical state in memory.
+  Common-envelope version 21 establishes a durable barrier in the original
+  journal before rollover, so older readers fail closed even after interrupted
+  state replacement. Execution state version 27 stores a single command catalog
+  with per-step indexes; long accepted commands no longer expand across every
+  plan step. Explicit migrations preserve evidence and consumed effects.
+  Codex uses the public bounded turn read and metadata-only continuation/fork
+  responses so accumulated valid results cannot overflow a history response;
+  the full current-turn audit and protocol cap remain enforced.
+  Summaries and public projections stay bounded; these bytes imply no token
+  budget, native generation setting, or complete provider usage accounting.
+
 ## 2026-10-20
 
 - **Output-exhausted checkpoints pause after reconciliation.** Each pipeline

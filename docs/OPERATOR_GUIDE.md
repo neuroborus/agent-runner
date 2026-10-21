@@ -464,6 +464,13 @@ whose stop is still applicable. Never manually delete, edit, or bypass lease
 files. Recover the recorded owner through supported actions, or wait for normal
 release or state-owned identity-based owner reclamation.
 
+Structured role results allow exactly 2 MiB of serialized UTF-8 JSON. Semantic
+field and inventory limits still apply. This is byte headroom, not a token
+budget or a native model output setting. Run journals may span contiguous
+bounded segments; preserve every segment when inspecting or recovering a run.
+Do not prune history to reclaim capacity. See
+[the storage contract](ARCHITECTURE.md#structured-result-headroom).
+
 ## 5. Recover a pause without taking over the work
 
 Some short runner bounds deliberately remain fixed. Each model-free subprocess

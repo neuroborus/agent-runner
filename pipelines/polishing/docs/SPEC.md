@@ -1127,6 +1127,14 @@ never restages an already verified handoff.
 
 ## Persistence And Resume
 
+Each structured role result permits exactly 2 MiB (2,097,152 bytes) of
+serialized UTF-8 JSON; one-byte overflow is rejected. This is byte headroom,
+not a token budget. Semantic text, item, path, inventory, dispute, and correction
+bounds remain unchanged. New size diagnostics use `maximum-2-mebibytes` while
+historical `maximum-256-kibibytes` records remain valid. Rejected output is never
+retained. The root owns larger state/recovery containers and complete segmented
+journal recovery; see [the enclosing budgets](../../../docs/ARCHITECTURE.md#structured-result-headroom).
+
 State lives outside both the target repository and task directory under the
 common external run store. Pipeline state includes resolved settings, baseline,
 input hashes, clarification status, backend versions, bootstrap summaries,
@@ -1354,7 +1362,8 @@ for aggregate, persisted, finalization, and fingerprint evidence. Its leased
 version-11 migration preserves legacy 64/128 inventories, counters, terminal
 history, and pending or completed handoff effects without replaying role work
 or reloading configuration. Per-item, structured-output, and durable byte limits
-remain unchanged; count-valid output can still exceed the 256 KiB result limit.
+were unchanged by that migration; count-valid output can still exceed the
+structured-result byte ceiling.
 Expanded schemas retain strict Claude preflight and existing sandbox restrictions,
 without enabling `allowAllUnixSockets: true` or broader host access.
 

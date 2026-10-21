@@ -101,13 +101,13 @@ export function createStopService({
         const requestId = action.record.keyHash;
         // The journal proves acceptance even if receipt publication was interrupted,
         // a competing cancellation won, or the pipeline has since terminated.
-        const accepted = snapshot.events.find(
-          (event) =>
+        for await (const event of journal.replaySnapshot(directory, snapshot)) {
+          if (
             event.state.stopRequest?.requestId === requestId &&
-            event.state.stopRequest.acceptedRevision === event.revision,
-        );
-        if (accepted !== undefined)
-          return receipt(runId, accepted.state.stopRequest);
+            event.state.stopRequest.acceptedRevision === event.revision
+          )
+            return receipt(runId, event.state.stopRequest);
+        }
         const current = snapshot.state;
         if (
           TERMINAL_STATES.has(current.pipelineState.workflowState) ||
@@ -349,11 +349,15 @@ export function createStopService({
   }
 
   async function checkpoint(runId) {
-    const snapshot = await loadSnapshot(await getRunDirectory(runId), runId);
+    const directory = await getRunDirectory(runId);
+    const snapshot = await loadSnapshot(directory, runId);
     const revision = snapshot.state.stopRequest?.checkpoint.revision;
-    return revision === undefined
-      ? null
-      : deepFreeze(snapshot.events[revision - 1].state);
+    if (revision !== undefined) {
+      for await (const event of journal.replaySnapshot(directory, snapshot)) {
+        if (event.revision === revision) return deepFreeze(event.state);
+      }
+    }
+    return null;
   }
 
   async function activity(lease, value) {
