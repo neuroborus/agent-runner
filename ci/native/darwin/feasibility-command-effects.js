@@ -27,6 +27,7 @@ import {
 } from "./feasibility.js";
 import {
   DARWIN_COLD_STARTUP_TRACE_INTENT,
+  assertDarwinColdStartupTrace,
   openDarwinStartupTrace,
 } from "./startup-trace.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
@@ -541,9 +542,12 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       maxBuffer: 1048576,
     });
   const call = (operation, signal) => command.call(operation, signal);
-  const finishColdTrace = async (operation) => {
+  const finishColdTrace = async (operation, requireComplete = false) => {
     const entry = coldTraces.get(operation);
-    if (!entry) return;
+    if (!entry) {
+      need(!requireComplete);
+      return;
+    }
     const trace = (entry.result ??= await entry.trace.finish());
     if (!entry.reported) {
       const report = JSON.stringify({ ...entry.binding, trace });
@@ -556,6 +560,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       entry.reported = true;
     }
     need(["RETIRED", "NOT_RUN"].includes(trace.cleanup));
+    if (requireComplete) assertDarwinColdStartupTrace(trace);
   };
   const snapshots = async (signal) =>
     JSON.parse(
@@ -804,17 +809,17 @@ export function createDarwinCommandEffects(dispatch, inputs) {
                 observe("startup-observer-retire", value),
             });
           coldTraces.set(operation, { trace, binding });
-          await trace.arm();
+          need((await trace.arm()).status === "armed");
         },
       });
       value.transport = command.transport;
       await command.ready;
       const version = await call("V", signal);
       need(version.stdout === "codex-cli 0.160.0\n" && version.exitCode === 0);
-      await finishColdTrace("V");
+      await finishColdTrace("V", true);
       const schema = await call("G", signal);
       need(schema.exitCode === 0);
-      await finishColdTrace("G");
+      await finishColdTrace("G", true);
       const readSchema = async (name) => {
         const file = path.join(root, "schema/v2", name),
           st = await lstat(file);

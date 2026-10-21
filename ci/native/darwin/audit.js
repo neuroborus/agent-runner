@@ -192,6 +192,7 @@ export function createDarwinAuditDecoder(reader, mappingValue) {
             returns = [],
             selectors = [],
             objects = [],
+            pathObjects = new Map(),
             descriptors = [];
           for (const token of tokens.slice(1, -1)) {
             if (token.kind === "subject") {
@@ -244,25 +245,52 @@ export function createDarwinAuditDecoder(reader, mappingValue) {
               if ([0x3e, 0x73].includes(token.type)) {
                 const bytes = Buffer.from(token.hex, "hex");
                 requireDarwin(bytes.length === (token.type === 0x3e ? 29 : 33));
-                objects.push({
+                const object = {
                   mode: bytes.readUInt32BE(1) & 0o7777,
                   uid: bytes.readUInt32BE(5),
                   gid: bytes.readUInt32BE(9),
                   device: String(bytes.readUInt32BE(13)),
                   inode: bytes.readBigUInt64BE(17).toString(),
-                });
+                };
+                objects.push(object);
+                if (event.selector === "path") {
+                  const index = selectors.length - 1;
+                  requireDarwin(index >= 0 && !pathObjects.has(index));
+                  pathObjects.set(index, {
+                    object,
+                    type: bytes.readUInt32BE(1) & 0o170000,
+                  });
+                }
               }
             }
           }
           requireDarwin(
             subjects.length === 1 &&
               returns.length === 1 &&
-              (event.selector === "none"
-                ? selectors.length === 0
-                : selectors.length === 1) &&
-              objects.length <= 1 &&
-              descriptors.length <= 1,
+              (event.selector === "none" || descriptors.length <= 1),
           );
+          let selected = 0;
+          if (event.selector === "path" && selectors.length > 1) {
+            // openat variants may carry a directory vnode before the operated
+            // vnode. Select only an unambiguous terminal file/FIFO attribute;
+            // an extra path alone or a second file never supplies authority.
+            requireDarwin(
+              event.opcode.startsWith("AUE_OPEN") &&
+                new Set(selectors).size === selectors.length &&
+                pathObjects.size === selectors.length &&
+                objects.length === selectors.length &&
+                selectors
+                  .slice(0, -1)
+                  .every(
+                    (_, index) => pathObjects.get(index).type === 0o040000,
+                  ) &&
+                [0o100000, 0o010000].includes(
+                  pathObjects.get(selectors.length - 1).type,
+                ),
+            );
+            selected = selectors.length - 1;
+          } else if (event.selector !== "none")
+            requireDarwin(selectors.length === 1 && objects.length <= 1);
           if (event.selector !== "none") {
             const subject = subjects[0],
               result = returns[0];
@@ -270,7 +298,7 @@ export function createDarwinAuditDecoder(reader, mappingValue) {
               id: digest(bytes),
               pid: subject.pid,
               opcode: event.opcode,
-              target: selectors[0],
+              target: selectors[selected],
               auid: subject.auid,
               asid: subject.asid,
               result: result.result,
@@ -280,7 +308,10 @@ export function createDarwinAuditDecoder(reader, mappingValue) {
               gid: subject.gid,
               kind: event.selector,
               descriptor: descriptors[0] ?? null,
-              nativeObject: objects[0] ?? null,
+              nativeObject:
+                event.selector === "path"
+                  ? (pathObjects.get(selected)?.object ?? null)
+                  : (objects[0] ?? null),
             });
           }
           bytes.fill(0);

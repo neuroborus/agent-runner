@@ -37,7 +37,11 @@ const barrier = (sequence, time) =>
 const record = Buffer.alloc(18, 1),
   framed = Buffer.concat([word(record.length), record]);
 const finish = Buffer.concat([word(0xffffffff), word(record.length), word(1)]);
-function decoder(change = (value) => value, attributeType = 0x3e) {
+function decoder(
+  change = (value) => value,
+  attributeType = 0x3e,
+  eventMapping = mapping,
+) {
   const token = Buffer.alloc(4 + Buffer.byteLength(path));
   token[0] = 0x23;
   token.writeUInt16BE(Buffer.byteLength(path) + 1, 1);
@@ -63,7 +67,7 @@ function decoder(change = (value) => value, attributeType = 0x3e) {
               kind: "header",
               version: 11,
               event: 1,
-              name: Buffer.from("AUE_OPEN").toString("hex"),
+              name: Buffer.from(eventMapping.events[0].opcode).toString("hex"),
               classes: 1,
               seconds: 100,
               milliseconds: 2,
@@ -87,7 +91,7 @@ function decoder(change = (value) => value, attributeType = 0x3e) {
           ],
         }),
     },
-    mapping,
+    eventMapping,
   );
 }
 const capture = () =>
@@ -190,6 +194,63 @@ test("audit truncation, unmatched mappings, ambiguous selectors and helper loss 
     await assert.rejects(d.push(word(0)));
   }
 });
+test("openat directory context selects only its terminal held file or FIFO and rejects ambiguous vnodes", async () => {
+  const events = [
+      { event: 1, opcode: "AUE_OPENAT_W", classes: 1, selector: "path" },
+    ],
+    eventMapping = {
+      ...mapping,
+      events,
+      mappingSha256: digest(JSON.stringify({ headerVersion: 11, events })),
+    };
+  for (const fault of [
+    null,
+    "file-context",
+    "duplicate",
+    "unpaired",
+    "directory-target",
+  ]) {
+    const d = decoder(
+      (value) => {
+        const directory = "/fixture",
+          bytes = Buffer.alloc(directory.length + 4);
+        bytes[0] = 0x23;
+        bytes.writeUInt16BE(directory.length + 1, 1);
+        bytes.write(directory, 3);
+        const attribute = Buffer.from(value.tokens[3].hex, "hex");
+        attribute.writeUInt32BE(
+          (fault === "file-context" ? 0o100000 : 0o040000) | 0o700,
+          1,
+        );
+        const target = Buffer.from(value.tokens[3].hex, "hex");
+        target.writeUInt32BE(
+          (fault === "directory-target" ? 0o040000 : 0o100000) | 0o400,
+          1,
+        );
+        value.tokens[3].hex = target.toString("hex");
+        const context = [
+          { kind: "metadata", type: 0x23, hex: bytes.toString("hex") },
+          { kind: "metadata", type: 0x3e, hex: attribute.toString("hex") },
+        ];
+        if (fault === "duplicate") context[0] = { ...value.tokens[2] };
+        if (fault === "unpaired") context.pop();
+        value.tokens.splice(2, 0, ...context);
+        return value;
+      },
+      0x3e,
+      eventMapping,
+    );
+    if (fault) await assert.rejects(d.push(capture()), /Unverified/);
+    else {
+      await d.push(capture());
+      const [event] = d.window(1, 2);
+      assert.equal(event.target, path);
+      assert.equal(event.nativeObject.inode, "4");
+      assert.equal(event.nativeObject.mode, 0o400);
+    }
+  }
+});
+
 test("missing acknowledged windows cannot become an audit witness", async () => {
   const d = decoder();
   await d.push(Buffer.concat([word(0), framed, finish]));

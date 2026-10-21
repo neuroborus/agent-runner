@@ -17,6 +17,7 @@ import {
 } from "../ci/native/darwin/index.js";
 import { feasibilityCommandParameters } from "../ci/native/providers/index.js";
 import { withNativeDiagnostics } from "../ci/native/index.js";
+import { assertDarwinColdStartupTrace } from "../ci/native/darwin/startup-trace.js";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex"),
   PIN = sha("fixture");
@@ -45,6 +46,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
       ).exec(source)?.[1],
     project = (value) =>
       value
+        .replaceAll("->", ".")
         .replace(/^#(?:ifdef|endif).*$/gmu, "")
         .replace("pid_t pids[4096];", "const pids=[];")
         .replace(
@@ -55,7 +57,10 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "auditpinfo_addr_t a={.ap_pid=pids[i]}, b={.ap_pid=pids[i]};",
           "const a={ap_pid:pids[i]}, b={ap_pid:pids[i]};",
         )
-        .replace("struct identity member;", "const member={token:{val:[]}};")
+        .replace(
+          "struct identity member;",
+          "const member={token:{val:[]},bsd:{}};",
+        )
         .replace(
           /struct identity (value|actual);/gu,
           "const $1={token:{val:[]},bsd:{}};",
@@ -63,7 +68,12 @@ function commandGuards(header, helper, body, caller, options = {}) {
         .replace("struct proc_bsdinfo bsd;", "const bsd={};")
         .replace("char byte;", "let byte;")
         .replace("struct timeval time;", "const time={};")
-        .replaceAll("&time", "time")
+        .replace(
+          "auditinfo_addr_t audit={0};",
+          "const audit={ai_termid:{},ai_mask:{}};",
+        )
+        .replaceAll("sizeof(audit)", "1")
+        .replace(/(?<!&)&time\b/gu, "time")
         .replace("au_mask_t empty={0,0};", "const empty={};")
         .replace(
           "struct auditpipe_ioctl_preselect choice={0};",
@@ -86,22 +96,23 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "1",
         )
         .replace(
-          /&(low|high|size|nonblocking)\b/gu,
+          /(?<!&)&(low|high|size|nonblocking)\b/gu,
           (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
         )
-        .replace(/&foreign\b/gu, "{set value(v){foreign=v}}")
-        .replace(/&right\b/gu, "{set value(v){right=v}}")
-        .replace(/&byte\b/gu, "{set value(v){byte=v}}")
+        .replace(/(?<!&)&foreign\b/gu, "{set value(v){foreign=v}}")
+        .replace(/(?<!&)&right\b/gu, "{set value(v){right=v}}")
+        .replace(/(?<!&)&byte\b/gu, "{set value(v){byte=v}}")
         .replace(
-          /&(prerequisite_status)\b/gu,
+          /(?<!&)&(prerequisite_status)\b/gu,
           "{set value(v){prerequisite_status=v}}",
         )
-        .replace(/&(\w+\.token|actual|value|bsd)\b/gu, "$1")
+        .replace(/(?<!&)&(\w+\.token|actual|value|bsd)\b/gu, "$1")
         .replace(
-          /&(before|after|a|b|member|queue|mode|empty|choice|status|attempt)\b/gu,
+          /(?<!&)&(before|after|a|b|member|queue|mode|empty|choice|status|attempt|audit)\b/gu,
           "$1",
         )
-        .replace(/\((?:int|unsigned|void|size_t|uint64_t)\)/gu, "")
+        .replaceAll("raw+3", "raw.subarray(3)")
+        .replace(/\((?:int|unsigned|void|size_t|uint64_t|pid_t)\)/gu, "")
         .replace(/\blong long /gu, "let ")
         .replace(
           /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t|ssize_t|size_t|uint32_t|uint64_t) /gu,
@@ -208,6 +219,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
     ...(options.audit ? [[header, "command_drain", ""]] : []),
+    ...(options.membership ? [[header, "command_absent", "pid"]] : []),
     ...(options.lifecycle
       ? [
           [helper, "live", "expected"],
@@ -1265,7 +1277,7 @@ test("Darwin command membership errors stop at their native call and preserve th
     const f = commandGuards(
       header,
       helper,
-      `const asid=55,signal_members=false;${body}`,
+      `const asid=55,signal_members=true;${body}`,
       "command_members",
       { cleanup: !!fault, context: { command_prerequisite: false } },
     );
@@ -1304,7 +1316,12 @@ test("Darwin command membership errors stop at their native call and preserve th
       inspect(pid, value) {
         assert.equal(pid, 42);
         value.token.val[6] = 55;
+        Object.assign(value.bsd, { pbi_start_tvsec: 90, pbi_start_tvusec: 1 });
         return sample("inspect");
+      },
+      signal_identity(value, signal) {
+        assert.equal(value.token.val[6], 55);
+        assert.equal(signal, 9);
       },
     });
     if (!fault) {
@@ -1371,6 +1388,314 @@ test("Darwin command membership errors stop at their native call and preserve th
     [5, 5, 13],
   );
 });
+test("Darwin census disappearance needs repeated complete absence and rejects replacement births", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const body =
+    /static unsigned command_members\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(body);
+  for (const fault of [
+    "nonempty",
+    "gone-before",
+    "gone-audit",
+    "gone-after",
+    "gone-audit-after",
+    "present",
+    "replaced",
+    "incomplete",
+    "inventory-error",
+    "duplicate",
+    "permission",
+    "birth",
+  ]) {
+    const f = commandGuards(
+      header,
+      helper,
+      `const asid=55,signal_members=false;${body}`,
+      "command_members",
+      {
+        membership: true,
+        context: { command_prerequisite: false, command_owner: 0 },
+      },
+    );
+    let lists = 0,
+      bsds = 0,
+      audits = 0;
+    const failed = (operation) =>
+      fault === operation ||
+      ([
+        "present",
+        "replaced",
+        "incomplete",
+        "inventory-error",
+        "permission",
+        "duplicate",
+      ].includes(fault) &&
+        operation === "gone-before");
+    Object.assign(f.context, {
+      PROC_ALL_PIDS: 1,
+      PROC_PIDTBSDINFO: 2,
+      A_GETPINFO_ADDR: 3,
+      SZOMB: 5,
+      proc_listpids(_kind, _uid, pids) {
+        lists++;
+        f.context.errno = 0;
+        if (lists === 1 || ["present", "replaced"].includes(fault))
+          pids.push(42);
+        else {
+          pids.push(43);
+          if (fault === "duplicate") pids.push(43);
+        }
+        if (lists > 1 && fault === "inventory-error") {
+          f.context.errno = 5;
+          return 0;
+        }
+        return lists > 1 && fault === "incomplete" ? 4096 : pids.length;
+      },
+      proc_pidinfo(_pid, _kind, _flavor, value) {
+        f.context.errno = 0;
+        const operation = bsds++ ? "gone-after" : "gone-before";
+        if (failed(operation)) {
+          f.context.errno = fault === "permission" ? 13 : 3;
+          return 0;
+        }
+        Object.assign(value, {
+          pbi_start_tvsec: 90,
+          pbi_start_tvusec: fault === "birth" && bsds > 1 ? 2 : 1,
+          pbi_uid: 501,
+          pbi_gid: 20,
+          pbi_status: 1,
+        });
+        return 1;
+      },
+      auditon(_kind, value) {
+        f.context.errno = 0;
+        const operation = audits++ ? "gone-audit-after" : "gone-audit";
+        if (failed(operation)) {
+          f.context.errno = 3;
+          return -1;
+        }
+        Object.assign(value, { ap_asid: 55, ap_auid: 501 });
+        return 0;
+      },
+      inspect() {
+        assert.fail("Unproved snapshots never acquire a signal identity");
+      },
+    });
+    if (fault === "nonempty") {
+      assert.equal(f.run(), 1);
+      assert.equal(lists, 1);
+    } else if (fault.startsWith("gone-")) {
+      assert.equal(f.run(), 0, fault);
+      assert.equal(lists, 3, fault);
+      assert.equal(f.context.failed_operation, null);
+    } else assert.throws(f.run, undefined, fault);
+  }
+});
+
+test("Darwin native target and post-operation marker join exact subjects, open variants and causal delivery", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const record = /static void command_record\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    header,
+  )?.[1];
+  assert.ok(record);
+  const paths = /      if\(command_action>=0[\s\S]*?\n      \}/u.exec(
+      record,
+    )?.[0],
+    join = /  if\(opening &&[\s\S]*?\n  \}/u.exec(record)?.[0],
+    opening = /opening=!strncmp\([^;]+;/u.exec(record)?.[0];
+  assert.ok(paths && join && opening);
+  for (const opcode of ["AUE_OPEN_W", "AUE_OPENAT_W", "AUE_OPEN_EXTENDED_W"]) {
+    const f = commandGuards(
+      header,
+      helper,
+      `${opening}\n${paths}\nif(extra){raw=extra;token={id:0x23,len:raw.length};${paths}}\n${join}`,
+      "command_record",
+    );
+    Object.assign(f.context, {
+      AUT_PATH: 0x23,
+      command_action: 2,
+      command_target: [null, null, "/fixture/target"],
+      command_gate: "/fixture/gate",
+      command_case_started: 100,
+      command_attempt_time: 0,
+      command_case_identity: {
+        token: { val: [501, 501, 20, 501, 20, 42, 17] },
+      },
+      command_attempt_seen: false,
+      command_attempt_permitted: false,
+      command_marker_seen: false,
+      subject: 42,
+      auid: 501,
+      asid: 17,
+      uid: 501,
+      gid: 20,
+      stamp: 101,
+      error: 0,
+      result: 3,
+      e: { ae_name: opcode },
+      extra: Buffer.from([0x23, 0, 0, ...Buffer.from("/fixture/context"), 0]),
+      strncmp: (a, b, n) => Number(a.slice(0, n) !== b.slice(0, n)),
+      strlen: (value) => value.length,
+      memcmp: (a, b, n) =>
+        Number(!a.subarray(0, n).equals(Buffer.from(b).subarray(0, n))),
+    });
+    const event = (name, changes = {}) => {
+      const raw = Buffer.from([0x23, 0, 0, ...Buffer.from(name), 0]);
+      Object.assign(f.context, {
+        raw,
+        token: { id: 0x23, len: raw.length },
+        target: false,
+        marker: false,
+        ...changes,
+      });
+      f.run();
+    };
+    event("/fixture/gate");
+    assert.equal(f.context.command_marker_seen, false);
+    event("/fixture/target", { subject: 43 });
+    assert.equal(f.context.command_attempt_seen, false);
+    event("/fixture/target", { subject: 42, stamp: 99 });
+    assert.equal(f.context.command_attempt_seen, false);
+    event("/fixture/target", { stamp: 102 });
+    assert.equal(f.context.command_attempt_seen, true);
+    assert.equal(f.context.command_attempt_permitted, true);
+    event("/fixture/gate", { stamp: 103, asid: 18 });
+    assert.equal(f.context.command_marker_seen, false);
+    event("/fixture/gate", { asid: 17, error: 13, result: -1 });
+    assert.equal(f.context.command_marker_seen, false);
+    event("/fixture/gate", { error: 0, result: 3 });
+    assert.equal(f.context.command_marker_seen, true);
+  }
+});
+
+test("Darwin producer coverage is set and read back only in the owned launcher's audit session", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = header.indexOf(
+      "    auditinfo_addr_t audit={0};",
+      header.indexOf("static struct identity command_spawn("),
+    ),
+    end = header.indexOf("    command_native(setgroups", start);
+  assert.ok(start > 0 && end > start);
+  for (const fault of [
+    null,
+    "set",
+    "get",
+    "auid",
+    "session",
+    "success-mask",
+    "failure-mask",
+  ]) {
+    const calls = [],
+      f = commandGuards(
+        header,
+        helper,
+        header.slice(start, end),
+        "command_spawn",
+      );
+    Object.assign(f.context, {
+      command_uid: 501,
+      AU_ASSIGN_ASID: -1,
+      AU_IPv4: 4,
+      command_classes: () => 7,
+      setaudit_addr(value) {
+        calls.push("set");
+        assert.equal(value.ai_auid, 501);
+        assert.equal(value.ai_asid, -1);
+        assert.equal(value.ai_mask.am_success, 7);
+        assert.equal(value.ai_mask.am_failure, 7);
+        f.context.errno = 5;
+        return fault === "set" ? -1 : 0;
+      },
+      getaudit_addr(value) {
+        calls.push("get");
+        value.ai_asid = fault === "session" ? 0 : 17;
+        if (fault === "auid") value.ai_auid = 502;
+        if (fault === "success-mask") value.ai_mask.am_success = 0;
+        if (fault === "failure-mask") value.ai_mask.am_failure = 0;
+        f.context.errno = 13;
+        return fault === "get" ? -1 : 0;
+      },
+    });
+    if (fault) assert.throws(f.run);
+    else f.run();
+    assert.deepEqual(calls, fault === "set" ? ["set"] : ["set", "get"]);
+  }
+});
+
+test("Darwin completion keeps the helper parked until target, marker, birth, policy and held reads join", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const body = /static void command_case_finish\(void\) \{([\s\S]*?)\n\}/u.exec(
+    header,
+  )?.[1];
+  assert.ok(body);
+  for (const fault of [null, "target", "marker", "birth", "policy"]) {
+    const f = commandGuards(header, helper, body, "command_case_finish");
+    const reads = [];
+    Object.assign(f.context, {
+      command_attempt_seen: false,
+      command_marker_seen: false,
+      command_case_identity: { token: { val: [0, 0, 0, 0, 0, 42] } },
+      command_control: false,
+      command_action: 0,
+      command_helper: "/fixture/helper",
+      command_helper_hash: PIN,
+      sandbox_binding: {},
+      command_gate_fd: 7,
+      command_poll() {
+        f.context.command_attempt_seen = fault !== "target";
+        f.context.command_marker_seen = fault !== "marker";
+      },
+      live: () => fault !== "birth",
+      command_image_identity: () => reads.push("image"),
+      feasibility_sandbox_active: () => (fault === "policy" ? 0 : 1),
+      command_object: () => reads.push("object"),
+      command_gate_object: () => reads.push("gate"),
+      emit_identity() {},
+      printf() {},
+      puts() {},
+      write(fd, byte) {
+        assert.equal(fd, 7);
+        assert.equal(byte, "F");
+        reads.push("release");
+        return 1;
+      },
+    });
+    if (fault) {
+      assert.throws(f.run);
+      assert.ok(!reads.includes("release"), fault);
+    } else {
+      f.run();
+      assert.deepEqual(reads, ["image", "object", "gate", "release"]);
+    }
+    if (["target", "marker", "birth"].includes(fault))
+      assert.ok(
+        f.diagnostics[0][2].includes(
+          fault === "birth"
+            ? "live(command_case_identity)"
+            : `command_${fault === "target" ? "attempt" : "marker"}_seen`,
+        ),
+      );
+  }
+});
+
 function fixture(change = () => {}) {
   const calls = [],
     requests = [],
@@ -2600,6 +2925,43 @@ test("Darwin broker refuses an unjoined cold child without releasing it", async 
     assert.deepEqual(f.sent, ["V"]);
     assert.deepEqual(f.signals, ["SIGTERM"]);
   }
+});
+
+test("cold admission refuses missing or partial trace reports while retirement remains independently consumable", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/darwin/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    start = source.indexOf("  const finishColdTrace ="),
+    end = source.indexOf("  const snapshots =", start);
+  assert.ok(start > 0 && end > start);
+  const coldTraces = new Map(),
+    reports = [],
+    finish = new Script(
+      `${source.slice(start, end)}finishColdTrace`,
+    ).runInNewContext({
+      coldTraces,
+      root: "/fixture",
+      path,
+      assertDarwinColdStartupTrace,
+      need: (ok) => assert.ok(ok),
+      nativeDiagnostic() {},
+      writeFile: async (_file, report) => reports.push(JSON.parse(report)),
+    });
+  await assert.rejects(finish("V", true));
+  await finish("V");
+  coldTraces.set("G", {
+    binding: { operation: "G" },
+    trace: { finish: async () => ({ status: "partial", cleanup: "RETIRED" }) },
+  });
+  await assert.rejects(finish("G", true));
+  await finish("G");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].trace.status, "partial");
+  assert.equal(reports[0].trace.cleanup, "RETIRED");
 });
 
 test("Darwin failed cold requests settle every trace after domain retirement without replacing its failure", async () => {

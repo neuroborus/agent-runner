@@ -9,6 +9,8 @@ import { Script } from "node:vm";
 import {
   DARWIN_STARTUP_TRACE_INTENT,
   DARWIN_COLD_STARTUP_TRACE_INTENT,
+  DARWIN_STARTUP_TRACE_LIMITS,
+  assertDarwinColdStartupTrace,
   openDarwinStartupTrace,
 } from "../ci/native/darwin/startup-trace.js";
 import { darwinSignatureDiagnostics } from "../ci/native/darwin/signature-logs.js";
@@ -2830,9 +2832,15 @@ function traceFixture({
             : DARWIN_STARTUP_TRACE_INTENT
           ).programSha256,
         );
-        assert.match(program, /^#pragma D option strsize=129$/mu);
+        assert.ok(
+          program.includes(
+            `#pragma D option strsize=${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes + 1 : 129}\n`,
+          ),
+        );
         assert.equal(
-          program.match(/copyinstr\(self->pointer, 128\)/gu)?.length,
+          program.split(
+            `copyinstr(self->pointer, ${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes : 128})`,
+          ).length - 1,
           1,
         );
         assert.ok(program.includes("%S\\n"));
@@ -2950,6 +2958,95 @@ function traceFixture({
     },
   };
 }
+
+test("cold schema capture crosses former byte and record caps without losing pairings or its digest", async () => {
+  const f = traceFixture({ coldCommand: true });
+  await f.trace.arm();
+  const rows = [...TRACE_START];
+  let time = 101;
+  const numeric = (name, args, result) => {
+    const syscall = name === "mmap" || name === "mprotect";
+    if (syscall) rows.push(`entry 42 ${time++} ${name}`);
+    rows.push(`numeric-entry 42 ${time++} ${name} 7 ${args}`);
+    if (syscall) rows.push(`return 42 ${time++} ${name} 0 ${result}`);
+    rows.push(
+      `numeric-return 42 ${time++} ${name} 7 ${syscall ? 0 : -1} ${result}`,
+    );
+  };
+  numeric("sysconf", "29", "4096");
+  numeric("pthread_get_stackaddr_np", "1", "32768");
+  numeric("pthread_get_stacksize_np", "1", "8192");
+  numeric("mprotect", "8192 4096 0", "0");
+  for (let i = 0; i < 256; i++) {
+    rows.push(`entry 42 ${time++} openat`);
+    rows.push(
+      `argument-entry 42 ${time++} openat 8 complete 0 0 /fixture/schema/${"s".repeat(180)}-${i}\\0`,
+    );
+    rows.push(`return 42 ${time++} openat 0 10`);
+    rows.push(`argument-return 42 ${time++} openat 8 0 10`);
+    numeric("mmap", "0 4096 3 4098 10 0", "8192");
+  }
+  rows.push(`exit 42 ${time++}`);
+  const bytes = Buffer.from(rows.join("\n") + "\n");
+  assert.ok(bytes.length > 65536);
+  for (let offset = 0, part = 0; offset < bytes.length; part++) {
+    const size = [1, 7, 1023, 4096][part % 4];
+    f.child.stdout.write(bytes.subarray(offset, offset + size));
+    offset += size;
+  }
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.argumentStatus, "complete");
+  assert.equal(result.numericStatus, "complete");
+  assert.equal(result.arguments.length, 256);
+  assert.equal(result.runtime.mmap.length, 256);
+  assert.equal(result.events, rows.length);
+  assert.equal(
+    result.sha256,
+    createHash("sha256").update(rows.join("\n")).digest("hex"),
+  );
+  assert.equal(assertDarwinColdStartupTrace(result), result);
+  for (const change of [
+    { status: "partial" },
+    { captureComplete: false },
+    { cleanup: "UNCERTAIN" },
+    { argumentStatus: "missing" },
+    { numericStatus: "missing" },
+    { sha256: null },
+    {
+      arguments: Array(DARWIN_STARTUP_TRACE_LIMITS.arguments + 1).fill(
+        result.arguments[0],
+      ),
+    },
+    {
+      runtime: {
+        ...result.runtime,
+        mmap: Array(DARWIN_STARTUP_TRACE_LIMITS.numeric + 1).fill(
+          result.runtime.mmap[0],
+        ),
+      },
+    },
+  ])
+    assert.throws(() => assertDarwinColdStartupTrace({ ...result, ...change }));
+});
+
+test("cold capture overflow and missing exec or exit refuse admission while independent retirement still runs", async () => {
+  for (const bytes of [
+    Buffer.alloc(DARWIN_STARTUP_TRACE_LIMITS.bytes + 1, 32),
+    Buffer.from("entry 42 101 open\nreturn 42 102 open 0 3\nexit 42 103\n"),
+    Buffer.from(TRACE_START.join("\n") + "\n"),
+  ]) {
+    const f = traceFixture({ coldCommand: true });
+    await f.trace.arm();
+    f.child.stdout.write(bytes);
+    await f.close();
+    const result = await f.trace.finish();
+    assert.notEqual(result.status, "observed");
+    assert.equal(result.sha256, null);
+    assert.equal(result.cleanup, "RETIRED");
+    assert.throws(() => assertDarwinColdStartupTrace(result));
+  }
+});
 
 test("cold startup numeric observations retain exact guard mapping inputs separately from protection", async () => {
   const f = traceFixture({ coldCommand: true });
@@ -3281,7 +3378,7 @@ test("startup argument limitations never identify a denied object from a prefix 
     "argument-entry 42 102 csrctl 8 complete 4294967296 0 \n",
     "argument-entry 42 102 open 8 complete 0 0 " + "x".repeat(1025),
     Array.from(
-      { length: 64 },
+      { length: DARWIN_STARTUP_TRACE_LIMITS.arguments },
       (_, i) =>
         `argument-entry 42 102 open ${100 + i} complete 0 0 /neutral\\0\n`,
     ).join(""),

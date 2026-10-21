@@ -35,6 +35,7 @@ static struct identity command_case_identity;
 static int command_action = -1;
 static bool command_attempt_seen, command_attempt_permitted, command_marker_seen;
 static bool command_control;
+static uint64_t command_case_started, command_attempt_time;
 static char command_control_before[512], command_control_after[512];
 static char command_control_gate_before[256], command_control_gate_after[256];
 static au_asid_t command_case_asid;
@@ -69,6 +70,19 @@ static void command_health(void) {
   command_native(ioctl(command_audit,AUDITPIPE_GET_TRUNCATES,&truncated), == 0);
   need(!drops && !truncated);
 }
+/* ESRCH is only a race candidate. Two fresh complete all-PID inventories must
+ * exclude the name; a replacement or failed/incomplete inventory still refuses. */
+static bool command_absent(pid_t pid) {
+  for(unsigned pass=0;pass<2;pass++) {
+    pid_t pids[4096];errno=0;int size=proc_listpids(PROC_ALL_PIDS,0,pids,sizeof(pids)), error=errno;
+    command_observed(!error && size>0, size, error);need(size<(int)sizeof(pids)&&size%sizeof(pid_t)==0);
+    for(unsigned i=0;i<(unsigned)size/sizeof(pid_t);i++) {
+      if(!pids[i])continue;need(pids[i]>0);for(unsigned j=0;j<i;j++)need(pids[i]!=pids[j]);
+      if(pids[i]==pid)return false;
+    }
+  }
+  return true;
+}
 static unsigned command_members(au_asid_t asid, bool signal_members) {
   pid_t pids[4096]; errno=0; int size=proc_listpids(PROC_ALL_PIDS,0,pids,sizeof(pids));
   int list_error=errno; command_observed(!list_error && size>0, size, list_error);
@@ -78,15 +92,23 @@ static unsigned command_members(au_asid_t asid, bool signal_members) {
     if (!pids[i]) continue;
     need(pids[i]>0); for(unsigned j=0;j<i;j++) need(pids[i]!=pids[j]);
     struct proc_bsdinfo before, after; auditpinfo_addr_t a={.ap_pid=pids[i]}, b={.ap_pid=pids[i]};
-    command_native(proc_pidinfo(pids[i],PROC_PIDTBSDINFO,1,&before,sizeof(before)), == sizeof(before));
-    command_native(auditon(A_GETPINFO_ADDR,&a,sizeof(a)), == 0);
-    command_native(proc_pidinfo(pids[i],PROC_PIDTBSDINFO,1,&after,sizeof(after)), == sizeof(after));
-    command_native(auditon(A_GETPINFO_ADDR,&b,sizeof(b)), == 0);
+    errno=0;int first=proc_pidinfo(pids[i],PROC_PIDTBSDINFO,1,&before,sizeof(before)), first_error=errno;
+    if(first!=sizeof(before)){if(!first&&first_error==ESRCH&&command_absent(pids[i]))continue;command_observed(first==sizeof(before), first, first_error);}
+    errno=0;int audit_first=auditon(A_GETPINFO_ADDR,&a,sizeof(a)), audit_first_error=errno;
+    if(audit_first){if(audit_first_error==ESRCH&&command_absent(pids[i]))continue;command_observed(audit_first==0, audit_first, audit_first_error);}
+    errno=0;int last=proc_pidinfo(pids[i],PROC_PIDTBSDINFO,1,&after,sizeof(after)), last_error=errno;
+    if(last!=sizeof(after)){if(!last&&last_error==ESRCH&&command_absent(pids[i]))continue;command_observed(last==sizeof(after), last, last_error);}
+    errno=0;int audit_last=auditon(A_GETPINFO_ADDR,&b,sizeof(b)), audit_last_error=errno;
+    if(audit_last){if(audit_last_error==ESRCH&&command_absent(pids[i]))continue;command_observed(audit_last==0, audit_last, audit_last_error);}
     need(before.pbi_start_tvsec==after.pbi_start_tvsec &&
-      before.pbi_start_tvusec==after.pbi_start_tvusec && before.pbi_uid==after.pbi_uid && a.ap_asid==b.ap_asid && a.ap_auid==b.ap_auid);
+      before.pbi_start_tvusec==after.pbi_start_tvusec && before.pbi_uid==after.pbi_uid &&
+      before.pbi_gid==after.pbi_gid && a.ap_asid==b.ap_asid && a.ap_auid==b.ap_auid);
     if (a.ap_asid==asid) { need(++found<=32); if(after.pbi_status==SZOMB){need(before.pbi_status==SZOMB);continue;}
-      struct identity member; need(inspect(pids[i],&member)); need(member.token.val[6]==(unsigned)asid);
-      if(signal_members) signal_identity(member,SIGKILL); }
+      /* Counting an observed member as nonempty needs no new task-name right.
+       * Only signalling acquires authority, joined back to this sampled birth. */
+      if(signal_members){struct identity member; need(inspect(pids[i],&member)); need(member.token.val[6]==(unsigned)asid &&
+        member.bsd.pbi_start_tvsec==before.pbi_start_tvsec && member.bsd.pbi_start_tvusec==before.pbi_start_tvusec);
+        signal_identity(member,SIGKILL);} }
   }
   return found;
 }
@@ -205,7 +227,8 @@ static uint64_t command_u64(const unsigned char *p){return ((uint64_t)command_u3
 static void command_record(unsigned char *bytes, size_t size) {
   need(AUT_ATTR32==0x3e && AUT_ATTR64==0x73 && AUT_PATH==0x23);
   printf("{\"event\":\"audit\",\"hex\":\""); command_hex(bytes,size); printf("\",\"tokens\":{\"tokens\":[");
-  unsigned count=0,headers=0,subjects=0,returns=0,trailers=0; size_t offset=0; pid_t subject=0; bool target=false,marker=false; int error=-1;
+  unsigned count=0,headers=0,subjects=0,returns=0,trailers=0; size_t offset=0; pid_t subject=0; unsigned auid=0,asid=0,uid=0,gid=0;
+  bool target=false,marker=false,opening=false; int error=-1; long long result=-1; uint64_t stamp=0;
   while(offset<size){ tokenstr_t token={0};need(++count<=256);command_native(au_fetch_tok(&token,bytes+offset,(int)(size-offset)), == 0);need(token.len>0 && (size_t)token.len<=size-offset);
     const unsigned char *raw=bytes+offset;
     if(token.id==AUT_HEADER32 || token.id==AUT_HEADER64 || token.id==AUT_HEADER32_EX || token.id==AUT_HEADER64_EX){
@@ -214,29 +237,34 @@ static void command_record(unsigned char *bytes, size_t size) {
       uint16_t id; memcpy(&id,raw+6,2); au_event_ent_t *e=getauevnum(ntohs(id)); need(e && e->ae_name && e->ae_class);
       const unsigned char *time=raw+token.len-times; uint64_t seconds=wide?command_u64(time):command_u32(time),milliseconds=wide?command_u64(time+8):command_u32(time+4);
       need(seconds<=UINT32_MAX && milliseconds<1000);
-      uint64_t stamp=seconds*1000+milliseconds;if(stamp>command_latest_record_time)command_latest_record_time=stamp;
+      stamp=seconds*1000+milliseconds;opening=!strncmp(e->ae_name,"AUE_OPEN",8);if(stamp>command_latest_record_time)command_latest_record_time=stamp;
       printf("{\"kind\":\"header\",\"version\":%u,\"event\":%u,\"name\":\"",raw[5],ntohs(id)); command_hex((unsigned char*)e->ae_name,strlen(e->ae_name));
       printf("\",\"classes\":%u,\"seconds\":%llu,\"milliseconds\":%llu}",e->ae_class,(unsigned long long)seconds,(unsigned long long)milliseconds);
     }else if(token.id==AUT_SUBJECT32 || token.id==AUT_SUBJECT64 || token.id==AUT_SUBJECT32_EX || token.id==AUT_SUBJECT64_EX){
       need(headers && !trailers && ++subjects==1 && token.len>=29); subject=(pid_t)command_u32(raw+21);
+      auid=command_u32(raw+1);asid=command_u32(raw+25);uid=command_u32(raw+5);gid=command_u32(raw+9);
       printf(",{\"kind\":\"subject\",\"pid\":%u,\"auid\":%u,\"asid\":%u,\"uid\":%u,\"gid\":%u}",subject,command_u32(raw+1),command_u32(raw+25),command_u32(raw+5),command_u32(raw+9));
     }else if(token.id==AUT_RETURN32 || token.id==AUT_RETURN64){
       need(headers && !trailers && ++returns==1); unsigned char status=token.id==AUT_RETURN32?token.tt.ret32.status:token.tt.ret64.err;
       command_native(au_bsm_to_errno(status,&error), == 0);need(error>=0 && error<=255);
+      result=token.id==AUT_RETURN32?(long long)(int32_t)token.tt.ret32.ret:(long long)token.tt.ret64.val;
       printf(",{\"kind\":\"return\",\"error\":%d,\"result\":%lld}",error,token.id==AUT_RETURN32?(long long)(int32_t)token.tt.ret32.ret:(long long)token.tt.ret64.val);
     }else if(token.id==AUT_TRAILER){need(++trailers==1 && offset+token.len==size && token.tt.trail.count==size && token.tt.trail.magic==AUT_TRAILER_MAGIC);printf(",{\"kind\":\"trailer\"}");}
     else {need(headers && !trailers); printf(",{\"kind\":\"metadata\",\"type\":%u,\"hex\":\"",token.id); command_hex(raw,(size_t)token.len);printf("\"}");
       if(command_action>=0 && token.id==AUT_PATH && token.len>=4 && raw[token.len-1]==0){
-        target=token.len==(int)strlen(command_target[command_action])+4 && !memcmp(raw+3,command_target[command_action],(size_t)token.len-4);
-        marker=token.len==(int)strlen(command_gate)+4 && !memcmp(raw+3,command_gate,(size_t)token.len-4);
+        target|=token.len==(int)strlen(command_target[command_action])+4 && !memcmp(raw+3,command_target[command_action],(size_t)token.len-4);
+        marker|=token.len==(int)strlen(command_gate)+4 && !memcmp(raw+3,command_gate,(size_t)token.len-4);
       }
     }
     offset+=(size_t)token.len;
   }
   need(headers==1 && subjects==1 && returns==1 && trailers==1); puts("]}}");
-  if(subject==(pid_t)command_case_identity.token.val[5]) {
-    if(marker && !error && command_attempt_seen)command_marker_seen=true;
-    if(target){command_attempt_seen=true;command_attempt_permitted=error==0;}
+  if(opening && subject==(pid_t)command_case_identity.token.val[5] && stamp>=command_case_started &&
+      auid==command_case_identity.token.val[0] && asid==command_case_identity.token.val[6] &&
+      uid==command_case_identity.token.val[1] && gid==command_case_identity.token.val[2]) {
+    need(!(target&&marker));
+    if(target){need(!command_attempt_seen);command_attempt_seen=true;command_attempt_permitted=!error&&result>=0;command_attempt_time=stamp;}
+    if(marker && command_attempt_seen && !error && result>=0 && stamp>=command_attempt_time)command_marker_seen=true;
   }
 }
 static void command_drain(void) {
@@ -292,7 +320,12 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   pid_t wrapper=fork();int fork_error=errno;command_observed(wrapper>=0, wrapper, fork_error);
   if(!wrapper){close(input[1]);close(output[0]);close(errors[0]);close(birth[0]);close(release[1]);
     auditinfo_addr_t audit={0};audit.ai_auid=command_uid;audit.ai_asid=AU_ASSIGN_ASID;audit.ai_termid.at_type=AU_IPv4;
-    command_native(setaudit_addr(&audit,sizeof(audit)), == 0);command_native(setgroups(0,NULL), == 0);
+    unsigned selected_classes=command_classes();audit.ai_mask.am_success=audit.ai_mask.am_failure=selected_classes;
+    command_native(setaudit_addr(&audit,sizeof(audit)), == 0);
+    command_native(getaudit_addr(&audit,sizeof(audit)), == 0);
+    need(audit.ai_auid==command_uid && audit.ai_asid>0 &&
+      audit.ai_mask.am_success==selected_classes && audit.ai_mask.am_failure==selected_classes);
+    command_native(setgroups(0,NULL), == 0);
     command_native(setgid(command_gid), == 0);command_native(setuid(command_uid), == 0);
     char cwd[4096];command_path(cwd,"workspace");command_native(chdir(cwd), == 0);policy(command_policy);
     /* The normal-UID launcher cannot create Codex until the root owner holds
@@ -371,11 +404,13 @@ static void command_case_ready(void) {
     need(found<=1);if(found){command_case_identity=selected;command_image_identity(selected,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)selected.token.val[5]), == 1);
       if(!command_control){printf("{\"event\":\"N\",\"identity\":");emit_identity(selected);printf(",\"sandboxed\":true,\"object\":");command_object((unsigned)command_action,NULL);printf(",\"gate\":");command_gate_object(NULL);puts("}");}
       else {command_object(2,command_control_before);command_gate_object(command_control_gate_before);}
+      struct timeval started;command_case_started=command_clock(&started);
       command_native(write(command_gate_fd,"A",1), == 1);return;}command_poll();}
   need(0);
 }
 static void command_case_finish(void) {
-  for(unsigned pass=0;pass<1000&&(!command_attempt_seen||!command_marker_seen);pass++)command_poll();need(command_attempt_seen&&command_marker_seen&&live(command_case_identity));
+  for(unsigned pass=0;pass<1000&&(!command_attempt_seen||!command_marker_seen);pass++)command_poll();
+  need(command_attempt_seen);need(command_marker_seen);need(live(command_case_identity));
   command_image_identity(command_case_identity,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)command_case_identity.token.val[5]), == 1);
   if(!command_control){printf("{\"event\":\"F\",\"identity\":");emit_identity(command_case_identity);printf(",\"sandboxed\":true,\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_object((unsigned)command_action,NULL);printf(",\"gate\":");command_gate_object(NULL);puts("}");}
   else {command_object(2,command_control_after);command_gate_object(command_control_gate_after);}

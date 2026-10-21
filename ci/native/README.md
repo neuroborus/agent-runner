@@ -1791,11 +1791,12 @@ and [systrace.c](https://raw.githubusercontent.com/apple-oss-distributions/xnu/m
 establish the finite open-family path positions (`arg0`, or `arg1` for openat),
 abort namespace/code/reason (`arg0`/`arg1`/`arg4`) and scalar `csrctl` operation.
 Sysctl selectors remain unsupported; no selector array or payload buffer is read.
-One bounded `copyinstr` acquires at most 128 bytes; `%S` escapes output through
+One bounded `copyinstr` acquires at most 128 bytes (1024 for cold V/G);
+`%S` escapes output through
 Apple's `pfprint_estr`/`strchr2esc`, including one terminal escaped NUL. The parser
 recognizes that frame only after tokenizing escapes, preserving a literal escaped
 backslash followed by zero. The frame is excluded from payload byte/escaped-text
-bounds and stored diagnostic text; the 128-byte payload boundary remains
+bounds and stored diagnostic text; the configured payload boundary remains
 conservatively truncated, never an exact denied object. Missing strings require
 the empty `%S` frame and remain unavailable; copy-failed, numeric and unsupported
 records retain unformatted empty payloads. Interior/repeated NUL, suffix data and
@@ -1803,8 +1804,13 @@ ambiguous escapes refuse capture.
 Missing, copy-failed, truncated and unsupported arguments remain explicit;
 malformed/oversized records refuse capture. Missing returns discard path text;
 the documented nonreturning abort retains its entry reason and exact unsigned code.
-At most 64 argument observations and 1024 bytes per row fit within the existing stream
-bound. Copy faults have a target/thread-bound ERROR record, while DTrace stderr
+A capture admits at most 8192 argument observations, 8192 numeric observations,
+131072 target rows and eight MiB of stdout. Ordinary startup retains its
+128-byte argument and 1024-byte row bounds; cold V/G capture uses 1024-byte
+arguments and 8192-byte rows, including bounded escaped text. These shared
+producer/consumer bounds cover the schema workload without truncation. Rows are
+validated and hashed incrementally; no full raw-row copy or digest concatenation
+is retained. Copy faults have a target/thread-bound ERROR record. DTrace stderr
 still refuses complete capture. Arguments stay diagnostic; public causes expose
 only a finite argument status, never their text or numeric selector/code values.
 That optional status cannot displace existing failure or cleanup facts.
@@ -2880,6 +2886,29 @@ policy permits fixture writes but denies network. A separate outside-write contr
 must actually succeed under it; an enclosing denial cannot prove Codex's stock
 command sandbox.
 
+Each owned launcher sets and reads back its own success/failure audit mask for
+`fr`, `fw`, `fc` and `pc` before dropping credentials; its descendants inherit
+that observed process policy. Local pipe selection alone supplies no producer
+coverage, and no system-wide audit policy is changed. Command observation joins
+open/openat-family events to the acknowledged subject's PID, audit session and
+credentials and to the native operation time. Path tokens accumulate matches;
+an unrelated later token cannot erase the target or marker. The decoder accepts
+an openat directory context only when its directory attributes precede one
+unambiguous terminal file/FIFO vnode. Extra unpaired paths, multiple file vnodes,
+changed held identities and missing actual delivery continue to refuse success.
+The helper stays parked until target and subsequent successful marker observations,
+live birth, image, policy and held-object reads join, then receives F. Individual
+predicate failures remain distinct from unrelated App Server warnings.
+
+Command membership samples preserve immediate API results and births. ESRCH is
+only a disappearance candidate: two fresh complete all-PID inventories must
+exclude that PID. A still-listed or replacement PID, changed birth, other API
+failure, duplicate PID or incomplete inventory refuses. A fully observed live
+member counts as nonempty without acquiring a task-name right. Signalling
+acquires the full task identity and must join the sampled birth. Normal and
+independent cleanup use the same census contract and preserve the original failure separately from
+cleanup uncertainty. These portable fixtures supply no hosted native proof.
+
 The generated `admission.sb` grants only the exact `hw.pagesize` and
 `hw.pagesize_compat` sysctl reads for cold executable page-size acquisition.
 Default denial and every existing process/file restriction remain; no general
@@ -2914,9 +2943,15 @@ No numeric observations produce `numericStatus: empty`; a partially observed
 function inventory or missing pair produces `missing`. Neither prevents a valid
 mandatory capture from being observed. Missing mandatory exec/exit or syscall
 entry/return records instead refuse capture and discard all numeric observations.
-The 64-call/64-KiB bounds, thread/entry/return pairing, original observer custody
-and independent retirement remain enforced. Missing values are null, never
-filled from the warmed launcher. Refused or incomplete tracing supplies no runtime
+Cold admission uses the shared eight-MiB/131072-row and separate 8192-argument
+and 8192-numeric budgets, retaining thread/entry/return pairing, original observer
+custody and independent retirement. V/G admission requires armed and complete
+observed capture with mandatory exec/exit and syscall entry/return, a matching
+program digest and independently retired tracers. Missing pairs, malformed or
+overflowed capture refuse success; zero-match numeric probes may remain empty.
+Capture refusal remains separate from successful independent trace cleanup.
+Missing values are null, never filled from the warmed launcher. Refused or
+incomplete tracing supplies no runtime
 values and requires no host-policy change or alternate trace program. Reports
 join operation, original cold-child identity, image hash, policy-file hash
 and fixed trace intent in the existing command evidence/diagnostic owners.

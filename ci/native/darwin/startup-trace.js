@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import { constants as osConstants } from "node:os";
 import {
@@ -7,6 +8,17 @@ import {
   sameDarwinIdentity,
 } from "./protocol.js";
 import { nativeException, observeNativeProcess } from "../diagnostics.js";
+
+// One cold schema run emits thousands of syscall rows and hundreds of paths.
+// Bound each retained collection independently; never trim a successful prefix.
+export const DARWIN_STARTUP_TRACE_LIMITS = Object.freeze({
+  bytes: 8 * 1024 * 1024,
+  rows: 131072,
+  rowBytes: 8192,
+  argumentBytes: 1024,
+  arguments: 8192,
+  numeric: 8192,
+});
 
 // XNU syscalls.master and systrace.c establish these entry argument positions.
 const PATH_ARGUMENTS = Object.freeze({
@@ -32,17 +44,17 @@ const probes = (names) =>
 // No fallback, generic argument decoding, destructive action or unrelated-process
 // predicate. Cold numeric descriptions may match zero probes; core observations
 // are required independently of compilation and BEGIN acknowledgement.
-const PROGRAM = `#pragma D option quiet
-#pragma D option strsize=129
+const startupProgram = (argumentBytes) => `#pragma D option quiet
+#pragma D option strsize=${argumentBytes + 1}
 dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
 syscall:::entry /pid == $1/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
 syscall:::entry /pid == $1 && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_with_payload"])})/ {
   self->operation = probefunc; self->namespace = probefunc == "abort_with_payload" ? (uint32_t)arg0 : 0;
   self->code = probefunc == "abort_with_payload" ? (uint64_t)arg1 : 0;
   self->pointer = probefunc == "abort_with_payload" ? arg4 : (${probes(Object.keys(PATH_ARGUMENTS).filter((name) => PATH_ARGUMENTS[name] === 1))}) ? arg1 : arg0;
-  self->copying = self->pointer != 0; self->text = self->pointer ? copyinstr(self->pointer, 128) : "";
+  self->copying = self->pointer != 0; self->text = self->pointer ? copyinstr(self->pointer, ${argumentBytes}) : "";
   self->copying = 0;
-  printf("argument-entry %d %llu %s %llu %s %u %llu %S\\n", pid, timestamp, probefunc, (uint64_t)tid, self->pointer == 0 ? "missing" : strlen(self->text) < 128 ? "complete" : "truncated", (uint32_t)self->namespace, (uint64_t)self->code, self->text);
+  printf("argument-entry %d %llu %s %llu %s %u %llu %S\\n", pid, timestamp, probefunc, (uint64_t)tid, self->pointer == 0 ? "missing" : strlen(self->text) < ${argumentBytes} ? "complete" : "truncated", (uint32_t)self->namespace, (uint64_t)self->code, self->text);
   self->text = 0; self->operation = 0;
 }
 syscall:::entry /pid == $1 && probefunc == "csrctl"/ { printf("argument-entry %d %llu %s %llu complete %u 0 \\n", pid, timestamp, probefunc, (uint64_t)tid, (uint32_t)arg0); }
@@ -53,6 +65,7 @@ syscall:::return /pid == $1 && (${probes(ARGUMENT_FUNCTIONS.filter((name) => nam
 proc:::exec-success /pid == $1/ { printf("exec %d %llu\\n", pid, timestamp); }
 proc:::exit /pid == $1/ { printf("exit %d %llu\\n", pid, timestamp); exit(0); }
 `;
+const PROGRAM = startupProgram(128);
 export const DARWIN_STARTUP_TRACE_INTENT = Object.freeze({
   tool: "/usr/sbin/dtrace",
   programSha256: digest(PROGRAM),
@@ -75,7 +88,7 @@ const NUMERIC_ARGUMENTS = Object.freeze({
   mprotect: ["address", "length", "protection"],
 });
 const COLD_PROGRAM =
-  PROGRAM +
+  startupProgram(DARWIN_STARTUP_TRACE_LIMITS.argumentBytes) +
   Object.entries(NUMERIC_ARGUMENTS)
     .map(([name, args]) => {
       const syscall = name === "mmap" || name === "mprotect",
@@ -110,6 +123,44 @@ const matchingCI = () =>
 const need = (value) => {
   if (!value) throw new Error("Unproved startup trace");
 };
+/** Cold-command admission consumes the same bounds as the streaming producer.
+ * Optional zero-match numeric probes remain empty, never invented observations. */
+export function assertDarwinColdStartupTrace(trace) {
+  need(
+    trace?.status === "observed" &&
+      trace.captureComplete === true &&
+      trace.cleanup === "RETIRED" &&
+      trace.exit?.code === 0 &&
+      trace.exit.signal === null &&
+      trace.programSha256 === DARWIN_COLD_STARTUP_TRACE_INTENT.programSha256 &&
+      Number.isSafeInteger(trace.events) &&
+      trace.events > 0 &&
+      trace.events <= DARWIN_STARTUP_TRACE_LIMITS.rows &&
+      /^[a-f0-9]{64}$/u.test(trace.sha256) &&
+      ["complete", "empty", "unsupported"].includes(trace.argumentStatus) &&
+      ["complete", "empty"].includes(trace.numericStatus) &&
+      Array.isArray(trace.arguments) &&
+      trace.arguments.length <= DARWIN_STARTUP_TRACE_LIMITS.arguments,
+  );
+  let count = 0;
+  for (const name of Object.keys(NUMERIC_ARGUMENTS)) {
+    const records = trace.runtime?.[name];
+    need(records === null || Array.isArray(records));
+    need(trace.numericStatus !== "complete" || records !== null);
+    if (records) {
+      count += records.length;
+      need(
+        records.length > 0 &&
+          records.every((record) => record.operation === name && record.result),
+      );
+    }
+  }
+  need(
+    count <= DARWIN_STARTUP_TRACE_LIMITS.numeric &&
+      (trace.numericStatus === "empty" ? count === 0 : count > 0),
+  );
+  return trace;
+}
 async function installed() {
   for (const file of ["/usr/bin/sudo", "/usr/sbin/dtrace"]) {
     const info = await lstat(file);
@@ -151,11 +202,12 @@ const TRACE_FIELDS = Object.freeze({
 });
 const unsigned = (value, maximum) =>
   /^(?:0|[1-9][0-9]{0,19})$/u.test(value) && BigInt(value) <= maximum;
-function traceRow(line) {
+function traceRow(line, argumentBytes) {
   const fields = line.split(" "),
     [kind, pid, time, name] = fields;
   need(
-    line.length <= 1024 &&
+    line.length <=
+      (argumentBytes === 128 ? 1024 : DARWIN_STARTUP_TRACE_LIMITS.rowBytes) &&
       Object.hasOwn(TRACE_FIELDS, kind) &&
       (kind === "numeric-entry"
         ? Object.hasOwn(NUMERIC_ARGUMENTS, name) &&
@@ -225,11 +277,11 @@ function traceRow(line) {
     if (string && ["complete", "truncated", "missing"].includes(state))
       need(isNul(tokens.pop()));
     text = tokens.join("");
-    need(text.length <= 512 && !tokens.some(isNul));
+    need(text.length <= argumentBytes * 4 && !tokens.some(isNul));
     need(
       string
-        ? (state === "complete" && tokens.length < 128) ||
-            (state === "truncated" && tokens.length === 128) ||
+        ? (state === "complete" && tokens.length < argumentBytes) ||
+            (state === "truncated" && tokens.length === argumentBytes) ||
             (["missing", "copy-failed"].includes(state) && !text)
         : !text &&
             (name === "csrctl"
@@ -348,7 +400,7 @@ export function openDarwinStartupTrace(
     finished,
     argumentMalformed = false;
   const owners = [],
-    rows = [],
+    traceHash = createHash("sha256"),
     argumentsSeen = [],
     pendingArguments = new Map(),
     expectedArguments = new Map();
@@ -416,13 +468,12 @@ export function openDarwinStartupTrace(
     stdoutBytes += chunk.length;
     if (invalid) return;
     if (
-      stdoutBytes > 65536 ||
+      stdoutBytes > DARWIN_STARTUP_TRACE_LIMITS.bytes ||
       Date.now() >= captureDeadline ||
       (terminalSeparator && chunk.length > 0) ||
-      [...chunk].some((byte) => byte !== 10 && (byte < 32 || byte > 126))
+      chunk.some((byte) => byte !== 10 && (byte < 32 || byte > 126))
     ) {
       invalid = true;
-      rows.length = 0;
       fail(new Error("Startup trace capture rejected"), "capture");
       return;
     }
@@ -438,7 +489,10 @@ export function openDarwinStartupTrace(
           terminalSeparator = true;
           continue;
         }
-        row = traceRow(line);
+        row = traceRow(
+          line,
+          coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes : 128,
+        );
         need(coldCommand || !row.kind.startsWith("numeric-"));
         need(
           row.kind === "armed"
@@ -469,7 +523,10 @@ export function openDarwinStartupTrace(
           );
         if (row.kind === "numeric-entry") {
           const key = `${row.thread}:${row.name}`;
-          need(!pendingNumeric.has(key) && numericSeen.length < 64);
+          need(
+            !pendingNumeric.has(key) &&
+              numericSeen.length < DARWIN_STARTUP_TRACE_LIMITS.numeric,
+          );
           const record = {
             operation: row.name,
             thread: row.thread,
@@ -491,7 +548,10 @@ export function openDarwinStartupTrace(
           pendingNumeric.delete(key);
         }
         if (row.kind === "argument-entry") {
-          need(!pendingArguments.has(row.thread) && argumentsSeen.length < 64);
+          need(
+            !pendingArguments.has(row.thread) &&
+              argumentsSeen.length < DARWIN_STARTUP_TRACE_LIMITS.arguments,
+          );
           const observation = {
             pid: row.pid,
             thread: row.thread,
@@ -514,7 +574,6 @@ export function openDarwinStartupTrace(
       } catch (error) {
         argumentMalformed ||= line.startsWith("argument-");
         invalid = true;
-        rows.length = 0;
         fail(error, "capture");
         return;
       }
@@ -525,14 +584,21 @@ export function openDarwinStartupTrace(
         armTime = timestamp;
         acknowledge();
       } else {
-        count++;
-        rows.push(line);
+        if (count >= DARWIN_STARTUP_TRACE_LIMITS.rows) {
+          invalid = true;
+          fail(new Error("Startup trace row count exceeded bound"), "capture");
+          return;
+        }
+        if (count++) traceHash.update("\n");
+        traceHash.update(line);
       }
     }
-    if (pending.length > 1024) {
+    if (
+      pending.length >
+      (coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.rowBytes : 1024)
+    ) {
       argumentMalformed ||= pending.startsWith("argument-");
       invalid = true;
-      rows.length = 0;
       fail(new Error("Startup trace record exceeded bound"), "capture");
     }
   };
@@ -765,7 +831,6 @@ export function openDarwinStartupTrace(
           child.stderr.readableEnded;
         const complete = intact && !stderrBytes;
         if (!complete) {
-          rows.length = 0;
           status = intact ? "refused" : "partial";
         } else if (
           !failure &&
@@ -853,7 +918,7 @@ export function openDarwinStartupTrace(
           observers: owners,
           events: complete && status === "observed" ? count : null,
           sha256:
-            complete && status === "observed" ? digest(rows.join("\n")) : null,
+            complete && status === "observed" ? traceHash.digest("hex") : null,
         };
       })());
     },
