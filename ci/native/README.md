@@ -1186,6 +1186,20 @@ remain zero. Birth/token drift, PID-only input, incomplete carriers and changed
 provider/catalog/chain joins refuse admission without replay. The helper admits
 `O/D/T/U` only for the original rooted read/edit roles.
 
+The creator uses its already held, suspended source-process handle to grant the
+exact AppContainer SID `PROCESS_DUP_HANDLE` (`0x40`) on that process alone. The
+original protected user-only DACL is verified before replacement; the resulting
+protected DACL retains the user's full access and adds exactly one noninheriting
+package ACE with that mask. Creator and independent suspended-child verifier
+read back the owner, protection, two exact SIDs, ACE types/flags and masks before
+release. Other process, thread, Job and pipe DACLs retain their existing contract.
+In particular the privileged destination receives no package duplication grant.
+After the persisted input/provider join and `D`, the actual source token must
+successfully open its own current PID with only `PROCESS_DUP_HANDLE` and close
+that handle before the original one-shot Winsock duplication. Source open/close
+failures remain distinct native refusals; closure uncertainty also retains its
+independent cleanup cause. This preflight supplies no destination-access proof.
+
 At a failed original source duplication, the immediate `WSAGetLastError` is saved
 before any diagnostic operation. An optional `tcpObservation.transfer` records
 that error, the original negotiated/high Winsock versions, creation flags and
@@ -1238,8 +1252,8 @@ These finite observations share the unchanged 2 KiB TCP capture budget and have
 no admission authority. Malformed, missing or failed diagnostic output remains
 incomplete/unavailable evidence; it cannot replace the original failure. Every
 acquired diagnostic handle receives an independent close attempt before output;
-failed diagnostic closure retains a separate cleanup cause. No process DACL,
-capability or payload grant changes.
+failed diagnostic closure retains a separate cleanup cause. These diagnostic
+reads add no authority or admission proof.
 
 The public
 [WSADuplicateSocketW contract](https://learn.microsoft.com/en-us/windows/win32/api/winsock2/nf-winsock2-wsaduplicatesocketw)
@@ -1306,10 +1320,15 @@ the provider's failed operation or justify granting `PROCESS_DUP_HANDLE` on the
 held launcher. The self control also refused, so the destination difference
 alone does not isolate the cause. `WSAEINVAL` identifies an invalid parameter
 without identifying which prerequisite failed, and documented Windows Store
-support does not prove this exact AppContainer/provider path works. No supported
-functional correction is established by these observations. The original refusal
-still fails before connect without a receipt; original-socket transfer and native
-acceptance remain pending fresh matching Windows CI.
+support does not prove this exact AppContainer/provider path works. Separately,
+the original source's own `OpenProcess(PROCESS_DUP_HANDLE)` was denied with
+Win32 error 5. Its creator-supplied protected DACL granted only the normal user,
+leaving the source's AppContainer access check without the required mask. The
+source-only correction above repairs that demonstrated operation; neither the
+saved Winsock error nor portable coverage proves the provider's internal failure
+or a successful native transfer. Any remaining original refusal still fails
+before connect without a receipt. Original-socket transfer and native acceptance
+remain pending fresh matching Windows CI.
 
 The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native

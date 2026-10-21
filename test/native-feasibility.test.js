@@ -6057,11 +6057,336 @@ test("TCP setup and observer failures retain native causes and close each acquir
   }
 });
 
+test("socket source authority is confined to the held child and independently read back", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|BOOL) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const native = (text) =>
+    text
+      .replaceAll('L"', '"')
+      .replace(/&(?=[a-zA-Z_])/gu, "")
+      .replaceAll("->", ".")
+      .replaceAll("(DWORD)", "")
+      .replace(/\b(?:BOOL|DWORD)\b/gu, "let");
+  const readback = native(body("socket_source_acl"))
+    .replace(
+      "PSID owner = NULL; PACL dacl = NULL; PSECURITY_DESCRIPTOR sd = NULL;",
+      "const owner = {}, dacl = {}, sd = {};",
+    )
+    .replace(
+      "SECURITY_DESCRIPTOR_CONTROL flags = 0; let revision = 0;",
+      "const flags = {}, revision = {};",
+    )
+    .replace("ACCESS_ALLOWED_ACE *ace = NULL;", "const ace = {};")
+    .replaceAll("(void **)ace", "ace")
+    .replaceAll("owner &&", "owner.value &&")
+    .replaceAll("IsValidSid(owner)", "IsValidSid(owner.value)")
+    .replaceAll("EqualSid(owner,", "EqualSid(owner.value,")
+    .replaceAll("dacl &&", "dacl.value &&")
+    .replaceAll("IsValidAcl(dacl)", "IsValidAcl(dacl.value)")
+    .replaceAll("dacl.AceCount", "dacl.value.AceCount")
+    .replaceAll("GetAce(dacl,", "GetAce(dacl.value,")
+    .replaceAll("ace.", "ace.value.")
+    .replaceAll("(flags &", "(flags.value &")
+    .replaceAll(
+      "GetSecurityDescriptorControl(sd,",
+      "GetSecurityDescriptorControl(sd.value,",
+    )
+    .replace("if (sd) LocalFree(sd)", "if (sd.value) LocalFree(sd.value)");
+  const grant = native(body("socket_source_grant"))
+    .replace("WCHAR sddl[1024];", "const sddl = [];")
+    .replace("PSECURITY_DESCRIPTOR sd = NULL;", "const sd = {};")
+    .replace(
+      "PACL dacl = NULL; let present = FALSE, defaulted = FALSE;",
+      "const dacl = {}, present = {}, defaulted = {};",
+    )
+    .replace(
+      "GetSecurityDescriptorDacl(sd,",
+      "GetSecurityDescriptorDacl(sd.value,",
+    )
+    .replace(
+      "present && !defaulted && dacl",
+      "present.value && !defaulted.value && dacl.value",
+    )
+    .replace("NULL, NULL, dacl, NULL", "NULL, NULL, dacl.value, NULL")
+    .replace("LocalFree(sd)", "LocalFree(sd.value)");
+  const ready = native(body("socket_source_ready"))
+    .replace("HANDLE process", "const process")
+    .replace(
+      /\(struct diagnosis\)\{"([a-z-]+)", "win32", ([^}]+)\}/gu,
+      '{operation:"$1",domain:"win32",value:$2}',
+    )
+    .replace(/\*problem = ([^;]+);/gu, "Object.assign(problem, $1);");
+  const script = new Script(`
+    function socket_source_ready(problem) {${ready}}
+    function socket_source_acl(process) {${readback}}
+    function socket_source_grant(process) {${grant}}
+    ({grant:socket_source_grant, read:socket_source_acl, ready:socket_source_ready});
+  `);
+  for (const fault of [
+    null,
+    "set",
+    "descriptor",
+    "missing-dacl",
+    "read",
+    "control",
+    "entry",
+    "owner",
+    "sid",
+    "mask",
+    "inherited",
+    "type",
+    "unprotected",
+    "extra",
+  ]) {
+    const original = {
+      owner: "user",
+      flags: 0x1000,
+      entries: [
+        {
+          Header: { AceType: 0, AceFlags: 0 },
+          Mask: 0x1fffff,
+          SidStart: "user",
+        },
+      ],
+    };
+    let current = structuredClone(original),
+      applied = false;
+    const freed = [],
+      operations = [],
+      opened = [],
+      closed = [];
+    const context = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      SE_KERNEL_OBJECT: 6,
+      OWNER_SECURITY_INFORMATION: 1,
+      DACL_SECURITY_INFORMATION: 4,
+      PROTECTED_DACL_SECURITY_INFORMATION: 0x80000000,
+      SE_DACL_PROTECTED: 0x1000,
+      SDDL_REVISION_1: 1,
+      ERROR_INVALID_DATA: 13,
+      PROCESS_DUP_HANDLE: 0x40,
+      GENERIC_ALL: 0x10000000,
+      PROCESS_ALL_ACCESS: 0x1fffff,
+      ACCESS_ALLOWED_ACE_TYPE: 0,
+      userText: "user",
+      appText: "package",
+      userSid: "user",
+      appSid: "package",
+      acl(process, type, privateAcl) {
+        assert.deepEqual([process, type, privateAcl], [73, 6, true]);
+        assert.deepEqual(current, original);
+        operations.push("private");
+      },
+      swprintf_s(out, bound, format, owner, user, mask, app) {
+        assert.equal(bound, 1024);
+        assert.equal(format, "O:%lsD:P(A;;GA;;;%ls)(A;;0x%08lx;;;%ls)");
+        assert.deepEqual(
+          [owner, user, mask, app],
+          ["user", "user", 0x40, "package"],
+        );
+        out.push("descriptor");
+        return 1;
+      },
+      ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        text,
+        revision,
+        out,
+      ) {
+        assert.deepEqual(Array.from(text), ["descriptor"]);
+        assert.equal(revision, 1);
+        out.value = "new-descriptor";
+        return true;
+      },
+      GetSecurityDescriptorDacl(sd, present, dacl, defaulted) {
+        assert.equal(sd, "new-descriptor");
+        present.value = fault !== "missing-dacl";
+        defaulted.value = false;
+        dacl.value = "source-acl";
+        return fault !== "descriptor";
+      },
+      SetSecurityInfo(process, type, flags, owner, group, dacl, sacl) {
+        assert.deepEqual(
+          [process, type, flags >>> 0, owner, group, dacl, sacl],
+          [73, 6, 0x80000004, null, null, "source-acl", null],
+        );
+        operations.push("set");
+        if (fault === "set") return 5;
+        applied = true;
+        current.entries.push({
+          Header: { AceType: 0, AceFlags: 0 },
+          Mask: 0x40,
+          SidStart: "package",
+        });
+        return 0;
+      },
+      GetSecurityInfo(process, type, flags, owner, group, dacl, sacl, sd) {
+        assert.deepEqual(
+          [process, type, flags, group, sacl],
+          [73, 6, 5, null, null],
+        );
+        operations.push("read");
+        if (fault === "read") return 5;
+        const observed = structuredClone(current);
+        if (fault === "owner") observed.owner = "other";
+        if (fault === "sid") observed.entries[1].SidStart = "other";
+        if (fault === "mask") observed.entries[1].Mask |= 0x20;
+        if (fault === "inherited") observed.entries[1].Header.AceFlags = 0x10;
+        if (fault === "type") observed.entries[1].Header.AceType = 1;
+        if (fault === "unprotected") observed.flags = 0;
+        if (fault === "extra") observed.entries.push(observed.entries[1]);
+        owner.value = observed.owner;
+        dacl.value = {
+          AceCount: observed.entries.length,
+          entries: observed.entries,
+        };
+        sd.value = observed;
+        return 0;
+      },
+      GetSecurityDescriptorControl(sd, flags) {
+        flags.value = sd.flags;
+        return fault !== "control";
+      },
+      GetAce(dacl, index, ace) {
+        ace.value = dacl.entries[index];
+        return fault !== "entry";
+      },
+      IsValidSid: (sid) => typeof sid === "string",
+      EqualSid: (a, b) => a === b,
+      IsValidAcl: (dacl) => Array.isArray(dacl.entries),
+      LocalFree: (sd) => freed.push(sd),
+      GetCurrentProcessId: () => 43,
+      OpenProcess(access, inherit, pid) {
+        assert.deepEqual([access, inherit, pid], [0x40, false, 43]);
+        opened.push(pid);
+        return current.entries.some(
+          (ace) => ace.SidStart === "package" && (ace.Mask & access) === access,
+        )
+          ? 74
+          : null;
+      },
+      CloseHandle(handle) {
+        closed.push(handle);
+        return true;
+      },
+      cleanup_error: () =>
+        assert.fail("No preflight closure failure injected here"),
+      GetLastError: () => 5,
+      status_check(status, operation) {
+        if (status) throw new Error(operation);
+      },
+      win32_check(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      invariant(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+    };
+    const actual = script.runInNewContext(context);
+    if (fault) assert.throws(() => actual.grant(73), /socket-source/u, fault);
+    else {
+      const problem = {};
+      assert.equal(
+        actual.ready(problem),
+        false,
+        "the original protected user-only DACL denies the source's restricted token",
+      );
+      assert.deepEqual(problem, {
+        operation: "observer-source-open",
+        domain: "win32",
+        value: 5,
+      });
+      actual.grant(73);
+      actual.read(73); // Independent held-handle observation uses the same exact predicate.
+      assert.deepEqual(current.entries[1], {
+        Header: { AceType: 0, AceFlags: 0 },
+        Mask: 0x40,
+        SidStart: "package",
+      });
+      assert.deepEqual(operations, ["private", "set", "read", "read"]);
+      assert.equal(actual.ready({}), true);
+      assert.deepEqual(opened, [43, 43]);
+      assert.deepEqual(closed, [74]);
+    }
+    assert.equal(
+      applied,
+      !["descriptor", "missing-dacl", "set"].includes(fault),
+      fault,
+    );
+    assert.equal(freed[0], "new-descriptor", fault);
+    if (applied && fault !== "read")
+      assert.equal(typeof freed[1], "object", fault);
+  }
+  const launch = source.slice(
+    source.indexOf("static void launch("),
+    source.indexOf("static void observe("),
+  );
+  const grantCall =
+    /if \(workspaceRole &&[^\n]+socket_source_grant\(child.hProcess\);/u.exec(
+      launch,
+    )[0];
+  assert.ok(launch.indexOf(grantCall) > launch.indexOf('"launch-image-equal"'));
+  assert.ok(launch.indexOf(grantCall) < launch.indexOf("CreateThread("));
+  const inspect = source.slice(
+    source.indexOf("  if (suspended) {"),
+    source.indexOf("    WCHAR expected[4096], actual[4096], native[4096]"),
+  );
+  const inspectCall = inspect
+    .slice(inspect.indexOf("    if (!git"))
+    .replaceAll("#endif", "");
+  for (const mode of ["read", "edit", "null-probe", "argv", "cancel", null]) {
+    const granted = [],
+      verified = [];
+    const context = {
+      workspaceRole: mode,
+      child: { hProcess: 73 },
+      args: [0, 0, 0, 0, 0, 0, mode],
+      git: false,
+      TRUE: true,
+      SE_KERNEL_OBJECT: 6,
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      socket_source_grant: (process) => granted.push(process),
+      socket_source_acl: (process) => verified.push([process, "source"]),
+      acl: (process, type, privateAcl) =>
+        verified.push([process, type, privateAcl]),
+    };
+    new Script(native(grantCall)).runInNewContext(context);
+    new Script(native(inspectCall)).runInNewContext({ ...context, child: 73 });
+    assert.deepEqual(granted, ["read", "edit"].includes(mode) ? [73] : []);
+    assert.deepEqual(verified, [
+      [73, ...(["read", "edit"].includes(mode) ? ["source"] : [6, true])],
+    ]);
+    verified.length = 0;
+    new Script(native(inspectCall)).runInNewContext({
+      ...context,
+      child: 73,
+      git: true,
+    });
+    assert.deepEqual(
+      verified,
+      [[73, 6, true]],
+      "Git child keeps its private DACL",
+    );
+  }
+});
+
 test("original socket transfer validates its actual input and partial-transfer cleanup", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
   );
+  const sourceReady =
+    /static BOOL socket_source_ready\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )[1];
   const transferStart = source.indexOf("static BOOL wfp_transfer(");
   const transfer = source.slice(
     transferStart,
@@ -6098,6 +6423,9 @@ test("original socket transfer validates its actual input and partial-transfer c
       .replace(/\(const BYTE \*\)|\(BYTE\)|\(DWORD\)|\(int\)|\(char \*\)/gu, "")
       .replaceAll('L"', '"')
       .replace(/L'([^'])'/gu, (_match, value) => String(value.charCodeAt(0)));
+  const readyBody = native(sourceReady)
+    .replace("HANDLE process", "const process")
+    .replace("DWORD error", "const error");
   const transferBody = native(
     transfer.slice(transfer.indexOf("{") + 1, transfer.lastIndexOf("}")),
   )
@@ -6164,6 +6492,7 @@ test("original socket transfer validates its actual input and partial-transfer c
     .replace(/fprintf\(stderr, TCP_PREFIX " end\\n"\); fflush\(stderr\);/u, "");
   const script =
     new Script(`function socket_protocol(value) {${protocolBody}} function socket_target_binding(expected) {${ownerBinding}}
+    function socket_source_ready(problem) {${readyBody}}
     function wfp_transfer(socket, end, problem) {${transferBody}}
     function close() {${close}} transferred = wfp_transfer(socket, end, problem) && transferState.value;
     transferred = transferState.value; result = close();`);
@@ -6180,6 +6509,8 @@ test("original socket transfer validates its actual input and partial-transfer c
     "reused",
     "input-partial",
     "input-ack",
+    "source-open",
+    "source-close",
     "partial",
     "ack",
     "close",
@@ -6225,6 +6556,7 @@ test("original socket transfer validates its actual input and partial-transfer c
       TRUE: true,
       FALSE: false,
       ERROR_SUCCESS: 0,
+      PROCESS_DUP_HANDLE: 0x40,
       SOCKET_ERROR: -1,
       AF_INET: 2,
       SOCK_STREAM: 1,
@@ -6290,9 +6622,24 @@ test("original socket transfer validates its actual input and partial-transfer c
           modified: data.readUInt32LE(32),
         });
       },
+      OpenProcess(access, inherit, pid) {
+        assert.deepEqual([access, inherit, pid], [0x40, false, 43]);
+        assert.ok(events.includes("D"));
+        assert.ok(!events.includes("duplicate"));
+        events.push("source-open");
+        lastError = 5;
+        return fault === "source-open" ? null : 72;
+      },
+      CloseHandle(handle) {
+        assert.equal(handle, 72);
+        events.push("source-close");
+        lastError = 6;
+        return fault !== "source-close";
+      },
       WSADuplicateSocketW(socket, pid, value) {
         assert.equal(socket, 17);
         assert.equal(pid, 41);
+        assert.ok(events.includes("source-close"));
         events.push("duplicate");
         value.ticket = 1;
         return 0;
@@ -6409,6 +6756,8 @@ test("original socket transfer validates its actual input and partial-transfer c
         "exited",
         "input-partial",
         "input-ack",
+        "source-open",
+        "source-close",
       ].includes(fault)
         ? 0
         : 1,
@@ -6422,6 +6771,32 @@ test("original socket transfer validates its actual input and partial-transfer c
       assert.equal(failures[0][0], "observer-carrier");
     if (["ack", "input-ack"].includes(fault))
       assert.deepEqual(failures[0], ["ack-read", "win32", 109]);
+    if (["source-open", "source-close"].includes(fault)) {
+      assert.deepEqual(failures[0], [
+        `observer-${fault}`,
+        "win32",
+        fault === "source-open" ? 5 : 6,
+      ]);
+      assert.equal(
+        events.filter((event) => event === "source-close").length,
+        fault === "source-open" ? 0 : 1,
+      );
+      assert.equal(secondary.length, fault === "source-close" ? 1 : 0);
+      const diagnostic =
+        windowsDiagnostic(...failures[0]) +
+        (secondary.length
+          ? `native-windows-cleanup: operation=${secondary[0][0]} domain=win32 value=6\n`
+          : "");
+      assert.deepEqual(windowsFeasibilityDiagnostics(diagnostic).failure, {
+        operation: failures[0][0],
+        domain: "win32",
+        value: failures[0][2],
+      });
+      assert.equal(
+        windowsFeasibilityDiagnostics(diagnostic).cleanup?.operation ?? null,
+        fault === "source-close" ? "observer-source-close" : null,
+      );
+    }
     if (fault === "close")
       assert.deepEqual(secondary[0], ["tcp-close", "win32", 10038]);
   }
@@ -7185,6 +7560,7 @@ test("original TCP caller retains source duplication failures and bounded prereq
     .replace(/\bint\b/gu, "let")
     .replaceAll("!tcp_ack(", "!await tcp_ack(");
   const script = new Script(`
+    function socket_source_ready(problem) {${native(body("socket_source_ready"))}}
     function socket_protocol(value) {${protocol}}
     function socket_protocol_same(a,b) {${native(body("socket_protocol_same"))}}
     function socket_target_binding(expected) {${binding}}
@@ -7853,6 +8229,11 @@ test("original TCP caller retains source duplication failures and bounded prereq
       OpenProcess(access, inherit, pid) {
         if (access === context.PROCESS_DUP_HANDLE) {
           assert.deepEqual([access, inherit, pid], [0x40, false, 43]);
+          if (!primary.length) {
+            assert.equal(inLauncher, false);
+            order.push("source-open");
+            return 72;
+          }
           assert.deepEqual(primary[0], ["observer-transfer", "win32", 10022]);
           assert.equal(
             inLauncher,
@@ -7921,6 +8302,12 @@ test("original TCP caller retains source duplication failures and bounded prereq
         return token === 143;
       },
       CloseHandle(handle) {
+        if (handle === 72) {
+          assert.equal(inLauncher, false);
+          assert.equal(primary.length, 0);
+          order.push("source-close");
+          return true;
+        }
         assert.ok([61, 71, 141, 143, 144, 161].includes(handle));
         order.push(`handle-close:${handle}`);
         lastError = 6;
@@ -10167,6 +10554,13 @@ test("Windows helper failures before the first record retain their operation thr
   for (const [operation, domain, value, code] of [
     ["acl-read", "win32", 5, 126],
     ["acl-entries", "invariant", 0, 126],
+    ["socket-source-descriptor", "win32", 5, 126],
+    ["socket-source-descriptor", "invariant", 0, 126],
+    ["socket-source-grant", "win32", 5, 126],
+    ["socket-source-acl", "win32", 5, 126],
+    ["socket-source-acl", "invariant", 0, 126],
+    ["observer-source-open", "win32", 5, 126],
+    ["observer-source-close", "win32", 6, 126],
     ["hash-create", "ntstatus", 0xc000000d, 126],
     ["profile-derive", "hresult", 0x80004001, 78],
     ["thread-query", "ntstatus", 0xc0000003, 78],
@@ -10284,6 +10678,9 @@ test("Windows diagnostic grammar rejects malformed, tainted and oversized stream
   for (const stderr of [
     windowsDiagnostic("foreign-operation", "win32", 5),
     windowsDiagnostic("acl-read", "errno", 5),
+    windowsDiagnostic("socket-source-grant", "invariant", 0),
+    windowsDiagnostic("observer-source-open", "win32", 0),
+    windowsDiagnostic("observer-source-close", "invariant", 0),
     windowsDiagnostic("acl-read", "win32", 0x100000000),
     windowsDiagnostic("acl-entries", "invariant", 203),
     windowsDiagnostic("hash-create", "ntstatus", 5),

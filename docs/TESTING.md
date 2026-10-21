@@ -575,8 +575,18 @@ retirement refusals and first causes through redacted reports. Fresh native CI
 must establish underlying cause and closure; no new slow-tier guarantee applies.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
-Windows socket regressions execute the actual source transfer, destination
-input/import and destination-binding bodies with injected OS calls. The production
+Windows socket regressions execute the actual source DACL producer/readback,
+source-access preflight, transfer, destination input/import and destination-binding
+bodies with injected OS calls. The creator-held source receives only an exact
+`PROCESS_DUP_HANDLE` AppContainer ACE beside the retained full user ACE; the
+independent suspended-child verifier requires the same protected DACL. Readback
+rejects a changed owner/SID/mask, inheritance, extra ACEs and query failures.
+Setter/descriptor failures refuse release and free the temporary descriptor.
+Only the original read/edit source selects this contract; Git children and other
+launches retain private DACLs. The actual effective-token preflight opens only
+the source's current PID, checks closure, and refuses duplication on either
+failure without producing a receipt. Its first cause and separate closure failure
+survive the existing strict diagnostic transport. The production
 operation loop uses the guarded helper session for both original read/edit roles
 and persists the target/provider record before `D`. Original `10022` reaches
 bounded prerequisite collection, checked source closure and the unchanged
@@ -622,11 +632,14 @@ The optional prerequisite record retains exact public provider bytes and
 negotiated Winsock versions within the unchanged 2 KiB TCP budget; missing or
 malformed observations supply no proof. Actual application socket copying through
 `DuplicateHandle` is not an admitted route, and injected API success cannot prove
-native reference accounting. Failed persistence withholds the next `D/T/U`
+native reference accounting. The source self-open denial is repaired at its held
+process DACL; neither destination denial nor `10022` authorizes an observer grant.
+Failed persistence withholds the next `D/T/U`
 acknowledgment without replay. Flags remain zero; strict actual `10013` denial,
 outside nonce, closed-port `10061`, full-PoC DROP semantics and independent
 retirement remain mandatory. Portable coverage establishes neither native
-transfer compatibility nor a cause for `10022` and adds no slow-tier assignment.
+transfer compatibility nor the provider's internal cause for `10022` and adds no
+slow-tier assignment.
 Darwin portable coverage protects narrow policy grants and literal quoting,
 matching-worker dispatch, missing native records, audit-token argument binding
 and the distinction between recorded process retirement and full domain recovery.

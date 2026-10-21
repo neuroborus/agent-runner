@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Keep socket transfer authority on the owned source
+
+The Windows feasibility creator grants exactly `PROCESS_DUP_HANDLE` to the
+AppContainer SID on its held suspended read/edit source process, retaining the
+protected full-user ACE. Creator and independent verifier require the exact
+resulting DACL; the actual source token checks its self-open and closure before
+one-shot Winsock duplication. This repairs the demonstrated source access denial
+without granting payload access into the privileged observer. Same-socket WFP
+joins, real network/IPC controls and independent retirement remain required.
+Portable regressions establish no native transfer success or internal Winsock
+causality; fresh matching hosted evidence remains necessary.
+
 ## 2026-10-21 — Admit the numeric cold page-size consumer
 
 Darwin command admission permits the exact `hw.pagesize_compat` OID used by

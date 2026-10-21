@@ -326,6 +326,43 @@ static void acl(HANDLE object, SE_OBJECT_TYPE type, BOOL private) {
   }
   LocalFree(sd);
 }
+#ifndef NATIVE_COMMAND_EXPERIMENT
+/* Socket transfer needs source-process access, not observer-process access.
+ * Both creator and independent verifier read back this exact protected DACL. */
+static void socket_source_acl(HANDLE process) {
+  PSID owner = NULL; PACL dacl = NULL; PSECURITY_DESCRIPTOR sd = NULL;
+  SECURITY_DESCRIPTOR_CONTROL flags = 0; DWORD revision = 0;
+  DWORD status = GetSecurityInfo(process, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd);
+  BOOL valid = FALSE;
+  if (!status) {
+    if (!GetSecurityDescriptorControl(sd, &flags, &revision)) status = GetLastError();
+    else if (owner && IsValidSid(owner) && EqualSid(owner, userSid) && dacl && IsValidAcl(dacl) && (flags & SE_DACL_PROTECTED) && dacl->AceCount == 2) {
+      valid = TRUE;
+      for (DWORD i = 0; i < 2; i++) {
+        ACCESS_ALLOWED_ACE *ace = NULL;
+        if (!GetAce(dacl, i, (void **)&ace)) { status = GetLastError(); valid = FALSE; break; }
+        if (ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE || ace->Header.AceFlags ||
+            !IsValidSid(&ace->SidStart) || !EqualSid(&ace->SidStart, i ? appSid : userSid) ||
+            (i ? ace->Mask != PROCESS_DUP_HANDLE : (ace->Mask != GENERIC_ALL && ace->Mask != PROCESS_ALL_ACCESS))) valid = FALSE;
+      }
+    }
+  }
+  if (sd) LocalFree(sd);
+  status_check(status, "socket-source-acl"); invariant(valid, "socket-source-acl");
+}
+static void socket_source_grant(HANDLE process) {
+  acl(process, SE_KERNEL_OBJECT, TRUE);
+  WCHAR sddl[1024]; invariant(swprintf_s(sddl, 1024, L"O:%lsD:P(A;;GA;;;%ls)(A;;0x%08lx;;;%ls)", userText, userText, (DWORD)PROCESS_DUP_HANDLE, appText) > 0, "socket-source-descriptor");
+  PSECURITY_DESCRIPTOR sd = NULL;
+  win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL), "socket-source-descriptor");
+  PACL dacl = NULL; BOOL present = FALSE, defaulted = FALSE;
+  BOOL read = GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted);
+  DWORD status = read ? ERROR_INVALID_DATA : GetLastError();
+  if (read && present && !defaulted && dacl)
+    status = SetSecurityInfo(process, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION, NULL, NULL, dacl, NULL);
+  LocalFree(sd); status_check(status, "socket-source-grant"); socket_source_acl(process);
+}
+#endif
 /* Opening a non-reparse object is not canonical path evidence. */
 static HANDLE openfile(const WCHAR *path, DWORD access) {
   HANDLE h = CreateFileW(path, access | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
@@ -955,6 +992,9 @@ static void launch(int argc, WCHAR **argv) {
   hashfile(transport.executable, wfpImageHash); fileid(transport.executable, wfpImageId);
 #endif
   WCHAR actual[4096]; DWORD actualSize = 4096; win32_check(QueryFullProcessImageNameW(child.hProcess, PROCESS_NAME_NATIVE, actual, &actualSize), "launch-image-query"); invariant(actualSize > 0 && actualSize < 4096, "launch-image-bound"); invariant(!_wcsicmp(actual, expected), "launch-image-equal");
+#ifndef NATIVE_COMMAND_EXPERIMENT
+  if (workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) socket_source_grant(child.hProcess);
+#endif
   invariant(swprintf_s(recordName, 128, L"control\\%ls.launch", caseId) > 0, "launch-record");
   ULONGLONG times[] = {GetProcessId(child.hProcess), creation(child.hProcess)}; recordio(recordName, times, sizeof(times), TRUE);
   printf("{\"event\":\"suspended\",\"owner\":"); identity(GetCurrentProcess()); printf(",\"child\":"); identity(child.hProcess);
@@ -1031,6 +1071,10 @@ static void observe(WCHAR **args, BOOL suspended, BOOL terminate, BOOL watch, BO
   if (wait == WAIT_TIMEOUT) container(child);
   else invariant(!suspended && !watch && (!terminate || rooted), "process-wait");
   if (suspended) {
+#ifndef NATIVE_COMMAND_EXPERIMENT
+    if (!git && (!wcscmp(args[6], L"read") || !wcscmp(args[6], L"edit"))) socket_source_acl(child);
+    else
+#endif
     acl(child, SE_KERNEL_OBJECT, TRUE);
     WCHAR expected[4096], actual[4096], native[4096]; DWORD size = 4096; name(expected, git ? L"build\\git.exe" : !wcscmp(args[6], L"argv") ? L"build\\argv-fixture.exe" : L"build\\helper.exe");
     HANDLE executable = expected_executable(expected); native_image(executable, native);
@@ -1508,6 +1552,17 @@ closed:
     socket_control_write(kind, 0, &control.offer.target, status);
   }
 }
+/* Check the demonstrated source authority under the actual effective token.
+ * This opens only the current process, not the privileged destination. */
+static BOOL socket_source_ready(struct diagnosis *problem) {
+  HANDLE process = OpenProcess(PROCESS_DUP_HANDLE, FALSE, GetCurrentProcessId());
+  if (!process) { *problem = (struct diagnosis){"observer-source-open", "win32", GetLastError()}; return FALSE; }
+  if (!CloseHandle(process)) {
+    DWORD error = GetLastError(); *problem = (struct diagnosis){"observer-source-close", "win32", error};
+    cleanup_error("observer-source-close", "win32", error); return FALSE;
+  }
+  return TRUE;
+}
 static BOOL wfp_transfer(SOCKET socket, ULONGLONG end, struct diagnosis *problem, BOOL *transferred) {
   if (wcscmp(role, L"bundle") || !workspaceRole || wcscmp(workspaceRole, L"null-probe") == 0) return TRUE;
   struct socket_offer offer = {0}; WCHAR target[2 * sizeof(offer.target) + 1];
@@ -1530,6 +1585,7 @@ static BOOL wfp_transfer(SOCKET socket, ULONGLONG end, struct diagnosis *problem
   if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
   for (unsigned phase = 0; phase < 2; phase++) {
     if (phase) {
+      if (!socket_source_ready(problem)) return FALSE;
       if (GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return FALSE; }
       if (WSADuplicateSocketW(socket, offer.target.pid, &offer.protocol) == SOCKET_ERROR) {
         DWORD error = WSAGetLastError(); *problem = (struct diagnosis){"observer-transfer", "win32", error};
