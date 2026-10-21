@@ -3214,9 +3214,9 @@ and checked-close order. Shared capture cleanup independently attempts remaining
 batch, subscription, bookmark and notification closures on retirement or partial
 failure, including inactive preflight. Immediate primary errors and separate
 cleanup uncertainty remain intact; 4317 and other unexpected API errors stay fatal.
-The Security channel, query, strict/future flags, missing-record requirements and
-10-second barrier/terminal-delivery and 120/30-second operation/cleanup bounds
-remain unchanged.
+The Security channel, exact selection scope, strict/future flags, missing-record
+requirements and 10-second barrier/terminal-delivery and 120/30-second
+operation/cleanup bounds remain unchanged.
 
 Fresh hosted Windows CI must establish whether the observed
 `command-capture-next`/Win32 4317 is closed and broker coverage succeeds.
@@ -3266,10 +3266,11 @@ prerequisite observations, not event-generation proof.
 The original Security
 [pull subscription](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtsubscribe)
 starts before installation with `EvtSubscribeToFutureEvents | EvtSubscribeStrict`.
-Its query selects Event nodes through one outer predicate; the former
-root-level `or` combined two selections into an XPath Boolean. The corrected
-producer retains the same loss/clear and SID/type/event conditions rather than
-opening an unbound scan. Its fixed predicate selects loss/clear records plus failed
+Its structured `QueryList` has exactly two `Select` entries on `Security`, each
+selecting Event nodes. `EvtSubscribe` receives a null channel argument because the
+query itself supplies the paths. The loss/clear selection is unconditional; the
+other selection binds the exact subject SID and file type. There is no broad
+query or fallback after empty delivery. The access selection includes failed
 [4656 handle requests](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4656)
 (`AuditFailure`, `0x0010000000000000`) and 4663 records for the exact subject SID
 and `ObjectType=File`. The decoder requires successful
@@ -3283,12 +3284,22 @@ fresh acknowledged capture window.
 
 The real control reuses C/N/T/F/U/B and the same independent process/token
 readers, held targets and decoder as the restricted command cases. Before T
-releases target I/O, N now reads effective success/failure auditing from that
-actual parked command's process token and re-reads the target and marker SACLs
-through their original held handles. The effects owner joins both file identities
-and ACL hashes to the installed inventory. F repeats these inputs before U;
-missing/failed policy reads, changed SACLs and mismatched objects refuse progress.
-The token reference uses the existing checked prerequisite cleanup slot. These
+releases target I/O, N reads the security context of the client's last nonce
+write using
+[ImpersonateNamedPipeClient](https://learn.microsoft.com/en-us/windows/win32/api/namedpipeapi/nf-namedpipeapi-impersonatenamedpipeclient)
+and `OpenThreadToken`. The fixed helper opens its pipe with explicit
+`SECURITY_SQOS_PRESENT | SECURITY_CONTEXT_TRACKING | SECURITY_IMPERSONATION`:
+context tracking follows each exchange rather than the token captured at open.
+That same command thread performs the target and marker operations between its
+nonce writes. The native reader requires the exact principal and impersonation
+level, retains the token for effective-policy queries, and reverts before those
+queries and privileged held-file reads. The effects owner matches the operating
+SID, logon, integrity, restrictions and token details to the independently held
+process observation, then joins both target/marker identities and SACL hashes to
+the installed inventory. F repeats these inputs before U; a substituted thread
+context, missing/failed policy read, changed SACL or mismatched object refuses
+progress. Impersonation, token acquisition and reversion retain their immediate
+native failure; acquired state uses the existing checked cleanup slots. These
 inputs establish neither event generation nor subscription delivery. Its fresh
 4663 write success and later 4663 gate-read marker must join the actual helper
 birth, SID/logon, image, token, access mask and capture window. The expected write
@@ -3321,8 +3332,8 @@ restoration. Original failures and separate cleanup uncertainty remain distinct.
 The terminal gate-read diagnostics retain bounded installed SACL/ACE and effective
 thread-token facts, immediate query failures and checked token/handle closure.
 They remain fatal-refusal diagnostics, never success or retirement authority.
-Saved broker-only reads with empty capture establish no producer/subscription
-repair. Missing actual control or terminal delivery remains unresolved until fresh
+Effective policy and SACL readback with empty capture establish no delivery.
+Missing actual control or terminal delivery remains unresolved until fresh
 matching Windows CI establishes it. Portable regressions supply no native
 acceptance; all original scenarios and system records remain required.
 A retirement `lstat` returning `ENOENT` is diagnostic only until independent

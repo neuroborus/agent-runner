@@ -479,11 +479,11 @@ static DWORD command_members(HANDLE job) {
   for(DWORD i=0;i<list->NumberOfProcessIdsInList;i++){invariant(list->ProcessIdList[i]<=MAXDWORD,"command-member-pid");HANDLE h=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,(DWORD)list->ProcessIdList[i]);BOOL member;
     win32_check(h!=NULL,"command-member-open");win32_check(IsProcessInJob(h,job,&member),"command-member-job");invariant(member,"command-member-job");if(!close_handle(h,"process-close"))failure(126);} return list->NumberOfProcessIdsInList;
 }
-/* Select Event nodes with one predicate, rather than returning a top-level
- * Boolean. Keep both loss events and the exact principal/type/event filter;
- * case-insensitive held-name joins remain below, outside XPath equality. */
+/* Separate exact Event-node selections using the Event Log structured-query
+ * contract. Neither selection is a fallback; loss events remain unconditional.
+ * Held names still join case-insensitively after capture, outside XPath. */
 static void command_audit_query(WCHAR query[2048], const WCHAR *interval) {
-  invariant(swprintf_s(query,2048,L"*[System[(EventID=1101 or EventID=1102)%ls] or (System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"])]",interval,interval,userText)>0,"command-subscription-query");
+  invariant(swprintf_s(query,2048,L"<QueryList><Query Id=\"0\" Path=\"Security\"><Select Path=\"Security\">*[System[(EventID=1101 or EventID=1102)%ls]]</Select><Select Path=\"Security\">*[System[(EventID=4663 or (EventID=4656 and band(Keywords,4503599627370496)))%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]</Select></Query></QueryList>",interval,interval,userText)>0,"command-subscription-query");
 }
 /* Security's UTC timestamp must follow the domain-empty boundary. Older queued
  * broker reads cannot end the wait for the separate terminal witness. */
@@ -690,7 +690,9 @@ static void command_probe_output(PROCESS_INFORMATION p,const char *event) {
 }
 static void command_case(int argc,WCHAR **argv) {
   invariant(argc==8,"command-case-arguments");invariant(wcslen(argv[5])==32,"command-case-nonce");
-  HANDLE pipe=CreateFileW(argv[2],GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);win32_check(pipe!=INVALID_HANDLE_VALUE,"command-case-pipe-open");DWORD count;char nonceBytes[33];
+  /* Track the context of each nonce write, not the token captured at pipe open.
+   * The same command thread performs target/marker I/O between these barriers. */
+  HANDLE pipe=CreateFileW(argv[2],GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,SECURITY_SQOS_PRESENT|SECURITY_CONTEXT_TRACKING|SECURITY_IMPERSONATION,NULL);win32_check(pipe!=INVALID_HANDLE_VALUE,"command-case-pipe-open");DWORD count;char nonceBytes[33];
   int encoded=WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,argv[5],-1,nonceBytes,33,NULL,NULL);win32_check(encoded!=0,"command-case-nonce-encode");invariant(encoded==33,"command-case-nonce-size");
   win32_check(WriteFile(pipe,nonceBytes,32,&count,NULL),"command-case-ready-write");invariant(count==32,"command-case-ready-write-size");
   char ackValue;win32_check(ReadFile(pipe,&ackValue,1,&count,NULL),"command-case-ready-read");invariant(count==1,"command-case-ready-read-size");invariant(ackValue=='R',"command-case-ready-ack");
@@ -731,12 +733,19 @@ static BOOL command_gate_wait(BOOL connect, char bytes[32]) {
     }WaitForSingleObject(thread,1);
   }need(CloseHandle(thread)&&read.ok);memcpy(bytes,read.bytes,32);return TRUE;
 }
-/* Read the actual parked command token, not the administrative broker token.
- * These held-object inputs are prerequisites, never evidence of delivery. */
+/* The last nonce write carries the operating thread's dynamic security context.
+ * Query that context, then revert before privileged held-SACL reads. A parked
+ * process token alone cannot describe a thread's file-access authority. */
 static void command_case_auditing(void) {
-  invariant(!command_preflight_owned.token,"command-effective-policy");
-  win32_check(OpenProcessToken(command_client,TOKEN_QUERY,&command_preflight_owned.token),"process-token");
+  invariant(!command_preflight_owned.token&&!command_preflight_owned.impersonating,"command-effective-policy");
+  win32_check(ImpersonateNamedPipeClient(command_gate),"command-client-impersonate");command_preflight_owned.impersonating=TRUE;
+  win32_check(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&command_preflight_owned.token),"command-client-token");
+  TOKEN_USER *subject=info(command_preflight_owned.token,TokenUser);TOKEN_STATISTICS *stats=info(command_preflight_owned.token,TokenStatistics);
+  BOOL matched=EqualSid(subject->User.Sid,userSid)&&stats->TokenType==TokenImpersonation&&stats->ImpersonationLevel==SecurityImpersonation;
+  free(subject);free(stats);invariant(matched,"command-client-context");
+  if(!command_revert())failure(126);
   fputs("{\"effective\":",stdout);command_effective(command_preflight_owned.token);
+  printf(",\"operating\":{\"userSid\":\"%ls\",\"level\":%u,\"token\":",userText,(unsigned)SecurityImpersonation);command_token_read(command_preflight_owned.token);putchar('}');
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
   fputs(",\"files\":[",stdout);
   unsigned indices[2]={command_action,3};
@@ -942,7 +951,7 @@ static int command_main(int argc,WCHAR **argv) {
   BOOL pipesClosed=TRUE;if(!release_handle(&command_input,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_output,"pipe-close"))pipesClosed=FALSE;if(!release_handle(&command_error,"pipe-close"))pipesClosed=FALSE;if(!pipesClosed)failure(126);
   command_observed.census=TRUE;DWORD admissionMembers=command_members(ownedJob);command_observed.census=FALSE;invariant(!admissionMembers,"command-admission-members");command_observed.audit[0]=1;
   command_files_prepare();command_observed.audit[0]=2;command_audit_query(command_subscription_query,L"");
-  command_subscription=EvtSubscribe(NULL,command_event,L"Security",command_subscription_query,NULL,NULL,NULL,command_subscription_flags);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
+  command_subscription=EvtSubscribe(NULL,command_event,NULL,command_subscription_query,NULL,NULL,NULL,command_subscription_flags);DWORD subscribeError=command_subscription?ERROR_SUCCESS:GetLastError();command_observed.audit[1]=subscribeError;SetLastError(subscribeError);win32_check(command_subscription!=NULL,"command-subscription-create");command_observed.audit[0]=3;invariant(swprintf_s(command_pipe,128,L"\\\\.\\pipe\\native.command.%ls",nonce)>0,"command-gate-name");
   PSECURITY_DESCRIPTOR gateSd;win32_check(ConvertStringSecurityDescriptorToSecurityDescriptorW(L"D:P(A;;GRGW;;;WD)",SDDL_REVISION_1,&gateSd,NULL),"command-gate-descriptor");SECURITY_ATTRIBUTES gateSa={sizeof(gateSa),gateSd,FALSE};
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
   printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);fputs("\"fileSystem\":",stdout);command_system_observation();printf(",\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);

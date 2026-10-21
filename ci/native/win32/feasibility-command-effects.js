@@ -192,12 +192,21 @@ const effectiveCommandAudit = (value) =>
   value.success === true &&
   value.failure === true &&
   value.error === 0;
+const operatingCommandAudit = (audit, identity, token) =>
+  audit?.operating?.level === 2 &&
+  audit.operating.userSid === identity.userSid &&
+  token !== undefined &&
+  JSON.stringify(audit.operating.token) === JSON.stringify(token);
 function commandCaseAuditing(value, row, action) {
   const audit = row.auditing,
     indices = [["inspect", "edit", "outside"].indexOf(action), 3];
   commandEvidence(
+    operatingCommandAudit(audit, row.identity, row.token),
+    "The operating context did not join the held command token.",
+  );
+  commandEvidence(
     effectiveCommandAudit(audit?.effective),
-    "The actual command token lacks effective success/failure auditing.",
+    "The operating command token lacks effective success/failure auditing.",
   );
   commandEvidence(
     Array.isArray(audit.files) &&
@@ -249,6 +258,8 @@ export function assessWindowsCommandObservation(
   commandEvidence(
     effectiveCommandAudit(auditing?.before?.effective) &&
       effectiveCommandAudit(auditing?.after?.effective) &&
+      operatingCommandAudit(auditing.before, before, observation.beforeToken) &&
+      operatingCommandAudit(auditing.after, after, observation.afterToken) &&
       JSON.stringify(auditing.before) === JSON.stringify(auditing.after) &&
       Array.isArray(auditing.before.files) &&
       auditing.before.files.length === 2 &&

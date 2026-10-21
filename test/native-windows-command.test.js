@@ -274,6 +274,11 @@ function fixture(change = () => {}) {
         ["before", "after"].map((phase) => [
           phase,
           {
+            operating: {
+              userSid: identity.userSid,
+              level: 2,
+              token: { ...token },
+            },
             effective: {
               available: true,
               success: true,
@@ -733,6 +738,7 @@ test("real control delivery joins decoded subject, object and completion evidenc
     "marker-order",
     "control-policy",
     "control-sacl",
+    "control-operating",
     "loss",
     "reply",
     "restoration",
@@ -795,6 +801,9 @@ test("real control delivery joins decoded subject, object and completion evidenc
             observation.auditing.before.effective.success = false;
           if (fault === "control-sacl")
             observation.auditing.after.files[0].saclSha256 = sha("changed");
+          if (fault === "control-operating")
+            observation.auditing.before.operating.token.authenticationId =
+              "00000000:00000002";
           if (fault === "reply") value.reply.exitCode = 7;
           return value;
         };
@@ -947,7 +956,7 @@ test("native subscription and capture retain case-variant real control names thr
   }
 });
 
-test("native audit query selects Event nodes while retaining loss and exact subject/type filters", async () => {
+test("native structured audit query selects only loss and exact subject/type Event nodes", async () => {
   const program = await commandCaptureProgram(),
     f = commandCaptureFixture(program);
   // XPath 'or' outside the selected Event predicate returns a Boolean, not
@@ -982,21 +991,33 @@ test("native audit query selects Event nodes while retaining loss and exact subj
     " and TimeCreated[@SystemTime>='2026-10-01T00:00:00Z']",
   ]) {
     f.api.command_audit_query(f.api.command_subscription_query, interval);
-    const expression = eventPredicate(f.api.command_subscription_query.text);
+    const query = f.api.command_subscription_query.text;
+    assert.match(query, /^<QueryList><Query Id="0" Path="Security">/u);
+    assert.ok(query.endsWith("</Query></QueryList>"));
+    const selections = [
+      ...query.matchAll(/<Select Path="Security">(.*?)<\/Select>/gu),
+    ];
+    assert.equal(selections.length, 2);
+    const [loss, access] = selections.map((m) => eventPredicate(m[1]));
     assert.deepEqual(
-      [...expression.matchAll(/EventID=(\d+)/gu)].map((m) => Number(m[1])),
-      [1101, 1102, 4656, 4663],
+      [...loss.matchAll(/EventID=(\d+)/gu)].map((m) => Number(m[1])),
+      [1101, 1102],
     );
-    assert.ok(expression.includes("band(Keywords,4503599627370496)"));
+    assert.ok(!loss.includes("EventData")); // Loss cannot be filtered by a command principal.
+    assert.deepEqual(
+      [...access.matchAll(/EventID=(\d+)/gu)].map((m) => Number(m[1])),
+      [4663, 4656],
+    );
+    assert.ok(access.includes("band(Keywords,4503599627370496)"));
     assert.ok(
-      expression.includes(`Data[@Name="SubjectUserSid"]="${f.api.userText}"`),
+      access.includes(`Data[@Name="SubjectUserSid"]="${f.api.userText}"`),
     );
-    assert.ok(expression.includes('Data[@Name="ObjectType"]="File"'));
+    assert.ok(access.includes('Data[@Name="ObjectType"]="File"'));
     assert.equal(
-      expression.split(interval || "TimeCreated").length - 1,
+      query.split(interval || "TimeCreated").length - 1,
       interval ? 2 : 0,
     );
-    assert.ok(!expression.includes("ObjectName")); // Held Windows names join after subscription.
+    assert.ok(!query.includes("ObjectName")); // Held Windows names join after subscription.
   }
 });
 
@@ -1031,6 +1052,11 @@ test("actual command token and held SACL reads precede control I/O and remain re
     "sacl",
     "identity",
     "after",
+    "operating-missing",
+    "operating-sid",
+    "operating-level",
+    "operating-token",
+    "operating-after",
   ]) {
     const prepared = {
       nonce: "a".repeat(32),
@@ -1040,6 +1066,7 @@ test("actual command token and held SACL reads precede control I/O and remain re
     await brokerSetup(prepared);
     const audit = {
       effective: { available: true, success: true, failure: true, error: 0 },
+      operating: { userSid: identity.userSid, level: 2, token: {} },
       files: [2, 3].map((index) => ({
         identity: prepared.original.files[index].identity,
         saclSha256: sha("owned-acl"),
@@ -1056,6 +1083,13 @@ test("actual command token and held SACL reads precede control I/O and remain re
     if (fault === "identity")
       before.auditing.files[1].identity = prepared.original.files[0].identity;
     if (fault === "after") after.auditing.files[1].saclSha256 = sha("foreign");
+    if (fault === "operating-missing") delete before.auditing.operating;
+    if (fault === "operating-sid") before.auditing.operating.userSid += "0";
+    if (fault === "operating-level") before.auditing.operating.level = 1;
+    if (fault === "operating-token")
+      before.auditing.operating.token.restricted = true;
+    if (fault === "operating-after")
+      after.auditing.operating.token.restricted = true;
     const context = {
       Buffer,
       prepared,
@@ -1084,7 +1118,10 @@ test("actual command token and held SACL reads precede control I/O and remain re
         /command token|SACL/u,
         fault,
       );
-      assert.deepEqual(calls, fault === "after" ? ["N", "T", "F"] : ["N"]);
+      assert.deepEqual(
+        calls,
+        ["after", "operating-after"].includes(fault) ? ["N", "T", "F"] : ["N"],
+      );
     } else {
       const result = await program.runInNewContext(context);
       assert.deepEqual(calls, ["N", "T", "F", "U", "B"]);
@@ -1098,7 +1135,7 @@ test("actual command token and held SACL reads precede control I/O and remain re
   }
 });
 
-test("native command auditing queries the parked control token and original held target/marker", async () => {
+test("native command auditing queries the dynamic operating context, reverts and reads held target/marker SACLs", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
@@ -1117,12 +1154,17 @@ test("native command auditing queries the parked control token and original held
     .replace("&policy", "value=>policy=value");
   const auditing = body("command_case_auditing")
     .replaceAll("&command_preflight_owned.token", "tokenSlot")
+    .replace("TOKEN_USER *subject", "const subject")
+    .replace("TOKEN_STATISTICS *stats", "const stats")
+    .replaceAll("subject->User.Sid", "subject.User.Sid")
+    .replaceAll("stats->", "stats.")
     .replace(
       "unsigned indices[2]={command_action,3}",
       "const indices=[command_action,3]",
     )
     .replace("char id[50],hash[65]", "const id={},hash={}")
-    .replace(/\bunsigned\b/gu, "let")
+    .replace(/\b(?:unsigned|BOOL)\b/gu, "let")
+    .replace("(let)SecurityImpersonation", "SecurityImpersonation")
     .replace("strcmp(id,", "strcmp(id.value,")
     .replace('i?",":"",id,hash', 'i?",":"",id.value,hash.value');
   const program = new Script(
@@ -1130,7 +1172,12 @@ test("native command auditing queries the parked control token and original held
   );
   for (const fault of [
     null,
+    "impersonate",
     "open",
+    "subject",
+    "type",
+    "level",
+    "revert",
     "query",
     "failure-policy",
     "close",
@@ -1154,23 +1201,61 @@ test("native command auditing queries the parked control token and original held
       FALSE: false,
       ERROR_SUCCESS: 0,
       TOKEN_QUERY: 8,
+      TokenUser: 1,
+      TokenStatistics: 10,
+      TokenImpersonation: 2,
+      SecurityImpersonation: 2,
       POLICY_AUDIT_EVENT_SUCCESS: 1,
       POLICY_AUDIT_EVENT_FAILURE: 2,
       command_client: 73,
+      command_gate: 74,
+      userSid: identity.userSid,
+      userText: identity.userSid,
       command_category: "file-system",
       command_action: 2,
       command_files: [11, 12, 13, 14],
       command_ids: ["inspect", "edit", "outside", "marker"],
       stdout: {},
-      OpenProcessToken(process, access, out) {
-        assert.deepEqual([process, access], [73, 8]);
+      ImpersonateNamedPipeClient(pipe) {
+        assert.equal(pipe, 74);
+        calls.push("impersonate");
+        return fault !== "impersonate";
+      },
+      GetCurrentThread: () => 99,
+      OpenThreadToken(thread, access, asSelf, out) {
+        assert.deepEqual([thread, access, asSelf], [99, 8, true]);
         calls.push("token");
         if (fault === "open") return false;
         out.value = 19;
         return true;
       },
+      OpenProcessToken: () =>
+        assert.fail("The parked primary is not the operating token"),
+      info(token, kind) {
+        assert.equal(token, 19);
+        return kind === 1
+          ? { User: { Sid: fault === "subject" ? "other" : identity.userSid } }
+          : {
+              TokenType: fault === "type" ? 1 : 2,
+              ImpersonationLevel: fault === "level" ? 1 : 2,
+            };
+      },
+      EqualSid: (a, b) => a === b,
+      free: () => {},
+      command_revert() {
+        assert.equal(context.command_preflight_owned.impersonating, true);
+        context.command_preflight_owned.impersonating = false;
+        calls.push("revert");
+        if (fault === "revert") throw new Error("command-revert");
+        return true;
+      },
+      command_token_read(token) {
+        assert.equal(token, 19);
+        output += JSON.stringify({ authenticationId: "00000000:00000001" });
+      },
       AuditComputeEffectivePolicyByToken(token, category, count, out) {
         assert.deepEqual([token, category, count], [19, "file-system", 1]);
+        assert.equal(context.command_preflight_owned.impersonating, false);
         calls.push("effective");
         if (fault === "query") return false;
         out({
@@ -1217,11 +1302,26 @@ test("native command auditing queries the parked control token and original held
         let i = 0;
         output += format.replace(/%(?:l)?[us]/gu, () => String(args[i++]));
       },
+      putchar: (text) => {
+        output += text;
+      },
     };
-    if (["open", "close", "identity", "sacl"].includes(fault))
+    if (
+      [
+        "impersonate",
+        "open",
+        "subject",
+        "type",
+        "level",
+        "revert",
+        "close",
+        "identity",
+        "sacl",
+      ].includes(fault)
+    )
       assert.throws(
         () => program.runInNewContext(context),
-        /process-token|command-token-close|command-file-identity|sacl-read/u,
+        /command-client|command-revert|command-token-close|command-file-identity|sacl-read/u,
       );
     else {
       program.runInNewContext(context);
@@ -1232,12 +1332,19 @@ test("native command auditing queries the parked control token and original held
         failure: fault !== "query" && fault !== "failure-policy",
         error: fault === "query" ? 5 : 0,
       });
+      assert.deepEqual(row.operating, {
+        userSid: identity.userSid,
+        level: 2,
+        token: { authenticationId: "00000000:00000001" },
+      });
       assert.deepEqual(row.files, [
         { identity: "outside", saclSha256: sha("13") },
         { identity: "marker", saclSha256: sha("14") },
       ]);
       assert.deepEqual(calls, [
+        "impersonate",
         "token",
+        "revert",
         "effective",
         "close",
         "id:13",
@@ -1246,10 +1353,35 @@ test("native command auditing queries the parked control token and original held
         "sacl:14",
       ]);
     }
-    assert.equal(freed.length, ["open", "query"].includes(fault) ? 0 : 1);
+    assert.equal(
+      freed.length,
+      [
+        "impersonate",
+        "open",
+        "subject",
+        "type",
+        "level",
+        "revert",
+        "query",
+      ].includes(fault)
+        ? 0
+        : 1,
+    );
   }
   const observation = body("command_case_observe");
   assert.ok(observation.includes("command_case_auditing()"));
+  for (const [operation, domain, value] of [
+    ["command-client-impersonate", "win32", 5],
+    ["command-client-token", "win32", 5],
+    ["command-client-context", "invariant", 0],
+  ]) {
+    assert.deepEqual(
+      windowsFeasibilityDiagnostics(
+        `native-windows: operation=${operation} domain=${domain} value=${value}\n`,
+      ).failure,
+      { operation, domain, value },
+    );
+  }
 });
 
 test("actual effects require the assessed real control and restored target before release", async () => {
@@ -4514,6 +4646,9 @@ test("actual command-case guards attribute native calls and control invariants w
       FILE_SHARE_DELETE: 4,
       OPEN_EXISTING: 3,
       FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      SECURITY_SQOS_PRESENT: 0x100000,
+      SECURITY_CONTEXT_TRACKING: 0x40000,
+      SECURITY_IMPERSONATION: 0x20000,
       PROCESS_DUP_HANDLE: 64,
       PROCESS_TERMINATE: 1,
       ERROR_ACCESS_DENIED: 5,
@@ -4541,6 +4676,7 @@ test("actual command-case guards attribute native calls and control invariants w
           assert.equal(sharing, 7);
           assert.equal(flags, 0x200000);
         }
+        if (name === "pipe") assert.equal(flags, 0x160000);
         if (!call(operation)) return -1;
         if (name === "target" && mode === "outside") {
           lastError = fault === "target-denial" ? 87 : 5;
@@ -6685,7 +6821,7 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     ) => {
       assert.deepEqual(
         [session, signal, channel, bookmark, context, callback, flags],
-        [null, "notification", "Security", null, null, null, 0x10001],
+        [null, "notification", null, null, null, null, 0x10001],
       );
       assert.equal(query, api.command_subscription_query);
       return "subscription";
