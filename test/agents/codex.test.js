@@ -10,6 +10,7 @@ import { largeFinalizationResult } from "../support/index.js";
 import packageMetadata from "../../package.json" with { type: "json" };
 import * as planAuthoringSchemas from "../../pipelines/plan-authoring/src/schemas.js";
 import * as planExecutionSchemas from "../../pipelines/plan-execution/src/schemas.js";
+import * as planExecutionBootstrapUnitSchemas from "../../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
 import * as polishingSchemas from "../../pipelines/polishing/src/schemas.js";
 import {
   CODEX_BACKEND_ID,
@@ -2737,6 +2738,7 @@ test("accepts every Runner-owned pipeline response schema", async (t) => {
   for (const [pipeline, schemas] of Object.entries({
     "plan-authoring": planAuthoringSchemas,
     "plan-execution": planExecutionSchemas,
+    "plan-execution-bootstrap-units": planExecutionBootstrapUnitSchemas,
     polishing: polishingSchemas,
   })) {
     for (const [name, schema] of Object.entries(schemas)) {

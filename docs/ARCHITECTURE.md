@@ -1775,6 +1775,17 @@ migration verifies the complete legacy schedule against its immutable role
 assignments before replacing only its representation. It preserves amendments,
 gate evidence, counters, and prepared or consumed commit effects.
 
+Plan execution also owns private pure repository-discovery and bounded
+applicability-unit contracts in `bootstrap-units.js` and
+`bootstrap-unit-schemas.js`, with shared inventory fragments isolated in
+`validation-schema-fragments.js` from complete response-schema exports. They
+reuse its inventory validators and bind ordered complete coverage and shared
+correction accounting to frozen inputs, role, catalog, and repository evidence.
+They expose no runtime capability or public package API and are not activated
+in workflow state or migrations. The
+[execution specification](../pipelines/plan-execution/docs/SPEC.md#private-bounded-bootstrap-contracts)
+owns their exact contracts and their distinction from active bootstrap.
+
 Finalization records its active step and exact ordered checks; terminal
 confirmation hashes the complete canonical evidence tuple. Resume validates
 both bindings before reuse. Confirmation also sees future requirements when

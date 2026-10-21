@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-21
 
+- **Bootstrap work units have private deterministic contracts.** Execution can
+  validate repository discovery separately from compact applicability batches,
+  subdivide contiguous ranges by supplied bytes and step count, and assemble
+  an inventory only after complete bound coverage. Catalog correction preserves
+  requirements while invalidating dependent coverage and sharing the producing
+  role's existing single correction attempt. Pure contracts and focused tests
+  establish these rules without activating workflow changes or state migration.
+
 - **Structured results have two mebibytes of byte headroom.** All pipelines
   accept exactly 2,097,152 serialized UTF-8 bytes while retaining semantic
   bounds and historical diagnostics. Larger finite state and recovery containers

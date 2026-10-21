@@ -2063,6 +2063,62 @@ followed or silently rewritten.
 In independent mode, the Reviewer summary additionally states what it intends
 to verify. Lazy mode creates no Reviewer summary.
 
+### Private bounded bootstrap contracts
+
+`bootstrap-unit-schemas.js` and `bootstrap-units.js` define completed
+repository-discovery and applicability reports and pure work-record transitions.
+These contracts are not wired into `BOOTSTRAP`, validation migration, or the
+persisted pipeline state; current workflow behavior and state version remain
+unchanged.
+
+Shared inventory fragments live in `validation-schema-fragments.js`, keeping
+`schemas.js` exports limited to complete object-root response schemas.
+
+Discovery contains the producing role's repository summary, selected-step
+assessment, ordered command catalog without `steps`, canonical infrastructure
+paths, capability requirements, and environment blockers. Its validators reuse
+the existing exact-command, staging-independence, path, capability, structured
+result size, and inventory bounds. Root-owned inspection of existing canonical
+regular files and semantic plan-position review remain separate obligations;
+pure validation cannot establish either from an agent assertion.
+
+A work record binds contract version 1, role, frozen-input and canonical-plan
+fingerprints, repository and infrastructure fingerprints, frozen trusted-command
+authority, selected position, and accepted discovery. Applicability requests
+contain this binding, the discovery catalog and its fingerprint, a deterministic
+unit ID, and a contiguous canonical plan range. Caller-supplied positive finite
+step and serialized UTF-8 byte bounds partition the plan in order. Oversized
+ranges bisect deterministically through single-step units; an oversized or
+exhausted single step raises `ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED`. The byte
+measurement covers exactly the supplied request JSON, excluding referenced-file
+reads and provider framing; it implies no native output-token limit.
+
+Each accepted batch identifies its exact unit and supplies unique catalog-order
+check IDs with ascending steps inside that range. Every step needs coverage.
+Reload rejects gaps, overlaps, noncanonical subdivisions, reordered, duplicate,
+foreign, stale, or cross-role evidence. Assembly requires complete ordered
+coverage, every discovered command assigned, and the original aggregate bounds;
+only then does the existing bootstrap normalizer produce a ready role inventory.
+Final-batch acceptance also validates that assembled inventory. A failed final
+batch remains unaccepted so it can use the remaining shared role correction
+allowance without discarding earlier accepted batches.
+Accepted assignments, applicability unions, capability reports, and blockers
+remain available to the existing schedule and inspection contracts.
+
+A batch may instead request catalog correction with no accepted assignments,
+reporting missing commands, infrastructure paths, capability requirements, or
+environment blockers. Before a correction invocation, the caller must persist
+`consumeBootstrapCorrection` and charge the existing producing-role bootstrap
+ledger. Catalog and invalid-unit repairs share its single attempt. Corrected
+discovery must retain accepted commands and reports and include every new
+requirement; it invalidates all dependent units and coverage. Reload takes the
+saved role attempt as a lower bound. Construction is for initial discovery only;
+subdivision, rediscovery, reconstruction, and resume must retain the consumed
+attempt. Pending correction authorization permits reconstruction of that same
+attempt, never a new allowance. Subdivision replaces only an unaccepted leaf,
+so each catalog admits at most plan-step-count minus one splits. No contract
+truncates an oversized inventory or treats partial coverage as ready.
+
 ### Reconciliation
 
 The remaining reconciliation requirements apply only in independent mode. After

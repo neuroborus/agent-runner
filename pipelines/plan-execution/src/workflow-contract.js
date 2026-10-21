@@ -869,7 +869,7 @@ function assertExactOutputFields(value, fields, field = "result") {
   }
 }
 
-function assertStructuredResultSize(
+export function assertStructuredResultSize(
   payload,
   diagnostic = outputConstraint("result", "maximum-2-mebibytes"),
 ) {
@@ -916,7 +916,7 @@ function normalizeText(
   return value.trim().replace(/\s+/gu, " ");
 }
 
-function normalizeSummary(
+export function normalizeSummary(
   value,
   name,
   code = "ERR_INVALID_PLAN_EXECUTION_STATE",
@@ -1723,7 +1723,7 @@ function stagingDependentCheckDiagnostics(checks) {
   );
 }
 
-function normalizePhaseSafeRequiredChecks(value, code, options) {
+export function normalizePhaseSafeRequiredChecks(value, code, options) {
   const { collectDiagnostics = false, ...normalizationOptions } = options ?? {};
   const checks = normalizeRequiredChecks(value, code, normalizationOptions);
   const diagnostics = stagingDependentCheckDiagnostics(checks);
@@ -1871,7 +1871,7 @@ function normalizeRequiredChecks(
   return checks;
 }
 
-function normalizeValidationInfrastructure(
+export function normalizeValidationInfrastructure(
   value,
   code,
   { maxItems = MAX_VALIDATION_ITEMS } = {},
