@@ -1153,18 +1153,24 @@ test("Darwin native receipt guards bound the aggregate separately without broade
   }
 });
 
-test("Darwin generated custody joins the real build producer and consuming guards beneath a private report parent", async () => {
+async function boundCustodyFixture({ experiment = true } = {}) {
   const source = await readFile(
       new URL("custody-reader.c", import.meta.url),
       "utf8",
     ),
-    header = await readFile(new URL("custody.h", import.meta.url), "utf8");
+    header = await readFile(new URL("custody.h", import.meta.url), "utf8"),
+    effective = await readFile(
+      new URL("effective-reader.h", import.meta.url),
+      "utf8",
+    );
   const functions = [
     ["installed_cache_path", "name"],
     ["installed_input_path", "name"],
     ["experiment_installed_path", "name"],
     ["is_bootstrap_parent", "name, st"],
     ["same_stat", "a, b"],
+    ["lease_entry", "value"],
+    ["lease_guard", "value"],
     ["ancestors", "path"],
     ["stable_identity", "value"],
     ["build_guard", ""],
@@ -1174,18 +1180,31 @@ test("Darwin generated custody joins the real build producer and consuming guard
     ["slot", "text"],
     ["build_directory", "encoded"],
     ["build_root_open", "name"],
+    ["reservation_contents", "entry"],
+    ["reservation_guard", ""],
+    ["reserve", "entry, nonce"],
+    ["reservation_close", ""],
   ];
   const project = (body) =>
     body
       .replace(
         /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/gu,
-        (_, experiment) => experiment,
+        (_, ordinary, reviewed) => (experiment ? ordinary : reviewed),
       )
       .replace(
         "unsigned char bytes[65536];",
         "const bytes = Buffer.alloc(65536);",
       )
+      .replace(
+        /const char expected\[\] = ("[^\n]+");/gu,
+        'const expected = Buffer.from($1 + "\\0");',
+      )
+      .replace(
+        "char bytes[sizeof(expected) - 1];",
+        "const bytes = Buffer.alloc(expected.length - 1);",
+      )
       .replace("char *end;", "const end = {};")
+      .replace("struct pfioc_rule rule = {0};", "const rule = {rule: {}};")
       .replaceAll("!*end", "!end.value")
       .replaceAll("*tokens[3]", "tokens[3][0]")
       .replace(
@@ -1214,10 +1233,18 @@ test("Darwin generated custody joins the real build producer and consuming guard
       .replace("slash != name", "slash.index !== 0")
       .replace("slash == name", "slash.index === 0")
       .replace("leaf != name", "leaf.index !== 0")
-      .replaceAll("sizeof(bytes)", "65536")
+      .replaceAll("sizeof(bytes)", "bytes.length")
+      .replaceAll(
+        "sizeof(expected)",
+        body.includes("const char expected[]") ? "expected.length" : "4096",
+      )
+      .replace(/sizeof\(("(?:[^"\\]|\\.)*")\)/gu, (_, literal) =>
+        String(Buffer.byteLength(JSON.parse(literal)) + 1),
+      )
       .replace(/sizeof\([^)]+\)/gu, "4096")
       .replace(/\b(?:unsigned|bool|int|size_t|uint64_t) /gu, "let ")
       .replace(/\(uint64_t\)/gu, "")
+      .replace(/\(void\)(\w+);/gu, "void $1;")
       .replace(/\b0([0-7]{2,})\b/gu, "0o$1");
   const declarations = functions.map(([name, args]) => {
     const body = new RegExp(
@@ -1228,7 +1255,9 @@ test("Darwin generated custody joins the real build producer and consuming guard
         name === "experiment_installed_path" ||
         name === "is_bootstrap_parent"
         ? header
-        : source,
+        : name.startsWith("reservation_") || name === "reserve"
+          ? effective
+          : source,
     )?.[1];
     assert.ok(body, name);
     return `function ${name}(${args}) {${project(body)}}`;
@@ -1253,7 +1282,7 @@ test("Darwin generated custody joins the real build producer and consuming guard
   assert.ok(start > 0 && end > start);
   assert.ok(admissionStart > 0 && readStart > 0 && readEnd > readStart);
   const script = new Script(
-    `${declarations.join("\n")} ({build_directory, ancestors, stable, slot, admitPlan() {${project(admission)}}, openEntry() {${project(open)}}, readEntry() {${project(read)}}});`,
+    `${declarations.join("\n")} ({build_directory, ancestors, stable, slot, reserve, reservation_guard, reservation_close, admitPlan() {${project(admission)}}, openEntry() {${project(open)}}, readEntry() {${project(read)}}});`,
   );
   const bytes = Buffer.from("generated helper bytes"),
     output = "/fixture/report/platform-build",
@@ -1271,7 +1300,7 @@ test("Darwin generated custody joins the real build producer and consuming guard
       st_mtimespec: { tv_sec: 1, tv_nsec: 0 },
       st_ctimespec: { tv_sec: 1, tv_nsec: 0 },
     });
-  const fixture = () => {
+  const fixture = ({ lease = false } = {}) => {
     const events = [],
       nodes = new Map(),
       held = new Map();
@@ -1289,6 +1318,15 @@ test("Darwin generated custody joins the real build producer and consuming guard
       report_path: {},
       build_identity: {},
       report_identity: {},
+      lease_parent: -1,
+      lease_base: -1,
+      lease_parent_identity: {},
+      lease_base_identity: {},
+      lease_identity: {},
+      reservation_fd: -1,
+      reservation_entry: null,
+      reservation_stat: {},
+      case_recovery: false,
       case_mode: false,
       preparation_mode: false,
       case_path: "/private/var/run/native-poc/cases/fixture",
@@ -1300,6 +1338,8 @@ test("Darwin generated custody joins the real build producer and consuming guard
       errno: 0,
       ENOENT: 2,
       Buffer,
+      LOCK_EX: 1,
+      LOCK_NB: 2,
       build_mode: false,
       O_RDONLY: 1,
       O_DIRECTORY: 2,
@@ -1358,15 +1398,18 @@ test("Darwin generated custody joins the real build producer and consuming guard
       open(value, flags) {
         assert.ok(flags & env.O_NOFOLLOW);
         const node = nodes.get(text(value));
-        if (!node) return -1;
+        if (!node || node.symlink) return -1;
         const fd = nextFd++;
         held.set(fd, node);
         return fd;
       },
       openat(fd, name, flags) {
-        assert.equal(held.get(fd), parent);
-        assert.equal(name, "platform-build");
-        return env.open(output, flags);
+        assert.ok(flags & env.O_NOFOLLOW);
+        const node = held.get(fd)?.children?.get(text(name));
+        if (!node || node.symlink) return -1;
+        const opened = nextFd++;
+        held.set(opened, node);
+        return opened;
       },
       fstat(fd, out) {
         const node = held.get(fd);
@@ -1421,6 +1464,23 @@ test("Darwin generated custody joins the real build producer and consuming guard
       read_at(fd, out, size, offset) {
         held.get(fd).bytes.copy(out, 0, offset, offset + size);
       },
+      memcmp: (a, b, size) => a.subarray(0, size).compare(b.subarray(0, size)),
+      dup(fd) {
+        const duplicate = nextFd++;
+        held.set(duplicate, held.get(fd));
+        return duplicate;
+      },
+      flock() {
+        events.push("lock");
+        return env.lockUnavailable ? -1 : 0;
+      },
+      no_subjects: () => events.push("subjects-absent"),
+      pf_restored_guard: () => events.push("pf-restored"),
+      close(fd) {
+        events.push("close");
+        return held.delete(fd) ? 0 : -1;
+      },
+      fputs() {},
       hex(value, size, out) {
         out.value = value.subarray(0, size).toString("hex");
       },
@@ -1433,6 +1493,7 @@ test("Darwin generated custody joins the real build producer and consuming guard
       input_refusal() {},
     };
     const native = script.runInNewContext(env);
+    if (lease) return { env, native, nodes, held, events, metadata };
     native.build_directory(output);
     assert.deepEqual(
       events.filter((name) => name !== "acl"),
@@ -1459,6 +1520,11 @@ test("Darwin generated custody joins the real build producer and consuming guard
     events.length = 0;
     return { env, native, nodes, root, parent, image, events };
   };
+  return { fixture, bytes, output, file };
+}
+
+test("Darwin generated custody joins the real build producer and consuming guards beneath a private report parent", async () => {
+  const { fixture, bytes, output, file } = await boundCustodyFixture();
   const admitted = fixture();
   // This unchanged generic route reproduces the original successful-lstat refusal.
   assert.throws(
@@ -1562,6 +1628,260 @@ test("Darwin generated custody joins the real build producer and consuming guard
       /Native bound custody refused/u,
       fault,
     );
+  }
+});
+
+test("Darwin fixed PF lease joins its exclusive producer through admission, open, stability and reservation", async () => {
+  const source = await readFile(
+      new URL("experiment-inputs.js", import.meta.url),
+      "utf8",
+    ),
+    provisioning = await readFile(
+      new URL("case-provisioning.js", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      "  for (const directory of [",
+      source.indexOf("// Create only the fixed"),
+    ),
+    end = source.indexOf("  const publish =", start),
+    leaseStart = source.indexOf("  const leaseSource =", end),
+    leaseEnd = source.indexOf("  const volumeSource =", leaseStart);
+  assert.ok(
+    start > 0 && end > start && leaseStart > end && leaseEnd > leaseStart,
+  );
+  const publish = new Script(
+      `(async () => {${source.slice(start, end)}${source.slice(leaseStart, leaseEnd)}})();`,
+    ),
+    ordinary = await boundCustodyFixture(),
+    reviewed = await boundCustodyFixture({ experiment: false }),
+    leasePath = JSON.parse(/const lease = ("[^"]+");/u.exec(provisioning)[1]),
+    basePath = leasePath.slice(0, leasePath.lastIndexOf("/")),
+    declaration = new Script(
+      `(${/entries.push\(\s*(\{\s*kind: "data",\s*path: lease,[\s\S]*?\})/u.exec(provisioning)[1]})`,
+    ).runInNewContext({ lease: leasePath, digest }),
+    contents = Buffer.from("native-poc-pf-lease-v1\n"),
+    refused = /Native bound custody refused/u;
+  const fixture = async ({ experiment = true, recovery = false } = {}) => {
+    const f = (experiment ? ordinary : reviewed).fixture({ lease: true }),
+      { env, nodes, metadata, events } = f,
+      staged = new Map(),
+      parent = { stat: metadata(10, 0, 1, 0o40775), children: new Map() };
+    nodes.set("/private", { stat: metadata(8, 0, 0, 0o40755) });
+    nodes.set("/private/var", { stat: metadata(9, 0, 0, 0o40755) });
+    nodes.set("/private/var/run", parent);
+    let ino = 11;
+    await publish.runInNewContext({
+      staging: "/fixture/staging",
+      path: { join: (directory, name) => directory + "/" + name },
+      fs: {
+        async writeFile(name, bytes, options) {
+          assert.deepEqual({ ...options }, { flag: "wx", mode: 0o400 });
+          assert.ok(!staged.has(name));
+          staged.set(name, Buffer.from(bytes));
+        },
+      },
+      async run(binary, args) {
+        assert.equal(binary, "/usr/bin/sudo");
+        assert.deepEqual(Array.from(args.slice(0, 2)), ["-n", "--"]);
+        const name = args.at(-1),
+          parent = nodes.get(name.slice(0, name.lastIndexOf("/"))),
+          leaf = name.slice(name.lastIndexOf("/") + 1);
+        if (args[2] === "/bin/mkdir") {
+          assert.deepEqual(Array.from(args.slice(3, 5)), ["-m", "0711"]);
+          assert.ok(!nodes.has(name), "Private publication must be exclusive");
+          const node = {
+            stat: metadata(ino++, 0, parent.stat.st_gid, 0o40711),
+            children: new Map(),
+          };
+          nodes.set(name, node);
+          parent.children.set(leaf, node);
+        } else if (args[2] === "/usr/sbin/chown") {
+          assert.equal(args[3], "0:0");
+          Object.assign(nodes.get(name).stat, { st_uid: 0, st_gid: 0 });
+        } else {
+          assert.deepEqual(Array.from(args.slice(2, 9)), [
+            "/usr/bin/install",
+            "-o",
+            "0",
+            "-g",
+            "0",
+            "-m",
+            "0400",
+          ]);
+          assert.ok(!parent.children.has(leaf));
+          const bytes = staged.get(args[9]),
+            node = {
+              stat: metadata(ino++, 0, 0, 0o100400, bytes.length),
+              bytes,
+            };
+          nodes.set(name, node);
+          parent.children.set(leaf, node);
+        }
+        events.push(args[2]);
+      },
+    });
+    assert.deepEqual(events, [
+      "/bin/mkdir",
+      "/usr/sbin/chown",
+      "/bin/mkdir",
+      "/usr/sbin/chown",
+      "/usr/bin/install",
+    ]);
+    const entry = {
+      kind: declaration.kind,
+      path: declaration.path,
+      pin: declaration.sha256,
+      fd: -1,
+      stat: {},
+    };
+    Object.assign(env, {
+      case_mode: true,
+      case_recovery: recovery,
+      entries: [entry],
+      count: 1,
+    });
+    events.length = 0;
+    return {
+      ...f,
+      entry,
+      parent,
+      base: nodes.get(basePath),
+      lease: nodes.get(leasePath),
+    };
+  };
+  const open = (f) => {
+      f.native.admitPlan();
+      f.native.openEntry();
+    },
+    reserve = (f) => f.native.reserve(f.entry, "a".repeat(32));
+  for (const recovery of [false, true]) {
+    const f = await fixture({ recovery });
+    // Reproduce the original successful-lstat refusal without weakening it.
+    assert.throws(() => f.native.ancestors(leasePath), refused);
+    open(f);
+    assert.equal(f.native.slot("0"), f.entry);
+    reserve(f);
+    f.native.reservation_guard();
+    assert.deepEqual(f.lease.bytes, contents);
+    assert.equal(
+      f.base.stat.st_gid,
+      0,
+      "Only the producer normalizes inherited GID",
+    );
+    assert.equal(f.events.includes("subjects-absent"), !recovery);
+    assert.ok(
+      f.events.every((event) =>
+        ["acl", "lock", "subjects-absent"].includes(event),
+      ),
+    );
+    f.events.length = 0;
+    f.native.reservation_close();
+    assert.equal(f.env.reservation_fd, -1);
+    assert.ok(
+      f.events.indexOf("subjects-absent") < f.events.indexOf("pf-restored"),
+    );
+    assert.ok(f.events.indexOf("pf-restored") < f.events.indexOf("close"));
+  }
+  for (const stage of ["admitted", "opened", "reserved"])
+    for (const target of ["parent", "base", "lease"]) {
+      const f = await fixture();
+      f.native.admitPlan();
+      if (stage !== "admitted") f.native.openEntry();
+      if (stage === "reserved") reserve(f);
+      const replacement = {
+        ...f[target],
+        stat: { ...f[target].stat, st_ino: 99 },
+      };
+      if (target === "parent") f.nodes.set("/private/var/run", replacement);
+      if (target === "base") f.parent.children.set("native-poc", replacement);
+      if (target === "lease") {
+        f.base.children.set("pf-lease", replacement);
+        f.nodes.set(leasePath, replacement);
+      }
+      assert.throws(
+        () =>
+          stage === "admitted"
+            ? f.native.openEntry()
+            : stage === "opened"
+              ? f.native.slot("0")
+              : f.native.reservation_guard(),
+        refused,
+        `${stage}/${target}`,
+      );
+    }
+  for (const fault of [
+    "kind",
+    "pin",
+    "content",
+    "size",
+    "owner",
+    "group",
+    "mode",
+    "links",
+    "base-owner",
+    "base-group",
+    "base-mode",
+    "base-acl",
+    "lease-acl",
+    "parent-birth",
+    "base-birth",
+    "lease-birth",
+    "canonical",
+    "parent-owner",
+    "parent-mode",
+    "prefix",
+    "near-miss",
+    "lock",
+  ]) {
+    const f = await fixture();
+    open(f);
+    reserve(f);
+    if (fault === "kind") f.entry.kind = "image";
+    if (fault === "pin") f.entry.pin = "e".repeat(64);
+    if (fault === "content") f.lease.bytes[0] ^= 1;
+    if (fault === "size") f.lease.stat.st_size++;
+    if (fault === "owner") f.lease.stat.st_uid = 501;
+    if (fault === "group") f.lease.stat.st_gid = 1;
+    if (fault === "mode") f.lease.stat.st_mode = 0o100600;
+    if (fault === "links") f.lease.stat.st_nlink = 2;
+    if (fault === "base-owner") f.base.stat.st_uid = 501;
+    if (fault === "base-group") f.base.stat.st_gid = 1;
+    if (fault === "base-mode") f.base.stat.st_mode = 0o40775;
+    if (fault === "base-acl") f.base.acl = true;
+    if (fault === "lease-acl") f.lease.acl = true;
+    if (fault === "parent-birth") f.parent.stat.st_birthtimespec.tv_sec++;
+    if (fault === "base-birth") f.base.stat.st_birthtimespec.tv_sec++;
+    if (fault === "lease-birth") f.lease.stat.st_birthtimespec.tv_sec++;
+    if (fault === "parent-owner") f.parent.stat.st_uid = 501;
+    if (fault === "parent-mode") f.parent.stat.st_mode = 0o40777;
+    if (fault === "canonical") f.lease.canonical = basePath + "/other";
+    if (["prefix", "near-miss"].includes(fault)) {
+      f.entry.path =
+        fault === "prefix"
+          ? basePath + "-other/pf-lease"
+          : leasePath + "-other";
+      f.nodes.set(f.entry.path, f.lease);
+      f.nodes.set(basePath + "-other", f.base);
+    }
+    if (fault === "lock") f.env.lockUnavailable = true;
+    assert.throws(() => f.native.reservation_guard(), refused, fault);
+    assert.ok(f.env.reservation_fd >= 0, "Failure must retain exclusion");
+  }
+  const corrupt = await fixture();
+  corrupt.lease.bytes[0] ^= 1;
+  corrupt.native.admitPlan();
+  assert.throws(() => corrupt.native.openEntry(), refused);
+  for (const target of ["base", "lease"]) {
+    const f = await fixture();
+    f[target].symlink = true;
+    f[target].stat.st_mode = 0o120777;
+    assert.throws(() => open(f), refused, `${target} symlink`);
+  }
+  for (const experiment of [false, true]) {
+    const f = await fixture({ experiment });
+    if (experiment) f.env.case_mode = false;
+    assert.throws(() => f.native.admitPlan(), refused);
   }
 });
 

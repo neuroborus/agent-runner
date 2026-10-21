@@ -116,6 +116,51 @@ static void same_stat(struct stat a, struct stat b) {
     a.st_mtimespec.tv_sec == b.st_mtimespec.tv_sec && a.st_mtimespec.tv_nsec == b.st_mtimespec.tv_nsec &&
     a.st_ctimespec.tv_sec == b.st_ctimespec.tv_sec && a.st_ctimespec.tv_nsec == b.st_ctimespec.tv_nsec);
 }
+static int lease_parent = -1, lease_base = -1;
+static struct stat lease_parent_identity, lease_base_identity, lease_identity;
+static bool lease_entry(struct entry *value) {
+#ifdef NATIVE_CI_EXPERIMENT
+  if (!case_mode || strcmp(value->path, "/private/var/run/native-poc/pf-lease")) return false;
+  need(!strcmp(value->kind, "data") && !strcmp(value->pin, "4670840cca5efc5a69097d8b0be5b85030474dcd30449162919de4fffbeca572"));
+  return true;
+#else
+  (void)value; return false;
+#endif
+}
+/* Only the ordinary producer's exact private base joins disposable host
+ * ancestry. Held no-follow descriptors retain both sides of that boundary. */
+static void lease_guard(struct entry *value) {
+  char canonical[PATH_MAX]; struct stat parent, base, named, leaf;
+  need(lease_entry(value) && realpath(value->path, canonical) && !strcmp(value->path, canonical));
+  bool opening = lease_parent < 0;
+  if (opening) {
+    need(lease_base < 0);
+    lease_parent = open("/private/var/run", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(lease_parent >= 0 && !fstat(lease_parent, &lease_parent_identity));
+    lease_base = openat(lease_parent, "native-poc", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    need(lease_base >= 0 && !fstat(lease_base, &lease_base_identity));
+  }
+  need(!fstat(lease_parent, &parent) && !lstat("/private/var/run", &named)); same_stat(parent, named);
+  need(S_ISDIR(parent.st_mode) && parent.st_uid == 0 && !(parent.st_mode & 06002) &&
+    parent.st_dev == lease_parent_identity.st_dev && parent.st_ino == lease_parent_identity.st_ino &&
+    parent.st_mode == lease_parent_identity.st_mode && parent.st_uid == lease_parent_identity.st_uid && parent.st_gid == lease_parent_identity.st_gid &&
+    parent.st_birthtimespec.tv_sec == lease_parent_identity.st_birthtimespec.tv_sec && parent.st_birthtimespec.tv_nsec == lease_parent_identity.st_birthtimespec.tv_nsec);
+  need(!fstat(lease_base, &base) && !fstatat(lease_parent, "native-poc", &named, AT_SYMLINK_NOFOLLOW)); same_stat(base, named);
+  need(!lstat("/private/var/run/native-poc", &named)); same_stat(base, named);
+  need(S_ISDIR(base.st_mode) && base.st_uid == 0 && base.st_gid == 0 && (base.st_mode & 07777) == 0711 &&
+    base.st_dev == lease_base_identity.st_dev && base.st_ino == lease_base_identity.st_ino &&
+    base.st_mode == lease_base_identity.st_mode && base.st_uid == lease_base_identity.st_uid && base.st_gid == lease_base_identity.st_gid &&
+    base.st_birthtimespec.tv_sec == lease_base_identity.st_birthtimespec.tv_sec && base.st_birthtimespec.tv_nsec == lease_base_identity.st_birthtimespec.tv_nsec);
+  no_acl(lease_base);
+  need(!fstatat(lease_base, "pf-lease", &leaf, AT_SYMLINK_NOFOLLOW) && !lstat(value->path, &named)); same_stat(leaf, named);
+  need(S_ISREG(leaf.st_mode) && leaf.st_uid == 0 && leaf.st_gid == 0 && (leaf.st_mode & 07777) == 0400 && leaf.st_nlink == 1 && leaf.st_size == sizeof("native-poc-pf-lease-v1\n") - 1);
+  if (opening) lease_identity = leaf;
+  else {
+    same_stat(lease_identity, leaf);
+    need(leaf.st_birthtimespec.tv_sec == lease_identity.st_birthtimespec.tv_sec && leaf.st_birthtimespec.tv_nsec == lease_identity.st_birthtimespec.tv_nsec);
+  }
+  if (value->fd >= 0) { same_stat(value->stat, leaf); no_acl(value->fd); }
+}
 static void ancestors(const char *path) {
   char name[PATH_MAX], canonical[PATH_MAX]; struct stat st;
   need(realpath(path, canonical) && !strcmp(path, canonical));
@@ -189,6 +234,7 @@ static bool build_entry(struct entry *value) {
   return true;
 }
 static void entry_ancestors(struct entry *value) {
+  if (lease_entry(value)) { lease_guard(value); return; }
   if (!build_entry(value)) { ancestors(value->path); return; }
   build_guard();
   char canonical[PATH_MAX]; need(realpath(value->path, canonical) && !strcmp(value->path, canonical));
@@ -2558,7 +2604,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "open")) {
       need(n == 3); unsigned index = number(tokens[2]); need(index < count); struct entry *entry = &entries[index]; need(entry->fd < 0);
       bool authority = !strcmp(entry->kind, "authority"), dir = !strcmp(entry->kind, "directory"); entry_ancestors(entry);
-      entry->fd = open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
+      entry->fd = lease_entry(entry) ? openat(lease_base, "pf-lease", O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC) :
+        open(entry->path, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (dir ? O_DIRECTORY : 0));
       bool hosted = !authority && !dir && experiment_installed_path(entry->path), sampled = false, directory_entry = false;
       const char *predicate = "open";
       bool ok = entry->fd >= 0 && (predicate = "stat", sampled = fstat(entry->fd, &entry->stat) == 0) &&
@@ -2676,6 +2723,7 @@ int main(int argc, char **argv) {
       if (case_asid) { struct audit_domain_view domain = audit_census(subject_uid, case_asid); need(!domain.nl); }
       for (unsigned i = 0; i < root_domain_count; i++) need(root_members(root_domains[i].token.val[6], false) == 0);
       for (unsigned i = 0; i < session_count; i++) need(mach_port_deallocate(mach_task_self(), sessions[i]) == KERN_SUCCESS);
+      if (lease_base >= 0) { need(!close(lease_base) && !close(lease_parent)); lease_base = lease_parent = -1; }
       fputs("{\"closed\":true}", stdout); puts("}"); fflush(stdout); return 0;
     } else need(0);
     puts("}"); need(!fflush(stdout));

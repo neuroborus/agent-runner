@@ -1652,9 +1652,24 @@ producer, read-only root join, complete-plan admission and open/read/stability
 guards with injected filesystem calls. Its private user-owned report parent
 reproduces the generic ancestry refusal before the bound join succeeds. Root/file
 replacement, birth changes, ACLs, wrong pins/bindings and unrelated ancestry still
-refuse, and consuming reads cannot chown or reseal the root. The existing raw-IPC
-preparation fixture also retains the declared root across pinned generated-source
-reads and private case copies, alongside original-failure and independent
+refuse, and consuming reads cannot chown or reseal the root.
+The same small filesystem projection follows the actual experiment lease
+publication and case declaration into native plan admission, descriptor-relative
+open, stability and PF reservation guards. A successful `lstat` of the observed
+root-owned gid-1 mode-0775 run directory still refuses through generic ancestry;
+only the exact experiment lease joins its strict producer-created private base.
+The producer models Darwin directory-GID inheritance and normalizes only after
+exclusive creation. Read-only consumers retain root:wheel ownership, exact
+modes/bytes/pin, no-follow canonical paths and ACL refusal without resealing.
+Parent/base/lease replacement refuses after admission, open and reservation;
+birth, kind, content, ownership/mode/link, ACL, symlink, lock and near-miss-path
+substitutions retain exclusion. Reviewed and non-case reads cannot acquire the
+experiment exception. Source-derived normal and interrupted reservation paths
+retain fresh absence and PF-restoration checks before closure; the existing
+independent settlement matrices remain their separate owner. No Darwin binary
+is compiled or executed by this fixture.
+The existing raw-IPC preparation fixture also retains the declared root across
+pinned generated-source reads and private case copies, alongside original-failure and independent
 retirement coverage. These portable regressions run no Darwin binary and add no
 validation command or durable slow-tier requirement. Its focused invocation is
 `node ci/native/darwin/custody.test.js`; it performs no elevation, native build,

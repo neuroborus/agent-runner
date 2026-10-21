@@ -24,10 +24,17 @@
 static int reservation_fd = -1;
 static struct stat reservation_stat;
 static struct entry *reservation_entry;
+static void reservation_contents(struct entry *entry) {
+  const char expected[] = "native-poc-pf-lease-v1\n";
+  need(!strcmp(entry->path, "/private/var/run/native-poc/pf-lease") && !strcmp(entry->kind, "data"));
+  need(S_ISREG(entry->stat.st_mode) && entry->stat.st_uid == 0 && entry->stat.st_gid == 0 && entry->stat.st_size == sizeof(expected) - 1 && (entry->stat.st_mode & 07777) == 0400);
+  need(entry->stat.st_nlink == 1); no_acl(entry->fd);
+  char bytes[sizeof(expected) - 1]; read_at(entry->fd, bytes, sizeof(bytes), 0); need(!memcmp(bytes, expected, sizeof(bytes)));
+}
 static void reservation_guard(void) {
   struct stat current;
   need(reservation_fd >= 0 && reservation_entry && !fstat(reservation_fd, &current));
-  same_stat(reservation_stat, current); stable(reservation_entry);
+  same_stat(reservation_stat, current); stable(reservation_entry); reservation_contents(reservation_entry);
   need(!flock(reservation_fd, LOCK_EX | LOCK_NB));
 }
 static bool subjects_absent(void) {
@@ -41,10 +48,7 @@ static void no_subjects(void) { need(subjects_absent()); }
 static void reserve(struct entry *entry, const char *nonce) {
   need(reservation_fd < 0 && strlen(nonce) == 32 && strspn(nonce, "0123456789abcdef") == 32);
   /* One reusable pinned inode, never replaced to allocate a new job nonce. */
-  const char expected[] = "native-poc-pf-lease-v1\n";
-  need(!strcmp(entry->path, "/private/var/run/native-poc/pf-lease") && !strcmp(entry->kind, "data"));
-  need(S_ISREG(entry->stat.st_mode) && entry->stat.st_uid == 0 && entry->stat.st_gid == 0 && entry->stat.st_size == sizeof(expected) - 1 && (entry->stat.st_mode & 07777) == 0400);
-  char bytes[sizeof(expected) - 1]; read_at(entry->fd, bytes, sizeof(bytes), 0); need(!memcmp(bytes, expected, sizeof(bytes)));
+  stable(entry); reservation_contents(entry);
   if (!case_mode || !case_recovery) no_subjects(); reservation_fd = dup(entry->fd); need(reservation_fd >= 0 && !flock(reservation_fd, LOCK_EX | LOCK_NB));
   reservation_stat = entry->stat; reservation_entry = entry; reservation_guard(); identity(entry);
 }

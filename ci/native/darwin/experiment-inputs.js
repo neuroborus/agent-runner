@@ -482,7 +482,7 @@ export async function acquireDarwinExperimentInputs(
   for (const directory of [
     "/private/var/run/native-poc",
     "/private/var/run/native-poc/cases",
-  ])
+  ]) {
     await run("/usr/bin/sudo", [
       "-n",
       "--",
@@ -491,6 +491,16 @@ export async function acquireDarwinExperimentInputs(
       "0711",
       directory,
     ]);
+    // Darwin mkdir inherits the host parent's group. Normalize only the
+    // directory this producer just created exclusively, never a read-only join.
+    await run("/usr/bin/sudo", [
+      "-n",
+      "--",
+      "/usr/sbin/chown",
+      "0:0",
+      directory,
+    ]);
+  }
   const publish = async ({ path: file, sha256, bytes }) => {
     requireObservation(
       path.dirname(file) === prepared.sourceDirectory &&

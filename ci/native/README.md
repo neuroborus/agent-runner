@@ -9836,6 +9836,28 @@ through independent retirement and verified restoration. This pinned mode-0400
 data file contains exactly `native-poc-pf-lease-v1\n` and is reused across jobs;
 allocating a nonce never replaces its inode or contents. Every lease read and PF
 mutation rechecks that the protected pathname still names the held inode.
+
+For ordinary experiments, the exact data declaration and its fixed content pin
+join the producer's private `/private/var/run/native-poc` base. The producer
+creates that base and its `cases` child exclusively with mode 0711, then sets
+their group to 0 before publishing the mode-0400 lease. This accounts for
+Darwin's inherited directory GID without normalizing pre-existing state.
+Admission holds no-follow descriptors for `/private/var/run` and the private
+base; the lease opens relative to that held base. Disposable-host ancestry trust
+applies only above this exact experiment base, accepting the observed root-owned
+group-writable run directory while retaining its sampled identity, ownership,
+mode and birth. The private base remains root:wheel, mode 0711, without ACLs;
+the lease remains a root:wheel single-link regular file with its exact bytes,
+pin and mode. Descriptor-relative and named identities, canonical paths and
+births rejoin at admission, open, stability and reservation checks. Consumers
+never chown or reseal either object, and replacement or changed contents retains
+exclusion. The two directory descriptors remain held until independent cleanup
+and reservation closure permit reader completion. Reviewed admission, generic
+ancestry and the separate generated-build join retain their existing rules.
+Reservation rechecks also reread the fixed contents and reject ACL changes;
+normal and interrupted retirement/PF-restoration ordering remains unchanged.
+Portable source coverage proves these guards, not matching macOS acceptance.
+
 Seatbelt observations bind the acknowledged verification/release phase, candidate,
 closure, nonce and exact launch arguments before any native policy read.
 
