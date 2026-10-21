@@ -382,6 +382,14 @@ classification and whether a process record is persisted, without exposing a
 PID or process identity. An interrupted owner reconstructs work from durable
 state after revalidating inputs and the repository.
 
+Repeated choosing/ready and other control publications leave unchanged journal
+prefixes eligible for byte-certified reuse. Directory metadata churn alone
+does not force historical state normalization. Actual journal namespace or byte
+changes still require conservative validation; a cold or evicted optional
+checkpoint receives full canonical validation rather than a corruption diagnosis.
+Status and activity reads remain lock-free, with complete durable history and
+the same bounded retention and mutation exclusion.
+
 Unexpected-issue reporting is an optional MCP-only operator action for behavior
 that contradicts the documented runner contract. Expected pauses, invalid
 input, configured limits, and environmental blockers are not unexpected

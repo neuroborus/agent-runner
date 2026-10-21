@@ -100,6 +100,18 @@ Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific
 unresolved risk, not a ritual.
 
+The fast state `journal-checkpoints.test.js` suite owns namespace certification:
+real repeated choosing/ready claims during controlled directory observations
+must preserve unchanged-prefix reuse, while cold reads validate every event.
+It counts durable event decoding rather than timing or optimistic read attempts.
+Controlled segment publication during suffix validation proves that recognized
+namespace changes require canonical proof or rejection. Existing adjacent cases
+retain segmented growth, replacement, restored-mtime tamper, cache eviction,
+partial-tail recovery, publication interruption and complete projection coverage.
+Journal changes also require the state/operator-stop and legacy-confirmation
+slow coverage, plus the affected MCP workflow and control-plane composition
+listed above; focused namespace fixtures do not replace those durable gates.
+
 Claude restricted-host launcher changes use deterministic public-adapter tests
 with controlled bubblewrap processes for the commit gate. That coverage must
 compare every x64 and arm64 BPF instruction, reject unsupported architectures

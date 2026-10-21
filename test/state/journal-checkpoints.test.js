@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { utimesSync, writeFileSync } from "node:fs";
+import filesystem from "node:fs/promises";
 import {
   appendFile,
   copyFile,
@@ -12,6 +13,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -52,6 +54,79 @@ function eventDecodes(t, onEvent = () => {}) {
   });
   return revisions;
 }
+
+test("repeated control claims preserve unchanged journal certification during warm and cold reads", async (t) => {
+  let publications = 0;
+  const { store, created, stateRoot } = await fixture(t, {
+    onLeasePublicationBoundary: async ({ filePath, phase }) => {
+      if (filePath.includes("/.mutation-") && phase === "published")
+        publications += 1;
+    },
+  });
+  const { runId } = created.state;
+  const latest = await store.transitionRun(created.lease, {
+    counters: { rounds: 1 },
+  });
+  const journalPath = join(created.directoryPath, "events.jsonl");
+  const original = await readFile(journalPath);
+  await store.loadRun(runId);
+  const decoded = eventDecodes(t);
+  const nativeLstat = filesystem.lstat;
+  let publishing = false;
+  const mockedLstat = t.mock.method(
+    filesystem,
+    "lstat",
+    async (path, options) => {
+      const metadata = await nativeLstat(path, options);
+      if (path === created.directoryPath && options?.bigint && !publishing) {
+        publishing = true;
+        try {
+          // The public artifact operation runs the real choosing/ready protocol
+          // without appending a journal event. Await every publication at the
+          // observation boundary, independently of filesystem scheduling.
+          for (let index = 0; index < 4; index += 1)
+            await store.writeRunArtifact(
+              created.lease,
+              "control-note.md",
+              "Note.\n",
+            );
+        } finally {
+          publishing = false;
+        }
+      }
+      return metadata;
+    },
+  );
+  syncBuiltinESMExports();
+  try {
+    publications = 0;
+    assert.deepEqual(await store.loadRun(runId), latest);
+    assert.ok(publications >= 4);
+    assert.deepEqual(
+      decoded,
+      [],
+      "control publications do not revalidate history",
+    );
+    assert.equal(
+      (await store.readPublicActivity(runId)).cursor,
+      latest.revision,
+    );
+    assert.deepEqual(decoded, [], "covered projections need no event decoding");
+    assert.deepEqual(
+      await createRunStore({ stateRoot }).loadRun(runId),
+      latest,
+    );
+    assert.deepEqual(
+      decoded,
+      [1, 2],
+      "cold reads still validate every event once",
+    );
+    assert.deepEqual(await readFile(journalPath), original);
+  } finally {
+    mockedLstat.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
 
 test("repeated validated reads decode only appended records across transitions and segments", async (t) => {
   const { store, created, stateRoot } = await fixture(t);
@@ -202,6 +277,78 @@ test("a prefix changed during suffix validation is revalidated even with restore
   });
   assert.deepEqual(await store.loadRun(runId), state);
   assert.deepEqual(decoded, [3, 1, 2, 3]);
+});
+
+test("namespace changes during suffix validation require canonical proof", async (t) => {
+  for (const contiguous of [true, false]) {
+    await t.test(contiguous ? "appended segment" : "segment gap", async (t) => {
+      const { store, created } = await fixture(t);
+      const { runId } = created.state;
+      const previous = await store.transitionRun(created.lease, {
+        counters: { rounds: 1 },
+      });
+      function record(revision) {
+        const state = {
+          ...previous,
+          revision,
+          counters: { rounds: revision - 1 },
+        };
+        return {
+          state,
+          source: `${JSON.stringify({
+            schemaVersion: state.schemaVersion,
+            revision,
+            runId,
+            recordedAt: state.updatedAt,
+            state,
+            activity: null,
+          })}\n`,
+        };
+      }
+      await writeFile(
+        join(created.directoryPath, "events-000001.jsonl"),
+        record(3).source,
+      );
+      const next = record(4);
+      let changed = false;
+      const decoded = eventDecodes(t, (event) => {
+        if (event.revision !== 3 || changed) return;
+        changed = true;
+        writeFileSync(
+          join(
+            created.directoryPath,
+            contiguous ? "events-000002.jsonl" : "events-000003.jsonl",
+          ),
+          next.source,
+        );
+      });
+      if (contiguous) {
+        assert.deepEqual(await store.loadRun(runId), next.state);
+        assert.deepEqual(
+          decoded.filter((revision) => revision <= 2),
+          [1, 2],
+        );
+        // Complete state publication so this read tests the new certificate,
+        // rather than the separate canonical proof for an older lagging state.
+        await writeFile(
+          join(created.directoryPath, "state.json"),
+          JSON.stringify(next.state),
+        );
+        decoded.length = 0;
+        assert.deepEqual(await store.loadRun(runId), next.state);
+        assert.deepEqual(
+          decoded,
+          [],
+          "the new complete prefix can be certified",
+        );
+      } else {
+        await assert.rejects(store.loadRun(runId), {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+      }
+      assert.equal(changed, true);
+    });
+  }
 });
 
 test("snapshot mismatch, old lagging snapshots, and partial tails require canonical proof", async (t) => {

@@ -6,14 +6,22 @@ import { isDeepStrictEqual } from "node:util";
 import { openRegularFile } from "./files.js";
 import { RunStoreError } from "./validation.js";
 
-function observation(stat) {
+function identity(stat) {
   return {
     dev: String(stat.dev),
     ino: String(stat.ino),
+    mode: String(stat.mode),
+    uid: String(stat.uid),
+    gid: String(stat.gid),
+  };
+}
+
+function observation(stat) {
+  return {
+    ...identity(stat),
     size: Number(stat.size),
     mtime: String(stat.mtimeNs),
     ctime: String(stat.ctimeNs),
-    mode: String(stat.mode),
     links: Number(stat.nlink),
   };
 }
@@ -29,7 +37,7 @@ export async function observeJournalDirectory(directory) {
 }
 
 export function sameJournalIdentity(left, right) {
-  return left.dev === right.dev && left.ino === right.ino;
+  return isDeepStrictEqual(identity(left), identity(right));
 }
 
 export async function journalFileUnchanged(filePath, expected) {
@@ -101,8 +109,7 @@ export async function readJournalSegment(filePath, limit, prefix = null) {
       observation: stable ? after : null,
       binding: stable
         ? {
-            dev: before.dev,
-            ino: before.ino,
+            ...identity(before),
             length: position,
             digest: hash.digest("hex"),
           }

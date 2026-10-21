@@ -96,6 +96,15 @@ write-ahead events, owner-token leases, canonical paths, link checks, and
 bounded schemas make interruption recoverable without trusting a half-written
 file or a surviving native session.
 
+Journal reuse requires a certificate of the originally validated run/revision
+prefix, ordered contiguous segment namespace, file identities and exact byte
+ranges. Fresh consumed-byte digests and stable directory identity and file
+handle/path observations establish unchanged history. Unrelated control-claim
+publication cannot substitute for or invalidate that proof through directory
+timestamps alone. Namespace, replacement, link, ownership and restored-mtime
+tamper checks remain mandatory. Certificates are independent of optional bounded
+checkpoint retention; absent cache evidence requires canonical validation.
+
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended
 journal checkpoint and existing blockers; cancellation cannot be downgraded.

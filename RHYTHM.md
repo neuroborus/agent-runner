@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22
+
+- **Journal certificates follow the relevant namespace.** Validated scans bind
+  run and revision endpoints, ordered segments, file identities, exact ranges
+  and digests independently of optional checkpoint admission. Fresh prefix
+  hashing, namespace re-listing and stable directory identity replace the use
+  of whole-directory metadata as a proxy for changed history. Real repeated
+  choosing/ready publications therefore preserve unchanged-prefix reuse without
+  historical normalization. Namespace changes, replacements and tampering retain
+  conservative validation; cold and evicted checkpoints remain canonical reads.
+  No retry, retention, journal, ownership or mutation limits changed.
+
 ## 2026-10-21
 
 - **Validated public projections avoid redundant state replay.** Journal scans

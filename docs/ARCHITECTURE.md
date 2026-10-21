@@ -3315,19 +3315,29 @@ Each store instance may retain at most eight validated journal checkpoints with
 a combined 16 MiB serialized footprint (counting shared references conservatively).
 A checkpoint contains only the last two adjacent events, the current stop's
 continuity proof, segment bindings, snapshot metadata, and bounded public
-projection records. Before reuse, safely opened files stream fresh SHA-256
-digests over every cached exact byte prefix.
-Bindings require the same directory identity, ordered contiguous segment names,
-and file identities and ranges. Stable before/after handle, path, and directory
-observations are required; timestamps alone grant no reuse. Changed bytes,
-replacement, races, or uncertain observations invalidate reuse conservatively.
+projection records. Each validated scan produces an operation-local prefix
+certificate independently of optional checkpoint admission. It binds the run,
+first and last revisions, directory identity, ordered contiguous segment names,
+and each segment's revision endpoints, file identity, and exact `[0, length)`
+byte range and digest. Before reuse, safely opened files stream fresh SHA-256
+digests over every certified byte prefix and compare them to the original bindings.
+The scan re-lists the recognized journal namespace before certifying its result.
+Directory device/inode, mode, and ownership must remain stable; unrelated
+choosing/ready claims and derived/control publications may change directory
+timestamps or size without changing journal history. Full before/after file
+handle and path observations, including link count and change time, must remain
+stable across consumed-byte reading and semantic validation. Timestamps alone
+grant no reuse. Changed bytes, replacement, namespace races, or unavailable
+proof invalidate reuse conservatively without extra retry allowances.
 Only appended records then need normalization and continuity validation. Every
 read still rereads and validates `state.json` and proves its exact event match;
 snapshots older than the retained adjacent pair require complete replay.
-Cold reads, cache overflow, and eviction retain complete validation. Partial
+Cold reads, cache overflow, and eviction retain complete validation; missing
+optional cache evidence is not a corruption diagnosis. Partial
 tails are never cached, and failed publication discards retained checkpoints,
 including any populated by publication callbacks. No checkpoint is authoritative
-or persisted. Full history and recovery-proof APIs continue canonical replay.
+or persisted. Certificates retain no historical state sequence. Full history
+and recovery-proof APIs continue canonical replay.
 
 Cold validation and validated suffixes collect public activities with their
 revision, timestamp, redacted dispatch message, and event-specific public stop

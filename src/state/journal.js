@@ -420,14 +420,7 @@ function assertStopContinuity(
   return { checkpoint, accepted };
 }
 
-async function* readEvents(
-  runDirectory,
-  runId,
-  resolveStopBoundary,
-  metadata = {},
-  checkpoint = null,
-) {
-  const directory = await observeJournalDirectory(runDirectory);
+async function readJournalFilenames(runDirectory) {
   const filenames = (await readdir(runDirectory)).filter(
     (name) => name === EVENTS_FILENAME || /^events-[0-9]+\.jsonl$/iu.test(name),
   );
@@ -445,11 +438,28 @@ async function* readEvents(
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
+  return filenames;
+}
+
+async function* readEvents(
+  runDirectory,
+  runId,
+  resolveStopBoundary,
+  metadata = {},
+  checkpoint = null,
+) {
+  const directory = await observeJournalDirectory(runDirectory);
+  const filenames = await readJournalFilenames(runDirectory);
+  const certificate = checkpoint?.certificate;
   if (
     checkpoint &&
-    (!sameJournalIdentity(directory, checkpoint.directory) ||
-      checkpoint.bindings.length > filenames.length ||
-      checkpoint.bindings.some(
+    (!certificate ||
+      certificate.runId !== runId ||
+      certificate.firstRevision !== 1 ||
+      certificate.lastRevision !== checkpoint.lastEvent.revision ||
+      !sameJournalIdentity(directory, certificate.directory) ||
+      certificate.bindings.length > filenames.length ||
+      certificate.bindings.some(
         (binding, index) => binding.filename !== filenames[index],
       ))
   )
@@ -461,7 +471,10 @@ async function* readEvents(
   const bindings = [];
   const observations = [];
   for (const [index, filename] of filenames.entries()) {
-    const prefix = checkpoint?.bindings[index] ?? null;
+    const prefix = certificate?.bindings[index] ?? null;
+    const firstRevision =
+      prefix?.firstRevision ?? (previous?.revision ?? 0) + 1;
+    let lastRevision = prefix?.lastRevision;
     let result;
     try {
       result = await readJournalSegment(
@@ -479,12 +492,11 @@ async function* readEvents(
     if (
       result === null ||
       (prefix &&
-        index < checkpoint.bindings.length - 1 &&
+        index < certificate.bindings.length - 1 &&
         result.binding.length !== prefix.length)
     )
       throw new CheckpointInvalid();
     const { source, binding } = result;
-    bindings.push(binding === null ? null : { ...binding, filename });
     observations.push(result.observation);
     const completeEnd = source.lastIndexOf("\n") + 1;
     const hasPartialTail = completeEnd !== source.length;
@@ -531,10 +543,16 @@ async function* readEvents(
       if (index === 0 && event.schemaVersion >= 21) versionBarrier = true;
       metadata.previousEvent = previous;
       previous = event;
+      lastRevision = event.revision;
       if (metadata.projection) collectProjection(metadata.projection, event);
       start = end + 1;
       yield event;
     }
+    bindings.push(
+      binding === null
+        ? null
+        : { ...binding, filename, firstRevision, lastRevision },
+    );
     if (index === 0 && filenames.length > 1 && !versionBarrier) {
       throw new RunStoreError("Segmented history lacks its version barrier.", {
         code: "ERR_INVALID_EVENT_LOG",
@@ -550,7 +568,12 @@ async function* readEvents(
       stopProof,
     });
   }
-  let stable = true;
+  // Directory timestamps include choosing/ready claims and derived files.
+  // Prove the relevant namespace explicitly instead of treating that metadata
+  // churn as a change to journal history. File observations still cover every
+  // consumed range across semantic validation, including restored-mtime edits.
+  const filenamesAfter = await readJournalFilenames(runDirectory);
+  let stable = isDeepStrictEqual(filenames, filenamesAfter);
   for (const [index, filename] of filenames.entries()) {
     if (
       !(await journalFileUnchanged(
@@ -561,13 +584,20 @@ async function* readEvents(
       stable = false;
   }
   const directoryAfter = await observeJournalDirectory(runDirectory);
-  stable = stable && isDeepStrictEqual(directory, directoryAfter);
+  stable = stable && sameJournalIdentity(directory, directoryAfter);
   if (checkpoint && !stable) throw new CheckpointInvalid();
   Object.assign(metadata, {
-    directory,
-    bindings:
+    // Certification belongs to this validated operation even when its snapshot
+    // is too large for optional checkpoint retention.
+    certificate:
       stable && bindings.every(Boolean) && !metadata.hasPartialTail
-        ? bindings
+        ? deepFreeze({
+            runId,
+            firstRevision: 1,
+            lastRevision: previous.revision,
+            directory,
+            bindings,
+          })
         : null,
   });
 }
@@ -724,7 +754,7 @@ export function createStateJournal({
   }
   function remember(directory, snapshot) {
     forget(directory);
-    if (snapshot.bindings === null) return;
+    if (snapshot.certificate === null) return;
     // Measure bounded components separately and stop on overflow rather than
     // materializing a string containing several copies of a large state.
     let bytes = 0;
@@ -772,7 +802,7 @@ export function createStateJournal({
     // Callers supply a freshly validated snapshot. Publication must reload it
     // after callbacks, so a callback's nested reads or edits grant no reuse.
     if (
-      snapshot.bindings !== null &&
+      snapshot.certificate !== null &&
       snapshot.projection.afterRevision <= afterRevision
     ) {
       for (const activity of snapshot.projection.activities)
