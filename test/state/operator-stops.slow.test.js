@@ -192,6 +192,8 @@ test("replays many large journal segments under a bounded heap", async (t) => {
   }
   const program = `
     import assert from "node:assert/strict";
+    import { readFile } from "node:fs/promises";
+    import { join } from "node:path";
     const { createRunStore } = await import(process.argv[1]);
     const store = createRunStore({ stateRoot: process.argv[2] });
     const runId = process.argv[3];
@@ -207,6 +209,13 @@ test("replays many large journal segments under a bounded heap", async (t) => {
       assert.equal((await store.recoverRun(lease)).revision, 36);
       assert.equal((await store.transitionRun(lease, { counters: { rounds: 36 } })).revision, 37);
       assert.equal((await store.loadRun(runId)).pipelineState.results.length, 4);
+      const tail = await store.readPublicActivity(runId, { afterRevision: 34 });
+      assert.deepEqual(tail.activities.map(activity => activity.revision), [35, 36]);
+      assert.equal(tail.cursor, 37);
+      const progress = await readFile(join(await store.getRunDirectory(runId), "progress.md"), "utf8");
+      assert.match(progress, /Revision: 37/u);
+      assert.equal(progress.split("\\n").filter(line => line.startsWith("- ")).length, 36);
+      assert.doesNotMatch(progress, /pipelineState|results/u);
     } finally {
       await lease.release();
     }

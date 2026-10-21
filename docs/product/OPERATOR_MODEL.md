@@ -197,6 +197,11 @@ fresh byte and identity verification of their complete cached prefixes. Current
 snapshots still require exact journal matches; cold reads and uncertain bindings
 use full validation. Reuse never removes history or changes recovery, revision,
 progress, activity, or exclusive mutation guarantees.
+Validated public records may also serve progress regeneration and activity
+pagination within explicit record and byte caps. Overflow or an older activity
+cursor falls back to canonical history; every activity, event-specific stop
+summary, revision, and progress line remains available. Publication callbacks
+grant no reuse without fresh byte and identity verification.
 Public projections remain bounded and exclude private results. These byte
 limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified

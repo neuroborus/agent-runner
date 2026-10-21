@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-21
 
+- **Validated public projections avoid redundant state replay.** Journal scans
+  and suffix validation collect only redacted activity records and event-specific
+  stop summaries, bounded by 1,024 records and 1 MiB within the existing checkpoint
+  budget. Covered activity pages and complete progress reuse them after fresh
+  byte and identity verification, including after publication callbacks. Older
+  cursors and overflowed progress retain streamed canonical replay. Recovery,
+  complete history, and dispatch proofs keep their existing authority; failed
+  publication drops callback-populated evidence. No transport cache or polling
+  was added.
+
 - **Journal validation reuses byte-proven checkpoints.** Store instances retain
   only bounded adjacent events and continuity proofs, capped by entry count and
   serialized bytes. Every reuse freshly hashes safely opened cached prefixes and

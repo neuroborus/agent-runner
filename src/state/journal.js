@@ -11,7 +11,11 @@ import {
   readJournalSegment,
   sameJournalIdentity,
 } from "./journal-files.js";
-import { publicDispatchActivity } from "./dispatch.js";
+import {
+  collectProjection,
+  createProjection,
+  projectPublicActivity,
+} from "./projections.js";
 import {
   appendDurableLine,
   atomicWriteFile,
@@ -527,6 +531,7 @@ async function* readEvents(
       if (index === 0 && event.schemaVersion >= 21) versionBarrier = true;
       metadata.previousEvent = previous;
       previous = event;
+      if (metadata.projection) collectProjection(metadata.projection, event);
       start = end + 1;
       yield event;
     }
@@ -629,7 +634,7 @@ async function loadSnapshot(
       (checkpoint.previousEvent?.revision ?? checkpoint.lastEvent.revision)
   )
     checkpoint = null;
-  const eventLog = {};
+  const eventLog = { projection: createProjection(checkpoint?.projection) };
   let lastEvent = checkpoint?.lastEvent;
   let storedStateMatched =
     storedState === null ||
@@ -669,7 +674,7 @@ async function loadSnapshot(
   };
 }
 
-async function* renderProgress(state, events) {
+async function* renderProgress(state, activities) {
   yield [
     "# Agent Runner Progress",
     "",
@@ -682,13 +687,10 @@ async function* renderProgress(state, events) {
     "",
   ].join("\n");
   let hasActivity = false;
-  for await (const event of events) {
-    if (event.activity === null) continue;
+  for await (const activity of activities) {
     hasActivity = true;
-    const { actor, kind, message, phase } = publicDispatchActivity(
-      event.activity,
-    );
-    yield `- ${event.recordedAt} — ${actor}/${phase}/${kind}: ${message}\n`;
+    const { actor, kind, message, phase } = activity;
+    yield `- ${activity.recordedAt} — ${actor}/${phase}/${kind}: ${message}\n`;
   }
   if (!hasActivity) yield "No public activity yet.\n";
 }
@@ -766,6 +768,41 @@ export function createStateJournal({
       throw cause;
     }
   }
+  async function* publicActivities(directory, snapshot, afterRevision = 0) {
+    // Callers supply a freshly validated snapshot. Publication must reload it
+    // after callbacks, so a callback's nested reads or edits grant no reuse.
+    if (
+      snapshot.bindings !== null &&
+      snapshot.projection.afterRevision <= afterRevision
+    ) {
+      for (const activity of snapshot.projection.activities)
+        if (activity.revision > afterRevision) yield activity;
+      return;
+    }
+    for await (const event of replaySnapshot(
+      directory,
+      snapshot,
+      resolveStopBoundary,
+    )) {
+      if (event.revision <= afterRevision) continue;
+      const activity = projectPublicActivity(event);
+      if (activity !== null) yield activity;
+    }
+  }
+
+  async function writeProgress(directory, state) {
+    const snapshot = await loadCheckpoint(directory, state.runId);
+    if (!isDeepStrictEqual(snapshot.state, state)) {
+      throw new RunStoreError("Run changed during progress publication.", {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
+    }
+    await atomicWriteFile(
+      join(directory, PROGRESS_FILENAME),
+      renderProgress(state, publicActivities(directory, snapshot)),
+    );
+  }
+
   async function appendTransition(runDirectory, state, snapshot, activity) {
     await removePartialEventTail(runDirectory, snapshot);
 
@@ -816,13 +853,7 @@ export function createStateJournal({
     await onTransitionBoundary("event-appended");
     await writeState(runDirectory, state);
     await onTransitionBoundary("state-replaced");
-    await atomicWriteFile(
-      join(runDirectory, PROGRESS_FILENAME),
-      renderProgress(
-        state,
-        replaySnapshot(runDirectory, { state }, resolveStopBoundary),
-      ),
-    );
+    await writeProgress(runDirectory, state);
     await onTransitionBoundary("progress-replaced");
   }
 
@@ -832,13 +863,7 @@ export function createStateJournal({
       await writeState(runDirectory, snapshot.state);
     }
 
-    await atomicWriteFile(
-      join(runDirectory, PROGRESS_FILENAME),
-      renderProgress(
-        snapshot.state,
-        replaySnapshot(runDirectory, snapshot, resolveStopBoundary),
-      ),
-    );
+    await writeProgress(runDirectory, snapshot.state);
   }
 
   return Object.freeze({
@@ -855,6 +880,14 @@ export function createStateJournal({
     loadSnapshot: loadCheckpoint,
     replaySnapshot: (directory, snapshot) =>
       replaySnapshot(directory, snapshot, resolveStopBoundary),
-    recover,
+    publicActivities,
+    recover: async (directory, snapshot) => {
+      try {
+        await recover(directory, snapshot);
+      } catch (cause) {
+        forget(directory);
+        throw cause;
+      }
+    },
   });
 }

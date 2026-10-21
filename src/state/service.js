@@ -15,7 +15,6 @@ import {
   dispatchActivity,
   isRecoveryPreparation,
   normalizeRecoveryDispatch,
-  publicDispatchActivity,
 } from "./dispatch.js";
 import {
   availabilityActivity,
@@ -39,7 +38,6 @@ import {
 } from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
 import { createStopService } from "./stops.js";
-import { projectOperatorStop } from "./stop-projection.js";
 import {
   assertRunCanAdvance,
   assertStopProgress,
@@ -1633,25 +1631,17 @@ export function createRunStore({
       });
     }
     const activities = [];
-    let cursor = afterRevision;
+    let cursor = snapshot.state.revision;
 
-    for await (const event of journal.replaySnapshot(runDirectory, snapshot)) {
-      if (event.revision <= afterRevision) {
-        continue;
-      }
-      cursor = event.revision;
-      if (event.activity !== null) {
-        activities.push({
-          revision: event.revision,
-          recordedAt: event.recordedAt,
-          ...publicDispatchActivity(event.activity),
-          ...(event.state.stopRequest == null
-            ? {}
-            : { stop: projectOperatorStop(event.state) }),
-        });
-        if (activities.length === limit) {
-          break;
-        }
+    for await (const activity of journal.publicActivities(
+      runDirectory,
+      snapshot,
+      afterRevision,
+    )) {
+      activities.push(activity);
+      if (activities.length === limit) {
+        cursor = activity.revision;
+        break;
       }
     }
 

@@ -59,13 +59,27 @@ test("repeated validated reads decode only appended records across transitions a
   await store.loadRun(runId);
   const decoded = eventDecodes(t);
   for (let rounds = 1; rounds <= 4; rounds += 1) {
+    decoded.length = 0;
     const next = await store.transitionRun(created.lease, {
       counters: { rounds },
     });
-    decoded.length = 0;
-    assert.deepEqual(await store.loadRun(runId), next);
     assert.deepEqual(decoded, [next.revision]);
     decoded.length = 0;
+    assert.deepEqual(await store.loadRun(runId), next);
+    assert.deepEqual(await store.readPublicActivity(runId), {
+      cursor: next.revision,
+      activities: [
+        {
+          revision: 1,
+          recordedAt: created.state.createdAt,
+          actor: "runner",
+          phase: "run",
+          kind: "created",
+          message: "Run created.",
+        },
+      ],
+    });
+    assert.deepEqual(await store.recoverRun(created.lease), next);
     assert.deepEqual(await store.loadRun(runId), next);
     assert.deepEqual(decoded, []);
   }
@@ -227,10 +241,12 @@ test("bounded checkpoint retention evicts older runs without losing canonical hi
     runs.push(await store.loadRun(next.state.runId));
   }
   const decoded = eventDecodes(t);
+  assert.equal((await store.readPublicActivity(runs.at(-1).runId)).cursor, 1);
   assert.deepEqual(await store.loadRun(runs.at(-1).runId), runs.at(-1));
   assert.deepEqual(decoded, []);
-  assert.deepEqual(await store.loadRun(runs[0].runId), runs[0]);
+  assert.equal((await store.readPublicActivity(runs[0].runId)).cursor, 1);
   assert.deepEqual(decoded, [1]);
+  assert.deepEqual(await store.loadRun(runs[0].runId), runs[0]);
 });
 
 test("checkpoint byte overflow falls back to complete validation", async (t) => {
@@ -247,27 +263,340 @@ test("checkpoint byte overflow falls back to complete validation", async (t) => 
   assert.deepEqual(decoded, [1, 2]);
 });
 
-test("publication interruption clears evidence populated by a callback read", async (t) => {
-  let interrupt = false;
-  let readDuringPublication;
+test("publication interruption clears projections populated by callback reads at every boundary", async (t) => {
+  const decoded = eventDecodes(t);
+  for (const boundary of [
+    "event-appended",
+    "state-replaced",
+    "progress-replaced",
+  ]) {
+    let interrupt = false;
+    let readDuringPublication;
+    const { store, created } = await fixture(t, {
+      async onTransitionBoundary(point) {
+        if (interrupt && point === boundary) {
+          await readDuringPublication();
+          throw new Error("Interrupted publication.");
+        }
+      },
+    });
+    const { runId } = created.state;
+    readDuringPublication = () => store.readPublicActivity(runId);
+    await readDuringPublication();
+    interrupt = true;
+    await assert.rejects(
+      store.transitionRun(
+        created.lease,
+        { counters: { rounds: 1 } },
+        {
+          activity: {
+            actor: "runner",
+            phase: "run",
+            kind: "recorded",
+            message: "Checkpoint recorded.",
+          },
+        },
+      ),
+      /Interrupted publication/u,
+    );
+    decoded.length = 0;
+    const page = await readDuringPublication();
+    assert.equal(page.cursor, 2);
+    assert.deepEqual(decoded, [1, 2]);
+    interrupt = false;
+    await rm(join(created.directoryPath, "progress.md"));
+    assert.equal((await store.recoverRun(created.lease)).revision, 2);
+    assert.match(
+      await readFile(join(created.directoryPath, "progress.md"), "utf8"),
+      /Checkpoint recorded\./u,
+    );
+    assert.deepEqual(await readDuringPublication(), page);
+  }
+});
+
+test("progress and activity revalidate prefix bytes after publication callbacks", async (t) => {
+  let changePrefix;
   const { store, created } = await fixture(t, {
     async onTransitionBoundary(boundary) {
-      if (interrupt && boundary === "event-appended") {
-        await readDuringPublication();
-        throw new Error("Interrupted publication.");
+      if (boundary === "state-replaced" && changePrefix) await changePrefix();
+    },
+  });
+  const { runId } = created.state;
+  const path = join(created.directoryPath, "events.jsonl");
+  changePrefix = async () => {
+    const metadata = await stat(path);
+    const source = await readFile(path, "utf8");
+    await writeFile(path, source.replace("Run created.", "Run updated."));
+    await utimes(path, metadata.atime, metadata.mtime);
+  };
+  await store.transitionRun(created.lease, { counters: { rounds: 1 } });
+  assert.equal(
+    (await store.readPublicActivity(runId)).activities[0].message,
+    "Run updated.",
+  );
+  const progressPath = join(created.directoryPath, "progress.md");
+  assert.match(await readFile(progressPath, "utf8"), /Run updated\./u);
+  changePrefix = async () => {
+    const source = await readFile(path, "utf8");
+    await writeFile(path, source.replace('"model":"base"', '"model":"fake"'));
+  };
+  await assert.rejects(
+    store.transitionRun(created.lease, { counters: { rounds: 2 } }),
+    { code: "ERR_INVALID_EVENT_LOG" },
+  );
+  await assert.rejects(store.readPublicActivity(runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+});
+
+test("lock-free activity readers see one complete prefix during interrupted state publication", async (t) => {
+  let reached;
+  let release;
+  const arrived = new Promise((resolve) => {
+    reached = resolve;
+  });
+  const proceed = new Promise((resolve) => {
+    release = resolve;
+  });
+  let pause = false;
+  const { store, created, stateRoot } = await fixture(t, {
+    async onTransitionBoundary(boundary) {
+      if (pause && boundary === "event-appended") {
+        reached();
+        await proceed;
       }
     },
   });
-  readDuringPublication = () => store.loadRun(created.state.runId);
-  await readDuringPublication();
-  interrupt = true;
-  await assert.rejects(
-    store.transitionRun(created.lease, { counters: { rounds: 1 } }),
-    /Interrupted publication/u,
+  const { runId } = created.state;
+  pause = true;
+  const transition = store.transitionRun(
+    created.lease,
+    { counters: { rounds: 1 } },
+    {
+      activity: {
+        actor: "worker",
+        phase: "implement",
+        kind: "summary",
+        message: "Candidate updated.",
+      },
+    },
   );
+  try {
+    await arrived;
+    const peer = createRunStore({ stateRoot });
+    const pages = await Promise.all([
+      store.readPublicActivity(runId),
+      store.readPublicActivity(runId),
+      peer.readPublicActivity(runId),
+    ]);
+    assert.equal(pages[0].cursor, 2);
+    assert.equal(pages[0].activities.at(-1).message, "Candidate updated.");
+    assert.deepEqual(pages[1], pages[0]);
+    assert.deepEqual(pages[2], pages[0]);
+  } finally {
+    release();
+    await transition;
+  }
+});
+
+test("bounded public projections preserve overflowed history, gaps, segments, and exact progress", async (t) => {
   const decoded = eventDecodes(t);
-  assert.equal((await readDuringPublication()).revision, 2);
-  assert.deepEqual(decoded, [1, 2]);
-  interrupt = false;
-  assert.equal((await store.recoverRun(created.lease)).revision, 2);
+  for (const [count, message] of [
+    [1030, "Checkpoint recorded."],
+    [600, "\u{1f642}".repeat(500)],
+  ]) {
+    const { store, created } = await fixture(t);
+    const { runId } = created.state;
+    await store.loadRun(runId);
+    const expected = [
+      {
+        revision: 1,
+        recordedAt: created.state.updatedAt,
+        actor: "runner",
+        phase: "run",
+        kind: "created",
+        message: "Run created.",
+      },
+    ];
+    const segments = [""];
+    let latest;
+    for (let index = 0; index <= count; index += 1) {
+      const revision = index + 2;
+      const state = {
+        ...created.state,
+        revision,
+        counters: { rounds: index + 1 },
+      };
+      latest = state;
+      // The last revision has no activity: cursors must still advance to it.
+      const activity =
+        index === count
+          ? null
+          : { actor: "runner", phase: "run", kind: "recorded", message };
+      if (activity)
+        expected.push({ revision, recordedAt: state.updatedAt, ...activity });
+      const segment = Math.floor(index / 100);
+      segments[segment] =
+        (segments[segment] ?? "") +
+        `${JSON.stringify({
+          schemaVersion: state.schemaVersion,
+          revision,
+          runId,
+          recordedAt: state.updatedAt,
+          state,
+          activity,
+        })}\n`;
+    }
+    for (const [index, source] of segments.entries())
+      await appendFile(
+        join(
+          created.directoryPath,
+          index === 0
+            ? "events.jsonl"
+            : `events-${String(index).padStart(6, "0")}.jsonl`,
+        ),
+        source,
+      );
+    await writeFile(
+      join(created.directoryPath, "state.json"),
+      JSON.stringify(latest),
+    );
+    assert.equal((await store.loadRun(runId)).revision, count + 2);
+    decoded.length = 0;
+    assert.deepEqual(
+      await store.readPublicActivity(runId, {
+        afterRevision: count - 1,
+        limit: 1,
+      }),
+      { activities: [expected[count - 1]], cursor: count },
+    );
+    assert.deepEqual(
+      await store.readPublicActivity(runId, {
+        afterRevision: count,
+        limit: 1,
+      }),
+      { activities: [expected[count]], cursor: count + 1 },
+    );
+    assert.deepEqual(
+      await store.readPublicActivity(runId, { afterRevision: count }),
+      { activities: [expected[count]], cursor: count + 2 },
+    );
+    assert.deepEqual(
+      await store.readPublicActivity(runId, { afterRevision: count + 1 }),
+      { activities: [], cursor: count + 2 },
+    );
+    assert.deepEqual(decoded, [], "recent pages reuse bounded projections");
+    assert.deepEqual(await store.readPublicActivity(runId, { limit: 2 }), {
+      activities: expected.slice(0, 2),
+      cursor: 2,
+    });
+    assert.deepEqual(
+      decoded,
+      [1, 2],
+      "historical pages replay instead of omitting evicted activity",
+    );
+    const progressPath = join(created.directoryPath, "progress.md");
+    await writeFile(progressPath, "Stale progress.\n");
+    await store.recoverRun(created.lease);
+    assert.equal(
+      await readFile(progressPath, "utf8"),
+      [
+        "# Agent Runner Progress",
+        "",
+        `Run: \`${runId}\``,
+        `Pipeline: \`${created.state.pipelineId}\``,
+        `Revision: ${count + 2}`,
+        "",
+        "## Activity",
+        "",
+        "",
+      ].join("\n") +
+        expected
+          .map(
+            (activity) =>
+              `- ${activity.recordedAt} — ${activity.actor}/${activity.phase}/${activity.kind}: ${activity.message}\n`,
+          )
+          .join(""),
+    );
+    const history = await store.loadRunHistory(runId);
+    assert.deepEqual(
+      history.events.map((event) => event.revision),
+      Array.from({ length: count + 2 }, (_, index) => index + 1),
+    );
+  }
+});
+
+test("reused public records keep dispatch redaction and each event's stop summary", async (t) => {
+  const { store, created } = await fixture(t);
+  const { runId } = created.state;
+  const dispatch = {
+    id: "11111111-1111-4111-8111-111111111111",
+    expectedRevision: 1,
+  };
+  await store.recordRecoveryDispatch(created.lease, dispatch);
+  await store.recordRecoveryDispatch(created.lease, dispatch, true);
+  const stop = await store.requestOperatorStop({
+    runId,
+    kind: "pause_requested",
+    expectedRevision: 3,
+    idempotencyKey: "pause-request",
+  });
+  await store.completeOperatorStop(created.lease, {
+    requestId: stop.requestId,
+    patch: {
+      pipelineState: { workflowState: "WAITING_FOR_USER" },
+      pause: {
+        reason: "operator_paused",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: null,
+          activeTurn: null,
+        },
+      },
+    },
+    outcomeMessage: "Operator pause settled.",
+  });
+  const decoded = eventDecodes(t);
+  const page = await store.readPublicActivity(runId);
+  assert.deepEqual(decoded, []);
+  assert.deepEqual(
+    page.activities.slice(1, 3).map((activity) => activity.message),
+    [
+      "Detached recovery acquired execution ownership.",
+      "Detached recovery reached checkpoint continuation.",
+    ],
+  );
+  assert.deepEqual(
+    page.activities.slice(3).map((activity) => activity.stop),
+    [
+      {
+        kind: "pause_requested",
+        revision: 4,
+        timing: "immediate",
+        effectiveTiming: "immediate",
+        targetStep: null,
+        state: "applicable",
+        settlement: null,
+      },
+      {
+        kind: "pause_requested",
+        revision: 4,
+        timing: "immediate",
+        effectiveTiming: "immediate",
+        targetStep: null,
+        state: "settled",
+        settlement: { kind: "quiescent", commit: null },
+      },
+    ],
+  );
+  const progress = await readFile(
+    join(created.directoryPath, "progress.md"),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(page) + progress,
+    new RegExp(`${dispatch.id}|${stop.requestId}|requestId|"checkpoint":`, "u"),
+  );
+  assert.match(progress, /Operator pause settled\./u);
 });

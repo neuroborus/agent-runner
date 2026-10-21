@@ -3307,15 +3307,16 @@ Active waits observe segment publication as well as current-state replacement,
 including interruption between those two durable boundaries. Replay retains
 one bounded segment source, adjacent states, and the current stop's compact
 checkpoint/acceptance proof, rather than all historical snapshots. Public
-activity and recovery proofs scan the same validated prefix; derived progress
+activity and recovery proofs use the same validated prefix; derived progress
 is atomically streamed to disk. Replay memory therefore does not grow with the
 number of segments, and no authoritative record is removed to save memory.
 
 Each store instance may retain at most eight validated journal checkpoints with
 a combined 16 MiB serialized footprint (counting shared references conservatively).
 A checkpoint contains only the last two adjacent events, the current stop's
-continuity proof, segment bindings, and snapshot metadata. Before reuse, safely
-opened files stream fresh SHA-256 digests over every cached exact byte prefix.
+continuity proof, segment bindings, snapshot metadata, and bounded public
+projection records. Before reuse, safely opened files stream fresh SHA-256
+digests over every cached exact byte prefix.
 Bindings require the same directory identity, ordered contiguous segment names,
 and file identities and ranges. Stable before/after handle, path, and directory
 observations are required; timestamps alone grant no reuse. Changed bytes,
@@ -3326,8 +3327,29 @@ snapshots older than the retained adjacent pair require complete replay.
 Cold reads, cache overflow, and eviction retain complete validation. Partial
 tails are never cached, and failed publication discards retained checkpoints,
 including any populated by publication callbacks. No checkpoint is authoritative
-or persisted. Full history and recovery-proof APIs continue canonical replay;
-progress regeneration remains streamed from that replay.
+or persisted. Full history and recovery-proof APIs continue canonical replay.
+
+Cold validation and validated suffixes collect public activities with their
+revision, timestamp, redacted dispatch message, and event-specific public stop
+summary. Each checkpoint retains at most 1,024 activities and 1 MiB of serialized
+activity data, also counted within the combined checkpoint cap. Overflow evicts
+the oldest activities and retains their last revision as a coverage boundary;
+it never drops authoritative events or retains historical states. Activity
+pagination uses the retained range only when it covers the requested cursor.
+Older requests and uncertain bindings replay the canonical snapshot prefix.
+Cursors still advance across revisions without activity and stop at the last
+returned activity when a page is full.
+
+Progress publication uses these records only when they cover the complete run;
+overflow falls back to streamed canonical replay with identical text. After
+event and state publication callbacks, the journal reloads the snapshot and
+freshly verifies prefix bytes and identities before generating progress. A
+changed snapshot rejects publication, and a changed prefix receives complete
+validation. Recovery likewise revalidates after repairing a partial tail or
+lagging snapshot and atomically regenerates stale or missing progress. Failed
+publication or recovery discards retained evidence, including callback reads.
+Runner monitoring and MCP activity/wait consumers continue using the state
+capability; they own no projection cache or additional polling.
 
 Lock-free readers discover an ordered segment prefix after reading current
 state, prove every revision and cross-segment transition, and reject missing,
