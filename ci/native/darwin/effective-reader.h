@@ -269,6 +269,12 @@ static void pf_generation_guard(int fd) {
   }
 }
 static struct pfi_kif pf_interfaces[128]; static unsigned pf_interface_count; static char pf_routes[65]; static bool pf_active;
+static void pf_route_need(bool ok, const char *predicate, size_t size, size_t offset, int error) {
+  if (!ok) {
+    fprintf(stderr, "native-darwin-pf-route: predicate=%s bytes=%zu offset=%zu errno=%d\n", predicate, size, offset, error);
+    fflush(stderr); errno = error; need(false);
+  }
+}
 /* Pinned XNU route.h/rtsock.c: NET_RT_DUMP exports usage in rtm_use and
  * rmx_pksent. Traffic changes these counters, not route authority. */
 static void pf_route_counters(struct rt_msghdr *r) {
@@ -276,19 +282,31 @@ static void pf_route_counters(struct rt_msghdr *r) {
 }
 static void pf_route_digest(unsigned char *routes, size_t size, char hash[65]) {
   for (size_t offset = 0; offset < size;) {
-    struct rt_msghdr header; need(size - offset >= sizeof(header)); memcpy(&header, routes + offset, sizeof(header));
-    need(header.rtm_msglen >= sizeof(header) && header.rtm_msglen <= size - offset && header.rtm_version == RTM_VERSION && header.rtm_type == RTM_GET);
+    struct rt_msghdr header;
+    pf_route_need(size - offset >= sizeof(header), "header-size", size, offset, 0);
+    memcpy(&header, routes + offset, sizeof(header));
+    pf_route_need(header.rtm_msglen >= sizeof(header) && header.rtm_msglen <= size - offset, "message-size", size, offset, 0);
+    pf_route_need(header.rtm_version == RTM_VERSION, "version", size, offset, 0);
+    pf_route_need(header.rtm_type == RTM_GET, "type", size, offset, 0);
     pf_route_counters(&header); memcpy(routes + offset, &header, sizeof(header)); offset += header.rtm_msglen;
   }
-  unsigned char sum[32]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, hash);
+  unsigned char sum[32]; pf_route_need(CC_SHA256(routes, (CC_LONG)size, sum) != NULL, "digest", size, 0, 0); hex(sum, 32, hash);
+}
+static void pf_route_read(char hash[65]) {
+  int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes);
+  errno = 0; int result = sysctl(mib, 6, routes, &size, NULL, 0); int error = errno;
+  pf_route_need(result == 0, "sysctl", size, 0, error);
+  pf_route_need(size > 0 && size <= sizeof(routes), "size", size, 0, 0);
+  pf_route_digest(routes, size, hash);
 }
 static void pf_environment_guard(int fd) {
   struct pf_status status; need(!ioctl(fd, DIOCGETSTATUS, &status) && status.running == pf_active && !status.states);
   struct pfi_kif items[128]; struct pfioc_iface query = {0}; query.pfiio_esize = sizeof(items[0]); query.pfiio_size = 128; query.pfiio_buffer = items;
   need(!ioctl(fd, DIOCIGETIFACES, &query) && query.pfiio_size == pf_interface_count);
   for (unsigned i = 0; i < pf_interface_count; i++) need(!memcmp(items[i].pfik_name, pf_interfaces[i].pfik_name, IFNAMSIZ) && items[i].pfik_flags == pf_interfaces[i].pfik_flags);
-  int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes); char hash[65];
-  need(!sysctl(mib, 6, routes, &size, NULL, 0) && size && size <= sizeof(routes)); pf_route_digest(routes, size, hash); need(!strcmp(hash, pf_routes));
+  /* Each route dump must be valid and bounded. Unrelated host routing is an
+   * observation, not PF authority or an immutable experiment prerequisite. */
+  char hash[65]; pf_route_read(hash);
 }
 static void pf_observation_guard(int fd) { pf_generation_guard(fd); pf_environment_guard(fd); }
 static void pf_address(const struct pf_rule_addr *address, unsigned family) {
@@ -451,13 +469,13 @@ static void pf_read(void) {
 #endif
     printf("%s\"name\":\"%s\",\"skip\":%s}", start, interfaces[i].pfik_name, interfaces[i].pfik_flags & PFI_IFLAG_SKIP ? "true" : "false");
   }
-  int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes);
-  need(!sysctl(mib, 6, routes, &size, NULL, 0) && size > 0 && size <= sizeof(routes));
   char route_hash[65];
 #ifdef NATIVE_CI_EXPERIMENT
-  pf_route_digest(routes, size, route_hash);
+  pf_route_read(route_hash);
   pf_interface_count = query.pfiio_size; memcpy(pf_interfaces, interfaces, sizeof(interfaces[0]) * pf_interface_count); strcpy(pf_routes, route_hash); pf_active = before.running;
 #else
+  int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0}; unsigned char routes[65536]; size_t size = sizeof(routes);
+  need(!sysctl(mib, 6, routes, &size, NULL, 0) && size > 0 && size <= sizeof(routes));
   unsigned char sum[32]; need(CC_SHA256(routes, (CC_LONG)size, sum)); hex(sum, 32, route_hash);
   if (case_mode && count > 12) {
     for (unsigned set = 0; set < PF_RULESET_MAX; set++) {

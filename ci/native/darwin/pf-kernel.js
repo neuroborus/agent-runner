@@ -12,7 +12,9 @@ const decimal = (n) =>
   BigInt(n) <= 0xffffffffffffffffn;
 export function darwinPfAuthority(read) {
   if (read.purpose !== "experiment") return read;
-  const { kernel, ...authority } = read;
+  // Keep routes in the transcript, but do not freeze unrelated hosted routing
+  // as authority for the fixed, unscoped experiment PF recipe.
+  const { kernel, routesSha256, ...authority } = read;
   return {
     ...authority,
     graph: read.graph.map((node) => ({
@@ -108,7 +110,6 @@ export function assertDarwinPfPreserved(
     before.purpose === "experiment" &&
       after.purpose === "experiment" &&
       after.states === 0 &&
-      before.routesSha256 === after.routesSha256 &&
       observationDigest(darwinPfForeign(before)) ===
         observationDigest(darwinPfForeign(after)) &&
       observationDigest(

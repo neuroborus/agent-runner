@@ -2980,7 +2980,7 @@ test("Darwin PF return semantics reject altered ICMP responses and queue selecto
   assert.match(source, /&& pf_return_supported\(r\) &&/u);
 });
 
-test("Darwin PF route authority preserves policy while ignoring documented usage counters", async () => {
+test("Darwin PF route observations normalize only documented usage counters", async () => {
   const source = await readFile(new URL("effective-reader.h", SOURCE), "utf8"),
     body = /static void pf_route_counters\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
       source,
@@ -3008,12 +3008,226 @@ test("Darwin PF route authority preserves policy while ignoring documented usage
   normalize(route);
   assert.deepEqual(route, expected);
   assert.match(source, /header\.rtm_msglen <= size - offset/u);
-  assert.match(
-    source,
-    /header\.rtm_version == RTM_VERSION && header\.rtm_type == RTM_GET/u,
-  );
+  assert.match(source, /header\.rtm_version == RTM_VERSION/u);
+  assert.match(source, /header\.rtm_type == RTM_GET/u);
   assert.match(source, /pf_route_digest\(routes, size, hash\)/u);
-  assert.match(source, /pf_route_digest\(routes, size, route_hash\)/u);
+  assert.match(source, /pf_route_read\(route_hash\)/u);
+  const environment =
+    /static void pf_environment_guard\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(environment);
+  assert.match(environment, /pf_route_read\(hash\)/u);
+  assert.doesNotMatch(environment, /strcmp\([^;\n]*\bpf_routes\b/u);
+  assert.match(environment, /status\.running == pf_active && !status\.states/u);
+  assert.match(
+    environment,
+    /items\[i\]\.pfik_flags == pf_interfaces\[i\]\.pfik_flags/u,
+  );
+  const custody = await readFile(new URL("custody-reader.c", SOURCE), "utf8"),
+    preserved = /static unsigned pf_preserved\(void\) \{([\s\S]*?)\n\}/u.exec(
+      custody,
+    )?.[1];
+  assert.ok(preserved);
+  assert.doesNotMatch(preserved, /strcmp\([^;\n]*\bpf_routes\b/u);
+  const predicate = /need\((strnlen\(pf_baseline\.routes[^;]+)\);/u.exec(
+    preserved,
+  )?.[1];
+  assert.ok(predicate);
+  const valid = new Script(
+    `(pf_baseline) => ${predicate.replaceAll("sizeof(pf_baseline.routes)", "65")}`,
+  ).runInNewContext({
+    strnlen: (value, bound) => Math.min(value.length, bound),
+    strspn(value, characters) {
+      const invalid = [...value].findIndex(
+        (item) => !characters.includes(item),
+      );
+      return invalid < 0 ? value.length : invalid;
+    },
+  });
+  for (const routes of ["a".repeat(64), "f".repeat(64)])
+    assert.equal(valid({ routes }), true);
+  for (const routes of ["", "a".repeat(63), "a".repeat(65), "z".repeat(64)])
+    assert.equal(valid({ routes }), false);
+});
+
+test("Darwin PF route reads distinguish acquisition, bounds and malformed normalization without native execution", async () => {
+  const source = await readFile(new URL("effective-reader.h", SOURCE), "utf8");
+  const body = (name) => {
+    const found = new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+    assert.ok(found, name);
+    return found;
+  };
+  // Synthetic storage exercises the native bodies, not a Darwin SDK layout.
+  const headerSize = 32;
+  const script = new Script(`
+    function pf_route_need(ok, predicate, size, offset, error) {${body("pf_route_need")}}
+    function pf_route_counters(r) {${body("pf_route_counters").replaceAll("r->", "r.")}}
+    function pf_route_digest(routes, size, hash) {${body("pf_route_digest")
+      .replace("size_t offset = 0", "let offset = 0")
+      .replace("struct rt_msghdr header;", "const header = {};")
+      .replaceAll("sizeof(header)", "HEADER_SIZE")
+      .replaceAll("&header", "header")
+      .replaceAll("routes + offset", "routes.subarray(offset)")
+      .replace("unsigned char sum[32];", "const sum = Buffer.alloc(32);")
+      .replace("(CC_LONG)size", "size")
+      .replaceAll("NULL", "null")}}
+    function pf_route_read(hash) {${body("pf_route_read")
+      .replace(
+        "int mib[] = {CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0};",
+        "const mib = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0];",
+      )
+      .replace(
+        "unsigned char routes[65536]; size_t size = sizeof(routes);",
+        "const routes = Buffer.alloc(65536); let size = routes.length;",
+      )
+      .replace("&size", "(value) => { size = value; }")
+      .replaceAll("sizeof(routes)", "routes.length")
+      .replace(/\bint (result|error) =/gu, "const $1 =")
+      .replaceAll("NULL", "null")}}
+    pf_route_read;
+  `);
+  const route = (metric = 1500, usage = 7) => {
+    const bytes = Buffer.alloc(headerSize);
+    bytes.writeUInt16LE(headerSize, 0);
+    bytes[2] = 5;
+    bytes[3] = 4;
+    bytes.writeUInt32LE(usage, 4);
+    bytes.writeUInt32LE(usage + 1, 8);
+    bytes.writeUInt32LE(metric, 12);
+    return bytes;
+  };
+  for (const [fault, predicate, error] of [
+    [null, null, 0],
+    ["sysctl", "sysctl", 13],
+    ["sysctl-zero", "sysctl", 0],
+    ["empty", "size", 0],
+    ["oversize", "size", 0],
+    ["truncated", "header-size", 0],
+    ["short-message", "message-size", 0],
+    ["long-message", "message-size", 0],
+    ["version", "version", 0],
+    ["type", "type", 0],
+    ["trailing", "header-size", 0],
+    ["digest", "digest", 0],
+  ]) {
+    const records = [],
+      calls = [],
+      samples = [
+        Buffer.concat([route(), route(1400)]),
+        Buffer.concat([route(1500, 20), route(1400, 30)]),
+        Buffer.concat([route(1600), route(1400)]),
+      ];
+    const globals = {
+      Buffer,
+      HEADER_SIZE: headerSize,
+      CTL_NET: 1,
+      PF_ROUTE: 2,
+      NET_RT_DUMP: 3,
+      RTM_VERSION: 5,
+      RTM_GET: 4,
+      stderr: {},
+      errno: 99,
+      fprintf(_, format, ...values) {
+        records.push(values);
+        globals.errno = 77;
+      },
+      fflush() {
+        globals.errno = 88;
+      },
+      need(ok) {
+        if (!ok) throw new Error("native route refusal");
+      },
+      memcpy(target, input) {
+        if (Buffer.isBuffer(target)) {
+          target.writeUInt16LE(input.rtm_msglen, 0);
+          target[2] = input.rtm_version;
+          target[3] = input.rtm_type;
+          target.writeUInt32LE(input.rtm_use, 4);
+          target.writeUInt32LE(input.rtm_rmx.rmx_pksent, 8);
+        } else
+          Object.assign(target, {
+            rtm_msglen: input.readUInt16LE(0),
+            rtm_version: input[2],
+            rtm_type: input[3],
+            rtm_use: input.readUInt32LE(4),
+            rtm_rmx: { rmx_pksent: input.readUInt32LE(8) },
+          });
+      },
+      CC_SHA256(bytes, size, sum) {
+        calls.push("digest");
+        if (fault === "digest") return null;
+        Buffer.from(digest(bytes.subarray(0, size)), "hex").copy(sum);
+        return sum;
+      },
+      hex(bytes, size, out) {
+        out.value = bytes.subarray(0, size).toString("hex");
+      },
+      sysctl(mib, count, bytes, setSize, input, inputSize) {
+        assert.deepEqual(Array.from(mib), [1, 2, 0, 0, 3, 0]);
+        assert.equal(count, 6);
+        assert.equal(input, null);
+        assert.equal(inputSize, 0);
+        calls.push("sysctl");
+        const sample = samples.shift();
+        sample.copy(bytes);
+        if (fault === "short-message") bytes.writeUInt16LE(0, 0);
+        if (fault === "long-message") bytes.writeUInt16LE(65535, 0);
+        if (fault === "version") bytes[2] = 6;
+        if (fault === "type") bytes[3] = 5;
+        setSize(
+          {
+            empty: 0,
+            oversize: 65537,
+            truncated: 1,
+            trailing: sample.length + 1,
+          }[fault] ?? sample.length,
+        );
+        globals.errno = error;
+        return fault?.startsWith("sysctl") ? -1 : 0;
+      },
+    };
+    const read = script.runInNewContext(globals),
+      hash = {};
+    if (predicate) {
+      assert.throws(() => read(hash), /native route refusal/u, fault);
+      assert.equal(records.length, 1);
+      assert.equal(records[0][0], predicate);
+      assert.equal(
+        records[0][1],
+        {
+          empty: 0,
+          oversize: 65537,
+          truncated: 1,
+          trailing: headerSize * 2 + 1,
+        }[fault] ?? headerSize * 2,
+      );
+      assert.equal(records[0][2], fault === "trailing" ? headerSize * 2 : 0);
+      assert.equal(records[0][3], error);
+      assert.equal(globals.errno, error);
+      assert.equal(hash.value, undefined);
+      assert.equal(calls.includes("digest"), fault === "digest");
+    } else {
+      read(hash);
+      const first = hash.value;
+      read(hash);
+      assert.equal(hash.value, first);
+      read(hash);
+      assert.notEqual(hash.value, first);
+      assert.equal(records.length, 0);
+      assert.deepEqual(calls, [
+        "sysctl",
+        "digest",
+        "sysctl",
+        "digest",
+        "sysctl",
+        "digest",
+      ]);
+    }
+  }
 });
 
 test("Darwin cache loader queries validate SDK records and reject substituted UUID or base before image reads", async () => {

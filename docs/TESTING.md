@@ -284,17 +284,24 @@ source regression checks counter normalization against the adapter. No test buil
 a Darwin helper or supplies matching-host PF acceptance.
 Injected root action and match substitutions must reject setup even when its root
 digest comes from readback, retaining uncertain setup and its reservation.
-The route regression preserves authority and expiry metrics while normalizing only
-documented usage counters, so control traffic cannot invalidate route equality.
+Route regressions execute the native acquisition and normalization bodies with
+synthetic storage. They distinguish syscall failure (including errno 0), empty or
+oversized dumps, truncated headers, invalid message extents/version/type and hash
+failure. Only documented usage counters are normalized; other observed bytes
+remain in the digest. Ordinary route variation is accepted across preparation,
+case snapshots, counter windows, normal restoration and interrupted recovery;
+reviewed route pins remain strict. The native journal retains its bounded original
+route hash without requiring host routing to rewind. These tests infer no failed
+predicate from the original combined guard's errno 0 and run no native API.
 Return-response regressions reject altered ICMP codes and unsupported queue
 selectors without inferring expected policy from installed bytes.
 PF lifecycle fixtures retain disabled stock-style attachments and foreign child
 rules across installation, normal restoration and cold rejoin. Injected interruption
 points cover enablement, attachment, installation replies and restoration replies;
 recovery cannot replay installation or accept missing original-operation evidence.
-Foreign rule-byte/identity, generation, route/interface and state substitutions
-retain exclusion. Root relocation permits only derived ordinals/skip destinations
-while preserving authority and order. Native source predicates protect conditional
+Foreign rule-byte/identity, generation, interface and state substitutions and
+malformed route observations retain exclusion. Root relocation permits only derived
+ordinals/skip destinations while preserving authority and order. Native source predicates protect conditional
 insertion/removal, durable intent ordering and refusal of impossible phase states;
 they supply no compilation or running-kernel proof. Composition coverage drains
 capture before restoring owned PF effects and closing custody over the stock graph.

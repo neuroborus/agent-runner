@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Treat ordinary Darwin routes as observations
+
+Ordinary PF experiments validate bounded route dumps and retain their normalized
+hashes as evidence, while excluding unrelated host routing from PF authority/root
+equality and restoration prerequisites. Native acquisition, size and normalization
+failures remain distinct refusals; errno 0 from the former combined guard proves
+no specific cause. The fixed unscoped recipe, complete rule identities/semantics,
+generation/counter joins, interface/state guards, private lease and independently
+observed non-emergency retirement/restoration remain required. Reviewed route pins
+stay strict. Portable regressions supply no native acceptance; matching hosted CI
+and all 69 system records remain supervisor-owned follow-up.
+
 ## 2026-10-20 — Verify ordinary command auditing with the real control
 
 Ordinary Windows command experiments replace the extra administrative broker P/M

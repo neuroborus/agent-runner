@@ -9915,11 +9915,27 @@ fence admission, independently retire payloads and original policy writers, requ
 drained loss-free audit evidence and capture retirement, then restore owned changes.
 Foreign rule identities and order survive root ordinal/skip recalculation; generation
 tickets and traffic counters need not rewind. Complete readback verifies foreign
-authority (including restored root ordinals/skip destinations), interfaces, routes
+authority (including restored root ordinals/skip destinations), interfaces
 and the original disabled state before lease/custody closure. A missing enable
 result, torn journal, live writer, undrained capture or
 inconsistent read retains exclusion; recovery never adopts a new token or replays
-installation. Matching macOS must still prove the original access/file/Git recipes,
+installation.
+
+Ordinary route dumps remain bounded, validated observations, rather than immutable
+PF authority. Each native read separates acquisition, size, message normalization
+and digest failures; bounded refusal facts contain only the predicate, byte count,
+offset and operation errno. The original combined guard's errno 0 identifies none
+of those predicates. The digest covers the returned bytes after zeroing documented
+usage counters and remains in read evidence and original journals. Route hashes are excluded
+only from experiment authority/root equality across setup, effective case reads,
+counter windows and restoration/recovery. The fixed experiment recipe rejects
+scoped routes, dynamic addresses and routing pools; PF rule identities/semantics,
+generations, interfaces, states, actual network controls and independent retirement
+still gate acceptance. Reviewed route inventory pins and exact comparisons remain
+strict. Ordinary cleanup restores owned PF effects without requiring unrelated
+host routing to rewind.
+
+Matching macOS must still prove the original access/file/Git recipes,
 positive/negative controls, counters and independent policy restoration.
 Only kernel custody pointers and counters are excluded from ABI rule digests;
 dynamic addresses or nonempty routing pools are unsupported. Limits are 64 anchors,

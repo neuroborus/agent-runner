@@ -1090,9 +1090,9 @@ async function recoverDarwinAccess(
     const before = normalizeDarwinPfRead(await reader.pf()),
       after = normalizeDarwinPfRead(await reader.pf());
     if (binding.purpose === "experiment") assertDarwinPfWindow(before, after);
+    else requireObservation(same(before, after));
     requireObservation(
-      same(before, after) &&
-        darwinPfAuthorityDigest(after) === pfBindings.baselineSha256,
+      darwinPfAuthorityDigest(after) === pfBindings.baselineSha256,
     );
   }
   await verifyRetirement();

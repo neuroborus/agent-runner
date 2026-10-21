@@ -9,6 +9,7 @@ import {
   assertDarwinPfPreserved,
 } from "./pf-kernel.js";
 import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
+import { darwinPfRootDigest } from "./pf-preparation.js";
 import {
   createDarwinPfPreparation,
   createDarwinEffectiveReaders,
@@ -117,7 +118,19 @@ test("experiment PF graph transcripts require every child, ruleset and stable ge
   assert.throws(() => assertDarwinPfWindow(observed, changed));
   changed.graph[2].rules[0].ticket = observed.graph[2].rules[0].ticket;
   changed.routesSha256 = "f".repeat(64);
-  assert.throws(() => assertDarwinPfWindow(observed, changed));
+  assertDarwinPfWindow(observed, changed);
+  assert.equal(
+    darwinPfAuthorityDigest(observed),
+    darwinPfAuthorityDigest(changed),
+  );
+  assert.equal(darwinPfRootDigest(observed), darwinPfRootDigest(changed));
+  for (const routesSha256 of [null, "", "invalid"]) {
+    assert.throws(() => normalizeDarwinPfRead({ ...changed, routesSha256 }));
+  }
+  assert.notEqual(
+    darwinPfRootDigest(installed),
+    darwinPfRootDigest({ ...installed, routesSha256: changed.routesSha256 }),
+  );
   assert.throws(() => normalizeDarwinPfRead(read, "reviewed"));
   assert.throws(() => normalizeDarwinPfRead(baseline, "experiment"));
 });
@@ -861,10 +874,16 @@ function stockLifecycle(fault = null) {
     effectsCount: () => ({ install: installEffects, restore: restoreEffects }),
   };
 }
-test("experiment PF preserves the stock graph and recovers partial installation or lost restoration without replay", async () => {
+test("experiment PF preserves the stock graph across routing changes and recovers without replay", async () => {
   for (const fault of [null, "enabled", "attached", "ready", "restore-reply"]) {
     const f = stockLifecycle(fault),
+      read = f.effects.read,
       owner = f.owner();
+    let routeReads = 0;
+    f.effects.read = async () => ({
+      ...(await read()),
+      routesSha256: digest(`route-observation-${++routeReads}`),
+    });
     if (["enabled", "attached", "ready"].includes(fault))
       await assert.rejects(owner.prepare());
     else {
@@ -891,6 +910,11 @@ test("experiment PF preserves the stock graph and recovers partial installation 
     );
     await f.owner().recover(structuredClone(f.records), {});
     assert.deepEqual(f.effectsCount(), { install: 1, restore: 1 });
+    assert.ok(routeReads > 2);
+    assert.notEqual(
+      f.records[0].before.routesSha256,
+      f.input.bindings.routesSha256,
+    );
   }
 });
 test("PF recovery retains exclusion for competing authority, rule identity, generation or missing original operations", async () => {
@@ -910,7 +934,7 @@ test("PF recovery retains exclusion for competing authority, rule identity, gene
         .sets[1].ticket++;
     },
     (value) => {
-      value.routesSha256 = "e".repeat(64);
+      value.routesSha256 = "invalid";
     },
     (value) => {
       value.interfaces.push({ name: "en0", flags: 0, skip: false });

@@ -126,7 +126,7 @@ const rootGraph = (read) => ({
   active: read.active,
   root: darwinPfAuthority(read).graph.find((entry) => entry.anchor === ""),
   interfaces: read.interfaces,
-  routesSha256: read.routesSha256,
+  ...(read.purpose === "experiment" ? {} : { routesSha256: read.routesSha256 }),
 });
 export function darwinPfRootDigest(read) {
   return digest(JSON.stringify(rootGraph(read)));
@@ -313,7 +313,7 @@ export function createDarwinPfPreparation(value, effects) {
                   ownedAnchor(entry.anchor) && entry.rules.length === 0,
               )) &&
             darwinPfAuthorityDigest(before) === expectation.baselineSha256 &&
-            before.routesSha256 === expectation.routesSha256 &&
+            (experiment || before.routesSha256 === expectation.routesSha256) &&
             before.interfaces.every(
               (item) =>
                 item.skip === (item.name === "lo0" && expectation.loopbackSkip),

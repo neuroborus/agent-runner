@@ -746,7 +746,10 @@ static void pf_position(struct pfioc_rule *r) {
 }
 static unsigned pf_preserved(void) {
   unsigned old = 0, attached = 0;
-  need(pf_baseline.rules <= 64 && pf_baseline.anchors <= 64 && pf_baseline.interfaces < 128 && !strcmp(pf_baseline.routes, pf_routes));
+  need(pf_baseline.rules <= 64 && pf_baseline.anchors <= 64 && pf_baseline.interfaces < 128);
+  /* Retain the original route observation, without requiring host routes to
+   * rewind before independently verified retirement can restore owned PF. */
+  need(strnlen(pf_baseline.routes, sizeof(pf_baseline.routes)) == 64 && strspn(pf_baseline.routes, "0123456789abcdef") == 64);
   for (unsigned i = 0; i < pf_read_rule_count; i++) {
     struct pfioc_rule current = pf_read_rules[i];
     if (pf_owned(current.anchor)) { need(0); } /* private rules must retire first */

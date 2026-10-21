@@ -3154,6 +3154,7 @@ function buildTranscripts(experiment = false, complete = false) {
           live,
           snapshot,
           sessions,
+          pfRead,
         });
         if (raw !== undefined) value = raw;
         else if (name === "slots-closed")
@@ -8300,6 +8301,59 @@ test("Darwin interrupted pre-policy custody releases exclusion only after fresh 
   assert.equal(f.processes.size, 0);
 });
 
+test("Darwin experiment pre-policy recovery accepts fresh route observations without replaying setup", async () => {
+  const f = buildTranscripts(true),
+    binding = experimentCase(f, "access.read-only"),
+    effects = createDarwinSystemEffects(f.input, f.options),
+    recipe = darwinSystemRecipes().find(({ id }) => id === "access.read-only");
+  let interrupted = true,
+    reachedReceipt = false,
+    routeReads = 0;
+  await effects.bootstrap();
+  f.operationFrames((name, args, { pfRead }) => {
+    if (interrupted && name === "case-receipt") {
+      reachedReceipt = true;
+      throw new Error("Interrupted initial native receipt");
+    }
+    if (name === "pf-read")
+      return {
+        ...stockPfFixture(pfRead()),
+        routesSha256: digest(`route-observation-${++routeReads}`),
+      };
+  });
+  await assert.rejects(
+    effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy() {},
+    }),
+  );
+  assert.equal(reachedReceipt, true);
+  assert.ok(!f.events.includes("pf-write"));
+  interrupted = false;
+  f.processes.clear();
+  const diagnostics = [],
+    recovered = await withNativeDiagnostics(
+      () =>
+        createDarwinSystemEffects(f.input, f.options).recover({
+          request: {
+            candidateSha,
+            platform: "darwin",
+            jobSha256: observationDigest(f.input.job),
+            preparationSha256: observationDigest(f.input.preparation),
+          },
+          job: f.input.job,
+          preparation: f.input.preparation,
+        }),
+      (owner, value) => diagnostics.push(owner + ": " + value.exception?.stack),
+    );
+  assert.equal(recovered.status, "RETIRED", diagnostics.join("\n"));
+  assert.ok(routeReads > 2);
+  assert.ok(f.events.includes("access-lease-released"));
+  assert.ok(!f.events.includes("case-start"));
+  assert.ok(!f.events.includes("pf-write"));
+  assert.equal(f.processes.size, 0);
+});
+
 test("Darwin uncertain observation retires possible payloads and retains undrained audit and policy", async () => {
   const f = buildTranscripts(),
     binding = accessBinding(f, "workspace-write"),
@@ -8698,10 +8752,19 @@ test("complete Darwin experiments retain all file and Git native owners and orig
   }
 });
 
-test("Darwin scoped experiment access retains every profile and drains capture before PF restoration", async () => {
+test("Darwin scoped experiment access tolerates route observations and drains capture before PF restoration", async () => {
   for (const profile of ["read-only", "workspace-write", "trusted-command"]) {
-    const f = buildTranscripts(true),
-      id = "access." + profile,
+    const f = buildTranscripts(true);
+    let routeReads = 0;
+    f.operationFrames((name, args, { pfRead }) =>
+      name === "pf-read"
+        ? {
+            ...stockPfFixture(pfRead()),
+            routesSha256: digest(`route-observation-${++routeReads}`),
+          }
+        : undefined,
+    );
+    const id = "access." + profile,
       setup = completeExperimentCase(f, id, undefined, "fe80::2%7"),
       effects = createDarwinSystemEffects(f.input, f.options),
       recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
@@ -8731,6 +8794,7 @@ test("Darwin scoped experiment access retains every profile and drains capture b
         f.events.indexOf("access-lease-released"),
     );
     assert.equal(f.processes.size, 0);
+    assert.ok(routeReads > 2);
   }
 });
 

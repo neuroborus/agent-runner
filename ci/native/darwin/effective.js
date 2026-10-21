@@ -182,10 +182,11 @@ export function createDarwinEffectiveReaders(
           experiment ? "experiment" : "reviewed",
         );
       if (experiment) assertDarwinPfWindow(read, again);
-      requireDarwin(
-        digest(JSON.stringify(read)) === digest(JSON.stringify(again)) &&
-          read.routesSha256 === expected.routesSha256,
-      );
+      else
+        requireDarwin(
+          digest(JSON.stringify(read)) === digest(JSON.stringify(again)) &&
+            read.routesSha256 === expected.routesSha256,
+        );
       assertDarwinPfRoot(read, expected.rootSha256);
       const anchor = read.graph.find(
         (entry) => entry.anchor === plan.anchor,
