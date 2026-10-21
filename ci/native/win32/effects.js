@@ -20,6 +20,7 @@ import {
   hash,
   windowsLaunchDigest,
   WINDOWS_LITERAL_ARGUMENTS,
+  normalizeWindowsIdentity,
   sameWindowsIdentity,
   systemIdentity,
   inspectWindowsPe,
@@ -995,12 +996,30 @@ export function createWindowsSystemEffects(
           inspect: async (request, subjects) => {
             state.guard(signal);
             const observed = await launchEffects.inspect(request, subjects);
-            for (const identity of [
-              subjects.helper,
-              subjects.payload,
-              ...subjects.helpers.map((entry) => entry.identity),
-            ].filter(Boolean)) {
-              const key = observationDigest(identity);
+            const identities = new Map(
+              [
+                subjects.helper,
+                subjects.payload,
+                ...subjects.helpers.map((entry) => entry.identity),
+              ]
+                .filter(Boolean)
+                .map((value) => {
+                  const identity = normalizeWindowsIdentity(value);
+                  return [observationDigest(identity), identity];
+                }),
+            );
+            for (const [key, identity] of identities) {
+              if (sameWindowsIdentity(identity, current.admission.helper)) {
+                requireObservation(
+                  sameWindowsIdentity(
+                    (await current.reader.observeHelper(identity)).identity,
+                    identity,
+                  ),
+                );
+                continue;
+              }
+              // These slots belong only to the case reader. The primary stays
+              // retained by its independent admission verifier above.
               if (!processes.has(key))
                 processes.set(
                   key,

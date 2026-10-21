@@ -97,6 +97,7 @@ export function createWindowsCustodyReader(value, options = {}) {
     helper,
     bridge,
     verifier,
+    admissionSha256,
     taskSha256,
     started = false,
     opening = false,
@@ -779,6 +780,7 @@ export function createWindowsCustodyReader(value, options = {}) {
             sameWindowsIdentity(admission.helper, helper) &&
             hash(admission.nativeEventSha256),
         );
+        admissionSha256 = observationDigest(admission);
         await save("admitted", {
           helper: structuredClone(helper),
           verifier: structuredClone(verifier),
@@ -1655,6 +1657,41 @@ export function createWindowsCustodyReader(value, options = {}) {
       closed(value, ["sha256"]);
       requireWindows(value.sha256 === plan[index].signatureSha256);
       return { ...value, independent: true };
+    },
+    async observeHelper(identity) {
+      guard();
+      identity = systemIdentity(identity);
+      requireWindows(
+        admitted &&
+          !auditRestoring &&
+          !cleanup &&
+          sameWindowsIdentity(identity, helper),
+      );
+      // The case reader cannot retain itself. Its admission owner already holds
+      // this exact process; only that owner may supply the fresh token read.
+      const proof = await verify("verifyHelper", {
+        input,
+        helper: identity,
+        verifier,
+        admissionSha256,
+      });
+      closed(proof, [
+        "independent",
+        "verifier",
+        "admissionSha256",
+        "observation",
+        "nativeEventSha256",
+      ]);
+      const actual = processObservation(proof.observation);
+      requireWindows(
+        proof.independent === true &&
+          proof.admissionSha256 === admissionSha256 &&
+          sameWindowsIdentity(proof.verifier, verifier) &&
+          sameWindowsIdentity(actual.identity, helper) &&
+          !actual.retired &&
+          hash(proof.nativeEventSha256),
+      );
+      return { ...actual, independent: true };
     },
     async retainProcess(identity) {
       requireWindows(

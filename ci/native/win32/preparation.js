@@ -703,6 +703,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
   const methods = [
     "verifyBootstrap",
     "verifyAdmission",
+    "verifyHelper",
     "verifyTransfer",
     "verifyHelperRetirement",
     "verifyRetirement",

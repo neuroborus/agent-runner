@@ -1681,6 +1681,18 @@ substitutions, and retains the distinct installed-input request.
 Generated cases preserve native copy kinds, complete copied Git loader graphs
 and valid Git index padding/checksums. The preparation suite keeps immutable Git
 copying in the case custodian without requesting bootstrap read authority.
+The raw-IPC preparation fixture gives each reader a distinct process identity
+and enforces its native self-retain refusal. Through the actual launch guard,
+custody reader and bound admission verifier, it reproduces the original
+case-reader self-retain failure and proves independent primary-helper observation
+while payload and other-helper slots remain with the case reader. Duplicate full
+identities consume one slot per owner; each inspection still reads fresh process
+and current-token evidence. Reused births, changed session/SID, substituted slots
+and a failed fresh read refuse after an earlier success. The custody suite also
+rejects wrong candidate/context, plan, admission and verifier bindings before
+native reads. Original admission failure and separate independent-observer
+retirement failure coverage remain intact. These portable regressions execute no
+Windows binary and add no validation command or slow-tier requirement.
 The native custody suite also exercises experiment-purpose Job/handle protection
 through raw frames. These checks perform no Windows build, elevation, policy or
 Task Scheduler effect and provide no native CI proof. The existing Windows

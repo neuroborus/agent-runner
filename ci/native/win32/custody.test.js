@@ -5209,6 +5209,46 @@ test("Windows repository verifier joins separately admitted source, process/toke
   );
 });
 
+test("Windows helper observation requires its original candidate, context, admission and verifier", async () => {
+  for (const damage of [
+    "unadmitted",
+    "candidate",
+    "context",
+    "plan",
+    "admission",
+    "helper",
+    "verifier",
+  ]) {
+    const k = verificationFixture();
+    await k.verifier.verifyBootstrap(k.f.input);
+    const admission =
+        damage === "unadmitted"
+          ? null
+          : await k.verifier.verifyAdmission(k.admission),
+      request = {
+        input: structuredClone(k.f.input),
+        helper: structuredClone(k.f.helper),
+        verifier: structuredClone(k.f.verifier),
+        admissionSha256: admission ? observationDigest(admission) : hash,
+      };
+    if (damage === "candidate")
+      request.input.context.candidateSha = "f".repeat(40);
+    if (damage === "context")
+      request.input.context.executionId = "ownership.storage";
+    if (damage === "plan") request.input.plan.sha256 = "f".repeat(64);
+    if (damage === "admission") request.admissionSha256 = "f".repeat(64);
+    if (damage === "helper") request.helper.pid++;
+    if (damage === "verifier") request.verifier.creationTime = "99999";
+    const before = k.events.length;
+    await assert.rejects(k.verifier.verifyHelper(request), /Unverified/u);
+    assert.equal(
+      k.events.length,
+      before,
+      "Wrong bindings must refuse before native reads",
+    );
+  }
+});
+
 test("Windows verifier rejects reused births, changed task identity and malformed native frames without accepting later replies", async () => {
   for (const damage of [
     "birth",

@@ -2186,6 +2186,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     jobCreators = new Map(),
     tasks = new Map(),
     events = [],
+    commands = [],
     fileIds = new Map();
   if (environment) {
     Object.assign(f.manifest.environment, environment);
@@ -2701,6 +2702,12 @@ function rawPreparation({ experiment = false, environment } = {}) {
     if (operation === "verify-retain") {
       const actual = actors.get(Number(args[0]));
       assert.ok(actual);
+      assert.notEqual(
+        actual.identity.pid,
+        scope.serving.pid,
+        "Native self-retain refusal",
+      );
+      assert.equal(actual.identity.creationTime, args[1]);
       let slot = retained.indexOf(actual);
       if (slot < 0) slot = retained.push(actual) - 1;
       assert.ok(slot < 128);
@@ -3269,6 +3276,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
           });
         else {
           const [operation, sequence, ...values] = frame.trim().split(/ +/u);
+          commands.push({ owner: helper, operation, values });
           await f.beforeRawCommand?.(operation);
           let value;
           if (observer)
@@ -3447,6 +3455,13 @@ function rawPreparation({ experiment = false, environment } = {}) {
             };
           } else if (operation === "process-open") {
             const state = actors.get(Number(values[0]));
+            assert.ok(state);
+            assert.notEqual(
+              state.identity.pid,
+              helper.pid,
+              "Native self-retain refusal",
+            );
+            assert.ok(processSlots.length < 32);
             value = { slot: processSlots.push(state) - 1, observation: state };
           } else if (operation === "process-image")
             value = {
@@ -3456,7 +3471,13 @@ function rawPreparation({ experiment = false, environment } = {}) {
             };
           else if (operation === "process")
             value = processSlots[Number(values[0])];
-          else if (operation === "helper-send") {
+          else if (operation === "verifier") {
+            const actual = actors.get(Number(values[0]));
+            assert.ok(actual && !actual.retired);
+            assert.equal(actual.identity.creationTime, values[1]);
+            assert.notEqual(actual.identity.pid, helper.pid);
+            value = actual.identity;
+          } else if (operation === "helper-send") {
             const control = Buffer.from(values[1], "hex").toString();
             if (control === "R") actors.get(worker.pid).retired = true;
             if (control === "S") actors.get(child.pid).retired = true;
@@ -3557,6 +3578,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
         }
       : {}),
     rawEvents: events,
+    rawCommands: commands,
     rawTasks: tasks,
     rawExitCodes: exitCodes,
     signed,
@@ -8064,6 +8086,146 @@ test("Windows fixed provisioning reserves only template-approved TCP/UDP loopbac
       }
     });
     assert.equal(observed, !damage);
+  }
+});
+
+async function caseReaderObservationFixture() {
+  const f = rawPreparation(),
+    { recipe, binding } = provisionCase(f),
+    observed = { independent: true, nativeEventSha256: hash };
+  f.options.ownerEffects = async (current) => {
+    f.current = current;
+    // Only the unrelated launch result is injected; its consuming custody and
+    // admission-verifier guards run through the real owners and raw IPC below.
+    return {
+      ...Object.fromEntries(
+        [
+          "verifyInputs",
+          "verifySetup",
+          "installPolicy",
+          "verifyAuthority",
+          "verifyReceipt",
+          "retire",
+          "readProvisioning",
+          "readPolicy",
+          "persist",
+        ].map((name) => [name, async () => {}]),
+      ),
+      inspect: async () => observed,
+    };
+  };
+  await buildRawPreparation(f);
+  const system = await createSystemEffects(f, f.options),
+    prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: () => {},
+    });
+  return { f, prepared, observed };
+}
+
+test("Windows launch observation reads its admitted primary through the bound independent owner", async () => {
+  const { f, prepared, observed } = await caseReaderObservationFixture(),
+    { helper, verifier } = f.current.admission,
+    payload = f.rawActor(false),
+    other = f.rawActor(),
+    subjects = {
+      helper,
+      payload,
+      helpers: [
+        { identity: { ...helper } },
+        { identity: other },
+        { identity: Object.fromEntries(Object.entries(other).reverse()) },
+      ],
+    },
+    observations = [],
+    observeHelper = f.current.reader.observeHelper.bind(f.current.reader);
+  f.current.reader.observeHelper = async (...args) => {
+    const actual = await observeHelper(...args);
+    observations.push(actual);
+    return actual;
+  };
+  for (let i = 0; i < 2; i++) {
+    f.actors.get(helper.pid).privileges = [
+      { luid: "5".repeat(16), attributes: i },
+    ];
+    const start = f.rawCommands.length;
+    assert.equal(
+      await prepared.effects.inspect(prepared.input, subjects),
+      observed,
+    );
+    const commands = f.rawCommands.slice(start);
+    assert.deepEqual(
+      commands
+        .filter(({ operation }) => operation === "process-open")
+        .map(({ owner, values }) => [owner, Number(values[0])]),
+      i === 0
+        ? [
+            [helper, payload.pid],
+            [helper, other.pid],
+          ]
+        : [],
+    );
+    assert.deepEqual(
+      commands
+        .filter(({ operation }) => operation === "process")
+        .map(({ owner, values }) => [owner, Number(values[0])]),
+      [
+        [helper, 0],
+        [helper, 1],
+      ],
+    );
+    assert.deepEqual(
+      commands
+        .filter(({ operation }) => operation === "verify-process")
+        .map(({ owner }) => owner),
+      [verifier],
+    );
+    assert.deepEqual(observations.at(-1).privileges, [
+      { luid: "5".repeat(16), attributes: i },
+    ]);
+  }
+});
+
+test("Windows launch observation rejects substituted identities, owner slots and failed fresh reads", async () => {
+  for (const damage of [
+    "birth",
+    "session",
+    "sid",
+    "retired",
+    "observer-slot",
+    "case-slot",
+    "fresh",
+  ]) {
+    const { f, prepared } = await caseReaderObservationFixture(),
+      { helper } = f.current.admission,
+      payload = f.rawActor(false),
+      other = f.rawActor(),
+      subjects = { helper, payload, helpers: [{ identity: other }] },
+      cause = new Error("Fresh process observation unavailable");
+    // First obtain the slots normally: a prior success cannot replace the next read.
+    await prepared.effects.inspect(prepared.input, subjects);
+    f.accessNative = (operation, values, scope) => {
+      if (operation === "verify-process") {
+        const actual = structuredClone(scope.retained[Number(values[0])]);
+        if (actual.identity.pid !== helper.pid) return;
+        if (damage === "fresh") throw cause;
+        if (damage === "birth") actual.identity.creationTime = "99999";
+        if (damage === "session") actual.identity.sessionId++;
+        if (damage === "sid") actual.identity.userSid = payload.userSid;
+        if (damage === "retired") actual.retired = true;
+        if (damage === "observer-slot") return scope.retained[1];
+        return actual;
+      }
+      if (damage === "case-slot" && operation === "process")
+        return scope.processSlots[1 - Number(values[0])];
+    };
+    await assert.rejects(
+      prepared.effects.inspect(prepared.input, subjects),
+      (error) =>
+        damage === "fresh"
+          ? error === cause
+          : /Unverified/u.test(error.message),
+    );
   }
 });
 

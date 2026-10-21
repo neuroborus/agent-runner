@@ -8796,6 +8796,20 @@ acknowledges setup. An administrator token is insufficient. The task adds no
 daemon, shell, UAC prompt or provider credential inheritance; the reader replaces
 its environment, and helper creation supplies only the fixed CI environment.
 
+The launch inspection guard routes only the exact admitted case-reader identity
+to the independent outer/preparation verifier that admitted it. That verifier
+rejoins the original candidate/context, admission and full PID/birth/session/SID,
+then reads the retained process and its current token afresh. A prior successful
+observation cannot replace that read. Payloads and other helpers stay on the case
+reader; complete normalized identities are deduplicated and native slots remain
+with their owning reader. The bound primary observation is preserved. Native
+self-retain refusal, process limits, access rights and independent retirement
+remain unchanged. This correction establishes neither native acceptance nor
+complete PoC success; the separate Winsock10022, current-token
+`PROCESS_DUP_HANDLE` denial and undelivered command-marker subscription blockers
+remain open, alongside the Darwin TASK_ACCESS_PORT/owner-loss and Codex guard-page
+EINVAL blockers. Matching native CI and publication remain supervisor-owned.
+
 The shared `--serve`/`--observe` startup replaces the reader environment before
 COM initialization and trust calls with exactly `CI=true`, `GITHUB_ACTIONS=true`,
 `PATH=C:\nonexistent` and `SystemRoot` derived from

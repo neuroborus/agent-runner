@@ -74,6 +74,7 @@ export function createWindowsCustodyVerifier(
     target,
     bridge,
     taskSha256,
+    admission,
     sequence = 0,
     failure,
     failed = false,
@@ -1467,7 +1468,7 @@ export function createWindowsCustodyVerifier(
         });
       taskSha256 = installed.sha256;
       target = structuredClone(actual.identity);
-      return {
+      const proof = {
         independent: true,
         helper: actual.identity,
         verifier: verifier(),
@@ -1483,6 +1484,29 @@ export function createWindowsCustodyVerifier(
           original,
           executable,
         }),
+      };
+      admission = structuredClone(proof);
+      return proof;
+    },
+    async verifyHelper(value) {
+      requireWindows(
+        input &&
+          same(value.input, input) &&
+          admission &&
+          value.admissionSha256 === observationDigest(admission) &&
+          sameWindowsIdentity(value.helper, admission.helper) &&
+          sameWindowsIdentity(value.verifier, admission.verifier) &&
+          sameWindowsIdentity(verifier(), admission.verifier),
+      );
+      const observation = await observe(admission.helper),
+        admissionSha256 = observationDigest(admission);
+      requireWindows(!observation.retired);
+      return {
+        independent: true,
+        verifier: verifier(),
+        admissionSha256,
+        observation,
+        nativeEventSha256: observationDigest({ admissionSha256, observation }),
       };
     },
     async verifyPreSetup(value) {
