@@ -207,18 +207,29 @@ static void domain_access_observe(const char *phase) {
     domain_mach(released, "fault-access-release");
   }
 }
+static void domain_access_release(task_t self, mach_port_t access, mach_port_type_t type) {
+  bool owned = type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME);
+  kern_return_t released = owned ? mach_port_deallocate(self, access) : KERN_SUCCESS;
+  domain_access_diagnostic("payload", KERN_SUCCESS, access, type, KERN_SUCCESS, owned ? released : -1);
+  if (released != KERN_SUCCESS) {
+    remember("fault-access-release", "mach", released);
+    remember_cleanup("fault-access-release", "mach", released);
+    failure(126);
+  }
+}
 static void domain_sanitize(void) {
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host, access; natural_t type; mach_vm_address_t address;
   domain_mach(task_get_special_port(self,TASK_HOST_PORT,&host), "fault-host-port");
   domain_mach(mach_port_kobject(self,host,&type,&address), "fault-host-kind"); invariant(type == 3, "fault-host-kind");
-  domain_mach(mach_port_deallocate(self,host), "fault-host-release");
   domain_mach(task_get_special_port(self,TASK_ACCESS_PORT,&access), "fault-access-port");
   /* XNU consults the target task's access port when authorizing task_for_pid.
-   * This inherited endpoint is unidentified; releasing a getter copy does not
-   * clear its slot. copy_send_mqueue can return a dead sentinel or a right that
-   * dies before inspection. Live or unknown rights still block exec.
-   * The task-access slot cannot be overwritten while its port is valid. */
+   * Ordinary hosted execution trusts that inherited authorization service, not
+   * arbitrary SEND rights. Require the slot's exact SEND type and IKOT_NONE;
+   * a task/thread or other kernel object cannot stand in for the service.
+   * Keep this getter copy through the census. Its local name is meaningful only
+   * in this task; releasing it never clears or overwrites the special slot. */
+  bool access_held = false;
   mach_port_type_t access_type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
   kern_return_t access_query = KERN_SUCCESS;
   if (MACH_PORT_VALID(access)) access_query = mach_port_type(self, access, &access_type);
@@ -231,19 +242,16 @@ static void domain_sanitize(void) {
     domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query, -1);
   domain_mach(access_query, "fault-access-kind");
   if (MACH_PORT_VALID(access)) {
-    bool harmless = access_type == MACH_PORT_TYPE_DEAD_NAME;
-    if (!harmless) remember("fault-access-authority", "invariant", 0);
-    kern_return_t released = KERN_SUCCESS;
-    /* Release only the getter's inspected reference, never an unrelated right. */
-    if (access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME))
-      released = mach_port_deallocate(self, access);
-    domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query,
-      access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME) ? released : -1);
-    if (released != KERN_SUCCESS) {
-      remember("fault-access-release", "mach", released);
-      remember_cleanup("fault-access-release", "mach", released);
+    kern_return_t service_query = KERN_SUCCESS;
+    if (access_type == MACH_PORT_TYPE_SEND) {
+      service_query = mach_port_kobject(self, access, &type, &address);
+      if (service_query != KERN_SUCCESS) remember("fault-access-service", "mach", service_query);
+      else access_held = type == 0; /* IKOT_NONE, not task-control authority. */
     }
-    if (!harmless || released != KERN_SUCCESS) failure(126);
+    bool accepted = access_held || access_type == MACH_PORT_TYPE_DEAD_NAME;
+    if (!accepted && service_query == KERN_SUCCESS) remember("fault-access-authority", "invariant", 0);
+    if (!access_held) domain_access_release(self, access, access_type);
+    if (!accepted) failure(126);
   } else domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, -1, -1);
   domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
   domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
@@ -255,10 +263,21 @@ static void domain_sanitize(void) {
   mig_dealloc_reply_port(mig_get_reply_port()); mach_port_t reply = mig_get_reply_port();
   mach_port_name_array_t names; mach_port_type_array_t types; mach_msg_type_number_t n, nt;
   domain_mach(mach_port_names(self, &names, &n, &types, &nt), "fault-port-list"); invariant(n == nt && n <= 4096, "fault-port-count");
-  for (unsigned i = 0; i < n; i++) if (names[i] != self && names[i] != thread && names[i] != reply)
-    domain_mach(mach_port_destroy(self, names[i]), "fault-port-destroy");
+  bool host_seen = false, access_seen = !access_held;
+  for (unsigned i = 0; i < n; i++) {
+    if (names[i] == self || names[i] == thread || names[i] == reply) continue;
+    if (names[i] == host) {
+      invariant(types[i] == MACH_PORT_TYPE_SEND, "fault-port-authority"); host_seen = true;
+    } else if (access_held && names[i] == access) {
+      invariant(types[i] == MACH_PORT_TYPE_SEND, "fault-port-authority"); access_seen = true;
+    } else invariant(types[i] == MACH_PORT_TYPE_DEAD_NAME, "fault-port-authority");
+  }
+  /* Unknown live rights refuse exec; destroying them cannot prove confinement. */
+  invariant(host_seen && access_seen, "fault-port-authority");
   domain_mach(mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names)), "fault-port-list-release");
   domain_mach(mach_vm_deallocate(self, (mach_vm_address_t)types, nt*sizeof(*types)), "fault-port-list-release");
+  if (access_held) domain_access_release(self, access, access_type);
+  domain_mach(mach_port_deallocate(self, host), "fault-host-release");
   domain_mach(mach_port_deallocate(self, thread), "fault-thread-release");
 }
 static void domain_denied(int result, const char *operation) {

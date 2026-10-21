@@ -3552,76 +3552,60 @@ and Mach rights, bounded process count and native credential/session/delegation
 negative controls. Image, birth, parent, credentials and Seatbelt observations
 join candidate, case and exact policy bytes before protected intent and release.
 
-At this feasibility-only launch boundary, task-access sanitation accepts
-`MACH_PORT_NULL`, the `MACH_PORT_DEAD` sentinel, or a successfully queried
-name whose complete type is exactly `MACH_PORT_TYPE_DEAD_NAME`. Pinned
-[XNU task special-port reads](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ipc_tt.c)
-use `ipc_port_copy_send_mqueue`, which can return a dead port; the
-[Mach port contract](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/mach/port.h)
-distinguishes that sentinel from an allocated dead name. Neither carries live
-authority. Current XNU's
-[`task_for_pid`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_proc.c)
-consults the target task's access port during caller authorization after the
-POSIX/MAC checks. The getter copy alone is not direct task authority, and the
-inherited endpoint remains unidentified. Every allocated name must pass
-`mach_port_type`; query failures
-stop the owned child without an unverified-name release and are never treated
-as absent rights. Checked deallocation releases only an inspected send,
-send-once or dead-name reference, including a rejected live reference; it does
-not clear the task's special slot. Types without such a reference stop without
-another namespace operation, preserving the authority refusal rather than
-risking an invalid-right guard exception. A release failure remains blocking
-and retains separate cleanup diagnosis without
-replacing the first authority refusal. Null/dead sentinels allocate no
-name to release. All remaining descriptor, bootstrap, registered-port,
-exception and foreign-name sanitation still precedes the original payload exec.
-The slot is never blindly overwritten: XNU refuses replacement of an already
-valid task-access port, and a live or unknown endpoint cannot reach payload exec
-without a separately source-supported confined launch correction.
-The original observed `type=0x10000/query=0` is a live send right and retains the
-pre-exec `fault-access-authority` refusal. Bounded lifecycle observations now
-separate `custodian-entry` before sealed reexec, `custodian-fork` after reexec and
-audit-session setup, `child-fork` in the forked child after its existing alarm and
-before audit-session or credential transitions, and the existing unprivileged
-`payload` sanitation read.
-They retain PID/parent, real/effective credentials, getter/type status, local name
-and reference-release status; `-1` denotes an unattempted query or release.
-Failed getter/type reads do not establish absence or a usable queried type.
-The two custodian observations and the child observation query only their own
-public task-access slot.
-Each successful getter's valid copied send reference is released once, even if
-its optional type query is unavailable; a failed release blocks and retains its
-independent cleanup cause. Failed getters allocate no reference. Original child
-sanitation keeps its stricter inspected-name release and refusal behavior.
-The child observation localizes inheritance; releasing its getter copy cannot
-clear the source task slot or establish a safe confined launch.
-Local names cannot establish endpoint identity across observations or prove
-confinement. No endpoint is contacted and no setter or extra launch is tried.
+At this feasibility-only ordinary launch boundary, task-access sanitation accepts
+`MACH_PORT_NULL`, `MACH_PORT_DEAD`, an exactly typed allocated dead name, or the
+host-inherited authorization service returned by this task's `TASK_ACCESS_PORT`
+getter. Pinned
+[XNU inheritance and special-port reads](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/kern/ipc_tt.c)
+copy the parent's task-access endpoint. The target task's service participates in
+[`task_for_pid` authorization](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_proc.c)
+after POSIX/MAC checks; its getter is not a task-control grant. Ordinary disposable
+host trust accommodates that role without identifying the service by a name from
+another process or an earlier observation.
+
+An allocated name must pass `mach_port_type`. A live service must have exactly
+`MACH_PORT_TYPE_SEND` and a successful
+[`mach_port_kobject`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/ipc/mach_debug.c)
+read of type `IKOT_NONE` (0), excluding task/thread control and every other kernel
+object. Mixed, send-once, unknown and empty types refuse exec. Query failures
+remain failures. Only inspected getter references are released; rejected rights
+without a send, send-once or dead-name reference are left untouched until the
+owned child exits. A release failure retains its separate cleanup cause without
+replacing an earlier authority or query refusal. Releasing a getter copy neither
+clears the slot nor establishes confinement, and no slot setter or service message
+is introduced.
+
+The accepted service and ordinary host getter copies stay held through the bounded
+Mach-name census. Only this task, its current thread, its owned MIG reply port,
+those two checked local names and dead names are admitted. Unexpected live rights
+refuse exec without destroying unrelated rights to manufacture a safe namespace.
+Missing or changed census entries also refuse. The census arrays, held service,
+host and thread copies have checked releases; the service's slot reference survives.
+Explicit bootstrap/debug/resource-notify clearing, registered-port removal and
+task/thread exception sanitation remain required, alongside descriptor closure,
+credential separation and the real task/process/IPC negative controls.
+
+Bounded lifecycle observations separate `custodian-entry` before sealed reexec,
+`custodian-fork` after reexec and audit-session setup, `child-fork` after the child's
+alarm but before credential/session changes, and the unprivileged `payload` read.
+They retain PID/parent, credentials, getter/type status, local name and release
+status; `-1` means an unattempted query or release. Custodian/child observation
+getters release their own valid copies once, even if their optional type query
+fails; a failed release blocks and retains cleanup diagnosis. These observations
+localize inheritance and supply no endpoint identity, admission or retirement proof.
 The existing JS custody caller forwards custodian stderr through the ordinary CI
 diagnostic sink, separately from relayed original payload stderr; neither stream's
 lifecycle metadata supplies a receipt, admission or retirement proof. A failed
 diagnostic sink cannot interrupt original custody capture or replace its failure
-and cleanup evidence. Fresh matching macOS CI must establish a supported confined
+and cleanup evidence. Fresh matching macOS CI must establish the confined
 launch and independent retirement of both original faults while all eight earlier
 capabilities remain passing.
 Portable classification and caller coverage supply no native acceptance.
 
-The live inherited slot remains a technical blocker. The pinned public XNU
-`ipc_task_init` copies it on fork; `task_set_special_port` refuses overwriting a
-valid slot, and `ipc_task_reset` does not clear it. Public
-[`posix_spawn` attributes](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/sys/spawn.h)
-provide credential reset and descriptor-close controls, not a task-access-slot
-reset. The existing deny-default sandbox and its installed-state query neither
-identify the inherited endpoint nor prove that delegated work is confined.
-The saved lifecycle reads already show a live inherited slot before the child's
-credential transition; copied-reference release cannot establish its absence.
-No supported confined launch
-or endpoint ownership has been established. The smallest missing authority fact
-is a public-contract-supported launch with absent authority, or an independently
-identified endpoint with proved confinement and ownership. No unidentified
-endpoint is contacted, and successful unrelated setters cannot discharge this
-requirement. The original live-right refusal and all eight earlier capability
-obligations remain owned.
+The task-access slot remains inherited: XNU refuses replacement of a valid slot,
+and `ipc_task_reset` does not clear it. This correction admits the constrained
+service role under ordinary hosted trust instead of manufacturing slot absence.
+It supplies no native cancellation, owner-loss or independent retirement result.
 
 Failure settlement corrects two separate source defects: acquired domain pipes
 and the direct child previously lived only in `domain_start` locals, and an

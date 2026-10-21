@@ -4688,7 +4688,7 @@ test("Darwin custodian lifecycle observations balance their own public getter re
   );
 });
 
-test("Darwin fault sanitation admits only absent or dead access rights before the original payload exec", async () => {
+test("Darwin fault sanitation preserves the inherited authorization service and refuses unexpected control rights", async () => {
   const source = await readFile(
       new URL("feasibility-domain.h", SOURCE),
       "utf8",
@@ -4705,7 +4705,13 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     /static void domain_access_observe\(const char \*phase\) \{([\s\S]*?)\n\}/u.exec(
       source,
     )?.[1];
-  assert.ok(sanitation && observation && start > 0 && end > start);
+  const releaseBody =
+    /static void domain_access_release\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(
+    sanitation && observation && releaseBody && start > 0 && end > start,
+  );
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
   const translate = (body) =>
@@ -4739,6 +4745,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       );
   const script = new Script(`
     function domain_access_observe(phase) {${translate(observation)}}
+    function domain_access_release(self, access, type) {${translate(releaseBody)}}
     function domain_sanitize() {${translate(sanitation)}}
     () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
   `);
@@ -4753,12 +4760,7 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     ["dead sentinel", { access: DEAD }],
     ["allocated dead name", { access: 200, rights: DEAD_NAME }],
     ["child getter refused", { childGet: 5 }],
-    [
-      "child query refused",
-      { access: 200, rights: SEND, childQuery: 15 },
-      "fault-access-authority",
-      0,
-    ],
+    ["child query unavailable", { access: 200, rights: SEND, childQuery: 15 }],
     [
       "child release refused",
       { access: 200, rights: SEND, childRelease: 15 },
@@ -4766,23 +4768,41 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       15,
       15,
     ],
-    ["live send", { access: 200, rights: SEND }, "fault-access-authority", 0],
+    ["authorization service", { access: 200, rights: SEND }],
     [
-      "dead observation cannot admit a later live slot",
-      { childAccess: DEAD, access: 200, rights: SEND },
-      "fault-access-authority",
-      0,
+      "local names are not endpoint identities",
+      { childAccess: 301, access: 200, rights: SEND },
     ],
     [
-      "null observation cannot admit a later live slot or hide release failure",
-      { childAccess: 0, access: 200, rights: SEND, release: 15 },
+      "fresh slot observation",
+      { childAccess: DEAD, access: 200, rights: SEND },
+    ],
+    ["prior live copy cannot replace a null slot read", { childAccess: 200 }],
+    ...[1, 2, 3, 4, 20, 36, 44, 45, 46, 47, 99].map((serviceKind) => [
+      `kernel object ${serviceKind} in access slot`,
+      { access: 200, rights: SEND, serviceKind },
+      "fault-access-authority",
+      0,
+    ]),
+    [
+      "task authority and release refused",
+      { access: 200, rights: SEND, serviceKind: 2, release: 15 },
       "fault-access-authority",
       0,
       15,
     ],
     [
-      "live getter copy does not replace the authoritative null read",
-      { childAccess: 200 },
+      "service query refused",
+      { access: 200, rights: SEND, serviceQuery: 15 },
+      "fault-access-service",
+      15,
+    ],
+    [
+      "service query and release refused",
+      { access: 200, rights: SEND, serviceQuery: 15, release: 5 },
+      "fault-access-service",
+      15,
+      5,
     ],
     [
       "live send/receive",
@@ -4837,15 +4857,59 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       15,
     ],
     [
-      "live release refused",
+      "service copy release refused",
       { access: 200, rights: SEND, release: 15 },
-      "fault-access-authority",
-      0,
+      "fault-access-release",
+      15,
       15,
     ],
     ["privileged host", { host: 4 }, "fault-host-kind", 0],
-    ["foreign right retained", { destroy: 5 }, "fault-port-destroy", 5],
+    [
+      "ordinary host release refused",
+      { hostRelease: 15 },
+      "fault-host-release",
+      15,
+    ],
+    [
+      "thread copy release refused",
+      { threadRelease: 15 },
+      "fault-thread-release",
+      15,
+    ],
+    ["unowned dead name preserved", { extraRights: DEAD_NAME }],
+    ...[SEND, RECEIVE, SEND_ONCE, SEND | RECEIVE, PORT_SET, 0].map(
+      (extraRights) => [
+        `unexpected census authority ${extraRights}`,
+        { extraRights },
+        "fault-port-authority",
+        0,
+      ],
+    ),
+    [
+      "service survives the census",
+      { access: 200, rights: SEND, extraRights: DEAD_NAME },
+    ],
+    [
+      "service omitted from census",
+      { access: 200, rights: SEND, omitAccess: true },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "service census type changed",
+      { access: 200, rights: SEND, accessCensusType: SEND | RECEIVE },
+      "fault-port-authority",
+      0,
+    ],
+    ["ordinary host omitted", { omitHost: true }, "fault-port-authority", 0],
     ["port census refused", { census: 5 }, "fault-port-list", 5],
+    ["port census count mismatch", { censusCount: 3 }, "fault-port-count", 0],
+    [
+      "port census release refused",
+      { access: 200, rights: SEND, censusRelease: 15 },
+      "fault-port-list-release",
+      15,
+    ],
     ["gate refused", { gate: "N" }, "fault-gate-value", 0],
   ]) {
     const calls = [],
@@ -4974,14 +5038,16 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
           which === 1 ? 103 : observing ? childAccess : (options.access ?? 0);
         return which === 2 && !observing ? (options.get ?? 0) : 0;
       },
-      mach_port_kobject(_self, _host, type, address) {
-        type.value = options.host ?? 3;
+      mach_port_kobject(_self, name, type, address) {
+        calls.push(["kobject", name]);
+        type.value =
+          name === 103 ? (options.host ?? 3) : (options.serviceKind ?? 0);
         address.value = 0;
-        return 0;
+        return name === 103 ? 0 : (options.serviceQuery ?? 0);
       },
       mach_port_type(self, name, target) {
         assert.equal(self, 101);
-        assert.equal(name, 200);
+        assert.equal(name, observing ? childAccess : options.access);
         calls.push([observing ? "observe-type" : "type", name]);
         const error = observing ? options.childQuery : options.query;
         if (!error)
@@ -4989,15 +5055,20 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
         return error ?? 0;
       },
       mach_port_deallocate(_self, name) {
+        assert.ok(
+          observing ? name === childAccess : [103, 102, 200].includes(name),
+          "Only owned getter references may be released",
+        );
         if (name === 200 && !observing)
           assert.ok(
             !options.noRelease,
             "No getter reference was proved for deallocation",
           );
         calls.push([observing ? "observe-release" : "release", name]);
-        return name === 200
-          ? ((observing ? options.childRelease : options.release) ?? 0)
-          : 0;
+        if (observing) return options.childRelease ?? 0;
+        if (name === 200) return options.release ?? 0;
+        if (name === 103) return options.hostRelease ?? 0;
+        return options.threadRelease ?? 0;
       },
       task_set_special_port(_self, which, port) {
         calls.push(["clear", which, port]);
@@ -5018,17 +5089,39 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       mig_get_reply_port: () => (++replies === 1 ? 77 : 104),
       mig_dealloc_reply_port: (name) => calls.push(["reply", name]),
       mach_port_names(_self, names, count, types, typeCount) {
-        names.value = [101, 102, 104, 111];
-        count.value = 4;
-        types.value = [SEND, SEND, RECEIVE, SEND];
-        typeCount.value = 4;
+        calls.push(["census"]);
+        const actualNames = [101, 102, 104],
+          actualTypes = [SEND, SEND, RECEIVE];
+        if (!options.omitHost) {
+          actualNames.push(103);
+          actualTypes.push(SEND);
+        }
+        if (
+          options.access === 200 &&
+          options.rights === SEND &&
+          !options.omitAccess
+        ) {
+          actualNames.push(200);
+          actualTypes.push(options.accessCensusType ?? SEND);
+        }
+        if (options.extraRights !== undefined) {
+          actualNames.push(111);
+          actualTypes.push(options.extraRights);
+        }
+        names.value = actualNames;
+        types.value = actualTypes;
+        count.value = actualNames.length;
+        typeCount.value = options.censusCount ?? actualTypes.length;
         return options.census ?? 0;
       },
-      mach_port_destroy(_self, name) {
-        calls.push(["destroy", name]);
-        return options.destroy ?? 0;
+      mach_port_destroy() {
+        assert.fail("Unowned rights must never be destroyed");
       },
-      mach_vm_deallocate: () => 0,
+      mach_vm_deallocate(_self, array, length) {
+        calls.push(["census-release"]);
+        assert.equal(array.length, length);
+        return options.censusRelease ?? 0;
+      },
       fprintf(_stream, _format, ...values) {
         diagnostics.push(values);
       },
@@ -5044,7 +5137,8 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
         error.kind,
         operation.endsWith("authority") ||
           (operation.endsWith("kind") && value === 0) ||
-          operation === "fault-gate-value"
+          operation === "fault-gate-value" ||
+          operation === "fault-port-count"
           ? "invariant"
           : "mach",
         label,
@@ -5078,6 +5172,11 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       released = calls.some(([op, name]) => op === "release" && name === 200);
     const got =
       calls.some(([op, which]) => op === "get" && which === 2) && !options.get;
+    const held =
+      queried &&
+      options.rights === SEND &&
+      !options.serviceQuery &&
+      !(options.serviceKind ?? 0);
     assert.deepEqual(
       lifecycle,
       [
@@ -5089,17 +5188,17 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
             ? 0
             : childAccess === DEAD
               ? DEAD_NAME
-              : childAccess === 200 && !options.childQuery
+              : childAccess !== 0 && childAccess !== DEAD && !options.childQuery
                 ? SEND
                 : 0,
-          childAccess === 200 && !options.childGet
+          childAccess !== 0 && childAccess !== DEAD && !options.childGet
             ? (options.childQuery ?? 0)
             : -1,
-          childAccess === 200 && !options.childGet
+          childAccess !== 0 && childAccess !== DEAD && !options.childGet
             ? (options.childRelease ?? 0)
             : -1,
         ],
-        ...(got
+        ...(got && (!held || released)
           ? [
               [
                 "payload",
@@ -5126,7 +5225,10 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     );
     assert.equal(
       released,
-      queried && !options.query && !options.noRelease,
+      queried &&
+        !options.query &&
+        !options.noRelease &&
+        (!held || calls.filter(([op]) => op === "census-release").length === 2),
       label,
     );
     assert.equal(
@@ -5146,6 +5248,19 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
     );
     if (!operation) {
       assert.equal(context.bootstrap_port, 0);
+      if (held) {
+        assert.ok(
+          calls.findIndex(([op]) => op === "census") <
+            calls.findIndex(([op, name]) => op === "release" && name === 200),
+        );
+        assert.deepEqual(
+          calls.filter(([op]) => op === "kobject"),
+          [
+            ["kobject", 103],
+            ["kobject", 200],
+          ],
+        );
+      }
       assert.deepEqual(
         calls.filter(([op]) => op === "clear"),
         [
@@ -5153,10 +5268,6 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
           ["clear", 4, 0],
           ["clear", 5, 0],
         ],
-      );
-      assert.deepEqual(
-        calls.filter(([op]) => op === "destroy"),
-        [["destroy", 111]],
       );
       assert.deepEqual(
         calls.filter(([op]) => op === "registered"),
@@ -5173,8 +5284,8 @@ test("Darwin fault sanitation admits only absent or dead access rights before th
       assert.deepEqual(
         calls.filter(([op]) => op === "release"),
         [
-          ["release", 103],
           ...(released ? [["release", 200]] : []),
+          ["release", 103],
           ["release", 102],
         ],
       );

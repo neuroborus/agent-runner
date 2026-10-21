@@ -339,40 +339,41 @@ Fault transition regressions execute the original writable-journal handoff and
 audit-session creation bodies with injected native calls, covering descriptor
 substitution, read-only access, exact errors and preserved reexec effects.
 
-Task-access regressions execute the actual complete sanitation body through
-the original child launch branch, using only injected Mach and process calls.
-Null and dead sentinels need no namespace release; allocated dead names require
-a successful type query and checked release. Live, mixed, unknown and empty
-types, failed getters/queries, refused deallocation and retained foreign rights
-cannot reach the payload exec. Unexpected types without a send, send-once or
-dead-name reference stop before deallocation can raise an invalid-right guard
-exception; the original authority refusal survives. Combined authority/release
-failures preserve
-the primary refusal and independent cleanup error. The same execution retains
-ordinary-host checks, descriptor closure, bootstrap/registered/exception clearing
-and foreign-name destruction. Existing cancel/owner-loss caller and independent
-domain-retirement cases remain required; bounded task-access metadata alone
-supplies no success or retirement evidence. Custodian lifecycle fixtures execute
-the actual observation body with failed getters, absent/dead values, live send
-references, unavailable type queries and refused releases. They verify one checked
-release per valid getter copy, no endpoint contact and unchanged errno. The
-same matrix includes the forked child's observation after its alarm and before
-audit-session or credential transitions. The original child fixture executes
-that observation and its separate payload read, retaining live-authority refusal.
-Unavailable child getter/type facts stay distinct from the authoritative payload
-check; a failed child copied-reference release stops before the audit transition
-and retains its cleanup cause. The custody caller fixture forwards fragmented
-raw lifecycle and malformed metadata while preserving the original authority failure and separate
-release cause, including when the raw diagnostic sink throws. These portable
-fixtures run no native compiler or macOS tool and add no slow-tier assignment.
+Task-access regressions execute the actual sanitation, checked-release and
+original child launch bodies using injected Mach and process calls. They accept
+absent/dead values and the specific task-access slot's exact SEND service with
+`IKOT_NONE`, including different local names across lifecycle observations.
+Task/thread/kernel substitutions, mixed/unknown types and failed type or kobject
+queries refuse exec. A getter-copy release cannot clear the slot. The accepted
+service survives the full bounded census and is released only afterward, alongside
+the checked ordinary-host and thread copies. Unknown live census rights refuse
+without destruction; unowned dead names remain untouched. Missing/changed census
+entries, list/count failures and array/reference release failures also refuse.
+Unsupported types without an owned reference are never deallocated; combined
+query/authority and release failures preserve the first refusal and independent
+cleanup cause. Descriptor closure and explicit bootstrap/debug/registered/exception
+sanitation remain covered.
+
+Custodian lifecycle fixtures retain one checked release per valid getter copy,
+no endpoint contact and unchanged errno, including unavailable type queries. The
+child's observation remains after its alarm and before credential/session changes;
+its optional getter/query cannot replace the authoritative payload sanitation, and
+failed copied-reference release stops before that transition. The custody caller
+still forwards fragmented raw lifecycle and malformed metadata without replacing
+the original refusal or separate release cause when diagnostics throw. Bounded
+classification covers service-query and census-authority failures through the
+existing owner. The existing cancellation/owner-loss and independent retirement
+matrices remain required: primitive cleanup success cannot pass cancellation.
+These portable fixtures run no native compiler or macOS tool, supply no native
+acceptance and add no slow-tier assignment.
 
 `test/native-darwin-command.test.js` additionally executes the actual finite
 command guard, failure and cleanup bodies with injected native calls. Capture
 fixtures forward exact child stderr bytes, including split binary chunks,
 through the existing broker diagnostics before V/G exit and schema refusal.
-Read and diagnostic-write failures preserve the original outcome. Live task-access
-cancellation refusal, owner-loss fences and independent cleanup coverage remain
-unchanged. Audit-pipe open/query/selection failures retain exact caller/guard,
+Read and diagnostic-write failures preserve the original outcome. Unexpected
+task-access authority refusals, owner-loss fences and independent cleanup coverage
+remain required. Audit-pipe open/query/selection failures retain exact caller/guard,
 return value and saved errno, including when diagnostics or cleanup change errno.
 Checked `FIONBIO` success and failure protect the audit driver's explicit nonblocking initialization
 before its selection queries. Actual drain bodies cover empty nonblocking drains

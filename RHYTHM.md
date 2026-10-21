@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Separate task authorization services from task control
+
+Ordinary Darwin feasibility faults admit the inherited task-access authorization
+service only through the task's own slot, an exact SEND type and `IKOT_NONE`.
+The getter copy stays held through the bounded census; unexpected live rights
+refuse exec without destroying unrelated names. Only owned references are released,
+without claiming that a getter release clears its slot. Explicit sanitation,
+credential separation, real process/IPC controls and independent retirement remain
+required. Portable fixtures establish no native cancellation or owner-loss success;
+primitive cleanup remains separate from those proofs.
+
 ## 2026-10-21 — Treat ordinary Darwin routes as observations
 
 Ordinary PF experiments validate bounded route dumps and retain their normalized
