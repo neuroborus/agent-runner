@@ -1309,9 +1309,8 @@ test(
     const send = child.send.bind(child);
     t.mock.method(child, "send", (message, callback) => {
       if (message.type !== "terminate") return send(message, callback);
-      // A lost IPC acknowledgment adds a fallback scan before the close scan.
-      // Make that outcome explicit instead of depending on the kill/write race.
-      const sent = send(message, () => {});
+      // Refuse this write without also delivering a real termination request.
+      // The failed callback adds a fallback scan before the close scan.
       process.nextTick(() =>
         callback(
           Object.assign(new Error("Termination channel closed."), {
@@ -1319,7 +1318,7 @@ test(
           }),
         ),
       );
-      return sent;
+      return false;
     });
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);

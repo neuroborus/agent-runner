@@ -290,6 +290,8 @@ export function windowsCustodyChannel(
           const apiFailure = [
             "CreateFileW",
             "GetFileInformationByHandleEx/FileAttributeTagInfo",
+            "GetFinalPathNameByHandleW",
+            "SetHandleInformation",
           ].includes(open.operation);
           requireWindows(
             Object.hasOwn(value, "lastError") &&
@@ -301,6 +303,11 @@ export function windowsCustodyChannel(
                 "GetFileInformationByHandleEx/FileAttributeTagInfo",
                 "reparse-point",
                 "file-kind",
+                "GetFinalPathNameByHandleW",
+                "final-path-size",
+                "final-path-prefix",
+                "final-path-equality",
+                "SetHandleInformation",
               ].includes(open.operation) &&
               open.apiFailure === apiFailure &&
               typeof open.directory === "boolean" &&

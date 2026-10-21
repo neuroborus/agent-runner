@@ -425,6 +425,42 @@ static void process_image(unsigned index, struct entry *entry) {
   printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
   printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Module enumeration preserves the spelling used to load an image, whereas
+ * hold requires the normalized DOS name. Resolve that producer through an
+ * owned no-write/no-delete handle, never through case folding or an alias guess.
+ * Keep the original parents until the canonical file and parents are retained. */
+static struct held_file hold_loaded_module(wchar_t name[4096]) {
+  need(wcslen(name) > 3 && wcslen(name) < 4096 && name[1] == ':' && name[2] == '\\');
+  HANDLE selected = CreateFileW(name, GENERIC_READ | READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ,
+    NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after; wchar_t canonical[4100], parent[4096];
+  need(selected != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(selected, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+    !(tag.FileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) &&
+    GetFileInformationByHandleEx(selected, FileIdInfo, &before, sizeof(before)));
+  if (!SetHandleInformation(selected, HANDLE_FLAG_INHERIT, 0)) { open_file_refusal(name, "SetHandleInformation", TRUE, FALSE, NULL); need(false); }
+  DWORD size = GetFinalPathNameByHandleW(selected, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+  if (!size) { open_file_refusal(name, "GetFinalPathNameByHandleW", TRUE, FALSE, NULL); need(false); }
+  if (size <= 7 || size >= 4100) { open_file_refusal(name, "final-path-size", FALSE, FALSE, &tag); need(false); }
+  if (wcsncmp(canonical, L"\\\\?\\", 4) || canonical[5] != ':' || canonical[6] != '\\') { open_file_refusal(name, "final-path-prefix", FALSE, FALSE, &tag); need(false); }
+  HANDLE parents[32]; unsigned count = 0; wcscpy_s(parent, 4096, name);
+  wchar_t *slash = wcsrchr(parent, '\\'); need(slash); *slash = 0;
+  while (wcslen(parent) > 2) {
+    need(count < 32); HANDLE held = CreateFileW(parent, READ_CONTROL | FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
+      NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    need(held != INVALID_HANDLE_VALUE); parents[count++] = held;
+    need(GetFileInformationByHandleEx(held, FileAttributeTagInfo, &tag, sizeof(tag)) &&
+      !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && SetHandleInformation(held, HANDLE_FLAG_INHERIT, 0));
+    slash = wcsrchr(parent, '\\'); need(slash); *slash = 0;
+  }
+  struct held_file file = hold(canonical+4, FALSE, FALSE, GENERIC_READ);
+  need(!memcmp(&before, &file.id, sizeof(before)) && GetFileInformationByHandleEx(selected, FileIdInfo, &after, sizeof(after)) && !memcmp(&before, &after, sizeof(before)));
+  wcscpy_s(name, 4096, file.path);
+  BOOL closed = CloseHandle(selected);
+  for (unsigned i = 0; i < count; i++) if (!CloseHandle(parents[i])) closed = FALSE;
+  need(closed); return file;
+}
+#endif
 static DWORD rva(BYTE *bytes, DWORD size, IMAGE_NT_HEADERS64 *pe, DWORD address, DWORD needed) {
   need(needed <= size); if (address < pe->OptionalHeader.SizeOfHeaders) { need(address <= size-needed); return address; }
   IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe); need((BYTE *)sections >= bytes && (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size && pe->FileHeader.NumberOfSections <= 96);
@@ -441,7 +477,12 @@ static void loader(unsigned subject, struct entry *image) {
   struct held_file *files = calloc(128, sizeof(*files)); need(paths && files); unsigned n = used/sizeof(HMODULE);
   printf("{\"loaded\":[");
   for (unsigned i = 0; i < n; i++) { DWORD length = GetModuleFileNameExW(process, modules[i], paths[i], 4096); need(length > 0 && length < 4096);
-    files[i] = hold(paths[i], FALSE, FALSE, GENERIC_READ); DWORD size; BYTE *bytes = read_file(&files[i], 536870912, &size); char hash[65], dacl[65], sig[65]; sum(bytes, size, hash); free(bytes);
+#ifdef NATIVE_CI_EXPERIMENT
+    files[i] = hold_loaded_module(paths[i]);
+#else
+    files[i] = hold(paths[i], FALSE, FALSE, GENERIC_READ);
+#endif
+    DWORD size; BYTE *bytes = read_file(&files[i], 536870912, &size); char hash[65], dacl[65], sig[65]; sum(bytes, size, hash); free(bytes);
     wchar_t mapped[4100], named[4100]; DWORD mappedSize = GetMappedFileNameW(process, modules[i], mapped, 4100), namedSize = GetFinalPathNameByHandleW(files[i].handle, named, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_NT);
     need(mappedSize && mappedSize < 4100 && namedSize && namedSize < 4100 && !_wcsicmp(mapped, named));
     security(files[i].handle, SE_FILE_OBJECT, FALSE, dacl); signature(&files[i], NULL, sig);

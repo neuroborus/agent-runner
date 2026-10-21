@@ -63,8 +63,9 @@ supervisor's bounded incomplete-inspection retries separate from controlled
 parent observations: an uncertain parent must retain registration, so a fixture
 expecting durable deregistration supplies an empty parent view and races callback
 entry against premature completion. Keep the distinct persistent and transient
-parent-uncertainty regressions. The transient case forces a failed termination
-message callback, making its additional fallback inspection deterministic.
+parent-uncertainty regressions. The transient case fails the termination write
+without delivering its command, then reports the asynchronous callback error;
+its additional fallback inspection is independent of native IPC delivery.
 The persistent retry assertion advances its injected supervisor clock only
 after another inspection, so scheduler stalls and termination-message delivery
 cannot bypass its retry proof. Other live supervisor retry windows retain real
@@ -1805,6 +1806,19 @@ Final task absence cannot settle a surviving retained child or Job; closure rere
 and leaves the independent observer with preparation. Controlled clocks cover
 expiry before later native commands and after protected receipt completion.
 These transcripts supply no native acceptance.
+
+The same custody suite executes the loaded-module name producer, identity-bound
+canonicalization and exact file guard with injected native reads. Synthetic
+load-time spelling differences pass only through held identity, original
+no-reparse ancestors and the retained NT mapped-image join. Query/bounds/prefix,
+exact-path, file-ID/replacement, reparse, mapping, noninheritance and close failures
+refuse admission, including fresh failures after an earlier successful read.
+The existing open-refusal fixture carries each final-path predicate through the
+bounded authenticated channel and preserves immediate API errors separately
+from invariant refusals with last-error zero. Existing release/verifier fixtures
+retain independent slots, fresh runtime reads and negative path/identity joins.
+These portable regressions add no slow-tier assignment and establish no native
+compilation, observed path alias or cause of the archived compound refusal.
 
 Windows `effective.test.js` and `audit.test.js` inject held native reads and
 protected control transport. They cover approved binding joins, actual ACL/MIC

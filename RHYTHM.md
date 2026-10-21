@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Normalize module names through held identity
+
+Ordinary Windows module enumeration now resolves load-time spelling through
+native held-file identity before entering the exact canonical file guard.
+Original no-reparse ancestors remain held through canonical admission; the
+existing mapped-image, security and runtime-custody joins remain required.
+General and reviewed file guards stay exact. Bounded refusal operations separate
+final-path acquisition, bounds, prefix, equality and noninheritance without
+guessing from last-error zero. Portable regressions do not establish the archived
+native failure's predicate or native success.
+
 ## 2026-10-21 — Join real command auditing before accepting delivery
 
 Windows command subscriptions select Event nodes with a single outer predicate,

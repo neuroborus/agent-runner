@@ -4185,6 +4185,14 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       ["query", true, "C:\\Fixture SDK"],
       ["open", true, "C:\\"],
       ["write", false],
+      ...[
+        "final-query",
+        "final-small",
+        "final-large",
+        "final-prefix",
+        "final-equality",
+        "inheritance",
+      ].map((fault) => [fault, false]),
       ["open", false, "C:\\" + "x".repeat(4092)],
       [null, false],
       [null, true, "C:\\"],
@@ -4197,7 +4205,20 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
             .map((unit) => unit.charCodeAt(0))
             .concat(0),
         ),
-        apiFailure = ["open", "write", "query"].includes(fault),
+        apiFailure = [
+          "open",
+          "write",
+          "query",
+          "final-query",
+          "inheritance",
+        ].includes(fault),
+        refusalError = apiFailure
+          ? ["query", "inheritance"].includes(fault)
+            ? 5
+            : 3
+          : fault?.startsWith("final-")
+            ? 0
+            : 87,
         attributes =
           fault === "reparse"
             ? 0x420
@@ -4264,10 +4285,22 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           },
           GetFinalPathNameByHandleW() {
             calls.push("canonical");
-            return 20;
+            if (fault?.startsWith("final-"))
+              error = fault === "final-query" ? 3 : 0;
+            return fault === "final-query"
+              ? 0
+              : fault === "final-small"
+                ? 4
+                : fault === "final-large"
+                  ? 4100
+                  : 20;
           },
           SetHandleInformation() {
             calls.push("inheritance");
+            if (fault === "inheritance") {
+              error = 5;
+              return 0;
+            }
             return 1;
           },
           GetLastError() {
@@ -4278,8 +4311,8 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
             error = value;
           },
           wcslen: (value) => value.indexOf(0),
-          wcsncmp: () => 0,
-          wcscmp: () => 0,
+          wcsncmp: () => (fault === "final-prefix" ? 1 : 0),
+          wcscmp: () => (fault === "final-equality" ? 1 : 0),
           fprintf(stream, format, ...args) {
             assert.equal(stream, "stderr");
             return emit(formatC(format, args));
@@ -4301,10 +4334,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           () => program.runInNewContext(api),
           (cause) => {
             assert.equal(cause.message, "Original open refusal");
-            assert.equal(
-              cause.lastError,
-              apiFailure ? (fault === "query" ? 5 : 3) : 87,
-            );
+            assert.equal(cause.lastError, refusalError);
             return true;
           },
         );
@@ -4312,6 +4342,10 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
         assert.deepEqual(calls, [
           "open",
           ...(["open", "write"].includes(fault) ? [] : ["query"]),
+          ...(fault?.startsWith("final-") || fault === "inheritance"
+            ? ["canonical"]
+            : []),
+          ...(fault === "inheritance" ? ["inheritance"] : []),
           ...(experiment ? ["error"] : []),
         ]);
       } else {
@@ -4328,7 +4362,17 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
               ? "GetFileInformationByHandleEx/FileAttributeTagInfo"
               : fault === "reparse"
                 ? "reparse-point"
-                : "file-kind";
+                : fault === "final-query"
+                  ? "GetFinalPathNameByHandleW"
+                  : fault === "final-small" || fault === "final-large"
+                    ? "final-path-size"
+                    : fault === "final-prefix"
+                      ? "final-path-prefix"
+                      : fault === "final-equality"
+                        ? "final-path-equality"
+                        : fault === "inheritance"
+                          ? "SetHandleInformation"
+                          : "file-kind";
         assert.ok(
           output.includes(
             `operation=${operation} domain=${apiFailure ? "win32" : "invariant"} expected-kind=${directory ? "directory" : "file"}`,
@@ -4337,7 +4381,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
         assert.ok(
           output.includes(
             apiFailure
-              ? `error=${fault === "query" ? 5 : 3} attributes=unavailable tag=unavailable`
+              ? `error=${refusalError} attributes=unavailable tag=unavailable`
               : `error=unavailable attributes=0x${attributes.toString(16).padStart(8, "0")} tag=${fault === "reparse" ? `0x${tag.toString(16).padStart(8, "0")}` : "unavailable"}`,
           ),
         );
@@ -4353,7 +4397,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       if (experiment && fault) {
         const frames = [];
         Object.assign(api, {
-          capturedError: apiFailure ? (fault === "query" ? 5 : 3) : 87,
+          capturedError: refusalError,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           strrchr,
@@ -4435,6 +4479,256 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
     },
   })("custody-reader.c", 274, 87);
   assert.deepEqual(fallback, ["open", ["custody-reader.c", 274, 87]]);
+});
+
+test("loaded module spelling joins the exact canonical guard through retained identity and mapping", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    header = await readFile(new URL("custody.h", import.meta.url), "utf8"),
+    body =
+      /static struct held_file hold_loaded_module\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )[1],
+    opening = /static HANDLE open_file_shared\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )[1],
+    producer = /DWORD length = GetModuleFileNameExW\([^\n]+/u.exec(source)[0],
+    admission = /files\[i\] = hold_loaded_module\(paths\[i\]\);/u.exec(
+      source,
+    )[0],
+    mapping =
+      /wchar_t mapped\[4100\], named\[4100\];[^\n]+\n    need\(mappedSize[^\n]+/u.exec(
+        source,
+      )[0];
+  const translate = (text) =>
+    text
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n[\s\S]*?#endif/gu,
+        "$1",
+      )
+      .replace(
+        "FILE_ATTRIBUTE_TAG_INFO tag; FILE_ID_INFO before, after; wchar_t canonical[4100], parent[4096];",
+        'const tag={}, before={}, after={}, canonical={text:""}, parent={text:""};',
+      )
+      .replace(
+        "FILE_ATTRIBUTE_TAG_INFO tag; wchar_t canonical[4100]; DWORD size;",
+        'const tag={}, canonical={text:""}; let size;',
+      )
+      .replace(
+        "wchar_t mapped[4100], named[4100];",
+        'const mapped={text:""}, named={text:""};',
+      )
+      .replace("HANDLE parents[32]", "const parents=[]")
+      .replace("wchar_t *slash", "let slash")
+      .replaceAll(
+        "*slash = 0",
+        "slash.buffer.text=slash.buffer.text.slice(0,slash.index)",
+      )
+      .replace("struct held_file file", "const file")
+      .replaceAll(/\b(?:HANDLE|DWORD|BOOL|unsigned) /gu, "let ")
+      .replaceAll(/sizeof\([^)]+\)/gu, "1")
+      .replaceAll(/&(tag|before|after|file.id)\b/gu, "$1")
+      .replaceAll(/\bL(?=["'])/gu, "")
+      .replaceAll(/canonical\[(\d)\]/gu, "canonical.text[$1]")
+      .replaceAll(/name\[(\d)\]/gu, "name.text[$1]")
+      .replaceAll(/canonical\s*\+\s*4/gu, "canonical.text.slice(4)")
+      .replaceAll("paths[i]", "name")
+      .replaceAll("modules[i]", "module")
+      .replaceAll("files[i].handle", "file.handle");
+  const program = new Script(`
+    function open_file_shared(name,directory,access,mutable) {${translate(opening)}}
+    function hold_loaded_module(name) {${translate(body)}}
+    ${translate(producer)}
+    ${translate(admission).replace("files[i] =", "const file =")}
+    ${translate(mapping)}
+    file;
+  `);
+  const canonical = "C:\\Fixture Runtime\\module.dll",
+    loaded = "C:\\FIXTUR~1\\MODULE.dll",
+    text = (value) => (typeof value === "string" ? value : value.text);
+  for (const fault of [
+    null,
+    "producer",
+    "open",
+    "reparse",
+    "parent-reparse",
+    "query",
+    "bounds",
+    "prefix",
+    "canonical",
+    "identity",
+    "changed",
+    "mapping",
+    "inheritance",
+    "close",
+  ]) {
+    let next = 1,
+      activeFault = null;
+    const handles = new Map(),
+      calls = [],
+      refused = [],
+      name = { text: "" };
+    const api = {
+      name,
+      process: 11,
+      module: 19,
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      INVALID_HANDLE_VALUE: -1,
+      GENERIC_READ: 0x80000000,
+      READ_CONTROL: 0x20000,
+      FILE_READ_ATTRIBUTES: 0x80,
+      FILE_SHARE_READ: 1,
+      FILE_SHARE_WRITE: 2,
+      OPEN_EXISTING: 3,
+      FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      FILE_FLAG_BACKUP_SEMANTICS: 0x2000000,
+      FILE_ATTRIBUTE_REPARSE_POINT: 0x400,
+      FILE_ATTRIBUTE_DIRECTORY: 0x10,
+      HANDLE_FLAG_INHERIT: 1,
+      FileAttributeTagInfo: 9,
+      FileIdInfo: 18,
+      FILE_NAME_NORMALIZED: 0,
+      VOLUME_NAME_DOS: 0,
+      VOLUME_NAME_NT: 2,
+      GetModuleFileNameExW(process, module, out, capacity) {
+        assert.deepEqual([process, module, capacity], [11, 19, 4096]);
+        out.text = loaded;
+        return activeFault === "producer" ? 4096 : loaded.length;
+      },
+      CreateFileW(path, access, share, _security, disposition, flags) {
+        const value = text(path),
+          directory = !value.endsWith(".dll");
+        assert.equal(access, (directory ? 0 : 0x80000000) | 0x20080);
+        assert.equal(share, directory ? 3 : 1);
+        assert.equal(disposition, 3);
+        assert.equal(flags, 0x2200000);
+        calls.push(`open:${value}`);
+        if (activeFault === "open") return -1;
+        const handle = next++;
+        handles.set(handle, { path: value, directory, closed: false });
+        return handle;
+      },
+      GetFileInformationByHandleEx(handle, kind, out) {
+        const entry = handles.get(handle);
+        assert.ok(entry && !entry.closed);
+        if (kind === 9) {
+          out.FileAttributes =
+            (entry.directory ? 0x10 : 0) |
+            (activeFault === (entry.directory ? "parent-reparse" : "reparse")
+              ? 0x400
+              : 0);
+        } else {
+          assert.equal(kind, 18);
+          out.value =
+            activeFault === "changed" && calls.includes("hold")
+              ? "replaced"
+              : "original";
+        }
+        return true;
+      },
+      GetFinalPathNameByHandleW(handle, out, capacity, flags) {
+        const entry = handles.get(handle);
+        assert.ok(entry && !entry.closed);
+        assert.equal(capacity, 4100);
+        const raw = entry.path === loaded;
+        if (raw && activeFault === "query") return 0;
+        if (raw && activeFault === "bounds") return 4100;
+        out.text =
+          flags === 2
+            ? "\\Device\\FixtureVolume\\Fixture Runtime\\module.dll"
+            : raw && activeFault === "prefix"
+              ? canonical
+              : "\\\\?\\" +
+                (activeFault === "canonical" && !raw
+                  ? "C:\\Other\\module.dll"
+                  : canonical);
+        return out.text.length;
+      },
+      GetMappedFileNameW(process, module, out, capacity) {
+        assert.deepEqual([process, module, capacity], [11, 19, 4100]);
+        out.text =
+          "\\Device\\FixtureVolume\\" +
+          (activeFault === "mapping"
+            ? "other.dll"
+            : "Fixture Runtime\\module.dll");
+        return out.text.length;
+      },
+      SetHandleInformation(handle, flag, value) {
+        assert.ok(handles.has(handle));
+        assert.deepEqual([flag, value], [1, 0]);
+        return activeFault !== "inheritance";
+      },
+      hold(path, directory, privateFile, access) {
+        assert.equal(path, canonical);
+        assert.deepEqual(
+          [directory, privateFile, access],
+          [false, false, 0x80000000],
+        );
+        assert.ok(
+          [...handles.values()].some(
+            (entry) => entry.directory && !entry.closed,
+          ),
+          "original parent stays held through canonical admission",
+        );
+        const handle = api.openCanonical(path, directory, access, false);
+        calls.push("hold");
+        // Existing hold coverage owns volume, ACL and retained canonical-parent reads.
+        return {
+          handle,
+          path,
+          id: { value: activeFault === "identity" ? "other" : "original" },
+        };
+      },
+      CloseHandle(handle) {
+        const entry = handles.get(handle);
+        assert.ok(entry && !entry.closed);
+        entry.closed = true;
+        calls.push("close");
+        return activeFault !== "close";
+      },
+      wcslen: (value) => text(value).length,
+      wcscpy_s: (out, _capacity, value) => {
+        out.text = text(value);
+      },
+      wcsrchr: (buffer, char) => ({
+        buffer,
+        index: buffer.text.lastIndexOf(char),
+      }),
+      wcsncmp: (left, right, count) =>
+        text(left).slice(0, count) === right.slice(0, count) ? 0 : 1,
+      wcscmp: (left, right) => (text(left) === text(right) ? 0 : 1),
+      _wcsicmp: (left, right) =>
+        text(left).toLowerCase() === text(right).toLowerCase() ? 0 : 1,
+      memcmp: (left, right) => (left.value === right.value ? 0 : 1),
+      open_file_refusal(_name, operation) {
+        refused.push(operation);
+      },
+      need: assert.ok,
+    };
+    // Expose the actual strict guard to the injected non-path parts of hold.
+    const expose = new Script(
+      `function open_file_shared(name,directory,access,mutable) {${translate(opening)}} open_file_shared;`,
+    );
+    api.openCanonical = expose.runInNewContext(api);
+    assert.equal(program.runInNewContext(api).path, canonical);
+    assert.equal(name.text, canonical);
+    assert.equal(refused.length, 0);
+    if (fault) {
+      activeFault = fault;
+      calls.length = 0;
+      assert.throws(
+        () => program.runInNewContext({ ...api }),
+        assert.AssertionError,
+        fault,
+      );
+      if (fault === "canonical")
+        assert.deepEqual(refused, ["final-path-equality"]);
+    }
+  }
 });
 
 test("Windows account readback distinguishes ordinary metadata variation from reviewed privilege and authority refusals", async () => {

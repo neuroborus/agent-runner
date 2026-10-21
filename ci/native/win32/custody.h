@@ -186,8 +186,17 @@ static HANDLE open_file_shared(const wchar_t *name, BOOL directory, DWORD access
     !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == directory);
 #endif
   size = GetFinalPathNameByHandleW(result, canonical, 4100, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+#ifdef NATIVE_CI_EXPERIMENT
+  if (!size) { open_file_refusal(name, "GetFinalPathNameByHandleW", TRUE, directory, NULL); need(false); }
+  if (size <= 4 || size >= 4100) { open_file_refusal(name, "final-path-size", FALSE, directory, &tag); need(false); }
+  if (wcsncmp(canonical, L"\\\\?\\", 4)) { open_file_refusal(name, "final-path-prefix", FALSE, directory, &tag); need(false); }
+  if (wcscmp(canonical + 4, name)) { open_file_refusal(name, "final-path-equality", FALSE, directory, &tag); need(false); }
+  if (!SetHandleInformation(result, HANDLE_FLAG_INHERIT, 0)) { open_file_refusal(name, "SetHandleInformation", TRUE, directory, NULL); need(false); }
+#else
   need(size > 4 && size < 4100 && !wcsncmp(canonical, L"\\\\?\\", 4) && !wcscmp(canonical + 4, name) &&
-    SetHandleInformation(result, HANDLE_FLAG_INHERIT, 0)); return result;
+    SetHandleInformation(result, HANDLE_FLAG_INHERIT, 0));
+#endif
+  return result;
 }
 static HANDLE open_file(const wchar_t *name, BOOL directory, DWORD access) { return open_file_shared(name, directory, access, FALSE); }
 static struct held_file hold_shared(const wchar_t *name, BOOL directory, BOOL private, DWORD access, BOOL mutable) {

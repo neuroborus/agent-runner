@@ -8877,6 +8877,20 @@ rejoin loaded modules to the case inventory. Token reads surround the image/modu
 read; the case image is inspected before and after it. Cached admission or held
 file ownership cannot substitute for fresh process/image/module observations.
 The earlier launch correction and ordinary payload/helper custody remain intact.
+Module enumeration supplies the spelling used to load an image, not necessarily
+the normalized DOS name required by the exact file guard. The experiment reader
+resolves that name through an owned read handle without write/delete sharing,
+checks the original file and ancestor handles for reparses, and retains them
+until the canonical file and parents are held. Both file-ID reads on the original
+handle must join the canonical held identity before publishing the canonical
+module path. The existing NT mapped-image join, security/signature reads and
+module census still apply. No case-folded or guessed alias comparison replaces
+the exact general file guard; reviewed admission remains unchanged.
+That guard's existing bounded refusal owner now distinguishes final-path API
+failure, size, prefix, equality and noninheritance failure. API refusals retain
+the immediate error; invariant refusals do not interpret incidental last-error
+values. The archived compound line-190 refusal does not identify any one of
+these predicates or demonstrate a case or alias difference.
 Portable coverage establishes these joins and refusal paths, not matching Windows
 runtime acceptance or closure of the carried native defects above.
 
