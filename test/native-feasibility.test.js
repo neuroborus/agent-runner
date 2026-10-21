@@ -12304,6 +12304,7 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
   const metadata =
     "native-darwin-fault-metadata: object=created-root uid=0 gid=20 mode=040700 links=2 size=64 dev=1 inode=42\n" +
     "native-darwin-fault-access: name=200 type=0x10000 query=0\n" +
+    "native-darwin-fault-port: name=111 census-type=0x10000 type-query=0 type=0x10000 object-query=0 object-kind=2 object=42\n" +
     "native-darwin-fault-access-lifecycle: phase=payload pid=42 parent=9000 uid=90001 euid=90001 gid=90002 egid=90002 get=0 name=200 type=0x10000 query=0 release=0\n" +
     "native-darwin-fault-access-lifecycle: phase=unknown get=0 malformed\n";
   for (const [operation, domain, value] of [
@@ -12317,6 +12318,7 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     ["fault-birth-read", "status", 0],
     ["fault-child-status", "status", 256],
     ["fault-host-port", "mach", 5],
+    ["fault-bootstrap-release", "mach", 15],
     ["fault-access-kind", "mach", 15],
     ["fault-access-service", "mach", 15],
     ["fault-access-authority", "invariant", 0],

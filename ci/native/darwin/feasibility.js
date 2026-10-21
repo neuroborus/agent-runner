@@ -420,6 +420,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-birth-read",
     "fault-birth-write",
     "fault-bootstrap-port",
+    "fault-bootstrap-release",
     "fault-control-audit-binding",
     "fault-control-audit-create",
     "fault-control-audit-hold",

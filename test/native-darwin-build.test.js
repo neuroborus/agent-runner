@@ -4709,8 +4709,23 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     /static void domain_access_release\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
       source,
     )?.[1];
+  const portBody = (name) =>
+    new RegExp(
+      `static (?:void|kern_return_t) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+  const portRelease = portBody("domain_port_release"),
+    portCleanup = portBody("domain_port_cleanup"),
+    portDiagnostic = portBody("domain_port_diagnostic");
   assert.ok(
-    sanitation && observation && releaseBody && start > 0 && end > start,
+    sanitation &&
+      observation &&
+      releaseBody &&
+      portRelease &&
+      portCleanup &&
+      portDiagnostic &&
+      start > 0 &&
+      end > start,
   );
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
@@ -4728,9 +4743,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       .replaceAll("&birth", "birth")
       .replaceAll("&limit", "limit")
       .replaceAll("in[", "input[")
+      .replaceAll("*held", "held.value")
       .replace(
-        /&(host|access|type|address|access_type|notify|readback|names|types|n|nt|gate)\b/gu,
-        (_, name) => `{set value(v) {${name} = v;}}`,
+        /&(host|access|type|address|access_type|notify|readback|names|types|n|nt|gate|current|kind|object|domain_bootstrap_local|domain_host_copy|domain_access_copy|domain_thread_copy)\b/gu,
+        (_, name) =>
+          `{get value() {return ${name};}, set value(v) {${name} = v;}}`,
       )
       .replaceAll("sizeof(*names)", "1")
       .replaceAll("sizeof(*types)", "1")
@@ -4738,12 +4755,18 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       .replaceAll("sizeof(fds)", "512")
       .replaceAll("sizeof(birth)", "1")
       .replaceAll("sizeof(parent)", "24")
-      .replace(/\(mach_vm_address_t\)|\(unsigned\)/gu, "")
+      .replace(
+        /\(mach_vm_address_t\)|\(unsigned long long\)|\(unsigned\)/gu,
+        "",
+      )
       .replace(
         /\b(?:task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|unsigned|int) /gu,
         "let ",
       );
   const script = new Script(`
+    function domain_port_release(held, operation) {${translate(portRelease)}}
+    function domain_port_cleanup() {${translate(portCleanup)}}
+    function domain_port_diagnostic(name, census_type) {${translate(portDiagnostic)}}
     function domain_access_observe(phase) {${translate(observation)}}
     function domain_access_release(self, access, type) {${translate(releaseBody)}}
     function domain_sanitize() {${translate(sanitation)}}
@@ -4757,6 +4780,59 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     DEAD = 0xffffffff;
   for (const [label, options, operation, value, cleanupValue] of [
     ["null", {}],
+    ["null bootstrap", { bootstrap: 0 }],
+    ["dead bootstrap sentinel", { bootstrap: DEAD }],
+    ["allocated dead bootstrap reference", { bootstrapType: DEAD_NAME }],
+    ["bootstrap aliases the host getter", { bootstrap: 103 }],
+    [
+      "bootstrap aliases the access getter",
+      { bootstrap: 200, access: 200, rights: SEND },
+    ],
+    [
+      "aliased bootstrap release fails without losing the access copy",
+      { bootstrap: 200, access: 200, rights: SEND, bootstrapRelease: 15 },
+      "fault-bootstrap-release",
+      15,
+    ],
+    [
+      "bootstrap aliases the resource getter",
+      { bootstrap: 205, notifyPort: 205 },
+    ],
+    [
+      "resource getter aliases the access copy",
+      { access: 200, rights: SEND, notifyPort: 200 },
+    ],
+    [
+      "failed aliased resource release preserves the access copy",
+      {
+        access: 200,
+        rights: SEND,
+        notifyPort: 200,
+        notifySet: 5,
+        notifyRelease: 15,
+      },
+      "fault-notify-port",
+      5,
+    ],
+    ["bootstrap slot refusal", { bootstrapSet: 5 }, "fault-bootstrap-port", 5],
+    [
+      "bootstrap release refusal",
+      { bootstrapRelease: 15 },
+      "fault-bootstrap-release",
+      15,
+    ],
+    [
+      "bootstrap slot refusal survives failed release",
+      { bootstrapSet: 5, bootstrapRelease: 15 },
+      "fault-bootstrap-port",
+      5,
+    ],
+    [
+      "another reference to the former bootstrap name remains unknown",
+      { bootstrapExtra: true },
+      "fault-port-authority",
+      0,
+    ],
     ["dead sentinel", { access: DEAD }],
     ["allocated dead name", { access: 200, rights: DEAD_NAME }],
     ["child getter refused", { childGet: 5 }],
@@ -4863,6 +4939,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       15,
       15,
     ],
+    ["host getter refused", { hostGet: 5 }, "fault-host-port", 5],
     ["privileged host", { host: 4 }, "fault-host-kind", 0],
     [
       "ordinary host release refused",
@@ -4885,6 +4962,43 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         0,
       ],
     ),
+    ...[1, 2].map((extraKind) => [
+      "unknown control object",
+      { extraRights: SEND, extraKind },
+      "fault-port-authority",
+      0,
+    ]),
+    [
+      "failed census type query cannot replace authority refusal",
+      { extraRights: SEND, censusQuery: 15 },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "failed census object query cannot replace authority refusal",
+      { extraRights: SEND, censusObjectQuery: 5 },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "authority refusal survives independent release failures",
+      {
+        access: 200,
+        rights: SEND,
+        extraRights: SEND,
+        censusRelease: 15,
+        hostRelease: 5,
+        threadRelease: 20,
+      },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "authority refusal survives failed service-copy release",
+      { access: 200, rights: SEND, extraRights: SEND, release: 15 },
+      "fault-port-authority",
+      0,
+    ],
     [
       "service survives the census",
       { access: 200, rights: SEND, extraRights: DEAD_NAME },
@@ -4904,6 +5018,12 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     ["ordinary host omitted", { omitHost: true }, "fault-port-authority", 0],
     ["port census refused", { census: 5 }, "fault-port-list", 5],
     ["port census count mismatch", { censusCount: 3 }, "fault-port-count", 0],
+    [
+      "count refusal survives failed array releases",
+      { censusCount: 3, censusRelease: 15 },
+      "fault-port-count",
+      0,
+    ],
     [
       "port census release refused",
       { access: 200, rights: SEND, censusRelease: 15 },
@@ -4982,19 +5102,39 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       0,
     ],
     ["gate refused", { gate: "N" }, "fault-gate-value", 0],
+    [
+      "payload exec refusal does not release references twice",
+      { execFailure: true },
+      "fault-payload-exec",
+      8,
+    ],
   ]) {
     const calls = [],
       diagnostics = [],
+      portDiagnostics = [],
       lifecycle = [],
       cleanup = [],
+      releaseFailures = [],
+      referenceReleases = [],
+      notifyCopies = [],
       executed = {},
       originalBirth = { pid: 42 },
       domain = { uid: 90001, gid: 90002 };
     const childAccess = options.childAccess ?? options.access ?? 0;
+    const valid = (name) => name !== 0 && name !== DEAD;
+    const bootstrap = options.bootstrap ?? 110,
+      references = new Map();
+    const own = (name) => {
+      if (valid(name)) references.set(name, (references.get(name) ?? 0) + 1);
+      return name;
+    };
+    own(bootstrap);
+    if (options.bootstrapExtra) own(bootstrap);
     let first,
       replies = 0,
       notifyReads = 0,
-      observing = true;
+      observing = true,
+      bootstrapReleased = false;
     const context = {
       errno: 0,
       stderr: {},
@@ -5006,9 +5146,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       MACH_PORT_DEAD: DEAD,
       MACH_PORT_TYPE_NONE: 0,
       MACH_PORT_TYPE_SEND: SEND,
+      MACH_PORT_TYPE_RECEIVE: RECEIVE,
       MACH_PORT_TYPE_SEND_ONCE: SEND_ONCE,
       MACH_PORT_TYPE_DEAD_NAME: DEAD_NAME,
-      MACH_PORT_VALID: (name) => name !== 0 && name !== DEAD,
+      MACH_PORT_VALID: valid,
       TASK_HOST_PORT: 1,
       TASK_ACCESS_PORT: 2,
       TASK_BOOTSTRAP_PORT: 3,
@@ -5017,7 +5158,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       EXC_MASK_ALL: 0xffff,
       EXCEPTION_DEFAULT: 1,
       THREAD_STATE_NONE: 0,
-      bootstrap_port: 110,
+      bootstrap_port: bootstrap,
+      domain_port_owner: 0,
+      domain_bootstrap_local: 0,
+      domain_host_copy: 0,
+      domain_access_copy: 0,
+      domain_thread_copy: 0,
+      resource_uncertain: false,
       RLIMIT_NPROC: 1,
       PROC_PIDLISTFDS: 1,
       ready: [16, 17],
@@ -5034,8 +5181,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       remember_cleanup(op, kind, number) {
         cleanup.push({ operation: op, kind, value: number });
+        context.resource_uncertain = true;
       },
       failure(code) {
+        context.domain_port_cleanup();
         throw Object.assign(new Error(first.operation), first, { code });
       },
       invariant(ok, op) {
@@ -5099,10 +5248,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       unsetenv: () => 0,
       execl(...args) {
         calls.push(["exec", ...args]);
+        if (options.execFailure) {
+          context.errno = 8;
+          return -1;
+        }
         throw executed;
       },
       mach_task_self: () => 101,
-      mach_thread_self: () => 102,
+      mach_thread_self: () => own(102),
       task_get_special_port(self, which, target) {
         assert.equal(self, 101);
         if (which === 1) observing = false;
@@ -5112,14 +5265,37 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           target.value = readback
             ? (options.notifyReadback ?? 0)
             : (options.notifyPort ?? 0);
-          return (readback ? options.notifyRead : options.notifyGet) ?? 0;
+          const result =
+            (readback ? options.notifyRead : options.notifyGet) ?? 0;
+          if (!result && valid(target.value)) {
+            own(target.value);
+            notifyCopies.push({
+              name: target.value,
+              error: readback ? options.readbackRelease : options.notifyRelease,
+            });
+          }
+          return result;
         }
         if (observing && options.childGet) return options.childGet;
         target.value =
           which === 1 ? 103 : observing ? childAccess : (options.access ?? 0);
-        return which === 2 && !observing ? (options.get ?? 0) : 0;
+        const result =
+          which === 1
+            ? (options.hostGet ?? 0)
+            : !observing
+              ? (options.get ?? 0)
+              : 0;
+        if (!result) own(target.value);
+        return result;
       },
       mach_port_kobject(_self, name, type, address) {
+        if (calls.some(([op]) => op === "census")) {
+          calls.push(["census-kobject", name]);
+          type.value = name === 103 ? 3 : (options.extraKind ?? 0);
+          address.value = 900 + name;
+          context.errno = 22;
+          return options.censusObjectQuery ?? 0;
+        }
         calls.push(["kobject", name]);
         type.value =
           name === 103 ? (options.host ?? 3) : (options.serviceKind ?? 0);
@@ -5128,6 +5304,18 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       mach_port_type(self, name, target) {
         assert.equal(self, 101);
+        if (calls.some(([op]) => op === "census")) {
+          calls.push(["census-type", name]);
+          if (!options.censusQuery)
+            target.value =
+              name === 103
+                ? SEND
+                : name === 200
+                  ? (options.accessCensusType ?? SEND)
+                  : (options.extraRights ?? SEND);
+          context.errno = 22;
+          return options.censusQuery ?? 0;
+        }
         assert.equal(name, observing ? childAccess : options.access);
         calls.push([observing ? "observe-type" : "type", name]);
         const error = observing ? options.childQuery : options.query;
@@ -5139,26 +5327,72 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         assert.ok(
           observing
             ? name === childAccess
-            : [103, 102, 200, 205, 206].includes(name),
-          "Only owned getter references may be released",
+            : [bootstrap, 103, 102, 200, 205, 206].includes(name),
+          "Only explicitly owned references may be released",
         );
-        if (name === 200 && !observing)
+        calls.push([observing ? "observe-release" : "release", name]);
+        const local =
+          !observing &&
+          name === bootstrap &&
+          context.domain_bootstrap_local === 0 &&
+          !bootstrapReleased;
+        if (local) bootstrapReleased = true;
+        const held = {
+          200: ["access", context.domain_access_copy],
+          103: ["host", context.domain_host_copy],
+          102: ["thread", context.domain_thread_copy],
+        }[name];
+        const role = observing
+          ? "child"
+          : local
+            ? "bootstrap"
+            : held && held[1] === 0
+              ? held[0]
+              : "notify";
+        if (role === "access")
           assert.ok(
             !options.noRelease,
             "No getter reference was proved for deallocation",
           );
-        calls.push([observing ? "observe-release" : "release", name]);
-        if (observing) return options.childRelease ?? 0;
-        if (name === 200) return options.release ?? 0;
-        if (name === 205) return options.notifyRelease ?? 0;
-        if (name === 206) return options.readbackRelease ?? 0;
-        if (name === 103) return options.hostRelease ?? 0;
-        return options.threadRelease ?? 0;
+        const notify =
+          role === "notify"
+            ? notifyCopies.splice(
+                notifyCopies.findIndex((copy) => copy.name === name),
+                1,
+              )[0]
+            : null;
+        if (role === "notify") assert.equal(notify?.name, name);
+        const result =
+          {
+            child: options.childRelease,
+            bootstrap: options.bootstrapRelease,
+            access: options.release,
+            host: options.hostRelease,
+            thread: options.threadRelease,
+            notify: notify?.error,
+          }[role] ?? 0;
+        assert.ok(
+          references.get(name) > 0,
+          "A slot or census entry supplies no owned local reference",
+        );
+        if (!result) references.set(name, references.get(name) - 1);
+        referenceReleases.push({ role, name });
+        if (result)
+          releaseFailures.push({
+            operation: `fault-${role === "child" ? "access" : role}-release`,
+            kind: "mach",
+            value: result,
+          });
+        return result;
       },
       task_set_special_port(self, which, port) {
         assert.equal(self, 101);
         calls.push(["clear", which, port]);
-        return which === 5 ? (options.notifySet ?? 0) : 0;
+        return which === 5
+          ? (options.notifySet ?? 0)
+          : which === 3
+            ? (options.bootstrapSet ?? 0)
+            : 0;
       },
       mach_ports_register(_self, ports, count) {
         calls.push(["registered", ports, count]);
@@ -5194,10 +5428,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           actualNames.push(111);
           actualTypes.push(options.extraRights);
         }
+        if (references.get(bootstrap) > 0 && !actualNames.includes(bootstrap)) {
+          actualNames.push(bootstrap);
+          actualTypes.push(options.bootstrapType ?? SEND);
+        }
         names.value = actualNames;
-        types.value = actualTypes;
         count.value = actualNames.length;
         typeCount.value = options.censusCount ?? actualTypes.length;
+        types.value = actualTypes.slice(0, typeCount.value);
         return options.census ?? 0;
       },
       mach_port_destroy() {
@@ -5205,11 +5443,27 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       mach_vm_deallocate(_self, array, length) {
         calls.push(["census-release"]);
+        assert.equal(
+          context.errno,
+          0,
+          "Census diagnostics preserve errno before cleanup",
+        );
         assert.equal(array.length, length);
+        if (options.censusRelease)
+          releaseFailures.push({
+            operation: "fault-port-list-release",
+            kind: "mach",
+            value: options.censusRelease,
+          });
         return options.censusRelease ?? 0;
       },
       fprintf(_stream, _format, ...values) {
-        diagnostics.push(values);
+        (_format.startsWith("native-darwin-fault-port:")
+          ? portDiagnostics
+          : diagnostics
+        ).push(values);
+        if (_format.startsWith("native-darwin-fault-port:"))
+          calls.push(["census-diagnostic"]);
       },
       domain_access_diagnostic: (...facts) => lifecycle.push(facts),
       fflush() {},
@@ -5227,14 +5481,16 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           operation === "fault-port-count" ||
           (operation === "fault-notify-read" && value === 0)
           ? "invariant"
-          : "mach",
+          : operation === "fault-payload-exec"
+            ? "errno"
+            : "mach",
         label,
       );
       return true;
     });
     assert.equal(
       calls.some(([op]) => op === "exec"),
-      !operation,
+      !operation || !!options.execFailure,
       label,
     );
     assert.equal(
@@ -5242,30 +5498,19 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       !options.childRelease,
       label,
     );
-    assert.deepEqual(
-      cleanup,
-      [
-        ...(cleanupValue === undefined
-          ? []
-          : [
-              {
-                operation: "fault-access-release",
-                kind: "mach",
-                value: cleanupValue,
-              },
-            ]),
-        ...[options.notifyRelease, options.readbackRelease]
-          .filter((value) => value)
-          .map((value) => ({
-            operation: "fault-notify-release",
-            kind: "mach",
-            value,
-          })),
-      ],
-      label,
-    );
+    assert.deepEqual(cleanup, releaseFailures, label);
+    assert.equal(notifyCopies.length, 0, label);
+    if (cleanupValue !== undefined)
+      assert.ok(
+        cleanup.some(
+          (entry) =>
+            entry.operation === "fault-access-release" &&
+            entry.value === cleanupValue,
+        ),
+        label,
+      );
     const queried = calls.some(([op]) => op === "type"),
-      released = calls.some(([op, name]) => op === "release" && name === 200);
+      released = referenceReleases.some(({ role }) => role === "access");
     const got =
       calls.some(([op, which]) => op === "get" && which === 2) && !options.get;
     const held =
@@ -5273,6 +5518,12 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       options.rights === SEND &&
       !options.serviceQuery &&
       !(options.serviceKind ?? 0);
+    const normalAccessRelease =
+      held &&
+      calls.filter(([op]) => op === "census-release").length === 2 &&
+      !portDiagnostics.length &&
+      !options.censusRelease &&
+      !options.censusCount;
     assert.deepEqual(
       lifecycle,
       [
@@ -5294,7 +5545,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
             ? (options.childRelease ?? 0)
             : -1,
         ],
-        ...(got && (!held || released)
+        ...(got && (!held || normalAccessRelease)
           ? [
               [
                 "payload",
@@ -5321,14 +5572,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     );
     assert.equal(
       released,
-      queried &&
-        !options.query &&
-        !options.noRelease &&
-        (!held || calls.filter(([op]) => op === "census-release").length === 2),
+      queried && !options.query && !options.noRelease,
       label,
     );
     assert.equal(
-      calls.filter(([op, name]) => op === "release" && name === 200).length,
+      referenceReleases.filter(({ role }) => role === "access").length,
       released ? 1 : 0,
       label,
     );
@@ -5342,12 +5590,81 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       !calls.some(([op, which]) => op === "clear" && which === 2),
       label,
     );
+    const started = calls.some(([op, which]) => op === "get" && which === 1);
+    if (started) {
+      assert.equal(context.bootstrap_port, 0, label);
+      assert.equal(context.domain_port_owner, 0, label);
+      for (const [role, expected] of [
+        ["bootstrap", bootstrap !== 0 && bootstrap !== DEAD ? 1 : 0],
+        ["host", options.hostGet ? 0 : 1],
+        ["thread", 1],
+      ])
+        assert.equal(
+          referenceReleases.filter((entry) => entry.role === role).length,
+          expected,
+          label,
+        );
+      assert.deepEqual(
+        [
+          context.domain_bootstrap_local,
+          context.domain_host_copy,
+          context.domain_access_copy,
+          context.domain_thread_copy,
+        ],
+        [0, 0, 0, 0],
+        label,
+      );
+    }
+    if (operation === "fault-port-authority") {
+      const name = options.omitHost
+        ? 103
+        : options.omitAccess || options.accessCensusType
+          ? 200
+          : options.bootstrapExtra
+            ? bootstrap
+            : 111;
+      const censusType =
+        options.omitHost || options.omitAccess
+          ? 0
+          : (options.accessCensusType ?? options.extraRights ?? SEND);
+      const current = options.censusQuery
+        ? 0
+        : name === 103
+          ? SEND
+          : name === 200
+            ? (options.accessCensusType ?? SEND)
+            : (options.extraRights ?? SEND);
+      const object =
+        !options.censusQuery && current & (SEND | SEND_ONCE | RECEIVE);
+      assert.deepEqual(
+        portDiagnostics,
+        [
+          [
+            name,
+            censusType,
+            options.censusQuery ?? 0,
+            current,
+            object ? (options.censusObjectQuery ?? 0) : -1,
+            object ? (name === 103 ? 3 : (options.extraKind ?? 0)) : 0,
+            object ? 900 + name : 0,
+          ],
+        ],
+        label,
+      );
+      assert.ok(
+        calls.findIndex(([op]) => op === "census-diagnostic") <
+          calls.findIndex(([op]) => op === "census-release"),
+        label,
+      );
+    } else assert.deepEqual(portDiagnostics, [], label);
     if (!operation) {
       assert.equal(context.bootstrap_port, 0);
       if (held) {
         assert.ok(
           calls.findIndex(([op]) => op === "census") <
-            calls.findIndex(([op, name]) => op === "release" && name === 200),
+            calls.findLastIndex(
+              ([op, name]) => op === "release" && name === 200,
+            ),
         );
         assert.deepEqual(
           calls.filter(([op]) => op === "kobject"),
@@ -5380,13 +5697,18 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       assert.deepEqual(
         calls.filter(([op]) => op === "release"),
         [
-          ...(options.notifyPort === 205 && !options.notifyGet
-            ? [["release", 205]]
+          ...(released && !held ? [["release", 200]] : []),
+          ...(bootstrap !== 0 && bootstrap !== DEAD
+            ? [["release", bootstrap]]
             : []),
-          ...(released ? [["release", 200]] : []),
+          ...(valid(options.notifyPort ?? 0) && !options.notifyGet
+            ? [["release", options.notifyPort]]
+            : []),
+          ...(released && held ? [["release", 200]] : []),
           ["release", 103],
           ["release", 102],
         ],
+        label,
       );
       assert.deepEqual(calls.at(-1), [
         "exec",
@@ -5414,8 +5736,9 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       );
       for (const name of [205, 206])
         assert.equal(
-          calls.filter(([op, port]) => op === "release" && port === name)
-            .length,
+          referenceReleases.filter(
+            (entry) => entry.role === "notify" && entry.name === name,
+          ).length,
           Number(options.notifyPort === name && !options.notifyGet) +
             Number(
               notifyReads === 2 &&
@@ -6138,6 +6461,7 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       domain_status: 0,
       domain_pipes: pipes,
       domain_released: fault === "released",
+      domain_port_cleanup() {},
       getpid: () => (fault === "child" ? 42 : 9000),
       errno: fault === "eintr" ? 4 : 10,
       EINTR: 4,

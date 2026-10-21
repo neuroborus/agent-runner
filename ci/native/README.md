@@ -3683,6 +3683,29 @@ those two checked local names and dead names are admitted. Unexpected live right
 refuse exec without destroying unrelated rights to manufacture a safe namespace.
 Missing or changed census entries also refuse. The census arrays, held service,
 host and thread copies have checked releases; the service's slot reference survives.
+Before sanitation can fail, the child takes responsibility for the explicitly
+owned local `bootstrap_port` reference and nulls that global. Clearing
+`TASK_BOOTSTRAP_PORT` releases the kernel slot's separate reference; it does not
+consume the local one. The local reference is released once before the census,
+including allocated dead names, while null/dead sentinels require no release.
+Each acquired reference retains its own cleanup entry even when bootstrap,
+host, access or resource getter names alias. No name deduplication can discard
+an owned reference or consume another entry's reference.
+
+Sanitation refusal releases its tracked owned references, including the host and
+thread copies acquired before access admission. Failure cleanup attempts every
+remaining owned release without retrying an already attempted one. Both census
+array releases run after count or authority refusal and even if one release
+fails. Release failures retain separate cleanup causes without replacing the
+first refusal; successful exec preparation leaves no pending local cleanup.
+The first rejected census predicate additionally records its local name, census
+type, immediate type-query result and kernel-object query/result on stderr
+before cleanup. A missing expected entry uses `MACH_PORT_TYPE_NONE` as its census
+type; `-1` marks an unattempted object query. These diagnostic reads contact no
+service and cannot authorize an unknown right. The bootstrap ownership repair
+does not identify the unknown right in earlier hosted observations. Portable
+reference/alias/refusal fixtures supply no native confinement or retirement proof.
+
 Explicit bootstrap/debug/resource-notify clearing, registered-port removal and
 task/thread exception sanitation remain required, alongside descriptor closure,
 credential separation and the real task/process/IPC negative controls.
