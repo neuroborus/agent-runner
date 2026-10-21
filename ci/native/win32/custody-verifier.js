@@ -1421,6 +1421,7 @@ export function createWindowsCustodyVerifier(
         });
         requireWindows(lifecycle.instances === lifecycle.running.length);
       } else closed(lifecycle, ["absent"]);
+      const after = await observe(value.helper);
       bridge = normalizeWindowsIdentity(value.bridge);
       requireWindows(
         bridge.userSid === input.runnerSid &&
@@ -1431,6 +1432,7 @@ export function createWindowsCustodyVerifier(
       const running = lifecycle.running?.[0],
         predicates = {
           live: !actual.retired,
+          lifetime: !after.retired && same(actual, after),
           dacl: actual.processDaclSha256 === value.processDaclSha256,
           present: installed.absent === false && lifecycle.absent === false,
           digest:
@@ -1444,7 +1446,11 @@ export function createWindowsCustodyVerifier(
           state: original.state === 4 && running?.state === 4,
           engine:
             original.enginePid > 0 &&
-            running?.engine.pid === original.enginePid,
+            running?.engine.pid === original.enginePid &&
+            BigInt(running.engine.creationTime) <=
+              BigInt(actual.identity.creationTime) &&
+            (running.engine.pid !== actual.identity.pid ||
+              sameWindowsIdentity(running.engine, actual.identity)),
           helper: running?.helperLinked === true,
         };
       if (!Object.values(predicates).every(Boolean))
@@ -1480,6 +1486,7 @@ export function createWindowsCustodyVerifier(
         processDaclSha256: actual.processDaclSha256,
         nativeEventSha256: observationDigest({
           actual,
+          after,
           installed,
           lifecycle,
           original,

@@ -2309,6 +2309,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
+        reader_scheduler_failure: () => false,
         reader_context_failure: () => false,
         reader_open_failure: () => false,
         reader_command: "open",
@@ -2463,6 +2464,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
+          reader_scheduler_failure: () => false,
           reader_context_failure: () => false,
           reader_open_failure: () => false,
           control: "authenticated",
@@ -4401,6 +4403,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           strrchr,
+          reader_scheduler_failure: () => false,
           reader_context_failure() {
             assert.fail("Loader context masked the sampled open refusal");
           },
@@ -4473,6 +4476,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       fallback.push("open");
       return false;
     },
+    reader_scheduler_failure: () => false,
     reader_context_failure(source, line, error) {
       fallback.push([source, line, error]);
       return true;
@@ -5289,7 +5293,7 @@ function verificationFixture(f = fixture()) {
             : Array.from({ length: state.instances }, () => ({
                 guid: instance.guid,
                 state: 4,
-                engine: f.helper,
+                engine: structuredClone(f.helper),
                 helperLinked: true,
               })),
       };
@@ -5595,6 +5599,9 @@ test("Windows admission joins the original scheduler instance, including hidden 
     "guid",
     "state",
     "engine",
+    "engine-birth",
+    "engine-reused",
+    "helper-ended",
     "helper",
   ]) {
     const k = verificationFixture();
@@ -5610,6 +5617,16 @@ test("Windows admission joins the original scheduler instance, including hidden 
           row.guid = "{22222222-2222-3333-4444-555555555555}";
         if (fault === "state") row.state = 2;
         if (fault === "engine") row.engine.pid = 2048;
+        if (fault === "engine-birth")
+          row.engine.creationTime = (
+            BigInt(k.f.helper.creationTime) + 1n
+          ).toString();
+        if (fault === "engine-reused")
+          row.engine.creationTime = (
+            BigInt(k.f.helper.creationTime) - 1n
+          ).toString();
+        if (fault === "helper-ended")
+          k.states.get(k.f.helper.pid).retired = true;
         if (fault === "helper") row.helperLinked = false;
       }
       return Buffer.from(JSON.stringify(frame) + "\n");
@@ -5635,6 +5652,9 @@ test("Windows admission joins the original scheduler instance, including hidden 
           guid: "original",
           state: "state",
           engine: "engine",
+          "engine-birth": "engine",
+          "engine-reused": "engine",
+          "helper-ended": "lifetime",
           helper: "helper",
         }[fault];
         assert.equal(error.admission.predicates[predicate], false);
@@ -5799,65 +5819,451 @@ test("Windows bridge completion acknowledgement uses the held identity after pro
   }
 });
 
-test("actual scheduler query explicitly includes hidden instances and selects the exact task path", async () => {
-  const source = await readFile(
-      new URL("./custody-reader.c", import.meta.url),
-      "utf8",
-    ),
-    body = /static LONG task_instances\([^\n]*\) \{([\s\S]*?)\n\}/u
-      .exec(source)[1]
-      .replace(
-        "IRunningTaskCollection *all; LONG count, found=0; wchar_t path[132];",
-        "let all,count,found=0,path;",
+test("scheduler refusals retain the exact API/HRESULT independently of last-error and reject malformed context", async () => {
+  for (const fault of [
+    null,
+    "path",
+    "cleanup",
+    "cleanup-zero",
+    "cleanup-header",
+    "header-api",
+    "cleanup-flag",
+    "api",
+    "hresult",
+    "index",
+    "attempt",
+    "extra",
+    "command",
+    "mixed",
+  ]) {
+    const f = transport(),
+      value = {
+        phase: "reader-failure",
+        sequence: 5,
+        command: "verify-task",
+        source: "custody-reader.c",
+        line: 47,
+        lastError: 0,
+        scheduler: {
+          operation:
+            fault === "path"
+              ? "IRunningTask_get_Path"
+              : "IRunningTaskCollection_get_Item",
+          hresult: "0x8004130b",
+          index: 2,
+          attempt: 3,
+          cleanupError: 0,
+          cleanupFailed: false,
+        },
+      };
+    if (
+      ["cleanup", "cleanup-zero", "cleanup-header", "cleanup-flag"].includes(
+        fault,
       )
+    )
+      Object.assign(value.scheduler, {
+        operation: null,
+        hresult: null,
+        cleanupError: fault === "cleanup-zero" ? 0 : 6,
+        cleanupFailed: fault !== "cleanup-flag",
+      });
+    if (["cleanup-header", "header-api"].includes(fault))
+      value.source = "custody.h";
+    if (fault === "api") value.scheduler.operation = "unknown";
+    if (fault === "hresult") value.scheduler.hresult = 0x8004130b;
+    if (fault === "index") value.scheduler.index = 4097;
+    if (fault === "attempt") value.scheduler.attempt = 4;
+    if (fault === "extra") value.scheduler.extra = 1;
+    if (fault === "command") value.command = "verify-image";
+    if (fault === "mixed") value.transfer = {};
+    const valid = [
+      null,
+      "path",
+      "cleanup",
+      "cleanup-zero",
+      "cleanup-header",
+    ].includes(fault);
+    const pending = f.channel.receive(),
+      completion = f.channel.completion.catch((error) => error);
+    const bytes = "\x1e" + JSON.stringify(value) + "\n";
+    f.child.stdout.write(bytes.slice(0, 39));
+    f.child.stdout.write(bytes.slice(39));
+    await assert.rejects(pending, (error) => {
+      assert.equal(Object.hasOwn(error, "custodyReaderFailure"), valid);
+      if (valid) assert.deepEqual(error.custodyReaderFailure, value);
+      return true;
+    });
+    assert.ok((await completion) instanceof Error);
+    assert.throws(() => f.channel.settle());
+    f.child.emit("close", 126, null);
+    f.channel.close();
+  }
+});
+
+async function schedulerProgram() {
+  const source = await readFile(
+    new URL("./custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:LONG|void|DWORD|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (text) =>
+    text
+      .replace("struct task_scope *s=reader_task", "const s=reader_task")
+      .replace("wchar_t path[132]", "let path")
       .replace(
         /swprintf_s\(path,132,L"[^\n]*?",name\)/u,
         "format(value=>path=value,name)",
       )
-      .replace(/\bLONG\b/gu, "let")
       .replace(
-        "VARIANT index;VariantInit(&index);",
-        "let index={};VariantInit(index);",
+        "VARIANT index;VariantInit(&index)",
+        "const index={};VariantInit(index)",
       )
-      .replace("IRunningTask *running;BSTR actual;", "let running,actual;")
-      .replace(/(?<!&)&(all|count|running|actual)\b/gu, "value=>$1=value");
-  for (const paths of [[], ["\\other"], ["\\owned"], ["\\owned", "\\owned"]]) {
-    const owned = [],
-      released = [],
-      api = {
-        service: {},
-        name: "owned",
-        owned,
-        TASK_ENUM_HIDDEN: 1,
-        VT_I4: 3,
-        format: (out, name) => {
-          out("\\" + name);
-          return 1;
-        },
-        need: assert.ok,
-        need_hr: (fn, ...args) => fn(...args),
-        VariantInit: () => {},
-        ITaskService_GetRunningTasks: (_service, flags, out) => {
-          assert.equal(flags, 1);
-          out(paths);
-        },
-        IRunningTaskCollection_get_Count: (all, out) => out(all.length),
-        IRunningTaskCollection_get_Item: (all, index, out) =>
-          out(all[index.lVal - 1]),
-        IRunningTask_get_Path: (task, out) => out(task),
-        _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
-        IRunningTask_Release: (task) => released.push(task),
-        SysFreeString: () => {},
-        IRunningTaskCollection_Release: () => {},
+      .replace(
+        "BSTR strings[]={s->root,s->name,s->xml,s->sd,s->guid,s->registeredPath}",
+        "const strings=[s.root,s.name,s.xml,s.sd,s.guid,s.registeredPath]",
+      )
+      .replace(
+        /(?<!&)&reader_task->(all|item|path)/gu,
+        "value=>reader_task.$1=value",
+      )
+      .replace(/->/gu, ".")
+      .replace(/\bL(?=['"])/gu, "")
+      .replace(/(?<!&)&count\b/gu, "value=>count=value")
+      .replace(/\b(?:LONG|BOOL|DWORD|HANDLE|HRESULT|unsigned)\b/gu, "let");
+  return new Script(`
+    function task_result(result,operation,line){${translate(body("task_result"))}}
+    function task_census_close(owned){${translate(body("task_census_close"))}}
+    function task_engine_close(){${translate(body("task_engine_close"))}}
+    function task_close(){${translate(body("task_close"))}}
+    function task_instances(service,name,owned){${translate(body("task_instances"))}}
+  `);
+}
+
+function schedulerFixture(program, snapshots, fault) {
+  const closed = [],
+    calls = [],
+    scheduler = { cleanupError: 0, cleanupFailed: false },
+    owned = Array(32).fill(null);
+  let lastError = 0,
+    reads = 0;
+  const api = {
+    NULL: null,
+    TRUE: true,
+    FALSE: false,
+    __LINE__: 47,
+    __FILE__: "custody-reader.c",
+    TASK_ENUM_HIDDEN: 1,
+    VT_I4: 3,
+    SCHED_E_TASK_NOT_RUNNING: 0x8004130b | 0,
+    reader_task: { running: owned },
+    reader_scheduler: scheduler,
+    FAILED: (value) => value < 0,
+    SUCCEEDED: (value) => value >= 0,
+    GetLastError: () => lastError,
+    SetLastError: (value) => {
+      lastError = value;
+    },
+    format: (out, name) => {
+      out("\\" + name);
+      return 1;
+    },
+    VariantInit: () => {},
+    SysStringLen: (value) => value.length,
+    wcslen: (value) => value.length,
+    _wcsicmp: (a, b) => Number(a.toLowerCase() !== b.toLowerCase()),
+    need(ok) {
+      if (!ok) {
+        api.task_close();
+        throw new Error("incomplete census");
+      }
+    },
+    need_hresult_at(result, ok, operation) {
+      if (ok) return;
+      const failure = {
+        result,
+        operation,
+        index: scheduler.index,
+        attempt: scheduler.attempt,
+        lastError,
       };
-    assert.equal(
-      new Script(`(function(){${body}})()`).runInNewContext(api),
-      paths.filter((p) => p === "\\owned").length,
+      api.task_close();
+      throw Object.assign(new Error("scheduler refusal"), {
+        scheduler: failure,
+      });
+    },
+    task_hr(fn, ...args) {
+      const result = fn(...args),
+        ok = api.task_result(result, fn.name, 47);
+      api.SetLastError(scheduler.error);
+      api.need_hresult_at(result, ok, fn.name);
+    },
+    ITaskService_GetRunningTasks(service, flags, out) {
+      assert.equal(flags, 1);
+      calls.push(["census", ++reads]);
+      out({ rows: snapshots[Math.min(reads - 1, snapshots.length - 1)] });
+      lastError = 0;
+      return fault?.("all", reads, 0) ?? 0;
+    },
+    IRunningTaskCollection_get_Count(all, out) {
+      out(all.rows.censusCount ?? all.rows.length);
+      lastError = 0;
+      return fault?.("count", reads, 0) ?? 0;
+    },
+    IRunningTaskCollection_get_Item(all, index, out) {
+      assert.equal(index.vt, 3);
+      assert.ok(index.lVal > 0);
+      calls.push(["item", reads, index.lVal]);
+      const row = all.rows[index.lVal - 1];
+      assert.ok(row);
+      out(row);
+      lastError = 0;
+      return fault?.("item", reads, index.lVal) ?? 0;
+    },
+    IRunningTask_get_Path(row, out) {
+      calls.push(["path", row.id]);
+      out(row.path);
+      lastError = 0;
+      return fault?.("path", reads, scheduler.index) ?? 0;
+    },
+    IRunningTask_Refresh(row) {
+      calls.push(["refresh", row.id]);
+      lastError = 0;
+      return fault?.("refresh", reads, scheduler.index) ?? 0;
+    },
+    IRunningTask_Release: (row) => {
+      closed.push(row.id);
+      lastError = 91;
+    },
+    IRunningTaskCollection_Release: (all) => {
+      closed.push(all.rows ? "census" : "instances");
+      lastError = 92;
+    },
+    IRegisteredTask_Release: (task) => {
+      closed.push(task);
+      lastError = 93;
+    },
+    ITaskFolder_Release: (folder) => {
+      closed.push(folder);
+      lastError = 94;
+    },
+    ITaskService_Release: (service) => {
+      closed.push(service);
+      lastError = 95;
+    },
+    SysFreeString: (text) => {
+      closed.push(`string:${text}`);
+      lastError = 96;
+    },
+    CloseHandle: (handle) => {
+      closed.push(handle);
+      lastError = handle === "bad-close-zero" ? 0 : 6;
+      return !handle.startsWith("bad-close");
+    },
+  };
+  program.runInNewContext(api);
+  return {
+    api,
+    owned,
+    closed,
+    calls,
+    read: () => api.task_instances({}, "owned", owned),
+  };
+}
+
+test("actual scheduler census retains one-based hidden reads, exact paths and every partial reference", async () => {
+  const program = await schedulerProgram();
+  const other = { id: "other", path: "\\other" },
+    first = { id: "first", path: "\\owned" },
+    hidden = { id: "hidden", path: "\\OWNED" };
+  for (const rows of [[], [other], [first], [other, first, hidden]]) {
+    const f = schedulerFixture(program, [rows]);
+    assert.equal(f.read(), rows.filter((row) => row !== other).length);
+    assert.deepEqual(
+      f.calls.filter((row) => row[0] === "item").map((row) => row[2]),
+      rows.map((_, i) => i + 1),
     );
     assert.deepEqual(
-      released,
-      paths.filter((p) => p !== "\\owned"),
+      f.owned.filter(Boolean),
+      rows.filter((row) => row !== other),
     );
+    f.api.task_close();
+    for (const row of rows)
+      assert.equal(f.closed.filter((id) => id === row.id).length, 1);
+    assert.equal(f.closed.filter((id) => id === "census").length, 1);
+  }
+  for (const stage of ["item", "path", "refresh"]) {
+    const f = schedulerFixture(program, [[first, hidden]], (at, pass, index) =>
+      at === stage && index === 2 ? 0x80070005 | 0 : 0,
+    );
+    assert.throws(f.read, (error) => {
+      assert.deepEqual(error.scheduler, {
+        result: 0x80070005 | 0,
+        operation: {
+          item: "IRunningTaskCollection_get_Item",
+          path: "IRunningTask_get_Path",
+          refresh: "IRunningTask_Refresh",
+        }[stage],
+        index: 2,
+        attempt: 1,
+        lastError: 0,
+      });
+      return true;
+    });
+    assert.equal(f.calls.filter((row) => row[0] === "census").length, 1);
+    assert.equal(f.closed.filter((id) => id === "first").length, 1);
+    assert.equal(f.closed.filter((id) => id === "hidden").length, 1);
+    assert.equal(f.api.reader_task, null);
+  }
+});
+
+test("ended scheduler entries discard the whole census and cannot turn exhaustion into absence", async () => {
+  const program = await schedulerProgram();
+  const first = { id: "first", path: "\\owned" },
+    ended = { id: "ended", path: "\\owned" },
+    live = { id: "live", path: "\\owned" };
+  for (const stage of ["item", "path", "refresh"]) {
+    for (const exhausted of [false, true]) {
+      const f = schedulerFixture(
+        program,
+        [[first, ended], [live]],
+        (at, pass, index) =>
+          at === stage && (exhausted || (pass === 1 && index === 2))
+            ? 0x8004130b | 0
+            : 0,
+      );
+      if (exhausted) {
+        assert.throws(
+          f.read,
+          (error) =>
+            error.scheduler.attempt === 3 &&
+            error.scheduler.result === (0x8004130b | 0),
+        );
+        assert.equal(f.owned.filter(Boolean).length, 0);
+      } else {
+        assert.equal(f.read(), 1);
+        assert.deepEqual(f.owned.filter(Boolean), [live]);
+        assert.ok(f.closed.includes("first") && f.closed.includes("ended"));
+        f.api.task_close();
+      }
+      assert.equal(
+        f.calls.filter((row) => row[0] === "census").length,
+        exhausted ? 3 : 2,
+      );
+    }
+  }
+  const f = schedulerFixture(program, [[ended], []], (at, pass) =>
+    at === "refresh" && pass === 1 ? 0x8004130b | 0 : 0,
+  );
+  assert.equal(f.read(), 0); // A complete fresh census; held retirement is required separately.
+  assert.deepEqual(f.calls.filter((row) => row[0] === "census").length, 2);
+  f.api.task_close();
+});
+
+test("scheduler census rejects failed collection reads and incomplete count bounds before any item", async () => {
+  const program = await schedulerProgram();
+  for (const stage of ["all", "count", "negative", "overflow"]) {
+    const rows = [];
+    if (stage === "negative") rows.censusCount = -1;
+    if (stage === "overflow") rows.censusCount = 4097;
+    const f = schedulerFixture(program, [rows], (at) =>
+      at === stage ? 0x80070057 | 0 : 0,
+    );
+    assert.throws(f.read, (error) => {
+      if (["all", "count"].includes(stage))
+        assert.equal(
+          error.scheduler.operation,
+          stage === "all"
+            ? "ITaskService_GetRunningTasks"
+            : "IRunningTaskCollection_get_Count",
+        );
+      return true;
+    });
+    assert.equal(f.calls.filter((row) => row[0] === "census").length, 1);
+    assert.equal(
+      f.calls.some((row) => row[0] === "item"),
+      false,
+    );
+    assert.equal(f.closed.filter((row) => row === "census").length, 1);
+  }
+});
+
+test("task scope closure frees every partial COM/string result and preserves handle-close uncertainty", async () => {
+  const program = await schedulerProgram();
+  for (const failure of [null, 0, 6]) {
+    const f = schedulerFixture(program, [[]]);
+    Object.assign(f.api.reader_task, {
+      service: "service",
+      folder: "folder",
+      task: "task",
+      again: "again",
+      instances: {},
+      all: { rows: [] },
+      item: { id: "partial" },
+      path: "path",
+      root: "root",
+      name: "name",
+      xml: "xml",
+      sd: "sd",
+      guid: "guid",
+      registeredPath: "registered",
+      engine:
+        failure === null
+          ? "engine"
+          : failure === 0
+            ? "bad-close-zero"
+            : "bad-close",
+    });
+    f.api.reader_task.running[0] = { id: "owned" };
+    f.api.SetLastError(123);
+    assert.equal(f.api.task_close(), failure === null);
+    assert.equal(f.api.reader_scheduler.cleanupFailed, failure !== null);
+    assert.equal(f.api.reader_scheduler.cleanupError, failure ?? 0);
+    assert.equal(f.api.GetLastError(), 123);
+    assert.equal(f.api.reader_task, null);
+    const once = [...f.closed];
+    assert.equal(f.api.task_close(), failure === null);
+    assert.deepEqual(f.closed, once);
+    for (const item of [
+      failure === null
+        ? "engine"
+        : failure === 0
+          ? "bad-close-zero"
+          : "bad-close",
+      "partial",
+      "owned",
+      "census",
+      "instances",
+      "again",
+      "task",
+      "folder",
+      "service",
+      "string:path",
+      "string:root",
+      "string:name",
+      "string:xml",
+      "string:sd",
+      "string:guid",
+      "string:registered",
+    ])
+      assert.equal(f.closed.filter((v) => v === item).length, 1, item);
+  }
+  // The normal details path closes each engine before closing the outer scope.
+  for (const handle of ["engine", "bad-close-zero", "bad-close"]) {
+    const f = schedulerFixture(program, [[]]),
+      failed = handle !== "engine";
+    f.api.reader_task.engine = handle;
+    assert.equal(f.api.task_engine_close(), !failed);
+    assert.equal(f.api.reader_scheduler.cleanupFailed, failed);
+    assert.equal(
+      f.api.reader_scheduler.cleanupError,
+      handle === "bad-close" ? 6 : 0,
+    );
+    assert.equal(f.api.task_close(), !failed);
+    assert.equal(f.closed.filter((item) => item === handle).length, 1);
   }
 });
 
@@ -5920,18 +6326,20 @@ test("actual experiment cold census requires bounded complete enumeration before
   const absent =
       /if \(result == HRESULT_FROM_WIN32\(ERROR_FILE_NOT_FOUND\)\) \{([\s\S]*?)\n  \}/u
         .exec(source)[1]
-        .replace(
-          "IRunningTask *running[32]; LONG active",
-          "const running = []; const active",
-        )
+        .replace("LONG active", "const active")
         .replaceAll("LONG i", "let i"),
     task = new Script(absent);
   for (const count of [0, 1, 32]) {
     let accepted = false;
     const api = {
       result: 2,
+      NULL: null,
       expected: null,
       taskLine: 1,
+      reader_scheduler: { error: 0, line: 1 },
+      scope: { service: {}, name: "original" },
+      running: [],
+      SetLastError: () => {},
       __FILE__: "reader",
       service: {},
       taskName: "original",
@@ -5955,7 +6363,7 @@ test("actual task removal refuses any live retained process or surviving held Jo
       "utf8",
     ),
     body =
-      /      for \(unsigned i = 0; i < process_count; i\+\+\) need\(WaitForSingleObject\(processes\[i\], 0\) == WAIT_OBJECT_0\);[\s\S]*?(?=      need_hr\(ITaskFolder_DeleteTask)/u.exec(
+      /      for \(unsigned i = 0; i < process_count; i\+\+\) need\(WaitForSingleObject\(processes\[i\], 0\) == WAIT_OBJECT_0\);[\s\S]*?(?=      task_hr\(ITaskFolder_DeleteTask)/u.exec(
         source,
       )?.[0];
   assert.ok(body, "Expected the native task-removal retirement boundary");

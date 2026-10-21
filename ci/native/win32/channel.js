@@ -331,6 +331,63 @@ export function windowsCustodyChannel(
             uint32(value.lastError) && !Object.hasOwn(value, "trust"),
           );
         }
+        if (Object.hasOwn(value, "scheduler")) {
+          fields.push("scheduler");
+          const scheduler = value.scheduler;
+          closed(scheduler, [
+            "operation",
+            "hresult",
+            "index",
+            "attempt",
+            "cleanupFailed",
+            "cleanupError",
+          ]);
+          requireWindows(
+            Object.hasOwn(value, "lastError") &&
+              !["open", "trust", "transfer", "loader", "retain"].some((field) =>
+                Object.hasOwn(value, field),
+              ) &&
+              (value.source === "custody-reader.c" ||
+                (value.source === "custody.h" &&
+                  scheduler.operation === null)) &&
+              [
+                "verify-task",
+                "verify-task-instance",
+                "verify-task-remove",
+              ].includes(value.command) &&
+              uint32(scheduler.cleanupError) &&
+              typeof scheduler.cleanupFailed === "boolean" &&
+              (scheduler.cleanupFailed || scheduler.cleanupError === 0) &&
+              Number.isInteger(scheduler.index) &&
+              scheduler.index >= 0 &&
+              scheduler.index <= 4096 &&
+              Number.isInteger(scheduler.attempt) &&
+              scheduler.attempt >= 1 &&
+              scheduler.attempt <= 3 &&
+              (scheduler.operation === null
+                ? scheduler.hresult === null && scheduler.cleanupFailed
+                : [
+                    "CoCreateInstance",
+                    "ITaskService_Connect",
+                    "ITaskService_GetFolder",
+                    "ITaskFolder_GetTask",
+                    "IRegisteredTask_get_Path",
+                    "IRegisteredTask_get_Xml",
+                    "IRegisteredTask_GetSecurityDescriptor",
+                    "IRegisteredTask_GetInstances",
+                    "ITaskService_GetRunningTasks",
+                    "IRunningTaskCollection_get_Count",
+                    "IRunningTaskCollection_get_Item",
+                    "IRunningTask_get_Path",
+                    "IRunningTask_Refresh",
+                    "IRunningTask_get_InstanceGuid",
+                    "IRunningTask_get_State",
+                    "IRunningTask_get_EnginePID",
+                    "ITaskFolder_DeleteTask",
+                  ].includes(scheduler.operation) &&
+                  /^0x[a-f0-9]{8}$/u.test(scheduler.hresult)),
+          );
+        }
         if (Object.hasOwn(value, "loader")) {
           fields.push("loader");
           const loader = value.loader;

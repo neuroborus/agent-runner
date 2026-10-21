@@ -137,6 +137,46 @@ static __declspec(thread) struct {
   BOOL active, process; DWORD pid, observedPid, processAccess, tokenAccess;
   int matched, tokenResult;
 } reader_retain;
+/* Task queries own every partial COM result until their one-shot scope closes. */
+struct task_scope {
+  ITaskService *service; ITaskFolder *folder; IRegisteredTask *task, *again;
+  IRunningTaskCollection *all, *instances; IRunningTask *item, *running[32];
+  BSTR root, name, xml, sd, path, guid, registeredPath; HANDLE engine;
+};
+static __declspec(thread) struct task_scope *reader_task;
+static __declspec(thread) struct {
+  const char *operation; HRESULT result; DWORD error, cleanupError; BOOL cleanupFailed; unsigned line, attempt; LONG index;
+} reader_scheduler;
+static void task_census_close(BOOL owned) {
+  struct task_scope *s=reader_task;
+  if(s->path){SysFreeString(s->path);s->path=NULL;}
+  if(s->item){IRunningTask_Release(s->item);s->item=NULL;}
+  if(s->all){IRunningTaskCollection_Release(s->all);s->all=NULL;}
+  if(owned)for(unsigned i=0;i<32;i++)if(s->running[i]){IRunningTask_Release(s->running[i]);s->running[i]=NULL;}
+}
+static BOOL task_engine_close(void) {
+  HANDLE engine=reader_task->engine;reader_task->engine=NULL;if(!engine)return TRUE;
+  if(CloseHandle(engine))return TRUE;
+  reader_scheduler.cleanupError=GetLastError();reader_scheduler.cleanupFailed=TRUE;return FALSE;
+}
+static BOOL task_close(void) {
+  struct task_scope *s=reader_task;if(!s)return !reader_scheduler.cleanupFailed;
+  DWORD saved=GetLastError();task_census_close(TRUE);
+  task_engine_close();
+  BSTR strings[]={s->root,s->name,s->xml,s->sd,s->guid,s->registeredPath};
+  for(unsigned i=0;i<6;i++)if(strings[i])SysFreeString(strings[i]);
+  if(s->instances)IRunningTaskCollection_Release(s->instances);
+  if(s->again)IRegisteredTask_Release(s->again);
+  if(s->task)IRegisteredTask_Release(s->task);
+  if(s->folder)ITaskFolder_Release(s->folder);
+  if(s->service)ITaskService_Release(s->service);
+  reader_task=NULL;SetLastError(saved);return !reader_scheduler.cleanupFailed;
+}
+static BOOL task_result(HRESULT result, const char *operation, unsigned line) {
+  reader_scheduler.error=GetLastError();reader_scheduler.result=result;reader_scheduler.line=line;
+  reader_scheduler.operation=FAILED(result)?operation:NULL;return SUCCEEDED(result);
+}
+#define task_hr(operation, ...) do { HRESULT task_status=operation(__VA_ARGS__); BOOL task_ok=task_result(task_status,#operation,__LINE__); SetLastError(reader_scheduler.error); need_hresult_at(task_status,task_ok,#operation,__FILE__,__LINE__); } while(0)
 /* Diagnostics use bounded UTF-16 bytes, never locale-dependent path output. */
 static BOOL reader_context_failure(const char *source, unsigned line, DWORD error) {
   if (!reader_loader.active && !reader_retain.active) return FALSE;
@@ -198,9 +238,18 @@ static BOOL reader_open_failure(const char *source, unsigned line, DWORD error) 
 #endif
   return FALSE;
 }
+static BOOL reader_scheduler_failure(const char *source, unsigned line, DWORD error) {
+  task_close();
+  if(!reader_scheduler.operation&&!reader_scheduler.cleanupFailed)return FALSE;
+  char bytes[1024],operation[96]="null",result[16]="null";DWORD written;
+  if(reader_scheduler.operation){sprintf_s(operation,sizeof(operation),"\"%s\"",reader_scheduler.operation);sprintf_s(result,sizeof(result),"\"0x%08lx\"",(DWORD)reader_scheduler.result);}
+  int size=sprintf_s(bytes,sizeof(bytes),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"scheduler\":{\"operation\":%s,\"hresult\":%s,\"index\":%ld,\"attempt\":%u,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",sequence,reader_command,source,line,error,operation,result,reader_scheduler.index,reader_scheduler.attempt,reader_scheduler.cleanupFailed?"true":"false",reader_scheduler.cleanupError);
+  if(size>0)WriteFile(control,bytes,(DWORD)size,&written,NULL);return TRUE;
+}
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  if(reader_scheduler_failure(source,line,error))return;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
   /* Import resolution can fail while holding the resolved file or its parents. */
   if (reader_open_failure(source, line, error) || reader_context_failure(source, line, error)) return;
@@ -826,13 +875,37 @@ static struct verify_handles *creator_inventory(USHORT types[2], BOOL with_threa
 /* GetInstances has no include-hidden flag. Enumerate the scheduler's hidden
  * running tasks explicitly and select the exact registered path. */
 static LONG task_instances(ITaskService *service, BSTR name, IRunningTask *owned[32]) {
-  IRunningTaskCollection *all; LONG count, found=0; wchar_t path[132]; need(swprintf_s(path,132,L"\\%ls",name)>0);
-  need_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&all);need_hr(IRunningTaskCollection_get_Count,all,&count);need(count>=0&&count<=4096);
-  for(LONG i=1;i<=count;i++){VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;IRunningTask *running;BSTR actual;
-    need_hr(IRunningTaskCollection_get_Item,all,index,&running);need_hr(IRunningTask_get_Path,running,&actual);
-    if(!_wcsicmp(path,actual)){need(found<32);owned[found++]=running;}else IRunningTask_Release(running);SysFreeString(actual);
+  wchar_t path[132];need(reader_task&&owned==reader_task->running&&swprintf_s(path,132,L"\\%ls",name)>0);
+  for(unsigned attempt=1;attempt<=3;attempt++){
+    LONG count=0,found=0;BOOL complete=TRUE;reader_scheduler.attempt=attempt;reader_scheduler.index=0;
+    task_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&reader_task->all);need(reader_task->all);
+    task_hr(IRunningTaskCollection_get_Count,reader_task->all,&count);need(count>=0&&count<=4096);
+    for(LONG i=1;i<=count;i++){
+      VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;reader_scheduler.index=i;
+      HRESULT result=IRunningTaskCollection_get_Item(reader_task->all,index,&reader_task->item);
+      if(!task_result(result,"IRunningTaskCollection_get_Item",__LINE__)){complete=FALSE;break;}
+      need(reader_task->item);
+      result=IRunningTask_get_Path(reader_task->item,&reader_task->path);
+      if(!task_result(result,"IRunningTask_get_Path",__LINE__)){complete=FALSE;break;}
+      need(reader_task->path&&reader_task->path[0]==L'\\'&&SysStringLen(reader_task->path)>0&&SysStringLen(reader_task->path)<4096&&SysStringLen(reader_task->path)==wcslen(reader_task->path));
+      if(!_wcsicmp(path,reader_task->path)){
+        /* A stopped snapshot entry is never silently removed from a census. */
+        result=IRunningTask_Refresh(reader_task->item);
+        if(!task_result(result,"IRunningTask_Refresh",__LINE__)){complete=FALSE;break;}
+        need(found<32);owned[found++]=reader_task->item;reader_task->item=NULL;
+      }
+      SysFreeString(reader_task->path);reader_task->path=NULL;
+      if(reader_task->item){IRunningTask_Release(reader_task->item);reader_task->item=NULL;}
+    }
+    task_census_close(!complete);
+    if(complete){reader_scheduler.operation=NULL;reader_scheduler.index=0;return found;}
+    /* Only the documented ended-instance result discards the entire snapshot.
+     * A subsequent full census is mandatory; callers still prove held lifetime. */
+    if(reader_scheduler.result==SCHED_E_TASK_NOT_RUNNING&&attempt<3)continue;
+    SetLastError(reader_scheduler.error);
+    need_hresult_at(reader_scheduler.result,FALSE,reader_scheduler.operation,__FILE__,reader_scheduler.line);
   }
-  IRunningTaskCollection_Release(all);return found;
+  need(FALSE);return 0;
 }
 static DWORD task_parent(HANDLE process) {
   HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);PROCESSENTRY32W entry={sizeof(entry)};DWORD parent=0;unsigned found=0;
@@ -842,27 +915,29 @@ static DWORD task_parent(HANDLE process) {
 }
 static void verifier_task(const char *kind, const wchar_t *nonceText, const char *expected, unsigned subject, BOOL details) {
   need((!strcmp(kind, "custody") || !strcmp(kind, "prerequisite")) && wcslen(nonceText) == 32 && wcsspn(nonceText, L"0123456789abcdef") == 32);
-  ITaskService *service; ITaskFolder *folder; IRegisteredTask *task; VARIANT empty; VariantInit(&empty);
-  need_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&service);
-  need_hr(ITaskService_Connect, service, empty, empty, empty, empty);
-  BSTR root = SysAllocString(L"\\"); need(root); need_hr(ITaskService_GetFolder, service, root, &folder); SysFreeString(root);
+  struct task_scope scope={0};need(!reader_task);reader_task=&scope;memset(&reader_scheduler,0,sizeof(reader_scheduler));reader_scheduler.attempt=1;
+  VARIANT empty; VariantInit(&empty);
+  task_hr(CoCreateInstance, &CLSID_TaskScheduler, NULL, CLSCTX_INPROC_SERVER, &IID_ITaskService, (void **)&scope.service);
+  task_hr(ITaskService_Connect, scope.service, empty, empty, empty, empty);
+  scope.root=SysAllocString(L"\\");need(scope.root);task_hr(ITaskService_GetFolder,scope.service,scope.root,&scope.folder);
   wchar_t name[128]; need(swprintf_s(name, 128, L"%ls%ls", !strcmp(kind, "custody") ? L"NativeProof-Custody-" : L"AgentRunnerPrerequisites-", nonceText) > 0);
-  BSTR taskName = SysAllocString(name); need(taskName); HRESULT result = ITaskFolder_GetTask(folder, taskName, &task); unsigned taskLine = __LINE__;
+  scope.name=SysAllocString(name);need(scope.name);HRESULT result=ITaskFolder_GetTask(scope.folder,scope.name,&scope.task);BOOL found=task_result(result,"ITaskFolder_GetTask",__LINE__);
+  IRunningTask **running=scope.running;
   if (result == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)) {
-    need_hresult_at(result, !expected, "ITaskFolder_GetTask", __FILE__, taskLine);
-    IRunningTask *running[32]; LONG active = task_instances(service, taskName, running);
-    for (LONG i = 0; i < active; i++) IRunningTask_Release(running[i]);
+    SetLastError(reader_scheduler.error);need_hresult_at(result,!expected,"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);reader_scheduler.operation=NULL;
+    LONG active=task_instances(scope.service,scope.name,running);
     need(!active); printf("{\"absent\":true}");
   }
   else {
-    need_hresult_at(result, SUCCEEDED(result), "ITaskFolder_GetTask", __FILE__, taskLine); BSTR xml, sd;
-    need_hr(IRegisteredTask_get_Xml, task, &xml);
-    need_hr(IRegisteredTask_GetSecurityDescriptor, task, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &sd);
-    DWORD a = SysStringByteLen(xml), b = SysStringByteLen(sd); need(a && a <= 262144 && b && b <= 65536);
-    BYTE *bytes = calloc(a+b+8, 1); need(bytes); memcpy(bytes, &a, 4); memcpy(bytes+4, xml, a); memcpy(bytes+4+a, &b, 4); memcpy(bytes+8+a, sd, b);
-    char hash[65]; sum(bytes, a+b+8, hash); free(bytes); SysFreeString(xml); SysFreeString(sd);
-    IRunningTaskCollection *instances; LONG registered; need_hr(IRegisteredTask_GetInstances, task, 0, &instances); need_hr(IRunningTaskCollection_get_Count, instances, &registered); need(registered >= 0 && registered <= 32); IRunningTaskCollection_Release(instances);
-    IRunningTask *running[32];LONG active=task_instances(service,taskName,running);
+    SetLastError(reader_scheduler.error);need_hresult_at(result,found,"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);need(scope.task);
+    task_hr(IRegisteredTask_get_Path,scope.task,&scope.registeredPath);wchar_t exact[132];need(swprintf_s(exact,132,L"\\%ls",name)>0&&scope.registeredPath&&SysStringLen(scope.registeredPath)==wcslen(exact)&&!_wcsicmp(scope.registeredPath,exact));
+    task_hr(IRegisteredTask_get_Xml,scope.task,&scope.xml);
+    task_hr(IRegisteredTask_GetSecurityDescriptor,scope.task,OWNER_SECURITY_INFORMATION|DACL_SECURITY_INFORMATION,&scope.sd);
+    DWORD a=SysStringByteLen(scope.xml),b=SysStringByteLen(scope.sd);need(a&&a<=262144&&b&&b<=65536);
+    BYTE *bytes=calloc(a+b+8,1);need(bytes);memcpy(bytes,&a,4);memcpy(bytes+4,scope.xml,a);memcpy(bytes+4+a,&b,4);memcpy(bytes+8+a,scope.sd,b);
+    char hash[65];sum(bytes,a+b+8,hash);free(bytes);
+    LONG active=task_instances(scope.service,scope.name,running);
+    LONG registered;task_hr(IRegisteredTask_GetInstances,scope.task,0,&scope.instances);need(scope.instances);task_hr(IRunningTaskCollection_get_Count,scope.instances,&registered);need(registered>=0&&registered<=active);
     if (expected) {
       need(!strcmp(kind, "prerequisite") || !strcmp(kind, "custody")); wchar_t ownedJob[96]; need(swprintf_s(ownedJob, 96, L"Local\\NativeProof-%ls", nonceText) > 0); BOOL heldJob = FALSE;
       for (unsigned i = 0; i < job_count; i++) if (!wcscmp(verification_job_names[i], ownedJob)) heldJob = TRUE;
@@ -871,26 +946,24 @@ static void verifier_task(const char *kind, const wchar_t *nonceText, const char
       for (unsigned i = 0; i < process_count; i++) need(WaitForSingleObject(processes[i], 0) == WAIT_OBJECT_0);
       for (unsigned i = 0; i < 128; i++) if (verified_jobs[i]) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(verified_jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
       for (unsigned i = 0; i < job_count; i++) { JOBOBJECT_BASIC_ACCOUNTING_INFORMATION current; need(QueryInformationJobObject(jobs[i], JobObjectBasicAccountingInformation, &current, sizeof(current), NULL) && !current.ActiveProcesses); }
-      need_hr(ITaskFolder_DeleteTask, folder, taskName, 0); IRegisteredTask *again;
-      need_hr_equal(ITaskFolder_GetTask, HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND), folder, taskName, &again); printf("{\"removed\":true,\"sha256\":\"%s\"}", hash);
+      task_hr(ITaskFolder_DeleteTask,scope.folder,scope.name,0);
+      result=ITaskFolder_GetTask(scope.folder,scope.name,&scope.again);task_result(result,"ITaskFolder_GetTask",__LINE__);if(result!=HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND))reader_scheduler.operation="ITaskFolder_GetTask";SetLastError(reader_scheduler.error);need_hresult_at(result,result==HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND),"ITaskFolder_GetTask",__FILE__,reader_scheduler.line);reader_scheduler.operation=NULL;printf("{\"removed\":true,\"sha256\":\"%s\"}",hash);
     } else if(details){
       need(subject<process_count&&WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);DWORD parent=task_parent(processes[subject]);
       printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld,\"registeredInstances\":%ld,\"running\":[",hash,active,registered);
-      for(LONG i=0;i<active;i++){BSTR guid;GUID parsed;wchar_t canonical[40];TASK_STATE state;DWORD enginePid;
-        need_hr(IRunningTask_Refresh,running[i]);need_hr(IRunningTask_get_InstanceGuid,running[i],&guid);need(SUCCEEDED(CLSIDFromString(guid,&parsed))&&StringFromGUID2(&parsed,canonical,40));SysFreeString(guid);
-        need_hr(IRunningTask_get_State,running[i],&state);need_hr(IRunningTask_get_EnginePID,running[i],&enginePid);
-        HANDLE engine=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,enginePid);need(engine&&system_process(engine)&&WaitForSingleObject(engine,0)==WAIT_TIMEOUT);
+      for(LONG i=0;i<active;i++){GUID parsed;wchar_t canonical[40];TASK_STATE state;DWORD enginePid;
+        task_hr(IRunningTask_get_InstanceGuid,running[i],&scope.guid);need(scope.guid&&SUCCEEDED(CLSIDFromString(scope.guid,&parsed))&&StringFromGUID2(&parsed,canonical,40));SysFreeString(scope.guid);scope.guid=NULL;
+        task_hr(IRunningTask_get_State,running[i],&state);task_hr(IRunningTask_get_EnginePID,running[i],&enginePid);
+        scope.engine=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,enginePid);HANDLE engine=scope.engine;need(engine&&system_process(engine)&&WaitForSingleObject(engine,0)==WAIT_TIMEOUT);
         FILETIME a,b,c,d,e,f,g,h;need(GetProcessTimes(engine,&a,&b,&c,&d)&&GetProcessTimes(processes[subject],&e,&f,&g,&h));
         ULONGLONG engineBirth=((ULONGLONG)a.dwHighDateTime<<32)|a.dwLowDateTime,helperBirth=((ULONGLONG)e.dwHighDateTime<<32)|e.dwLowDateTime;
         if(i)putchar(',');printf("{\"guid\":\"%ls\",\"state\":%u,\"engine\":",canonical,(unsigned)state);identity(engine);
-        printf(",\"helperLinked\":%s}",(enginePid==GetProcessId(processes[subject])||parent==enginePid)&&engineBirth<=helperBirth?"true":"false");need(CloseHandle(engine));
+        printf(",\"helperLinked\":%s}",(enginePid==GetProcessId(processes[subject])||parent==enginePid)&&engineBirth<=helperBirth?"true":"false");need(WaitForSingleObject(engine,0)==WAIT_TIMEOUT);need(task_engine_close());
       }
       need(WaitForSingleObject(processes[subject],0)==WAIT_TIMEOUT);printf("]}");
     } else printf("{\"absent\":false,\"sha256\":\"%s\",\"instances\":%ld}", hash, active);
-    for(LONG i=0;i<active;i++)IRunningTask_Release(running[i]);
-    IRegisteredTask_Release(task);
   }
-  SysFreeString(taskName); ITaskFolder_Release(folder); ITaskService_Release(service);
+  BOOL closed=task_close();SetLastError(reader_scheduler.cleanupError);need(closed);memset(&reader_scheduler,0,sizeof(reader_scheduler));
 }
 static HANDLE duplicate_process_owner(unsigned slot) {
   need(slot < process_count); HANDLE process = OpenProcess(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, GetProcessId(processes[slot]));

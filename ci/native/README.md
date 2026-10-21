@@ -8979,11 +8979,34 @@ matching Windows CI must establish trust success and independent original-effect
 retirement separately; the original non-JSON refusal remains a failure.
 
 The bridge retains the original `IRunningTask` GUID, state and engine PID.
-Independent admission enumerates `TASK_ENUM_HIDDEN` by exact registered path and
-retains the separate `GetInstances(0)` count. One original GUID must join the held
-helper birth through its live System engine or direct parent, with unchanged
-image, DACL and task digest. Zero, multiple or unjoined instances fail with bounded
-predicate facts; a matching digest alone supplies no launch authority.
+Independent admission verifies the registered path and enumerates
+`TASK_ENUM_HIDDEN` with documented one-based collection indices. It selects only
+that complete path, refreshes each owned entry and retains the separate
+`GetInstances(0)` count after the hidden census; this count cannot introduce an
+instance missing from that census. Partial reads cannot contribute counts.
+Only `SCHED_E_TASK_NOT_RUNNING` permits discarding an incomplete snapshot and
+acquiring a fresh complete census, at most three times within the existing
+request/owner bounds. All references and strings from the discarded snapshot
+are released first. Other errors and exhaustion refuse immediately; no index is
+skipped and no stopped entry is converted into an absent-instance receipt.
+
+An ended owned instance can be reconciled only when a fresh complete census has
+no owned entries and independent original-process/whole-Job lifetime observations
+also establish retirement. Registration removal still requires every retained
+owner and Job to be retired, the original task digest and fresh exact absence.
+For live admission, one original GUID must join the held helper birth through
+its live System engine or direct parent. Engine creation cannot follow helper
+creation, and a same-PID engine must have that exact held helper identity.
+Fresh helper observations surround the scheduler read, with unchanged image,
+DACL, token and task digest. Zero, multiple, changed or unjoined instances fail
+with bounded predicate facts; a matching digest alone supplies no launch authority.
+
+The existing private refusal frame carries the precise scheduler API, immediate
+HRESULT, collection index and census attempt independently of incidental
+`lastError`, including zero. Partial task scopes release acquired COM interfaces,
+BSTRs and engine handles before refusal; handle-close uncertainty is retained
+separately from the original HRESULT. This metadata supplies no completion or
+retirement authority. Successful queries clear the refusal context.
 Rejected admission retains protected original receipts and fences work. A fresh
 verifier under the original deadline rechecks ownership before `X` exits the
 parked helper without plan loading or setup authorization. Independent process/Job
