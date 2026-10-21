@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Join real command auditing before accepting delivery
+
+Windows command subscriptions select Event nodes with a single outer predicate,
+retaining exact SID/type/event filters and loss detection. Parked commands now
+supply their own effective success/failure policy and original target/marker
+SACL reads before I/O and after completion, joined to installed held identities
+and ACL bytes. Administrative broker setup cannot replace those token inputs;
+inputs and completed operations cannot replace delivered attributed target and
+marker events. Global policy, bounded capture and independent non-emergency
+retirement before restoration remain unchanged. Portable regressions supply no
+hosted delivery or native failure-causality proof.
+
 ## 2026-10-21 — Keep socket transfer authority on the owned source
 
 The Windows feasibility creator grants exactly `PROCESS_DUP_HANDLE` to the

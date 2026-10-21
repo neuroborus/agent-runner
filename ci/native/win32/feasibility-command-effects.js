@@ -187,6 +187,33 @@ const commandEvidence = (value, detail, code = "missing-observation") => {
 };
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const effectiveCommandAudit = (value) =>
+  value?.available === true &&
+  value.success === true &&
+  value.failure === true &&
+  value.error === 0;
+function commandCaseAuditing(value, row, action) {
+  const audit = row.auditing,
+    indices = [["inspect", "edit", "outside"].indexOf(action), 3];
+  commandEvidence(
+    effectiveCommandAudit(audit?.effective),
+    "The actual command token lacks effective success/failure auditing.",
+  );
+  commandEvidence(
+    Array.isArray(audit.files) &&
+      audit.files.length === 2 &&
+      indices.every(
+        (index, i) =>
+          index >= 0 &&
+          audit.files[i].identity === value.original.files[index].identity &&
+          audit.files[i].saclSha256 ===
+            digest(
+              Buffer.from(value.original.cleanup.files[index].saclHex, "hex"),
+            ),
+      ),
+    "The command target/marker SACL did not join the installed held objects.",
+  );
+}
 /** A reply cannot replace native token, held object, or Security observations. */
 export function assessWindowsCommandObservation(
   spec,
@@ -217,6 +244,20 @@ export function assessWindowsCommandObservation(
       JSON.stringify(observation.beforeToken) ===
         JSON.stringify(observation.afterToken),
     "Command process, image, token or creation-time Job custody did not join.",
+  );
+  const auditing = observation.auditing;
+  commandEvidence(
+    effectiveCommandAudit(auditing?.before?.effective) &&
+      effectiveCommandAudit(auditing?.after?.effective) &&
+      JSON.stringify(auditing.before) === JSON.stringify(auditing.after) &&
+      Array.isArray(auditing.before.files) &&
+      auditing.before.files.length === 2 &&
+      [observation.object.before, observation.gate.before].every(
+        (object, i) =>
+          auditing.before.files[i].identity === object.identity &&
+          hash(auditing.before.files[i].saclSha256),
+      ),
+    "Effective command auditing or held target/marker SACL readback is incomplete.",
   );
   commandEvidence(
     reply.exitCode === 0 &&
@@ -1324,6 +1365,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         "helper",
         signal,
       );
+    commandCaseAuditing(prepared, before, spec.action);
     await call("T");
     const after = await call("F"),
       independentAfter = await verifier(
@@ -1331,6 +1373,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         "helper",
         signal,
       );
+    commandCaseAuditing(prepared, after, spec.action);
     const settled = await call("U");
     const end = await call("B"),
       state = decoder.state();
@@ -1341,6 +1384,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       after: independentAfter.identity,
       beforeToken: independentBefore.token,
       afterToken: independentAfter.token,
+      auditing: { before: before.auditing, after: after.auditing },
       imageSha256: prepared.helperSha256,
       creationJob: true,
       captureComplete: state.ready && !failed,

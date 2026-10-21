@@ -270,6 +270,23 @@ function fixture(change = () => {}) {
       after: { ...identity },
       beforeToken: token,
       afterToken: { ...token },
+      auditing: Object.fromEntries(
+        ["before", "after"].map((phase) => [
+          phase,
+          {
+            effective: {
+              available: true,
+              success: true,
+              failure: true,
+              error: 0,
+            },
+            files: [file, file].map(({ identity }) => ({
+              identity,
+              saclSha256: PIN,
+            })),
+          },
+        ]),
+      ),
       imageSha256: PIN,
       creationJob: true,
       captureComplete: true,
@@ -714,6 +731,8 @@ test("real control delivery joins decoded subject, object and completion evidenc
     "opcode",
     "marker",
     "marker-order",
+    "control-policy",
+    "control-sacl",
     "loss",
     "reply",
     "restoration",
@@ -772,6 +791,10 @@ test("real control delivery joins decoded subject, object and completion evidenc
             ...event,
             logonId: capture.logons.get(event.raw.id),
           }));
+          if (fault === "control-policy")
+            observation.auditing.before.effective.success = false;
+          if (fault === "control-sacl")
+            observation.auditing.after.files[0].saclSha256 = sha("changed");
           if (fault === "reply") value.reply.exitCode = 7;
           return value;
         };
@@ -922,6 +945,311 @@ test("native subscription and capture retain case-variant real control names thr
     if (substitute) assert.throws(verify);
     else assert.match(verify(), /^[a-f0-9]{64}$/u);
   }
+});
+
+test("native audit query selects Event nodes while retaining loss and exact subject/type filters", async () => {
+  const program = await commandCaptureProgram(),
+    f = commandCaptureFixture(program);
+  // XPath 'or' outside the selected Event predicate returns a Boolean, not
+  // Event nodes. Inspect the produced expression, without emulating Event Log.
+  const eventPredicate = (query) => {
+    assert.ok(query.startsWith("*["));
+    let depth = 0,
+      quote;
+    for (let i = 1; i < query.length; i++) {
+      const c = query[i];
+      if (quote) {
+        if (c === quote) quote = null;
+        continue;
+      }
+      if (c === '"' || c === "'") {
+        quote = c;
+        continue;
+      }
+      if (c === "[") depth++;
+      if (c === "]" && --depth === 0) {
+        assert.equal(i, query.length - 1, "the result must select Event nodes");
+        return query.slice(2, -1);
+      }
+    }
+    assert.fail("Unclosed Event predicate");
+  };
+  assert.throws(() =>
+    eventPredicate("*[System[EventID=1101]] or *[System[EventID=4663]]"),
+  );
+  for (const interval of [
+    "",
+    " and TimeCreated[@SystemTime>='2026-10-01T00:00:00Z']",
+  ]) {
+    f.api.command_audit_query(f.api.command_subscription_query, interval);
+    const expression = eventPredicate(f.api.command_subscription_query.text);
+    assert.deepEqual(
+      [...expression.matchAll(/EventID=(\d+)/gu)].map((m) => Number(m[1])),
+      [1101, 1102, 4656, 4663],
+    );
+    assert.ok(expression.includes("band(Keywords,4503599627370496)"));
+    assert.ok(
+      expression.includes(`Data[@Name="SubjectUserSid"]="${f.api.userText}"`),
+    );
+    assert.ok(expression.includes('Data[@Name="ObjectType"]="File"'));
+    assert.equal(
+      expression.split(interval || "TimeCreated").length - 1,
+      interval ? 2 : 0,
+    );
+    assert.ok(!expression.includes("ObjectName")); // Held Windows names join after subscription.
+  }
+});
+
+test("actual command token and held SACL reads precede control I/O and remain required after it", async () => {
+  const source = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const guards = source.slice(
+    source.indexOf("const effectiveCommandAudit ="),
+    source.indexOf("/** A reply cannot"),
+  );
+  const start = source.indexOf(
+    "  const observation = async (spec, signal) => {",
+  );
+  const observe = source.slice(
+    start,
+    source.indexOf("\n  return {\n    noCustody:", start),
+  );
+  const program = new Script(
+    `(async () => {${guards} ${observe} return observation({action:"outside"}, signal);})()`,
+  );
+  for (const fault of [
+    null,
+    "missing",
+    "query",
+    "success",
+    "failure",
+    "sacl",
+    "identity",
+    "after",
+  ]) {
+    const prepared = {
+      nonce: "a".repeat(32),
+      observer: identity,
+      helperSha256: PIN,
+    };
+    await brokerSetup(prepared);
+    const audit = {
+      effective: { available: true, success: true, failure: true, error: 0 },
+      files: [2, 3].map((index) => ({
+        identity: prepared.original.files[index].identity,
+        saclSha256: sha("owned-acl"),
+      })),
+    };
+    const before = { identity, token: {}, auditing: structuredClone(audit) },
+      after = structuredClone(before),
+      calls = [];
+    if (fault === "missing") delete before.auditing;
+    if (fault === "query") before.auditing.effective.error = 5;
+    if (fault === "success" || fault === "failure")
+      before.auditing.effective[fault] = false;
+    if (fault === "sacl") before.auditing.files[0].saclSha256 = sha("foreign");
+    if (fault === "identity")
+      before.auditing.files[1].identity = prepared.original.files[0].identity;
+    if (fault === "after") after.auditing.files[1].saclSha256 = sha("foreign");
+    const context = {
+      Buffer,
+      prepared,
+      signal: new AbortController().signal,
+      start: { records: 0 },
+      logons: new Map(),
+      failed: null,
+      digest: sha,
+      commandEvidence: (ok, reason) => assert.ok(ok, reason),
+      verifier: async (row) => row,
+      decoder: { state: () => ({ ready: true, events: [] }) },
+      call: async (key) => {
+        calls.push(key);
+        return key === "N"
+          ? before
+          : key === "F"
+            ? after
+            : key === "B"
+              ? { time: "110", records: 0 }
+              : { exitCode: 0 };
+      },
+    };
+    if (fault) {
+      await assert.rejects(
+        program.runInNewContext(context),
+        /command token|SACL/u,
+        fault,
+      );
+      assert.deepEqual(calls, fault === "after" ? ["N", "T", "F"] : ["N"]);
+    } else {
+      const result = await program.runInNewContext(context);
+      assert.deepEqual(calls, ["N", "T", "F", "U", "B"]);
+      assert.deepEqual(result.auditing.before, audit);
+      assert.equal(
+        result.events.length,
+        0,
+        "producer prerequisites do not invent delivered events",
+      );
+    }
+  }
+});
+
+test("native command auditing queries the parked control token and original held target/marker", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static void ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const effective = body("command_effective")
+    .replace("AUDIT_POLICY_INFORMATION *policy", "let policy")
+    .replace(/\b(?:BOOL|DWORD)\b/gu, "let")
+    .replaceAll("&policy->AuditSubCategoryGuid", "policy.AuditSubCategoryGuid")
+    .replaceAll("policy->", "policy.")
+    .replaceAll("&command_category", "command_category")
+    .replace("&policy", "value=>policy=value");
+  const auditing = body("command_case_auditing")
+    .replaceAll("&command_preflight_owned.token", "tokenSlot")
+    .replace(
+      "unsigned indices[2]={command_action,3}",
+      "const indices=[command_action,3]",
+    )
+    .replace("char id[50],hash[65]", "const id={},hash={}")
+    .replace(/\bunsigned\b/gu, "let")
+    .replace("strcmp(id,", "strcmp(id.value,")
+    .replace('i?",":"",id,hash', 'i?",":"",id.value,hash.value');
+  const program = new Script(
+    `function command_effective(token) {${effective}} ${auditing}`,
+  );
+  for (const fault of [
+    null,
+    "open",
+    "query",
+    "failure-policy",
+    "close",
+    "identity",
+    "sacl",
+  ]) {
+    const calls = [],
+      freed = [],
+      tokenSlot = { value: null };
+    let output = "",
+      lastError = 5;
+    const context = {
+      tokenSlot,
+      command_preflight_owned: {
+        get token() {
+          return tokenSlot.value;
+        },
+      },
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      TOKEN_QUERY: 8,
+      POLICY_AUDIT_EVENT_SUCCESS: 1,
+      POLICY_AUDIT_EVENT_FAILURE: 2,
+      command_client: 73,
+      command_category: "file-system",
+      command_action: 2,
+      command_files: [11, 12, 13, 14],
+      command_ids: ["inspect", "edit", "outside", "marker"],
+      stdout: {},
+      OpenProcessToken(process, access, out) {
+        assert.deepEqual([process, access], [73, 8]);
+        calls.push("token");
+        if (fault === "open") return false;
+        out.value = 19;
+        return true;
+      },
+      AuditComputeEffectivePolicyByToken(token, category, count, out) {
+        assert.deepEqual([token, category, count], [19, "file-system", 1]);
+        calls.push("effective");
+        if (fault === "query") return false;
+        out({
+          AuditSubCategoryGuid: category,
+          AuditingInformation: fault === "failure-policy" ? 1 : 3,
+        });
+        return true;
+      },
+      AuditFree(policy) {
+        freed.push(policy);
+        lastError = 6;
+      },
+      release_handle(slot, operation) {
+        assert.deepEqual([slot.value, operation], [19, "command-token-close"]);
+        slot.value = null;
+        calls.push("close");
+        if (fault === "close") throw new Error(operation);
+        return true;
+      },
+      fileid(handle, out) {
+        calls.push(`id:${handle}`);
+        out.value =
+          fault === "identity" ? "other" : handle === 13 ? "outside" : "marker";
+      },
+      command_sacl_read(handle, out) {
+        calls.push(`sacl:${handle}`);
+        if (fault === "sacl") throw new Error("sacl-read");
+        out.value = sha(String(handle));
+      },
+      GetLastError: () => lastError,
+      IsEqualGUID: (a, b) => a === b,
+      strcmp: (a, b) => (a === b ? 0 : 1),
+      win32_check(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      invariant(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      failure: () => assert.fail("Unexpected cleanup dispatch"),
+      fputs: (text) => {
+        output += text;
+      },
+      printf: (format, ...args) => {
+        let i = 0;
+        output += format.replace(/%(?:l)?[us]/gu, () => String(args[i++]));
+      },
+    };
+    if (["open", "close", "identity", "sacl"].includes(fault))
+      assert.throws(
+        () => program.runInNewContext(context),
+        /process-token|command-token-close|command-file-identity|sacl-read/u,
+      );
+    else {
+      program.runInNewContext(context);
+      const row = JSON.parse(output);
+      assert.deepEqual(row.effective, {
+        available: fault !== "query",
+        success: fault !== "query",
+        failure: fault !== "query" && fault !== "failure-policy",
+        error: fault === "query" ? 5 : 0,
+      });
+      assert.deepEqual(row.files, [
+        { identity: "outside", saclSha256: sha("13") },
+        { identity: "marker", saclSha256: sha("14") },
+      ]);
+      assert.deepEqual(calls, [
+        "token",
+        "effective",
+        "close",
+        "id:13",
+        "sacl:13",
+        "id:14",
+        "sacl:14",
+      ]);
+    }
+    assert.equal(freed.length, ["open", "query"].includes(fault) ? 0 : 1);
+  }
+  const observation = body("command_case_observe");
+  assert.ok(observation.includes("command_case_auditing()"));
 });
 
 test("actual effects require the assessed real control and restored target before release", async () => {

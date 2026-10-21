@@ -3230,7 +3230,10 @@ prerequisite observations, not event-generation proof.
 The original Security
 [pull subscription](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtsubscribe)
 starts before installation with `EvtSubscribeToFutureEvents | EvtSubscribeStrict`.
-Its fixed predicate selects loss/clear records plus failed
+Its query selects Event nodes through one outer predicate; the former
+root-level `or` combined two selections into an XPath Boolean. The corrected
+producer retains the same loss/clear and SID/type/event conditions rather than
+opening an unbound scan. Its fixed predicate selects loss/clear records plus failed
 [4656 handle requests](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4656)
 (`AuditFailure`, `0x0010000000000000`) and 4663 records for the exact subject SID
 and `ObjectType=File`. The decoder requires successful
@@ -3243,7 +3246,14 @@ joins the exact command PID/birth, principal/logon, image, token, access mask an
 fresh acknowledged capture window.
 
 The real control reuses C/N/T/F/U/B and the same independent process/token
-readers, held targets and decoder as the restricted command cases. Its fresh
+readers, held targets and decoder as the restricted command cases. Before T
+releases target I/O, N now reads effective success/failure auditing from that
+actual parked command's process token and re-reads the target and marker SACLs
+through their original held handles. The effects owner joins both file identities
+and ACL hashes to the installed inventory. F repeats these inputs before U;
+missing/failed policy reads, changed SACLs and mismatched objects refuse progress.
+The token reference uses the existing checked prerequisite cleanup slot. These
+inputs establish neither event generation nor subscription delivery. Its fresh
 4663 write success and later 4663 gate-read marker must join the actual helper
 birth, SID/logon, image, token, access mask and capture window. The expected write
 must complete with its fixed reply while original gate bytes/DACLs and held file

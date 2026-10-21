@@ -947,6 +947,19 @@ wrong subjects/objects/logons, stale or historical records, missing target/marke
 evidence, loss and failed controls. Every restricted command keeps its own
 4656 denial or 4663 permitted I/O, completed-I/O marker and sentinel checks.
 
+The actual query producer is checked as an Event-node selection with one outer
+predicate, retaining both loss IDs, failed 4656, 4663, exact SID/type filters and
+both bounded interval branches. A rejected root-level Boolean example protects
+the producer/consumer result contract without pretending to emulate Event Log.
+Actual-body command readback uses the parked command token and the original
+held target/marker, with policy-query errors, missing outcomes, identity/SACL
+mismatch and checked token release. The actual effects sequence withholds T or U
+on failed before/after joins to installed SACL bytes; broker setup success cannot
+supply this different token observation. Existing decoded missing-target/marker,
+wrong-principal/logon/PID/mask, loss, window and cleanup regressions remain the
+delivery and retirement proof. Zero records still fail. Portable coverage proves
+no native delivery or hosted failure causality and adds no slow-tier assignment.
+
 Terminal regressions require a separate broker 4663 gate read after complete domain
 retirement, bound to D's native domain-empty FILETIME and the last command window.
 The last child marker, absent/stale events and an unclosed decoder cannot replace

@@ -479,10 +479,11 @@ static DWORD command_members(HANDLE job) {
   for(DWORD i=0;i<list->NumberOfProcessIdsInList;i++){invariant(list->ProcessIdList[i]<=MAXDWORD,"command-member-pid");HANDLE h=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,(DWORD)list->ProcessIdList[i]);BOOL member;
     win32_check(h!=NULL,"command-member-open");win32_check(IsProcessInJob(h,job,&member),"command-member-job");invariant(member,"command-member-job");if(!close_handle(h,"process-close"))failure(126);} return list->NumberOfProcessIdsInList;
 }
-/* XPath string equality is case sensitive; Windows object-name joins are not.
- * Keep the principal/type filter here and the original held-name joins below. */
+/* Select Event nodes with one predicate, rather than returning a top-level
+ * Boolean. Keep both loss events and the exact principal/type/event filter;
+ * case-insensitive held-name joins remain below, outside XPath equality. */
 static void command_audit_query(WCHAR query[2048], const WCHAR *interval) {
-  invariant(swprintf_s(query,2048,L"*[System[(EventID=1101 or EventID=1102)%ls]] or *[System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]",interval,interval,userText)>0,"command-subscription-query");
+  invariant(swprintf_s(query,2048,L"*[System[(EventID=1101 or EventID=1102)%ls] or (System[((EventID=4656 and band(Keywords,4503599627370496)) or EventID=4663)%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"])]",interval,interval,userText)>0,"command-subscription-query");
 }
 /* Security's UTC timestamp must follow the domain-empty boundary. Older queued
  * broker reads cannot end the wait for the separate terminal witness. */
@@ -730,10 +731,22 @@ static BOOL command_gate_wait(BOOL connect, char bytes[32]) {
     }WaitForSingleObject(thread,1);
   }need(CloseHandle(thread)&&read.ok);memcpy(bytes,read.bytes,32);return TRUE;
 }
+/* Read the actual parked command token, not the administrative broker token.
+ * These held-object inputs are prerequisites, never evidence of delivery. */
+static void command_case_auditing(void) {
+  invariant(!command_preflight_owned.token,"command-effective-policy");
+  win32_check(OpenProcessToken(command_client,TOKEN_QUERY,&command_preflight_owned.token),"process-token");
+  fputs("{\"effective\":",stdout);command_effective(command_preflight_owned.token);
+  if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
+  fputs(",\"files\":[",stdout);
+  unsigned indices[2]={command_action,3};
+  for(unsigned i=0;i<2;i++){char id[50],hash[65];unsigned index=indices[i];fileid(command_files[index],id);invariant(!strcmp(id,command_ids[index]),"command-file-identity");command_sacl_read(command_files[index],hash);printf("%s{\"identity\":\"%s\",\"saclSha256\":\"%s\"}",i?",":"",id,hash);}
+  fputs("]}",stdout);
+}
 static void command_case_observe(BOOL after) {
   char bytes[32],expected[33];if(!command_gate_wait(!after,bytes))return;need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL)==33&&!memcmp(bytes,expected,32));
   if(!after){DWORD pid;need(GetNamedPipeClientProcessId(command_gate,&pid));command_case_pid=pid;command_target_seen=command_marker_seen=FALSE;command_client=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);need(command_client);BOOL member;need(IsProcessInJob(command_client,ownedJob,&member)&&member);command_image_read(command_client,command_helper_hash,FALSE);}
-  printf("{\"event\":\"%s\",\"identity\":",after?"F":"N");identity(command_client);printf(",\"token\":");command_token(command_client);printf(",\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_snapshot(command_action);printf(",\"gate\":");command_snapshot(3);puts("}");
+  printf("{\"event\":\"%s\",\"identity\":",after?"F":"N");identity(command_client);printf(",\"token\":");command_token(command_client);printf(",\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_snapshot(command_action);printf(",\"gate\":");command_snapshot(3);fputs(",\"auditing\":",stdout);command_case_auditing();puts("}");
 
 }
 static void command_retire_domain(void) {
