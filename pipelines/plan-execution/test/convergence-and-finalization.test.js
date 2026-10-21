@@ -11,9 +11,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
 
+import { REPOSITORY_DISCOVERY_SCHEMA } from "../src/bootstrap-unit-schemas.js";
 import { planExecutionPipeline } from "../src/index.js";
 import {
-  BOOTSTRAP_SCHEMA,
   CANDIDATE_CLEAN_CONFIRM_SCHEMA,
   CANDIDATE_REVIEW_SCHEMA,
   CHECK_AND_FIX_SCHEMA,
@@ -1814,13 +1814,15 @@ test("selects the first safely inspectable conventional skill", async (t) => {
     skillPath,
   );
   assert.equal(
-    fixture.calls.worker.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
-      .length,
+    fixture.calls.worker.filter(
+      ({ schema }) => schema === REPOSITORY_DISCOVERY_SCHEMA,
+    ).length,
     1,
   );
   assert.equal(
-    fixture.calls.reviewer.filter(({ schema }) => schema === BOOTSTRAP_SCHEMA)
-      .length,
+    fixture.calls.reviewer.filter(
+      ({ schema }) => schema === REPOSITORY_DISCOVERY_SCHEMA,
+    ).length,
     1,
   );
   assert.deepEqual(

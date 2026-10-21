@@ -16,6 +16,8 @@ import {
   isRecord,
   normalizeBootstrapResult,
   normalizePhaseSafeRequiredChecks,
+  normalizeRequiredChecks,
+  stagingDependentCheckDiagnostics,
   normalizeSummary,
   normalizeValidationInfrastructure,
   sha256,
@@ -107,7 +109,11 @@ export function createBootstrapScope({
   });
 }
 
-export function normalizeRepositoryDiscovery(payload, scope) {
+export function normalizeRepositoryDiscovery(
+  payload,
+  scope,
+  { deferredDiagnostics = false } = {},
+) {
   assertStructuredResultSize(payload);
   assert(exact(payload, DISCOVERY_FIELDS), "discovery", "exact-field-set");
   assert(
@@ -116,28 +122,37 @@ export function normalizeRepositoryDiscovery(payload, scope) {
     "stepAssessment",
     "runner-selected-position",
   );
-  const requiredChecks = normalizePhaseSafeRequiredChecks(
-    payload.requiredChecks,
-    INVALID,
-    {
-      maxItems: MAX_BOOTSTRAP_ITEMS,
-    },
-  );
+  const requiredChecks = (
+    deferredDiagnostics
+      ? normalizeRequiredChecks
+      : normalizePhaseSafeRequiredChecks
+  )(payload.requiredChecks, INVALID, {
+    maxItems: MAX_BOOTSTRAP_ITEMS,
+  });
   assert(
     validCapabilityReports(payload, requiredChecks, scope.trustedCommands),
     "capabilityRequirements",
     "exact-command-capability-reports",
   );
   assert(
-    scope.trustedCommands.every(({ command }) =>
-      requiredChecks.some((check) => check.command === command),
-    ),
+    deferredDiagnostics ||
+      scope.trustedCommands.every(({ command }) =>
+        requiredChecks.some((check) => check.command === command),
+      ),
     "requiredChecks",
     "includes-runner-trusted-commands",
   );
-  return finish({
+  const result = finish({
     ...payload,
-    summary: normalizeSummary(payload.summary, "repository discovery", INVALID),
+    summary: normalizeSummary(
+      payload.summary,
+      "repository discovery",
+      INVALID,
+      {
+        field: "summary",
+        constraint: "concise-markdown-up-to-20000-characters",
+      },
+    ),
     requiredChecks,
     validationInfrastructure: normalizeValidationInfrastructure(
       payload.validationInfrastructure,
@@ -145,6 +160,9 @@ export function normalizeRepositoryDiscovery(payload, scope) {
       { maxItems: MAX_BOOTSTRAP_ITEMS },
     ),
   });
+  return deferredDiagnostics
+    ? { result, diagnostics: stagingDependentCheckDiagnostics(requiredChecks) }
+    : result;
 }
 
 // This exact request is the measured supplied JSON. Referenced file contents and

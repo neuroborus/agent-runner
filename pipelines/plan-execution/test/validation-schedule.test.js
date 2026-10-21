@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { REPOSITORY_DISCOVERY_SCHEMA } from "../src/bootstrap-unit-schemas.js";
 import {
   migratePlanExecutionStateV22,
   migratePlanExecutionStateV26,
 } from "../src/index.js";
-import {
-  BOOTSTRAP_SCHEMA,
-  CHECK_AND_FIX_SCHEMA,
-  FINALIZATION_SCHEMA,
-} from "../src/schemas.js";
+import { CHECK_AND_FIX_SCHEMA, FINALIZATION_SCHEMA } from "../src/schemas.js";
 import {
   normalizeBootstrapResult,
   normalizePipelineState,
@@ -411,7 +408,7 @@ test("version-22 discovery survives interruption and preserves consumed-effect v
   for (const role of ["worker", "reviewer"]) {
     const turns = fixture.calls[role].filter(
       (request) =>
-        request.schema === BOOTSTRAP_SCHEMA &&
+        request.schema === REPOSITORY_DISCOVERY_SCHEMA &&
         request.prompt.includes("versioned-state migration"),
     );
     assert.equal(turns.length, 1);
@@ -512,7 +509,7 @@ test("consumed legacy commit verifies before scoped discovery for the following 
       }
     },
     onRoleRun(_role, request) {
-      if (migrated && request.schema === BOOTSTRAP_SCHEMA)
+      if (migrated && request.schema === REPOSITORY_DISCOVERY_SCHEMA)
         events.push("discover");
     },
   });

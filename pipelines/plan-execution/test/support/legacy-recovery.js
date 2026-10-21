@@ -12,6 +12,10 @@ import {
   parseRunnerConfiguration,
 } from "../../../../src/index.js";
 import { planExecutionPipeline } from "../../src/index.js";
+import {
+  REPOSITORY_DISCOVERY_SCHEMA,
+  APPLICABILITY_BATCH_SCHEMA,
+} from "../../src/bootstrap-unit-schemas.js";
 import * as schemas from "../../src/schemas.js";
 import {
   bootstrapReady,
@@ -143,18 +147,37 @@ export async function createLegacyRecoveryFixture(
       let structured;
       if (schema === schemas.CLARIFICATION_SCHEMA)
         structured = clarificationReady();
-      else if (schema === schemas.BOOTSTRAP_SCHEMA)
+      else if (schema === REPOSITORY_DISCOVERY_SCHEMA) {
+        const ready = bootstrapReady("Role");
         structured = {
           result: {
-            ...bootstrapReady("Role"),
-            requiredChecks: checks.map((check) => ({
-              ...check,
-              steps: Array.from({ length: steps }, (_, index) => index + 1),
-            })),
+            stepAssessment: ready.stepAssessment,
+            summary: ready.summary,
+            requiredChecks: checks,
             validationInfrastructure: infrastructure,
+            capabilityRequirements: [],
+            environmentBlockers: [],
           },
         };
-      else if (schema === schemas.BOOTSTRAP_RECONCILIATION_SCHEMA)
+      } else if (schema === APPLICABILITY_BATCH_SCHEMA) {
+        const unit = JSON.parse(
+          /Applicability request \(data\):\n([^\n]+)/u.exec(request.prompt)[1],
+        );
+        structured = {
+          result: {
+            status: "READY",
+            unitId: unit.unitId,
+            assignments: checks.map(({ id }) => ({
+              checkId: id,
+              steps: unit.steps.map(({ number }) => number),
+            })),
+            missingCommands: [],
+            missingInfrastructure: [],
+            capabilityRequirements: [],
+            environmentBlockers: [],
+          },
+        };
+      } else if (schema === schemas.BOOTSTRAP_RECONCILIATION_SCHEMA)
         structured = { result: reconciliationResolved() };
       else if (schema === schemas.IMPLEMENTATION_SCHEMA) {
         await writeFile(

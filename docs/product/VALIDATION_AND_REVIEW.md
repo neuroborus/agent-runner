@@ -66,6 +66,17 @@ their applicability. A Reviewer-only requirement survives reconciliation.
 Later requirements remain persisted without executing during earlier finalization.
 Polishing continues to use one workspace inventory.
 
+Execution establishes each role's catalog through broad read-only discovery,
+then accepts bounded applicability batches. Accepted units survive interruption
+when their frozen input, role, repository, infrastructure, and catalog bindings
+remain valid. Complete future-step coverage and capability preparation precede
+writable work. Output exhaustion subdivides only unfinished applicability work
+within a finite persisted allowance; discovery and indivisible exhaustion
+pause. Catalog correction and unexpected drift invalidate dependent evidence
+without renewing output or semantic correction allowances. Partial coverage
+never becomes an inventory. Compatible complete legacy inventories survive
+migration without fabricated batch proof, and consumed commits settle first.
+
 Execution finalization and terminal confirmation bind the active step and its
 exact ordered evidence. A confirmed inventory amendment affects only that
 step; advancing clears its amendment and gate evidence and selects the next

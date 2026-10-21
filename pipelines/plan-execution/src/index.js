@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { assertExecutionRun as validateRun } from "./bootstrap-progress.js";
 import {
   deriveValidationSchedule,
   scheduledChecks,
@@ -32,7 +33,6 @@ import {
   WORKFLOW_STATES,
 } from "./workflow.js";
 import {
-  assertRun as validateRun,
   DEFAULT_FINALIZATION_POLICY,
   EMPTY_TRUSTED_VALIDATION,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
@@ -1377,11 +1377,23 @@ export function migratePlanExecutionStateV26(run) {
   return Object.freeze({ ...current, validationSchedule });
 }
 
+export function migratePlanExecutionStateV27(run) {
+  // Compatible complete inventories are already independently accepted. Never
+  // manufacture discovery or batch proof for unfinished legacy roles.
+  return Object.freeze({
+    ...run.pipelineState,
+    bootstrapProgress: Object.freeze({
+      worker: Object.freeze({ work: null, subdivisions: 0 }),
+      reviewer: Object.freeze({ work: null, subdivisions: 0 }),
+    }),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 27,
+  stateVersion: 28,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1414,6 +1426,7 @@ export const planExecutionPipeline = Object.freeze({
     24: migratePlanExecutionStateV24,
     25: migratePlanExecutionStateV25,
     26: migratePlanExecutionStateV26,
+    27: migratePlanExecutionStateV27,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

@@ -1,4 +1,5 @@
 import { STEP_ASSESSMENT } from "./plan-position.js";
+import { BOOTSTRAP_SCHEMA } from "./schemas.js";
 import {
   CAPABILITY_REQUIREMENTS,
   ENVIRONMENT_BLOCKERS,
@@ -31,14 +32,23 @@ const paths = BOOTSTRAP_VALIDATION_INFRASTRUCTURE;
 // Completed discovery is repository evidence and a catalog, never applicability.
 export const REPOSITORY_DISCOVERY_SCHEMA = freezeReport(
   object({
-    result: object({
-      stepAssessment: STEP_ASSESSMENT,
-      summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_LENGTH },
-      requiredChecks: { ...list(REQUIRED_CHECK), minItems: 1 },
-      validationInfrastructure: paths,
-      capabilityRequirements: CAPABILITY_REQUIREMENTS,
-      environmentBlockers: ENVIRONMENT_BLOCKERS,
-    }),
+    result: {
+      anyOf: [
+        object({
+          stepAssessment: STEP_ASSESSMENT,
+          summary: {
+            type: "string",
+            minLength: 1,
+            maxLength: MAX_SUMMARY_LENGTH,
+          },
+          requiredChecks: { ...list(REQUIRED_CHECK), minItems: 1 },
+          validationInfrastructure: paths,
+          capabilityRequirements: CAPABILITY_REQUIREMENTS,
+          environmentBlockers: ENVIRONMENT_BLOCKERS,
+        }),
+        ...BOOTSTRAP_SCHEMA.properties.result.anyOf.slice(1),
+      ],
+    },
   }),
 );
 

@@ -13,10 +13,18 @@ import {
 } from "./implementation-evidence.js";
 import {
   selectedPlanPosition,
+  validStepAssessment,
   matchesPlanPosition,
   STEP_ASSESSMENT_INSTRUCTIONS,
   PLAN_CONTEXT_INSTRUCTIONS,
 } from "./plan-position.js";
+import { runBoundedBootstrap } from "./bounded-bootstrap.js";
+import {
+  clearedBootstrapWork,
+  assertExecutionRun as assertRun,
+  normalizeExecutionState as normalizePipelineState,
+} from "./bootstrap-progress.js";
+import { REPOSITORY_DISCOVERY_SCHEMA } from "./bootstrap-unit-schemas.js";
 import { inspectionRequirements } from "./capability-requirements.js";
 import {
   candidateCheckpoint,
@@ -50,7 +58,6 @@ import {
   AGENT_GUIDANCE_SCOPE_INSTRUCTIONS,
   BOOTSTRAP_ARBITRATION_INSTRUCTIONS,
   BOOTSTRAP_CORRECTION_INSTRUCTIONS,
-  BOOTSTRAP_INSTRUCTIONS,
   BOOTSTRAP_RECONCILIATION_INSTRUCTIONS,
   CHECK_AND_FIX_INSTRUCTIONS,
   CANDIDATE_CLEAN_CONFIRM_INSTRUCTIONS,
@@ -106,7 +113,6 @@ import {
   MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
   WORKFLOW_STATES,
-  assertRun,
   assertRuntime,
   assertSettings,
   createFinalizationGuidanceDecision,
@@ -119,7 +125,6 @@ import {
   isOutputDiagnostic,
   normalizeAdapterCapabilities,
   normalizeBootstrapArbitration,
-  normalizeBootstrapResultCandidate,
   normalizeCandidateReviewResult,
   normalizeCheckAndFixResult,
   assertStepAssessment,
@@ -130,7 +135,6 @@ import {
   normalizeFindingArbitration,
   normalizeInputSnapshot,
   normalizeImplementationResult,
-  normalizePipelineState,
   normalizeReconsiderationResult,
   normalizeReconciliationResult,
   normalizeResolutionResult,
@@ -536,23 +540,6 @@ function normalizeRoleOutput(normalize, output, context) {
   }
 }
 
-function normalizeBootstrapRoleOutputCandidate(
-  output,
-  role,
-  phase = "bootstrap",
-  stepCount,
-  trustedCommands,
-) {
-  return normalizeRoleOutput(
-    (value) =>
-      normalizeBootstrapResultCandidate(value, role, stepCount, {
-        trustedCommands,
-      }),
-    output,
-    bootstrapOutputContext(role, phase),
-  );
-}
-
 function normalizeBootstrapReconciliationOutput(output, phase = "bootstrap") {
   return normalizeRoleOutput(
     normalizeReconciliationResult,
@@ -567,34 +554,6 @@ function normalizeBootstrapArbitrationOutput(output, phase = "bootstrap") {
     output,
     arbitrationOutputContext(phase),
   );
-}
-
-function normalizeValidationMigrationRoleOutput(
-  output,
-  role,
-  stepCount,
-  trustedCommands,
-) {
-  const candidate = normalizeBootstrapRoleOutputCandidate(
-    output,
-    role,
-    "validation-migration",
-    stepCount,
-    trustedCommands,
-  );
-  const { result } = candidate;
-  if (
-    !["READY", "CAPACITY_EXHAUSTED", "PLAN_REVISION_REQUIRED"].includes(
-      result.status,
-    )
-  ) {
-    throw invalidRoleOutput(
-      "Validation migration requires a ready inventory.",
-      bootstrapOutputContext(role, "validation-migration"),
-      { field: "status", constraint: "validation-migration-status" },
-    );
-  }
-  return candidate;
 }
 
 function normalizeValidationMigrationReconciliationOutput(output) {
@@ -1115,6 +1074,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerSummary: null,
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         resolvedSummary: null,
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
@@ -1235,7 +1195,11 @@ Include every listed command exactly once in requiredChecks with its actual cano
       }
       if (cause.changes?.includes("head") && !(await ensurePlanPosition()))
         return false;
-      await pause("unsafe_git_state", { code: cause.code });
+      await pause(
+        "unsafe_git_state",
+        { code: cause.code },
+        { bootstrapProgress: clearedBootstrapWork(state().bootstrapProgress) },
+      );
       return false;
     }
     return true;
@@ -1734,6 +1698,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
       recoveryContext = "",
       contextReview = false,
       contractContext,
+      focusedContext,
+      outputExhaustionPatch,
     } = {},
   ) {
     if (state().preflightComplete && !(await verifyFinalizationGuidance())) {
@@ -1745,7 +1711,12 @@ Include every listed command exactly once in requiredChecks with its actual cano
       return null;
     const turn = contextReview
       ? { role, phase: "plan-context" }
-      : activeTurn(role, state().workflowState);
+      : activeTurn(
+          role,
+          checkpoint === "validation-migration"
+            ? "VALIDATION_MIGRATION"
+            : state().workflowState,
+        );
     const retrying = currentRun.availabilityRetry != null;
     const recovering =
       interruptedTurn !== null ||
@@ -1782,22 +1753,44 @@ Include every listed command exactly once in requiredChecks with its actual cano
       evidence.canonicalPlan,
       evidence.clarification,
     );
-    const context = durableContext(evidenceContext, recoveryContext);
+    const context = durableContext(
+      focusedContext === undefined ? evidenceContext : focusedContext(evidence),
+      recoveryContext,
+    );
     const contextKey = contextKeyFor(role, checkpoint, evidenceContext);
     // Narrative review has no accepted result yet. Rebuild its read-only
     // producing turn under the same recovery allowance before reviewing again.
     const narrativeCheckpoint = `plan-context:read-only:${checkpoint}`;
+    const recoveries = [
+      currentRun.availabilityRetry,
+      currentRun.inactivityRecovery,
+    ];
     const reconstructingNarrative =
       !contextReview &&
       access === "read-only" &&
-      [currentRun.availabilityRetry, currentRun.inactivityRecovery].some(
+      recoveries.some(
         (recovery) =>
           recovery?.role === role &&
           recovery.checkpoint === narrativeCheckpoint,
       );
+    // Version 27 bound migration retries to the suspended workflow phase.
+    // Keep that exact recovery checkpoint until success, without changing the
+    // new read-only turn identity or renewing either recovery allowance.
+    const legacyMigrationCheckpoint = `${activeTurn(role, state().workflowState).phase}:read-only:validation-migration`;
+    const resumingLegacyMigration =
+      checkpoint === "validation-migration" &&
+      access === "read-only" &&
+      state().validationMigrationPending &&
+      recoveries.some(
+        (recovery) =>
+          recovery?.role === role &&
+          recovery.checkpoint === legacyMigrationCheckpoint,
+      );
     const availabilityCheckpoint = reconstructingNarrative
       ? narrativeCheckpoint
-      : `${turn.phase}:${access}:${checkpoint}`;
+      : resumingLegacyMigration
+        ? legacyMigrationCheckpoint
+        : `${turn.phase}:${access}:${checkpoint}`;
     const continuingNarrativeRecovery =
       contextReview &&
       narrativeRecovery?.role === role &&
@@ -1867,6 +1860,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
       CLARIFICATION_SCHEMA,
       PLAN_COMPATIBILITY_SCHEMA,
       BOOTSTRAP_SCHEMA,
+      REPOSITORY_DISCOVERY_SCHEMA,
       BOOTSTRAP_RECONCILIATION_SCHEMA,
       BOOTSTRAP_ARBITRATION_SCHEMA,
     ].includes(schema)
@@ -2080,6 +2074,33 @@ Include every listed command exactly once in requiredChecks with its actual cano
             latestSession?.contextKey !== contextKey);
         const exhausted =
           runtime.outputExhaustion?.eligible(agentError) === true;
+        const sourceForkPatch = hasPossibleSourceForkEffect
+          ? {
+              authenticationSourceForkRecovery: Object.freeze({
+                role,
+                contextKey,
+              }),
+            }
+          : consumeSourceFork
+            ? { lazySourceForkConsumed: false }
+            : {};
+        const subdivisionPatch = exhausted
+          ? outputExhaustionPatch?.()
+          : undefined;
+        if (subdivisionPatch !== undefined) {
+          await transition(
+            { ...state(), ...subdivisionPatch, ...sourceForkPatch },
+            {
+              publicActivity: activity(
+                role,
+                checkpoint,
+                "bootstrap-subdivided",
+                "Unfinished read-only applicability subdivided after output exhaustion.",
+              ),
+            },
+          );
+          return null;
+        }
         await pause(
           exhausted ? "output_exhausted" : "authentication_required",
           {
@@ -2091,16 +2112,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           },
           {
             ...exhaustedWorkspace?.state,
-            ...(hasPossibleSourceForkEffect
-              ? {
-                  authenticationSourceForkRecovery: Object.freeze({
-                    role,
-                    contextKey,
-                  }),
-                }
-              : consumeSourceFork
-                ? { lazySourceForkConsumed: false }
-                : {}),
+            ...sourceForkPatch,
           },
           exhaustedWorkspace?.options,
         );
@@ -2693,6 +2705,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const resolvedInventory =
       ["READY", "RESOLVED"].includes(result.status) ||
+      (result.status === undefined && context.contract === "bootstrap") ||
       ["USE_WORKER", "USE_REVIEWER", "SYNTHESIZE"].includes(result.direction);
     const omitsTrustedCommand =
       resolvedInventory &&
@@ -2849,8 +2862,15 @@ Include every listed command exactly once in requiredChecks with its actual cano
     buildPrompt,
     normalize,
     deferredDiagnostics = false,
+    context: suppliedContext,
+    semanticContext = true,
+    wrapped = false,
+    outputExhaustionPatch,
+    focusedContext,
+    correctionPatch = () => ({}),
   }) {
-    const context = roleOutputContextFor(role, schema, checkpoint);
+    const context =
+      suppliedContext ?? roleOutputContextFor(role, schema, checkpoint);
     while (true) {
       if (!(await verifyFinalizationGuidance())) return null;
       const correction = pendingBootstrapCorrection(context);
@@ -2864,15 +2884,43 @@ Include every listed command exactly once in requiredChecks with its actual cano
               ? prompt
               : `${prompt}\n\n${BOOTSTRAP_CORRECTION_INSTRUCTIONS}\n\nCorrection diagnostic batch:\n${JSON.stringify(correction, null, 2)}`;
           },
-          { checkpoint, recoveryContext },
+          {
+            checkpoint,
+            recoveryContext,
+            focusedContext,
+            contractContext: context,
+            outputExhaustionPatch,
+          },
         );
         if (output === null) {
           return null;
         }
         if (!(await verifyFinalizationGuidance())) return null;
+        if (
+          schema === REPOSITORY_DISCOVERY_SCHEMA &&
+          validStepAssessment(output?.result?.stepAssessment) &&
+          !matchesPlanPosition(
+            output.result.stepAssessment,
+            selectedPlanPosition(state()),
+          ) &&
+          !(await validatePlanContext(
+            output,
+            role,
+            checkpoint,
+            context,
+            recoveryContext,
+          ))
+        )
+          return null;
         let normalized;
         try {
-          normalized = normalize(output);
+          normalized = wrapped
+            ? normalizeRoleOutput(
+                (value) => normalize({ result: value }),
+                output,
+                context,
+              )
+            : normalize(output);
           if (
             Object.keys(output).length !== schema.required.length ||
             schema.required.some((field) => !Object.hasOwn(output, field))
@@ -2899,6 +2947,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           deferredDiagnostics ? normalized.diagnostics : [],
         );
         if (
+          semanticContext &&
           !(await validatePlanContext(
             output,
             role,
@@ -2937,6 +2986,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
             ...state(),
             bootstrapCorrections: [...state().bootstrapCorrections, correction],
             pendingBootstrapCorrection: correction,
+            ...correctionPatch(),
           },
           {
             publicActivity: activity(
@@ -3067,6 +3117,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerSummary: null,
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
       });
@@ -3076,6 +3127,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         ...(paused ? current : invalidatedLegacyValidation(current)),
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         validationMigrationPending: true,
       });
     }
@@ -3108,6 +3160,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         reviewerSummary: null,
         workerValidation: null,
         reviewerValidation: null,
+        bootstrapProgress: clearedBootstrapWork(current.bootstrapProgress),
         bootstrapDisagreement: null,
         bootstrapArbitrationUsed: false,
       });
@@ -3214,30 +3267,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
   }
 
   async function rediscoverValidationRole(role) {
-    const result = await runBootstrapContract({
-      role,
-      schema: BOOTSTRAP_SCHEMA,
-      checkpoint: "validation-migration",
-      deferredDiagnostics: true,
-      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}
-
-This is a versioned-state migration checkpoint. Treat every persisted legacy summary, resolved context, check, path, fingerprint, and aggregate validation result as provisional. Independently re-establish the complete phase-safe summary and current validation inventory from repository evidence before work can advance.
-
-${finalizationBootstrapInstructions(state().finalizationGuidance)}
-
-${trustedValidationInstructions()}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-
-${evidence}`,
-      normalize: (output) =>
-        normalizeValidationMigrationRoleOutput(
-          output,
-          role,
-          parseCommitPlan(state().canonicalPlan).steps.length,
-          state().trustedValidation.commands,
-        ),
-    });
+    const result = await boundedBootstrapRole(role, "validation-migration");
     if (result === null) {
       return false;
     }
@@ -3252,6 +3282,10 @@ ${evidence}`,
     await transition(
       {
         ...state(),
+        bootstrapProgress: {
+          ...state().bootstrapProgress,
+          [role]: { ...state().bootstrapProgress[role], work: null },
+        },
         [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,
@@ -3970,34 +4004,57 @@ ${JSON.stringify(
     return true;
   }
 
+  async function boundedBootstrapRole(role, checkpoint) {
+    try {
+      return await runBoundedBootstrap({
+        role,
+        checkpoint,
+        state,
+        run: () => currentRun,
+        transition,
+        runContract: runBootstrapContract,
+        correctionAttempt: (context) =>
+          bootstrapCorrectionAttempt(context) === undefined ? 0 : 1,
+        chargeCorrection: async (context, patch) => {
+          const correction = {
+            attempt: 1,
+            diagnostics: [
+              outputDiagnostic(
+                {
+                  diagnostic: {
+                    field: "catalogCorrection",
+                    constraint: "complete-catalog-required",
+                  },
+                },
+                context,
+              ),
+            ],
+          };
+          await transition({
+            ...state(),
+            ...patch,
+            bootstrapCorrections: [...state().bootstrapCorrections, correction],
+            pendingBootstrapCorrection: correction,
+          });
+        },
+        fingerprintInfrastructure: validationInfrastructureFingerprint,
+        guidance: () =>
+          `${finalizationBootstrapInstructions(state().finalizationGuidance)}\n\n${trustedValidationInstructions()}`,
+      });
+    } catch (cause) {
+      if (cause?.code !== "ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED") throw cause;
+      await pause("bootstrap_inventory_capacity_exhausted", {
+        code: cause.code,
+        explanation:
+          "A single canonical applicability step exceeds the bounded supplied-request capacity. Reduce its context or start a new run with a compatible Runner contract.",
+        evidence: [`Bootstrap role: ${role}.`],
+      });
+      return null;
+    }
+  }
+
   async function bootstrapRole(role) {
-    const result = await runBootstrapContract({
-      role,
-      schema: BOOTSTRAP_SCHEMA,
-      checkpoint: "bootstrap",
-      deferredDiagnostics: true,
-      buildPrompt: (evidence) => `${BOOTSTRAP_INSTRUCTIONS}${
-        role === "reviewer"
-          ? "\nAs Reviewer, also state what you intend to verify."
-          : ""
-      }
-
-${finalizationBootstrapInstructions(state().finalizationGuidance)}
-
-${trustedValidationInstructions()}
-
-${PRODUCT_DECISION_INSTRUCTIONS}
-
-${evidence}`,
-      normalize: (output) =>
-        normalizeBootstrapRoleOutputCandidate(
-          output,
-          role,
-          "bootstrap",
-          parseCommitPlan(state().canonicalPlan).steps.length,
-          state().trustedValidation.commands,
-        ),
-    });
+    const result = await boundedBootstrapRole(role, "bootstrap");
     if (result === null) {
       return false;
     }
@@ -4015,6 +4072,10 @@ ${evidence}`,
     await transition(
       {
         ...state(),
+        bootstrapProgress: {
+          ...state().bootstrapProgress,
+          [role]: { ...state().bootstrapProgress[role], work: null },
+        },
         [`${role}Summary`]: result.summary,
         [`${role}Validation`]: {
           requiredChecks: result.requiredChecks,

@@ -599,6 +599,7 @@ Persist at least:
 - complete per-step validation schedule, active required-check inventory,
   optional current-step amendment, legacy-scope marker, validation-infrastructure
   file list, and runner-computed infrastructure fingerprint;
+- per-role durable discovery/applicability work and consumed output-subdivision allowances;
 - bounded bootstrap-correction attempts containing only attempt number and
   deduplicated role, phase, contract, field, and constraint diagnostic batches;
 - the current step's bounded finalization-correction ledger and optional
@@ -1943,7 +1944,7 @@ Persist concise summaries:
 
 ```text
 context/worker.md
-context/reviewer.md  # independent mode only
+context/reviewer.md  # independent and combined modes only
 ```
 
 Each summary should cover:
@@ -1955,8 +1956,8 @@ Each summary should cover:
 - risks/ambiguities;
 - finalization procedure.
 
-Each active bootstrap role returns an independently discovered ordered inventory
-of stable `C`-prefixed IDs, exact commands, and `steps`: a nonempty ascending
+Each active bootstrap role establishes an independently discovered ordered inventory
+through discovery and accepted applicability batches. The final role inventory has stable `C`-prefixed IDs, exact commands, and `steps`: a nonempty ascending
 array of unique canonical plan step numbers. Missing applicability, invalid
 references, and missing step coverage are rejected. Every role discovers a
 complete procedure for every step, including the repository's ordinary fast
@@ -2033,7 +2034,7 @@ lookaround. They retain strict objects, bounds, safe lexical patterns, and
 status-specific variants. Deterministic pipeline normalization remains
 authoritative for exact nonempty text, commands, uniqueness, and safe
 repository-relative paths. Each bootstrap schema keeps a strict object root
-and places its discriminated variants in a nested `result` union. A rejected
+and places its outcome variants in a nested `result` union. A rejected
 bootstrap result persists and publishes only its bounded, deduplicated role,
 phase, contract, field, and violated-constraint diagnostic batch; it never
 retains a rejected value, command, path, or raw role output.
@@ -2063,13 +2064,17 @@ followed or silently rewritten.
 In independent mode, the Reviewer summary additionally states what it intends
 to verify. Lazy mode creates no Reviewer summary.
 
-### Private bounded bootstrap contracts
+### Durable bounded bootstrap
 
 `bootstrap-unit-schemas.js` and `bootstrap-units.js` define completed
 repository-discovery and applicability reports and pure work-record transitions.
-These contracts are not wired into `BOOTSTRAP`, validation migration, or the
-persisted pipeline state; current workflow behavior and state version remain
-unchanged.
+Both initial `BOOTSTRAP` and validation-migration discovery use them. Each
+mode-required role normally performs broad read-only repository discovery once,
+including a distinct semantic plan-context review, then supplies focused
+applicability batches. Worker and Reviewer discovery remain independent in
+independent and combined modes; lazy uses only Worker. No writable effect may
+begin until every required role has complete canonical coverage, the stable
+Worker-first union is established, and capability preparation succeeds.
 
 Shared inventory fragments live in `validation-schema-fragments.js`, keeping
 `schemas.js` exports limited to complete object-root response schemas.
@@ -2086,10 +2091,11 @@ A work record binds contract version 1, role, frozen-input and canonical-plan
 fingerprints, repository and infrastructure fingerprints, frozen trusted-command
 authority, selected position, and accepted discovery. Applicability requests
 contain this binding, the discovery catalog and its fingerprint, a deterministic
-unit ID, and a contiguous canonical plan range. Caller-supplied positive finite
-step and serialized UTF-8 byte bounds partition the plan in order. Oversized
-ranges bisect deterministically through single-step units; an oversized or
-exhausted single step raises `ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED`. The byte
+unit ID, and a contiguous canonical plan range. The workflow persists fixed
+limits of four canonical steps and 262,144 supplied JSON bytes per unit,
+partitioning the plan in order. Oversized
+ranges bisect deterministically through single-step units; an oversized
+single-step request raises `ERR_BOOTSTRAP_UNIT_CAPACITY_EXHAUSTED`. The byte
 measurement covers exactly the supplied request JSON, excluding referenced-file
 reads and provider framing; it implies no native output-token limit.
 
@@ -2112,12 +2118,56 @@ environment blockers. Before a correction invocation, the caller must persist
 ledger. Catalog and invalid-unit repairs share its single attempt. Corrected
 discovery must retain accepted commands and reports and include every new
 requirement; it invalidates all dependent units and coverage. Reload takes the
-saved role attempt as a lower bound. Construction is for initial discovery only;
-subdivision, rediscovery, reconstruction, and resume must retain the consumed
-attempt. Pending correction authorization permits reconstruction of that same
+saved role attempt as a lower bound. Rebinding a corrected catalog to newly
+fingerprinted infrastructure, subdivision, rediscovery, reconstruction, and
+resume must retain the consumed attempt. Pending correction authorization permits reconstruction of that same
 attempt, never a new allowance. Subdivision replaces only an unaccepted leaf,
-so each catalog admits at most plan-step-count minus one splits. No contract
-truncates an oversized inventory or treats partial coverage as ready.
+so each catalog admits at most plan-step-count minus one splits. The workflow
+additionally retains at most 16 output-triggered subdivisions per role for the
+entire run, separately from semantic correction accounting. Accepted discovery
+and each accepted unit are journaled before advancement. Output exhaustion can
+split only the unfinished read-only applicability unit; the split and consumed
+allowance persist atomically with the exhaustion record before continuation.
+Discovery exhaustion, an exhausted single-step unit, or exhaustion after that
+allowance is consumed pauses without accepting partial output. A supplied
+single-step request exceeding the byte limit pauses for capacity instead.
+
+Pipeline state version 28 adds strict `bootstrapProgress` records for Worker and
+Reviewer, each containing nullable bound work and a consumed subdivision count.
+After a role inventory is published, its temporary work is retired but consumed
+allowances remain. A compatible native session receives focused instructions;
+reconstruction receives frozen input-file references and hashes, its accepted
+catalog and exact current unit, without routinely repeating broad discovery or
+the entire applicability matrix. Native session survival is never required.
+Reload validates partitions, ordered accepted units, role bindings, the exact
+selected plan position, and the shared correction ledger. Live reuse also checks
+input, repository, infrastructure, and trusted-command fingerprints. Unexpected
+drift invalidates affected proof under the existing input and Git guards;
+rediscovery and catalog correction never replenish either allowance.
+Migration bootstrap turns persist the read-only `validation-migration` identity
+instead of inheriting their suspended workflow phase. Interrupted recovery and
+operator stops therefore retain read-only reconciliation even when the workflow
+is suspended at `IMPLEMENT` or `FINALIZE`. Exhaustion pauses retain that migration
+checkpoint and the suspended workflow's resume state. Repository drift pauses
+and clears stale bootstrap work atomically while preserving consumed allowances.
+Saved version-27 availability and inactivity retries retain their exact legacy
+checkpoint only for the same role and suspended phase's read-only migration.
+Retry accounting remains consumed while new turns use `validation-migration`;
+successful provider reconciliation retires the saved recovery record normally.
+Journal-proven confirmation recovery accepts this identity only behind the
+pending migration barrier with unchanged workflow, input, and repository
+bindings and no pending consumed commit effect. Later candidate acceptance and
+passing finalization still require their complete journal provenance.
+
+The ordered version-27 migration initializes empty work and zero subdivision
+counts because older states contain no such proof or consumed output allowance.
+Compatible complete legacy role inventories, schedules, current-step amendments,
+completed commits, corrections, and historical confirmation evidence remain
+unchanged. Unfinished roles perform discovery without fabricated batch evidence;
+older incompatible inventories retain their existing migration barrier. A
+consumed commit settles by verification before discovery or another writable
+effect. No contract truncates an oversized inventory or treats partial coverage
+as ready.
 
 ### Reconciliation
 
@@ -3707,8 +3757,9 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 27 to
-    `independent` without reviving terminal runs or replaying completed or
+74. every supported legacy version migrates through state version 28, preserving
+    its saved mode and defaulting missing modes to `independent`, without
+    reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats
     read-only validation discovery when prior evidence is provisional.
 75. lazy provider and deterministic contract failures receive one scoped

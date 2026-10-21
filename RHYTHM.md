@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-21
 
+- **Execution bootstrap resumes from accepted bounded evidence.** Initial and
+  migration bootstrap now discover each active role's repository catalog before
+  focused applicability batches. Each accepted unit is journaled; output
+  exhaustion subdivides only unfinished read-only applicability work under a
+  separate durable allowance. Catalog correction and drift cannot renew retry
+  budgets or admit a partial schedule. Version 28 preserves compatible complete
+  legacy inventories without inventing batch proof, and consumed commits still
+  settle before discovery. This keeps long plans recoverable without native
+  session survival or routine repetition of the complete applicability matrix.
+
 - **Bootstrap work units have private deterministic contracts.** Execution can
   validate repository discovery separately from compact applicability batches,
   subdivide contiguous ranges by supplied bytes and step count, and assemble

@@ -136,6 +136,12 @@ test("continues one detached MCP execution after client replacement", async (t) 
 
   const running = await reconnected.runStatus({ runId: execution.runId });
   assert.equal(running.execution.state, "running");
+  const bootstrapped = await runStore.loadRun(execution.runId);
+  assert.deepEqual(bootstrapped.pipelineState.bootstrapCorrections, []);
+  assert.deepEqual(bootstrapped.pipelineState.validationSchedule, {
+    commands: ["git diff --check HEAD"],
+    steps: [{ step: 1, commandIndexes: [0] }],
+  });
   await reconnected.runCancel({
     idempotencyKey: "execution-cancel",
     runId: execution.runId,

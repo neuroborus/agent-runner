@@ -72,6 +72,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "workerValidation",
   "reviewerValidation",
   "resolvedSummary",
+  "bootstrapProgress",
   "bootstrapDisagreement",
   "bootstrapArbitrationUsed",
   "bootstrapCorrections",
@@ -1708,7 +1709,7 @@ function isStagingIndependentCommand(command) {
   return true;
 }
 
-function stagingDependentCheckDiagnostics(checks) {
+export function stagingDependentCheckDiagnostics(checks) {
   return Object.freeze(
     checks.flatMap((check, index) =>
       isStagingIndependentCommand(check.command)
@@ -1766,7 +1767,7 @@ function normalizeValidationInfrastructurePath(value, name, code, diagnostic) {
   return value;
 }
 
-function normalizeRequiredChecks(
+export function normalizeRequiredChecks(
   value,
   code,
   {
@@ -4352,6 +4353,19 @@ export function normalizePipelineState(value) {
       "Plan-execution pending bootstrap correction is inconsistent.",
     );
   }
+  if (
+    !isRecord(value.bootstrapProgress) ||
+    !hasExactFields(value.bootstrapProgress, ["worker", "reviewer"]) ||
+    Object.values(value.bootstrapProgress).some(
+      (progress) =>
+        !isRecord(progress) ||
+        !hasExactFields(progress, ["work", "subdivisions"]) ||
+        (progress.work !== null && !isRecord(progress.work)) ||
+        !Number.isSafeInteger(progress.subdivisions) ||
+        progress.subdivisions < 0,
+    )
+  )
+    throw workflowError("Invalid bootstrap progress.");
   const finalizationRecovery = normalizeFinalizationRecovery(
     value.finalizationRecovery,
     value,
@@ -5367,6 +5381,10 @@ export function createPlanExecutionState({
       workerValidation: null,
       reviewerValidation: null,
       resolvedSummary: null,
+      bootstrapProgress: Object.freeze({
+        worker: Object.freeze({ work: null, subdivisions: 0 }),
+        reviewer: Object.freeze({ work: null, subdivisions: 0 }),
+      }),
       bootstrapDisagreement: null,
       bootstrapArbitrationUsed: false,
       bootstrapCorrections: Object.freeze([]),
@@ -5508,7 +5526,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 27 ||
+    run.pipelineStateVersion !== 28 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5790,7 +5808,14 @@ export function assertRun(run) {
         (!run.pause.checkpoint.startsWith(
           `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
         ) &&
-          !run.pause.checkpoint.startsWith("plan-context:read-only:")) ||
+          !run.pause.checkpoint.startsWith("plan-context:read-only:") &&
+          !(
+            state.validationMigrationPending &&
+            !state.compatibilityCheckRequired &&
+            state.pendingCommit?.status !== "consumed" &&
+            run.pause.checkpoint ===
+              "validation-migration:read-only:validation-migration"
+          )) ||
         (run.pause.resumeState === "COMMIT" &&
           (run.pause.role !== "worker" ||
             run.pause.checkpoint !== `commit:${state.currentStep}`)) ||

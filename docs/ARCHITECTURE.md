@@ -1781,10 +1781,32 @@ applicability-unit contracts in `bootstrap-units.js` and
 `validation-schema-fragments.js` from complete response-schema exports. They
 reuse its inventory validators and bind ordered complete coverage and shared
 correction accounting to frozen inputs, role, catalog, and repository evidence.
-They expose no runtime capability or public package API and are not activated
-in workflow state or migrations. The
-[execution specification](../pipelines/plan-execution/docs/SPEC.md#private-bounded-bootstrap-contracts)
-owns their exact contracts and their distinction from active bootstrap.
+They expose no runtime capability or public package API. Private
+`bounded-bootstrap.js` activates discovery followed by focused applicability
+turns for both bootstrap and validation migration; `bootstrap-progress.js`
+validates the durable work and independent output-subdivision allowance.
+Accepted discovery and each complete unit pass through the existing write-ahead
+transition before advancement. Exhaustion can subdivide only the unfinished
+read-only applicability unit, with its allowance consumed in the same durable
+transition. Discovery and indivisible exhaustion pause; semantic corrections
+remain a separate shared producing-role allowance. Catalog corrections and
+unexpected drift invalidate dependent proof without replenishing allowances.
+
+Execution state version 28 adds per-role nullable bound work and consumed split
+counts. Its ordered version-27 migration preserves compatible complete
+inventories, schedules, amendments, correction accounting, completed commits,
+and historical confirmation proof without inventing batch evidence. Unfinished
+roles use discovery; consumed effects settle first. Frozen inputs, accepted
+catalogs, and pending units reconstruct requests without a native session or
+routinely repeating the applicability matrix. Migration bootstrap turns retain
+a distinct read-only identity across interruption and operator stops; repository
+drift pauses and invalidates stale work without renewing allowances. Saved
+version-27 availability and inactivity records keep their exact checkpoint for
+the same role and suspended phase's read-only migration until successful
+reconciliation, preserving consumed recovery accounting alongside the new turn
+identity. The
+[execution specification](../pipelines/plan-execution/docs/SPEC.md#durable-bounded-bootstrap)
+owns exact bounds, state, acceptance, and recovery rules.
 
 Finalization records its active step and exact ordered checks; terminal
 confirmation hashes the complete canonical evidence tuple. Resume validates

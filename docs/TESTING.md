@@ -80,6 +80,15 @@ Keep the ordinary gate as `npm run check`; never fold slow matrices into it.
 The fast execution `validation-schedule.test.js` uses injected effects to cover
 two-step selection in all modes, persisted reload, confirmation reuse, and
 migration of pending rework and correction accounting.
+The fast execution `bounded-bootstrap.test.js` uses lightweight effects to cover
+multi-step discovery and batch acceptance, persisted interruption and reload,
+role isolation in all modes, output subdivision, migration exhaustion pauses,
+catalog correction, drift, read-only mutation guards, compatible inventory
+migration, and confirmation provenance after rediscovery. Pure
+`bootstrap-units.test.js` owns partition, binding, and malformed-coverage
+rejection. Durable runner and legacy-migration slow suites own actual journal,
+lease, and consumed-effect composition; changing bootstrap activation or its
+persisted migration requires those affected suites.
 
 Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific

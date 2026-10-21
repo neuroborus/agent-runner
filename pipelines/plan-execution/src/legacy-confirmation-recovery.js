@@ -5,7 +5,7 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import { executionPolicy, primaryFindings } from "./mode-policy.js";
-import { assertRun } from "./workflow-contract.js";
+import { assertExecutionRun as assertRun } from "./bootstrap-progress.js";
 
 // This evidence is deliberately neither persisted on the run nor projected.
 // A restart must obtain proof again from the state-owned validated journal.
@@ -318,6 +318,19 @@ async function proveHistory(run, history, migrate) {
             ) ||
               state.validationMigrationPending ||
               state.compatibilityCheckRequired)
+          ) &&
+          !(
+            current.activeTurn.phase === "validation-migration" &&
+            bound &&
+            !contentChanged &&
+            before.workflowState === state.workflowState &&
+            before.validationMigrationPending &&
+            state.validationMigrationPending &&
+            !state.compatibilityCheckRequired &&
+            state.pendingCommit?.status !== "consumed" &&
+            !["WAITING_FOR_USER", "FAILED", "CANCELED"].includes(
+              state.workflowState,
+            )
           )
         )
           return false;
