@@ -1194,32 +1194,52 @@ Capture completion describes the observation stream, never transaction success.
 Observations neither authorize receipts nor replace the first validated refusal.
 Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
-For each original read/edit bundle, the source transfers its original bound,
-unconnected socket with `WSADuplicateSocketW`; the designated held launcher
-consumes its opaque protocol information once with `WSASocketW`. The child
-receives only the launcher's PID, birth and primary-token data. The launcher
-rejoins that destination and the original child, records the source's
-`SO_PROTOCOL_INFOW` contract and emits `tcp-transfer-ready`. The driver persists
-this record before its one-shot `D` acknowledgment. Creation and import flags
-remain zero. Birth/token drift, PID-only input, incomplete carriers and changed
-provider/catalog/chain joins refuse admission without replay. The helper admits
-`O/D/T/U` only for the original rooted read/edit roles.
+For each original read/edit bundle, the held creator retains the original bound,
+unconnected socket and shares it **to the exact child**, rather than asking the
+restricted child to duplicate into the privileged observer. The child's initial
+socket establishes the public provider/catalog/chain contract only. Before
+creating the original, the creator reads the held child's primary token and
+requires the exact package/user SIDs, AppContainer state and zero capabilities.
+It impersonates that token only around socket creation, nonblocking/exclusive
+setup and loopback bind, reads the actual thread token before and after, and
+checks `RevertToSelf` before export or observer operations. An existing thread
+token, failed token read, identity drift, failed reversion or uncertain close
+blocks admission. No process DACL or requested process access is broadened.
 
-The creator uses its already held, suspended source-process handle to grant the
+`tcp-transfer-ready` records the held creator's PID/birth/primary-token identity,
+the actual effective AppContainer token at creation, the held child's
+PID/birth/primary-token identity and the provider contract. The driver persists
+that exact record before `D`. The creator then calls `WSADuplicateSocketW` once
+for the held child and sends one bounded private import packet through the
+existing child pipe. The child rejoins all identities and providers, checks
+closure of its preflight socket, imports once with `WSASocketW`, and requires the
+actual descriptor's provider, exclusive local endpoint and unconnected state.
+The child explicitly establishes nonblocking mode on the imported descriptor.
+When import fails before acquiring a descriptor, cleanup emits no close
+observation for that absent descriptor; partial capture remains incomplete.
+Creation/import flags remain zero. The creator requires the echoed opaque
+protocol information to equal its export and independently checks the retained
+original before observer readiness; provider-private bytes never enter reports.
+Birth/token drift, PID-only input, partial packets, substituted protocol data and
+changed provider/catalog/chain joins refuse admission without replay. `O/D/T/U`
+remain limited to the original rooted read/edit roles.
+
+The creator uses its already held, suspended child-process handle to grant the
 exact AppContainer SID `PROCESS_DUP_HANDLE` (`0x40`) on that process alone. The
 original protected user-only DACL is verified before replacement; the resulting
 protected DACL retains the user's full access and adds exactly one noninheriting
 package ACE with that mask. Creator and independent suspended-child verifier
 read back the owner, protection, two exact SIDs, ACE types/flags and masks before
 release. Other process, thread, Job and pipe DACLs retain their existing contract.
-In particular the privileged destination receives no package duplication grant.
-After the persisted input/provider join and `D`, the actual source token must
-successfully open its own current PID with only `PROCESS_DUP_HANDLE` and close
-that handle before the original one-shot Winsock duplication. Source open/close
-failures remain distinct native refusals; closure uncertainty also retains its
-independent cleanup cause. This preflight supplies no destination-access proof.
+In particular the privileged creator/observer receives no package duplication
+grant.
+The actual child token must still successfully open its own current PID with
+only `PROCESS_DUP_HANDLE` and close that handle before offering its preflight
+provider contract. Child self-access failures remain distinct native refusals;
+closure uncertainty also retains its independent cleanup cause. This preflight
+supplies no destination-access proof.
 
-At a failed original source duplication, the immediate `WSAGetLastError` is saved
+At a failed creator export, the immediate `WSAGetLastError` is saved
 before any diagnostic operation. An optional `tcpObservation.transfer` records
 that error, the original negotiated/high Winsock versions, creation flags and
 public provider bytes. Destination reads request only
@@ -1231,7 +1251,8 @@ type, alongside restricted-token and AppContainer reads. The source also queries
 its effective thread token with `TOKEN_QUERY`; `ERROR_NO_TOKEN` 1008 leaves that
 observation unavailable and identifies the existing process token as the effective
 context. Token identity arrays end with type and impersonation level; primary
-tokens use `null` for the inapplicable level. No impersonation is introduced.
+tokens use `null` for the inapplicable level. Export diagnostics run after
+checked reversion; the creation token is bound separately by the transfer record.
 The original socket receives one query-only `SIO_GET_QOS` call. `qos` contains
 native status, returned byte count, sending/receiving service types and provider
 buffer length. The last three values are `null` unless the complete x64 `QOS`
@@ -1251,7 +1272,7 @@ and protocol-name text are excluded.
 
 One additional query reads `SO_EXCLUSIVEADDRUSE` on the original failed socket,
 before its closure. Ordinary `native-windows-socket-input` diagnostics name
-`wfp_transfer` and `WSADuplicateSocketW`, preserve the saved original error and
+`socket_export` and `WSADuplicateSocketW`, preserve the saved original error and
 report the option's native status, returned size and value. Failed or short reads
 leave the value unavailable. This supplements the existing construction,
 provider/catalog/chain, zero flags, nonblocking/bind, QoS and token observations.
@@ -1292,24 +1313,21 @@ which can disrupt Winsock reference accounting. Shared descriptors refer to
 the same socket and require independent closure; successful `getsockopt` alone
 does not establish that accounting.
 
-After that original refusal, each read/edit source attempts at most two fresh
-unbound controls within the remaining 5000 ms transaction budget. Both retain
-the original effective AppContainer identity, public provider/catalog/chain,
-zero creation/import flags, nonblocking and exclusive options. Neither binds,
-connects or exchanges payload. The self control runs first, targeting and
-importing once in the source process with its own birth/token binding; an
-unsupported native self transfer remains its actual refusal. The destination
-control uses a different fresh socket and separate protocol information for
-the original birth/token-bound launcher. A distinct bounded carrier is consumed
-at most once beside `wfp_prepare`; it cannot enter original socket preparation.
-Its carried original monotonic deadline is rechecked before destination import;
-late arrival or a slow identity query cannot release a new import after expiry.
-The launcher latches the original refusal before control framing or cleanup
-can fail. It imports once, independently attempts closure, and writes `V` to
-acknowledge completion of the control attempt, including a refused import.
-`V` never acknowledges original `D/T/U`, readiness, attribution or retirement.
-The source closes each created control descriptor independently, including after
-lost acknowledgment; neither protocol information nor an operation is replayed.
+After a refused export, at most two fresh unbound diagnostic controls use the
+remaining 5000 ms transfer budget. They retain the actual exporting caller's
+identity, the public provider/catalog/chain, zero creation/import flags,
+nonblocking and exclusive options. Neither binds, connects or exchanges payload.
+The self control runs first and attempts one self import with checked closures;
+the exact-destination control uses a separate socket and protocol information.
+Their native duplicate statuses remain distinct: successful self sharing never
+proves destination reachability. The creator has no control-import receiver in
+the child, so a successful destination export leaves import unattempted and
+acknowledgment uncertain. It never consumes that ticket itself or treats a pipe
+reply as socket authority. Every source descriptor receives a checked close;
+uncertain import/closure remains failure through independent domain retirement.
+The existing child-origin diagnostic carrier/`V` reader remains diagnostic only,
+checks the original carried deadline before import, and cannot enter original
+socket preparation or acknowledge `D/T/U`.
 
 Optional `tcpObservation.controls` joins the same unchanged 2 KiB capture.
 Each entry has numeric `kind` (0 self, 1 destination), `side` (0 source,
@@ -1324,30 +1342,17 @@ uncertainty retain separate cleanup causes until independent original-domain
 retirement. The caller persists captured controls as diagnostic-only evidence;
 missing, malformed, repeated or oversized frames remain incomplete evidence.
 
-The saved original bound transfer and both unbound controls refused duplication
-with `WSAEINVAL` 10022, before destination import. The original negotiated/high
-Winsock versions were 2.2, and its complete `SIO_GET_QOS` read reported best-effort
-service in both directions with zero provider-buffer length. Those fields do not
-identify whether the documented QoS exclusion caused the refusal. The successful original
-`SO_EXCLUSIVEADDRUSE` read reported true; its
-[bind-ownership contract](https://learn.microsoft.com/en-us/windows/win32/winsock/so-exclusiveaddruse)
-does not establish a duplication prohibition or justify removing the option.
-The source's destination `PROCESS_QUERY_LIMITED_INFORMATION` open was denied;
-this diagnostic supplied no destination birth/token read, while the held
-launcher's own exact binding remains required. That observation does not identify
-the provider's failed operation or justify granting `PROCESS_DUP_HANDLE` on the
-held launcher. The self control also refused, so the destination difference
-alone does not isolate the cause. `WSAEINVAL` identifies an invalid parameter
-without identifying which prerequisite failed, and documented Windows Store
-support does not prove this exact AppContainer/provider path works. Separately,
-the original source's own `OpenProcess(PROCESS_DUP_HANDLE)` was denied with
-Win32 error 5. Its creator-supplied protected DACL granted only the normal user,
-leaving the source's AppContainer access check without the required mask. The
-source-only correction above repairs that demonstrated operation; neither the
-saved Winsock error nor portable coverage proves the provider's internal failure
-or a successful native transfer. Any remaining original refusal still fails
-before connect without a receipt. Original-socket transfer and native acceptance
-remain pending fresh matching Windows CI.
+Earlier source-to-observer evidence is not a universal Winsock refusal: after
+the source-only DACL repair, fresh self duplication/import/closure succeeded while
+exact-destination duplication still returned `WSAEINVAL` 10022. The restricted
+source's destination query was denied with Win32 error 5. Successful source
+self-access and self sharing therefore supply no privileged-destination
+reachability proof. The new direction uses the creator's existing held child
+authority, never a package duplication grant on the privileged observer.
+Neither that explanation nor portable tests establish native acceptance.
+Actual AppContainer/WFP attribution, successful controls and complete retirement
+must still be proved by matching fresh Windows CI. Any platform/provider topology
+that cannot retain those original identities fails before acceptance.
 
 The launcher retains the socket, child process, exact token and
 immutable image, rechecking birth, Job, zero-capability package/user and native

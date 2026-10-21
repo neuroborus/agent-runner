@@ -424,6 +424,8 @@ const GIT_HELPER_DOMAINS = Object.freeze({
   "tcp-eof": ["invariant"],
   "tcp-progress": ["invariant"],
   "tcp-nonce": ["invariant"],
+  "observer-impersonate": ["win32"],
+  "observer-revert": ["win32"],
   "observer-control-ack": ["win32", "invariant"],
   "observer-control-import": ["win32", "invariant"],
   ...Object.fromEntries(
@@ -583,7 +585,7 @@ const NATIVE_OPERATIONS = new Set(
   git-dubious-owner git-repository-read git-config-read git-user-name git-cwd-read
   git-home-missing git-path-read git-path-normalize executable-close
   tcp-endpoint tcp-exclusive observer-child observer-job observer-image observer-once observer-carrier
-  observer-protocol observer-socket observer-local observer-unconnected observer-token
+  observer-protocol observer-socket observer-local observer-unconnected observer-token observer-impersonate observer-revert
   observer-engine observer-collection observer-owner observer-transfer observer-socket-close observer-engine-close observer-enum-close observer-token-close
   observer-diagnostic-token-close observer-diagnostic-process-close
   observer-control-close observer-control-ack observer-control-import
@@ -1217,10 +1219,31 @@ function assertTcpTransfer(row, receipt) {
         row[key].pid === receipt[key].pid &&
         row[key].creationTime === receipt[key].creationTime,
     );
-  const transfer = row.transfer,
-    destination = transfer?.destination;
+  const transfer = row.transfer;
+  const identity = (value, expected) =>
+    wfpClosed(value, [
+      "pid",
+      "creationTime",
+      "tokenId",
+      "authenticationId",
+      "modifiedId",
+    ]) &&
+    value.pid === expected.pid &&
+    value.creationTime === expected.creationTime &&
+    [value.tokenId, value.authenticationId].every(
+      (id) =>
+        typeof id === "string" &&
+        /^[a-f0-9]{16}$/u.test(id) &&
+        !/^0+$/u.test(id),
+    ) &&
+    typeof value.modifiedId === "string" &&
+    /^[a-f0-9]{16}$/u.test(value.modifiedId);
   need(
     wfpClosed(transfer, [
+      "direction",
+      "creator",
+      "effective",
+      "appContainer",
       "destination",
       "providerId",
       "catalogId",
@@ -1229,23 +1252,17 @@ function assertTcpTransfer(row, receipt) {
       "socketType",
       "protocol",
     ]) &&
-      wfpClosed(destination, [
-        "pid",
-        "creationTime",
-        "tokenId",
-        "authenticationId",
-        "modifiedId",
-      ]) &&
-      destination.pid === receipt.owner.pid &&
-      destination.creationTime === receipt.owner.creationTime &&
-      [destination.tokenId, destination.authenticationId].every(
-        (value) =>
-          typeof value === "string" &&
-          /^[a-f0-9]{16}$/u.test(value) &&
-          !/^0+$/u.test(value),
-      ) &&
-      typeof destination.modifiedId === "string" &&
-      /^[a-f0-9]{16}$/u.test(destination.modifiedId) &&
+      transfer.direction === "creator-to-child" &&
+      transfer.appContainer === true &&
+      identity(transfer.creator, receipt.owner) &&
+      identity(transfer.effective, receipt.owner) &&
+      identity(transfer.destination, receipt.child) &&
+      transfer.effective.tokenId !== transfer.creator.tokenId &&
+      transfer.effective.authenticationId ===
+        transfer.destination.authenticationId &&
+      (!Object.hasOwn(row, "tokenId") ||
+        (transfer.destination.tokenId === row.tokenId &&
+          transfer.destination.authenticationId === row.authenticationId)) &&
       typeof transfer.providerId === "string" &&
       /^[a-f0-9]{32}$/u.test(transfer.providerId) &&
       !/^0+$/u.test(transfer.providerId) &&
@@ -3532,8 +3549,8 @@ export async function runWindowsFeasibility(
             run.session.send("O");
             const transfer = await nextRun();
             assertWindowsFeasibilityTcpTransfer(transfer, run.receipt);
-            // Bind the actual destination and provider before the one native
-            // duplication. Neither PID-only input nor a lost reply can advance.
+            // Bind creator, effective AppContainer token, destination and provider
+            // before export through the already-held creator authority.
             run.tcpAttribution = {
               transfer,
               requestedEndpoint: tcpEndpoint,
