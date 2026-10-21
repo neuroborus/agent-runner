@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-21
 
+- **Journal validation reuses byte-proven checkpoints.** Store instances retain
+  only bounded adjacent events and continuity proofs, capped by entry count and
+  serialized bytes. Every reuse freshly hashes safely opened cached prefixes and
+  binds directory, segment order, file identity, and exact ranges under stable
+  observations. Only new records need semantic validation; current snapshots
+  still match exact events, and old snapshots, changed evidence, and cache misses
+  use complete replay. Failed publication drops retained evidence. Authoritative
+  history, finite segment limits, recovery, and mutation exclusion are unchanged;
+  progress and complete history still replay canonically.
+
 - **Execution bootstrap resumes from accepted bounded evidence.** Initial and
   migration bootstrap now discover each active role's repository catalog before
   focused applicability batches. Each accepted unit is journaled; output

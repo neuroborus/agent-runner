@@ -192,6 +192,11 @@ larger state and recovery containers. Journals roll over into bounded segments
 while retaining the complete authoritative history and crash-recovery ordering;
 capacity exhaustion preserves the last accepted state. See the exact
 [storage and result budgets](../ARCHITECTURE.md#structured-result-headroom).
+Repeated reads may reuse bounded process-local validation checkpoints only after
+fresh byte and identity verification of their complete cached prefixes. Current
+snapshots still require exact journal matches; cold reads and uncertain bindings
+use full validation. Reuse never removes history or changes recovery, revision,
+progress, activity, or exclusive mutation guarantees.
 Public projections remain bounded and exclude private results. These byte
 limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified

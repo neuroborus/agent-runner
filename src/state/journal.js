@@ -5,6 +5,12 @@ import { isDeepStrictEqual } from "node:util";
 import { assertInactivityContinuity } from "./inactivity.js";
 import { assertObservationContinuity } from "./observations.js";
 import { assertAvailabilityContinuity } from "./availability.js";
+import {
+  observeJournalDirectory,
+  journalFileUnchanged,
+  readJournalSegment,
+  sameJournalIdentity,
+} from "./journal-files.js";
 import { publicDispatchActivity } from "./dispatch.js";
 import {
   appendDurableLine,
@@ -16,6 +22,7 @@ import { resolveCommitBoundary, assertStopProgress } from "./stop-policy.js";
 import {
   normalizePublicActivity,
   normalizeRunState,
+  deepFreeze,
   RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
@@ -67,6 +74,10 @@ const TRANSITION_STATE_FIELDS = [
 ];
 const MAX_EVENT_LOG_BYTES = 64 * 1024 * 1024;
 const MAX_EVENT_SEGMENTS = 1024;
+const MAX_CHECKPOINT_ENTRIES = 8;
+const MAX_CHECKPOINT_BYTES = 16 * 1024 * 1024;
+
+class CheckpointInvalid extends Error {}
 
 function eventFilename(index) {
   return index === 0
@@ -410,7 +421,9 @@ async function* readEvents(
   runId,
   resolveStopBoundary,
   metadata = {},
+  checkpoint = null,
 ) {
+  const directory = await observeJournalDirectory(runDirectory);
   const filenames = (await readdir(runDirectory)).filter(
     (name) => name === EVENTS_FILENAME || /^events-[0-9]+\.jsonl$/iu.test(name),
   );
@@ -428,19 +441,47 @@ async function* readEvents(
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
-  let previous = null;
-  let stopProof = null;
-  let versionBarrier = false;
+  if (
+    checkpoint &&
+    (!sameJournalIdentity(directory, checkpoint.directory) ||
+      checkpoint.bindings.length > filenames.length ||
+      checkpoint.bindings.some(
+        (binding, index) => binding.filename !== filenames[index],
+      ))
+  )
+    throw new CheckpointInvalid();
+  let previous = checkpoint?.lastEvent ?? null;
+  let stopProof = checkpoint?.stopProof ?? null;
+  let versionBarrier = checkpoint?.versionBarrier ?? false;
+  metadata.previousEvent = checkpoint?.previousEvent ?? null;
+  const bindings = [];
+  const observations = [];
   for (const [index, filename] of filenames.entries()) {
-    const source = await readOptionalText(join(runDirectory, filename));
-    if (source === null || Buffer.byteLength(source) > MAX_EVENT_LOG_BYTES) {
-      throw new RunStoreError(
-        "Run event log is missing or exceeds its size limit.",
-        {
-          code: "ERR_INVALID_EVENT_LOG",
-        },
+    const prefix = checkpoint?.bindings[index] ?? null;
+    let result;
+    try {
+      result = await readJournalSegment(
+        join(runDirectory, filename),
+        MAX_EVENT_LOG_BYTES,
+        prefix,
       );
+    } catch (cause) {
+      if (cause?.code !== "ENOENT") throw cause;
+      if (checkpoint) throw new CheckpointInvalid();
+      throw new RunStoreError("Run event log is missing.", {
+        code: "ERR_INVALID_EVENT_LOG",
+      });
     }
+    if (
+      result === null ||
+      (prefix &&
+        index < checkpoint.bindings.length - 1 &&
+        result.binding.length !== prefix.length)
+    )
+      throw new CheckpointInvalid();
+    const { source, binding } = result;
+    bindings.push(binding === null ? null : { ...binding, filename });
+    observations.push(result.observation);
     const completeEnd = source.lastIndexOf("\n") + 1;
     const hasPartialTail = completeEnd !== source.length;
     if (index < filenames.length - 1 && hasPartialTail) {
@@ -448,7 +489,7 @@ async function* readEvents(
         code: "ERR_INVALID_EVENT_LOG",
       });
     }
-    if (completeEnd === 0) {
+    if (completeEnd === 0 && prefix === null) {
       throw new RunStoreError("Run event log has no complete records.", {
         code: "ERR_INVALID_EVENT_LOG",
       });
@@ -484,6 +525,7 @@ async function* readEvents(
           resolveStopBoundary,
         );
       if (index === 0 && event.schemaVersion >= 21) versionBarrier = true;
+      metadata.previousEvent = previous;
       previous = event;
       start = end + 1;
       yield event;
@@ -495,13 +537,34 @@ async function* readEvents(
     }
     Object.assign(metadata, {
       hasPartialTail,
-      validByteLength: Buffer.byteLength(source.slice(0, completeEnd)),
+      validByteLength:
+        (prefix?.length ?? 0) + Buffer.byteLength(source.slice(0, completeEnd)),
       eventFilename: filename,
       segmentCount: filenames.length,
       versionBarrier,
       stopProof,
     });
   }
+  let stable = true;
+  for (const [index, filename] of filenames.entries()) {
+    if (
+      !(await journalFileUnchanged(
+        join(runDirectory, filename),
+        observations[index],
+      ))
+    )
+      stable = false;
+  }
+  const directoryAfter = await observeJournalDirectory(runDirectory);
+  stable = stable && isDeepStrictEqual(directory, directoryAfter);
+  if (checkpoint && !stable) throw new CheckpointInvalid();
+  Object.assign(metadata, {
+    directory,
+    bindings:
+      stable && bindings.every(Boolean) && !metadata.hasPartialTail
+        ? bindings
+        : null,
+  });
 }
 
 // Replays a validated snapshot's exact prefix. Later append-only publications
@@ -550,16 +613,37 @@ async function readStoredState(runDirectory, runId) {
   }
 }
 
-async function loadSnapshot(runDirectory, runId, resolveStopBoundary) {
+async function loadSnapshot(
+  runDirectory,
+  runId,
+  resolveStopBoundary,
+  checkpoint = null,
+) {
   const storedState = await readStoredState(runDirectory, runId);
+  // A lagging snapshot outside the adjacent retained pair needs canonical
+  // replay to prove its exact event, even when the newer prefix is unchanged.
+  if (
+    storedState &&
+    checkpoint &&
+    storedState.revision <
+      (checkpoint.previousEvent?.revision ?? checkpoint.lastEvent.revision)
+  )
+    checkpoint = null;
   const eventLog = {};
-  let lastEvent;
-  let storedStateMatched = storedState === null;
+  let lastEvent = checkpoint?.lastEvent;
+  let storedStateMatched =
+    storedState === null ||
+    [checkpoint?.previousEvent, lastEvent].some(
+      (event) =>
+        event?.revision === storedState?.revision &&
+        isDeepStrictEqual(storedState, event.state),
+    );
   for await (const event of readEvents(
     runDirectory,
     runId,
     resolveStopBoundary,
     eventLog,
+    checkpoint,
   )) {
     if (event.revision === storedState?.revision) {
       storedStateMatched = isDeepStrictEqual(storedState, event.state);
@@ -629,6 +713,59 @@ export function createStateJournal({
   onTransitionBoundary,
   resolveStopBoundary,
 }) {
+  // Owned by this store instance, never a cache of historical state sequences.
+  const checkpoints = new Map();
+  let checkpointBytes = 0;
+  function forget(directory) {
+    checkpointBytes -= checkpoints.get(directory)?.bytes ?? 0;
+    checkpoints.delete(directory);
+  }
+  function remember(directory, snapshot) {
+    forget(directory);
+    if (snapshot.bindings === null) return;
+    // Measure bounded components separately and stop on overflow rather than
+    // materializing a string containing several copies of a large state.
+    let bytes = 0;
+    for (const value of [
+      snapshot.lastEvent,
+      snapshot.previousEvent,
+      snapshot.state,
+      { ...snapshot, lastEvent: null, previousEvent: null, state: null },
+    ]) {
+      bytes += Buffer.byteLength(JSON.stringify(value));
+      if (bytes > MAX_CHECKPOINT_BYTES) return;
+    }
+    while (
+      checkpoints.size >= MAX_CHECKPOINT_ENTRIES ||
+      checkpointBytes + bytes > MAX_CHECKPOINT_BYTES
+    )
+      forget(checkpoints.keys().next().value);
+    checkpoints.set(directory, { snapshot: deepFreeze(snapshot), bytes });
+    checkpointBytes += bytes;
+  }
+  async function loadCheckpoint(directory, runId) {
+    const checkpoint = checkpoints.get(directory)?.snapshot ?? null;
+    try {
+      let snapshot;
+      try {
+        snapshot = await loadSnapshot(
+          directory,
+          runId,
+          resolveStopBoundary,
+          checkpoint,
+        );
+      } catch (cause) {
+        if (!(cause instanceof CheckpointInvalid)) throw cause;
+        forget(directory);
+        snapshot = await loadSnapshot(directory, runId, resolveStopBoundary);
+      }
+      remember(directory, snapshot);
+      return snapshot;
+    } catch (cause) {
+      forget(directory);
+      throw cause;
+    }
+  }
   async function appendTransition(runDirectory, state, snapshot, activity) {
     await removePartialEventTail(runDirectory, snapshot);
 
@@ -705,9 +842,17 @@ export function createStateJournal({
   }
 
   return Object.freeze({
-    appendTransition,
-    loadSnapshot: (directory, runId) =>
-      loadSnapshot(directory, runId, resolveStopBoundary),
+    appendTransition: async (directory, ...args) => {
+      try {
+        await appendTransition(directory, ...args);
+      } catch (cause) {
+        // Only prepublication checkpoints can survive successful publication;
+        // failed callbacks must not leave evidence populated by nested reads.
+        forget(directory);
+        throw cause;
+      }
+    },
+    loadSnapshot: loadCheckpoint,
     replaySnapshot: (directory, snapshot) =>
       replaySnapshot(directory, snapshot, resolveStopBoundary),
     recover,

@@ -33,7 +33,7 @@ const RESERVED_RUN_PATHS = new Set([
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const READ_REPLACEMENT_ATTEMPTS = 5;
 
-async function openRegularFile(filePath, flags, mode) {
+export async function openRegularFile(filePath, flags, mode) {
   const attempts = flags === constants.O_RDONLY ? READ_REPLACEMENT_ATTEMPTS : 1;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     let handle;

@@ -3311,8 +3311,26 @@ activity and recovery proofs scan the same validated prefix; derived progress
 is atomically streamed to disk. Replay memory therefore does not grow with the
 number of segments, and no authoritative record is removed to save memory.
 
+Each store instance may retain at most eight validated journal checkpoints with
+a combined 16 MiB serialized footprint (counting shared references conservatively).
+A checkpoint contains only the last two adjacent events, the current stop's
+continuity proof, segment bindings, and snapshot metadata. Before reuse, safely
+opened files stream fresh SHA-256 digests over every cached exact byte prefix.
+Bindings require the same directory identity, ordered contiguous segment names,
+and file identities and ranges. Stable before/after handle, path, and directory
+observations are required; timestamps alone grant no reuse. Changed bytes,
+replacement, races, or uncertain observations invalidate reuse conservatively.
+Only appended records then need normalization and continuity validation. Every
+read still rereads and validates `state.json` and proves its exact event match;
+snapshots older than the retained adjacent pair require complete replay.
+Cold reads, cache overflow, and eviction retain complete validation. Partial
+tails are never cached, and failed publication discards retained checkpoints,
+including any populated by publication callbacks. No checkpoint is authoritative
+or persisted. Full history and recovery-proof APIs continue canonical replay;
+progress regeneration remains streamed from that replay.
+
 Lock-free readers discover an ordered segment prefix after reading current
-state, validate every revision and cross-segment transition, and reject missing,
+state, prove every revision and cross-segment transition, and reject missing,
 misnamed, oversized, or incomplete sealed segments. Only the last segment may
 have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
