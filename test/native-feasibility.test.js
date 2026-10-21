@@ -6379,7 +6379,7 @@ test("socket source authority is confined to the held child and independently re
   }
 });
 
-test("socket creator impersonates only the held AppContainer and exports once to its held child", async () => {
+test("socket creation and observer admission bind the actual child primary token", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
@@ -6426,47 +6426,26 @@ test("socket creator impersonates only the held AppContainer and exports once to
     .replace("TOKEN_USER *user", "const user")
     .replace(/\bused (==|!=|<|>=)/gu, "used.value $1")
     .replace("active !=", "active.value !=");
+  const target =
+    "{version:1,pid:wfpChildPid,birth:wfpChildBirth,token:wfpTokenIdentity.TokenId,authentication:wfpTokenIdentity.AuthenticationId,modified:wfpTokenIdentity.ModifiedId}";
+  const primaryBody = native(body("socket_primary_identity"))
+    .replace(
+      "let thread = NULL, token = NULL; let statistics; let status = 0;",
+      "const thread = {value:null}, token = {value:null}, statistics = {}; let status = 0;",
+    )
+    .replaceAll("close_handle(thread,", "close_handle(thread.value,")
+    .replaceAll("close_handle(token,", "close_handle(token.value,")
+    .replaceAll("socket_app_token(token,", "socket_app_token(token.value,")
+    .replace(
+      "*value = (struct socket_target){1, GetCurrentProcessId(), creation(GetCurrentProcess()), statistics.TokenId, statistics.AuthenticationId, statistics.ModifiedId};",
+      "Object.assign(value, {version:1,pid:43,birth:100,token:statistics.TokenId,authentication:statistics.AuthenticationId,modified:statistics.ModifiedId});",
+    );
   const original = native(body("socket_original"))
     .replace(
       "(struct socket_target){1, wfpChildPid, wfpChildBirth, wfpTokenIdentity.TokenId, wfpTokenIdentity.AuthenticationId, wfpTokenIdentity.ModifiedId}",
-      "{version:1,pid:wfpChildPid,birth:wfpChildBirth,token:wfpTokenIdentity.TokenId,authentication:wfpTokenIdentity.AuthenticationId,modified:wfpTokenIdentity.ModifiedId}",
+      target,
     )
-    .replace(
-      "(struct socket_target){1, wfpTarget.pid, wfpTarget.birth, before.TokenId, before.AuthenticationId, before.ModifiedId}",
-      "{version:1,pid:wfpTarget.pid,birth:wfpTarget.birth,token:before.TokenId,authentication:before.AuthenticationId,modified:before.ModifiedId}",
-    )
-    .replace("let current = NULL;", "const current = {value:null};")
-    .replace("socket_app_token(current,", "socket_app_token(current.value,")
-    .replace("CloseHandle(current)", "CloseHandle(current.value)")
-    .replace(
-      "let effective = NULL; let before, after;",
-      "const effective = {value:null}, before = {}, after = {};",
-    )
-    .replaceAll(
-      "socket_app_token(effective,",
-      "socket_app_token(effective.value,",
-    )
-    .replaceAll("close_handle(effective,", "close_handle(effective.value,")
-    .replace("!effective ||", "!effective.value ||")
-    .replace(
-      "WSAPROTOCOL_INFOW provider = *selection;",
-      "const provider = structuredClone(selection);",
-    )
-    .replace(
-      "let nonblocking = 1; let exclusive = TRUE;",
-      "const nonblocking = {value:1}; const exclusive = true;",
-    )
-    .replace("struct sockaddr_in local = {0};", "const local = {sin_addr:{}};")
-    .replace(
-      "let status = 0; const char *operation",
-      "let status = 0; let operation",
-    )
-    .replace(
-      'let operation = "observer-token";',
-      'let operation = "observer-token"; do {',
-    )
-    .replaceAll("goto reverted;", "break;")
-    .replace("reverted:", "} while (false);");
+    .replaceAll("sizeof(wfpDestination)", "40");
   const destination = native(body("socket_destination_binding"))
     .replace(
       "let token = NULL; let statistics;",
@@ -6479,71 +6458,87 @@ test("socket creator impersonates only the held AppContainer and exports once to
       "struct socket_import packet = {0};",
       "const packet = {offer:{protocol:{}},local:{sin_addr:{}}};",
     )
-    .replace("let size = 16;", "const size = {value:16};")
-    .replace("size == 16", "size.value == 16")
     .replace("BYTE bytes[1 + 1392];", "const bytes = Array(1393).fill(0);")
     .replace("bytes + 1", "bytes")
     .replace("let sent = 0;", "const sent = {value:0};")
     .replace("sent == 1393", "sent.value == 1393");
-  const closed = native(body("wfp_close"));
+  const tcp = source.slice(source.indexOf("static int tcp_connection("));
+  const create = native(
+    tcp.slice(
+      tcp.indexOf("#ifndef NATIVE_COMMAND_EXPERIMENT"),
+      tcp.indexOf("  if (socket == INVALID_SOCKET)"),
+    ),
+  )
+    .replace(/#(?:ifndef NATIVE_COMMAND_EXPERIMENT|endif)/gu, "")
+    .replaceAll('L"', '"');
   const script =
     new Script(`function socket_app_token(token,statistics) {${appToken}}
+    function socket_primary_identity(value) {${primaryBody}}
     function socket_target_binding(expected) {${native(body("socket_target_binding")).replace("struct socket_target actual", "const actual").replaceAll("sizeof(actual)", "40")}}
     function socket_destination_binding() {${destination}}
-    function socket_original(selection) {${original}}
+    function socket_original(packet) {${original}}
     function socket_export() {${exported}}
-    function wfp_close() {${closed}}
-    try {socket_original(provider); socket_export(); accepted = true;} finally {cleanupOkay = wfp_close();}`);
+    function begin_socket() {${create}}
+    function wfp_close() {${native(body("wfp_close"))}}
+    try {begin_socket(); socket_original(packet); socket_export(); accepted = true;}
+    finally {cleanupOkay = wfp_close();}`);
   const luid = (LowPart) => ({ HighPart: 0, LowPart });
-  const primary = {
-    TokenType: 1,
-    TokenId: luid(1),
-    AuthenticationId: luid(2),
-    ModifiedId: luid(7),
+  const child = {
+    version: 1,
+    pid: 43,
+    birth: 100,
+    token: luid(1),
+    authentication: luid(2),
+    modified: luid(7),
   };
-  const provider = { dwCatalogEntryId: 7 };
   for (const fault of [
     null,
-    "primary-not-app",
+    "thread-token",
+    "thread-open",
+    "primary-type",
+    "token-api",
+    "token-api-zero",
+    "short",
     "package",
     "user",
     "capability",
-    "short",
-    "token-api",
-    "thread-token",
-    "impersonate",
-    "effective-not-app",
-    "effective-type",
-    "effective-change",
-    "create",
-    "bind",
-    "revert",
+    "primary-not-app",
     "token-close",
-    "current-close",
-    "thread-open",
-    "deadline",
+    "owner-token-close",
+    "creator",
+    "effective",
+    "local",
     "destination-change",
-    "destination-close",
-    "creator-birth",
-    "creator-token",
-    "creator-exit",
-    "export",
+    "owner-birth",
+    "owner-token",
+    "owner-exit",
+    "deadline",
     "packet-partial",
     "packet-write",
     "failure-before-write",
-    "socket-close",
   ]) {
-    const events = [],
-      primaryErrors = [],
-      cleanup = [];
     let lastError = 0,
-      impersonating = false,
-      threadReads = 0,
-      effectiveReads = 0,
-      childReads = 0;
+      reads = 0;
+    const events = [],
+      errors = [],
+      cleanup = [];
+    const packet = {
+      creator: structuredClone(child),
+      effective: structuredClone(child),
+      local: {
+        sin_family: 2,
+        sin_addr: { s_addr: 0x7f000001 },
+        sin_port: 45678,
+      },
+    };
+    if (fault === "creator") packet.creator.token = luid(9);
+    if (fault === "effective") packet.effective.modified = luid(9);
+    if (fault === "local") packet.local.sin_addr.s_addr++;
     const context = {
-      provider,
-      structuredClone,
+      packet,
+      socketCreation: {},
+      role: "bundle",
+      workspaceRole: "read",
       transport: { child: { hProcess: 43 }, write: 55 },
       transportLock: {},
       failing: { value: 0 },
@@ -6559,11 +6554,11 @@ test("socket creator impersonates only the held AppContainer and exports once to
       wfpTokenIdentity: {},
       wfpDestination: {},
       wfpEffective: {},
-      wfpProtocol: provider,
-      wfpExport: {},
+      wfpLocal: {},
+      wfpLocalPort: 0,
+      wfpProtocol: { catalog: 7 },
       wfpChildPid: 43,
       wfpChildBirth: 100,
-      wfpSocket: -1,
       wfpEngine: null,
       wfpCleanupFailed: false,
       wfpPreparedAt: 0,
@@ -6572,14 +6567,13 @@ test("socket creator impersonates only the held AppContainer and exports once to
       FALSE: false,
       NULL: null,
       INVALID_SOCKET: -1,
-      SOCKET_ERROR: -1,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
       ERROR_NO_TOKEN: 1008,
       ERROR_INVALID_DATA: 13,
       TokenPrimary: 1,
       TokenImpersonation: 2,
-      SecurityImpersonation: 2,
       TOKEN_QUERY: 8,
-      TOKEN_DUPLICATE: 2,
       TokenStatistics: 10,
       TokenIsAppContainer: 29,
       TokenAppContainerSid: 31,
@@ -6589,66 +6583,53 @@ test("socket creator impersonates only the held AppContainer and exports once to
       SOCK_STREAM: 1,
       IPPROTO_TCP: 6,
       INADDR_LOOPBACK: 0x7f000001,
-      FIONBIO: 0x8004667e,
-      SOL_SOCKET: 0xffff,
-      SO_EXCLUSIVEADDRUSE: 0xfffffffb,
       appSid: "package",
       userSid: "user",
       GetCurrentThread: () => 42,
-      GetTickCount64: () =>
-        fault === "deadline" && events.includes("create") ? 5000 : 10,
+      GetCurrentProcess: () => 43,
+      GetCurrentProcessId: () => 43,
+      creation: () => 100,
+      GetTickCount64: () => (fault === "deadline" ? 5000 : 10),
       GetLastError: () => lastError,
-      WSAGetLastError: () => lastError,
-      WAIT_FAILED: 0xffffffff,
-      WAIT_TIMEOUT: 258,
-      GetCurrentProcess: () => 41,
-      WaitForSingleObject: () =>
-        fault === "creator-exit" && events.includes("create") ? 0 : 258,
-      socket_target() {
-        assert.equal(impersonating, false);
-        return {
-          ...structuredClone(context.wfpTarget),
-          ...(events.includes("create") && fault === "creator-birth"
-            ? { birth: 91 }
-            : events.includes("create") && fault === "creator-token"
-              ? { token: luid(9) }
-              : {}),
-        };
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      tcp_observe: () => {},
+      WSASocketW() {
+        assert.deepEqual(structuredClone(context.socketCreation), child);
+        events.push("create");
+        return 17;
       },
-      wfp_binding() {
-        assert.equal(impersonating, false);
-        events.push("child-binding");
+      ntohl: (v) => v,
+      ntohs: (v) => v,
+      OpenThreadToken(thread, rights, self, out) {
+        assert.deepEqual([thread, rights, self], [42, 8, true]);
+        lastError = fault === "thread-open" ? 5 : 1008;
+        if (fault !== "thread-token") return false;
+        out.value = 63;
+        return true;
       },
       OpenProcessToken(process, rights, out) {
-        assert.equal(process, 43);
-        assert.ok([8, 10].includes(rights));
-        out.value = rights === 10 ? 61 : 62;
+        assert.deepEqual([process, rights], [43, 8]);
+        out.value = 61;
         return true;
       },
       GetTokenInformation(token, kind, out, capacity, used) {
         if (typeof token === "object") token = token.value;
-        assert.ok([61, 62, 63].includes(token));
-        lastError = 5;
-        if (fault === "token-api") return false;
+        assert.equal(token, 61);
+        lastError = fault === "token-api-zero" ? 0 : 5;
+        if (["token-api", "token-api-zero"].includes(fault)) return false;
         if (kind === 10) {
           used.value = fault === "short" ? 1 : 56;
-          Object.assign(out, structuredClone(primary));
-          if (token === 63) {
-            out.TokenType = fault === "effective-type" ? 1 : 2;
-            out.ImpersonationLevel = 2;
-            out.TokenId = luid(5);
-            if (effectiveReads++ && fault === "effective-change")
-              out.ModifiedId = luid(9);
-          }
-          if (token === 62 && childReads++ && fault === "destination-change")
-            out.ModifiedId = luid(9);
+          Object.assign(out, {
+            TokenType: fault === "primary-type" ? 2 : 1,
+            TokenId: luid(1),
+            AuthenticationId: luid(2),
+            ModifiedId: luid(
+              fault === "destination-change" && reads++ > 1 ? 9 : 7,
+            ),
+          });
         } else if (kind === 29) {
           used.value = 4;
-          out.value =
-            (fault === "primary-not-app" && token !== 63) ||
-            (fault === "effective-not-app" && token === 63)
-              ? 0
-              : 1;
+          out.value = fault === "primary-not-app" ? 0 : 1;
         } else if (kind === 31) {
           used.value = 76;
           out.TokenAppContainer = fault === "package" ? "other" : "package";
@@ -6664,249 +6645,89 @@ test("socket creator impersonates only the held AppContainer and exports once to
       },
       IsValidSid: (v) => typeof v === "string",
       EqualSid: (a, b) => a === b,
-      OpenThreadToken(thread, rights, self, out) {
-        assert.deepEqual([thread, rights, self], [42, 8, true]);
-        threadReads++;
-        lastError = 1008;
-        if (impersonating && fault === "thread-open") {
-          lastError = 5;
-          return false;
-        }
-        if (!impersonating && fault !== "thread-token") return false;
-        out.value = 63;
-        return true;
-      },
-      ImpersonateLoggedOnUser(token) {
-        assert.equal(token.value, 61);
-        events.push("impersonate");
-        lastError = 5;
-        if (fault === "impersonate") return false;
-        impersonating = true;
-        return true;
-      },
-      CloseHandle(handle) {
-        assert.equal(handle, 63);
-        assert.equal(impersonating, true);
-        events.push("close-current");
-        lastError = 6;
-        return fault !== "current-close";
-      },
-      RevertToSelf() {
-        events.push("revert");
-        lastError = 5;
-        if (fault === "revert") return false;
-        impersonating = false;
-        return true;
-      },
-      WSASocketW(af, type, protocol, info, group, flags) {
-        assert.deepEqual(
-          [af, type, protocol, info, group, flags],
-          [2, 1, 6, provider, 0, 0],
-        );
-        assert.equal(impersonating, true);
-        events.push("create");
-        lastError = 10055;
-        return fault === "create" ? -1 : 17;
-      },
-      ioctlsocket(socket, command, mode) {
-        assert.deepEqual([socket, command, mode.value], [17, 0x8004667e, 1]);
-        assert.equal(impersonating, true);
-        return 0;
-      },
-      setsockopt(socket, level, option, value, size) {
-        assert.deepEqual(
-          [socket, level, option, value, size],
-          [17, 0xffff, 0xfffffffb, true, 4],
-        );
-        assert.equal(impersonating, true);
-        return 0;
-      },
-      bind() {
-        assert.equal(impersonating, true);
-        events.push("bind");
-        lastError = 10013;
-        return fault === "bind" ? -1 : 0;
-      },
-      WSADuplicateSocketW(socket, pid, out) {
-        assert.deepEqual([socket, pid], [17, 43]);
-        assert.equal(impersonating, false);
-        assert.ok(events.includes("revert"));
-        events.push("export");
-        lastError = 10022;
-        Object.assign(out, provider);
-        return fault === "export" ? -1 : 0;
-      },
-      socket_protocol_same: (a, b) => a.dwCatalogEntryId === b.dwCatalogEntryId,
-      getsockname(socket, out, size) {
-        assert.equal(socket, 17);
-        Object.assign(out, {
-          sin_family: 2,
-          sin_addr: { s_addr: 0x7f000001 },
-          sin_port: 45678,
-        });
-        size.value = 16;
-        return 0;
-      },
-      htonl: (v) => v,
-      ntohl: (v) => v,
-      memcmp: (a, b) => (JSON.stringify(a) === JSON.stringify(b) ? 0 : 1),
-      memcpy(bytes, packet) {
-        assert.equal(packet.offer.target.pid, 43);
-        assert.equal(packet.creator.pid, 41);
-        assert.equal(packet.effective.token.LowPart, 5);
-      },
-      InterlockedCompareExchange(value, exchange, comparand) {
-        assert.deepEqual([exchange, comparand], [0, 0]);
-        return value.value;
-      },
-      AcquireSRWLockExclusive(lock) {
-        assert.equal(lock, context.transportLock);
-        if (fault === "failure-before-write") {
-          context.failing.value = 1;
-          context.remember("owner-read", "win32", 109);
-        }
-      },
-      ReleaseSRWLockExclusive(lock) {
-        assert.equal(lock, context.transportLock);
-        if (fault === "packet-write")
-          assert.deepEqual(primaryErrors[0], ["owner-write", "win32", 109]);
-        events.push("transport-unlocked");
-      },
-      WriteFile(pipe, bytes, size, sent) {
-        assert.equal(pipe, 55);
-        assert.equal(size, 1393);
-        assert.equal(bytes[0], "D");
-        events.push("packet");
-        sent.value = fault === "packet-partial" ? 100 : size;
-        lastError = 109;
-        return fault !== "packet-write";
-      },
-      socket_transfer_observe: (socket, offer, error) => {
-        assert.equal(error, 10022);
-        events.push("refusal");
-      },
-      socket_transfer_controls: () => events.push("controls"),
+      socket_target: () => ({
+        ...structuredClone(context.wfpTarget),
+        ...(fault === "owner-birth"
+          ? { birth: 91 }
+          : fault === "owner-token"
+            ? { token: luid(9) }
+            : {}),
+      }),
+      WaitForSingleObject: () => (fault === "owner-exit" ? 0 : 258),
+      wfp_binding: () => events.push("child-binding"),
       close_handle(handle, operation) {
-        assert.ok([62, 63].includes(handle));
-        assert.equal(impersonating, false);
+        assert.ok([61, 63].includes(handle));
         events.push(`close:${handle}`);
-        if (fault === (handle === 63 ? "token-close" : "destination-close")) {
-          context.remember(operation, "win32", 6);
-          cleanup.push([operation, "win32", 6]);
+        if (fault === "token-close") {
+          cleanup.push(operation);
           return false;
         }
         return true;
       },
       release_handle(token) {
-        if (token.value) events.push(`close:${token.value}`);
+        if (token.value) events.push("owned-token-close");
         token.value = null;
-        return true;
+        return fault !== "owner-token-close";
       },
-      closesocket(socket) {
-        assert.equal(socket, 17);
-        events.push("close:17");
-        lastError = 10038;
-        return fault === "socket-close" ? -1 : 0;
+      memcmp: (a, b) => (JSON.stringify(a) === JSON.stringify(b) ? 0 : 1),
+      memcpy(bytes, value) {
+        assert.deepEqual(structuredClone(value.creator), child);
+        assert.deepEqual(structuredClone(value.effective), child);
+        assert.deepEqual(structuredClone(value.offer.target), child);
+        assert.deepEqual(structuredClone(value.offer.protocol), {});
       },
-      FwpmEngineClose0: () => assert.fail("No WFP engine before import"),
-      remember(...value) {
-        if (!primaryErrors.length) primaryErrors.push(value);
+      InterlockedCompareExchange: (v) => v.value,
+      AcquireSRWLockExclusive() {
+        if (fault === "failure-before-write") context.failing.value = 1;
       },
-      cleanup_error: (...value) => cleanup.push(value),
-      invariant(ok, operation) {
-        if (!ok) {
-          context.remember(operation, "invariant", 0);
-          context.failure();
-        }
+      ReleaseSRWLockExclusive: () => events.push("unlocked"),
+      WriteFile(pipe, bytes, size, sent) {
+        assert.deepEqual([pipe, size, bytes[0]], [55, 1393, "D"]);
+        events.push("packet");
+        sent.value = fault === "packet-partial" ? 100 : size;
+        lastError = 109;
+        return fault !== "packet-write";
       },
-      status_check(status, operation) {
-        if (status) {
-          context.remember(operation, "win32", status);
-          context.failure();
-        }
+      remember: (...v) => errors.push(v),
+      cleanup_error: (...v) => cleanup.push(v),
+      invariant(ok) {
+        if (!ok) context.failure();
       },
-      win32_check(ok, operation) {
-        if (!ok) {
-          context.remember(operation, "win32", lastError);
-          context.failure();
-        }
+      status_check(status) {
+        if (status) context.failure();
+      },
+      win32_check(ok) {
+        if (!ok) context.failure();
       },
       failure: () => {
         throw new Error("Native refusal");
       },
     };
-    if (fault && fault !== "socket-close")
+    if (fault && fault !== "owner-token-close")
       assert.throws(
         () => script.runInNewContext(context),
         /Native refusal/u,
         fault,
       );
-    else script.runInNewContext(context);
-    assert.ok(events.filter((e) => e === "create").length <= 1, fault);
-    assert.equal(
-      events.filter((e) => e === "close:17").length,
-      events.includes("create") && fault !== "create" ? 1 : 0,
-      fault,
-    );
-    assert.equal(
-      events.includes("export"),
-      events.includes("packet") ||
-        ["export", "failure-before-write"].includes(fault),
-      fault,
-    );
-    if (events.includes("impersonate") && fault !== "impersonate")
-      assert.equal(events.filter((e) => e === "revert").length, 1, fault);
-    if (["impersonate", "revert"].includes(fault)) {
-      const [operation, domain, value] = primaryErrors[0];
-      assert.deepEqual(
-        windowsFeasibilityDiagnostics(
-          windowsDiagnostic(operation, domain, value),
-        ).failure,
-        { operation, domain, value },
-      );
+    else {
+      script.runInNewContext(context);
+      assert.equal(context.accepted, true);
     }
-    if (fault === "current-close") {
-      assert.deepEqual(primaryErrors[0], ["observer-token", "win32", 6]);
-      assert.deepEqual(cleanup[0], ["observer-token-close", "win32", 6]);
-    }
-    if (fault === "export")
-      assert.deepEqual(primaryErrors[0], ["observer-transfer", "win32", 10022]);
-    assert.equal(context.cleanupOkay, fault !== "socket-close", fault);
-    if (fault === "socket-close")
-      assert.deepEqual(cleanup[0], ["observer-socket-close", "win32", 10038]);
+    assert.equal(context.cleanupOkay, fault !== "owner-token-close");
+    if (events.includes("packet"))
+      assert.ok(events.includes("owned-token-close"));
+    if (fault === "packet-write")
+      assert.deepEqual(errors[0], ["owner-write", "win32", 109]);
     if (fault === "failure-before-write") {
       assert.equal(events.includes("packet"), false);
-      assert.equal(
-        events.filter((event) => event === "transport-unlocked").length,
-        1,
-      );
-      assert.deepEqual(primaryErrors[0], ["owner-read", "win32", 109]);
+      assert.equal(events.filter((v) => v === "unlocked").length, 1);
     }
-    if (fault === "packet-write")
-      assert.deepEqual(primaryErrors[0], ["owner-write", "win32", 109]);
+    if (["thread-token", "token-close"].includes(fault))
+      assert.ok(events.some((v) => v.startsWith("close:")));
   }
-  const echo =
-    /invariant\((socket_protocol_same\(&offer.source, &offer.protocol\)[^;]+), "observer-protocol"\);/u.exec(
-      body("wfp_prepare"),
-    )[1];
-  const predicate = new Script(
-    echo.replace(/&(?=[a-z])/gu, "").replace("sizeof(wfpExport)", "628"),
-  );
-  for (const substituted of [false, true])
-    assert.equal(
-      Boolean(
-        predicate.runInNewContext({
-          offer: { source: {}, protocol: { ticket: substituted ? 2 : 1 } },
-          wfpExport: { ticket: 1 },
-          socket_protocol_same: () => true,
-          memcmp: (a, b) => a.ticket - b.ticket,
-        }),
-      ),
-      !substituted,
-    );
 });
 
-test("creator-to-child socket import binds identities and closes partial transfers", async () => {
+test("child-owned socket self-transfer binds identities and closes partial transfers", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
@@ -6927,6 +6748,11 @@ test("creator-to-child socket import binds identities and closes partial transfe
       .replaceAll("*socket", "socket.value")
       .replaceAll("((BYTE *)&offer.target)[i]", "targetBytes[i]")
       .replaceAll("((BYTE *)&offer)[i]", "offerByte(offer,i)")
+      .replaceAll("((BYTE *)&observed)[i]", "offerByte(observed.offer,i)")
+      .replaceAll("sizeof(observed)", "1392")
+      .replaceAll("sizeof(observed.local)", "16")
+      .replaceAll("sizeof(packet.local)", "16")
+      .replaceAll("sizeof(empty)", "628")
       .replaceAll("sizeof(int)", "4")
       .replaceAll("sizeof(DWORD)", "4")
       .replaceAll("->", ".")
@@ -6955,6 +6781,21 @@ test("creator-to-child socket import binds identities and closes partial transfe
     .replace("let size = sizeof(*actual);", "const size = {value:628};")
     .replace("size == sizeof(*actual)", "size.value == 628");
   const transfer = native(body("wfp_transfer"))
+    .replace(
+      "struct socket_import observed = {0};",
+      "const observed = {local:{sin_addr:{}}};",
+    )
+    .replace(
+      "observed.offer = offer;",
+      "observed.offer = structuredClone(offer);",
+    )
+    .replace("let localSize = 16;", "const localSize = {value:16};")
+    .replace("localSize != 16", "localSize.value != 16")
+    .replace("const WSAPROTOCOL_INFOW empty = {0};", "const empty = {};")
+    .replace(
+      "struct socket_offer shared = {0};",
+      "const shared = {protocol:{}};",
+    )
     .replace(
       "struct socket_offer offer = {0}; WCHAR target[2 * 40 + 1];",
       "const offer = {target:{},source:{},protocol:{}}; const target = [], targetBytes = Buffer.alloc(40);",
@@ -7002,14 +6843,6 @@ test("creator-to-child socket import binds identities and closes partial transfe
     accepted = wfp_transfer(socketBox,end,problem); transferred = transferState.value;
     socket = socketBox.value; result = close();`);
   const luid = (LowPart) => ({ HighPart: 0, LowPart });
-  const creator = {
-    version: 1,
-    pid: 41,
-    birth: 90,
-    token: luid(3),
-    authentication: luid(2),
-    modified: luid(4),
-  };
   const destination = {
     version: 1,
     pid: 43,
@@ -7037,6 +6870,9 @@ test("creator-to-child socket import binds identities and closes partial transfe
     "token",
     "effective",
     "provider",
+    "ticket-injection",
+    "export",
+    "export-provider",
     "source-open",
     "source-close",
     "packet",
@@ -7065,12 +6901,12 @@ test("creator-to-child socket import binds identities and closes partial transfe
     ])
       bytes.writeUInt32LE(value, offset);
     const packet = {
-      creator: structuredClone(creator),
-      effective: { ...structuredClone(creator), token: luid(5) },
+      creator: structuredClone(destination),
+      effective: structuredClone(destination),
       offer: {
         target: structuredClone(destination),
         source: structuredClone(provider),
-        protocol: structuredClone(provider),
+        protocol: {},
       },
       local: {
         sin_family: 2,
@@ -7083,7 +6919,9 @@ test("creator-to-child socket import binds identities and closes partial transfe
     if (fault === "birth") packet.offer.target.birth++;
     if (fault === "token") packet.offer.target.token = luid(9);
     if (fault === "effective") packet.effective.authentication = luid(9);
-    if (fault === "provider") packet.offer.protocol.dwCatalogEntryId++;
+    if (fault === "provider") packet.offer.source.dwCatalogEntryId++;
+    if (fault === "ticket-injection")
+      packet.offer.protocol = structuredClone(provider);
     const events = [],
       failures = [],
       cleanup = [];
@@ -7091,6 +6929,8 @@ test("creator-to-child socket import binds identities and closes partial transfe
       identities = 0;
     const context = {
       Buffer,
+      structuredClone,
+      socketCreation: structuredClone(destination),
       role: "bundle",
       workspaceRole: "read",
       socketBox: { value: 17 },
@@ -7185,8 +7025,7 @@ test("creator-to-child socket import binds identities and closes partial transfe
         Object.assign(out, structuredClone(packet));
         return true;
       },
-      socket_control_identity(out, appContainer) {
-        assert.equal(appContainer, true);
+      socket_primary_identity(out) {
         Object.assign(out, structuredClone(destination));
         if (identities++ && fault === "token-drift") out.modified = luid(9);
         return 0;
@@ -7206,13 +7045,23 @@ test("creator-to-child socket import binds identities and closes partial transfe
         }
         return 0;
       },
+      WSADuplicateSocketW(socket, pid, out) {
+        assert.deepEqual([socket, pid], [17, 43]);
+        events.push("export");
+        lastError = 10022;
+        Object.assign(out, structuredClone(provider));
+        if (fault === "export-provider") out.dwCatalogEntryId++;
+        return fault === "export" ? -1 : 0;
+      },
+      socket_transfer_observe: () => events.push("refusal"),
+      socket_transfer_controls: () => events.push("controls"),
       WSASocketW(af, type, protocol, info, group, flags) {
         assert.deepEqual(
           [af, type, protocol, group, flags],
           [-1, -1, -1, 0, 0],
         );
         assert.equal(info.dwCatalogEntryId, 7);
-        assert.ok(events.includes("close:17"));
+        assert.ok(!events.includes("close:17"));
         events.push("import");
         lastError = 10022;
         return fault === "import" ? -1 : 73;
@@ -7223,10 +7072,10 @@ test("creator-to-child socket import binds identities and closes partial transfe
         return fault === "nonblocking" ? -1 : 0;
       },
       getsockname(socket, out, size) {
-        assert.equal(socket, 73);
+        assert.ok([17, 73].includes(socket));
         assert.equal(size.value, 16);
         Object.assign(out, structuredClone(packet.local));
-        if (fault === "local") out.sin_port++;
+        if (fault === "local" && socket === 73) out.sin_port++;
         return 0;
       },
       getpeername(socket) {
@@ -7235,10 +7084,17 @@ test("creator-to-child socket import binds identities and closes partial transfe
         return fault === "connected" ? 0 : -1;
       },
       htonl: (v) => v,
-      memcmp: (a, b) => (JSON.stringify(a) === JSON.stringify(b) ? 0 : 1),
+      memcmp(a, b) {
+        try {
+          assert.deepEqual(structuredClone(a), structuredClone(b));
+          return 0;
+        } catch {
+          return 1;
+        }
+      },
       offerByte: (offer) => {
-        if (context.transferState.value)
-          assert.deepEqual(offer.protocol, packet.offer.protocol);
+        if (events.includes("import"))
+          assert.deepEqual(structuredClone(offer.protocol), provider);
         return 0;
       },
       fputs: () => events.push("carrier"),
@@ -7270,7 +7126,10 @@ test("creator-to-child socket import binds identities and closes partial transfe
       },
       cleanup_error: (...v) => cleanup.push(v),
       failure: () => {
-        throw new Error("Native refusal");
+        throw new Error(
+          "Native refusal: " +
+            JSON.stringify({ problem: context.problem, events }),
+        );
       },
     };
     if (fault)
@@ -7284,11 +7143,7 @@ test("creator-to-child socket import binds identities and closes partial transfe
       assert.equal(context.accepted, true);
       assert.equal(context.result, 0);
     }
-    assert.equal(
-      events.filter((e) => e === "close:17").length,
-      fault === "preflight-close" ? 2 : 1,
-      fault,
-    );
+    assert.equal(events.filter((e) => e === "close:17").length, 1, fault);
     assert.equal(
       events.filter((e) => e === "close:73").length,
       events.includes("import") && fault !== "import" ? 1 : 0,
@@ -7302,8 +7157,7 @@ test("creator-to-child socket import binds identities and closes partial transfe
     );
     assert.equal(
       events.includes("observe:closesocket:complete"),
-      context.socketBox.value !== -1 &&
-        !["preflight-close", "close"].includes(fault),
+      context.socketBox.value !== -1 && fault !== "close",
       fault,
     );
     if (
@@ -7314,11 +7168,13 @@ test("creator-to-child socket import binds identities and closes partial transfe
         "token",
         "effective",
         "provider",
+        "ticket-injection",
         "packet",
         "ack-D",
         "source-open",
         "source-close",
-        "import-deadline",
+        "export",
+        "export-provider",
       ].includes(fault)
     )
       assert.equal(events.includes("import"), false, fault);
@@ -7607,21 +7463,21 @@ function tcpDenialFixture(
     preparedAt: "1000",
     exclusive: true,
     transfer: {
-      direction: "creator-to-child",
+      direction: "child-self",
       appContainer: true,
       creator: {
-        pid: receipt.owner.pid,
-        creationTime: receipt.owner.creationTime,
-        tokenId: "0000000000000003",
+        pid: receipt.child.pid,
+        creationTime: receipt.child.creationTime,
+        tokenId: "0000000000000001",
         authenticationId: "0000000000000002",
-        modifiedId: "0000000000000004",
+        modifiedId: "0000000000000007",
       },
       effective: {
-        pid: receipt.owner.pid,
-        creationTime: receipt.owner.creationTime,
-        tokenId: "0000000000000005",
+        pid: receipt.child.pid,
+        creationTime: receipt.child.creationTime,
+        tokenId: "0000000000000001",
         authenticationId: "0000000000000002",
-        modifiedId: "0000000000000006",
+        modifiedId: "0000000000000007",
       },
       destination: {
         pid: receipt.child.pid,
@@ -7666,7 +7522,7 @@ function tcpDenialFixture(
       peerStatus: 10057,
       startedAt: "1100",
       endedAt: "2000",
-      socketClose: 0,
+      socketHeld: true,
       tokenClosed: true,
       status: "matched",
       reason: "none",
@@ -7684,6 +7540,9 @@ function tcpDenialFixture(
           time: "1500",
           filterKey: "a".repeat(32),
           layerKey: "d1578dc3a705334c904f7fbceee60e82",
+          providerKey: "b".repeat(32),
+          calloutKey: null,
+          calloutProviderKey: null,
         },
       ],
     },
@@ -7711,6 +7570,21 @@ test("feasibility requires socket-bound ALE attribution and actual 10013 without
       undefined,
     ),
   );
+  const callout = structuredClone(f.attribution);
+  callout.matches[0].actionType = 0x5003;
+  callout.matches[0].calloutKey = "c".repeat(32);
+  callout.matches[0].calloutProviderKey = "d".repeat(32);
+  assert.equal(accept(callout), callout);
+  for (const change of [
+    (v) => (v.matches[0].providerKey = null),
+    (v) => (v.matches[0].providerKey = "0".repeat(32)),
+    (v) => (v.matches[0].calloutKey = null),
+    (v) => (v.matches[0].actionType = 0x1001),
+  ]) {
+    const altered = structuredClone(callout);
+    change(altered);
+    assert.throws(() => accept(altered));
+  }
   for (const code of [0, 5, 10035, 10061, 10060, 10054, null])
     assert.throws(() => accept(f.attribution, code));
   for (const change of [
@@ -7730,7 +7604,7 @@ test("feasibility requires socket-bound ALE attribution and actual 10013 without
     (v) => (v.transfer.appContainer = false),
     (v) => v.transfer.creator.pid++,
     (v) => (v.transfer.creator.creationTime = "91"),
-    (v) => (v.transfer.effective.tokenId = v.transfer.creator.tokenId),
+    (v) => (v.transfer.effective.tokenId = "f".repeat(16)),
     (v) => (v.transfer.effective.authenticationId = "f".repeat(16)),
     (v) => v.transfer.destination.pid++,
     (v) => (v.transfer.destination.creationTime = "91"),
@@ -7744,10 +7618,11 @@ test("feasibility requires socket-bound ALE attribution and actual 10013 without
     (v) => v.local.address++,
     (v) => (v.localStatus = 10022),
     (v) => (v.peerStatus = -1),
+    (v) => (v.peerStatus = 0),
     (v) => (v.startedAt = "999"),
     (v) => (v.endedAt = "1099"),
     (v) => (v.endedAt = "50001001"),
-    (v) => (v.socketClose = 10038),
+    (v) => (v.socketHeld = false),
     (v) => (v.tokenClosed = false),
     (v) => (v.exclusive = false),
     (v) => (v.engineClose = 5),
@@ -7791,6 +7666,185 @@ test("feasibility requires socket-bound ALE attribution and actual 10013 without
   );
 });
 
+test("native WFP filter lookup binds block and terminating-callout providers and frees partial results", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static DWORD wfp_filter\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replaceAll("->", ".")
+    .replaceAll("sizeof(empty)", "16")
+    .replaceAll("sizeof(GUID)", "16")
+    .replaceAll("(void **)", "")
+    .replace(/&(?=[a-z])/gu, "")
+    .replace(
+      "const GUID empty = {0}; FWPM_PROVIDER0 *provider = NULL, *calloutProvider = NULL; FWPM_CALLOUT0 *callout = NULL; DWORD status = ERROR_INVALID_DATA;",
+      "const empty = 'zero'; let provider = null, calloutProvider = null, callout = null, status = ERROR_INVALID_DATA; do {",
+    )
+    .replace(
+      "status = FwpmProviderGetByKey0(engine, filter.providerKey, provider);",
+      "({status,provider} = FwpmProviderGetByKey0(engine, filter.providerKey));",
+    )
+    .replace(
+      "status = FwpmProviderGetByKey0(engine, callout.providerKey, calloutProvider);",
+      "({status,calloutProvider} = FwpmProviderGetByKey0(engine, callout.providerKey));",
+    )
+    .replace(
+      "status = FwpmCalloutGetByKey0(engine, filter.action.calloutKey, callout);",
+      "({status,callout} = FwpmCalloutGetByKey0(engine, filter.action.calloutKey));",
+    )
+    .replaceAll("*providerKey =", "providerKey.value =")
+    .replaceAll("*calloutKey =", "calloutKey.value =")
+    .replaceAll("*calloutProviderKey =", "calloutProviderKey.value =")
+    .replaceAll("goto closed;", "break;")
+    .replace("closed:", "} while (false);");
+  const script = new Script(`result = (function() {${body}})();`);
+  for (const action of [0x1001, 0x5003])
+    for (const fault of [
+      null,
+      "missing-provider",
+      "provider-error",
+      "provider-null",
+      "provider-key",
+      "callout-error",
+      "callout-null",
+      "callout-key",
+      "callout-provider",
+      "callout-provider-error",
+      "callout-provider-null",
+      "callout-layer",
+      "action",
+    ]) {
+      if (action === 0x1001 && fault?.startsWith("callout")) continue;
+      const freed = [],
+        acquired = [],
+        calloutProvider = {
+          providerKey:
+            fault === "callout-provider" ? "other" : "callout-provider",
+        },
+        provider = {
+          providerKey: fault === "provider-key" ? "other" : "provider",
+        },
+        callout = {
+          calloutKey: fault === "callout-key" ? "other" : "callout",
+          providerKey: "callout-provider",
+          applicableLayer: fault === "callout-layer" ? "other" : "connect",
+        };
+      const context = {
+        engine: 17,
+        filter: {
+          providerKey: fault === "missing-provider" ? null : "provider",
+          action: {
+            type: fault === "action" ? 0x1002 : action,
+            calloutKey: "callout",
+          },
+        },
+        layer: { layerKey: "connect" },
+        providerKey: { value: null },
+        calloutKey: { value: null },
+        calloutProviderKey: { value: null },
+        NULL: null,
+        ERROR_INVALID_DATA: 13,
+        FWP_ACTION_BLOCK: 0x1001,
+        FWP_ACTION_CALLOUT_TERMINATING: 0x5003,
+        memcmp: (a, b) =>
+          (a && typeof a === "object" && "value" in a ? a.value : a) ===
+          (b && typeof b === "object" && "value" in b ? b.value : b)
+            ? 0
+            : 1,
+        FwpmProviderGetByKey0(engine, key) {
+          assert.equal(engine, 17);
+          if (key === "provider") {
+            if (!["provider-null", "provider-error"].includes(fault))
+              acquired.push(provider);
+            return {
+              status: fault === "provider-error" ? 5 : 0,
+              provider:
+                fault === "provider-null" || fault === "provider-error"
+                  ? null
+                  : provider,
+            };
+          }
+          assert.equal(key, "callout-provider");
+          if (
+            !["callout-provider-error", "callout-provider-null"].includes(fault)
+          )
+            acquired.push(calloutProvider);
+          return {
+            status: fault === "callout-provider-error" ? 5 : 0,
+            calloutProvider:
+              fault === "callout-provider-error" ||
+              fault === "callout-provider-null"
+                ? null
+                : calloutProvider,
+          };
+        },
+        FwpmCalloutGetByKey0(engine, key) {
+          assert.deepEqual([engine, key], [17, "callout"]);
+          if (!["callout-null", "callout-error"].includes(fault))
+            acquired.push(callout);
+          return {
+            status: fault === "callout-error" ? 5 : 0,
+            callout:
+              fault === "callout-null" || fault === "callout-error"
+                ? null
+                : callout,
+          };
+        },
+        FwpmFreeMemory0: (value) => freed.push(value),
+      };
+      script.runInNewContext(context);
+      assert.equal(context.result === 0, !fault, `${action}:${fault}`);
+      assert.equal(freed.length, acquired.length);
+      for (const allocation of acquired)
+        assert.equal(freed.filter((value) => value === allocation).length, 1);
+      if (freed.includes(callout)) assert.ok(freed.includes(provider));
+      if (!fault) {
+        assert.equal(context.providerKey.value, "provider");
+        assert.equal(
+          context.calloutKey.value,
+          action === 0x5003 ? "callout" : "zero",
+        );
+      }
+      if (fault === "callout-error") assert.deepEqual(freed, [provider]);
+    }
+  // The final lookup on the final page must not bypass the observation budget.
+  const start = source.indexOf("      GUID providerKey = {0}, calloutKey");
+  const admission = source
+    .slice(start, source.indexOf("      if (matched == 8)", start))
+    .replace(
+      "GUID providerKey = {0}, calloutKey = {0}, calloutProviderKey = {0};",
+      "const providerKey = {}, calloutKey = {}, calloutProviderKey = {};",
+    )
+    .replaceAll("filter->", "filter.")
+    .replace(/&(?=[a-z])/gu, "")
+    .replaceAll("goto closed;", "return false;");
+  const finish = new Script(
+    `accepted = (function() {${admission}return true;})();`,
+  );
+  for (const finishedAt of [4999, 5000, 5001]) {
+    let now = 0;
+    const context = {
+      socketBound: true,
+      engine: 17,
+      filter: {},
+      layer: {},
+      status: 0,
+      reason: "none",
+      deadline: 5000,
+      GetTickCount64: () => now,
+      wfp_filter: () => {
+        now = finishedAt;
+        return 0;
+      },
+    };
+    finish.runInNewContext(context);
+    assert.equal(context.accepted, finishedAt < 5000);
+    assert.equal(context.reason, finishedAt < 5000 ? "none" : "exhausted");
+  }
+});
+
 test("native socket and WFP predicates reject fabricated peers, stale windows and unrelated tuples", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
@@ -7800,7 +7854,7 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
   const bound = /socketBound = (tuple\.attempted[\s\S]*?);\n/u.exec(source)[1];
   const translate = (value) =>
     value
-      .replace(/sizeof\((?:remote|local)\)/gu, "16")
+      .replace(/sizeof\((?:remote|local|struct sockaddr_in)\)/gu, "16")
       .replace(/\bTRUE\b/gu, "true");
   const predicate = new Script(
     `peerBound = ${translate(peer)}; socketBound = ${translate(bound)};`,
@@ -7838,6 +7892,7 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
     AF_INET: 2,
     INADDR_LOOPBACK: 0x7f000001,
     SOCKET_ERROR: -1,
+    WSAENOTCONN: 10057,
     ntohl: (value) => value,
     ntohs: (value) => value,
     GetTickCount64: () => 200,
@@ -7911,7 +7966,6 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
     (v) => v.filter.filterId++,
     (v) => v.layer.layerId++,
     (v) => (v.filter.layerKey = "other"),
-    (v) => (v.filter.action.type = 0x1002),
     (v) => (v.filter = null),
   ]) {
     const context = {
@@ -8003,17 +8057,17 @@ test("socket export refusals retain distinct self/destination evidence and bound
   );
   // Keep refused-call diagnostics separate from creator/import admission and
   // partial cleanup above; none of these controls may prepare an original.
-  const exportBody = body("socket_export");
+  const exportBody = body("wfp_transfer");
   const refusedExport = native(
     exportBody.slice(
       exportBody.indexOf("  if (WSADuplicateSocketW("),
-      exportBody.indexOf("  invariant(socket_protocol_same"),
+      exportBody.indexOf("  if (!socket_protocol_same(&shared.source"),
     ),
   )
-    .replaceAll("wfpSocket", "socket")
-    .replaceAll("wfpDestination.pid", "offer.target.pid")
-    .replaceAll("packet.offer", "offer")
-    .replaceAll("wfpTransferEnd", "end")
+    .replaceAll("*socket", "socket")
+    .replaceAll("current.pid", "offer.target.pid")
+    .replaceAll("shared", "offer")
+    .replace("return FALSE;", "failure(126);")
     .replace(
       "socket_transfer_controls(offer, error, end)",
       "await socket_transfer_controls(offer, error, end)",
@@ -8522,7 +8576,6 @@ test("socket export refusals retain distinct self/destination evidence and bound
       wfpControlSeen: { value: 0 },
       wfpTransferError: 0,
       wfpPreparedAt: 0,
-      wfpSocket: -1,
       wfpEngine: null,
       wfpToken: null,
       wfpCleanupFailed: false,
@@ -9199,7 +9252,7 @@ test("socket export refusals retain distinct self/destination evidence and bound
         assert.equal(optionObservations.length, 2);
         assert.match(
           optionObservations[0],
-          /caller=socket_export api=WSADuplicateSocketW error=10022 option=SO_EXCLUSIVEADDRUSE/u,
+          /caller=wfp_transfer api=WSADuplicateSocketW error=10022 option=SO_EXCLUSIVEADDRUSE/u,
         );
         assert.ok(
           optionObservations[0].includes(
@@ -9212,7 +9265,7 @@ test("socket export refusals retain distinct self/destination evidence and bound
         );
         assert.equal(
           optionObservations[1],
-          `native-windows-socket-input: caller=socket_export api=OpenProcess original-error=10022 pid=43 access=64 status=${fault === "self-open" ? 5 : 0} close=${fault === "self-open" ? "null" : ["self-close", "diagnostic-close"].includes(fault) ? 6 : 0}\n`,
+          `native-windows-socket-input: caller=wfp_transfer api=OpenProcess original-error=10022 pid=43 access=64 status=${fault === "self-open" ? 5 : 0} close=${fault === "self-open" ? "null" : ["self-close", "diagnostic-close"].includes(fault) ? 6 : 0}\n`,
         );
         assert.equal(order.filter((value) => value === "self-open").length, 1);
         assert.equal(
@@ -9229,7 +9282,6 @@ test("socket export refusals retain distinct self/destination evidence and bound
         assert.equal(context.attempted, false);
         assert.equal(saved.has(`${mode}-tcp-intent`), false);
         assert.equal(context.wfpPreparedAt, 0);
-        assert.equal(context.wfpSocket, -1);
         assert.equal(order.includes("T") || order.includes("U"), false);
         for (const [socket, event, refusal] of [
           [81, "control-create:self", "control-create-self"],

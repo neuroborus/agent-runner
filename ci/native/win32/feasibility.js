@@ -1174,6 +1174,10 @@ export async function observeWindowsFeasibilityWfp(run, persist) {
 }
 // The feasibility gate requires WSAEACCES, even when the full PoC separately
 // permits a socket-correlated kernel DROP. Diagnostic snapshots have no authority.
+const tcpGuid = (value) =>
+  typeof value === "string" &&
+  /^[a-f0-9]{32}$/u.test(value) &&
+  !/^0+$/u.test(value);
 const tcpBindingKeys = [
   "child",
   "owner",
@@ -1253,14 +1257,16 @@ function assertTcpTransfer(row, receipt) {
       "socketType",
       "protocol",
     ]) &&
-      transfer.direction === "creator-to-child" &&
+      transfer.direction === "child-self" &&
       transfer.appContainer === true &&
-      identity(transfer.creator, receipt.owner) &&
-      identity(transfer.effective, receipt.owner) &&
+      identity(transfer.creator, receipt.child) &&
+      identity(transfer.effective, receipt.child) &&
       identity(transfer.destination, receipt.child) &&
-      transfer.effective.tokenId !== transfer.creator.tokenId &&
-      transfer.effective.authenticationId ===
-        transfer.destination.authenticationId &&
+      ["tokenId", "authenticationId", "modifiedId"].every(
+        (key) =>
+          transfer.creator[key] === transfer.destination[key] &&
+          transfer.effective[key] === transfer.destination[key],
+      ) &&
       (!Object.hasOwn(row, "tokenId") ||
         (transfer.destination.tokenId === row.tokenId &&
           transfer.destination.authenticationId === row.authenticationId)) &&
@@ -1321,7 +1327,7 @@ function assertWindowsFeasibilityTcpAttribution(
       "peerStatus",
       "startedAt",
       "endedAt",
-      "socketClose",
+      "socketHeld",
       "tokenClosed",
       "status",
       "reason",
@@ -1336,10 +1342,10 @@ function assertWindowsFeasibilityTcpAttribution(
       row.nativeStatus === 0 &&
       row.enumClose === 0 &&
       row.engineClose === 0 &&
-      row.socketClose === 0 &&
+      row.socketHeld === true &&
       row.tokenClosed === true &&
       row.localStatus === 0 &&
-      wfpUint(row.peerStatus) &&
+      row.peerStatus === 10057 &&
       tcpEndpoint(row.local, prepared.local.port) &&
       tcpEndpoint(row.requested, Number(endpoint)) &&
       wfpTime(row.startedAt) &&
@@ -1369,6 +1375,9 @@ function assertWindowsFeasibilityTcpAttribution(
         "time",
         "filterKey",
         "layerKey",
+        "providerKey",
+        "calloutKey",
+        "calloutProviderKey",
       ]) &&
         wfpTime(event.filterId) &&
         Number.isSafeInteger(event.layerId) &&
@@ -1376,7 +1385,13 @@ function assertWindowsFeasibilityTcpAttribution(
         event.layerId <= 65535 &&
         event.layerKey === "d1578dc3a705334c904f7fbceee60e82" &&
         event.direction === 0 &&
-        event.actionType === 0x1001 &&
+        ((event.actionType === 0x1001 &&
+          event.calloutKey === null &&
+          event.calloutProviderKey === null) ||
+          (event.actionType === 0x5003 &&
+            tcpGuid(event.calloutKey) &&
+            tcpGuid(event.calloutProviderKey))) &&
+        tcpGuid(event.providerKey) &&
         wfpUint(event.flags) &&
         (event.flags & 0x57f) === 0x57f &&
         !(event.flags & ~0x7ff) &&
@@ -3550,8 +3565,8 @@ export async function runWindowsFeasibility(
             run.session.send("O");
             const transfer = await nextRun();
             assertWindowsFeasibilityTcpTransfer(transfer, run.receipt);
-            // Bind creator, effective AppContainer token, destination and provider
-            // before export through the already-held creator authority.
+            // Bind the child's primary identity, self-transfer destination and
+            // provider before releasing its single self-import.
             run.tcpAttribution = {
               transfer,
               requestedEndpoint: tcpEndpoint,

@@ -1194,35 +1194,34 @@ Capture completion describes the observation stream, never transaction success.
 Observations neither authorize receipts nor replace the first validated refusal.
 Failed Winsock calls retain their actual errors before observation or cleanup;
 closure failure has a separate checked cleanup cause and prohibits a receipt.
-For each original read/edit bundle, the held creator retains the original bound,
-unconnected socket and shares it **to the exact child**, rather than asking the
-restricted child to duplicate into the privileged observer. The child's initial
-socket establishes the public provider/catalog/chain contract only. Before
-creating the original, the creator reads the held child's primary token and
-requires the exact package/user SIDs, AppContainer state and zero capabilities.
-It impersonates that token only around socket creation, nonblocking/exclusive
-setup and loopback bind, reads the actual thread token before and after, and
-checks `RevertToSelf` before export or observer operations. An existing thread
-token, failed token read, identity drift, failed reversion or uncertain close
-blocks admission. No process DACL or requested process access is broadened.
+For each original read/edit bundle, the restricted child creates the original
+nonblocking, exclusive loopback socket under its own primary token. It rejects
+an existing thread token and checks the exact package/user SIDs, AppContainer
+state, zero capabilities, process birth and token/authentication/modified IDs.
+The privileged observer never creates a replacement socket under impersonation:
+thread-token reads alone do not prove which identity ALE enforces.
 
-`tcp-transfer-ready` records the held creator's PID/birth/primary-token identity,
-the actual effective AppContainer token at creation, the held child's
-PID/birth/primary-token identity and the provider contract. The driver persists
-that exact record before `D`. The creator then calls `WSADuplicateSocketW` once
-for the held child and sends one bounded private import packet through the
-existing child pipe. The child rejoins all identities and providers, checks
-closure of its preflight socket, imports once with `WSASocketW`, and requires the
-actual descriptor's provider, exclusive local endpoint and unconnected state.
-The child explicitly establishes nonblocking mode on the imported descriptor.
-When import fails before acquiring a descriptor, cleanup emits no close
-observation for that absent descriptor; partial capture remains incomplete.
-Creation/import flags remain zero. The creator requires the echoed opaque
-protocol information to equal its export and independently checks the retained
-original before observer readiness; provider-private bytes never enter reports.
-Birth/token drift, PID-only input, partial packets, substituted protocol data and
-changed provider/catalog/chain joins refuse admission without replay. `O/D/T/U`
-remain limited to the original rooted read/edit roles.
+`tcp-transfer-ready` binds the held child primary identity and actual public
+provider/catalog/chain to the independent owner PID/birth. Its transfer direction
+is `child-self`; creator, effective and destination identities must all equal
+the child. The driver persists that record before `D`. One bounded private
+packet through the existing child pipe rejoins that identity, the original local
+endpoint and provider; it must contain no external import ticket. The child
+calls `WSADuplicateSocketW` once for its own PID, imports that ticket once with
+`WSASocketW`, and closes the original descriptor independently. The imported
+descriptor must retain the exact provider, exclusive local endpoint and
+unconnected state; nonblocking mode is explicitly checked. Creation/import
+flags remain zero. Both descriptors receive checked closure on partial failure.
+No socket or duplication authority is transferred into the privileged observer.
+
+The child reads its primary identity again before acknowledging the import.
+Birth/token drift, PID-only input, partial packets, injected tickets and changed
+provider/catalog/chain or local tuple refuse admission without replay. `O/D/T/U`
+remain limited to the original rooted read/edit roles. The trusted child parks
+with its actual socket held until `U`, including when no connect was attempted.
+The independent observer retains the child process, token and immutable image;
+its read-only kernel event census must join the same exclusive tuple and child
+identity before any genuine native denial can be accepted.
 
 The creator uses its already held, suspended child-process handle to grant the
 exact AppContainer SID `PROCESS_DUP_HANDLE` (`0x40`) on that process alone. The
@@ -1239,7 +1238,7 @@ provider contract. Child self-access failures remain distinct native refusals;
 closure uncertainty also retains its independent cleanup cause. This preflight
 supplies no destination-access proof.
 
-At a failed creator export, the immediate `WSAGetLastError` is saved
+At a failed child self-export, the immediate `WSAGetLastError` is saved
 before any diagnostic operation. An optional `tcpObservation.transfer` records
 that error, the original negotiated/high Winsock versions, creation flags and
 public provider bytes. Destination reads request only
@@ -1251,8 +1250,8 @@ type, alongside restricted-token and AppContainer reads. The source also queries
 its effective thread token with `TOKEN_QUERY`; `ERROR_NO_TOKEN` 1008 leaves that
 observation unavailable and identifies the existing process token as the effective
 context. Token identity arrays end with type and impersonation level; primary
-tokens use `null` for the inapplicable level. Export diagnostics run after
-checked reversion; the creation token is bound separately by the transfer record.
+tokens use `null` for the inapplicable level. The actual creation token is bound
+separately by the transfer record.
 The original socket receives one query-only `SIO_GET_QOS` call. `qos` contains
 native status, returned byte count, sending/receiving service types and provider
 buffer length. The last three values are `null` unless the complete x64 `QOS`
@@ -1272,7 +1271,7 @@ and protocol-name text are excluded.
 
 One additional query reads `SO_EXCLUSIVEADDRUSE` on the original failed socket,
 before its closure. Ordinary `native-windows-socket-input` diagnostics name
-`socket_export` and `WSADuplicateSocketW`, preserve the saved original error and
+`wfp_transfer` and `WSADuplicateSocketW`, preserve the saved original error and
 report the option's native status, returned size and value. Failed or short reads
 leave the value unavailable. This supplements the existing construction,
 provider/catalog/chain, zero flags, nonblocking/bind, QoS and token observations.
@@ -1313,21 +1312,14 @@ which can disrupt Winsock reference accounting. Shared descriptors refer to
 the same socket and require independent closure; successful `getsockopt` alone
 does not establish that accounting.
 
-After a refused export, at most two fresh unbound diagnostic controls use the
-remaining 5000 ms transfer budget. They retain the actual exporting caller's
-identity, the public provider/catalog/chain, zero creation/import flags,
-nonblocking and exclusive options. Neither binds, connects or exchanges payload.
-The self control runs first and attempts one self import with checked closures;
-the exact-destination control uses a separate socket and protocol information.
-Their native duplicate statuses remain distinct: successful self sharing never
-proves destination reachability. The creator has no control-import receiver in
-the child, so a successful destination export leaves import unattempted and
-acknowledgment uncertain. It never consumes that ticket itself or treats a pipe
-reply as socket authority. Every source descriptor receives a checked close;
-uncertain import/closure remains failure through independent domain retirement.
-The existing child-origin diagnostic carrier/`V` reader remains diagnostic only,
-checks the original carried deadline before import, and cannot enter original
-socket preparation or acknowledge `D/T/U`.
+After a refused self-export, one fresh unbound self control uses the remaining
+5000 ms transfer budget. It retains the actual caller's identity, public
+provider/catalog/chain, zero flags and nonblocking/exclusive options. It neither
+binds, connects nor exchanges payload. Successful self duplication/import and
+checked closures remain diagnostics; they cannot replace the refused original.
+The existing distinct-destination control and `V` carrier remain bounded
+fixture coverage of their own failure/cleanup contract, without granting
+restricted payloads access into privileged observers or acknowledging `D/T/U`.
 
 Optional `tcpObservation.controls` joins the same unchanged 2 KiB capture.
 Each entry has numeric `kind` (0 self, 1 destination), `side` (0 source,
@@ -1342,25 +1334,18 @@ uncertainty retain separate cleanup causes until independent original-domain
 retirement. The caller persists captured controls as diagnostic-only evidence;
 missing, malformed, repeated or oversized frames remain incomplete evidence.
 
-Earlier source-to-observer evidence is not a universal Winsock refusal: after
-the source-only DACL repair, fresh self duplication/import/closure succeeded while
-exact-destination duplication still returned `WSAEINVAL` 10022. The restricted
-source's destination query was denied with Win32 error 5. Successful source
-self-access and self sharing therefore supply no privileged-destination
-reachability proof. The new direction uses the creator's existing held child
-authority, never a package duplication grant on the privileged observer.
-Neither that explanation nor portable tests establish native acceptance.
-Actual AppContainer/WFP attribution, successful controls and complete retirement
-must still be proved by matching fresh Windows CI. Any platform/provider topology
-that cannot retain those original identities fails before acceptance.
+Earlier source-to-observer duplication failures and creator impersonation
+observations supply no socket enforcement proof. The child-primary creation
+path requires matching fresh Windows CI for actual AppContainer/WFP attribution,
+successful controls and complete retirement. Portable fixtures cannot establish
+native acceptance.
 
-The launcher retains the socket, child process, exact token and
-immutable image, rechecking birth, Job, zero-capability package/user and native
-image identity. Exclusive binding prevents another socket from sharing its tuple.
-It verifies the actual local loopback endpoint and unconnected peer status, opens
-the WFP reader and requires already-enabled event collection.
-It changes no collection setting, audit setting, policy or capability. Disabled
-or unreadable collection refuses admission rather than supplying denial proof.
+The launcher rechecks the retained child's birth, Job, zero-capability
+package/user, exact token and native image. The child verifies its actual held
+loopback endpoint, exclusive option and unconnected peer after import; the
+observer rejoins these native observations and requires already-enabled WFP
+event collection. It changes no collection setting, audit setting, policy or
+capability. Disabled or unreadable collection refuses admission.
 
 The driver acknowledges the original TCP attempt, persists the observer's actual
 socket/identity binding and frozen remote endpoint, and only then releases its
@@ -1372,15 +1357,24 @@ The installed SDK AppId/window enum reads pre-enumerator logged events through
 `FwpmNetEventCreateEnumHandle0` and `FwpmNetEventEnum2`: at most 256 events, eight
 matches and a finite deadline. Actual SDK flags, IPv4/TCP tuple, AppId, user and
 package SIDs, outbound `ALE_AUTH_CONNECT_V4`, filter/layer identities and native
-BLOCK action must all match. The requested remote address comes from the frozen
-connect vector; it is never fabricated as a successful connected-peer read.
+action must all match. A literal BLOCK must resolve its actual provider. A
+terminating-callout DROP must additionally resolve that exact callout, its
+applicable layer and independently resolved provider. The callout and filter
+may have different providers; each returned provider key must match its native
+reference. Provider/callout lookup failures, missing providers, identity
+mismatches and other action types refuse success; all acquired SDK allocations
+are freed even after partial lookup failure. Lookups completing at or beyond the
+observation deadline refuse the match. The requested remote address comes from
+the frozen connect vector; it is never fabricated as a successful connected-peer read.
 Actual `getsockname`/`getpeername` statuses remain separate diagnostics, and the
-launcher rechecks local ownership through its held socket even when the denied
-socket has no connected peer. The birth, token and image must remain unchanged.
+observer joins the parked child's exact exclusive local tuple. A connected peer
+cannot become a denial receipt. The birth, token and image must remain unchanged.
 
 The acceptance record is separate from the 4 KiB WFP diagnostic snapshot. Both
-retain actual enum/engine closure statuses; acceptance also requires checked
-socket/token closure and subsequent actual 10013 completion in the original
+retain actual enum/engine closure statuses. Acceptance records `socketHeld`
+while the child is parked, rather than claiming an observer socket close that
+never occurred. Checked child descriptor closure, token closure and independent
+retirement remain mandatory. The actual 10013 must complete within the original
 5000 ms transaction budget. Nonzero `SO_ERROR` is an actual completion error for
 write, exception or combined readiness; readiness alone supplies no refusal.
 Pending 10035, closed-port 10061, timeout, empty snapshots, unrelated events,

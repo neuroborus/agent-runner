@@ -577,70 +577,56 @@ must establish underlying cause and closure; no new slow-tier guarantee applies.
 Imports activate no payload, compiler, native observer, Git command or provider.
 These regressions establish reporting contracts only, never native success.
 Windows socket regressions execute the actual source DACL producer/readback,
-source-access preflight, transfer, destination input/import and destination-binding
-bodies with injected OS calls. The creator-held source receives only an exact
+primary-token creation, self-transfer, observer admission and partial-close
+bodies with injected OS calls. The held child source receives only an exact
 `PROCESS_DUP_HANDLE` AppContainer ACE beside the retained full user ACE; the
 independent suspended-child verifier requires the same protected DACL. Readback
 rejects a changed owner/SID/mask, inheritance, extra ACEs and query failures.
 Setter/descriptor failures refuse release and free the temporary descriptor.
 Only the original read/edit source selects this contract; Git children and other
-launches retain private DACLs. The actual effective-token preflight opens only
-the source's current PID, checks closure, and refuses duplication on either
-failure without producing a receipt. Its first cause and separate closure failure
-survive the existing strict diagnostic transport. The production
-operation loop uses the guarded helper session for both original read/edit roles
-and persists the target/provider record before `D`. Original `10022` reaches
-bounded prerequisite collection, checked source closure and the unchanged
-failure transport without importing the original socket, connecting or admitting
-it. Query-only destination
-access failures, failed/short token reads, failed restriction queries,
-diagnostic-output failure and separate diagnostic/source closure failures
-preserve the original cause. The same caller coverage samples the effective
-thread-token type/impersonation level and the original socket's query-only QoS
-status, including unsupported/short replies. Malformed new metadata stays
-incomplete without replacing `10022`; failed-query byte counts remain unknown.
-The same fixture executes the original socket's exclusive-address query at the
-failed transfer boundary, including failed and short replies. Its ordinary raw
-diagnostic preserves the original caller/error and leaves the transfer/control
-grammar and bounds intact. The same failure owner tests current-token
-`PROCESS_DUP_HANDLE` access to the current PID, with self-open success, denial
-and independently failed closure retaining the original `10022`. Its separate
-raw observation does not grant observer access. Existing assertions retain one
-original duplication, no original import/connect/receipt, checked independent
-closure and both controls.
-Both fresh unbound duplication refusals
-can remain `10022` with imports unattempted and independent source closure.
-Coverage runs every source/destination failure for both read/edit roles and
-protects destination drift, lost `D/T/U` acknowledgments and failed import;
-malformed/PID-only carriers, partial writes and original pipe bounds retain their
-existing regressions. No changed transfer boundary is replaced by an idealized
-success callback.
+launches retain private DACLs. The effective-token preflight opens only the
+source's current PID and checks closure. Neither destination denial nor `10022`
+authorizes an observer grant.
 
-The same actual-source/caller fixture exercises two separate fresh unbound
-controls after the original refusal, with the original identity, provider,
-zero flags and nonblocking/exclusive options. Self and destination duplication
-and import refusals remain distinct, including unsupported self sharing. It
-protects one-use destination carriers, birth/token drift, replay and short
-carriers, lost control acknowledgment, independently attempted source/import
-closure and shared-budget exhaustion, including delayed carrier arrival or
-identity reads before destination import. The original error is latched before
-control failures; successful controls never advance original `D/T/U`, observer
-state, connect or receipts. Invalid, repeated, oversized and mismatched control
-observations remain incomplete diagnostic data. Import and closure uncertainty
-remain separate from the original refusal and require independent retirement.
+Creation must use the child's exact primary AppContainer token with no thread
+token. Failed or short token reads, zero-error query failures, wrong package,
+user or capabilities, token drift and uncertain closure refuse admission.
+The production operation loop persists the exact child/provider record before
+`D`. Actual self-duplication/import bodies rejoin birth/token/local endpoint and
+provider/catalog/chain; PID-only carriers, injected tickets, partial input,
+changed providers, connected peers and lost `D/T/U` acknowledgments refuse
+success. Every acquired socket retains checked closure, including a failed
+original close after import. The child parks its held socket until independent
+observation completes; the observer receives no socket or duplication grant.
 
-The optional prerequisite record retains exact public provider bytes and
-negotiated Winsock versions within the unchanged 2 KiB TCP budget; missing or
-malformed observations supply no proof. Actual application socket copying through
-`DuplicateHandle` is not an admitted route, and injected API success cannot prove
-native reference accounting. The source self-open denial is repaired at its held
-process DACL; neither destination denial nor `10022` authorizes an observer grant.
-Failed persistence withholds the next `D/T/U`
-acknowledgment without replay. Flags remain zero; strict actual `10013` denial,
-outside nonce, closed-port `10061`, full-PoC DROP semantics and independent
+Native WFP fixtures resolve the actual filter provider and terminating callout,
+including different filter/callout providers, exact key/layer joins, partial
+lookup failures and one release per acquired SDK allocation. A lookup finishing
+at or beyond the original observation deadline cannot admit the final match.
+Receipt consumers reject a connected peer, empty or mismatched events, wrong
+filter/layer/direction/window and unsupported actions. Only native `10013`
+completion plus matching attribution and complete independent retirement can
+pass. Pending operations and deadlines supply no denial receipt.
+
+The refused-call fixture preserves the saved `10022` through query-only source,
+destination, effective-token, QoS and exclusive-option observations. Failed or
+short reads remain unavailable; diagnostic errors and separate closure failures
+cannot replace the original cause. The bounded self control after an original
+self-export refusal cannot authorize import or use of the original socket.
+Existing distinct-destination control fixtures retain their separate failure/cleanup
+contract, covering one-use carriers, birth/token drift, replay, partial input,
+lost acknowledgment and independently attempted source/import closure. Successful
+controls never advance original `D/T/U`, observer state or receipts.
+
+The optional prerequisite/control records retain exact public provider bytes
+and negotiated Winsock versions within the unchanged 2 KiB TCP budget; malformed,
+repeated, oversized or missing observations supply no proof. Actual application
+socket copying through `DuplicateHandle` remains excluded. Failed persistence
+withholds the next acknowledgment without replay. Creation/import flags remain
+zero; outside nonce, closed-port `10061`, full-PoC DROP semantics and independent
 retirement remain mandatory. Portable coverage establishes neither native
-transfer compatibility nor the provider's internal cause for `10022` and adds no
-slow-tier assignment.
+transfer compatibility nor WFP enforcement and adds no slow-tier assignment.
+
 Darwin portable coverage protects narrow policy grants and literal quoting,
 matching-worker dispatch, missing native records, audit-token argument binding
 and the distinction between recorded process retirement and full domain recovery.
