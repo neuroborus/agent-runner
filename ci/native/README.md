@@ -8810,6 +8810,23 @@ complete PoC success; the separate Winsock10022, current-token
 remain open, alongside the Darwin TASK_ACCESS_PORT/owner-loss and Codex guard-page
 EINVAL blockers. Matching native CI and publication remain supervisor-owned.
 
+The ordinary release-runtime consumer uses the same admission owner for its
+fresh main-image and loaded-module observations. Its case reader supplies the
+exact held helper image, signature, identity, DACL and link binding; the verifier
+rejoins that pin to its own held image and the original admission/context before
+using its already-retained process. The experiment-only bounded `verify-runtime`
+command reuses native process-image and module readers. Process and file slots
+remain private to that verifier, and its existing module-custody limits apply.
+The main helper's omitted import graph is recognized through that exact held
+image; private runtime import edges and observed hosted System32 modules retain
+their existing rules. Both owners normalize the result, and operation readers
+rejoin loaded modules to the case inventory. Token reads surround the image/module
+read; the case image is inspected before and after it. Cached admission or held
+file ownership cannot substitute for fresh process/image/module observations.
+The earlier launch correction and ordinary payload/helper custody remain intact.
+Portable coverage establishes these joins and refusal paths, not matching Windows
+runtime acceptance or closure of the carried native defects above.
+
 The shared `--serve`/`--observe` startup replaces the reader environment before
 COM initialization and trust calls with exactly `CI=true`, `GITHUB_ACTIONS=true`,
 `PATH=C:\nonexistent` and `SystemRoot` derived from

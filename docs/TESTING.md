@@ -1978,6 +1978,27 @@ successful helper builds and separately injects case-observer retirement failure
 closed reader custody cannot erase the original preparation cause or prove the
 observer retired. These cases use the existing portable suites and introduce no
 additional validation command or native acceptance claim.
+The existing raw experiment preparation fixture also reaches the actual
+`experiment-runtime.js` consumer through the normal system factory and independent
+admission verifier. Repeated observations retain the same owner slots while
+reading changed native module metadata and a newly loaded hosted System32 module.
+The case reader never retains itself or consumes the verifier's slots, and the
+successful case independently retires the original readers, tasks and accounts.
+After an initial success, raw frames substitute helper PID/birth/session/SID,
+verifier identity, owner process/file slots, image pins and module path/identity/
+hash/signature/DACL/link evidence; missing or undeclared private modules, wrong
+import scope and failed fresh process/runtime reads also refuse. The existing
+custody binding regression now obtains a successful helper observation before
+substituting candidate/context, plan, admission, helper or verifier bindings.
+That shared admission guard precedes both token-only and runtime observations.
+The operation fixture uses the actual marked experiment-image parser for unsigned
+helper signature observations while retaining reviewed signature parsing.
+Existing private-import, reviewed release, launch, payload and helper ownership
+coverage remains active. These regressions use the existing selected native
+harness, add no validation command or slow tier, and execute no Windows binary.
+Matching Windows CI must establish real image/module reads and original-owner
+retirement; portable success supplies no native acceptance or complete PoC claim.
+
 Distinct regressions reject unsigned/source/output substitution, publication changes
 outside allowed PE fields, missing approvals/completion/intent/birth records,
 misbound worker receipts, interrupted writers, journal gaps, surviving workers

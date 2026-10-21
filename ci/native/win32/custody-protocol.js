@@ -179,6 +179,14 @@ export function windowsVerificationArguments(name, values) {
         slot(args[0]) &&
         /^Local\\NativeProof-[a-f0-9]{32}$/u.test(decode(args[1]));
       break;
+    case "runtime":
+      valid =
+        args.length === 4 &&
+        slot(args[0]) &&
+        slot(args[1]) &&
+        hash(args[2]) &&
+        hash(args[3]);
+      break;
     case "image":
       valid =
         args.length === 3 && slot(args[0]) && hash(args[1]) && hash(args[2]);
@@ -449,6 +457,87 @@ export function fileObservation(value, { stockLinks = false } = {}) {
   );
   return structuredClone(value);
 }
+/** Normalize a fresh held-process module census against its held main image. */
+export function loaderObservation(value, purpose, image) {
+  closed(value, [
+    ...(purpose === "experiment" ? ["importScope"] : []),
+    "loaded",
+    "imports",
+    "linkerMajor",
+    "linkerMinor",
+    "timestamp",
+    "complete",
+  ]);
+  requireWindows(
+    value.complete === true &&
+      (purpose !== "experiment" || value.importScope === "private-runtime") &&
+      dense(value.loaded, 128).length > 0 &&
+      integer(value.linkerMajor, 255) &&
+      integer(value.linkerMinor, 255) &&
+      integer(value.timestamp, 0xffffffff),
+  );
+  for (const file of value.loaded) {
+    closed(file, [
+      "pathHex",
+      "identity",
+      "sha256",
+      "signatureSha256",
+      "daclSha256",
+      "links",
+    ]);
+    requireWindows(
+      location(decode(file.pathHex)) &&
+        hash(file.sha256) &&
+        hash(file.signatureSha256) &&
+        hash(file.daclSha256) &&
+        integer(file.links, 128) &&
+        file.links > 0,
+    );
+    normalizeWindowsFileIdentity(file.identity);
+  }
+  for (const entry of dense(value.imports, 2048)) {
+    closed(entry, ["source", "resolved", "delay", "importHex"]);
+    requireWindows(
+      integer(entry.source, value.loaded.length - 1) &&
+        integer(entry.resolved, value.loaded.length - 1) &&
+        typeof entry.delay === "boolean" &&
+        /^(?:[a-f0-9]{2}){1,255}$/u.test(entry.importHex),
+    );
+  }
+  requireWindows(
+    value.loaded.some(
+      (file) =>
+        file.identity === image.identity &&
+        file.sha256 === image.sha256 &&
+        file.signatureSha256 === image.signatureSha256,
+    ),
+  );
+  return structuredClone(value);
+}
+
+/** Fresh admission-owned image/module reads never export the owner's slots. */
+export function helperRuntimeObservation(value, helper, image) {
+  closed(value, ["processImage", "imageIdentity", "loader"]);
+  closed(value.processImage, ["identity", "sha256", "signatureSha256"]);
+  requireWindows(
+    value.imageIdentity === image.identity &&
+      sameWindowsIdentity(value.processImage.identity, helper) &&
+      value.processImage.sha256 === image.sha256 &&
+      value.processImage.signatureSha256 === image.signatureSha256,
+  );
+  const loader = loaderObservation(value.loader, "experiment", image);
+  requireWindows(
+    loader.loaded.some(
+      (file) =>
+        file.identity === image.identity &&
+        decode(file.pathHex).toLowerCase() === image.path.toLowerCase() &&
+        file.daclSha256 === image.daclSha256 &&
+        file.links === image.links,
+    ),
+  );
+  return { ...structuredClone(value), loader };
+}
+
 export function windowsTaskInstance(value) {
   closed(value, ["guid", "state", "enginePid"]);
   requireWindows(

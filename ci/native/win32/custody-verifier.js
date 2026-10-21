@@ -27,6 +27,7 @@ import {
   windowsCustodyInput as normalizeWindowsCustodyInput,
   windowsCustodyBinding,
   processObservation,
+  helperRuntimeObservation,
   coldProcessObservation,
   windowsClosedPreparationOwner,
   fileObservation,
@@ -1501,12 +1502,51 @@ export function createWindowsCustodyVerifier(
       const observation = await observe(admission.helper),
         admissionSha256 = observationDigest(admission);
       requireWindows(!observation.retired);
+      let runtime;
+      if (value.image !== undefined) {
+        const expected = value.image;
+        closed(expected, [
+          "path",
+          "sha256",
+          "signatureSha256",
+          "identity",
+          "daclSha256",
+          "links",
+        ]);
+        requireWindows(
+          input.purpose === "experiment" &&
+            expected.path === input.reader.path &&
+            expected.sha256 === input.reader.sha256 &&
+            expected.signatureSha256 === input.reader.signatureSha256,
+        );
+        const held = await retain(admission.helper),
+          image = await file(input.reader);
+        requireWindows(
+          image.identity === expected.identity &&
+            image.daclSha256 === expected.daclSha256,
+        );
+        runtime = await call("runtime", [
+          held.slot,
+          image.slot,
+          input.reader.sha256,
+          input.reader.signatureSha256,
+        ]);
+        runtime = helperRuntimeObservation(runtime, admission.helper, expected);
+        requireWindows(
+          !(await observe(admission.helper)).retired &&
+            sameWindowsIdentity(verifier(), admission.verifier),
+        );
+      }
+      const observations = {
+        admissionSha256,
+        observation,
+        ...(runtime ? { runtime } : {}),
+      };
       return {
         independent: true,
         verifier: verifier(),
-        admissionSha256,
-        observation,
-        nativeEventSha256: observationDigest({ admissionSha256, observation }),
+        ...observations,
+        nativeEventSha256: observationDigest(observations),
       };
     },
     async verifyPreSetup(value) {

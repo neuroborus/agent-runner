@@ -21,20 +21,18 @@ export function createWindowsExperimentRuntimeEffects(core) {
       observe: latch(async () => {
         const roots = specification.slots.components.map(({ index }) => index),
           actual = await reads.loader(specification.slots.loader, roots),
-          retained = await reader.retainProcess(current.admission.helper),
           image = specification.slots.components.find(
             ({ id }) => id === "custody-reader",
           );
         requireObservation(image);
-        const processImage = await reader.processImage(
-          retained.slot,
+        const { processImage, runtime } = await reads.helperRuntime(
+          current.admission.helper,
           image.index,
         );
         // Dynamic System/COM loads are observed by the native held-module lane.
         // Mapped identities remain held; import edges cover private runtimes,
         // without claiming transitive hosted-system admission.
-        const runtime = await reads.runtime(retained.slot, image.index),
-          verifier = await witness(),
+        const verifier = await witness(),
           observation = {
             purpose: "experiment",
             status: "OBSERVED",

@@ -173,7 +173,7 @@ export function createWindowsOperationReaders(
     return { images: observations, build, sdk };
   };
   const runtime = async (
-    subject,
+    observe,
     image,
     components = specification.slots.loader,
   ) => {
@@ -184,7 +184,7 @@ export function createWindowsOperationReaders(
           (component) => Array.isArray(component.imports) || omitted(component),
         ),
     );
-    const actual = await reader.loader(subject, image),
+    const actual = await observe(),
       reached = new Set([image]);
     requireObservation(!experiment || actual.importScope === "private-runtime");
     for (let size = -1; size !== reached.size;) {
@@ -249,5 +249,19 @@ export function createWindowsOperationReaders(
     }
     return actual;
   };
-  return { read, loader, runtime };
+  return {
+    read,
+    loader,
+    runtime: (subject, image, components) =>
+      runtime(() => reader.loader(subject, image), image, components),
+    async helperRuntime(identity, image) {
+      requireObservation(experiment);
+      let actual;
+      const loaded = await runtime(async () => {
+        actual = await reader.observeHelper(identity, image);
+        return actual.runtime;
+      }, image);
+      return { processImage: actual.processImage, runtime: loaded };
+    },
+  };
 }

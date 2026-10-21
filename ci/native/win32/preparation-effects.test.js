@@ -2333,6 +2333,47 @@ function rawPreparation({ experiment = false, environment } = {}) {
   plan.bootstrap.plan.sha256 = digest(planBytes);
   f.files.set(plan.bootstrap.plan.path, planBytes);
   for (const request of f.requests) request.toolSha256 = imageSha;
+  const runtimeRead = (args, scope) => {
+    const process = scope.retained[Number(args[0])],
+      file = scope.heldFilePaths[Number(args[1])],
+      data = scope.heldFiles[Number(args[1])];
+    assert.ok(process && !process.retired && data);
+    assert.equal(images.get(process.identity.pid), file);
+    assert.equal(digest(data), args[2]);
+    assert.equal(helperSignature, args[3]);
+    return {
+      processImage: {
+        identity: process.identity,
+        sha256: digest(data),
+        signatureSha256: helperSignature,
+      },
+      imageIdentity: fileId(file),
+      loader: {
+        importScope: "private-runtime",
+        loaded: (f.runtimeModules?.get(process.identity.pid) ?? [file]).map(
+          (name) => {
+            const bytes = f.files.get(name);
+            assert.ok(bytes);
+            return {
+              pathHex: encode(name),
+              identity: fileId(name),
+              sha256: digest(bytes),
+              signatureSha256: bytes.equals(helperBytes)
+                ? helperSignature
+                : signatureSha,
+              daclSha256: hash,
+              links: 1,
+            };
+          },
+        ),
+        imports: [],
+        linkerMajor: 0,
+        linkerMinor: 0,
+        timestamp: f.runtimeTimestamp ?? 0,
+        complete: true,
+      },
+    };
+  };
   const rawNative = async (operation, args, scope) => {
     const { retained, heldFiles, entries: selected } = scope;
     events.push(operation);
@@ -2684,6 +2725,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       assert.ok(data, file);
       assert.equal(digest(data), args[1]);
       const slot = heldFiles.push(data) - 1;
+      scope.heldFilePaths[slot] = file;
       assert.ok(slot < 128);
       return {
         identity: fileId(file),
@@ -2755,12 +2797,16 @@ function rawPreparation({ experiment = false, environment } = {}) {
         },
       };
     }
+    if (operation === "verify-runtime") return runtimeRead(args, scope);
     if (operation === "verify-image") {
       const file = images.get(retained[Number(args[0])].identity.pid),
         helper = [
           plan.bootstrap.reader.path,
           plan.bootstrap.bridge.path,
         ].includes(file);
+      scope.heldFilePaths[heldFiles.length] = file;
+      heldFiles.push(f.files.get(file));
+      assert.ok(heldFiles.length <= 128);
       return {
         sha256: helper ? helperSha : imageSha,
         signatureSha256: helper ? helperSignature : signatureSha,
@@ -3155,6 +3201,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       scope = {
         retained: [],
         heldFiles: [],
+        heldFilePaths: [],
         entries: selected,
         boundJobs: new Set(),
         recoveryJobs: new Set(),
@@ -3590,6 +3637,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     rawJobs: jobs,
     rawCompilerJobs: compilerJobs,
     rawImages: images,
+    rawRuntime: runtimeRead,
   });
 }
 
@@ -4293,7 +4341,7 @@ test("Windows experiment partial preparation settles only its matching owner and
     }
 });
 
-test("Windows raw experiment bindings cross the normalizing factory and shared preparation gate", async () => {
+async function preparedExperimentFixture() {
   const f = experimentBootstrapFixture();
   f.bootstrapOptions.binding = {
     candidateSha,
@@ -4335,7 +4383,191 @@ test("Windows raw experiment bindings cross the normalizing factory and shared p
       directory,
       async () => {},
       options,
+    );
+  return { f, options, job, preparation };
+}
+
+async function experimentRuntimeFixture() {
+  const { f, options, job, preparation } = await preparedExperimentFixture(),
+    declaration = preparation.system.cases.find(({ id }) => id === "release"),
+    specification = JSON.parse(
+      f.files.get(declaration.bindings.operations.expectation.path),
+    );
+  f.manifest.windowsPreparation.cases = preparation.system.cases;
+  installOperationNativeFixture(f, declaration.bindings.input, specification);
+  const system = createWindowsExperimentSystemEffects(
+      job,
+      preparation,
+      options,
+      new Map(),
     ),
+    recipe = windowsSystemRecipes().find(({ id }) => id === "release"),
+    prepared = await system.prepare(recipe, {
+      policyBinding: preparation.system.bindings.find(
+        ({ id }) => id === "release",
+      ).policyBinding,
+      recordPolicy() {},
+    });
+  return { f, system, recipe, prepared };
+}
+
+test("Windows experiment runtime reads fresh images and modules through its admitted independent verifier", async () => {
+  const { f, system, recipe, prepared } = await experimentRuntimeFixture();
+  let helper, verifier, slots;
+  for (let i = 0; i < 2; i++) {
+    f.runtimeTimestamp = i;
+    if (i) {
+      const stock = "C:\\Windows\\System32\\dynamic.dll";
+      f.files.set(stock, f.signed);
+      f.runtimeModules = new Map([
+        [helper.pid, [f.rawImages.get(helper.pid), stock]],
+      ]);
+    }
+    const start = f.rawCommands.length,
+      actual = await prepared.effects.observe(),
+      commands = f.rawCommands.slice(start),
+      reads = commands.filter(
+        ({ operation }) => operation === "verify-runtime",
+      );
+    helper ??= actual.processImage.identity;
+    verifier ??= actual.verifier;
+    assert.notEqual(helper.pid, verifier.pid);
+    assert.equal(actual.actual.images.length, 13);
+    assert.deepEqual(actual.processImage.identity, helper);
+    assert.equal(actual.runtime.timestamp, i);
+    assert.equal(actual.runtime.loaded.length, i + 1);
+    assert.equal(actual.runtime.importScope, "private-runtime");
+    assert.equal(actual.runtime.independent, true);
+    assert.equal(reads.length, 1);
+    assert.deepEqual(reads[0].owner, verifier);
+    if (slots) assert.deepEqual(reads[0].values, slots);
+    slots = reads[0].values;
+    assert.ok(
+      !commands.some(({ operation }) =>
+        ["process-open", "process-image", "loader"].includes(operation),
+      ),
+    );
+    assert.deepEqual(
+      commands
+        .filter(({ operation }) => operation === "verify-process")
+        .map(({ owner }) => owner),
+      [verifier, verifier],
+    );
+  }
+  const settled = await system.settle(recipe, prepared, {
+    signal: new AbortController().signal,
+    execution: execution(recipe.id),
+  });
+  assert.ok(
+    Object.values(settled)
+      .filter(Boolean)
+      .every(({ settlement }) => settlement.status === "RETIRED"),
+  );
+  assert.equal(f.rawTasks.size, 0);
+  assert.ok([...f.actors.values()].every(({ retired }) => retired));
+});
+
+test("Windows experiment runtime refuses substituted owners, image/module bindings and failed reads after success", async () => {
+  for (const damage of [
+    "pid",
+    "birth",
+    "session",
+    "sid",
+    "verifier",
+    "image-slot",
+    "case-image",
+    "image-sha",
+    "image-signature",
+    "module-path",
+    "module-identity",
+    "module-sha",
+    "module-signature",
+    "module-dacl",
+    "module-links",
+    "missing",
+    "extra-private",
+    "import-scope",
+    "process-slot",
+    "fresh-process",
+    "fresh-runtime",
+  ]) {
+    const { f, prepared } = await experimentRuntimeFixture(),
+      observed = await prepared.effects.observe(),
+      native = f.accessNative,
+      cause = new Error("Fresh admitted runtime unavailable");
+    let readRuntime = false;
+    f.accessNative = async (operation, values, scope, ...args) => {
+      if (
+        damage === "case-image" &&
+        readRuntime &&
+        operation === "inspect" &&
+        scope.entries[Number(values[0])].path ===
+          f.rawImages.get(observed.processImage.identity.pid)
+      )
+        return {
+          ...f.objectRead(scope.entries[Number(values[0])]),
+          daclSha256: "f".repeat(64),
+        };
+
+      if (operation === "verify-process" && damage === "fresh-process")
+        throw cause;
+      if (operation === "verifier" && damage === "verifier")
+        return { ...observed.verifier, creationTime: "99999" };
+      if (operation !== "verify-runtime")
+        return native(operation, values, scope, ...args);
+      if (damage === "fresh-runtime") throw cause;
+      readRuntime = true;
+      const value = f.rawRuntime(values, scope),
+        pid = value.processImage.identity.pid,
+        file = scope.heldFilePaths[Number(values[1])];
+      value.processImage.identity = { ...value.processImage.identity };
+      const image = value.processImage,
+        module = value.loader.loaded[0];
+      if (damage === "pid") image.identity.pid++;
+      if (damage === "birth") image.identity.creationTime = "99999";
+      if (damage === "session") image.identity.sessionId++;
+      if (damage === "sid") image.identity.userSid = "S-1-5-21-1-2-3-1001";
+      if (damage === "image-slot")
+        value.imageIdentity = f.rawFileId(
+          scope.heldFilePaths.find((name) => name !== file),
+        );
+      if (damage === "image-sha") image.sha256 = "f".repeat(64);
+      if (damage === "image-signature") image.signatureSha256 = "f".repeat(64);
+      if (damage === "module-path") module.pathHex = encode(file + ".other");
+      if (damage === "module-identity")
+        module.identity = f.rawFileId(file + ".other");
+      if (damage === "module-sha") module.sha256 = "f".repeat(64);
+      if (damage === "module-signature")
+        module.signatureSha256 = "f".repeat(64);
+      if (damage === "module-dacl") module.daclSha256 = "f".repeat(64);
+      if (damage === "module-links") module.links++;
+      if (damage === "missing") value.loader.loaded = [];
+      if (damage === "extra-private")
+        value.loader.loaded.push({
+          ...module,
+          pathHex: encode("C:\\Fixture\\unapproved.dll"),
+          identity: f.rawFileId("unapproved"),
+        });
+      if (damage === "import-scope") value.loader.importScope = "complete";
+      if (damage === "process-slot")
+        image.identity = scope.retained.find(
+          ({ identity }) => identity.pid !== pid,
+        ).identity;
+      return value;
+    };
+    await assert.rejects(
+      prepared.effects.observe(),
+      (error) =>
+        damage.startsWith("fresh-")
+          ? error === cause
+          : /Unverified/u.test(error.message),
+      damage,
+    );
+  }
+});
+
+test("Windows raw experiment bindings cross the normalizing factory and shared preparation gate", async () => {
+  const { f, options, job, preparation } = await preparedExperimentFixture(),
     raw = preparation.system.bindings.find(
       ({ id }) => id === "release",
     ).policyBinding,

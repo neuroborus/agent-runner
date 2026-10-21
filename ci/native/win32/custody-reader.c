@@ -417,6 +417,14 @@ static BOOL experiment_system_image(const wchar_t *name) {
     !wcschr(name+length+1, '\\') && !_wcsicmp(name+size-4, L".dll");
 }
 #endif
+static void process_image(unsigned index, struct entry *entry) {
+  need(index < process_count);
+  wchar_t actual[4096]; DWORD length = 4096; char signatureSha[65];
+  need((!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
+  pin(&entry->file, entry->pin); signature(&entry->file, entry->signature, signatureSha);
+  printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
+  printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
+}
 static DWORD rva(BYTE *bytes, DWORD size, IMAGE_NT_HEADERS64 *pe, DWORD address, DWORD needed) {
   need(needed <= size); if (address < pe->OptionalHeader.SizeOfHeaders) { need(address <= size-needed); return address; }
   IMAGE_SECTION_HEADER *sections = IMAGE_FIRST_SECTION(pe); need((BYTE *)sections >= bytes && (BYTE *)(sections + pe->FileHeader.NumberOfSections) <= bytes + size && pe->FileHeader.NumberOfSections <= 96);
@@ -447,7 +455,7 @@ static void loader(unsigned subject, struct entry *image) {
 #ifdef NATIVE_CI_EXPERIMENT
   /* Hosted System32 modules and marked helpers are observed above, not a
    * reconstructed trust graph. Only private runtime images retain import edges. */
-  BOOL isHelper = FALSE;
+  BOOL isHelper = !strcmp(image->kind, "helper") && !memcmp(&image->file.id, &files[source].id, sizeof(files[source].id));
   for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].kind, "helper") && entries[i].file.handle &&
     !memcmp(&entries[i].file.id, &files[source].id, sizeof(files[source].id))) isHelper = TRUE;
   if (isHelper || experiment_system_image(paths[source])) continue;
@@ -2372,6 +2380,20 @@ static void verification(char **values, unsigned n) {
       printf("{\"slot\":%u,\"process\":", index); process_read(index); putchar('}');
     } else if (!strcmp(values[0]+7, "process")) { need(n == 3); process_read(bounded_number(values[2], 127));
     } else if (!strcmp(values[0]+7, "compiler-policy")) { need(n == 4); compiler_policy(bounded_number(values[2], 127), bounded_number(values[3], 127));
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(values[0]+7, "runtime")) {
+      need(n == 6); unsigned subject = bounded_number(values[2], 127), index = bounded_number(values[3], 127);
+      need(subject < process_count && index < verification_file_count);
+      struct held_file *file = &verification_files[index];
+      verification_path(file->path, values[4], values[5]);
+      /* The admitted primary is a helper, not a private-runtime import root.
+       * Reuse its owner's held file and process; no slot or handle is transferred. */
+      struct entry image = {0}; strcpy_s(image.kind, sizeof(image.kind), "helper");
+      strcpy_s(image.pin, sizeof(image.pin), values[4]); strcpy_s(image.signature, sizeof(image.signature), values[5]);
+      wcscpy_s(image.path, 4096, file->path); image.file = *file;
+      printf("{\"processImage\":"); process_image(subject, &image);
+      printf(",\"imageIdentity\":\""); file_id(file); printf("\",\"loader\":"); loader(subject, &image); putchar('}');
+#endif
     } else if (!strcmp(values[0]+7, "image")) {
       need(n == 5); unsigned index = bounded_number(values[2], 127); need(index < process_count); wchar_t name[4096]; DWORD size = 4096;
       need(QueryFullProcessImageNameW(processes[index], 0, name, &size) && size && size < 4096);
@@ -4224,11 +4246,7 @@ int wmain(int argc, wchar_t **argv) {
     } else if (!strcmp(values[0], "process")) { need(n == 3); process_read(bounded_number(values[2], 31));
     } else if (!strcmp(values[0], "process-image")) {
       need(n == 4); unsigned index = bounded_number(values[2], 31); need(index < process_count); struct entry *entry = slot(values[3]);
-      wchar_t actual[4096]; DWORD length = 4096; char signatureSha[65];
-      need((!strcmp(entry->kind, "image") || !strcmp(entry->kind, "helper")) && QueryFullProcessImageNameW(processes[index], 0, actual, &length) && !_wcsicmp(actual, entry->path));
-      pin(&entry->file, entry->pin); signature(&entry->file, entry->signature, signatureSha);
-      printf("{\"identity\":"); retained_identity(processes[index], tokens[index], sessions[index]);
-      printf(",\"sha256\":\"%s\",\"signatureSha256\":\"%s\"}", entry->pin, signatureSha);
+      process_image(index, entry);
     } else if (!strcmp(values[0], "verifier")) { need(n == 4); verifier_read(values[2], values[3]);
     } else if (!strcmp(values[0], "job-open")) { need(n == 3 && job_count < 32); wchar_t name[96]; need(swprintf_s(name, 96, L"Local\\NativeProof-%hs", nonce) > 0);
       HANDLE job = OpenJobObjectW(JOB_OBJECT_QUERY | READ_CONTROL, FALSE, name); need(job); jobs[job_count] = job; printf("{\"slot\":%u,\"observation\":", job_count++); job_read(job); printf("}");

@@ -44,6 +44,8 @@ import {
   windowsCustodyBinding,
   fileObservation,
   processObservation,
+  loaderObservation,
+  helperRuntimeObservation,
   jobObservation,
   decodePlan,
   windowsVerificationArguments,
@@ -492,6 +494,26 @@ export function createWindowsCustodyReader(value, options = {}) {
     } finally {
       opening = false;
     }
+  };
+  const inspect = async (index) => {
+    requireWindows(held.has(index));
+    const stockLinks =
+      input.purpose === "experiment" &&
+      plan[index].kind === "image" &&
+      /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(plan[index].path);
+    const actual = fileObservation(await observe("inspect", index), {
+        stockLinks,
+      }),
+      prior = held.get(index);
+    requireWindows(
+      actual.identity === prior.identity &&
+        actual.pathHex === prior.pathHex &&
+        actual.volumeHex === prior.volumeHex &&
+        actual.filesystemHex === prior.filesystemHex &&
+        actual.links === prior.links &&
+        actual.directory === prior.directory,
+    );
+    return actual;
   };
   return {
     get retirementBinding() {
@@ -1614,26 +1636,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       held.set(index, value);
       return structuredClone(value);
     },
-    async inspect(index) {
-      requireWindows(held.has(index));
-      const stockLinks =
-        input.purpose === "experiment" &&
-        plan[index].kind === "image" &&
-        /^[A-Z]:\\Windows\\System32\\[^\\]+\.dll$/iu.test(plan[index].path);
-      const actual = fileObservation(await observe("inspect", index), {
-          stockLinks,
-        }),
-        prior = held.get(index);
-      requireWindows(
-        actual.identity === prior.identity &&
-          actual.pathHex === prior.pathHex &&
-          actual.volumeHex === prior.volumeHex &&
-          actual.filesystemHex === prior.filesystemHex &&
-          actual.links === prior.links &&
-          actual.directory === prior.directory,
-      );
-      return actual;
-    },
+    inspect,
     async read(index, offset, size) {
       requireWindows(
         held.has(index) &&
@@ -1658,7 +1661,7 @@ export function createWindowsCustodyReader(value, options = {}) {
       requireWindows(value.sha256 === plan[index].signatureSha256);
       return { ...value, independent: true };
     },
-    async observeHelper(identity) {
+    async observeHelper(identity, image) {
       guard();
       identity = systemIdentity(identity);
       requireWindows(
@@ -1667,15 +1670,35 @@ export function createWindowsCustodyReader(value, options = {}) {
           !cleanup &&
           sameWindowsIdentity(identity, helper),
       );
-      // The case reader cannot retain itself. Its admission owner already holds
-      // this exact process; only that owner may supply the fresh token read.
+      let pin, before;
+      if (image !== undefined) {
+        requireWindows(
+          input.purpose === "experiment" &&
+            held.has(image) &&
+            plan[image]?.kind === "helper" &&
+            plan[image].path === input.reader.path &&
+            plan[image].sha256 === input.reader.sha256 &&
+            plan[image].signatureSha256 === input.reader.signatureSha256,
+        );
+        before = await inspect(image);
+        pin = {
+          ...input.reader,
+          identity: before.identity,
+          daclSha256: before.daclSha256,
+          links: before.links,
+        };
+      }
+      // Only the admission owner holds this exact process. Every call reads
+      // fresh state there; its process and file slots never enter this reader.
       const proof = await verify("verifyHelper", {
         input,
         helper: identity,
         verifier,
         admissionSha256,
+        ...(pin ? { image: pin } : {}),
       });
       closed(proof, [
+        ...(pin ? ["runtime"] : []),
         "independent",
         "verifier",
         "admissionSha256",
@@ -1691,7 +1714,30 @@ export function createWindowsCustodyReader(value, options = {}) {
           !actual.retired &&
           hash(proof.nativeEventSha256),
       );
-      return { ...actual, independent: true };
+      if (!pin) return { ...actual, independent: true };
+      requireWindows(
+        proof.nativeEventSha256 ===
+          observationDigest({
+            admissionSha256,
+            observation: proof.observation,
+            runtime: proof.runtime,
+          }),
+      );
+      const runtime = helperRuntimeObservation(proof.runtime, helper, pin),
+        loader = runtime.loader;
+      requireWindows(
+        observationDigest(await inspect(image)) === observationDigest(before),
+      );
+      return {
+        ...actual,
+        independent: true,
+        processImage: { ...runtime.processImage, independent: true },
+        runtime: {
+          ...loader,
+          independent: true,
+          nativeSha256: observationDigest(runtime.loader),
+        },
+      };
     },
     async retainProcess(identity) {
       requireWindows(
@@ -1766,62 +1812,11 @@ export function createWindowsCustodyReader(value, options = {}) {
           ["image", "helper"].includes(plan[index].kind),
       );
       const value = await observe("loader", process, index);
-      closed(value, [
-        ...(input.purpose === "experiment" ? ["importScope"] : []),
-        "loaded",
-        "imports",
-        "linkerMajor",
-        "linkerMinor",
-        "timestamp",
-        "complete",
-      ]);
-      requireWindows(
-        value.complete === true &&
-          (input.purpose !== "experiment" ||
-            value.importScope === "private-runtime") &&
-          dense(value.loaded, 128).length > 0 &&
-          integer(value.linkerMajor, 255) &&
-          integer(value.linkerMinor, 255) &&
-          integer(value.timestamp, 0xffffffff),
-      );
-      for (const file of value.loaded) {
-        closed(file, [
-          "pathHex",
-          "identity",
-          "sha256",
-          "signatureSha256",
-          "daclSha256",
-          "links",
-        ]);
-        requireWindows(
-          location(decode(file.pathHex)) &&
-            hash(file.sha256) &&
-            hash(file.signatureSha256) &&
-            hash(file.daclSha256) &&
-            integer(file.links, 128) &&
-            file.links > 0,
-        );
-        normalizeWindowsFileIdentity(file.identity);
-      }
-      for (const entry of dense(value.imports, 2048)) {
-        closed(entry, ["source", "resolved", "delay", "importHex"]);
-        requireWindows(
-          integer(entry.source, value.loaded.length - 1) &&
-            integer(entry.resolved, value.loaded.length - 1) &&
-            typeof entry.delay === "boolean" &&
-            /^(?:[a-f0-9]{2}){1,255}$/u.test(entry.importHex),
-        );
-      }
-      requireWindows(
-        value.loaded.some(
-          (file) =>
-            file.identity === held.get(index).identity &&
-            file.sha256 === plan[index].sha256 &&
-            file.signatureSha256 === plan[index].signatureSha256,
-        ),
-      );
       return {
-        ...structuredClone(value),
+        ...loaderObservation(value, input.purpose, {
+          identity: held.get(index).identity,
+          ...plan[index],
+        }),
         independent: true,
         nativeSha256: observationDigest(value),
       };

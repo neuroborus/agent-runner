@@ -5231,6 +5231,10 @@ test("Windows helper observation requires its original candidate, context, admis
         verifier: structuredClone(k.f.verifier),
         admissionSha256: admission ? observationDigest(admission) : hash,
       };
+    if (admission) {
+      const actual = await k.verifier.verifyHelper(request);
+      assert.deepEqual(actual.observation.identity, k.f.helper);
+    }
     if (damage === "candidate")
       request.input.context.candidateSha = "f".repeat(40);
     if (damage === "context")

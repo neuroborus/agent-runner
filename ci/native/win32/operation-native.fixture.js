@@ -5,6 +5,10 @@ import { win32 as path } from "node:path";
 import { observationDigest, nativePolicyTemplateDigest } from "../index.js";
 import { digest, inspectWindowsPe } from "./protocol.js";
 import { encode, decode } from "./custody-protocol.js";
+import {
+  inspectWindowsExperimentPe,
+  WINDOWS_EXPERIMENT_MARKER,
+} from "./experiment-image.js";
 
 const sha1 = (bytes) => createHash("sha1").update(bytes).digest("hex");
 
@@ -544,9 +548,13 @@ export function installOperationNativeFixture(f, input, specification) {
     }
     if (command === "signature") {
       if (f.operationDamage === "signature") return { sha256: hash };
+      const bytes = f.files.get(entries[Number(args[0])].path);
       return {
-        sha256: inspectWindowsPe(f.files.get(entries[Number(args[0])].path))
-          .signatureSha256,
+        sha256:
+          f.manifest.purpose === "experiment" &&
+          bytes.includes(WINDOWS_EXPERIMENT_MARKER)
+            ? inspectWindowsExperimentPe(bytes).sha256
+            : inspectWindowsPe(bytes).signatureSha256,
       };
     }
     if (command === "read")
