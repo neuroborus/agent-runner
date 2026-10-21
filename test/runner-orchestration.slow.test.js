@@ -32,6 +32,176 @@ import {
   RUNNER_CONFIGURATION,
   SOURCE_SESSION,
 } from "./support/index.js";
+import { outputExhaustion } from "./support/output-exhaustion.js";
+import {
+  APPLICABILITY_BATCH_SCHEMA,
+  REPOSITORY_DISCOVERY_SCHEMA,
+} from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+test("combined bootstrap retains exhausted observations and exact coverage across runner replacement before writable entry", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  await writeFile(
+    join(fixture.taskPath, "plan.md"),
+    Array.from(
+      { length: 5 },
+      (_, index) =>
+        `## Commit ${index + 1}: feat(test): add part ${index + 1}\n\nImplement part ${index + 1}.`,
+    ).join("\n\n"),
+  );
+  const git = createGitService();
+  const baseline = await git.snapshot({ projectPath: fixture.projectPath });
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const discoveryRoles = [];
+  const reviewerUnits = [];
+  let exhausted = false;
+  let writableEntries = 0;
+  let writableRun;
+  let runId;
+  const stop = Object.assign(new Error("Inspected first writable entry."), {
+    code: "ERR_TEST_WRITABLE_ENTRY",
+  });
+  const observation = {
+    attempt: 1,
+    turn: 1,
+    kind: "primary",
+    outcome: "failed",
+    accounting: "incomplete",
+    last: null,
+    cumulative: {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      cacheWriteInputTokens: null,
+      outputTokens: 20,
+      reasoningOutputTokens: 10,
+      totalTokens: 120,
+    },
+    cumulativeScope: "thread",
+    inputIncludesCached: true,
+    outputIncludesReasoning: true,
+    contextCapacity: null,
+    commandCompletions: 2,
+    compactions: 0,
+    factsIncomplete: false,
+  };
+  function adapter(reader) {
+    const delegate = createExecutionAdapter();
+    return {
+      ...delegate,
+      async run(request) {
+        const run = await reader.loadRun(runId);
+        const role = run.activeTurn.role;
+        if (request.schema === REPOSITORY_DISCOVERY_SCHEMA)
+          discoveryRoles.push(role);
+        if (request.access !== "read-only") {
+          writableEntries++;
+          assert.equal(request.access, "workspace-write");
+          writableRun = run;
+          throw stop;
+        }
+        if (
+          role === "reviewer" &&
+          request.schema === APPLICABILITY_BATCH_SCHEMA
+        ) {
+          const unit = JSON.parse(
+            /Applicability request \(data\):\n([^\n]+)/u.exec(
+              request.prompt,
+            )[1],
+          );
+          reviewerUnits.push(unit.unitId);
+          if (!exhausted && unit.steps[0].number === 5) {
+            exhausted = true;
+            request.onObservation(observation);
+            throw outputExhaustion({ effect: "none" });
+          }
+        }
+        return delegate.run(request);
+      },
+    };
+  }
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter(store) },
+    {
+      runStore: store,
+      configuration: {
+        ...RUNNER_CONFIGURATION,
+        pipelines: { "plan-execution": { mode: "combined" } },
+      },
+    },
+  );
+  ({
+    run: { runId },
+  } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  }));
+  const paused = (await runner.resume({ runId, action: null })).run;
+  assert.equal(writableEntries, 0);
+  assert.deepEqual(paused.pause, {
+    reason: "output_exhausted",
+    code: "ERR_OUTPUT_EXHAUSTED",
+    resumeState: "BOOTSTRAP",
+    role: "reviewer",
+    checkpoint: "bootstrap:read-only:bootstrap",
+  });
+  const reader = createRunStore({ stateRoot: fixture.stateRoot });
+  const reloaded = await reader.loadRun(runId);
+  const attempt = reloaded.observations.attempts.at(-1);
+  assert.equal(attempt.role, paused.pause.role);
+  assert.equal(attempt.checkpoint, paused.pause.checkpoint);
+  assert.equal(attempt.status, "failed");
+  assert.equal(attempt.accounting, "incomplete");
+  assert.deepEqual(attempt.observations, [observation]);
+  assert.equal(attempt.measurements.structuredResultBytes, null);
+  assert.deepEqual(reloaded.pipelineState, paused.pipelineState);
+  assert.ok(reloaded.pipelineState.workerValidation);
+  assert.equal(reloaded.pipelineState.reviewerValidation, null);
+  assert.equal(
+    reloaded.pipelineState.bootstrapProgress.reviewer.work.accepted.length,
+    1,
+  );
+  await git.assertUnchanged(baseline);
+  const replacement = runnerFor(
+    fixture,
+    { codex: adapter(reader) },
+    { runStore: reader },
+  );
+  await assert.rejects(replacement.resume({ runId, action: null }), {
+    code: stop.code,
+  });
+  const recovered = await reader.loadRun(runId);
+  assert.equal(writableEntries, 1);
+  assert.equal(writableRun.pipelineState.settings.mode, "combined");
+  assert.deepEqual(
+    writableRun.pipelineState.workerValidation,
+    paused.pipelineState.workerValidation,
+  );
+  for (const owner of ["worker", "reviewer"]) {
+    assert.deepEqual(
+      writableRun.pipelineState[`${owner}Validation`].requiredChecks,
+      [{ id: "C1", command: "git diff --check HEAD", steps: [1, 2, 3, 4, 5] }],
+    );
+  }
+  assert.deepEqual(
+    writableRun.pipelineState.validationSchedule.steps.map(({ step }) => step),
+    [1, 2, 3, 4, 5],
+  );
+  assert.deepEqual(discoveryRoles, ["worker", "reviewer"]);
+  assert.equal(reviewerUnits.length, 3);
+  assert.equal(reviewerUnits[1], reviewerUnits[2]);
+  assert.notEqual(reviewerUnits[0], reviewerUnits[1]);
+  assert.deepEqual(
+    recovered.observations.attempts.find(({ id }) => id === attempt.id),
+    attempt,
+  );
+  assert.deepEqual(recovered.counters, paused.counters);
+  assert.deepEqual(recovered.pipelineState.bootstrapCorrections, []);
+  await git.assertUnchanged(baseline);
+});
 
 async function rewriteRunAsLegacy(directoryPath) {
   const statePath = join(directoryPath, "state.json");

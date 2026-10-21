@@ -170,6 +170,17 @@ and polishing runs retain their saved evidence and completed work on migration.
 Unfinished legacy execution requires fresh read-only scoped discovery before
 work advances; applicability is never inferred from its old union.
 
+Execution discovers each active role's catalog once, then assigns checks through
+contiguous units of at most four canonical steps and 256 KiB of supplied JSON.
+Accepted units survive restart. Recognized output exhaustion can split only the
+unfinished applicability unit, under a separate persisted limit of sixteen
+subdivisions per role. An indivisible unit, exhausted allowance, or exhausted
+discovery pauses at the exact role/checkpoint. Explicit resume retries unfinished
+work without renewing allowances or rediscovering compatible accepted evidence.
+Both independent inventories must be complete before combined execution can
+enter writable work. Repository, input, or infrastructure drift invalidates the
+affected evidence; a native session alone never establishes reusable coverage.
+
 Commands requiring unavailable sandbox capabilities, IPC, sockets, or host
 services may need runner-trusted execution. Root and safe project
 `trustedCommands` catalogs merge in root-then-project order. Identical same-name
@@ -470,6 +481,170 @@ budget or a native model output setting. Run journals may span contiguous
 bounded segments; preserve every segment when inspecting or recovering a run.
 Do not prune history to reclaim capacity. See
 [the storage contract](ARCHITECTURE.md#structured-result-headroom).
+
+### Output-budget verification record
+
+The eight accepted prerequisites supplied 67 passing finalization entries;
+29 have exact normalized runner-monotonic durations. These historical outcomes
+do not approve current content. All entries are **PASS**: numbers are milliseconds,
+`?` means timing unknown, and `—` means no recorded entry. Absence says nothing
+about applicability; never rerun old commits to manufacture timings. Slow rows
+abbreviate `npm run test:slow -- <path>.slow.test.js`: root rows omit `test/`,
+`execution/` means `pipelines/plan-execution/test/`, and `polishing/` means
+`pipelines/polishing/test/`.
+
+| Prerequisite                             | 1          | 2          | 3          | 4          | 5          | 6          | 7          | 8          |
+| ---------------------------------------- | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- | ---------- |
+| Commit                                   | `78b6ffc7` | `8c2f13ef` | `d1991d11` | `a9c6c12a` | `301db035` | `b9f4ebe0` | `d3d958f4` | `c0d6d7b0` |
+| `npm run format`                         | ?          | ?          | ?          | ?          | ?          | ?          | ?          | ?          |
+| `npm run check`                          | 57447      | 58561      | 60220      | 55925      | 58321      | ?          | ?          | ?          |
+| `git diff --check HEAD`                  | ?          | ?          | ?          | ?          | ?          | ?          | ?          | ?          |
+| `runner-operator-stops`                  | 25033      | —          | 31020      | —          | 34321      | ?          | —          | ?          |
+| `state/operator-stops`                   | —          | 4046       | 5160       | —          | 9091       | ?          | —          | —          |
+| `runner-orchestration`                   | —          | 15284      | 15680      | —          | 18646      | ?          | —          | ?          |
+| `integration/mcp-workflows`              | —          | 5966       | 6398       | —          | 8145       | ?          | —          | ?          |
+| `execution/legacy-confirmation-recovery` | —          | 32328      | 33336      | —          | 36443      | ?          | —          | ?          |
+| `execution/legacy-migrations`            | —          | 9551       | —          | —          | 12067      | ?          | —          | ?          |
+| `mcp/control-plane`                      | —          | ?          | 6414       | —          | 7545       | ?          | —          | ?          |
+| `integration/cli-workflows`              | —          | —          | 13642      | —          | 16058      | ?          | —          | ?          |
+| `runner-effects`                         | —          | —          | 39112      | —          | 42876      | ?          | —          | ?          |
+| `polishing/handoff-recovery`             | —          | —          | —          | —          | 8994       | ?          | —          | —          |
+
+Run current fast and aggregate slow checks during dedicated FINALIZE. The
+aggregate covers orchestration, effects, CLI/MCP composition and compatibility,
+and execution migrations; do not duplicate historical individual suites. Record
+fresh outcomes and elapsed times against finalized content in the run's normal
+evidence.
+
+The deterministic process-churn regression protects bounded inspection work and
+elapsed time. A focused pass cannot explain the earlier opaque fast-gate failure
+or dismiss the queued process-custody redesign. Earlier CLI/MCP blockers came
+from legacy bootstrap payloads in the shared fake backend; the accepted repair
+remains covered. Preserve assertions and investigate fresh failures directly.
+
+Five earlier gpt-6.1-sol/xhigh native cases establish old-schema READY compatibility
+and one-step independent discovery, without representative long-plan acceptance.
+The four discovery cases measured these bytes separately:
+
+| Case     | Role     | Prompt and reconstruction, each | Schema | Output | Structured JSON |
+| -------- | -------- | ------------------------------- | ------ | ------ | --------------- |
+| Observed | Worker   | 18340                           | 13496  | 12007  | 9894            |
+| Observed | Reviewer | 18391                           | 13496  | 12026  | 9913            |
+| Envelope | Worker   | 17285                           | 13496  | 12789  | 10658           |
+| Envelope | Reviewer | 17336                           | 13496  | 11769  | 9654            |
+
+Thread-cumulative token snapshots, completed commands, and compactions:
+
+| Case     | Role     | Input   | Cached input | Output | Reasoning output | Commands | Compactions |
+| -------- | -------- | ------- | ------------ | ------ | ---------------- | -------- | ----------- |
+| Observed | Worker   | 1012648 | 886400       | 13017  | 5606             | 30       | 0           |
+| Observed | Reviewer | 1628878 | 1486848      | 12248  | 4459             | 61       | 0           |
+| Envelope | Worker   | 1782008 | 1632512      | 16601  | 7597             | 46       | 0           |
+| Envelope | Reviewer | 1850213 | 1686272      | 15285  | 6680             | 45       | 0           |
+
+All four accounting records are incomplete. Input includes cached input; output
+includes reasoning. Never add those subsets again, sum cumulative snapshots, or
+treat thread totals as live context occupancy. The compatibility case reported
+12948 input and 1243 output tokens (43 reasoning), no commands or compactions,
+and incomplete accounting. Prompt/reconstruction sizes were unrecorded; schema
+was 13496 bytes, fixture/output 2593 bytes, and elapsed time 20221 ms. All five
+reported 475000-token context capacity. Referenced-file counts/bytes, earlier
+output-exhausted usage, and effective output limits remain unknown. Different
+task contexts establish no causal speedup.
+
+Nested forty-step attempts on 2026-10-21 used production bounded bootstrap,
+separate Worker and Reviewer instances, gpt-6.1-sol/xhigh, combined mode, and
+bounds of twelve requests, 120 seconds per request, and 900 seconds per role.
+Both stopped before model execution with
+`ERR_CODEX_PROCESS_EXITED`; a model-free public App Server initialization probe
+confirmed a read-only-filesystem startup error and exit code 1. Prepared request
+prompt/reconstruction/schema sizes were 17936/17936/12844 bytes for Worker and
+17986/17986/12844 for Reviewer. Startup attempts took 442 ms and 415 ms,
+respectively: startup timings, not bootstrap performance. Native usage, commands,
+compactions, results, and READY observations were unavailable; never substitute
+zeros or count these attempts as acceptance.
+
+An earlier operator-supervised host diagnostic retained the adapter read-only
+sandbox, combined mode, gpt-6.1-sol/xhigh, and forty-step plan. Bounds were sixteen
+requests per role, 300000 ms per request, and 1800000 ms per role. Worker discovery
+was interrupted after 300059 ms (role: 300111 ms), with 60 commands; Reviewer after
+300052 ms (role: 300106 ms), with 55 commands. Neither reached READY.
+Prompt and reconstruction each measured 40251 bytes for Worker and 40301 for
+Reviewer; schema was 12844 bytes, results unknown. Final thread-cumulative
+input/cached/output/reasoning snapshots were 1601428/1426944/9694/5927 and
+1571948/1423104/12809/8902, respectively. Accounting was incomplete, context
+capacity 475000, compactions zero, and both roles reported unchanged repository
+reconciliation. These are timeouts, not output exhaustion, startup failures, or
+completed bootstrap measurements.
+
+The admitted operator-supervised report on 2026-10-21 completed that forty-step
+production bootstrap through `runBoundedBootstrap` from accepted8
+(`c0d6d7b04b5f005c39d1b3b665dd00e287287025`), the measured runtime. This commit
+adds regressions and documentation. Fresh independent Worker and Reviewer roles
+retained gpt-6.1-sol/xhigh, combined mode, and the public adapter's unchanged
+read-only sandbox, without configuration or network expansion. Bounds were
+sixteen requests per role, 900000 ms per request, and 3600000 ms per role. Each
+completed discovery/catalog validation, distinct semantic position confirmation,
+ten contiguous four-step applicability units, production normalization, and full
+READY assembly:
+
+| Role     | Covered steps | Requests | Accepted units | Required checks | Infrastructure paths | Corrections | Role elapsed ms |
+| -------- | ------------- | -------- | -------------- | --------------- | -------------------- | ----------- | --------------- |
+| Worker   | 40            | 12       | 10             | 14              | 18                   | 0           | 1228019         |
+| Reviewer | 40            | 12       | 10             | 13              | 58                   | 0           | 1468496         |
+
+Prompt and reconstruction sizes are equal per request and separate from schema
+and returned bytes. Applicability ranges are per-request minima–maxima across
+ten requests, not totals.
+
+| Role     | Request kind          | Prompt and reconstruction, each | Schema bytes | Output bytes | Structured JSON bytes | Request elapsed ms |
+| -------- | --------------------- | ------------------------------- | ------------ | ------------ | --------------------- | ------------------ |
+| Worker   | Discovery             | 40251                           | 12844        | 9203         | 8449                  | 382372             |
+| Reviewer | Discovery             | 40301                           | 12844        | 13950        | 12166                 | 531325             |
+| Worker   | Position confirmation | 9410                            | 517          | 451          | 451                   | 14826              |
+| Reviewer | Position confirmation | 13127                           | 517          | 558          | 558                   | 14145              |
+| Worker   | Applicability         | 14102–16522                     | 4788         | 449–609      | 449–609               | 53261–110207       |
+| Reviewer | Applicability         | 17821–20241                     | 4788         | 445–596      | 445–596               | 54634–158583       |
+
+Final observed thread-cumulative token snapshots and per-request command counts
+remain separate for the two roles:
+
+| Role     | Input   | Cached input | Output | Reasoning output | Discovery commands | Later commands/request | Compactions/request |
+| -------- | ------- | ------------ | ------ | ---------------- | ------------------ | ---------------------- | ------------------- |
+| Worker   | 3331432 | 2755712      | 32878  | 26106            | 26                 | 0                      | 0                   |
+| Reviewer | 3799238 | 3249024      | 41409  | 32112            | 35                 | 0                      | 0                   |
+
+Every request reports incomplete accounting and 475000-token context capacity.
+Cached input and reasoning output are included subsets; never add them again or
+sum cumulative snapshots. Thread totals are not live context occupancy.
+Referenced-file counts/bytes, earlier output-exhausted usage, and effective native
+output ceilings remain unknown. Prompt/reconstruction/schema byte counts include
+directly supplied text and JSON, excluding separately read file contents, native
+wrappers, and prior session context. Reconstruction size does not prove it was
+sent. Workload, discovery, and bound differences establish no causal speedup.
+
+Every completed request and both roles reported unchanged repository
+reconciliation. Diagnostic full READY acceptance supplies neither current execution
+approval nor current role-inventory reconciliation. Fresh convergence, independent
+review, finalization, terminal confirmation, and runner-authorized commit remain
+required. Keep native tests opt-in; never repeat nested probes or broaden sandbox
+or network access. Retain only admitted facts and bounded measurements, excluding
+prompts, transcripts, tool output, reasoning, native identifiers, credentials, and
+arbitrary provider messages. Small schema or CAPACITY_EXHAUSTED results alone
+cannot establish representative acceptance.
+
+Codex 0.163.0's generated `turn/start` contract had no numeric `max_output_tokens`
+field; no output control was added. The documented 128000-token API ceiling is
+separate from an effective Codex turn limit; the incomplete reason proves no
+numeric ceiling. The 2 MiB allowance is structured-result byte headroom. Durable
+recovery and bounded requests are verified independently of unmeasured native
+budget improvements.
+
+Later deferred launch requires the verified corrected implementation in a fresh
+runtime and new combined run; frozen runtimes do not acquire target-checkout
+repairs. Preserve histories, frozen evidence, other checkouts, configuration, and
+skills. Deferred features remain queued; native acceptance proves neither the
+original native-platform proof of concept nor those later implementations.
 
 ## 5. Recover a pause without taking over the work
 

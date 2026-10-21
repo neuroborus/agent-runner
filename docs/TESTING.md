@@ -89,6 +89,12 @@ migration, and confirmation provenance after rediscovery. Pure
 rejection. Durable runner and legacy-migration slow suites own actual journal,
 lease, and consumed-effect composition; changing bootstrap activation or its
 persisted migration requires those affected suites.
+The runner orchestration slow suite additionally proves that output-exhausted
+Reviewer observations and the exact unfinished applicability unit survive runner
+replacement, and that both role inventories finish before combined writable
+entry. The focused state observation suite proves an accepted 2 MiB result
+survives interrupted write-ahead publication without truncation. These protect
+cross-capability composition rather than repeating the pure unit contracts.
 
 Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific

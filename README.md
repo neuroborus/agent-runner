@@ -842,6 +842,31 @@ alone establishes neither a numeric output ceiling nor context utilization.
 See the [provider model](docs/product/PROVIDER_MODEL.md#normalized-failures-and-recovery)
 for the recognition and safety boundaries.
 
+Execution bootstrap separates repository discovery from bounded contiguous
+applicability units. Restart preserves accepted work; only unfinished units may
+subdivide on recognized output exhaustion, without renewing correction budgets.
+Combined execution requires complete independent Worker and Reviewer inventories
+before writable work. Keep every journal segment and use the offered resume
+action; never edit durable evidence or repeat a consumed commit effect.
+
+The [operator verification record](docs/OPERATOR_GUIDE.md#output-budget-verification-record)
+separates historical per-commit checks, supplied bytes, public usage, commands,
+compactions, and missing observations. The five earlier native cases prove
+compatibility and one-step discovery. A subsequent operator-supervised diagnostic
+using accepted8 (`c0d6d7b0`), fresh independent Worker and Reviewer roles,
+gpt-6.1-sol/xhigh, and combined mode completed production discovery, semantic
+position confirmation, all ten applicability units, normalization, and full READY
+assembly for each role across forty canonical steps. Earlier nested App Server
+startup failures remain environment-specific evidence; earlier host discovery
+timeouts remain incomplete attempts. This diagnostic supplies no current
+execution approval, causal speedup, effective native output ceiling, or
+byte-to-token conversion.
+Codex 0.163.0's generated `turn/start` contract exposes no numeric
+`max_output_tokens` control; two MiB is serialized-result headroom.
+Native model tests remain opt-in. The later deferred launch requires the verified
+corrected implementation loaded in a fresh runtime and a new combined run;
+existing frozen runtimes and old approvals cannot supply that acceptance.
+
 An action-free resume also recovers a nonterminal, nonpaused persisted active
 turn after its execution owner is lost. Recovery retains the active marker
 through input and repository reconciliation, replaces it when the complete

@@ -18,6 +18,11 @@ import {
   recordObservations,
 } from "../../src/state/observations.js";
 import { runObservedAttempt } from "../../src/runner/observations.js";
+import { normalizeFinalizationResult } from "../../pipelines/plan-execution/src/workflow-contract.js";
+import {
+  largeFinalizationResult,
+  STRUCTURED_RESULT_BYTES,
+} from "../support/index.js";
 
 const selected = { role: "worker", checkpoint: "implement:workspace-write:1" };
 const observation = {
@@ -47,6 +52,57 @@ const identity = (state) => {
   const { id, role, checkpoint } = state.observations.attempts.at(-1);
   return { id, role, checkpoint };
 };
+
+test("an accepted two-mebibyte result survives interrupted durable publication without truncation", async (t) => {
+  let armed = false;
+  const f = await fixture(t, {
+    onTransitionBoundary: async (point) => {
+      if (armed && point === "event-appended") {
+        armed = false;
+        throw new Error("Interrupted result publication.");
+      }
+    },
+  });
+  const result = largeFinalizationResult("é");
+  assert.equal(
+    Buffer.byteLength(JSON.stringify(result)),
+    STRUCTURED_RESULT_BYTES,
+  );
+  const accepted = await runObservedAttempt({
+    runStore: f.store,
+    lease: f.lease,
+    ...selected,
+    request: { prompt: "Inspect synthetic validation evidence." },
+    operation: async () => ({ structured: result }),
+  });
+  const finalization = normalizeFinalizationResult(accepted.structured);
+  armed = true;
+  await assert.rejects(
+    f.store.transitionRun(f.lease, {
+      pipelineState: {
+        workflowState: "CONFIRM",
+        finalization,
+      },
+    }),
+    /Interrupted result publication/u,
+  );
+  const reader = createRunStore({ stateRoot: f.stateRoot });
+  const reloaded = await reader.loadRun(f.state.runId);
+  assert.deepEqual(reloaded.pipelineState.finalization, finalization);
+  assert.equal(reloaded.observations.attempts.at(-1).status, "completed");
+  assert.equal(
+    reloaded.observations.attempts.at(-1).measurements.structuredResultBytes,
+    STRUCTURED_RESULT_BYTES,
+  );
+  const recovered = await f.store.recoverRun(f.lease);
+  const history = await reader.loadRunHistory(f.state.runId);
+  assert.deepEqual(history.events.at(-1).state, recovered);
+  assert.deepEqual(recovered.pipelineState.finalization, finalization);
+  assert.deepEqual(
+    JSON.parse(await readFile(join(f.directoryPath, "state.json"), "utf8")),
+    recovered,
+  );
+});
 
 test("measured attempts survive durable failure and expose only allowlisted evidence and activity", async (t) => {
   const f = await fixture(t);
