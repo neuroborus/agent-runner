@@ -2830,17 +2830,43 @@ policy permits fixture writes but denies network. A separate outside-write contr
 must actually succeed under it; an enclosing denial cannot prove Codex's stock
 command sandbox.
 
-The generated `admission.sb` grants only
-`(allow sysctl-read (sysctl-name "hw.pagesize"))` for cold executable page-size
-reads. Default denial and every existing process/file restriction remain; no
-general sysctl grant or resource-limit adjustment is introduced.
+The generated `admission.sb` grants only the exact `hw.pagesize` and
+`hw.pagesize_compat` sysctl reads for cold executable page-size acquisition.
+Default denial and every existing process/file restriction remain; no general
+sysctl grant or resource-limit adjustment is introduced.
 Apple Libc's [getpagesize](https://github.com/apple-oss-distributions/Libc/blob/main/gen/FreeBSD/getpagesize.c)
 first reads `CTL_HW/HW_PAGESIZE` and returns -1 on refusal; the ordinary
-`sysconf(_SC_PAGESIZE)` branch calls it. XNU names this selector `hw.pagesize`.
-This establishes the former policy omission. The observed Rust guard-allocation
-`EINVAL` before `--version` did not record the hosted sysctl result or mapping
-inputs, so neither the allowance nor portable coverage establishes crash causality
-or native acceptance. Existing hosted cold installed-Codex version/schema probes,
+`sysconf(_SC_PAGESIZE)` branch calls it. XNU's
+[OID registration](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_mib.c)
+distinguishes the numeric `HW_PAGESIZE` int-sized `pagesize_compat` node from the
+named, quad-sized `pagesize` node. Its sysctl owner passes the resolved name to
+the MAC check. Permitting only the latter misses Libc's numeric consumer; both
+exact names also appear in Codex's public Seatbelt base policy.
+
+The recorded Rust panic is the guard `mmap` refusal, before the later `mprotect`:
+the source maps a page at the aligned stack start with read/write protection,
+`MAP_PRIVATE | MAP_ANON | MAP_FIXED`, descriptor -1 and offset 0. The original
+record supplies none of the cold process's page-size result, stack address/extent
+or exact mapping inputs/result beyond the panic's `EINVAL`. These remain unknown;
+the source-derived permission repair does not establish native crash causality.
+
+V/G now expose the already suspended, image/policy-checked cold child through the
+existing broker reader before its fixed T acknowledgement. The native owner
+keeps draining audit capture while waiting, rejects controller loss, and rechecks
+that same image, birth and applied sandbox before resume. Expiration and closed
+admission are checked again after those observations. The existing
+startup trace owner records bounded numeric `sysconf`, libpthread stack-address
+and stack-size returns, and the separate `mmap` and `mprotect` inputs/returns for
+that PID. Arguments retain unsigned 64-bit integer bits (including the descriptor
+and offset), returns retain signed values, and unavailable libc errno is null.
+The 64-call/64-KiB bounds, thread/entry/return pairing, original observer custody
+and independent retirement remain enforced. Missing values are null, never
+filled from the warmed launcher. Refused or incomplete tracing supplies no runtime
+values and requires no host-policy change or alternate trace program. Reports
+join operation, original cold-child identity, image hash, policy-file hash
+and fixed trace intent in the existing command evidence/diagnostic owners.
+New numeric observations are future hosted evidence, not already observed facts.
+Existing hosted cold installed-Codex version/schema probes,
 model-free command execution, positive controls and independent cleanup remain
 the native verification path; a warm helper's cached page size cannot replace it.
 

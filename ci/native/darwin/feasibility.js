@@ -857,7 +857,7 @@ async function native(root, operation, ...args) {
   );
   return JSON.parse(stdout);
 }
-async function startupObserver(
+export async function startupObserver(
   root,
   operation,
   value,

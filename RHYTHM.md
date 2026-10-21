@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Admit the numeric cold page-size consumer
+
+Darwin command admission permits the exact `hw.pagesize_compat` OID used by
+Libc's numeric `HW_PAGESIZE` query alongside the named `hw.pagesize` OID.
+The existing suspended cold child and startup trace owners now retain bounded
+numeric page-size, stack and mapping observations without borrowing warm-helper
+values. Missing native values stay unknown; portable coverage and the
+source-derived policy repair establish no hosted crash causality or acceptance.
+Actual cold version/schema execution, confinement and independent retirement
+remain required.
+
 ## 2026-10-21 — Separate task authorization services from task control
 
 Ordinary Darwin feasibility faults admit the inherited task-access authorization

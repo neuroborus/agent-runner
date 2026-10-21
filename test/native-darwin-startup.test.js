@@ -8,9 +8,11 @@ import test from "node:test";
 import { Script } from "node:vm";
 import {
   DARWIN_STARTUP_TRACE_INTENT,
+  DARWIN_COLD_STARTUP_TRACE_INTENT,
   openDarwinStartupTrace,
 } from "../ci/native/darwin/startup-trace.js";
 import { darwinSignatureDiagnostics } from "../ci/native/darwin/signature-logs.js";
+import { startupObserver } from "../ci/native/darwin/feasibility.js";
 import { darwinCustodyChannel } from "../ci/native/darwin/channel.js";
 import {
   createNativeDiagnosticWriter,
@@ -2660,29 +2662,12 @@ test("Darwin final statistics validate exact counts without hiding malformed eve
 });
 
 test("startup observer authority admits only fixed sudo/helper selectors and normalized arguments", async () => {
-  const source = await readFile(
-    new URL("../ci/native/darwin/feasibility.js", import.meta.url),
-    "utf8",
-  );
   const bytes = Buffer.from("candidate helper"),
     digest = (value) => createHash("sha256").update(value).digest("hex"),
     helperSha256 = digest(bytes),
     calls = [],
     reads = [];
-  const invoke = new Script(
-    source.slice(
-      source.indexOf("async function command("),
-      source.indexOf("async function persist("),
-    ) + "; startupObserver",
-  ).runInNewContext({
-    path,
-    digest,
-    need: (value) => assert.ok(value),
-    darwinFeasibilityIdentityArguments,
-    setTimeout,
-    clearTimeout,
-    nativeException: () => {},
-  });
+  const invoke = startupObserver;
   const options = {
     read: async (file) => {
       reads.push(file);
@@ -2800,6 +2785,7 @@ function traceFixture({
   acknowledge = true,
   beforeRead,
   observeState,
+  coldCommand = false,
 } = {}) {
   const binding = { identity: { ...identity } },
     child = new EventEmitter(),
@@ -2816,6 +2802,7 @@ function traceFixture({
     {
       isMatchingCI: true,
       parentPid: 999,
+      coldCommand,
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
@@ -2831,7 +2818,10 @@ function traceFixture({
         ]);
         assert.equal(
           createHash("sha256").update(program).digest("hex"),
-          DARWIN_STARTUP_TRACE_INTENT.programSha256,
+          (coldCommand
+            ? DARWIN_COLD_STARTUP_TRACE_INTENT
+            : DARWIN_STARTUP_TRACE_INTENT
+          ).programSha256,
         );
         assert.match(program, /^#pragma D option strsize=129$/mu);
         assert.equal(
@@ -2840,14 +2830,28 @@ function traceFixture({
         );
         assert.ok(program.includes("%S\\n"));
         assert.ok(program.includes('probefunc == "abort_with_payload" ? arg4'));
-        assert.doesNotMatch(program, /\barg[235]\b/u);
+        if (!coldCommand) assert.doesNotMatch(program, /\barg[235]\b/u);
+        else {
+          for (const name of [
+            "sysconf",
+            "pthread_get_stackaddr_np",
+            "pthread_get_stacksize_np",
+          ])
+            assert.ok(program.includes(`${name}:return /pid == $1/`));
+          assert.ok(program.includes('probefunc == "mmap"'));
+          assert.ok(program.includes('probefunc == "mprotect"'));
+          assert.ok(program.includes("(uint64_t)arg5"));
+        }
         for (const line of program
           .split("\n")
           .filter((line) => line.includes(":::")))
           assert.ok(
             line.startsWith("dtrace:::BEGIN") || line.includes("/pid == $1"),
           );
-        assert.equal(program.match(/\/pid == \$1\//gu)?.length, 4);
+        assert.equal(
+          program.match(/\/pid == \$1\//gu)?.length,
+          coldCommand ? 10 : 4,
+        );
         for (const probe of [
           "syscall:::entry",
           "syscall:::return",
@@ -2939,6 +2943,96 @@ function traceFixture({
     },
   };
 }
+
+test("cold startup numeric observations retain exact guard mapping inputs separately from protection", async () => {
+  const f = traceFixture({ coldCommand: true });
+  await f.trace.arm();
+  f.child.stdout.write(
+    [
+      "numeric-entry 42 101 sysconf 7 29",
+      "numeric-return 42 102 sysconf 7 -1 4096",
+      "numeric-entry 42 103 pthread_get_stackaddr_np 7 9000",
+      "numeric-return 42 104 pthread_get_stackaddr_np 7 -1 140734799806464",
+      "numeric-entry 42 105 pthread_get_stacksize_np 7 9000",
+      "numeric-return 42 106 pthread_get_stacksize_np 7 -1 8388608",
+      "entry 42 107 mmap",
+      "numeric-entry 42 107 mmap 7 140734791417856 4096 3 4114 18446744073709551615 0",
+      "return 42 108 mmap 22 -1",
+      "numeric-return 42 108 mmap 7 22 -1",
+      "entry 42 109 mprotect",
+      "numeric-entry 42 109 mprotect 8 8192 4096 0",
+      "return 42 110 mprotect 0 0",
+      "numeric-return 42 110 mprotect 8 0 0",
+      "exit 42 111",
+      "",
+    ].join("\n"),
+  );
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "observed");
+  assert.equal(result.numericStatus, "complete");
+  assert.equal(
+    result.programSha256,
+    DARWIN_COLD_STARTUP_TRACE_INTENT.programSha256,
+  );
+  assert.equal(result.cleanup, "RETIRED");
+  assert.deepEqual(result.runtime.sysconf[0].arguments, { selector: "29" });
+  assert.equal(result.runtime.sysconf[0].result.value, "4096");
+  assert.equal(result.runtime.sysconf[0].result.errno, null);
+  assert.equal(
+    result.runtime.pthread_get_stackaddr_np[0].result.value,
+    "140734799806464",
+  );
+  assert.equal(
+    result.runtime.pthread_get_stacksize_np[0].result.value,
+    "8388608",
+  );
+  assert.deepEqual(result.runtime.mmap[0], {
+    operation: "mmap",
+    thread: "7",
+    timestamp: "107",
+    arguments: {
+      address: "140734791417856",
+      length: "4096",
+      protection: "3",
+      flags: "4114",
+      descriptorBits: "18446744073709551615",
+      offsetBits: "0",
+    },
+    result: { timestamp: "108", errno: 22, value: "-1" },
+  });
+  assert.equal(result.runtime.mprotect[0].thread, "8");
+  assert.equal(result.runtime.mprotect[0].result.value, "0");
+});
+
+test("cold startup numeric gaps stay unknown and malformed or foreign observations are rejected", async () => {
+  for (const suffix of [
+    null,
+    "numeric-return 42 102 sysconf 8 -1 4096",
+    "numeric-return 43 102 sysconf 7 -1 4096",
+    "numeric-return 42 102 mmap 7 0 4096",
+    "numeric-entry 42 102 mmap 8 0 18446744073709551616 3 4114 0 0",
+  ]) {
+    const f = traceFixture({ coldCommand: true });
+    await f.trace.arm();
+    f.child.stdout.write(
+      "numeric-entry 42 101 sysconf 7 29\n" + (suffix ? suffix + "\n" : ""),
+    );
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.cleanup, "RETIRED");
+    if (suffix) {
+      assert.equal(result.status, "partial");
+      assert.ok(Object.values(result.runtime).every((value) => value === null));
+    } else {
+      assert.equal(result.numericStatus, "missing");
+      assert.equal(result.runtime.sysconf[0].result, null);
+      assert.equal(result.runtime.pthread_get_stackaddr_np, null);
+      assert.equal(result.runtime.pthread_get_stacksize_np, null);
+      assert.equal(result.runtime.mmap, null);
+    }
+  }
+});
 
 test("startup argument diagnostics join only the same thread and retain escaped bounded values without unsigned loss", async () => {
   const f = traceFixture();

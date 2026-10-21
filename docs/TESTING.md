@@ -670,13 +670,22 @@ native signal delivery or safe inherited-authority correction.
 The same fast command suite projects the production `admission.sb` write into an
 in-memory file and executes the native cold-launch policy-consumer body with
 injected effects. It captures the bytes selected by the broker and requires the
-exact `hw.pagesize` read grant plus the complete retained policy, including default
-denial, bounded fixture writes and absence of network or broader sysctl grants.
-The regression reproduces the missing grant without compiling or running Darwin
-binaries. It proves the source-policy repair, not the unobserved hosted sysctl
-result, Rust crash causality or native acceptance. Existing hosted version/schema
-probes, model-free commands, positive controls and independent cleanup remain
-required; no slow-tier assignment changes.
+exact `hw.pagesize` and numeric-consumer `hw.pagesize_compat` read grants plus the
+complete retained policy, including default denial, bounded fixture writes and
+absence of network or broader sysctl grants. Actual-body release tests require
+the cold-child trace acknowledgement followed by fresh image/policy checks;
+the existing injected broker fixture retains held-session, image and credential
+joins before acknowledgement. Capture continues while arming; controller loss,
+capture refusal, EOF, bad acknowledgement, expiration or closed admission after
+the image/policy recheck, and changed authority cannot resume the child.
+Startup trace fixtures in
+`test/native-darwin-startup.test.js` exercise bounded numeric page-size and
+libpthread stack observations, all six `mmap` inputs and its result separately
+from `mprotect`, thread pairing, unknown missing values, malformed bounds and
+foreign PID rejection. These regressions compile/run no Darwin binaries and
+establish no hosted values, Rust crash causality or installed-build equivalence.
+Existing hosted cold version/schema probes, model-free commands, positive
+controls and independent cleanup remain required; no slow-tier assignment changes.
 Fast source and injected-stream regressions in `test/native-feasibility.test.js`
 protect parked Git admission through the outside observers: original parent and
 child birth/credential joins, immutable helper images, applied policy and policy

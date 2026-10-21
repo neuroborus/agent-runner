@@ -56,6 +56,49 @@ export const DARWIN_STARTUP_TRACE_INTENT = Object.freeze({
   tool: "/usr/sbin/dtrace",
   programSha256: digest(PROGRAM),
 });
+// Cold Rust startup obtains the main-thread stack bounds through libpthread,
+// then maps its guard with mmap before mprotect. Preserve raw integer bits and
+// the actual return; a trace of the policy launcher cannot supply these values.
+const NUMERIC_ARGUMENTS = Object.freeze({
+  sysconf: ["selector"],
+  pthread_get_stackaddr_np: ["threadHandle"],
+  pthread_get_stacksize_np: ["threadHandle"],
+  mmap: [
+    "address",
+    "length",
+    "protection",
+    "flags",
+    "descriptorBits",
+    "offsetBits",
+  ],
+  mprotect: ["address", "length", "protection"],
+});
+const COLD_PROGRAM =
+  PROGRAM +
+  Object.entries(NUMERIC_ARGUMENTS)
+    .map(([name, args]) => {
+      const syscall = name === "mmap" || name === "mprotect",
+        provider = syscall
+          ? "syscall::"
+          : `pid$1:${name === "sysconf" ? "libsystem_c.dylib" : "libsystem_pthread.dylib"}:`,
+        probe = syscall ? `${provider}:` : `${provider}${name}:`,
+        predicate = `pid == $1${syscall ? ` && probefunc == "${name}"` : ""}`;
+      return `${probe}entry /${predicate}/ { printf("numeric-entry %d %llu ${name} %llu${args.map(() => " %llu").join("")}\\n", pid, timestamp, (uint64_t)tid, ${args.map((_, i) => `(uint64_t)arg${i}`).join(", ")}); }
+${probe}return /${predicate}/ { printf("numeric-return %d %llu ${name} %llu %d %lld\\n", pid, timestamp, (uint64_t)tid, ${syscall ? "errno, (int64_t)arg0" : "-1, (int64_t)arg1"}); }
+`;
+    })
+    .join("");
+export const DARWIN_COLD_STARTUP_TRACE_INTENT = Object.freeze({
+  tool: "/usr/sbin/dtrace",
+  programSha256: digest(COLD_PROGRAM),
+});
+const numericRuntime = (records = []) =>
+  Object.fromEntries(
+    Object.keys(NUMERIC_ARGUMENTS).map((name) => {
+      const calls = records.filter((record) => record.operation === name);
+      return [name, calls.length ? calls : null];
+    }),
+  );
 const matchingCI = () =>
   process.platform === "darwin" &&
   process.arch === "x64" &&
@@ -102,6 +145,8 @@ const TRACE_FIELDS = Object.freeze({
   exit: 3,
   "argument-entry": 9,
   "argument-return": 7,
+  "numeric-entry": 0,
+  "numeric-return": 7,
 });
 const unsigned = (value, maximum) =>
   /^(?:0|[1-9][0-9]{0,19})$/u.test(value) && BigInt(value) <= maximum;
@@ -111,9 +156,12 @@ function traceRow(line) {
   need(
     line.length <= 1024 &&
       Object.hasOwn(TRACE_FIELDS, kind) &&
-      (kind === "argument-entry"
-        ? fields.length >= 9
-        : fields.length === TRACE_FIELDS[kind]),
+      (kind === "numeric-entry"
+        ? Object.hasOwn(NUMERIC_ARGUMENTS, name) &&
+          fields.length === 5 + NUMERIC_ARGUMENTS[name].length
+        : kind === "argument-entry"
+          ? fields.length >= 9
+          : fields.length === TRACE_FIELDS[kind]),
   );
   need(
     /^[1-9][0-9]{0,9}$/u.test(pid) &&
@@ -123,25 +171,42 @@ function traceRow(line) {
   const timestamp = BigInt(time);
   need(timestamp <= 0xffffffffffffffffn);
   if (name !== undefined) need(/^[a-zA-Z0-9_]{1,64}$/u.test(name));
-  const diagnostic = kind.startsWith("argument-"),
+  const numeric = kind.startsWith("numeric-"),
+    diagnostic = numeric || kind.startsWith("argument-"),
     thread = diagnostic ? fields[4] : undefined;
   if (diagnostic)
     need(
-      ARGUMENT_FUNCTIONS.includes(name) &&
+      (numeric
+        ? Object.hasOwn(NUMERIC_ARGUMENTS, name)
+        : ARGUMENT_FUNCTIONS.includes(name)) &&
         unsigned(thread, 0xffffffffffffffffn) &&
         thread !== "0",
     );
   const error = fields[kind === "return" ? 4 : 5],
     value = fields[kind === "return" ? 5 : 6];
-  if (kind === "return" || kind === "argument-return")
+  if (
+    kind === "return" ||
+    kind === "argument-return" ||
+    kind === "numeric-return"
+  )
     need(
-      /^(0|[1-9][0-9]{0,4})$/u.test(error) &&
+      (kind === "numeric-return" && !["mmap", "mprotect"].includes(name)
+        ? error === "-1"
+        : /^(0|[1-9][0-9]{0,4})$/u.test(error)) &&
         Number(error) <= 65535 &&
         /^(?:0|-?[1-9][0-9]{0,18})$/u.test(value) &&
         BigInt(value) >= -0x8000000000000000n &&
         BigInt(value) <= 0x7fffffffffffffffn,
     );
   let argument;
+  if (kind === "numeric-entry") {
+    need(
+      fields.slice(5).every((value) => unsigned(value, 0xffffffffffffffffn)),
+    );
+    argument = Object.fromEntries(
+      NUMERIC_ARGUMENTS[name].map((key, i) => [key, fields[5 + i]]),
+    );
+  }
   if (kind === "argument-entry") {
     const [, , , , , state, first, second] = fields;
     let text = fields.slice(8).join(" ");
@@ -250,8 +315,10 @@ export function openDarwinStartupTrace(
     observeObserver,
     retireObserver,
     parentPid = process.pid,
+    coldCommand = false,
   } = {},
 ) {
+  need(typeof coldCommand === "boolean");
   let boundPid,
     child,
     closed,
@@ -280,6 +347,9 @@ export function openDarwinStartupTrace(
     argumentsSeen = [],
     pendingArguments = new Map(),
     expectedArguments = new Map();
+  const numericSeen = [],
+    pendingNumeric = new Map(),
+    expectedNumeric = new Map();
   const withinArm = () =>
     arming && !failure && !exit && Date.now() < armDeadline;
   let acknowledge, refuse;
@@ -364,6 +434,7 @@ export function openDarwinStartupTrace(
           continue;
         }
         row = traceRow(line);
+        need(coldCommand || !row.kind.startsWith("numeric-"));
         need(
           row.kind === "armed"
             ? armTime === undefined && withinArm()
@@ -377,6 +448,34 @@ export function openDarwinStartupTrace(
             row.name,
             (expectedArguments.get(row.name) ?? 0) + 1,
           );
+        if (row.kind === "entry" && ["mmap", "mprotect"].includes(row.name))
+          expectedNumeric.set(
+            row.name,
+            (expectedNumeric.get(row.name) ?? 0) + 1,
+          );
+        if (row.kind === "numeric-entry") {
+          const key = `${row.thread}:${row.name}`;
+          need(!pendingNumeric.has(key) && numericSeen.length < 64);
+          const record = {
+            operation: row.name,
+            thread: row.thread,
+            timestamp: String(row.timestamp),
+            arguments: row.argument,
+            result: null,
+          };
+          numericSeen.push(record);
+          pendingNumeric.set(key, record);
+        } else if (row.kind === "numeric-return") {
+          const key = `${row.thread}:${row.name}`,
+            record = pendingNumeric.get(key);
+          need(record);
+          record.result = {
+            timestamp: String(row.timestamp),
+            errno: row.error === "-1" ? null : Number(row.error),
+            value: row.value,
+          };
+          pendingNumeric.delete(key);
+        }
         if (row.kind === "argument-entry") {
           need(!pendingArguments.has(row.thread) && argumentsSeen.length < 64);
           const observation = {
@@ -454,7 +553,7 @@ export function openDarwinStartupTrace(
             "/usr/sbin/dtrace",
             "-q",
             "-n",
-            PROGRAM,
+            coldCommand ? COLD_PROGRAM : PROGRAM,
             String(boundPid),
           ],
           {
@@ -563,7 +662,18 @@ export function openDarwinStartupTrace(
     },
     finish() {
       return (finished ??= (async () => {
-        if (!child) return { status, cleanup: "NOT_RUN" };
+        if (!child)
+          return {
+            status,
+            cleanup: "NOT_RUN",
+            ...(coldCommand
+              ? {
+                  runtime: numericRuntime(),
+                  numericStatus: "unavailable",
+                  programSha256: digest(COLD_PROGRAM),
+                }
+              : {}),
+          };
         let cleanup = "UNCERTAIN";
         let retirementFailed = false;
         try {
@@ -688,6 +798,28 @@ export function openDarwinStartupTrace(
           captureComplete: complete,
           argumentStatus,
           arguments: argumentsObserved,
+          ...(coldCommand
+            ? {
+                runtime: numericRuntime(
+                  complete && status === "observed" ? numericSeen : [],
+                ),
+                numericStatus:
+                  !complete || status !== "observed"
+                    ? "unavailable"
+                    : pendingNumeric.size ||
+                        [...expectedNumeric].some(
+                          ([name, count]) =>
+                            numericSeen.filter(
+                              (record) => record.operation === name,
+                            ).length !== count,
+                        )
+                      ? "missing"
+                      : numericSeen.length
+                        ? "complete"
+                        : "empty",
+                programSha256: digest(COLD_PROGRAM),
+              }
+            : {}),
           observers: owners,
           events: complete && status === "observed" ? count : null,
           sha256:

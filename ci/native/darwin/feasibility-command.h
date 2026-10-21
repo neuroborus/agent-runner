@@ -328,6 +328,22 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   command_native(feasibility_sandbox_active(sandbox_binding,child), == 1);
   command_in=input[1];command_out=output[0];command_err=errors[0];return identity;
 }
+/* The trace observes this cold image, never the warmed policy launcher. The
+ * held audit-session domain owns the suspended child through every refusal. */
+static void command_cold_start(struct identity child, const char *operation) {
+  printf("{\"event\":\"cold-start\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"identity\":",operation,command_image_hash);emit_identity(child);puts("}");
+  /* Trace arming must not stop capture or hide the controller's disappearance. */
+  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};
+  for(;;){need(!command_expired && !command_admissions_closed);command_native(poll(waiting,2,1000), >= 0);command_drain();
+    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(waiting[0].revents&POLLIN)break;}
+  char acknowledgement[3];need(fgets(acknowledgement,sizeof(acknowledgement),stdin));need(!strcmp(acknowledgement,"T\n"));
+  need(!command_expired && !command_admissions_closed);
+  command_image_identity(child,command_image,command_image_hash);
+  command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)child.token.val[5]), == 1);
+  /* Cancellation may arrive during the full installed-image hash/readback. */
+  need(!command_expired && !command_admissions_closed);
+  command_continue(child);
+}
 static void command_capture(const char *event) {
   unsigned char output[65536],errors[65536];size_t used=0,err=0;int fds[]={command_out,command_err};
   while(fds[0]>=0||fds[1]>=0){command_poll();struct pollfd p[]={{fds[0],POLLIN,0},{fds[1],POLLIN,0}};command_native(poll(p,2,10), >= 0);
@@ -449,7 +465,7 @@ static int command_entry(int argc,char **argv) {
     for(unsigned i=2;i<4;i++)if(fds[i].revents&(POLLIN|POLLHUP)){unsigned char bytes[8192];ssize_t n=read(fds[i].fd,bytes,sizeof(bytes));int read_error=errno;command_observed(n>=0, n, read_error);if(n){printf("{\"event\":\"%s\",\"hex\":\"",i==2?"rpc":"stderr");command_hex(bytes,(size_t)n);puts("\"}");}else{close(fds[i].fd);if(i==2)command_out=-1;else command_err=-1;printf("{\"event\":\"%s-end\"}\n",i==2?"rpc":"stderr");}}
     need(!(fds[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(!(fds[0].revents&POLLIN))continue;need(fgets(line,sizeof(line),stdin)&&strchr(line,'\n'));line[strlen(line)-1]=0;
     need((!command_expired && !command_admissions_closed) || !strcmp(line,"D") || !strcmp(line,"S"));
-    if(!strcmp(line,"V")||!strcmp(line,"G")){char directory[4096];command_path(directory,"schema");char *v[]={(char*)command_image,"--version",NULL},*g[]={(char*)command_image,"app-server","generate-json-schema","--out",directory,NULL};struct identity child=command_spawn(line[0]=='V'?v:g,"schema-home");command_continue(child);command_capture(line);}
+    if(!strcmp(line,"V")||!strcmp(line,"G")){char directory[4096];command_path(directory,"schema");char *v[]={(char*)command_image,"--version",NULL},*g[]={(char*)command_image,"app-server","generate-json-schema","--out",directory,NULL};struct identity child=command_spawn(line[0]=='V'?v:g,"schema-home");command_cold_start(child,line);command_capture(line);}
     else if(!strcmp(line,"A")){char *args[]={(char*)command_image,"-c","web_search=\"disabled\"","-c","mcp_servers={}","app-server","--listen","stdio://",NULL};server=command_spawn(args,"home");command_server_wrapper=command_wrappers[command_count-1];command_case_asid=server.token.val[6];printf("{\"event\":\"A\",\"identity\":");emit_identity(server);printf(",\"sessionHeld\":true,\"imageSha256\":\"%s\"}\n",command_image_hash);}
     else if(!strcmp(line,"R")){command_continue(server);puts("{\"event\":\"R\"}");}
     else if(!strncmp(line,"J ",2)){size_t n=strlen(line+2);need(command_in>=0&&n>0&&n<=131072&&n%2==0);unsigned char bytes[65536];for(size_t i=0;i<n/2;i++){char hex[3]={line[2+i*2],line[3+i*2],0};char *end;unsigned long b=strtoul(hex,&end,16);need(!*end);bytes[i]=(unsigned char)b;}command_native(write(command_in,bytes,n/2), == (ssize_t)(n/2));}

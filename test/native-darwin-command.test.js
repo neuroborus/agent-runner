@@ -1590,7 +1590,7 @@ function fixture(change = () => {}) {
       ),
   };
 }
-test("Darwin cold exec consumes the generated admission policy with only the page-size sysctl grant", async () => {
+test("Darwin cold exec consumes the generated admission policy with both page-size selectors", async () => {
   const [effects, header, helper] = await Promise.all(
     [
       "feasibility-command-effects.js",
@@ -1669,10 +1669,129 @@ test("Darwin cold exec consumes the generated admission policy with only the pag
     "(allow file-read*)",
     "(allow file-map-executable)",
     '(allow sysctl-read (sysctl-name "hw.pagesize"))',
+    '(allow sysctl-read (sysctl-name "hw.pagesize_compat"))',
     "(allow process-info* (target same-sandbox))",
     `(allow file-write* (subpath ${JSON.stringify(root)}) (literal "/dev/null"))`,
     "",
   ]);
+});
+
+test("Darwin cold child release follows trace acknowledgement and fresh image/policy checks", async () => {
+  const [header, helper] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+        readFile(
+          new URL(`../ci/native/darwin/${name}`, import.meta.url),
+          "utf8",
+        ),
+      ),
+    ),
+    body = /static void command_cold_start\([^)]*\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(body);
+  for (const refusal of [
+    null,
+    "eof",
+    "wrong-ack",
+    "expired",
+    "expired-late",
+    "closed-late",
+    "owner-loss",
+    "capture",
+    "image",
+    "policy",
+  ]) {
+    const calls = [],
+      child = { token: { val: [501, 501, 20, 20, 501, 123, 17, 2] } },
+      projected = body
+        .replace(
+          "struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};",
+          "const waiting=[{revents:0},{revents:0}];",
+        )
+        .replace("char acknowledgement[3];", "const acknowledgement={};")
+        .replaceAll("sizeof(acknowledgement)", "3")
+        .replaceAll("(pid_t)", ""),
+      f = commandGuards(header, helper, projected, "command_cold_start", {
+        context: {
+          child,
+          operation: "V",
+          command_image: "/fixture/codex",
+          command_image_hash: PIN,
+          stdin: {},
+          command_audit: 6,
+          POLLIN: 1,
+          POLLHUP: 16,
+          POLLERR: 8,
+          POLLNVAL: 32,
+          sandbox_binding: {},
+          printf() {},
+          emit_identity(value) {
+            assert.equal(value, child);
+            calls.push("identity");
+          },
+          puts() {},
+          poll(waiting, size, timeout) {
+            assert.equal(size, 2);
+            assert.equal(timeout, 1000);
+            waiting[0].revents = calls.includes("poll")
+              ? refusal === "owner-loss"
+                ? 16
+                : 1
+              : 0;
+            calls.push("poll");
+            return 1;
+          },
+          command_drain() {
+            calls.push("drain");
+            if (refusal === "capture") throw new Error("Capture loss");
+          },
+          fgets(value, size) {
+            assert.equal(size, 3);
+            calls.push("ack");
+            value.value = refusal === "wrong-ack" ? "D\n" : "T\n";
+            return refusal === "eof" ? null : value;
+          },
+          strcmp: (a, b) => Number((a.value ?? a) !== b),
+          command_expired: refusal === "expired" ? 1 : 0,
+          command_image_identity(value, file, hash) {
+            assert.equal(value, child);
+            assert.equal(file, "/fixture/codex");
+            assert.equal(hash, PIN);
+            calls.push("image");
+            if (refusal === "image") throw new Error("Changed image");
+          },
+          feasibility_sandbox_active(_binding, pid) {
+            assert.equal(pid, 123);
+            calls.push("policy");
+            if (refusal === "expired-late") f.context.command_expired = 1;
+            if (refusal === "closed-late")
+              f.context.command_admissions_closed = true;
+            return refusal === "policy" ? 0 : 1;
+          },
+          command_continue(value) {
+            assert.equal(value, child);
+            calls.push("resume");
+          },
+        },
+      });
+    if (refusal) {
+      assert.throws(() => f.run());
+      assert.ok(!calls.includes("resume"));
+    } else {
+      f.run();
+      assert.deepEqual(calls, [
+        "identity",
+        "poll",
+        "drain",
+        "poll",
+        "drain",
+        "ack",
+        "image",
+        "policy",
+        "resume",
+      ]);
+    }
+  }
 });
 
 test("Darwin command construction uses an empty-home credential-free allowlist and both explicit stock policies", async () => {
@@ -2276,6 +2395,7 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
   for (const failed of ["V", "G"]) {
     const diagnostics = [],
       replies = [],
+      traceFinishes = [],
       captures = new Map();
     for (const operation of ["V", "G"]) {
       const capture = commandCaptureFixture(header, helper, {
@@ -2313,6 +2433,9 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
             schema.runInNewContext({
               signal,
               call: (...args) => f.owner.call(...args),
+              finishColdTrace: async (operation) => {
+                traceFinishes.push(operation);
+              },
             })(),
             /Incomplete native command observation/u,
           );
@@ -2321,6 +2444,7 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
         }
         assert.deepEqual(f.sent, failed === "V" ? ["V", "S"] : ["V", "G", "S"]);
         assert.equal(f.owner.captureFailure, undefined);
+        assert.deepEqual(traceFinishes, failed === "V" ? [] : ["V"]);
       },
       (_owner, value) => {
         if (value.stderr) diagnostics.push(Buffer.from(value.stderr));
@@ -2353,13 +2477,13 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
   }
 });
 
-async function commandBrokerFixture(t, signal, respond = () => {}) {
+async function commandBrokerFixture(t, signal, respond = () => {}, coldStart) {
   const broker = new EventEmitter(),
     sent = [],
     signals = [],
     requests = new EventEmitter(),
     sessions = new Set(),
-    value = { helperSha256: PIN };
+    value = { helperSha256: PIN, commandImageSha256: PIN, uid: 501, gid: 20 };
   let finished = false;
   const frame = (value) => broker.stdout.write(JSON.stringify(value) + "\n"),
     finish = () => {
@@ -2389,6 +2513,7 @@ async function commandBrokerFixture(t, signal, respond = () => {}) {
     signal,
     tokens: new Map(),
     admittedSessions: sessions,
+    coldStart,
     decoder: { push: async () => {} },
   });
   t.after(async () => {
@@ -2423,6 +2548,138 @@ async function commandBrokerFixture(t, signal, respond = () => {}) {
         : new Promise((resolve) => requests.once(operation, resolve)),
   };
 }
+
+test("Darwin broker binds a cold trace to the held child before acknowledging resume", async (t) => {
+  const armed = Promise.withResolvers(),
+    entered = Promise.withResolvers(),
+    f = await commandBrokerFixture(
+      t,
+      new AbortController().signal,
+      (operation, { frame }) => {
+        if (operation === "T")
+          frame({ event: "V", stdout: "fixture\n", exitCode: 0 });
+      },
+      async (binding) => {
+        entered.resolve(binding);
+        await armed.promise;
+      },
+    ),
+    response = f.owner.call("V");
+  f.frame({ event: "custody", identity, sessionHeld: true });
+  f.frame({ event: "cold-start", operation: "V", identity, imageSha256: PIN });
+  const binding = await entered.promise;
+  assert.deepEqual(binding.identity, identity);
+  assert.equal(binding.operation, "V");
+  assert.deepEqual(f.sent, ["V"]);
+  armed.resolve();
+  assert.equal((await response).exitCode, 0);
+  assert.deepEqual(f.sent, ["V", "T"]);
+});
+
+test("Darwin broker refuses an unjoined cold child without releasing it", async (t) => {
+  for (const mismatch of ["image", "credentials", "session", "operation"]) {
+    const f = await commandBrokerFixture(
+        t,
+        new AbortController().signal,
+        () => {},
+        async () => assert.fail("Unjoined cold child"),
+      ),
+      refused = assert.rejects(f.owner.call("V"));
+    if (mismatch !== "session")
+      f.frame({ event: "custody", identity, sessionHeld: true });
+    f.frame({
+      event: "cold-start",
+      operation: mismatch === "operation" ? "G" : "V",
+      identity: {
+        ...identity,
+        ...(mismatch === "credentials" ? { uid: 502 } : {}),
+      },
+      imageSha256: mismatch === "image" ? "b".repeat(64) : PIN,
+    });
+    await refused;
+    assert.deepEqual(f.sent, ["V"]);
+    assert.deepEqual(f.signals, ["SIGTERM"]);
+  }
+});
+
+test("Darwin failed cold requests settle every trace after domain retirement without replacing its failure", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/darwin/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    helperStart = source.indexOf("  const finishColdTrace ="),
+    helperEnd = source.indexOf("  const snapshots =", helperStart),
+    start = source.indexOf(
+      "      let exit, settled, failure;",
+      source.indexOf("    async retire("),
+    ),
+    end = source.indexOf("      active = false;", start);
+  assert.ok(
+    helperStart > 0 && helperEnd > helperStart && start > 0 && end > start,
+  );
+  const retire = new Script(
+    `(async()=>{${source.slice(helperStart, helperEnd)}${source.slice(start, end)}})`,
+  );
+  for (const failed of ["domain", "trace"]) {
+    const calls = [],
+      primary = new Error("Original domain failure"),
+      coldTraces = new Map(
+        ["V", "G"].map((operation) => [
+          operation,
+          {
+            binding: { operation, identity },
+            trace: {
+              finish: async () => {
+                calls.push(operation);
+                return {
+                  cleanup:
+                    failed === "trace" && operation === "V"
+                      ? "UNCERTAIN"
+                      : "RETIRED",
+                };
+              },
+            },
+          },
+        ]),
+      );
+    await assert.rejects(
+      retire.runInNewContext({
+        coldTraces,
+        path,
+        root: "/fixture",
+        admittedSessions: new Set(),
+        value: {},
+        signal: new AbortController().signal,
+        need(ok) {
+          assert.ok(ok, "Unretired trace");
+        },
+        nativeDiagnostic() {},
+        async writeFile(file, bytes, options) {
+          const report = JSON.parse(bytes);
+          assert.equal(
+            file,
+            `/fixture/evidence/command-${report.operation}-startup.json`,
+          );
+          assert.deepEqual({ ...options }, { flag: "wx", mode: 0o600 });
+          assert.equal(report.identity.pid, identity.pid);
+        },
+        async settleDarwinCommandCustody() {
+          calls.push("domain");
+          if (failed === "domain") throw primary;
+          return { domain: { emergency: true } };
+        },
+      })(),
+      (error) =>
+        failed === "domain"
+          ? error === primary
+          : error.emergency === true && /Unretired trace/u.test(error.message),
+    );
+    assert.deepEqual(calls, ["domain", "V", "G"]);
+  }
+});
 
 test("Darwin ready broker cancels an unanswered V without cancelling independent settlement", async (t) => {
   const work = new AbortController(),

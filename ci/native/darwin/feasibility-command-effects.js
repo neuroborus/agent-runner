@@ -23,7 +23,12 @@ import {
 import {
   buildDarwinFeasibility,
   darwinFeasibilityIdentityArguments,
+  startupObserver,
 } from "./feasibility.js";
+import {
+  DARWIN_COLD_STARTUP_TRACE_INTENT,
+  openDarwinStartupTrace,
+} from "./startup-trace.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import { digest, normalizeDarwinIdentity } from "./protocol.js";
@@ -198,7 +203,7 @@ function commandWait(promise, signal) {
 export function observeDarwinCommandBroker(
   broker,
   value,
-  { signal, decoder, tokens, admittedSessions },
+  { signal, decoder, tokens, admittedSessions, coldStart },
 ) {
   const pending = new Map(),
     rpc = new PassThrough(),
@@ -397,6 +402,24 @@ export function observeDarwinCommandBroker(
             );
             await decoder.push(bytes);
             captureFinished = true;
+          } else if (frame.event === "cold-start") {
+            const identity = normalizeDarwinIdentity(frame.identity);
+            need(
+              ["V", "G"].includes(frame.operation) &&
+                pending.has(frame.operation) &&
+                admittedSessions.has(identity.asid) &&
+                ["uid", "ruid", "svuid", "auid"].every(
+                  (key) => identity[key] === value.uid,
+                ) &&
+                ["gid", "rgid", "svgid"].every(
+                  (key) => identity[key] === value.gid,
+                ) &&
+                frame.imageSha256 === value.commandImageSha256 &&
+                typeof coldStart === "function",
+            );
+            await coldStart({ ...frame, identity });
+            need(!failed && !admissionsClosed && !signal.aborted);
+            send("T\n");
           } else if (frame.event === "custody") {
             need(
               frame.sessionHeld === true &&
@@ -500,7 +523,8 @@ export function createDarwinCommandEffects(dispatch, inputs) {
     prepared,
     active = false;
   const tokens = new Map(),
-    admittedSessions = new Set();
+    admittedSessions = new Set(),
+    coldTraces = new Map();
   const nativeArgs = (args, environment = env) => [
     "-n",
     "/usr/bin/env",
@@ -517,6 +541,22 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       maxBuffer: 1048576,
     });
   const call = (operation, signal) => command.call(operation, signal);
+  const finishColdTrace = async (operation) => {
+    const entry = coldTraces.get(operation);
+    if (!entry) return;
+    const trace = (entry.result ??= await entry.trace.finish());
+    if (!entry.reported) {
+      const report = JSON.stringify({ ...entry.binding, trace });
+      nativeDiagnostic("darwin-command:cold-startup", { stderr: report });
+      await writeFile(
+        path.join(root, "evidence", `command-${operation}-startup.json`),
+        report,
+        { flag: "wx", mode: 0o600 },
+      );
+      entry.reported = true;
+    }
+    need(["RETIRED", "NOT_RUN"].includes(trace.cleanup));
+  };
   const snapshots = async (signal) =>
     JSON.parse(
       (
@@ -634,6 +674,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
           "(allow file-read*)",
           "(allow file-map-executable)",
           '(allow sysctl-read (sysctl-name "hw.pagesize"))',
+          '(allow sysctl-read (sysctl-name "hw.pagesize_compat"))',
           "(allow process-info* (target same-sandbox))",
           `(allow file-write* (subpath ${JSON.stringify(root)}) (literal \"/dev/null\"))`,
           "",
@@ -683,6 +724,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         ),
         gate: path.join(workspace, ".command-gate"),
         helperSha256: digest(await readFile(helper)),
+        commandImageSha256: inputs.packages.codex.component.sha256,
         ...prerequisites,
       };
       const before = await snapshots(signal),
@@ -740,12 +782,39 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         decoder,
         tokens,
         admittedSessions,
+        coldStart: async ({ operation, identity, imageSha256 }) => {
+          need(!coldTraces.has(operation) && coldTraces.size < 2);
+          const binding = {
+              identity,
+              imageSha256,
+              operation,
+              traceIntent: DARWIN_COLD_STARTUP_TRACE_INTENT,
+              policyFileSha256: digest(
+                await readFile(path.join(root, "admission.sb")),
+              ),
+            },
+            observe = (selector, value) =>
+              startupObserver(root, selector, value, prepared.helperSha256),
+            trace = openDarwinStartupTrace(binding, {
+              coldCommand: true,
+              readObserver: (pid) => observe("startup-observer", pid),
+              observeObserver: (value) =>
+                observe("startup-observer-observe", value),
+              retireObserver: (value) =>
+                observe("startup-observer-retire", value),
+            });
+          coldTraces.set(operation, { trace, binding });
+          await trace.arm();
+        },
       });
       value.transport = command.transport;
       await command.ready;
       const version = await call("V", signal);
       need(version.stdout === "codex-cli 0.160.0\n" && version.exitCode === 0);
-      need((await call("G", signal)).exitCode === 0);
+      await finishColdTrace("V");
+      const schema = await call("G", signal);
+      need(schema.exitCode === 0);
+      await finishColdTrace("G");
       const readSchema = async (name) => {
         const file = path.join(root, "schema/v2", name),
           st = await lstat(file);
@@ -822,33 +891,51 @@ export function createDarwinCommandEffects(dispatch, inputs) {
       if (!broker) throw new Error("No native custody was admitted");
       // Stop admissions first; retain the audit-session right through the fresh
       // external all-UID kernel inventory, then retire the observer itself.
-      let exit;
-      const settled = await settleDarwinCommandCustody(admittedSessions, {
-        retireDomain: () => call("D", signal),
-        verifySession: async (asid) =>
-          JSON.parse(
-            (await native(["command-verify", String(asid)], signal)).stdout,
-          ),
-        closeObserver: async () => {
-          exit = await command.close(signal);
-        },
-        verifyObserver: async () => {
-          const verifier = JSON.parse(
-            (
-              await native(
-                [
-                  "command-observe",
-                  ...darwinFeasibilityIdentityArguments(value.observer),
-                ],
-                signal,
-              )
-            ).stdout,
-          );
-          need(verifier.status === "RETIRED");
-          active = false;
-          return verifier;
-        },
-      });
+      let exit, settled, failure;
+      try {
+        settled = await settleDarwinCommandCustody(admittedSessions, {
+          retireDomain: () => call("D", signal),
+          verifySession: async (asid) =>
+            JSON.parse(
+              (await native(["command-verify", String(asid)], signal)).stdout,
+            ),
+          closeObserver: async () => {
+            exit = await command.close(signal);
+          },
+          verifyObserver: async () => {
+            const verifier = JSON.parse(
+              (
+                await native(
+                  [
+                    "command-observe",
+                    ...darwinFeasibilityIdentityArguments(value.observer),
+                  ],
+                  signal,
+                )
+              ).stdout,
+            );
+            need(verifier.status === "RETIRED");
+            return verifier;
+          },
+        });
+      } catch (error) {
+        failure = error;
+      }
+      // On a failed cold request the domain retires first. Every trace still
+      // settles through its original outside observer, including attach failure.
+      for (const operation of coldTraces.keys()) {
+        try {
+          await finishColdTrace(operation);
+        } catch (error) {
+          failure ??= error;
+        }
+      }
+      if (failure) {
+        failure.emergency =
+          failure.emergency === true || settled?.domain.emergency === true;
+        throw failure;
+      }
+      active = false;
       try {
         need(
           !command.captureFailure &&
