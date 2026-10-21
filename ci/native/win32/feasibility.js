@@ -448,7 +448,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-job-create command-job-config command-broker-token command-intent-event command-closed-event
     command-capture-event command-bookmark command-admission-birth command-admission-terminate command-subscription-create command-gate-descriptor command-gate-create
     command-gate-impersonate command-gate-open command-gate-read command-gate-nonce-encode
-    command-client-impersonate command-client-token
+    command-client-impersonate command-client-token command-case-wait
     command-policy-query command-policy-principal-query command-policy-install command-sacl-install
     command-intent-set command-intent-wait command-broker-open command-broker-token-duplicate command-broker-token-query
     command-broker-file-duplicate command-broker-job-duplicate command-broker-job-query
@@ -467,7 +467,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-audit-category command-metadata-count command-event-id-type command-event-version-type
     command-version-count command-version-range command-version-missing command-preflight-arguments command-lifetime-size command-lifetime-range
     command-protect-format command-file-identity command-parent-baseline command-file-baseline command-audit-size
-    command-image-match command-job-limits command-members-count command-member-pid command-client-context
+    command-image-match command-job-limits command-members-count command-member-pid command-client-context command-case-lifetime
     command-launch-state command-attribute-allocation command-launch-bound command-broker-arguments command-broker-nonce
     command-helper-digest-match command-image-digest-match command-admission-line command-admission-members command-subscription-query command-gate-name
     command-gate-identity command-gate-size command-gate-nonce command-capture-bound command-capture-allocation

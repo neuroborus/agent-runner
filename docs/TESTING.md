@@ -935,10 +935,11 @@ evidence, loss and failed controls. Every restricted command keeps its own
 4656 denial or 4663 permitted I/O, completed-I/O marker and sentinel checks.
 
 The actual query producer is checked as an Event-node selection with one outer
-predicate, retaining both loss IDs, failed 4656, 4663, exact SID/type filters and
-both bounded interval branches. A rejected root-level Boolean example protects
-the producer/consumer result contract without pretending to emulate Event Log.
-Actual-body command readback uses the parked command token and the original
+predicate, retaining both loss IDs, failed 4656, successful 4663, exact
+provider/SID/type filters and both bounded interval branches. A rejected
+root-level Boolean example protects the producer/consumer result contract
+without pretending to emulate Event Log.
+Actual-body command readback uses the operating thread token and the original
 held target/marker, with policy-query errors, missing outcomes, identity/SACL
 mismatch and checked token release. The actual effects sequence withholds T or U
 on failed before/after joins to installed SACL bytes; broker setup success cannot
@@ -946,6 +947,21 @@ supply this different token observation. Existing decoded missing-target/marker,
 wrong-principal/logon/PID/mask, loss, window and cleanup regressions remain the
 delivery and retirement proof. Zero records still fail. Portable coverage proves
 no native delivery or hosted failure causality and adds no slow-tier assignment.
+
+The actual subscription startup primes the initially signaled manual-reset
+event after the readiness frame and before any control. A queued first batch
+follows decoder initialization; an empty drain still cannot acknowledge a
+marker. A failed initial enumeration preserves its original error and separately
+failed subscription closure. Controlled arrivals during draining and reset retain
+the existing notification-race coverage. Actual native target/marker predicates
+cover inspection, permitted and denied edits, denied outside access and the
+permitted outside control, joining the operating logon, subject, mask, release
+window and live held birth.
+Wrong outcomes, missing fields, expired/replaced processes, failed native waits
+and earlier/equal marker records cannot release a command. The effects fixture
+requires B before U. All six action/profile combinations carry the exact expected
+outcome through private selection, and U requires both delivered observations;
+partial-policy installation and independent restoration coverage remain unchanged.
 
 Terminal regressions require a separate broker 4663 gate read after complete domain
 retirement, bound to D's native domain-empty FILETIME and the last command window.

@@ -3231,7 +3231,12 @@ cleanup and asynchronous closure. C/N/T controls, broker protection, audit joins
 and independent restoration remain required. These attribution repairs select no
 underlying control API or handshake fix and establish no Windows native acceptance.
 
-Pull subscriptions use initially nonsignaled manual-reset notification events.
+The command pull subscription uses an initially signaled manual-reset event
+and drains it after publishing the `ready` frame, before installation or any
+control. Queued audit frames therefore follow decoder initialization. This
+primes enumeration even when no first notification has arrived;
+an empty initial drain supplies no delivery evidence. Preflight's separate
+interface-only event remains initially nonsignaled.
 `command_capture` alone owns readiness waits, enumeration and checked reset:
 nonblocking pumps return without `EvtNext` when not ready; terminal delivery
 retains 1-ms waits and barriers retain 10-ms waits. Notified batches drain through
@@ -3298,11 +3303,12 @@ starts before installation with `EvtSubscribeToFutureEvents | EvtSubscribeStrict
 Its structured `QueryList` has exactly two `Select` entries on `Security`, each
 selecting Event nodes. `EvtSubscribe` receives a null channel argument because the
 query itself supplies the paths. The loss/clear selection is unconditional; the
-other selection binds the exact subject SID and file type. There is no broad
-query or fallback after empty delivery. The access selection includes failed
+other selection binds the Security-Auditing provider, exact subject SID and file
+type. There is no broad query or fallback after empty delivery. The access
+selection includes failed
 [4656 handle requests](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4656)
-(`AuditFailure`, `0x0010000000000000`) and 4663 records for the exact subject SID
-and `ObjectType=File`. The decoder requires successful
+(`AuditFailure`, `0x0010000000000000`) and successful 4663 records for the exact
+subject SID and `ObjectType=File`. The decoder requires successful
 [4663 access use](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4663)
 (`AuditSuccess`, `0x0020000000000000`) for permitted target I/O and the later
 completed-I/O gate read. Denied commands still require failed 4656 access checks;
@@ -3311,7 +3317,7 @@ cannot establish denial. Held-name joins remain case-insensitive and every event
 joins the exact command PID/birth, principal/logon, image, token, access mask and
 fresh acknowledged capture window.
 
-The real control reuses C/N/T/F/U/B and the same independent process/token
+The real control reuses C/N/T/F/B/U and the same independent process/token
 readers, held targets and decoder as the restricted command cases. Before T
 releases target I/O, N reads the security context of the client's last nonce
 write using
@@ -3325,7 +3331,21 @@ level, retains the token for effective-policy queries, and reverts before those
 queries and privileged held-file reads. The effects owner matches the operating
 SID, logon, integrity, restrictions and token details to the independently held
 process observation, then joins both target/marker identities and SACL hashes to
-the installed inventory. F repeats these inputs before U; a substituted thread
+the installed inventory. The native owner also retains that operating logon.
+T freezes the release time before target I/O. F repeats the inputs while the
+command is still parked; B must join delivered events before U releases it.
+The existing private K selection carries the frozen action and expected
+permit/deny bit. Read-only edits and outside attempts require denial; permitted
+inspection, workspace edits and the outside control require success. Malformed
+or legacy selections refuse admission. U independently requires both target and
+marker observations and the original live birth before acknowledging exit.
+The native target predicate requires the original held birth to remain live,
+the exact subject/logon and access mask, the post-T timestamp and the expected
+4656 failure or 4663 success. The subsequent successful marker must have a later
+record ID and no earlier timestamp. A new target event invalidates an earlier
+marker. Neither PID-only delivery nor an already exited/replaced process can
+close this barrier. Wait failure retains its immediate native error separately
+from birth/liveness refusal and cleanup. A substituted thread
 context, missing/failed policy read, changed SACL or mismatched object refuses
 progress. Impersonation, token acquisition and reversion retain their immediate
 native failure; acquired state uses the existing checked cleanup slots. These

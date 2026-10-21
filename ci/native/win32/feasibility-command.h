@@ -33,7 +33,10 @@ static HANDLE command_null, command_server, command_saved_input, command_saved_o
 static HANDLE command_broker_token, command_audit_intent, command_closed, command_cleanup_timer;
 static BOOL command_control, command_server_released;
 static DWORD command_case_pid;
+static BOOL command_case_permit;
 static BOOL command_target_seen, command_marker_seen, command_retirement_seen;
+static ULONGLONG command_case_birth, command_case_from, command_case_logon;
+static ULONGLONG command_target_record, command_target_time;
 static ULONGLONG command_retirement_from;
 static char command_null_hash[65];
 static PACL command_sacls[4];
@@ -483,11 +486,10 @@ static DWORD command_members(HANDLE job) {
  * contract. Neither selection is a fallback; loss events remain unconditional.
  * Held names still join case-insensitively after capture, outside XPath. */
 static void command_audit_query(WCHAR query[2048], const WCHAR *interval) {
-  invariant(swprintf_s(query,2048,L"<QueryList><Query Id=\"0\" Path=\"Security\"><Select Path=\"Security\">*[System[(EventID=1101 or EventID=1102)%ls]]</Select><Select Path=\"Security\">*[System[(EventID=4663 or (EventID=4656 and band(Keywords,4503599627370496)))%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]</Select></Query></QueryList>",interval,interval,userText)>0,"command-subscription-query");
+  invariant(swprintf_s(query,2048,L"<QueryList><Query Id=\"0\" Path=\"Security\"><Select Path=\"Security\">*[System[(EventID=1101 or EventID=1102)%ls]]</Select><Select Path=\"Security\">*[System[Provider[@Name=\"Microsoft-Windows-Security-Auditing\"] and ((EventID=4663 and band(Keywords,9007199254740992)) or (EventID=4656 and band(Keywords,4503599627370496)))%ls] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]</Select></Query></QueryList>",interval,interval,userText)>0,"command-subscription-query");
 }
-/* Security's UTC timestamp must follow the domain-empty boundary. Older queued
- * broker reads cannot end the wait for the separate terminal witness. */
-static BOOL command_terminal_time(const WCHAR *text) {
+static ULONGLONG command_event_time(const WCHAR *text) {
+  if(!text)return 0;
   size_t length=wcslen(text);if(length<20||length>28||length==21||text[4]!=L'-'||text[7]!=L'-'||text[10]!=L'T'||text[13]!=L':'||text[16]!=L':'||(length!=20&&text[19]!=L'.')||text[length-1]!=L'Z')return FALSE;
   unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};
   for(unsigned i=0;i<6;i++)for(unsigned j=0;j<(i?2:4);j++){WCHAR c=text[starts[i]+j];if(c<L'0'||c>L'9')return FALSE;parts[i]=parts[i]*10+c-L'0';}
@@ -496,17 +498,51 @@ static BOOL command_terminal_time(const WCHAR *text) {
   SYSTEMTIME value={0};value.wYear=(WORD)parts[0];value.wMonth=(WORD)parts[1];value.wDay=(WORD)parts[2];value.wHour=(WORD)parts[3];value.wMinute=(WORD)parts[4];value.wSecond=(WORD)parts[5];
   FILETIME time;if(!SystemTimeToFileTime(&value,&time))return FALSE;
   ULARGE_INTEGER ticks;ticks.LowPart=time.dwLowDateTime;ticks.HighPart=time.dwHighDateTime;
-  return ticks.QuadPart+fraction>command_retirement_from;
+  return ticks.QuadPart+fraction;
+}
+/* Security's UTC timestamp must follow the domain-empty boundary. Older queued
+ * broker reads cannot end the wait for the separate terminal witness. */
+static BOOL command_terminal_time(const WCHAR *text) { return command_event_time(text)>command_retirement_from; }
+static BOOL command_event_number(const WCHAR *text, ULONGLONG *value) {
+  if(!text||!text[0]||wcslen(text)>20||text[0]==L'-'||text[0]==L'+'||iswspace(text[0]))return FALSE;
+  WCHAR *end;errno=0;ULONGLONG number=_wcstoui64(text,&end,0);
+  if(errno||*end)return FALSE;*value=number;return TRUE;
+}
+static void command_case_live(void) {
+  invariant(command_client&&creation(command_client)==command_case_birth,"command-case-lifetime");
+  DWORD waited=WaitForSingleObject(command_client,0);
+  if(waited==WAIT_FAILED)win32_check(FALSE,"command-case-wait");
+  invariant(waited==WAIT_TIMEOUT,"command-case-lifetime");
+}
+/* A queued PID or a marker alone cannot release a parked command. Rejoin its
+ * held birth, actual operating logon, outcome and post-release access window. */
+static void command_case_event(const WCHAR *process, const WCHAR *object, const WCHAR *eventId, const WCHAR *mask, const WCHAR *stamp,
+    const WCHAR *subject, const WCHAR *logon, const WCHAR *keywords, const WCHAR *record) {
+  if(!command_case_pid||!command_case_from||!command_client||command_closing||!object||!subject||wcscmp(subject,userText))return;
+  ULONGLONG pid,rights,id,authentication,bits,sequence,time=command_event_time(stamp);
+  if(!command_event_number(process,&pid)||pid!=command_case_pid||!command_event_number(mask,&rights)||rights>MAXDWORD||
+      !command_event_number(eventId,&id)||!command_event_number(logon,&authentication)||authentication!=command_case_logon||
+      !command_event_number(keywords,&bits)||!command_event_number(record,&sequence)||!sequence||time<command_case_from||time<command_case_birth)return;
+  command_case_live();
+  BOOL failureExpected=!command_case_permit;
+  BOOL failed=(bits&0x0030000000000000ULL)==0x0010000000000000ULL;
+  BOOL succeeded=(bits&0x0030000000000000ULL)==0x0020000000000000ULL;
+  if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2))&&
+      (failureExpected?(id==4656&&failed):(id==4663&&succeeded))){
+    command_target_seen=TRUE;command_target_record=sequence;command_target_time=time;command_marker_seen=FALSE;
+  }
+  if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&id==4663&&succeeded&&(rights&1)&&
+      sequence>command_target_record&&time>=command_target_time)command_marker_seen=TRUE;
 }
 static BOOL command_audit_project(BYTE *bytes, DWORD length) {
-  char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL,*stamp=NULL;
-  for(unsigned j=0;j<parsed.count;j++){struct xml_field *f=&parsed.fields[j];if(!wcscmp(f->name,L"ProcessId"))process=f->value;else if(!wcscmp(f->name,L"ObjectName"))object=f->value;else if(!wcscmp(f->name,L"EventID"))eventId=f->value;else if(!wcscmp(f->name,L"AccessMask"))mask=f->value;else if(!wcscmp(f->name,L"TimeCreated"))stamp=f->value;}
+  char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL,*stamp=NULL,*subject=NULL,*logon=NULL,*keywords=NULL,*record=NULL;
+  for(unsigned j=0;j<parsed.count;j++){struct xml_field *f=&parsed.fields[j];if(!wcscmp(f->name,L"ProcessId"))process=f->value;else if(!wcscmp(f->name,L"ObjectName"))object=f->value;else if(!wcscmp(f->name,L"EventID"))eventId=f->value;else if(!wcscmp(f->name,L"AccessMask"))mask=f->value;else if(!wcscmp(f->name,L"TimeCreated"))stamp=f->value;else if(!wcscmp(f->name,L"SubjectUserSid"))subject=f->value;else if(!wcscmp(f->name,L"SubjectLogonId"))logon=f->value;else if(!wcscmp(f->name,L"Keywords"))keywords=f->value;else if(!wcscmp(f->name,L"EventRecordID"))record=f->value;}
   BOOL selected=eventId&&(!wcscmp(eventId,L"1101")||!wcscmp(eventId,L"1102"));
   if(object)for(unsigned i=0;i<4;i++)if(!_wcsicmp(object,command_paths[i]))selected=TRUE;
   if(selected){
     printf("{\"event\":\"audit\",\"hex\":\"");hex(bytes,length);printf("\",\"decoded\":");
     if(command_closing&&process&&object&&eventId&&mask&&stamp&&command_terminal_time(stamp)&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==GetCurrentProcessId()){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end&&(rights&1))command_retirement_seen=TRUE;}}
-    if(command_case_pid&&process&&object&&eventId&&mask){WCHAR *end;ULONGLONG pid=_wcstoui64(process,&end,0);if(!*end&&pid==command_case_pid){ULONGLONG rights=_wcstoui64(mask,&end,0);if(!*end){if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2)))command_target_seen=TRUE;if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&!wcscmp(eventId,L"4663")&&(rights&1))command_marker_seen=TRUE;}}}
+    command_case_event(process,object,eventId,mask,stamp,subject,logon,keywords,record);
     xml_decode(encoded);puts("}");
   }
   free(parsed.fields);free(encoded);return selected;
@@ -637,7 +673,9 @@ static void command_installation(void) {
   last.LowPart=command_install_to.dwLowDateTime;last.HighPart=command_install_to.dwHighDateTime;
   printf("{\"from\":\"%llu\",\"to\":\"%llu\",\"error\":%lu}",first.QuadPart,last.QuadPart,command_install_error);
 }
-static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();invariant(GetTickCount64()-wait<10000,"command-marker-barrier");command_capture(10);}while(1);FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
+static void command_barrier(void) { ULONGLONG wait=GetTickCount64();do{command_capture(0);if(!command_case_pid||command_marker_seen)break;command_bound();invariant(GetTickCount64()-wait<10000,"command-marker-barrier");command_capture(10);}while(1);
+  if(command_case_pid&&!command_closing)command_case_live();
+  FILETIME ft;GetSystemTimePreciseAsFileTime(&ft);ULARGE_INTEGER time;time.LowPart=ft.dwLowDateTime;time.HighPart=ft.dwHighDateTime;
   printf("{\"event\":\"B\",\"sequence\":%u,\"time\":\"%llu\",\"records\":%u}\n",++command_barriers,time.QuadPart,command_records); }
 static void command_pump(HANDLE *pipe,const char *event) {
   if(!*pipe)return; DWORD available=0; if(!PeekNamedPipe(*pipe,NULL,0,NULL,&available,NULL)){need(GetLastError()==ERROR_BROKEN_PIPE);need(CloseHandle(*pipe));*pipe=NULL;if(!strcmp(event,"rpc")||!strcmp(event,"stderr"))printf("{\"event\":\"%s-end\"}\n",event);return;}
@@ -742,6 +780,8 @@ static void command_case_auditing(void) {
   win32_check(OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&command_preflight_owned.token),"command-client-token");
   TOKEN_USER *subject=info(command_preflight_owned.token,TokenUser);TOKEN_STATISTICS *stats=info(command_preflight_owned.token,TokenStatistics);
   BOOL matched=EqualSid(subject->User.Sid,userSid)&&stats->TokenType==TokenImpersonation&&stats->ImpersonationLevel==SecurityImpersonation;
+  ULONGLONG logon=((ULONGLONG)(DWORD)stats->AuthenticationId.HighPart<<32)|stats->AuthenticationId.LowPart;
+  matched=matched&&logon&&(!command_case_logon||command_case_logon==logon);command_case_logon=logon;
   free(subject);free(stats);invariant(matched,"command-client-context");
   if(!command_revert())failure(126);
   fputs("{\"effective\":",stdout);command_effective(command_preflight_owned.token);
@@ -754,7 +794,7 @@ static void command_case_auditing(void) {
 }
 static void command_case_observe(BOOL after) {
   char bytes[32],expected[33];if(!command_gate_wait(!after,bytes))return;need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL)==33&&!memcmp(bytes,expected,32));
-  if(!after){DWORD pid;need(GetNamedPipeClientProcessId(command_gate,&pid));command_case_pid=pid;command_target_seen=command_marker_seen=FALSE;command_client=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);need(command_client);BOOL member;need(IsProcessInJob(command_client,ownedJob,&member)&&member);command_image_read(command_client,command_helper_hash,FALSE);}
+  if(!after){DWORD pid;need(GetNamedPipeClientProcessId(command_gate,&pid));command_case_pid=pid;command_case_from=command_case_logon=command_target_record=command_target_time=0;command_target_seen=command_marker_seen=FALSE;command_client=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);need(command_client);command_case_birth=creation(command_client);BOOL member;need(IsProcessInJob(command_client,ownedJob,&member)&&member);command_image_read(command_client,command_helper_hash,FALSE);}
   printf("{\"event\":\"%s\",\"identity\":",after?"F":"N");identity(command_client);printf(",\"token\":");command_token(command_client);printf(",\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_snapshot(command_action);printf(",\"gate\":");command_snapshot(3);fputs(",\"auditing\":",stdout);command_case_auditing();puts("}");
 
 }
@@ -933,7 +973,9 @@ static int command_main(int argc,WCHAR **argv) {
   command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");ownedJob=CreateJobObjectW(NULL,NULL);win32_check(ownedJob!=NULL,"command-job-create");command_protect(ownedJob,JOB_OBJECT_ALL_ACCESS,"command-protect-job");JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=32;
   win32_check(SetInformationJobObject(ownedJob,JobObjectExtendedLimitInformation,&limits,sizeof(limits)),"command-job-config");command_limits(ownedJob);BOOL member;win32_check(IsProcessInJob(GetCurrentProcess(),ownedJob,&member),"command-job-membership");invariant(!member,"command-job-membership");
   win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_broker_events();
-  command_event=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
+  /* Pull subscriptions start with a drain, not a wait for the first signal.
+   * Publish ready before that drain can emit queued event frames. */
+  command_event=CreateEventW(NULL,TRUE,TRUE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
   WCHAR admissionLine[8192];invariant(swprintf_s(admissionLine,8192,L"\"%ls\" command-case",command_helper)>0,"command-admission-line");PROCESS_INFORMATION admission=command_spawn(admissionLine,root);command_image_read(admission.hProcess,command_helper_hash,FALSE);
   command_observed.pid=admission.dwProcessId;command_observed.thread=admission.dwThreadId;
   DWORD saved=GetLastError();FILETIME born,exited,kernel,user;BOOL timed=GetProcessTimes(admission.hProcess,&born,&exited,&kernel,&user);command_observed.status[0]=timed?0:GetLastError();
@@ -956,7 +998,7 @@ static int command_main(int argc,WCHAR **argv) {
   command_gate=CreateNamedPipeW(command_pipe,PIPE_ACCESS_DUPLEX|FILE_FLAG_FIRST_PIPE_INSTANCE,PIPE_TYPE_BYTE|PIPE_WAIT|PIPE_REJECT_REMOTE_CLIENTS,1,64,64,10000,&gateSa);DWORD gateError=command_gate==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;if(command_gate==INVALID_HANDLE_VALUE)remember("command-gate-create","win32",gateError);LocalFree(gateSd);if(command_gate==INVALID_HANDLE_VALUE)failure(126);
   printf("{\"event\":\"ready\",\"identity\":");identity(GetCurrentProcess());printf(",\"admission\":{\"pid\":%lu,\"thread\":%lu,\"creationTime\":\"%llu\",\"exitCode\":%lu,\"assigned\":%lld,\"listed\":%lld,\"referencesReleased\":true}",command_observed.pid,command_observed.thread,command_observed.birth,exitCode,command_observed.status[7],command_observed.status[8]);printf(",\"tokenHandle\":\"%llu\",\"gateHandle\":\"%llu\",\"jobHandle\":\"%llu\",\"files\":[",(ULONGLONG)(ULONG_PTR)command_broker_token,(ULONGLONG)(ULONG_PTR)command_files[3],(ULONGLONG)(ULONG_PTR)ownedJob);for(unsigned i=0;i<4;i++){if(i)putchar(',');command_snapshot(i);}printf("],\"cleanup\":{");char systemHash[65];command_sum((BYTE *)command_system,command_category_count*sizeof(*command_system),systemHash);fputs("\"fileSystem\":",stdout);command_system_observation();printf(",\"systemSha256\":\"%s\",\"nullSha256\":\"%s\",\"nullHandle\":\"%llu\",\"intentHandle\":\"%llu\",\"closedHandle\":\"%llu\",\"files\":[",systemHash,command_null_hash,(ULONGLONG)(ULONG_PTR)command_null,(ULONGLONG)(ULONG_PTR)command_audit_intent,(ULONGLONG)(ULONG_PTR)command_closed);
   for(unsigned i=0;i<6;i++){HANDLE h=i<4?command_files[i]:command_parents[i-4];PSECURITY_DESCRIPTOR baseline=i<4?command_baseline[i]:command_parent_baseline[i-4];char id[50];fileid(h,id);if(i)putchar(',');printf("{\"handle\":\"%llu\",\"identity\":\"%s\",\"baselineHex\":\"",(ULONGLONG)(ULONG_PTR)h,id);hex(baseline,GetSecurityDescriptorLength(baseline));printf("\",\"saclHex\":\"");if(i<4)hex(command_sacls[i],command_sacls[i]->AclSize);char saclHash[65];command_sacl_read(h,saclHash);printf("\",\"baselineSaclSha256\":\"%s\"}",saclHash);}puts("]}}");
-  invariant(!ferror(stdout),"command-ready-output");
+  invariant(!ferror(stdout),"command-ready-output");command_capture(0);
   PROCESS_INFORMATION server={0}; char line[131100];HANDLE input=GetStdHandle(STD_INPUT_HANDLE);unsigned size=0;
   for(;;){command_bound();command_capture(0);command_pump(&command_output,command_control?"probe-output":"rpc");command_pump(&command_error,command_control?"probe-stderr":"stderr");DWORD available;
     win32_check(PeekNamedPipe(input,NULL,0,NULL,&available,NULL),"command-owner-read");if(!available){Sleep(1);continue;}char c;DWORD count;
@@ -969,13 +1011,13 @@ static int command_main(int argc,WCHAR **argv) {
     else if(!strncmp(line,"J ",2)){need(command_control_verified&&command_server_released&&command_input&&!command_closing);size_t n=strlen(line+2);need(n>0&&n<=131072&&!(n%2));BYTE *bytes=malloc(n/2);need(bytes);for(size_t i=0;i<n/2;i++)bytes[i]=(BYTE)(nibble(line[2+2*i])*16+nibble(line[3+2*i]));need(WriteFile(command_input,bytes,(DWORD)(n/2),&count,NULL)&&count==n/2);free(bytes);}
     else if(!strcmp(line,"E")){need(command_input&&CloseHandle(command_input));command_input=NULL;puts("{\"event\":\"E\"}");}
     else if(!strcmp(line,"B"))command_barrier();
-    else if(!strncmp(line,"K ",2)){need(command_control_verified&&command_server_released&&!command_client&&strlen(line)==3&&line[2]>='0'&&line[2]<='2');command_action=(unsigned)(line[2]-'0');if(command_action<2)command_reset(command_action);puts("{\"event\":\"K\"}");}
+    else if(!strncmp(line,"K ",2)){need(command_control_verified&&command_server_released&&!command_client&&strlen(line)==5&&line[2]>='0'&&line[2]<='2'&&line[3]==' '&&(line[4]=='0'||line[4]=='1'));command_action=(unsigned)(line[2]-'0');command_case_permit=line[4]=='1';if(command_action<2)command_reset(command_action);puts("{\"event\":\"K\"}");}
     else if(!strcmp(line,"N"))command_case_observe(FALSE);
-    else if(!strcmp(line,"T")){need(command_client&&WriteFile(command_gate,"R",1,&count,NULL)&&count==1);puts("{\"event\":\"T\"}");}
+    else if(!strcmp(line,"T")){need(command_client&&!command_case_from);FILETIME from;GetSystemTimePreciseAsFileTime(&from);command_case_from=((ULONGLONG)from.dwHighDateTime<<32)|from.dwLowDateTime;need(WriteFile(command_gate,"R",1,&count,NULL)&&count==1);puts("{\"event\":\"T\"}");}
     else if(!strcmp(line,"F"))command_case_observe(TRUE);
-    else if(!strcmp(line,"U")){need(command_client&&WriteFile(command_gate,"F",1,&count,NULL)&&count==1&&FlushFileBuffers(command_gate)&&DisconnectNamedPipe(command_gate)&&CloseHandle(command_client));command_client=NULL;
+    else if(!strcmp(line,"U")){need(command_client&&command_target_seen&&command_marker_seen);command_case_live();need(WriteFile(command_gate,"F",1,&count,NULL)&&count==1&&FlushFileBuffers(command_gate)&&DisconnectNamedPipe(command_gate)&&CloseHandle(command_client));command_client=NULL;command_case_pid=0;command_case_from=0;
       DWORD controlCode=0;if(command_control){HANDLE child=command_processes[command_count-1];need(WaitForSingleObject(child,10000)==WAIT_OBJECT_0&&GetExitCodeProcess(child,&controlCode));command_pump(&command_output,"probe-output");command_pump(&command_error,"probe-stderr");if(command_input)need(CloseHandle(command_input));if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));command_input=command_saved_input;command_output=command_saved_output;command_error=command_saved_error;command_control=FALSE;command_control_completed=controlCode==0;}printf("{\"event\":\"U\",\"exitCode\":%lu}\n",controlCode);}
-    else if(!strcmp(line,"C")){need(command_setup_verified&&server.hProcess&&!command_server_released&&!command_control_verified&&!command_control);command_control=TRUE;command_observed.audit[0]=5;command_saved_input=command_input;command_saved_output=command_output;command_saved_error=command_error;command_input=command_output=command_error=NULL;command_action=2;need(swprintf_s(arguments,16384,L"\"%ls\" command-case \"%ls\" \"%ls\" outside %ls \"%ls\" %lu",command_helper,command_pipe,command_paths[2],nonce,command_paths[3],GetCurrentProcessId())>0);PROCESS_INFORMATION control=command_spawn(arguments,root);need(ResumeThread(control.hThread)==1);puts("{\"event\":\"C\"}");}
+    else if(!strcmp(line,"C")){need(command_setup_verified&&server.hProcess&&!command_server_released&&!command_control_verified&&!command_control);command_control=TRUE;command_observed.audit[0]=5;command_saved_input=command_input;command_saved_output=command_output;command_saved_error=command_error;command_input=command_output=command_error=NULL;command_action=2;command_case_permit=TRUE;need(swprintf_s(arguments,16384,L"\"%ls\" command-case \"%ls\" \"%ls\" outside %ls \"%ls\" %lu",command_helper,command_pipe,command_paths[2],nonce,command_paths[3],GetCurrentProcessId())>0);PROCESS_INFORMATION control=command_spawn(arguments,root);need(ResumeThread(control.hThread)==1);puts("{\"event\":\"C\"}");}
     else if(!strcmp(line,"X")){need(command_control_completed&&command_target_seen&&command_marker_seen&&!command_server_released&&!command_control_verified);command_reset(2);command_control_verified=TRUE;command_observed.audit[0]=6;command_observed.audit[8]=1;puts("{\"event\":\"X\"}");}
     else if(!strcmp(line,"D"))command_retire_domain();
     else if(!strcmp(line,"S")){invariant(command_closing&&!command_members(ownedJob),"command-retirement-state");command_capture(0);if(command_setup_verified){invariant(command_records>0,"command-retirement-records");

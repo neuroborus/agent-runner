@@ -1385,9 +1385,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         signal,
       );
     commandCaseAuditing(prepared, after, spec.action);
-    const settled = await call("U");
+    // Join delivery while the original command is still parked and held.
+    // Releasing it first loses native birth/liveness authority for the marker.
     const end = await call("B"),
       state = decoder.state();
+    const settled = await call("U");
     prepared.lastAuditTime = end.time;
     return {
       controlExitCode: settled.exitCode,
@@ -2059,8 +2061,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     },
     async begin(value, spec) {
       phase = "command-observation";
+      need(typeof spec.permit === "boolean");
       start = await call("B");
-      await call(`K ${["inspect", "edit", "outside"].indexOf(spec.action)}`);
+      await call(
+        `K ${["inspect", "edit", "outside"].indexOf(spec.action)} ${Number(spec.permit)}`,
+      );
     },
     observe: (value, spec, signal) => observation(spec, signal),
     async retire(value, signal) {

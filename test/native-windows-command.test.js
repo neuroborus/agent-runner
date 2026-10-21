@@ -888,6 +888,11 @@ test("native subscription and capture retain case-variant real control names thr
         object: rows[index].fields.ObjectName,
         eventId: "4663",
         mask: rows[index].fields.AccessMask ?? "0x2",
+        stamp: String(100 + Number(index) * 50),
+        subject: capture.api.userText,
+        logon: "0x1",
+        keywords: "0x8020000000000000",
+        record: String(Number(index) + 1),
       });
       const selected = program.selection.runInNewContext(capture.api);
       if (selected) program.caseProjection.runInNewContext(capture.api);
@@ -1009,6 +1014,10 @@ test("native structured audit query selects only loss and exact subject/type Eve
       [4663, 4656],
     );
     assert.ok(access.includes("band(Keywords,4503599627370496)"));
+    assert.ok(access.includes("band(Keywords,9007199254740992)"));
+    assert.ok(
+      access.includes('Provider[@Name="Microsoft-Windows-Security-Auditing"]'),
+    );
     assert.ok(
       access.includes(`Data[@Name="SubjectUserSid"]="${f.api.userText}"`),
     );
@@ -1018,6 +1027,210 @@ test("native structured audit query selects only loss and exact subject/type Eve
       interval ? 2 : 0,
     );
     assert.ok(!query.includes("ObjectName")); // Held Windows names join after subscription.
+  }
+});
+
+test("native target and later marker require the parked birth, operating logon and actual outcome", async () => {
+  const program = await commandCaptureProgram();
+  for (const [action, control, permit] of [
+    [0, false, true],
+    [1, false, true],
+    [1, false, false],
+    [2, false, false],
+    [2, true, true],
+  ]) {
+    const faults =
+      action === 2 && control
+        ? [
+            null,
+            "pid",
+            "sid",
+            "logon",
+            "before-release",
+            "before-birth",
+            "mask",
+            "outcome",
+            "keywords",
+            "missing",
+            "closing",
+            "birth",
+            "exited",
+            "wait",
+            "marker-order",
+            "marker-time",
+            "marker-outcome",
+          ]
+        : [null, "mask", "outcome"];
+    for (const fault of faults) {
+      const f = commandCaptureFixture(program),
+        api = f.api;
+      Object.assign(api, {
+        command_action: action,
+        command_control: control,
+        command_case_permit: permit,
+        command_paths: [
+          "C:\\fixture\\inspect",
+          "C:\\fixture\\edit",
+          "C:\\fixture\\outside",
+          "C:\\fixture\\gate",
+        ],
+        process: fault === "pid" ? "44" : "43",
+        object: [
+          "C:\\fixture\\inspect",
+          "C:\\fixture\\edit",
+          "C:\\fixture\\outside",
+        ][action],
+        eventId: permit ? "4663" : "4656",
+        mask: action === 0 ? "0x1" : "0x2",
+        stamp:
+          fault === "before-release"
+            ? "89"
+            : fault === "before-birth"
+              ? "49"
+              : "100",
+        subject: fault === "sid" ? "S-1-5-21-2" : api.userText,
+        logon: fault === "logon" ? "0x2" : "0x1",
+        keywords: permit ? "0x8020000000000000" : "0x8010000000000000",
+        record: "10",
+        _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+        wcscmp: (a, b) => (a === b ? 0 : 1),
+      });
+      if (fault === "before-birth") api.command_case_from = 40n;
+      if (fault === "mask") api.mask = "0x4";
+      if (fault === "outcome")
+        api.eventId = api.eventId === "4656" ? "4663" : "4656";
+      if (fault === "keywords") api.keywords = "0x8030000000000000";
+      if (fault === "missing") api.logon = null;
+      if (fault === "closing") api.command_closing = true;
+      if (fault === "birth") api.creation = () => 51n;
+      if (fault === "exited") api.WaitForSingleObject = () => api.WAIT_OBJECT_0;
+      if (fault === "wait")
+        api.WaitForSingleObject = () => {
+          api.SetLastError(5);
+          return api.WAIT_FAILED;
+        };
+      if (fault === "birth" || fault === "exited" || fault === "wait") {
+        assert.throws(
+          () => program.caseProjection.runInNewContext(api),
+          (code) => code === 126,
+        );
+        const [operation, domain, value] =
+          fault === "wait"
+            ? ["command-case-wait", "win32", 5]
+            : ["command-case-lifetime", "invariant", 0];
+        assert.deepEqual(api.first, [operation, domain, value]);
+        assert.deepEqual(
+          windowsFeasibilityDiagnostics(
+            `native-windows: operation=${operation} domain=${domain} value=${value}\n`,
+          ).failure,
+          { operation, domain, value },
+        );
+        continue;
+      }
+      program.caseProjection.runInNewContext(api);
+      const acceptedTarget = !fault || fault.startsWith("marker-");
+      assert.equal(
+        api.command_target_seen,
+        acceptedTarget,
+        `${action}:${control}:${fault}`,
+      );
+      Object.assign(api, {
+        object: api.command_paths[3].toUpperCase(),
+        eventId: fault === "marker-outcome" ? "4656" : "4663",
+        mask: "0x1",
+        stamp: fault === "marker-time" ? "99" : "101",
+        record: fault === "marker-order" ? "10" : "11",
+        keywords: "0x8020000000000000",
+      });
+      program.caseProjection.runInNewContext(api);
+      assert.equal(
+        api.command_marker_seen,
+        !fault,
+        `${action}:${control}:${fault}`,
+      );
+      if (!fault && control) {
+        Object.assign(api, {
+          object: api.command_paths[action],
+          mask: "0x2",
+          record: "12",
+          stamp: "102",
+        });
+        program.caseProjection.runInNewContext(api);
+        assert.equal(
+          api.command_marker_seen,
+          false,
+          "a later target needs its own post-operation marker",
+        );
+        Object.assign(api, {
+          object: api.command_paths[3],
+          mask: "0x1",
+          record: "13",
+          stamp: "103",
+        });
+        program.caseProjection.runInNewContext(api);
+        assert.equal(api.command_marker_seen, true);
+      }
+    }
+  }
+});
+
+test("the private command selection carries each frozen policy outcome to the native event predicate", async () => {
+  const [effects, source] = await Promise.all(
+    ["feasibility-command-effects.js", "feasibility-command.h"].map((file) =>
+      readFile(new URL(`../ci/native/win32/${file}`, import.meta.url), "utf8"),
+    ),
+  );
+  const begin = /async begin\(value, spec\) \{([\s\S]*?)\n    \},/u.exec(
+    effects,
+  )[1];
+  const native = source
+    .split("\n")
+    .find((row) => row.includes('strncmp(line,"K ",2)'));
+  const select = new Script(
+    native
+      .slice(native.indexOf("{") + 1, native.indexOf("puts("))
+      .replace("(unsigned)", ""),
+  );
+  for (const profile of ["read-only", "workspace-write"]) {
+    for (const [index, action] of ["inspect", "edit", "outside"].entries()) {
+      const permit =
+        action === "inspect" ||
+        (action === "edit" && profile === "workspace-write");
+      const calls = [],
+        resets = [],
+        state = {
+          need: assert.ok,
+          command_control_verified: true,
+          command_server_released: true,
+          command_client: null,
+          command_reset: (selected) => resets.push(selected),
+          strlen: (text) => text.length,
+        };
+      await new Script(`(async () => {${begin}})()`).runInNewContext({
+        value: {},
+        spec: { action, permit },
+        phase: "",
+        start: null,
+        need: assert.ok,
+        call: async (line) => {
+          calls.push(line);
+          if (line !== "B") {
+            state.line = line;
+            select.runInNewContext(state);
+          }
+          return {};
+        },
+      });
+      assert.deepEqual(calls, ["B", `K ${index} ${permit ? 1 : 0}`]);
+      assert.equal(state.command_action, index);
+      assert.equal(state.command_case_permit, permit);
+      assert.deepEqual(resets, index < 2 ? [index] : []);
+      for (const line of ["K 1", "K 1 true", "K 1 2", "K 3 1"]) {
+        state.line = line;
+        assert.throws(() => select.runInNewContext(state));
+        assert.equal(state.command_case_permit, permit);
+      }
+    }
   }
 });
 
@@ -1124,7 +1337,7 @@ test("actual command token and held SACL reads precede control I/O and remain re
       );
     } else {
       const result = await program.runInNewContext(context);
-      assert.deepEqual(calls, ["N", "T", "F", "U", "B"]);
+      assert.deepEqual(calls, ["N", "T", "F", "B", "U"]);
       assert.deepEqual(result.auditing.before, audit);
       assert.equal(
         result.events.length,
@@ -1159,11 +1372,15 @@ test("native command auditing queries the dynamic operating context, reverts and
     .replaceAll("subject->User.Sid", "subject.User.Sid")
     .replaceAll("stats->", "stats.")
     .replace(
+      "((ULONGLONG)(DWORD)stats.AuthenticationId.HighPart<<32)|stats.AuthenticationId.LowPart",
+      "stats.AuthenticationId.HighPart*0x100000000+stats.AuthenticationId.LowPart",
+    )
+    .replace(
       "unsigned indices[2]={command_action,3}",
       "const indices=[command_action,3]",
     )
     .replace("char id[50],hash[65]", "const id={},hash={}")
-    .replace(/\b(?:unsigned|BOOL)\b/gu, "let")
+    .replace(/\b(?:unsigned|BOOL|ULONGLONG)\b/gu, "let")
     .replace("(let)SecurityImpersonation", "SecurityImpersonation")
     .replace("strcmp(id,", "strcmp(id.value,")
     .replace('i?",":"",id,hash', 'i?",":"",id.value,hash.value');
@@ -1177,6 +1394,7 @@ test("native command auditing queries the dynamic operating context, reverts and
     "subject",
     "type",
     "level",
+    "logon",
     "revert",
     "query",
     "failure-policy",
@@ -1208,6 +1426,7 @@ test("native command auditing queries the dynamic operating context, reverts and
       POLICY_AUDIT_EVENT_SUCCESS: 1,
       POLICY_AUDIT_EVENT_FAILURE: 2,
       command_client: 73,
+      command_case_logon: fault === "logon" ? 2 : 0,
       command_gate: 74,
       userSid: identity.userSid,
       userText: identity.userSid,
@@ -1238,6 +1457,7 @@ test("native command auditing queries the dynamic operating context, reverts and
           : {
               TokenType: fault === "type" ? 1 : 2,
               ImpersonationLevel: fault === "level" ? 1 : 2,
+              AuthenticationId: { HighPart: 0, LowPart: 1 },
             };
       },
       EqualSid: (a, b) => a === b,
@@ -1313,6 +1533,7 @@ test("native command auditing queries the dynamic operating context, reverts and
         "subject",
         "type",
         "level",
+        "logon",
         "revert",
         "close",
         "identity",
@@ -1361,6 +1582,7 @@ test("native command auditing queries the dynamic operating context, reverts and
         "subject",
         "type",
         "level",
+        "logon",
         "revert",
         "query",
       ].includes(fault)
@@ -1627,6 +1849,20 @@ test("native setup permits the parked control while release and forwarding requi
     if (missing) api[missing] = false;
     assert.equal(check("X", api), !missing);
   }
+  for (const missing of [
+    null,
+    "command_client",
+    "command_target_seen",
+    "command_marker_seen",
+  ]) {
+    const api = {
+      command_client: 73,
+      command_target_seen: true,
+      command_marker_seen: true,
+    };
+    if (missing) api[missing] = false;
+    assert.equal(!!check("U", api), !missing);
+  }
   assert.doesNotMatch(
     source,
     /strcmp\(line,"[PM]"\)|command_coverage_control|command_delivery_query/u,
@@ -1650,7 +1886,7 @@ test("native terminal waiting ignores queued broker records from before domain r
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
       "utf8",
     ),
-    body = /static BOOL command_terminal_time\([^\n]+\) \{([\s\S]*?)\n\}/u
+    body = /static ULONGLONG command_event_time\([^\n]+\) \{([\s\S]*?)\n\}/u
       .exec(source)[1]
       .replace(
         "unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};",
@@ -1674,7 +1910,9 @@ test("native terminal waiting ignores queued broker records from before domain r
       .replace("ticks.QuadPart+fraction", "BigInt(time.ticks)+BigInt(fraction)")
       .replace(/\bL(?=['"])/gu, "")
       .replace(/\b(?:size_t|unsigned|DWORD)\b/gu, "let"),
-    timestamp = new Script(`(text) => {${body}}`).runInNewContext({
+    timestamp = new Script(
+      `(text) => {const ticks=(() => {${body}})();return ticks>command_retirement_from;}`,
+    ).runInNewContext({
       FALSE: false,
       wcslen: (text) => text.length,
       BigInt,
@@ -6640,6 +6878,7 @@ async function commandCaptureProgram() {
     function command_capture_close() {${translate(body(source, "command_capture_close"))}}
     function command_preflight_close(keepBroker) {${translate(preflight)} return ok;}
     function command_capture(timeout) {${translate(capture)}}
+    function command_case_live() {${translate(body(source, "command_case_live"))}}
     function command_observe_failure() {${translate(body(source, "command_observe_failure")).replaceAll("&diagnosticOutputLock", "diagnosticOutputLock")}}
     function command_audit_query(query,interval) {${body(source, "command_audit_query").replace(/\bL(?=")/gu, "")}}
     ${barrier}
@@ -6650,15 +6889,26 @@ async function commandCaptureProgram() {
   assert.equal(creations.length, 2);
   const selectionBody =
       /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(source)[1],
-    caseBody = source
-      .split("\n")
-      .find((line) => line.trim().startsWith("if(command_case_pid&&process"));
+    caseBody =
+      /static void command_case_event\([\s\S]*?\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )[1];
   return {
     dispatch,
     subscribe: new Script(
       source
         .match(/command_subscription=EvtSubscribe\([^;]+\);/u)[0]
         .replace(/\bL(?=")/gu, ""),
+    ),
+    arm: new Script(
+      source
+        .match(
+          /command_subscription=EvtSubscribe[^\n]+win32_check\(command_subscription!=NULL,"command-subscription-create"\);/u,
+        )[0]
+        .replace(/\bDWORD\b/gu, "let") +
+        source.match(
+          /invariant\(!ferror\(stdout\),"command-ready-output"\);command_capture\(0\);/u,
+        )[0],
     ),
     subscriptionFlags: new Script(
       `command_subscription_flags=${/static const DWORD command_subscription_flags = ([^;]+);/u.exec(source)[1]};`,
@@ -6669,12 +6919,20 @@ async function commandCaptureProgram() {
       `(() => {${selectionBody.replace(/\bL(?=")/gu, "").replace(/\b(?:BOOL|unsigned)\b/gu, "let")} return selected;})()`,
     ),
     caseProjection: new Script(
-      caseBody
+      `(function(process,object,eventId,mask,stamp,subject,logon,keywords,record){${caseBody
         .replace(/\bL(?=")/gu, "")
-        .replace("WCHAR *end;", "let end;")
-        .replace(/ULONGLONG (pid|rights)/gu, "let $1")
-        .replaceAll("&end", "value=>end=value")
-        .replaceAll("!*end", "!end"),
+        .replace(/\b(?:ULONGLONG|BOOL)\b/gu, "let")
+        .replace(/\b(0x[a-fA-F0-9]+)ULL\b/gu, "$1n")
+        .replaceAll(
+          "rights&(command_action==0?1:2)",
+          "rights&(command_action==0?1n:2n)",
+        )
+        .replaceAll("rights&1", "rights&1n")
+        .replace(
+          /,&(pid|rights|id|authentication|bits|sequence)\b/gu,
+          ",value=>$1=value",
+        )}
+      })(process,object,eventId,mask,stamp,subject,logon,keywords,record);`,
     ),
   };
 }
@@ -6746,7 +7004,25 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     command_capture_wait_error: -1,
     command_next_error: -1,
     command_case_pid: 43,
+    command_client: "client",
+    command_case_birth: 50n,
+    command_case_from: 90n,
+    command_case_logon: 1n,
+    command_target_record: 0n,
+    command_target_time: 0n,
+    command_event_time: (stamp) => BigInt(stamp ?? 0),
+    command_event_number: (text, out) => {
+      if (typeof text !== "string" || !/^(?:0x[0-9a-f]+|[0-9]+)$/iu.test(text))
+        return false;
+      const value = BigInt(text);
+      if (value > 0xffffffffffffffffn) return false;
+      out(value);
+      return true;
+    },
+    MAXDWORD: 0xffffffff,
+    creation: () => 50n,
     command_action: 2,
+    command_case_permit: true,
     command_ids: ["inspect-id", "edit-id", "outside-id", "marker-id"],
     command_target_seen: false,
     command_marker_seen: false,
@@ -6830,6 +7106,8 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     AcquireSRWLockExclusive: () => {},
     ReleaseSRWLockExclusive: () => {},
     stderr: {},
+    stdout: {},
+    ferror: () => false,
     fprintf: (_stream, text, ...args) => {
       output += format(text, args);
       lastError = 90;
@@ -6838,6 +7116,7 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     fflush: () => {},
     printf: (text, ...args) => (replies += format(text, args)),
     WaitForSingleObject: (event, timeout) => {
+      if (event === "client") return api.WAIT_TIMEOUT;
       assert.equal(event, "notification");
       calls.push(["wait", timeout]);
       if (fault === "wait") {
@@ -6950,8 +7229,64 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
       signaled = true;
     },
     capture: (timeout = 0) => api.command_capture(timeout),
+    arm: () => {
+      api.CreateEventW = (_attributes, manual, initial, name) => {
+        assert.equal(manual, true);
+        assert.equal(name, null);
+        signaled = initial;
+        return "notification";
+      };
+      program.createEvents.runInNewContext(api);
+      program.arm.runInNewContext(api);
+    },
   };
 }
+
+test("the original pull subscription drains once before controls and refuses missing selected delivery", async () => {
+  const program = await commandCaptureProgram(),
+    f = commandCaptureFixture(program);
+  const subscription = program.source.indexOf(
+      "command_subscription=EvtSubscribe",
+    ),
+    readyEnd = program.source.indexOf('puts("]}}");', subscription),
+    firstDrain = program.source.indexOf("command_capture(0);", subscription);
+  assert.ok(
+    readyEnd > subscription && readyEnd < firstDrain,
+    "the decoder readiness frame must precede any queued audit frame",
+  );
+  const queued = commandCaptureFixture(program);
+  queued.notify(["queued"]);
+  queued.arm();
+  assert.deepEqual(queued.projected, ["queued"]);
+  assert.equal(queued.api.command_target_seen, false);
+  assert.equal(queued.api.command_marker_seen, false);
+  f.arm();
+  assert.deepEqual(
+    f.calls.filter(([name]) => ["wait", "next", "reset"].includes(name)),
+    [["wait", 0], ["next"], ["reset"], ["next"]],
+  );
+  assert.equal(f.api.command_records, 0);
+  assert.equal(f.api.command_target_seen, false);
+  assert.equal(f.api.command_marker_seen, false);
+  assert.equal(f.api.command_next_error, 259);
+  assert.throws(
+    () => f.api.command_barrier(),
+    (code) => code === 126,
+  );
+  assert.equal(f.replies(), "");
+  assert.deepEqual(f.api.first, ["command-marker-barrier", "invariant", 0]);
+  const failed = commandCaptureFixture(program, {
+    fault: "next",
+    closeFailures: ["subscription"],
+  });
+  assert.throws(
+    () => failed.arm(),
+    (code) => code === 126,
+  );
+  assert.deepEqual(failed.api.first, ["command-capture-next", "win32", 4317]);
+  assert.deepEqual(failed.closed, ["subscription", "bookmark", "notification"]);
+  assert.equal(failed.cleanup.length, 1);
+});
 
 test("actual capture waits, drains ordered batches, rearms once and accepts later notifications", async () => {
   const program = await commandCaptureProgram(),
@@ -6971,7 +7306,7 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
   program.createEvents.runInNewContext(creationContext);
   assert.deepEqual(creations, [
     [null, true, false, null],
-    [null, true, false, null],
+    [null, true, true, null],
   ]);
   assert.equal(owned.event, "notification-1");
   assert.equal(creationContext.command_event, "notification-2");
