@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import { Script } from "node:vm";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
@@ -1589,6 +1590,91 @@ function fixture(change = () => {}) {
       ),
   };
 }
+test("Darwin cold exec consumes the generated admission policy with only the page-size sysctl grant", async () => {
+  const [effects, header, helper] = await Promise.all(
+    [
+      "feasibility-command-effects.js",
+      "feasibility-command.h",
+      "feasibility-helper.c",
+    ].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const writeStart = effects.indexOf(
+      '      await writeFile(\n        path.join(root, "admission.sb"),',
+    ),
+    writeEnd = effects.indexOf("      const prerequisites =", writeStart),
+    brokerStart = header.indexOf("  need(argc==9"),
+    policyLeaf = /command_path\(command_policy,"([^"]+)"\);/u.exec(
+      header.slice(brokerStart),
+    )?.[1],
+    launchStart = header.indexOf(
+      "    char cwd[4096];",
+      header.indexOf("static struct identity command_spawn("),
+    ),
+    launchEnd = header.indexOf("    /* The normal-UID launcher", launchStart);
+  assert.ok(writeStart > 0 && writeEnd > writeStart);
+  assert.ok(
+    brokerStart > 0 && policyLeaf && launchStart > 0 && launchEnd > launchStart,
+  );
+  const root = "/fixture/command",
+    files = new Map(),
+    publish = new Script(
+      `(async () => {${effects.slice(writeStart, writeEnd)}})()`,
+    );
+  await publish.runInNewContext({
+    root,
+    path,
+    async writeFile(file, bytes, options) {
+      assert.deepEqual({ ...options }, { flag: "wx", mode: 0o600 });
+      assert.ok(!files.has(file));
+      files.set(file, bytes);
+    },
+  });
+  let consumed;
+  const launch = commandGuards(
+    header,
+    helper,
+    header
+      .slice(launchStart, launchEnd)
+      .replace("char cwd[4096];", "const cwd = {};"),
+    "command_spawn",
+    {
+      context: {
+        command_policy: path.join(root, policyLeaf),
+        command_path(out, leaf) {
+          out.value = path.join(root, leaf);
+        },
+        chdir(cwd) {
+          assert.equal(cwd.value, path.join(root, "workspace"));
+          return 0;
+        },
+        policy(file) {
+          assert.ok(
+            files.has(file),
+            "Cold exec must consume the published policy",
+          );
+          consumed = files.get(file);
+        },
+      },
+    },
+  );
+  launch.run();
+  assert.equal(files.size, 1);
+  assert.deepEqual(consumed.split("\n"), [
+    "(version 1)",
+    "(deny default)",
+    "(allow process-fork)",
+    "(allow process-exec)",
+    "(allow file-read*)",
+    "(allow file-map-executable)",
+    '(allow sysctl-read (sysctl-name "hw.pagesize"))',
+    "(allow process-info* (target same-sandbox))",
+    `(allow file-write* (subpath ${JSON.stringify(root)}) (literal "/dev/null"))`,
+    "",
+  ]);
+});
+
 test("Darwin command construction uses an empty-home credential-free allowlist and both explicit stock policies", async () => {
   const env = darwinCommandEnvironment("/fixture/home", "/fixture/codex");
   assert.deepEqual(Object.keys(env).sort(), [

@@ -659,6 +659,16 @@ The existing fault-sanitation fixture also distinguishes earlier null/dead
 observations from a later live task-access slot, preserving the authority refusal
 and separate getter-reference release failures. These portable tests establish no
 native signal delivery or safe inherited-authority correction.
+The same fast command suite projects the production `admission.sb` write into an
+in-memory file and executes the native cold-launch policy-consumer body with
+injected effects. It captures the bytes selected by the broker and requires the
+exact `hw.pagesize` read grant plus the complete retained policy, including default
+denial, bounded fixture writes and absence of network or broader sysctl grants.
+The regression reproduces the missing grant without compiling or running Darwin
+binaries. It proves the source-policy repair, not the unobserved hosted sysctl
+result, Rust crash causality or native acceptance. Existing hosted version/schema
+probes, model-free commands, positive controls and independent cleanup remain
+required; no slow-tier assignment changes.
 Fast source and injected-stream regressions in `test/native-feasibility.test.js`
 protect parked Git admission through the outside observers: original parent and
 child birth/credential joins, immutable helper images, applied policy and policy

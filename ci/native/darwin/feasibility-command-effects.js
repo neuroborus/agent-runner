@@ -633,6 +633,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
           "(allow process-exec)",
           "(allow file-read*)",
           "(allow file-map-executable)",
+          '(allow sysctl-read (sysctl-name "hw.pagesize"))',
           "(allow process-info* (target same-sandbox))",
           `(allow file-write* (subpath ${JSON.stringify(root)}) (literal \"/dev/null\"))`,
           "",

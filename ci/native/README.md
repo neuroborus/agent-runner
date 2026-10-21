@@ -2830,6 +2830,20 @@ policy permits fixture writes but denies network. A separate outside-write contr
 must actually succeed under it; an enclosing denial cannot prove Codex's stock
 command sandbox.
 
+The generated `admission.sb` grants only
+`(allow sysctl-read (sysctl-name "hw.pagesize"))` for cold executable page-size
+reads. Default denial and every existing process/file restriction remain; no
+general sysctl grant or resource-limit adjustment is introduced.
+Apple Libc's [getpagesize](https://github.com/apple-oss-distributions/Libc/blob/main/gen/FreeBSD/getpagesize.c)
+first reads `CTL_HW/HW_PAGESIZE` and returns -1 on refusal; the ordinary
+`sysconf(_SC_PAGESIZE)` branch calls it. XNU names this selector `hw.pagesize`.
+This establishes the former policy omission. The observed Rust guard-allocation
+`EINVAL` before `--version` did not record the hosted sysctl result or mapping
+inputs, so neither the allowance nor portable coverage establishes crash causality
+or native acceptance. Existing hosted cold installed-Codex version/schema probes,
+model-free command execution, positive controls and independent cleanup remain
+the native verification path; a warm helper's cached page size cannot replace it.
+
 The existing broker reader now owns pending requests through operation cancellation
 and closure. The traced path is ready, V/G, launcher birth and held-session custody,
 private P release, suspended spawn and identity-checked resume, then capture/reap.
