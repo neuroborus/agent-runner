@@ -24,6 +24,7 @@ import {
   isWindows2025Image,
   joinNativeArtifacts,
   nativeArtifactDownload,
+  nativeArtifactName,
   normalizeNativeArtifactSelection,
   normalizeNativeJob,
   nativeCleanupFailure,
@@ -32,6 +33,7 @@ import {
   resolveNativeDispatch,
   selectNativeArtifacts,
 } from "./dispatch.js";
+import { PLATFORMS } from "./catalog.js";
 import {
   initialLinuxPreparation,
   initialLinuxReviewedPreparation,
@@ -194,16 +196,19 @@ async function readJSON(file) {
 async function persistJSON(
   file,
   value,
-  { mode = 0o666, exclusive = false } = {},
+  { mode = 0o666, exclusive = false, signal, assertLive } = {},
 ) {
+  assertLive?.();
   const bytes = JSON.stringify(value, null, 2) + "\n";
   if (Buffer.byteLength(bytes) > LIMIT) throw new Error("Oversized CI report");
   if (exclusive) {
-    await writeFile(file, bytes, { flag: "wx", mode });
+    await writeFile(file, bytes, { flag: "wx", mode, signal });
     return;
   }
   const temporary = `${file}.${process.pid}.tmp`;
-  await writeFile(temporary, bytes, { flag: "wx", mode });
+  await writeFile(temporary, bytes, { flag: "wx", mode, signal });
+  signal?.throwIfAborted();
+  assertLive?.();
   await rename(temporary, file);
 }
 
@@ -278,7 +283,18 @@ async function command(executable, args, timeout = 30000) {
 }
 
 // CI-only read authority. Never send this token to payloads, providers, or logs.
-async function github(env, route, { repositoryRoute = false } = {}) {
+async function github(
+  env,
+  route,
+  {
+    repositoryRoute = false,
+    deadline,
+    clock = () => performance.now(),
+    signal,
+    fetchImpl = fetch,
+    timeoutSignal = (milliseconds) => AbortSignal.timeout(milliseconds),
+  } = {},
+) {
   if (
     !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/u.test(env.GITHUB_REPOSITORY) ||
     !/^[1-9][0-9]*$/u.test(env.GITHUB_RUN_ID) ||
@@ -286,7 +302,12 @@ async function github(env, route, { repositoryRoute = false } = {}) {
     !env.GH_TOKEN
   )
     throw new Error("Missing CI metadata authority");
-  const response = await fetch(
+  const timeout =
+    deadline === undefined
+      ? 10000
+      : Math.min(10000, Math.floor(deadline - clock()));
+  if (timeout <= 0) throw new Error("CI metadata deadline");
+  const response = await fetchImpl(
     `https://api.github.com/repos/${env.GITHUB_REPOSITORY}${repositoryRoute ? "" : "/actions"}${route ? "/" + route : ""}`,
     {
       headers: {
@@ -294,7 +315,9 @@ async function github(env, route, { repositoryRoute = false } = {}) {
         accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
       },
-      signal: AbortSignal.timeout(10000),
+      signal: signal
+        ? AbortSignal.any([signal, timeoutSignal(timeout)])
+        : timeoutSignal(timeout),
       redirect: "error",
     },
   );
@@ -306,17 +329,23 @@ async function github(env, route, { repositoryRoute = false } = {}) {
     if (size > LIMIT) throw new Error("Oversized CI metadata");
     chunks.push(chunk);
   }
+  if (deadline !== undefined && clock() >= deadline)
+    throw new Error("CI metadata deadline");
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
-async function listMetadata(env, kind) {
+async function listMetadata(env, kind, { request = github, ...options } = {}) {
   const entries = [];
   for (let page = 1; page <= 4; page++) {
     const route =
       kind === "jobs"
         ? `runs/${env.GITHUB_RUN_ID}/attempts/${env.GITHUB_RUN_ATTEMPT}/jobs`
         : `runs/${env.GITHUB_RUN_ID}/artifacts`;
-    const data = await github(env, `${route}?per_page=100&page=${page}`);
+    const data = await request(
+      env,
+      `${route}?per_page=100&page=${page}`,
+      options,
+    );
     if (!Array.isArray(data[kind]) || data[kind].length > 100)
       throw new Error("Invalid CI metadata");
     entries.push(...data[kind]);
@@ -758,37 +787,274 @@ async function publish(env, directory, rendered, emit = true) {
     process.stdout.write(annotation + "\n");
 }
 
-async function collect(env, directory, purpose = "reviewed") {
+export async function collectNativeArtifacts(
+  env,
+  directory,
+  purpose = "reviewed",
+  io = {},
+) {
   const selectedContext = { ...context(env), workflowSha: env.GITHUB_SHA };
-  let selection;
+  // Leave ten seconds of the single 150-second owner budget for publication,
+  // inside the workflow's unchanged three-minute collection step.
+  const clock = io.clock ?? (() => performance.now()),
+    deadline = clock() + 150000;
+  const options = {
+    deadline: deadline - 10000,
+    clock,
+    signal: io.signal,
+    fetchImpl: io.fetchImpl,
+    timeoutSignal: io.timeoutSignal,
+  };
+  const request = io.github ?? github,
+    list = io.listMetadata ?? listMetadata;
+  const held = new Map(),
+    observed = new Map(),
+    receipts = new Map(),
+    uploads = new Map();
+  const artifactBinding = (artifact) => ({
+    id: String(artifact.id),
+    name: artifact.name,
+    digest: artifact.digest ?? null,
+    runId: String(artifact.workflow_run?.id),
+    headSha: artifact.workflow_run?.head_sha,
+    createdAt: artifact.created_at,
+    expiresAt: artifact.expires_at ?? null,
+    bytes: artifact.size_in_bytes,
+  });
+  const changedArtifact = (previous, next) =>
+    Object.keys(previous).some((key) =>
+      key === "digest"
+        ? previous.digest !== null &&
+          next.digest !== null &&
+          previous.digest !== next.digest
+        : previous[key] !== next[key],
+    );
+  const normalize = (value) =>
+    normalizeNativeArtifactSelection(selectedContext, value, "system", purpose);
+  const changedJob = (previous, job) =>
+    previous &&
+    (previous.jobId !== job.jobId ||
+      (previous.conclusion !== "in_progress" &&
+        previous.conclusion !== job.conclusion) ||
+      Object.keys(previous.stages).some(
+        (stage) =>
+          previous.stages[stage] !== "missing" &&
+          previous.stages[stage] !== job.stages[stage],
+      ));
+  let selection = normalize({
+    ...(purpose === "experiment" ? { purpose } : {}),
+    entries: [],
+    issues: [{ code: "metadata", platform: null }],
+    jobs: [],
+  });
+  const assertMetadataTime = () => {
+    io.signal?.throwIfAborted();
+    if (clock() >= options.deadline) throw new Error("CI metadata deadline");
+  };
   try {
     if (
-      (await command("git", ["rev-parse", "HEAD"])).stdout.trim() !==
-      selectedContext.candidateSha
+      (
+        await (io.command ?? command)(
+          "git",
+          ["rev-parse", "HEAD"],
+          Math.min(30000, options.deadline - clock()),
+        )
+      ).stdout.trim() !== selectedContext.candidateSha
     )
       throw new Error("Controller checkout mismatch");
-    const run = await github(env, `runs/${env.GITHUB_RUN_ID}`);
-    const jobs = await listMetadata(env, "jobs");
-    const artifacts = await listMetadata(env, "artifacts");
-    selection = normalizeNativeArtifactSelection(
-      selectedContext,
-      selectNativeArtifacts(selectedContext, run, jobs, artifacts, purpose),
-      "system",
-      purpose,
-    );
+    assertMetadataTime();
+    const run = await request(env, `runs/${env.GITHUB_RUN_ID}`, options);
+    do {
+      assertMetadataTime();
+      const jobs = await list(env, "jobs", { ...options, request });
+      assertMetadataTime();
+      // A failed artifact request must not erase already read job failures.
+      const partial = normalize(
+        selectNativeArtifacts(
+          selectedContext,
+          run,
+          jobs,
+          [],
+          purpose,
+          (io.now ?? Date.now)(),
+        ),
+      );
+      for (const job of partial.jobs) {
+        if (
+          !held.has(job.platform) &&
+          !changedJob(observed.get(job.platform), job)
+        ) {
+          selection.jobs = selection.jobs.filter(
+            (value) => value.platform !== job.platform,
+          );
+          selection.jobs.push(job);
+        }
+      }
+      selection = normalize(selection);
+      assertMetadataTime();
+      const artifacts = await list(env, "artifacts", { ...options, request });
+      assertMetadataTime();
+      const current = normalize(
+        selectNativeArtifacts(
+          selectedContext,
+          run,
+          jobs,
+          artifacts,
+          purpose,
+          (io.now ?? Date.now)(),
+        ),
+      );
+      const invalid = new Set();
+      for (const job of observed.values()) {
+        if (
+          jobs.some(
+            (row) =>
+              String(row.id) === job.jobId &&
+              (row.name !== `native-system-${job.platform}` ||
+                String(row.run_id) !== selectedContext.runId ||
+                row.run_attempt !== selectedContext.runAttempt),
+          )
+        )
+          invalid.add(job.platform);
+      }
+      for (const [platform, previous] of uploads) {
+        if (
+          artifacts.some(
+            (row) =>
+              String(row.id) === previous.id &&
+              changedArtifact(previous, artifactBinding(row)),
+          )
+        )
+          invalid.add(platform);
+      }
+      for (const job of current.jobs) {
+        const receipt = jobs
+          .find(
+            (row) =>
+              row.name === `native-system-${job.platform}` &&
+              String(row.id) === job.jobId,
+          )
+          .steps?.find((step) =>
+            step.name.startsWith("Bind native artifact "),
+          )?.name;
+        if (receipt) {
+          const previous = receipts.get(job.platform);
+          if (previous && previous !== receipt) invalid.add(job.platform);
+          else receipts.set(job.platform, receipt);
+        }
+        const previous = observed.get(job.platform);
+        if (changedJob(previous, job)) invalid.add(job.platform);
+        else if (!invalid.has(job.platform)) observed.set(job.platform, job);
+      }
+      for (const { os: platform } of PLATFORMS) {
+        const matches = artifacts.filter(
+          (row) => row.name === nativeArtifactName(selectedContext, platform),
+        );
+        if (
+          matches.length === 1 &&
+          !current.issues.some(
+            (issue) =>
+              issue.code !== "missing" &&
+              (issue.platform === null || issue.platform === platform),
+          )
+        ) {
+          const binding = artifactBinding(matches[0]),
+            previous = uploads.get(platform);
+          if (previous && changedArtifact(previous, binding))
+            invalid.add(platform);
+          else
+            uploads.set(platform, {
+              ...binding,
+              digest: binding.digest ?? previous?.digest ?? null,
+            });
+        }
+      }
+      for (const entry of current.entries) {
+        const platform = entry.binding.platform,
+          previous = held.get(platform);
+        if (
+          previous &&
+          observationDigest(previous.entry) !== observationDigest(entry)
+        )
+          invalid.add(platform);
+        if (!invalid.has(platform))
+          held.set(platform, {
+            entry,
+            job: current.jobs.find((job) => job.platform === platform),
+          });
+      }
+      // Completed bindings are immutable evidence, including failed producers.
+      // Retain them through later incomplete reads; never download a substitute.
+      current.entries = current.entries.filter(
+        (entry) => !invalid.has(entry.binding.platform),
+      );
+      for (const platform of invalid) {
+        current.jobs = current.jobs.filter((job) => job.platform !== platform);
+        if (observed.has(platform)) current.jobs.push(observed.get(platform));
+      }
+      for (const [platform, previous] of observed) {
+        if (!current.jobs.some((job) => job.platform === platform))
+          current.jobs.push(previous);
+      }
+      for (const { entry, job } of held.values()) {
+        current.entries = current.entries.filter(
+          (value) => value.binding.platform !== job.platform,
+        );
+        current.entries.push(entry);
+        current.jobs = current.jobs.filter(
+          (value) => value.platform !== job.platform,
+        );
+        current.jobs.push(job);
+      }
+      for (const platform of invalid) {
+        current.issues = current.issues.filter(
+          (issue) => issue.platform !== platform,
+        );
+        current.issues.push({ code: "metadata", platform });
+      }
+      selection = normalize(current);
+      if (
+        !selection.issues.length ||
+        selection.issues.some(({ code }) => code !== "missing")
+      )
+        break;
+    } while (clock() < options.deadline);
   } catch (diagnosticError) {
     nativeException("run.js:exception", diagnosticError);
-    selection = {
-      ...(purpose === "experiment" ? { purpose } : {}),
-      entries: [],
-      issues: [{ code: "metadata", platform: null }],
-      jobs: [],
-    };
+    if (
+      !selection.issues.some(
+        (issue) => issue.code === "metadata" && issue.platform === null,
+      )
+    )
+      selection.issues.push({ code: "metadata", platform: null });
   }
-  await persistJSON(path.join(directory, "selection.json"), {
-    context: selectedContext,
-    selection,
-  });
+  selection = normalize(selection);
+  const remaining = Math.floor(deadline - clock());
+  if (remaining <= 0) throw new Error("CI selection publication deadline");
+  const signal = (io.timeoutSignal ?? AbortSignal.timeout)(remaining);
+  const assertLive = () => {
+    signal.throwIfAborted();
+    if (clock() >= deadline)
+      throw new Error("CI selection publication deadline");
+  };
+  const pendingPublication = !selection.issues.some(
+    (issue) => issue.code === "metadata" && issue.platform === null,
+  );
+  const provisional = pendingPublication
+    ? normalize({
+        ...selection,
+        issues: [...selection.issues, { code: "metadata", platform: null }],
+      })
+    : selection;
+  // A provisional selection remains blocking if output publication fails.
+  await (io.persistJSON ?? persistJSON)(
+    path.join(directory, "selection.json"),
+    {
+      context: selectedContext,
+      selection: provisional,
+    },
+    { signal, assertLive },
+  );
   if (env.GITHUB_OUTPUT) {
     const download = nativeArtifactDownload(
       selectedContext,
@@ -797,11 +1063,21 @@ async function collect(env, directory, purpose = "reviewed") {
       "system",
       purpose,
     );
-    await appendFile(
+    await (io.appendFile ?? appendFile)(
       env.GITHUB_OUTPUT,
       `artifact_ids=${download.artifactIds}\nartifact_path=${download.path}\n`,
+      { signal },
     );
   }
+  assertLive();
+  if (pendingPublication)
+    await (io.persistJSON ?? persistJSON)(
+      path.join(directory, "selection.json"),
+      { context: selectedContext, selection },
+      { signal, assertLive },
+    );
+  assertLive();
+  return selection;
 }
 
 async function aggregate(env, directory, purpose = "reviewed") {
@@ -952,7 +1228,7 @@ async function main() {
   };
   if (stage === "collect")
     return tier === "system"
-      ? collect(env, directory, purpose)
+      ? collectNativeArtifacts(env, directory, purpose)
       : collectAcceptance(env, directory, controller);
   if (stage === "aggregate")
     return tier === "system"

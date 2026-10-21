@@ -11064,6 +11064,27 @@ Expiry, freshness, identity, digest, duplicate and substitution checks remain
 required, with no delay, timestamp tolerance or future acceptance. Artifact naming
 or payload provenance alone cannot bind a job.
 
+The ordinary system collector refreshes incomplete producer-job/artifact
+snapshots under one 150-second owner deadline within the unchanged three-minute
+collection step. It reserves the last ten seconds for validated selection and
+download-output publication; checkout, every pagination page and in-flight
+request consume the same remaining budget. Requests retain their ten-second
+maximum and abort when their remaining metadata bound expires. No fixed sleep
+or aggregate-job/workflow completion wait is added.
+Only missing producers/uploads or nonterminal producers with consistent available
+bindings may refresh. Invalid metadata, duplicates, changed job IDs, receipts or
+held artifact names/IDs/digests refuse without retrying to success. Completed
+bindings remain immutable through later incomplete reads, including genuine
+failed producers; native failure never becomes successful through collection.
+Available pending job/upload identities are also fixed across refreshes. A
+missing official digest remains incomplete and supplies no artifact binding. A
+provisional selection retains a blocking metadata issue until download outputs
+are published and the final selection commits within that same deadline.
+On deadline or request failure, the normalized partial selection preserves
+available bound artifacts and failure observations with unresolved missing or
+metadata issues. Those issues block complete acceptance. Original reports and
+all 69 system records retain their existing joining contract.
+
 Both collectors derive exact ID lists and destinations from normalized verified
 selections. Empty selections emit empty outputs and skip the download. For exactly
 one artifact, the requested path is `<runner-temp>/native-artifacts/<validated-name>`;

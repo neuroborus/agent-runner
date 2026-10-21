@@ -1100,15 +1100,55 @@ function selectArtifacts(
   );
   for (const { os } of PLATFORMS) {
     const matchedJobs = jobs.filter(
-      (job) =>
-        job.name === `native-${tier}-${os}` &&
-        String(job.run_id) === context.runId &&
-        job.run_attempt === context.runAttempt,
+      (job) => job.name === `native-${tier}-${os}`,
     );
     const name = nativeArtifactName(context, os, tier);
     const matchedArtifacts = artifacts.filter(
       (artifact) => artifact.name === name,
     );
+    if (
+      matchedJobs.some(
+        (job) =>
+          String(job.run_id) !== context.runId ||
+          job.run_attempt !== context.runAttempt ||
+          !Number.isSafeInteger(job.id) ||
+          !ID.test(String(job.id)) ||
+          ![
+            "completed",
+            "queued",
+            "in_progress",
+            "waiting",
+            "pending",
+            "requested",
+          ].includes(job.status) ||
+          (job.steps != null &&
+            (!Array.isArray(job.steps) ||
+              job.steps.some(
+                (step) => !step || typeof step.name !== "string",
+              ))) ||
+          (job.started_at != null &&
+            !Number.isFinite(Date.parse(job.started_at))) ||
+          (job.completed_at != null &&
+            (!Number.isFinite(Date.parse(job.completed_at)) ||
+              job.status !== "completed" ||
+              Date.parse(job.completed_at) < Date.parse(job.started_at))) ||
+          (job.status !== "completed"
+            ? job.conclusion != null
+            : ![
+                "success",
+                "failure",
+                "cancelled",
+                "skipped",
+                "timed_out",
+                "action_required",
+                "neutral",
+                "stale",
+              ].includes(job.conclusion)),
+      )
+    ) {
+      issue("metadata", os);
+      continue;
+    }
     let observedJob;
     if (
       matchedJobs.length === 1 &&
@@ -1152,6 +1192,42 @@ function selectArtifacts(
       };
       observedJobs.push(observedJob);
     }
+    if (matchedArtifacts.length === 1) {
+      const artifact = matchedArtifacts[0];
+      if (
+        !Number.isSafeInteger(artifact.id) ||
+        !ID.test(String(artifact.id)) ||
+        artifact.expired !== false ||
+        !Number.isSafeInteger(artifact.size_in_bytes) ||
+        artifact.size_in_bytes < 1 ||
+        artifact.size_in_bytes > 2097152 ||
+        (artifact.digest != null &&
+          !/^sha256:[a-f0-9]{64}$/u.test(artifact.digest)) ||
+        String(artifact.workflow_run?.id) !== context.runId ||
+        artifact.workflow_run?.head_sha !== run.head_sha ||
+        !Number.isFinite(Date.parse(artifact.created_at)) ||
+        (purpose === "experiment" && !(Date.parse(artifact.expires_at) > now))
+      ) {
+        issue("metadata", os);
+        continue;
+      }
+    }
+    const bindings = Array.isArray(matchedJobs[0]?.steps)
+      ? matchedJobs[0].steps.filter((step) =>
+          step.name.startsWith("Bind native artifact "),
+        )
+      : [];
+    if (
+      bindings.length > 1 ||
+      bindings.some(
+        (step) =>
+          !/^Bind native artifact [1-9][0-9]*$/u.test(step.name) ||
+          ![null, undefined, "success"].includes(step.conclusion),
+      )
+    ) {
+      issue("metadata", os);
+      continue;
+    }
     if (matchedJobs.length !== 1 || matchedArtifacts.length !== 1) {
       issue(
         matchedJobs.length > 1 || matchedArtifacts.length > 1
@@ -1166,11 +1242,32 @@ function selectArtifacts(
     const created = Date.parse(artifact.created_at);
     const started = Date.parse(job.started_at);
     const completed = Date.parse(job.completed_at);
-    const receipts = Array.isArray(job.steps)
-      ? job.steps.filter(
-          (step) => step.name === `Bind native artifact ${artifact.id}`,
-        )
-      : [];
+    const receipts = bindings.filter(
+      (step) => step.name === `Bind native artifact ${artifact.id}`,
+    );
+    if (job.status !== "completed") {
+      // Only absent terminal observations may converge. Every available
+      // identity, digest and receipt must already agree; no binding is selected.
+      issue(
+        Array.isArray(job.steps) &&
+          Number.isFinite(started) &&
+          created >= started &&
+          job.completed_at == null &&
+          bindings.every(
+            (step) => step.name === `Bind native artifact ${artifact.id}`,
+          ) &&
+          (purpose !== "experiment" ||
+            (Number.isFinite(Date.parse(run.run_started_at)) &&
+              Date.parse(run.run_started_at) <= started &&
+              created <= now &&
+              Date.parse(artifact.expires_at) > now &&
+              now - Date.parse(run.run_started_at) <= 7 * 86400000))
+          ? "missing"
+          : "metadata",
+        os,
+      );
+      continue;
+    }
     if (purpose === "experiment") {
       try {
         requireValue(now - Date.parse(run.run_started_at) <= 7 * 86400000);
@@ -1182,9 +1279,7 @@ function selectArtifacts(
     }
     if (
       !Number.isSafeInteger(job.id) ||
-      !Number.isSafeInteger(artifact.id) ||
       !ID.test(String(job.id)) ||
-      !ID.test(String(artifact.id)) ||
       job.status !== "completed" ||
       ![
         "success",
@@ -1198,20 +1293,16 @@ function selectArtifacts(
       ].includes(job.conclusion) ||
       receipts.length !== 1 ||
       receipts[0].conclusion !== "success" ||
-      artifact.expired !== false ||
-      !Number.isSafeInteger(artifact.size_in_bytes) ||
-      artifact.size_in_bytes < 1 ||
-      artifact.size_in_bytes > 2097152 ||
-      !/^sha256:[a-f0-9]{64}$/u.test(artifact.digest) ||
-      String(artifact.workflow_run?.id) !== context.runId ||
-      artifact.workflow_run?.head_sha !== run.head_sha ||
-      !Number.isFinite(created) ||
       !Number.isFinite(started) ||
       !Number.isFinite(completed) ||
       created < started ||
       created > completed
     ) {
       issue("metadata", os);
+      continue;
+    }
+    if (artifact.digest == null) {
+      issue("missing", os);
       continue;
     }
     observedJob.artifactId = String(artifact.id);

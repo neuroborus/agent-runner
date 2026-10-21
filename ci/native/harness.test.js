@@ -6062,6 +6062,58 @@ function ciMetadata() {
   return { context, run, jobs, artifacts, payloads };
 }
 
+test("artifact selection distinguishes incomplete producers from invalid available bindings", () => {
+  for (const fault of [
+    null,
+    "digest",
+    "digest-pending",
+    "receipt",
+    "attempt",
+    "duplicate",
+    "missing-job-digest",
+    "steps",
+  ]) {
+    const f = ciMetadata(),
+      job = f.jobs[0];
+    Object.assign(job, {
+      status: "in_progress",
+      conclusion: null,
+      completed_at: null,
+    });
+    if (fault === "digest") f.artifacts[0].digest = "sha256:invalid";
+    if (fault === "digest-pending") f.artifacts[0].digest = null;
+    if (fault === "receipt") job.steps[0].name = "Bind native artifact 999";
+    if (fault === "attempt") job.run_attempt = 2;
+    if (fault === "duplicate") f.jobs.push(structuredClone(job));
+    if (fault === "steps") job.steps = {};
+    if (fault === "missing-job-digest") {
+      f.jobs.shift();
+      f.artifacts[0].digest = "sha256:invalid";
+    }
+    const selected = selectNativeArtifacts(
+      f.context,
+      f.run,
+      f.jobs,
+      f.artifacts,
+    );
+    assert.equal(selected.entries.length, 2);
+    assert.deepEqual(selected.issues, [
+      {
+        code:
+          fault === null || fault === "digest-pending"
+            ? "missing"
+            : fault === "duplicate"
+              ? "duplicate"
+              : "metadata",
+        platform: "linux",
+      },
+    ]);
+    assert.ok(
+      !selected.entries.some((entry) => entry.binding.platform === "linux"),
+    );
+  }
+});
+
 test("first preparation cause survives failed-job joining and precedes derivative findings", () => {
   const input = ciMetadata();
   const metadata = input.jobs[0];

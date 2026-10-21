@@ -23,6 +23,7 @@ import {
   selectedSystemInventory,
 } from "./index.js";
 import { NATIVE_JOB_STEPS } from "./catalog.js";
+import { collectNativeArtifacts } from "./run.js";
 import {
   nativeArtifactDownload,
   normalizeNativeArtifactSelection,
@@ -185,7 +186,7 @@ function complete(platform, jobId) {
   return recordExperimentPreparationEffect(job, effect("possible", true));
 }
 
-function artifacts() {
+function artifacts({ reports = true } = {}) {
   const context = {
       candidateSha: C,
       repository: "example/native",
@@ -240,12 +241,14 @@ function artifacts() {
       created_at: stamp(30),
       expires_at: stamp(86400),
     })),
-    payloads = Object.fromEntries(
-      PLATFORMS.map(({ os }, index) => [
-        nativeArtifactName(context, os),
-        complete(os, String(index + 2)),
-      ]),
-    );
+    payloads = reports
+      ? Object.fromEntries(
+          PLATFORMS.map(({ os }, index) => [
+            nativeArtifactName(context, os),
+            complete(os, String(index + 2)),
+          ]),
+        )
+      : {};
   return { context, run, jobs, records, payloads, now };
 }
 
@@ -258,6 +261,387 @@ const select = (f) =>
     "experiment",
     f.now,
   );
+
+function collectionFixture(f, snapshots) {
+  let elapsed = 0,
+    cycle = -1;
+  const calls = [],
+    publications = [],
+    outputs = [];
+  const env = {
+    NATIVE_CANDIDATE_SHA: C,
+    GITHUB_SHA: C,
+    GITHUB_REPOSITORY: f.context.repository,
+    GITHUB_RUN_ID: "1",
+    GITHUB_RUN_ATTEMPT: "1",
+    GH_TOKEN: "synthetic-read-only",
+    RUNNER_TEMP: path.resolve("synthetic"),
+    GITHUB_OUTPUT: "synthetic-output",
+  };
+  const io = {
+    clock: () => elapsed,
+    now: () => f.now,
+    command: async (executable, args, timeout) => {
+      assert.equal(executable, "git");
+      assert.deepEqual(args, ["rev-parse", "HEAD"]);
+      assert.ok(timeout > 0 && timeout <= 30000);
+      return { stdout: C };
+    },
+    async fetchImpl(url, options) {
+      assert.equal(options.redirect, "error");
+      assert.equal(options.headers.authorization, `Bearer ${env.GH_TOKEN}`);
+      assert.ok(options.signal instanceof AbortSignal);
+      calls.push(new URL(url).pathname + new URL(url).search);
+      const page = Number(new URL(url).searchParams.get("page"));
+      if (url.includes("/jobs?") && page === 1) cycle++;
+      const snapshot =
+        snapshots[Math.min(Math.max(cycle, 0), snapshots.length - 1)];
+      if (io.advance) elapsed = io.advance(calls.at(-1), elapsed, cycle);
+      else elapsed++;
+      let value;
+      if (url.includes("/jobs?"))
+        value = { jobs: snapshot.jobs.slice((page - 1) * 100, page * 100) };
+      else if (url.includes("/artifacts?"))
+        value = {
+          artifacts: snapshot.records.slice((page - 1) * 100, page * 100),
+        };
+      else value = { ...f.run, status: "in_progress", conclusion: null };
+      return new Response(JSON.stringify(value));
+    },
+    async persistJSON(file, value, options) {
+      assert.equal(path.basename(file), "selection.json");
+      assert.equal(options.signal.aborted, false);
+      options.assertLive?.();
+      publications.push(structuredClone(value));
+    },
+    async appendFile(file, text, options) {
+      assert.equal(file, env.GITHUB_OUTPUT);
+      assert.equal(options.signal.aborted, false);
+      outputs.push(text);
+    },
+  };
+  return {
+    env,
+    io,
+    calls,
+    publications,
+    outputs,
+    time: () => elapsed,
+    advance: (value) => {
+      elapsed += value;
+    },
+  };
+}
+
+function pendingSnapshot(f, platform = "linux") {
+  const snapshot = structuredClone({ jobs: f.jobs, records: f.records });
+  const job = snapshot.jobs.find(
+    (job) => job.name === `native-system-${platform}`,
+  );
+  Object.assign(job, {
+    status: "in_progress",
+    conclusion: null,
+    completed_at: null,
+  });
+  job.steps = job.steps.map((step) => ({ ...step, conclusion: null }));
+  snapshot.records = snapshot.records.filter(
+    (row) => row.name !== nativeArtifactName(f.context, platform),
+  );
+  return snapshot;
+}
+
+test("collector awaits terminal producers and exact uploads while retaining genuine failures and all 69 records", async () => {
+  const f = artifacts(),
+    first = pendingSnapshot(f);
+  f.jobs[0].conclusion = "failure";
+  f.jobs[0].steps.find(
+    (step) => step.name === "Probe complete system inventory",
+  ).conclusion = "failure";
+  f.payloads[f.records[0].name].failure = "probe-failed";
+  f.payloads[f.records[0].name].cases.at(-1).status = "FAIL";
+  const uploading = structuredClone(first);
+  uploading.records = structuredClone(f.records);
+  const hashing = structuredClone(uploading),
+    terminalHashing = structuredClone(f);
+  hashing.records[0].digest = null;
+  terminalHashing.records[0].digest = null;
+  const before = structuredClone(f.payloads),
+    k = collectionFixture(f, [first, hashing, uploading, terminalHashing, f]);
+  // The controller and enclosing workflow remain in progress throughout.
+  first.jobs.push({ id: 99, name: "native-aggregate", status: "in_progress" });
+  const selection = await collectNativeArtifacts(
+    k.env,
+    "synthetic",
+    "experiment",
+    k.io,
+  );
+  assert.equal(k.calls.filter((route) => route.includes("/jobs?")).length, 5);
+  assert.equal(k.publications.length, 2);
+  assert.deepEqual(selection.issues, []);
+  assert.equal(selection.entries.length, 3);
+  assert.equal(
+    selection.jobs.find((job) => job.platform === "linux").conclusion,
+    "failure",
+  );
+  assert.match(k.outputs[0], /artifact_ids=10,11,12\n/u);
+  const report = joinNativeArtifacts(f.context, selection, f.payloads).report;
+  assert.equal(report.systemInventory.records, 68); // Passed records exclude the genuine failure.
+  assert.equal(report.results.length, 69);
+  assert.ok(report.results.some((result) => result.status === "FAIL"));
+  assert.equal(report.ciStatus, "FAIL");
+  assert.equal(report.experimentStatus, "FAIL");
+  assert.equal(report.platforms[0].failure, "probe-failed");
+  assert.deepEqual(f.payloads, before);
+});
+
+test("collector shares one deadline through pagination, partial failure selection and publication", async () => {
+  const f = artifacts({ reports: false });
+  f.jobs[1].conclusion = "failure";
+  const snapshot = pendingSnapshot(f);
+  for (let i = 0; i < 100; i++)
+    snapshot.jobs.push({ id: 100 + i, name: `unrelated-${i}` });
+  for (const publicationOverrun of [false, true]) {
+    const k = collectionFixture(f, [snapshot]),
+      bounds = [];
+    k.io.timeoutSignal = (milliseconds) => {
+      bounds.push(milliseconds);
+      return new AbortController().signal;
+    };
+    k.io.advance = (route, elapsed, cycle) =>
+      cycle < 1 ? elapsed + 1 : route.includes("&page=1") ? 139999 : 140000;
+    const persist = k.io.persistJSON;
+    k.io.persistJSON = async (...args) => {
+      await persist(...args);
+      k.advance(5000);
+    };
+    const append = k.io.appendFile;
+    k.io.appendFile = async (...args) => {
+      await append(...args);
+      k.advance(publicationOverrun ? 5001 : 4000);
+    };
+    const pending = collectNativeArtifacts(
+      k.env,
+      "synthetic",
+      "experiment",
+      k.io,
+    );
+    if (publicationOverrun)
+      await assert.rejects(pending, /publication deadline/u);
+    else {
+      const selection = await pending;
+      assert.equal(selection.entries.length, 2);
+      assert.ok(
+        selection.issues.some(
+          (issue) => issue.code === "missing" && issue.platform === "linux",
+        ),
+      );
+      assert.ok(
+        selection.issues.some(
+          (issue) => issue.code === "metadata" && issue.platform === null,
+        ),
+      );
+      assert.equal(
+        selection.jobs.find((job) => job.platform === "darwin").conclusion,
+        "failure",
+      );
+      assert.equal(k.time(), 149000);
+    }
+    assert.equal(k.calls.length, 6); // One run, two pages/jobs per pass, one artifact read.
+    assert.ok(!k.calls.at(-1).includes("/artifacts?"));
+    assert.equal(k.publications.length, 1);
+    assert.deepEqual(bounds.slice(-2), [1, 10000]);
+    assert.ok(
+      bounds.every((milliseconds) => milliseconds > 0 && milliseconds <= 10000),
+    );
+  }
+});
+
+test("collector cancels an in-flight metadata request without discarding validated failure artifacts", async () => {
+  const f = artifacts({ reports: false });
+  f.jobs[1].conclusion = "failure";
+  for (const early of [false, true]) {
+    const k = collectionFixture(f, [pendingSnapshot(f)]),
+      controller = new AbortController();
+    const entered = Promise.withResolvers(),
+      fetch = k.io.fetchImpl;
+    k.io.signal = controller.signal;
+    let reads = 0,
+      cancelled = false;
+    k.io.fetchImpl = (url, options) => {
+      if (
+        early
+          ? url.includes("/artifacts?")
+          : url.includes("/jobs?") && ++reads === 2
+      ) {
+        entered.resolve();
+        return new Promise((_resolve, reject) =>
+          options.signal.addEventListener(
+            "abort",
+            () => {
+              cancelled = true;
+              reject(options.signal.reason);
+            },
+            { once: true },
+          ),
+        );
+      }
+      return fetch(url, options);
+    };
+    const pending = collectNativeArtifacts(
+      k.env,
+      "synthetic",
+      "experiment",
+      k.io,
+    );
+    await entered.promise;
+    controller.abort(new Error("Synthetic request cancellation"));
+    const selection = await pending;
+    assert.equal(cancelled, true);
+    assert.equal(selection.entries.length, early ? 0 : 2);
+    assert.equal(
+      selection.jobs.find((job) => job.platform === "darwin").conclusion,
+      "failure",
+    );
+    assert.ok(selection.issues.some((issue) => issue.code === "metadata"));
+    assert.equal(k.publications.length, 1);
+  }
+});
+
+test("collector rejects invalid or changed job/artifact bindings without retrying to a later valid snapshot", async () => {
+  for (const fault of [
+    "id",
+    "name",
+    "digest",
+    "job",
+    "conclusion",
+    "malformed",
+    "duplicate",
+    "attempt",
+    "steps",
+    "missing-steps",
+    "pending-id",
+    "pending-job-name",
+    "pending-receipt",
+    "missing-artifact-receipt",
+    "unbound-upload-id",
+  ]) {
+    const f = artifacts({ reports: false });
+    f.jobs[1].conclusion = "failure";
+    const first = pendingSnapshot(f),
+      changed = structuredClone(f);
+    if (fault === "id") {
+      changed.records[1].id = 99;
+      changed.jobs[1].steps.at(-1).name = "Bind native artifact 99";
+    }
+    if (fault === "name") changed.records[1].name += "-substitute";
+    if (fault === "digest") changed.records[1].digest = `sha256:${OTHER}`;
+    if (fault === "job") changed.jobs[1].id = 99;
+    if (fault === "conclusion") changed.jobs[1].conclusion = "success";
+    if (fault === "malformed") changed.records[1].digest = "sha256:invalid";
+    if (fault === "duplicate")
+      changed.records.push(structuredClone(changed.records[1]));
+    if (fault === "attempt") changed.jobs[1].run_attempt = 2;
+    if (fault === "steps")
+      Object.assign(changed.jobs[0], {
+        status: "in_progress",
+        conclusion: null,
+        completed_at: null,
+        steps: {},
+      });
+    if (fault === "missing-steps") {
+      Object.assign(changed.jobs[0], {
+        status: "in_progress",
+        conclusion: null,
+        completed_at: null,
+        steps: {},
+      });
+      changed.records.shift();
+    }
+    if (fault === "pending-id") {
+      first.records = structuredClone(f.records);
+      changed.records[0].id = 99;
+      changed.jobs[0].steps.at(-1).name = "Bind native artifact 99";
+    }
+    if (fault === "pending-job-name")
+      changed.jobs[0].name = "substituted-native-system-linux";
+    if (fault === "pending-receipt")
+      first.jobs[0].steps.at(-1).name = "Bind native artifact 99";
+    if (fault === "missing-artifact-receipt") {
+      Object.assign(changed.jobs[0], {
+        status: "in_progress",
+        conclusion: null,
+        completed_at: null,
+      });
+      changed.jobs[0].steps.at(-1).name = "Bind native artifact invalid";
+      changed.records.shift();
+    }
+    if (fault === "unbound-upload-id") {
+      first.jobs.shift();
+      first.records = structuredClone(f.records);
+      changed.records[0].id = 99;
+      changed.jobs[0].steps.at(-1).name = "Bind native artifact 99";
+    }
+    const k = collectionFixture(f, [first, changed, f]);
+    const selection = await collectNativeArtifacts(
+      k.env,
+      "synthetic",
+      "experiment",
+      k.io,
+    );
+    assert.equal(k.calls.filter((route) => route.includes("/jobs?")).length, 2);
+    assert.ok(
+      selection.issues.some(
+        (issue) =>
+          issue.code === (fault === "duplicate" ? "duplicate" : "metadata") &&
+          issue.platform ===
+            ([
+              "steps",
+              "missing-steps",
+              "pending-id",
+              "pending-job-name",
+              "pending-receipt",
+              "missing-artifact-receipt",
+              "unbound-upload-id",
+            ].includes(fault)
+              ? "linux"
+              : "darwin"),
+      ),
+    );
+    const held = selection.entries.find(
+      (entry) => entry.binding.platform === "darwin",
+    );
+    assert.equal(held.binding.artifactId, "11");
+    assert.equal(held.binding.provenance.jobId, "3");
+    assert.equal(held.binding.conclusion, "failure");
+    assert.equal(held.digest, `sha256:${H}`);
+  }
+});
+
+test("late output publication cannot leave a complete selection acceptable", async () => {
+  for (const boundary of ["output", "selection"]) {
+    const f = artifacts({ reports: false }),
+      k = collectionFixture(f, [f]);
+    const append = k.io.appendFile;
+    k.io.appendFile = async (...args) => {
+      await append(...args);
+      if (boundary === "output") k.advance(150000);
+    };
+    const persist = k.io.persistJSON;
+    k.io.persistJSON = async (file, value, options) => {
+      if (boundary === "selection" && !value.selection.issues.length)
+        k.advance(150000);
+      await persist(file, value, options);
+    };
+    await assert.rejects(
+      collectNativeArtifacts(k.env, "synthetic", "experiment", k.io),
+      /publication deadline/u,
+    );
+    const selection = k.publications.at(-1).selection;
+    assert.equal(selection.entries.length, 3);
+    assert.ok(selection.issues.some((issue) => issue.code === "metadata"));
+    assert.equal(k.publications.length, 1);
+  }
+});
 
 test("experiment artifact creation may follow its receipt within the finite upload and job envelope", () => {
   const original = artifacts();
