@@ -46,6 +46,7 @@ static void named(int at, const char *name, int fd, struct file_identity expecte
   if (!(directory ? S_ISDIR(s.st_mode) : S_ISREG(s.st_mode))) reject("reject-identity");
   if (!directory && s.st_nlink != links) reject("reject-hardlink");
   int current = held(at, name, directory);
+  file_name_at(at, name, current);
   struct statfs fs; need(!fstatfs(current, &fs));
   if ((uint32_t)s.st_dev != root_id.device || (uint32_t)fs.f_fsid.val[0] != root_id.fs0 || (uint32_t)fs.f_fsid.val[1] != root_id.fs1) reject("reject-volume");
   struct file_identity id = identify(fd, directory, links), other = identify(current, directory, links);

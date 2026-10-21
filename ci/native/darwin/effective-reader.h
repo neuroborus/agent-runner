@@ -71,11 +71,7 @@ static void reservation_close(void) {
   reservation_guard(); need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; fputs("null", stdout);
 }
 static void file_capabilities(int fd) {
-  struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_CAPABILITIES};
-  struct { uint32_t length; vol_capabilities_attr_t value; } caps;
-  need(!fgetattrlist(fd, &attrs, &caps, sizeof(caps), 0) && caps.length == sizeof(caps));
-  uint32_t required = VOL_CAP_FMT_CASE_SENSITIVE | VOL_CAP_FMT_CASE_PRESERVING | VOL_CAP_FMT_PERSISTENTOBJECTIDS | VOL_CAP_FMT_HARDLINKS;
-  need((caps.value.valid[VOL_CAPABILITIES_FORMAT] & required) == required && (caps.value.capabilities[VOL_CAPABILITIES_FORMAT] & required) == required);
+  file_identity_capabilities(fd, false);
 }
 
 static void effective_authority(pid_t pid, struct entry *entry) {
@@ -129,7 +125,7 @@ static int relative_file(int root, const char *relative) {
   while (part) {
     need(strcmp(part, ".") && strcmp(part, "..")); char *following = strtok_r(NULL, "/", &next);
     int child = openat(fd, part, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC | (following ? O_DIRECTORY : 0));
-    need(child >= 0 && !close(fd)); fd = child; part = following;
+    need(child >= 0); file_name_at(fd, part, child); need(!close(fd)); fd = child; part = following;
   }
   return fd;
 }

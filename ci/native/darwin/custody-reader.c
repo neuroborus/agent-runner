@@ -489,7 +489,8 @@ static void transfer(struct entry *helper, struct entry *root, struct entry *bas
   struct file_identity r = identify(root->fd, true, 0), b = identify(base->fd, true, 0);
   char rtext[192], btext[192]; text(rtext, r); text(btext, b);
   int named = openat(base->fd, "files", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-  need(named >= 0 && same(identify(named, true, 0), r) && !close(named) && r.device == b.device && r.fs0 == b.fs0 && r.fs1 == b.fs1 && !memcmp(r.volume, b.volume, 16));
+  need(named >= 0); file_name_at(base->fd, "files", named);
+  need(same(identify(named, true, 0), r) && !close(named) && r.device == b.device && r.fs0 == b.fs0 && r.fs1 == b.fs1 && !memcmp(r.volume, b.volume, 16));
   struct proc_taskinfo task; need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == sizeof(task) && task.pti_threadnum == 1);
   int input[2], output[2], decision[2]; need(!pipe(input) && !pipe(output) && !pipe(decision)); file_pid = fork(); need(file_pid >= 0);
   if (!file_pid) {
@@ -2228,6 +2229,7 @@ static void file_object(int at, const char *name, bool directory, bool optional)
   bool symlink = S_ISLNK(named.st_mode);
   int fd = openat(at, name, O_RDONLY | O_CLOEXEC | O_NONBLOCK | (symlink ? O_SYMLINK : O_NOFOLLOW) | (directory && !symlink ? O_DIRECTORY : 0));
   need(fd >= 0 && !fstat(fd, &held)); same_stat(named, held); no_acl(fd);
+  if (strcmp(name, ".")) file_name_at(at, name, fd);
   struct statfs fs; char id[192];
   struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
   struct { uint32_t length; unsigned char uuid[16]; } uuid;

@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-21 — Admit ordinary Darwin files through held names
+
+Ordinary Darwin filesystem admission now requires the capabilities its actual
+operations use: known case semantics and case preservation for reads, plus
+hardlinks for publication. It accepts case-insensitive hosted volumes only with
+exact directory-entry spelling and descriptor-relative device/inode/birth joins.
+Permanent catalog object-ID support is unnecessary for these held identities;
+reviewed capability admission remains strict. Exclusive publication, the sole
+temporary two-link state, synchronization, substitution refusal and independently
+authorized identity-checked cleanup remain required. Portable fixtures supply no
+native acceptance proof.
+
 ## 2026-10-21 — Normalize module names through held identity
 
 Ordinary Windows module enumeration now resolves load-time spelling through

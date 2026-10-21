@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import { digest } from "./protocol.js";
 import {
   encodeDarwinFileRequest,
@@ -84,6 +86,256 @@ test("Darwin file authority rejects foreign volume, hardlink aliases and path/na
   assert.throws(() =>
     encodeDarwinFileRequest({ ...operation("publish"), bytes: "00\ncleanup" }),
   );
+});
+
+// Execute the original native decisions with injected APIs. Only C data and
+// pointer representations are projected; no Darwin executable is invoked.
+async function nativeFileFunctions(experiment = true) {
+  const [identity, effective, helper] = await Promise.all(
+    ["file-identity.h", "effective-reader.h", "file-helper.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const declarations = [
+    [identity, "file_identity_capabilities", "fd, publication"],
+    [identity, "file_name_at", "parent, name, fd"],
+    [effective, "file_capabilities", "fd"],
+    [helper, "named", "at, name, fd, expected, directory, links"],
+  ].map(([source, name, args]) => {
+    const body = new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+    assert.ok(body, name);
+    const projected = body
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else\n([\s\S]*?)#endif/gu,
+        (_, ordinary, reviewed) => (experiment ? ordinary : reviewed),
+      )
+      .replace(/struct attrlist attrs = \{[^;]+;/gu, "const attrs = {};")
+      .replace(
+        /struct \{ uint32_t length; vol_capabilities_attr_t value; \} caps = \{0\};/gu,
+        "const caps = {length: 0, value: {valid: [], capabilities: []}};",
+      )
+      .replace(
+        /struct stat ([\w, ]+);/gu,
+        (_, names) =>
+          `const ${names
+            .split(", ")
+            .map((value) => `${value} = {}`)
+            .join(", ")};`,
+      )
+      .replace("struct statfs fs;", "const fs = {f_fsid: {val: []}};")
+      .replaceAll("struct file_identity ", "let ")
+      .replaceAll("struct dirent *", "let ")
+      .replaceAll("DIR *", "let ")
+      .replaceAll("->", ".")
+      .replaceAll("sizeof(caps)", "4096")
+      .replace(/\*name\b/gu, "name.length")
+      .replace(/(?<!&)&(attrs|caps|before|after|named|held|s|fs)\b/gu, "$1")
+      .replace(/\((?:void|uint32_t)\)/gu, "")
+      .replace(/\b(?:unsigned|uint32_t|int) /gu, "let ");
+    return `function ${name}(${args}) {${projected}}`;
+  });
+  return (context) =>
+    new Script(
+      `${declarations.join("\n")} ({file_identity_capabilities, file_capabilities, file_name_at, named})`,
+    ).runInNewContext(context);
+}
+
+test("Darwin capability admission distinguishes query, validity and supported operations without weakening reviewed reads", async () => {
+  for (const experiment of [true, false]) {
+    const load = await nativeFileFunctions(experiment);
+    for (const publication of [false, true]) {
+      for (const [valid, values, failure, queryError = 5] of [
+        [15, 15, null],
+        [15, 10, experiment ? null : "supported"],
+        [11, 10, experiment ? null : "valid"],
+        [3, 2, experiment && !publication ? null : "valid"],
+        [15, 2, experiment && !publication ? null : "supported"],
+        [14, 14, "valid"],
+        [15, 13, "supported"],
+        [15, 15, "query"],
+        [15, 15, "query", 0],
+        [15, 15, "length"],
+      ]) {
+        const diagnostics = [],
+          calls = [];
+        const env = {
+          errno: 0,
+          stderr: {},
+          VOL_CAPABILITIES_FORMAT: 0,
+          VOL_CAP_FMT_CASE_SENSITIVE: 1,
+          VOL_CAP_FMT_CASE_PRESERVING: 2,
+          VOL_CAP_FMT_PERSISTENTOBJECTIDS: 4,
+          VOL_CAP_FMT_HARDLINKS: 8,
+          need: (ok) => assert.ok(ok),
+          fprintf: (_stream, message, ...facts) =>
+            diagnostics.push({ message, facts }),
+          fgetattrlist(fd, _attrs, caps) {
+            calls.push(fd);
+            env.errno = failure === "query" ? queryError : 0;
+            caps.length = failure === "length" ? 0 : 4096;
+            caps.value.valid[0] = valid;
+            caps.value.capabilities[0] = values;
+            return failure === "query" ? -1 : 0;
+          },
+        };
+        const native = load(env),
+          read = () =>
+            publication
+              ? native.file_identity_capabilities(7, true)
+              : native.file_capabilities(7);
+        if (failure) {
+          assert.throws(read);
+          assert.ok(diagnostics[0].message.includes(`predicate=${failure}`));
+          if (failure === "query")
+            assert.deepEqual(diagnostics[0].facts, [-1, queryError]);
+        } else {
+          read();
+          assert.deepEqual(diagnostics, []);
+        }
+        assert.deepEqual(calls, [7]);
+      }
+    }
+  }
+});
+
+test("Darwin native held-name checks exclude aliases and substitutions while retaining the controlled two-link state", async () => {
+  const load = await nativeFileFunctions();
+  for (const fault of [
+    null,
+    "two-links",
+    "case",
+    "unicode",
+    "missing",
+    "duplicate",
+    "read",
+    "overflow",
+    "parent",
+    "birth",
+    "inode",
+    "close",
+    "hardlink",
+    "symlink",
+    "volume",
+    "substitute",
+  ]) {
+    const metadata = (inode) => ({
+      st_dev: fault === "volume" ? 2 : 1,
+      st_ino: inode,
+      st_mode: fault === "symlink" ? 0o120777 : 0o100600,
+      st_uid: 0,
+      st_gid: 0,
+      st_nlink: ["two-links", "hardlink"].includes(fault) ? 2 : 1,
+      st_birthtimespec: { tv_sec: 100, tv_nsec: 0 },
+      st_mtimespec: { tv_sec: 100, tv_nsec: 0 },
+      st_ctimespec: { tv_sec: 100, tv_nsec: 0 },
+    });
+    let position = 0,
+      scanned = 0;
+    const name = fault === "unicode" ? "v\u00e1lue" : "value",
+      names =
+        fault === "overflow"
+          ? Array(4097).fill("other")
+          : fault === "case"
+            ? ["Value"]
+            : fault === "unicode"
+              ? ["va\u0301lue"]
+              : fault === "missing"
+                ? []
+                : fault === "duplicate"
+                  ? ["value", "value"]
+                  : [".", "..", "value"];
+    const calls = [],
+      env = {
+        errno: 0,
+        O_RDONLY: 1,
+        O_DIRECTORY: 2,
+        O_NOFOLLOW: 4,
+        O_CLOEXEC: 8,
+        AT_SYMLINK_NOFOLLOW: 16,
+        need: (ok) => assert.ok(ok),
+        S_ISDIR: (mode) => mode === 0o40700,
+        S_ISREG: (mode) => mode === 0o100600,
+        S_ISLNK: (mode) => mode === 0o120777,
+        strcmp: (a, b) => Number(a !== b),
+        strchr: (value, part) => value.includes(part),
+        root_id: { device: 1, fs0: 2, fs1: 3 },
+        held: () => 2,
+        identify: (fd) => ({
+          device: fault === "volume" ? 2 : 1,
+          inode: fd === 2 && fault === "substitute" ? 5 : 4,
+        }),
+        same: (a, b) => a.inode === b.inode,
+        volume_matches: () => fault !== "volume",
+        reject: (reason) => {
+          throw new Error(reason);
+        },
+        fstatfs(_fd, fs) {
+          fs.f_fsid.val = [2, 3];
+          return 0;
+        },
+        close(fd) {
+          assert.equal(fd, 2);
+          calls.push("held-close");
+          return 0;
+        },
+        openat(parent, name, flags) {
+          assert.equal(parent, 1);
+          assert.equal(name, ".");
+          assert.equal(flags, 15);
+          return 3;
+        },
+        fdopendir: (fd) => {
+          assert.equal(fd, 3);
+          return {};
+        },
+        readdir() {
+          if (position === names.length) {
+            env.errno = fault === "read" ? 5 : 0;
+            return null;
+          }
+          return { d_name: names[position++] };
+        },
+        fstat(fd, out) {
+          const value = metadata(fd === 3 ? 1 : 4);
+          if (fd === 3) {
+            value.st_mode = 0o40700;
+            if (scanned++ && fault === "parent") value.st_ctimespec.tv_nsec++;
+          }
+          Object.assign(out, value);
+          return 0;
+        },
+        fstatat(parent, name, out, flags) {
+          assert.equal(parent, 1);
+          assert.equal(name, fault === "unicode" ? "v\u00e1lue" : "value");
+          assert.equal(flags, 16);
+          const value = metadata(fault === "inode" ? 5 : 4);
+          if (fault === "birth") value.st_birthtimespec.tv_nsec++;
+          Object.assign(out, value);
+          return 0;
+        },
+        closedir() {
+          calls.push("close");
+          return fault === "close" ? -1 : 0;
+        },
+      };
+    const read = () =>
+      load(env).named(
+        1,
+        name,
+        9,
+        { inode: 4 },
+        false,
+        fault === "two-links" ? 2 : 1,
+      );
+    if (fault && fault !== "two-links") assert.throws(read, undefined, fault);
+    else {
+      read();
+      assert.deepEqual(calls, ["close", "held-close"]);
+    }
+  }
 });
 
 function publication({ interrupt = null, substitute = null } = {}) {

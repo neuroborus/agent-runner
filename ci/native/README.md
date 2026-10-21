@@ -8603,12 +8603,28 @@ lock owner. The lock and protected serial owner exclude other helpers and
 writers; payloads receive neither these descriptors nor the control pipe or
 writable parent grants.
 
-The helper requires valid native capability bits for persistent object IDs,
-hardlinks, case sensitivity and case preservation. Case-insensitive volumes
-are unsupported. All mutation names are fixed ASCII `allocation`, `value` and
-`.pending`; no caller-supplied path, case/Unicode/name representation, traversal,
-symlink, cross-volume object or foreign hardlink is admitted. Native capability,
-UUID, saved identity and supported synchronization mismatches retain storage.
+Reviewed helpers retain valid and supported persistent-object-ID, hardlink,
+case-sensitive and case-preserving capabilities. Ordinary experiment readers
+instead require valid case-sensitivity and case-preservation fields and supported
+case preservation; either known case-sensitivity value is admitted. The file
+helper additionally requires valid, supported hardlinks for exclusive publication.
+Held descriptor/inode/birth joins do not use permanent catalog object-ID lookup,
+so the experiment does not require that unrelated capability. Query failure,
+malformed response length, invalid required fields and unsupported required values
+have distinct refusal predicates; errno zero does not identify any of them.
+
+On ordinary case-sensitive or case-insensitive volumes, descriptor-relative
+reads enumerate a fresh held-parent description, require the exact directory-entry
+spelling and rejoin its device, inode, birth, mode, ownership and link count to
+the opened object. Incomplete or changing directories and case/Unicode aliases
+refuse admission. The helper applies the same guard before its existing held-name
+checks; independent file views and transferred roots retain it too. All mutation
+names remain fixed ASCII `allocation`, `value` and `.pending`; no caller-supplied
+path, alternate name representation, traversal, symlink, cross-volume object or
+foreign hardlink is admitted. Device/filesystem/volume UUID, saved identity,
+ownership, ACL, link-count and named-versus-held joins remain required. Unsupported
+publication or synchronization and uncertain cleanup retain storage and exclusion.
+Portable injected fixtures establish no hosted native acceptance.
 
 Operations are bounded to 32 commands and 4 KiB of hex-encoded synthetic bytes.
 `allocate`, `recover`, `publish`, `replace`, `inspect`, `cleanup` and `finish`
