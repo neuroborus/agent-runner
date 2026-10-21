@@ -4729,7 +4729,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       .replaceAll("&limit", "limit")
       .replaceAll("in[", "input[")
       .replace(
-        /&(host|access|type|address|access_type|names|types|n|nt|gate)\b/gu,
+        /&(host|access|type|address|access_type|notify|readback|names|types|n|nt|gate)\b/gu,
         (_, name) => `{set value(v) {${name} = v;}}`,
       )
       .replaceAll("sizeof(*names)", "1")
@@ -4910,6 +4910,77 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       "fault-port-list-release",
       15,
     ],
+    ["resource getter copy", { notifyPort: 205 }],
+    ["dead resource sentinel", { notifyPort: DEAD }],
+    [
+      "failed resource getter supplies no owned copy",
+      { notifyGet: 4, notifySet: 4, notifyPort: 205 },
+    ],
+    ...[0, 4, 5].flatMap((notifyGet) =>
+      [0, 4, 5].map((notifySet) => [
+        `resource selector getter ${notifyGet} setter ${notifySet}`,
+        { notifyGet, notifySet },
+        (!notifyGet && !notifySet) || (notifyGet === 4 && notifySet === 4)
+          ? undefined
+          : notifyGet
+            ? "fault-notify-get"
+            : "fault-notify-port",
+        notifyGet || notifySet,
+      ]),
+    ),
+    ...[4, 5].map((notifyRead) => [
+      `resource readback refused ${notifyRead}`,
+      { notifyPort: 205, notifyRead },
+      "fault-notify-read",
+      notifyRead,
+    ]),
+    [
+      "resource readback remains live",
+      { notifyPort: 205, notifyReadback: 206 },
+      "fault-notify-read",
+      0,
+    ],
+    [
+      "aliased resource getter copies each own a reference",
+      { notifyPort: 205, notifyReadback: 205 },
+      "fault-notify-read",
+      0,
+    ],
+    [
+      "failed resource readback supplies no owned copy",
+      { notifyPort: 205, notifyReadback: 206, notifyRead: 5 },
+      "fault-notify-read",
+      5,
+    ],
+    [
+      "dead resource readback is not null",
+      { notifyReadback: DEAD },
+      "fault-notify-read",
+      0,
+    ],
+    [
+      "resource copy release refused",
+      { notifyPort: 205, notifyRelease: 15 },
+      "fault-notify-release",
+      15,
+    ],
+    [
+      "resource setter refusal survives failed release",
+      { notifyPort: 205, notifySet: 5, notifyRelease: 15 },
+      "fault-notify-port",
+      5,
+    ],
+    [
+      "both resource copies attempt release after nonnull readback",
+      {
+        notifyPort: 205,
+        notifyReadback: 206,
+        notifyRelease: 15,
+        readbackRelease: 20,
+      },
+      "fault-notify-read",
+      0,
+    ],
     ["gate refused", { gate: "N" }, "fault-gate-value", 0],
   ]) {
     const calls = [],
@@ -4922,12 +4993,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     const childAccess = options.childAccess ?? options.access ?? 0;
     let first,
       replies = 0,
+      notifyReads = 0,
       observing = true;
     const context = {
       errno: 0,
       stderr: {},
       NULL: null,
       KERN_SUCCESS: 0,
+      KERN_INVALID_ARGUMENT: 4,
+      KERN_FAILURE: 5,
       MACH_PORT_NULL: 0,
       MACH_PORT_DEAD: DEAD,
       MACH_PORT_TYPE_NONE: 0,
@@ -5033,6 +5107,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         assert.equal(self, 101);
         if (which === 1) observing = false;
         calls.push([observing ? "observe-get" : "get", which]);
+        if (which === 5) {
+          const readback = notifyReads++ > 0;
+          target.value = readback
+            ? (options.notifyReadback ?? 0)
+            : (options.notifyPort ?? 0);
+          return (readback ? options.notifyRead : options.notifyGet) ?? 0;
+        }
         if (observing && options.childGet) return options.childGet;
         target.value =
           which === 1 ? 103 : observing ? childAccess : (options.access ?? 0);
@@ -5056,7 +5137,9 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       mach_port_deallocate(_self, name) {
         assert.ok(
-          observing ? name === childAccess : [103, 102, 200].includes(name),
+          observing
+            ? name === childAccess
+            : [103, 102, 200, 205, 206].includes(name),
           "Only owned getter references may be released",
         );
         if (name === 200 && !observing)
@@ -5067,12 +5150,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         calls.push([observing ? "observe-release" : "release", name]);
         if (observing) return options.childRelease ?? 0;
         if (name === 200) return options.release ?? 0;
+        if (name === 205) return options.notifyRelease ?? 0;
+        if (name === 206) return options.readbackRelease ?? 0;
         if (name === 103) return options.hostRelease ?? 0;
         return options.threadRelease ?? 0;
       },
-      task_set_special_port(_self, which, port) {
+      task_set_special_port(self, which, port) {
+        assert.equal(self, 101);
         calls.push(["clear", which, port]);
-        return 0;
+        return which === 5 ? (options.notifySet ?? 0) : 0;
       },
       mach_ports_register(_self, ports, count) {
         calls.push(["registered", ports, count]);
@@ -5138,7 +5224,8 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         operation.endsWith("authority") ||
           (operation.endsWith("kind") && value === 0) ||
           operation === "fault-gate-value" ||
-          operation === "fault-port-count"
+          operation === "fault-port-count" ||
+          (operation === "fault-notify-read" && value === 0)
           ? "invariant"
           : "mach",
         label,
@@ -5157,15 +5244,24 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     );
     assert.deepEqual(
       cleanup,
-      cleanupValue === undefined
-        ? []
-        : [
-            {
-              operation: "fault-access-release",
-              kind: "mach",
-              value: cleanupValue,
-            },
-          ],
+      [
+        ...(cleanupValue === undefined
+          ? []
+          : [
+              {
+                operation: "fault-access-release",
+                kind: "mach",
+                value: cleanupValue,
+              },
+            ]),
+        ...[options.notifyRelease, options.readbackRelease]
+          .filter((value) => value)
+          .map((value) => ({
+            operation: "fault-notify-release",
+            kind: "mach",
+            value,
+          })),
+      ],
       label,
     );
     const queried = calls.some(([op]) => op === "type"),
@@ -5284,6 +5380,9 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       assert.deepEqual(
         calls.filter(([op]) => op === "release"),
         [
+          ...(options.notifyPort === 205 && !options.notifyGet
+            ? [["release", 205]]
+            : []),
           ...(released ? [["release", 200]] : []),
           ["release", 103],
           ["release", 102],
@@ -5301,6 +5400,43 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       ]);
       assert.ok(calls.some(([op, fd]) => op === "close" && fd === 3));
       assert.ok(calls.some(([op, fd]) => op === "close" && fd === 4));
+    }
+    if (notifyReads) {
+      assert.equal(
+        notifyReads,
+        options.notifyGet || options.notifySet ? 1 : 2,
+        label,
+      );
+      assert.equal(
+        calls.filter(([op, which]) => op === "clear" && which === 5).length,
+        1,
+        label,
+      );
+      for (const name of [205, 206])
+        assert.equal(
+          calls.filter(([op, port]) => op === "release" && port === name)
+            .length,
+          Number(options.notifyPort === name && !options.notifyGet) +
+            Number(
+              notifyReads === 2 &&
+                options.notifyReadback === name &&
+                !options.notifyRead,
+            ),
+          label,
+        );
+      const clear = calls.findIndex(
+        ([op, which]) => op === "clear" && which === 5,
+      );
+      assert.ok(
+        calls.findIndex(([op, which]) => op === "get" && which === 5) < clear,
+        label,
+      );
+      if (notifyReads === 2)
+        assert.ok(
+          clear <
+            calls.findLastIndex(([op, which]) => op === "get" && which === 5),
+          label,
+        );
     }
     if (options.access && !options.get && !options.childRelease)
       assert.deepEqual(

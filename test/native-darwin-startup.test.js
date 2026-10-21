@@ -2774,6 +2774,12 @@ test("native observer root admission keeps exact arities, Worker identity checks
   );
 });
 
+const TRACE_START = [
+  "exec 42 100",
+  "entry 42 100 getpid",
+  "return 42 100 getpid 0 42",
+];
+
 function traceFixture({
   identity = IDENTITY,
   refused = false,
@@ -2806,12 +2812,13 @@ function traceFixture({
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
-        const program = args[5];
+        const program = args[coldCommand ? 6 : 5];
         assert.deepEqual(args, [
           "--non-interactive",
           "--",
           "/usr/sbin/dtrace",
           "-q",
+          ...(coldCommand ? ["-Z"] : []),
           "-n",
           program,
           String(identity.pid),
@@ -2949,6 +2956,7 @@ test("cold startup numeric observations retain exact guard mapping inputs separa
   await f.trace.arm();
   f.child.stdout.write(
     [
+      "exec 42 100",
       "numeric-entry 42 101 sysconf 7 29",
       "numeric-return 42 102 sysconf 7 -1 4096",
       "numeric-entry 42 103 pthread_get_stackaddr_np 7 9000",
@@ -3005,6 +3013,90 @@ test("cold startup numeric observations retain exact guard mapping inputs separa
   assert.equal(result.runtime.mprotect[0].result.value, "0");
 });
 
+test("unmatched optional cold probes retain unknown values without replacing mandatory capture or retirement", async () => {
+  for (const numeric of [
+    [],
+    [
+      "entry 42 101 mmap",
+      "numeric-entry 42 101 mmap 7 0 4096 3 4098 18446744073709551615 0",
+      "return 42 102 mmap 0 8192",
+      "numeric-return 42 102 mmap 7 0 8192",
+    ],
+  ]) {
+    for (const cleanupFailure of [false, true]) {
+      const f = traceFixture({ coldCommand: true, cleanupFailure });
+      assert.equal((await f.trace.arm()).status, "armed");
+      f.child.stdout.write(
+        [...TRACE_START, ...numeric, "exit 42 103", ""].join("\n"),
+      );
+      await f.close();
+      const result = await f.trace.finish();
+      assert.equal(result.captureComplete, true);
+      assert.equal(result.status, cleanupFailure ? "refused" : "observed");
+      assert.equal(result.cleanup, cleanupFailure ? "UNCERTAIN" : "RETIRED");
+      assert.equal(
+        result.numericStatus,
+        cleanupFailure ? "unavailable" : numeric.length ? "missing" : "empty",
+      );
+      for (const name of [
+        "sysconf",
+        "pthread_get_stackaddr_np",
+        "pthread_get_stacksize_np",
+        "mprotect",
+      ])
+        assert.equal(result.runtime[name], null);
+      if (numeric.length && !cleanupFailure)
+        assert.equal(result.runtime.mmap[0].result.value, "8192");
+      else assert.equal(result.runtime.mmap, null);
+      assert.equal(result.sha256 === null, cleanupFailure);
+    }
+  }
+});
+
+test("zero-match support never admits missing or contradictory mandatory startup observations", async () => {
+  const complete = [...TRACE_START, "exit 42 103"];
+  for (const coldCommand of [false, true]) {
+    for (const rows of [
+      [],
+      ...complete.map((_, missing) =>
+        complete.filter((_, index) => index !== missing),
+      ),
+      [TRACE_START[0], ...complete],
+      [complete.at(-1), ...TRACE_START],
+      [...complete, "entry 42 104 getpid"],
+      [...TRACE_START, "exit 43 103"],
+      [
+        "exec 42 100",
+        ...(coldCommand
+          ? [
+              "numeric-entry 42 101 sysconf 7 29",
+              "numeric-return 42 102 sysconf 7 -1 4096",
+            ]
+          : []),
+        "exit 42 103",
+      ],
+    ]) {
+      const f = traceFixture({ coldCommand });
+      assert.equal((await f.trace.arm()).status, "armed");
+      if (rows.length) f.child.stdout.write(rows.join("\n") + "\n");
+      await f.close();
+      const result = await f.trace.finish();
+      assert.equal(result.status, "partial");
+      assert.equal(result.captureComplete, false);
+      assert.equal(result.failure.reason, "capture");
+      assert.equal(result.cleanup, "RETIRED");
+      assert.equal(result.sha256, null);
+      assert.equal(result.events, null);
+      if (coldCommand) {
+        assert.equal(result.numericStatus, "unavailable");
+        assert.ok(
+          Object.values(result.runtime).every((value) => value === null),
+        );
+      }
+    }
+  }
+});
+
 test("cold startup numeric gaps stay unknown and malformed or foreign observations are rejected", async () => {
   for (const suffix of [
     null,
@@ -3016,7 +3108,10 @@ test("cold startup numeric gaps stay unknown and malformed or foreign observatio
     const f = traceFixture({ coldCommand: true });
     await f.trace.arm();
     f.child.stdout.write(
-      "numeric-entry 42 101 sysconf 7 29\n" + (suffix ? suffix + "\n" : ""),
+      TRACE_START.join("\n") +
+        "\nnumeric-entry 42 101 sysconf 7 29\n" +
+        (suffix ? suffix + "\n" : "") +
+        "exit 42 103\n",
     );
     await f.close();
     const result = await f.trace.finish();
@@ -3038,6 +3133,7 @@ test("startup argument diagnostics join only the same thread and retain escaped 
   const f = traceFixture();
   await f.trace.arm();
   const rows = [
+    ...TRACE_START,
     "entry 42 101 open",
     "argument-entry 42 101 open 7 complete 0 0 /neutral/space and\\nline\\\\tail\\0",
     "entry 42 102 open",
@@ -3149,7 +3245,8 @@ test("startup argument limitations never identify a denied object from a prefix 
     const f = traceFixture();
     await f.trace.arm();
     f.child.stdout.write(
-      `argument-entry 42 101 open 7 ${state} 0 0 ${text}\nargument-return 42 102 open 7 1 -1\n`,
+      TRACE_START.join("\n") +
+        `\nargument-entry 42 101 open 7 ${state} 0 0 ${text}\nargument-return 42 102 open 7 1 -1\nexit 42 103\n`,
     );
     await f.close();
     const result = await f.trace.finish();
@@ -3204,7 +3301,7 @@ test("startup argument limitations never identify a denied object from a prefix 
   }
   for (const [rows, pairing] of [
     [
-      "argument-entry 42 101 open 7 complete 0 0 /neutral\\0\nexit 42 102\n",
+      "argument-entry 42 101 open 7 complete 0 0 /neutral\\0\n",
       "missing-return",
     ],
     ["entry 42 101 open\nreturn 42 102 open 1 -1\n", null],
@@ -3215,7 +3312,9 @@ test("startup argument limitations never identify a denied object from a prefix 
   ]) {
     const missing = traceFixture();
     await missing.trace.arm();
-    missing.child.stdout.write(rows);
+    missing.child.stdout.write(
+      TRACE_START.join("\n") + "\n" + rows + "exit 42 110\n",
+    );
     await missing.close();
     const result = await missing.trace.finish();
     assert.equal(result.argumentStatus, "missing");
@@ -3294,16 +3393,17 @@ test("late BEGIN and incomplete identity rechecks cannot outlive the shared arm 
 });
 
 test("trace framing admits only one drained terminal empty separator after valid capture", async () => {
-  const rows = ["entry 42 101 open", "exit 42 102"];
+  const rows = [...TRACE_START, "entry 42 101 open", "exit 42 102"];
   for (const suffix of [[], ["\n"]]) {
     const f = traceFixture();
     await f.trace.arm();
+    f.child.stdout.write(TRACE_START.join("\n") + "\n");
     for (const chunk of ["entry 42 101 o", "pen\nexit 42 ", "102\n", ...suffix])
       f.child.stdout.write(chunk);
     await f.close();
     const result = await f.trace.finish();
     assert.equal(result.status, "observed");
-    assert.equal(result.events, 2);
+    assert.equal(result.events, rows.length);
     assert.equal(
       result.sha256,
       createHash("sha256").update(rows.join("\n")).digest("hex"),
@@ -3366,7 +3466,7 @@ test("observer disappearance races require fresh validated retirement of the bou
       });
       assert.equal((await f.trace.arm()).status, "armed");
       settling = true;
-      f.child.stdout.write("exit 42 101\n\n");
+      f.child.stdout.write(TRACE_START.join("\n") + "\nexit 42 101\n\n");
       await f.close();
       const result = await f.trace.finish();
       assert.equal(
@@ -3395,12 +3495,12 @@ test("fixed startup tracing binds owned native parents and independently retires
   const f = traceFixture({ live: true });
   assert.equal((await f.trace.arm()).status, "armed");
   f.child.stdout.write(
-    "entry 42 101 open\nreturn 42 102 open 13 -1\nexec 42 103\n",
+    "exec 42 101\nentry 42 102 open\nreturn 42 103 open 13 -1\nexit 42 104\n",
   );
   await f.close();
   const result = await f.trace.finish();
   assert.equal(result.status, "observed");
-  assert.equal(result.events, 3);
+  assert.equal(result.events, 4);
   assert.equal(result.cleanup, "RETIRED");
   assert.match(result.sha256, /^[a-f0-9]{64}$/u);
   assert.deepEqual(
@@ -3422,11 +3522,13 @@ test("startup tracing retains the normalized bound PID and refuses invalid macro
   const f = traceFixture({ identity: { ...IDENTITY, pid: 73 } });
   assert.equal((await f.trace.arm()).status, "armed");
   f.binding.identity.pid = 74;
-  f.child.stdout.write("entry 73 101 open\nexit 73 102\n");
+  f.child.stdout.write(
+    "exec 73 101\nentry 73 102 open\nreturn 73 103 open 0 3\nexit 73 104\n",
+  );
   await f.close();
   const result = await f.trace.finish();
   assert.equal(result.status, "observed");
-  assert.equal(result.events, 2);
+  assert.equal(result.events, 4);
   assert.equal(result.cleanup, "RETIRED");
 
   for (const pid of [0, 0x80000000, "42"]) {

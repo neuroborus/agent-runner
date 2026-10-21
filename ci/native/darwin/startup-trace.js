@@ -29,8 +29,9 @@ const ARGUMENT_FUNCTIONS = Object.freeze([
 ]);
 const probes = (names) =>
   names.map((name) => `probefunc == "${name}"`).join(" || ");
-// Installed providers must accept this entire fixed program; no fallback,
-// generic argument decoding, destructive action or unrelated-process predicate.
+// No fallback, generic argument decoding, destructive action or unrelated-process
+// predicate. Cold numeric descriptions may match zero probes; core observations
+// are required independently of compilation and BEGIN acknowledgement.
 const PROGRAM = `#pragma D option quiet
 #pragma D option strsize=129
 dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
@@ -327,6 +328,10 @@ export function openDarwinStartupTrace(
     previousTime,
     pending = "",
     count = 0,
+    execSeen = false,
+    exitSeen = false,
+    syscallEntrySeen = false,
+    syscallReturnSeen = false,
     stdoutBytes = 0,
     stderrBytes = 0,
     invalid = false,
@@ -443,6 +448,15 @@ export function openDarwinStartupTrace(
                 row.timestamp >= previousTime &&
                 row.timestamp - armTime <= 30000000000n,
         );
+        need(!exitSeen);
+        if (row.kind === "exec") {
+          need(!execSeen);
+          execSeen = true;
+        } else if (row.kind === "exit") {
+          need(execSeen);
+          exitSeen = true;
+        } else if (row.kind === "entry") syscallEntrySeen = true;
+        else if (row.kind === "return") syscallReturnSeen = true;
         if (row.kind === "entry" && ARGUMENT_FUNCTIONS.includes(row.name))
           expectedArguments.set(
             row.name,
@@ -552,6 +566,7 @@ export function openDarwinStartupTrace(
             "--",
             "/usr/sbin/dtrace",
             "-q",
+            ...(coldCommand ? ["-Z"] : []),
             "-n",
             coldCommand ? COLD_PROGRAM : PROGRAM,
             String(boundPid),
@@ -734,10 +749,18 @@ export function openDarwinStartupTrace(
             1000,
           ).catch((error) => fail(error, "retirement"));
         }
+        const mandatory =
+          execSeen && exitSeen && syscallEntrySeen && syscallReturnSeen;
+        if (!invalid && !pending && !mandatory)
+          fail(
+            new Error("Startup trace missing mandatory observations"),
+            "capture",
+          );
         const intact =
           !invalid &&
           !pending &&
           count > 0 &&
+          mandatory &&
           child.stdout.readableEnded &&
           child.stderr.readableEnded;
         const complete = intact && !stderrBytes;
@@ -807,6 +830,13 @@ export function openDarwinStartupTrace(
                   !complete || status !== "observed"
                     ? "unavailable"
                     : pendingNumeric.size ||
+                        (numericSeen.length > 0 &&
+                          Object.keys(NUMERIC_ARGUMENTS).some(
+                            (name) =>
+                              !numericSeen.some(
+                                (record) => record.operation === name,
+                              ),
+                          )) ||
                         [...expectedNumeric].some(
                           ([name, count]) =>
                             numericSeen.filter(

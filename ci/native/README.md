@@ -1789,8 +1789,15 @@ native observation, denial cause or permission remedy; matching hosted CI owns t
 The exact vector is
 `/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -n PROGRAM PID`:
 the sole operand is the normalized bound positive PID, used only by `pid == $1`
-predicates. There is no `-p` target grab, `-c` command, `-W` wait, preprocessing,
-`-Z`/defaultargs or script selection. Apple's
+predicates. Cold command tracing adds only `-Z` before `-n`, permitting optional
+numeric descriptions to match zero probes as documented by Apple's
+[`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c).
+Compilation and BEGIN alone cannot prove capture: bound syscall entry and return
+records, one exec-success and its subsequent exit must actually arrive within the
+existing bounds. Duplicate exec, exit before exec, or records after exit refuse
+capture. Optional numeric records cannot replace any mandatory observation.
+There is no `-p` target grab, `-c` command, `-W` wait, preprocessing,
+defaultargs or script selection. Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
 routes `-p` through `dtrace_proc_grab`; its
 [`dtrace.1` OPERANDS](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.1)
@@ -2878,6 +2885,11 @@ startup trace owner records bounded numeric `sysconf`, libpthread stack-address
 and stack-size returns, and the separate `mmap` and `mprotect` inputs/returns for
 that PID. Arguments retain unsigned 64-bit integer bits (including the descriptor
 and offset), returns retain signed values, and unavailable libc errno is null.
+Unavailable or uncalled numeric probes leave their function observations null.
+No numeric observations produce `numericStatus: empty`; a partially observed
+function inventory or missing pair produces `missing`. Neither prevents a valid
+mandatory capture from being observed. Missing mandatory exec/exit or syscall
+entry/return records instead refuse capture and discard all numeric observations.
 The 64-call/64-KiB bounds, thread/entry/return pairing, original observer custody
 and independent retirement remain enforced. Missing values are null, never
 filled from the warmed launcher. Refused or incomplete tracing supplies no runtime
@@ -3639,6 +3651,19 @@ host and thread copies have checked releases; the service's slot reference survi
 Explicit bootstrap/debug/resource-notify clearing, registered-port removal and
 task/thread exception sanitation remain required, alongside descriptor closure,
 credential separation and the real task/process/IPC negative controls.
+
+Resource-notify availability is tested only on `mach_task_self()`. XNU's
+[`ipc_tt.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/kern/ipc_tt.c)
+places both selectors behind `CONFIG_PROC_RESOURCE_LIMITS`; only a getter and
+null setter both returning `KERN_INVALID_ARGUMENT` admit an unavailable facility.
+Every other combination requires a successful getter, clearing and null readback.
+Mixed results, other failures and nonnull readback refuse exec. Every acquired
+getter copy is released once, including nonnull readback, before refusal; both
+release attempts run even when one fails. Release failures preserve a separate
+cleanup cause and cannot replace the earlier selector/readback refusal. No
+resource-notify right is added to the strict live-port census. These source and
+portable-fixture contracts supply no exact hosted-kernel availability or native
+cancellation, owner-loss, sentinel or independent-retirement proof.
 
 Bounded lifecycle observations separate `custodian-entry` before sealed reexec,
 `custodian-fork` after reexec and audit-session setup, `child-fork` after the child's

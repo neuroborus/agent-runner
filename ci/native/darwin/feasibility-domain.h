@@ -255,7 +255,38 @@ static void domain_sanitize(void) {
   } else domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, -1, -1);
   domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
   domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
-  domain_mach(task_set_special_port(self,TASK_RESOURCE_NOTIFY_PORT,MACH_PORT_NULL), "fault-notify-port");
+  /* XNU omits both resource-notify selectors without CONFIG_PROC_RESOURCE_LIMITS.
+   * Only that paired result on our own task establishes unavailability. A live
+   * slot must clear and read back null; getter copies are independent references. */
+  mach_port_t notify = MACH_PORT_NULL, readback = MACH_PORT_NULL;
+  kern_return_t notify_get = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &notify);
+  kern_return_t notify_set = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL);
+  bool notify_unavailable = notify_get == KERN_INVALID_ARGUMENT && notify_set == KERN_INVALID_ARGUMENT;
+  kern_return_t notify_read = KERN_FAILURE;
+  if (!notify_unavailable) {
+    if (notify_get != KERN_SUCCESS) remember("fault-notify-get", "mach", notify_get);
+    else if (notify_set != KERN_SUCCESS) remember("fault-notify-port", "mach", notify_set);
+    else {
+      notify_read = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &readback);
+      if (notify_read != KERN_SUCCESS) remember("fault-notify-read", "mach", notify_read);
+      else if (readback != MACH_PORT_NULL) remember("fault-notify-read", "invariant", 0);
+    }
+  }
+  kern_return_t notify_release = notify_get == KERN_SUCCESS && MACH_PORT_VALID(notify)
+    ? mach_port_deallocate(self, notify) : KERN_SUCCESS;
+  kern_return_t readback_release = notify_read == KERN_SUCCESS && MACH_PORT_VALID(readback)
+    ? mach_port_deallocate(self, readback) : KERN_SUCCESS;
+  if (notify_release != KERN_SUCCESS) {
+    remember("fault-notify-release", "mach", notify_release);
+    remember_cleanup("fault-notify-release", "mach", notify_release);
+  }
+  if (readback_release != KERN_SUCCESS) {
+    remember("fault-notify-release", "mach", readback_release);
+    remember_cleanup("fault-notify-release", "mach", readback_release);
+  }
+  if ((!notify_unavailable && (notify_get != KERN_SUCCESS || notify_set != KERN_SUCCESS ||
+      notify_read != KERN_SUCCESS || readback != MACH_PORT_NULL)) ||
+      notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) failure(126);
   domain_mach(mach_ports_register(self, NULL, 0), "fault-registered-ports");
   domain_mach(task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
   domain_mach(thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
