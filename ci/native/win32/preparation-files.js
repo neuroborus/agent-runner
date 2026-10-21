@@ -840,6 +840,7 @@ export function createWindowsPreparationFiles(input, options = {}) {
       if (name === "verifyColdPreparation") {
         guard();
         requireObservation(bootstrap.purpose === "experiment" && !verifier);
+        const original = structuredClone(args);
         const signal = AbortSignal.any([
             ...[workSignal].filter(Boolean),
             AbortSignal.timeout(
@@ -856,7 +857,11 @@ export function createWindowsPreparationFiles(input, options = {}) {
         try {
           await observer.beginCleanup(signal);
           const verifier = await observer.preSetupVerifier();
-          result = await verifier.verifyColdPreparation(...args);
+          result = await verifier.verifyColdPreparation(...original);
+          requireObservation(
+            observationDigest(result.originals) ===
+              observationDigest(original[1]),
+          );
         } catch (cause) {
           primary = cause;
         }
@@ -937,6 +942,14 @@ export function createWindowsPreparationFiles(input, options = {}) {
           "observations",
         ]);
         const exit = await owner.completion;
+        const stoppedBridge = await waitForWindowsCustodyExit(
+          owner,
+          AbortSignal.any([
+            ...[cleanupSignal ?? workSignal].filter(Boolean),
+            AbortSignal.timeout(Math.max(0, deadline - clock())),
+          ]),
+        );
+        guard();
         requireObservation(
           final.phase === "retired" &&
             final.taskSha256 === taskSha256 &&
@@ -945,7 +958,9 @@ export function createWindowsPreparationFiles(input, options = {}) {
             final.observations === 2 &&
             sameWindowsIdentity(final.helper, identity) &&
             exit.code === 0 &&
-            exit.signal === null,
+            exit.signal === null &&
+            (stoppedBridge === undefined ||
+              (stoppedBridge.code === 0 && stoppedBridge.signal === null)),
         );
         closedOwner = true;
         owner.settle?.();

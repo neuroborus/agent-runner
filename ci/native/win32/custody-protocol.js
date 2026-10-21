@@ -271,27 +271,41 @@ export function windowsClosedPreparationOwner(birth, result) {
 }
 
 export function coldProcessObservation(value, expected) {
+  const original = value.present === true && value.original === true;
   closed(
     value,
     value.present === true
-      ? ["complete", "present", "identity", "signaled", "exitCode"]
+      ? [
+          "complete",
+          "present",
+          "original",
+          "identity",
+          ...(original ? ["signaled", "exitCode"] : []),
+        ]
       : ["complete", "present"],
   );
   requireWindows(value.complete === true && typeof value.present === "boolean");
-  if (value.present)
+  if (value.present) {
+    const actual = normalizeWindowsIdentity(value.identity),
+      declared = normalizeWindowsIdentity(expected);
     requireWindows(
-      sameWindowsIdentity(value.identity, expected) &&
-        value.signaled === true &&
-        integer(value.exitCode) &&
-        value.exitCode !== 124,
+      typeof value.original === "boolean" &&
+        (original
+          ? sameWindowsIdentity(actual, declared) &&
+            value.signaled === true &&
+            integer(value.exitCode, 127) &&
+            value.exitCode !== 124
+          : actual.pid === declared.pid &&
+            BigInt(actual.creationTime) > BigInt(declared.creationTime)),
     );
+  }
   return value.present
     ? {
         complete: true,
         present: true,
+        original,
         identity: normalizeWindowsIdentity(value.identity),
-        signaled: true,
-        exitCode: value.exitCode,
+        ...(original ? { signaled: true, exitCode: value.exitCode } : {}),
       }
     : { complete: true, present: false };
 }

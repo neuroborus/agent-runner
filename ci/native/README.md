@@ -9987,13 +9987,35 @@ protocol is introduced.
 A fresh bootstrap/source/plan read rejoins candidate/build pins, file identities
 and protected parents without opening final helpers. Complete process censuses
 surround two reads of every original Job slot, compiler/controlling Job and owned
-task. Present originals must retain their exact birth/session/SID and be signaled;
-missing PIDs, error 87 or missing paths supply no retirement authority.
+task. Present originals must retain their exact birth/session/SID, be signaled
+and have a readable normal exit in 0–127 excluding watchdog exit 124. A current
+replacement is distinct evidence: its held PID must match, its birth must be
+strictly newer, and a second complete census and held birth read must agree.
+It never inherits the original's Job names or exit status. A stable replacement,
+or disappearance after an observed original exit, cannot resurrect the original;
+an older birth, changed replacement or incomplete observation retains exclusion.
+OpenProcess failure 87 permits only a second complete census proving absence;
+the error itself, an arbitrary acquisition error or a missing path proves nothing.
+Every census, acquisition, birth, wait and exit predicate retains its immediate
+original-call facts within the native cold owner. Its bounded failure record
+separates the failed predicate and native error from independently failed handle
+closure, including error-zero invariant refusals. Census exhaustion cannot lend
+stale ERROR_NO_MORE_FILES to a later failure.
+The original preparation observer waits for actual bridge closure after its
+matching helper retirement and task-removal frames. Those protected receipts,
+including the exact-input intent, select the original helper/bridge births for
+fresh verification; the resulting proof rejoins the same declarations before
+normal loading or recovery can consume it. A stored RETIRED status never replaces
+the current native process/Job/task observations. Observer closure remains ordered
+after dependent-reader retirement and neither kills a process nor extends a bound.
 Unacknowledged originals keep live custody requirements, and a failed live call
 cannot fall back to cold recovery. Account, rights, object/security, policy and
 audit cleanup remain independently required. A proof failure and a separate
 fresh-observer retirement failure retain both causes; no cleanup success can
 erase the original case failure. Fresh matching Windows CI remains necessary.
+Preparation cleanup PASS remains separate from all 23 system cases when setup
+prevented their execution. Native acceptance still requires both fresh original
+hosted workflows on the same final SHA and inspection of all 69 records.
 
 A missing birth, changed object, incomplete audit drain, surviving creator, altered
 task or unavailable baseline retains exclusion. Native setup flushes the complete

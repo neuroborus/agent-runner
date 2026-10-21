@@ -995,9 +995,9 @@ function hostedFixture(layout = "mingw64") {
     readExperimentImage: held,
     resolveExperimentImport: () => assert.fail("No synthetic imports"),
     beginVerification: (signal) => assert.ok(!signal?.aborted),
-    verify: async (name) => {
+    verify: async (name, _declaration, originals) => {
       assert.equal(name, "verifyColdPreparation");
-      return { ...retired, noLiveMembers: true, tasksRemoved: true };
+      return { ...retired, originals, noLiveMembers: true, tasksRemoved: true };
     },
     settleFiles: async () => retired,
   };
@@ -1149,11 +1149,30 @@ async function hostedPreparation(layout) {
     "git-image",
     "missing-git",
     "mixed-close",
+    "cold-owner",
     "candidate",
     "environment",
     "legacy",
     "incomplete",
   ]) {
+    if (fault === "cold-owner") {
+      const verify = f.filesOwner.verify;
+      f.filesOwner.verify = async (...args) => ({
+        ...(await verify(...args)),
+        originals: [],
+      });
+      try {
+        await assert.rejects(
+          loadWindowsExperiment(built.job, directory, {
+            ...f.options,
+            files: f.filesOwner,
+          }),
+        );
+      } finally {
+        f.filesOwner.verify = verify;
+      }
+      continue;
+    }
     if (["output", "mixed-close", "git-image", "missing-git"].includes(fault)) {
       const file =
           fault === "output"

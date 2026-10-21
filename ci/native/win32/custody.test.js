@@ -12,7 +12,10 @@ import {
   windowsCompilerArguments,
   WINDOWS_CUSTODY_DEADLINE_MS,
 } from "./index.js";
-import { windowsClosedPreparationOwner } from "./custody-protocol.js";
+import {
+  coldProcessObservation,
+  windowsClosedPreparationOwner,
+} from "./custody-protocol.js";
 import { windowsCustodyChannel } from "./channel.js";
 import {
   digest,
@@ -2309,6 +2312,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
+        reader_cold_failure: () => false,
         reader_scheduler_failure: () => false,
         reader_context_failure: () => false,
         reader_open_failure: () => false,
@@ -2464,6 +2468,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
+          reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure: () => false,
           reader_open_failure: () => false,
@@ -4403,6 +4408,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           strrchr,
+          reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure() {
             assert.fail("Loader context masked the sampled open refusal");
@@ -4476,6 +4482,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       fallback.push("open");
       return false;
     },
+    reader_cold_failure: () => false,
     reader_scheduler_failure: () => false,
     reader_context_failure(source, line, error) {
       fallback.push([source, line, error]);
@@ -5304,6 +5311,7 @@ function verificationFixture(f = fixture()) {
         ? {
             complete: true,
             present: true,
+            original: true,
             identity: process.identity,
             signaled: process.retired,
             exitCode: state.exitCode ?? 0,
@@ -6272,56 +6280,338 @@ test("actual experiment cold census requires bounded complete enumeration before
       new URL("./custody-reader.c", import.meta.url),
       "utf8",
     ),
-    body = /static void cold_process[^\n]*\{([\s\S]*?)  if \(!found\)/u
-      .exec(source)[1]
-      .replace("HANDLE snapshot", "const snapshot")
-      .replace(
-        "PROCESSENTRY32W entry = {sizeof(entry)}; unsigned count = 0, found = 0;",
-        "const entry = {}; let count = 0, found = 0;",
-      )
-      .replaceAll("&entry", "entry"),
-    census = new Script(`(function(){${body}return found;})()`);
+    body = (name) =>
+      new RegExp(
+        `static (?:void|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (text) =>
+      text
+        .replace(
+          "HANDLE handles[2]={reader_cold.snapshot,reader_cold.process}",
+          "const handles=[reader_cold.snapshot,reader_cold.process]",
+        )
+        .replace("memset(&reader_cold,0,sizeof(reader_cold))", "reset()")
+        .replace("PROCESSENTRY32W entry={sizeof(entry)}", "const entry={}")
+        .replace(
+          "FILETIME birth,exit,kernel,user",
+          "const birth={},exit={},kernel={},user={}",
+        )
+        .replaceAll(
+          "((ULONGLONG)birth.dwHighDateTime<<32)|birth.dwLowDateTime",
+          "(BigInt(birth.dwHighDateTime)*0x100000000n+BigInt(birth.dwLowDateTime))",
+        )
+        .replaceAll("&entry", "entry")
+        .replaceAll("&birth,&exit,&kernel,&user", "birth,exit,kernel,user")
+        .replace(/(?<!&)&code\b/gu, "value=>code=value")
+        .replace(/\b(?:HANDLE|DWORD|BOOL|unsigned)\b/gu, "let"),
+    census = new Script(`
+      function cold_release(){${translate(body("cold_release"))}}
+      function cold_require(ok,operation,error){${translate(body("cold_require"))}}
+      function cold_census(pid){${translate(body("cold_census"))}}
+      function cold_process(pid,creation){${translate(body("cold_process"))}}
+      cold_process(20,10020n);
+    `),
+    emit = new Script(
+      `(source,line,error)=>{${body("reader_cold_failure")
+        .replace("char bytes[1536];DWORD written", "const bytes={};let written")
+        .replace("int size", "const size")
+        .replaceAll("sizeof(bytes)", "1536")
+        .replaceAll("(DWORD)size", "size")
+        .replaceAll("&written", "value=>written=value")
+        .replaceAll("\\036", "\\x1e")}}`,
+    );
   for (const fault of [
     null,
-    "present",
+    "absent",
+    "vanished",
+    "replacement",
+    "replacement-gone",
+    "exit-127",
     "snapshot",
     "first",
     "next",
     "overflow",
     "duplicate",
-    "close",
+    "census-close",
     "not-observer",
+    "open-denied",
+    "open-still-present",
+    "pid",
+    "times",
+    "older",
+    "changed-birth",
+    "live",
+    "wait-failed",
+    "exit-read",
+    "watchdog",
+    "high-exit",
+    "wait-and-close",
+    "process-close",
   ]) {
-    let scanned = 0;
-    const present = ["present", "duplicate"].includes(fault),
+    let lastError = 18,
+      output = "",
+      enumerated = 0;
+    const closedHandles = [],
+      calls = [],
+      state = {},
+      replacement =
+        fault?.startsWith("replacement") || fault === "changed-birth",
       api = {
+        reader_cold: state,
         preparation_only: fault !== "not-observer",
-        pid: 20,
-        creation: 10020,
-        TH32CS_SNAPPROCESS: 2,
-        INVALID_HANDLE_VALUE: -1,
+        TRUE: true,
+        FALSE: false,
+        NULL: null,
+        ERROR_SUCCESS: 0,
+        ERROR_INVALID_PARAMETER: 87,
         ERROR_NO_MORE_FILES: 18,
-        need: assert.ok,
-        CreateToolhelp32Snapshot: () => (fault === "snapshot" ? -1 : 1),
-        Process32FirstW: (_snapshot, entry) => {
-          scanned++;
-          entry.th32ProcessID = present ? 20 : 10;
-          return fault !== "first";
+        INVALID_HANDLE_VALUE: -1,
+        WAIT_FAILED: 0xffffffff,
+        WAIT_OBJECT_0: 0,
+        PROCESS_QUERY_LIMITED_INFORMATION: 0x1000,
+        SYNCHRONIZE: 0x100000,
+        TH32CS_SNAPPROCESS: 2,
+        reset: () =>
+          Object.assign(state, {
+            snapshot: null,
+            process: null,
+            active: false,
+            cleanupFailed: false,
+            cleanupError: 0,
+            error: 0,
+            observedPid: 0,
+            birth: 0n,
+            census: 0,
+            count: 0,
+            found: 0,
+          }),
+        GetLastError: () => lastError,
+        SetLastError: (value) => {
+          lastError = value;
         },
-        Process32NextW: (_snapshot, entry) => {
-          scanned++;
+        need: assert.ok,
+        CreateToolhelp32Snapshot: () => {
+          calls.push("snapshot");
+          if (fault === "snapshot") {
+            lastError = 5;
+            return -1;
+          }
+          return { pass: state.census, index: 0 };
+        },
+        Process32FirstW: (snapshot, entry) => {
+          enumerated++;
+          entry.th32ProcessID = 10;
+          if (fault === "first") {
+            lastError = 5;
+            return false;
+          }
+          return true;
+        },
+        Process32NextW: (snapshot, entry) => {
+          enumerated++;
+          snapshot.index++;
           entry.th32ProcessID = fault === "overflow" ? 10 : 20;
-          return (
-            fault === "overflow" || (fault === "duplicate" && scanned === 2)
+          if (
+            fault === "overflow" ||
+            (snapshot.index <= (fault === "duplicate" ? 2 : 1) &&
+              fault !== "absent" &&
+              !(
+                snapshot.pass === 2 &&
+                ["vanished", "replacement-gone"].includes(fault)
+              ))
+          )
+            return true;
+          lastError = fault === "next" ? 5 : 18;
+          return false;
+        },
+        OpenProcess: () => {
+          calls.push("open");
+          if (
+            ["vanished", "open-denied", "open-still-present"].includes(fault)
+          ) {
+            lastError = fault === "open-denied" ? 5 : 87;
+            return null;
+          }
+          return "original-slot";
+        },
+        GetProcessId: () => (fault === "pid" ? 21 : 20),
+        GetProcessTimes: (_process, birth) => {
+          if (fault === "times") {
+            lastError = 5;
+            return false;
+          }
+          birth.dwHighDateTime = 0;
+          birth.dwLowDateTime =
+            fault === "older"
+              ? 10019
+              : replacement
+                ? state.census === 2 && fault === "changed-birth"
+                  ? 20001
+                  : 20000
+                : 10020;
+          return true;
+        },
+        WaitForSingleObject: () => {
+          if (fault === "wait-failed") {
+            lastError = 5;
+            return 0xffffffff;
+          }
+          return ["live", "wait-and-close"].includes(fault) ? 258 : 0;
+        },
+        GetExitCodeProcess: (_process, out) => {
+          if (fault === "exit-read") {
+            lastError = 5;
+            return false;
+          }
+          out(
+            fault === "watchdog"
+              ? 124
+              : fault === "high-exit"
+                ? 259
+                : fault === "exit-127"
+                  ? 127
+                  : 0,
+          );
+          return true;
+        },
+        CloseHandle: (handle) => {
+          closedHandles.push(handle);
+          const failed =
+            handle === "original-slot"
+              ? ["process-close", "wait-and-close"].includes(fault)
+              : fault === "census-close";
+          lastError = failed ? 6 : 99;
+          return !failed;
+        },
+        identity: () => {
+          output += JSON.stringify({
+            ...identity(20),
+            creationTime: String(state.birth),
+          });
+        },
+        printf: (format, ...values) => {
+          let at = 0;
+          output += format.replace(/%(?:ll|l)?[sud]/gu, () =>
+            String(values[at++]),
           );
         },
-        GetLastError: () => (fault === "next" ? 5 : 18),
-        CloseHandle: () => fault !== "close",
+        putchar: (char) => {
+          output += char;
+        },
       };
-    if (fault && fault !== "present")
+    const accepted = [
+      null,
+      "absent",
+      "vanished",
+      "replacement",
+      "replacement-gone",
+      "exit-127",
+    ].includes(fault);
+    if (accepted) {
+      census.runInNewContext(api);
+      const actual = JSON.parse(output);
+      assert.equal(
+        actual.present,
+        !["absent", "vanished", "replacement-gone"].includes(fault),
+      );
+      if (actual.present) assert.equal(actual.original, !replacement);
+      assert.ok(coldProcessObservation(actual, identity(20)).complete);
+      assert.equal(
+        calls.filter((name) => name === "snapshot").length,
+        ["vanished", "replacement", "replacement-gone"].includes(fault) ? 2 : 1,
+      );
+      assert.equal(
+        calls.filter((name) => name === "open").length,
+        fault === "absent" ? 0 : 1,
+      );
+    } else {
       assert.throws(() => census.runInNewContext(api), undefined, fault);
-    else assert.equal(census.runInNewContext(api), present ? 1 : 0);
-    if (fault === "overflow") assert.equal(scanned, 65537);
+      const operation =
+        {
+          "not-observer": "arguments",
+          "open-denied": "open",
+          "open-still-present": "open",
+          overflow: "bound",
+          older: "birth",
+          "changed-birth": "birth",
+          live: "wait",
+          "wait-failed": "wait",
+          "wait-and-close": "wait",
+          "exit-read": "exit",
+          watchdog: "exit-code",
+          "high-exit": "exit-code",
+        }[fault] ?? fault;
+      assert.equal(state.operation, operation, fault);
+      assert.equal(
+        state.error,
+        [
+          "snapshot",
+          "first",
+          "next",
+          "open-denied",
+          "times",
+          "wait-failed",
+          "exit-read",
+        ].includes(fault)
+          ? 5
+          : fault === "open-still-present"
+            ? 87
+            : ["census-close", "process-close"].includes(fault)
+              ? 6
+              : 0,
+        fault,
+      );
+      assert.equal(
+        lastError,
+        state.error,
+        "cleanup cannot replace the original failure",
+      );
+      assert.equal(
+        state.cleanupFailed,
+        ["census-close", "process-close", "wait-and-close"].includes(fault),
+      );
+      const f = transport(),
+        pending = f.channel.receive(),
+        frames = [];
+      emit.runInNewContext({
+        ...api,
+        reader_command: "verify-cold-process",
+        sequence: 1,
+        control: "authenticated",
+        sprintf_s: (target, maximum, format, ...values) => {
+          let at = 0;
+          target.value = format.replace(/%(?:ll|l)?[sud]/gu, () =>
+            String(values[at++]),
+          );
+          assert.ok(target.value.length < maximum);
+          return target.value.length;
+        },
+        WriteFile: (_handle, bytes, size) => {
+          frames.push(bytes.value.slice(0, size));
+          return true;
+        },
+      })("custody-reader.c", 810, state.error);
+      f.child.stdout.write(frames[0].slice(0, 31));
+      f.child.stdout.write(frames[0].slice(31));
+      await assert.rejects(pending, (error) => {
+        assert.equal(error.custodyReaderFailure.cold.operation, operation);
+        assert.equal(error.custodyReaderFailure.lastError, state.error);
+        assert.equal(
+          error.custodyReaderFailure.cold.cleanupFailed,
+          state.cleanupFailed,
+        );
+        return true;
+      });
+      await assert.rejects(f.channel.completion);
+      f.child.emit("close", 126, null);
+    }
+    assert.equal(
+      new Set(closedHandles).size,
+      closedHandles.length,
+      "each acquired handle closes at most once",
+    );
+    if (fault === "overflow") assert.equal(enumerated, 65537);
   }
   const absent =
       /if \(result == HRESULT_FROM_WIN32\(ERROR_FILE_NOT_FOUND\)\) \{([\s\S]*?)\n  \}/u
@@ -7219,6 +7509,8 @@ test("Windows experiment cold custody proves disappeared originals without retai
   const faults = [
     null,
     "present-retired",
+    "replacement-birth",
+    "replacement-changes",
     "reordered-identity",
     "reviewed",
     "pid-reuse",
@@ -7269,6 +7561,8 @@ test("Windows experiment cold custody proves disappeared originals without retai
     if (
       [
         "present-retired",
+        "replacement-birth",
+        "replacement-changes",
         "reordered-identity",
         "pid-reuse",
         "session",
@@ -7280,6 +7574,7 @@ test("Windows experiment cold custody proves disappeared originals without retai
     ) {
       const actual = { ...helper };
       if (fault === "pid-reuse") actual.creationTime = "999";
+      if (fault?.startsWith("replacement-")) actual.creationTime = "20000";
       if (fault === "session") actual.sessionId++;
       if (fault === "sid") actual.userSid = runnerSid;
       k.states.set(helper.pid, { identity: actual, retired: fault !== "live" });
@@ -7294,6 +7589,16 @@ test("Windows experiment cold custody proves disappeared originals without retai
     k.state.damage = (operation, frame) => {
       if (operation === "verify-cold-process") {
         scans++;
+        if (fault?.startsWith("replacement-") && frame.value.present) {
+          frame.value.original = false;
+          delete frame.value.signaled;
+          delete frame.value.exitCode;
+          if (fault === "replacement-changes" && scans === 3)
+            frame.value.identity = {
+              ...frame.value.identity,
+              creationTime: "20001",
+            };
+        }
         if (["handle-read", "census-read"].includes(fault))
           throw new Error(fault);
         if (fault === "process-changes" && scans === 3)
@@ -7308,6 +7613,7 @@ test("Windows experiment cold custody proves disappeared originals without retai
           frame.value = {
             complete: true,
             present: true,
+            original: true,
             identity: helper,
             signaled: true,
             exitCode: 0,
@@ -7349,7 +7655,12 @@ test("Windows experiment cold custody proves disappeared originals without retai
       delete k.f.input.bindingSha256;
     }
     const verify = () => k.verifier.verifyColdPreparation(k.f.input, [owner]);
-    if (fault && !["present-retired", "reordered-identity"].includes(fault)) {
+    if (
+      fault &&
+      !["present-retired", "replacement-birth", "reordered-identity"].includes(
+        fault,
+      )
+    ) {
       await assert.rejects(verify, undefined, fault);
       const count = k.events.length;
       k.state.damage = null;

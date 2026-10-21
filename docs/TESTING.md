@@ -1487,6 +1487,23 @@ with injected string operations, including out-of-root and nested-path refusals.
 These cases change no test assignment and establish no native Windows loading or
 retirement success.
 
+The existing Windows custody fixture executes the complete cold census/acquisition
+owner with injected native calls. It covers present exited originals, allowed and
+watchdog/out-of-range exits, live originals, disappearance during acquisition,
+newer replacement births, changed/older births, inaccessible handles and incomplete
+or duplicate inventories. Every failed predicate retains its immediate native
+error; separately failed closes cannot replace it. The actual bounded diagnostic
+producer passes through fragmented authenticated transport and remains failure
+evidence only. Repeated original Job/task checks and normal/recovery refusal
+matrices remain required. The preparation fixture holds actual bridge exit after
+its retirement frame and requires closure before publication. A controlled clock
+exhausts the original deadline during that wait and retains the first refusal
+without replaying finish; cancellation and dependent-reader ordering remain
+unchanged. These portable cases add no native execution or slow-tier assignment,
+and cleanup cannot attest the 23 unrun system
+cases. Both original hosted workflows must still prove native acceptance on the
+same final SHA.
+
 Darwin injected/source regressions protect shared sandbox function/data bindings,
 unavailable exports, all custody query consumers, path-filter results and PF
 counter normalization without losing experiment rule authority/order. Existing

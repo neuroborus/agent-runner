@@ -137,6 +137,15 @@ static __declspec(thread) struct {
   BOOL active, process; DWORD pid, observedPid, processAccess, tokenAccess;
   int matched, tokenResult;
 } reader_retain;
+#ifdef NATIVE_CI_EXPERIMENT
+/* Original-call facts belong to cold acquisition, not the census's last error. */
+static __declspec(thread) struct {
+  BOOL active, cleanupFailed; const char *operation; HANDLE snapshot, process;
+  DWORD pid, observedPid, error, cleanupError; ULONGLONG expected, birth;
+  unsigned census, count, found; LONGLONG waited, exitCode;
+} reader_cold;
+static void cold_release(void);
+#endif
 /* Task queries own every partial COM result until their one-shot scope closes. */
 struct task_scope {
   ITaskService *service; ITaskFolder *folder; IRegisteredTask *task, *again;
@@ -246,9 +255,23 @@ static BOOL reader_scheduler_failure(const char *source, unsigned line, DWORD er
   int size=sprintf_s(bytes,sizeof(bytes),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"scheduler\":{\"operation\":%s,\"hresult\":%s,\"index\":%ld,\"attempt\":%u,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",sequence,reader_command,source,line,error,operation,result,reader_scheduler.index,reader_scheduler.attempt,reader_scheduler.cleanupFailed?"true":"false",reader_scheduler.cleanupError);
   if(size>0)WriteFile(control,bytes,(DWORD)size,&written,NULL);return TRUE;
 }
+#ifdef NATIVE_CI_EXPERIMENT
+static BOOL reader_cold_failure(const char *source, unsigned line, DWORD error) {
+  if(!reader_cold.active)return FALSE;
+  reader_cold.error=error;cold_release();
+  char bytes[1536];DWORD written;
+  int size=sprintf_s(bytes,sizeof(bytes),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"cold\":{\"operation\":\"%s\",\"pid\":%lu,\"creationTime\":\"%llu\",\"observedPid\":%lu,\"observedCreationTime\":\"%llu\",\"census\":%u,\"count\":%u,\"found\":%u,\"wait\":%lld,\"exitCode\":%lld,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",
+    sequence,reader_command,source,line,reader_cold.error,reader_cold.operation,reader_cold.pid,reader_cold.expected,reader_cold.observedPid,reader_cold.birth,
+    reader_cold.census,reader_cold.count,reader_cold.found,reader_cold.waited,reader_cold.exitCode,reader_cold.cleanupFailed?"true":"false",reader_cold.cleanupError);
+  if(size>0)WriteFile(control,bytes,(DWORD)size,&written,NULL);return TRUE;
+}
+#else
+#define reader_cold_failure(source,line,error) FALSE
+#endif
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  if(reader_cold_failure(source,line,error))return;
   if(reader_scheduler_failure(source,line,error))return;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
   /* Import resolution can fail while holding the resolved file or its parents. */
@@ -793,23 +816,71 @@ static void recovery_jobs(unsigned subject, const char *ownedNonce) {
 }
 #ifdef NATIVE_CI_EXPERIMENT
 /* A complete process census, never OpenProcess's error code, proves absence.
- * Present originals still require a readable, birth-matched signaled handle. */
+ * An acquired replacement needs a newer held birth and a second complete view. */
+static void cold_release(void) {
+  HANDLE handles[2]={reader_cold.snapshot,reader_cold.process};reader_cold.snapshot=reader_cold.process=NULL;
+  for(unsigned i=0;i<2;i++)if(handles[i]&&!CloseHandle(handles[i])){
+    DWORD error=GetLastError();if(!reader_cold.cleanupFailed)reader_cold.cleanupError=error;reader_cold.cleanupFailed=TRUE;
+  }
+}
+static void cold_require(BOOL ok, const char *operation, DWORD error) {
+  reader_cold.operation=operation;reader_cold.error=error;
+  if(!ok){cold_release();SetLastError(error);need(FALSE);}
+}
+static BOOL cold_census(DWORD pid) {
+  reader_cold.census++;reader_cold.count=reader_cold.found=0;
+  HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS,0);DWORD error=snapshot==INVALID_HANDLE_VALUE?GetLastError():ERROR_SUCCESS;
+  if(snapshot!=INVALID_HANDLE_VALUE)reader_cold.snapshot=snapshot;
+  cold_require(snapshot!=INVALID_HANDLE_VALUE,"snapshot",error);
+  PROCESSENTRY32W entry={sizeof(entry)};BOOL ok=Process32FirstW(snapshot,&entry);error=ok?ERROR_SUCCESS:GetLastError();
+  cold_require(ok,"first",error);
+  do{
+    cold_require(++reader_cold.count<=65536,"bound",ERROR_SUCCESS);
+    if(entry.th32ProcessID==pid)cold_require(++reader_cold.found==1,"duplicate",ERROR_SUCCESS);
+    ok=Process32NextW(snapshot,&entry);error=ok?ERROR_SUCCESS:GetLastError();
+  }while(ok);
+  cold_require(error==ERROR_NO_MORE_FILES,"next",error);
+  reader_cold.snapshot=NULL;ok=CloseHandle(snapshot);error=ok?ERROR_SUCCESS:GetLastError();
+  if(!ok){reader_cold.cleanupFailed=TRUE;reader_cold.cleanupError=error;}
+  cold_require(ok,"census-close",error);return reader_cold.found!=0;
+}
 static void cold_process(DWORD pid, ULONGLONG creation) {
-  need(preparation_only && pid && creation);
-  HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-  PROCESSENTRY32W entry = {sizeof(entry)}; unsigned count = 0, found = 0;
-  need(snapshot != INVALID_HANDLE_VALUE && Process32FirstW(snapshot, &entry));
-  do { need(++count <= 65536); if (entry.th32ProcessID == pid) need(++found == 1); }
-  while (Process32NextW(snapshot, &entry));
-  need(GetLastError() == ERROR_NO_MORE_FILES && CloseHandle(snapshot));
-  if (!found) { printf("{\"complete\":true,\"present\":false}"); return; }
-  HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
-  FILETIME birth, exit, kernel, user; DWORD code;
-  need(process && GetProcessId(process) == pid && GetProcessTimes(process, &birth, &exit, &kernel, &user) &&
-    (((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime) == creation &&
-    WaitForSingleObject(process, 0) == WAIT_OBJECT_0 && GetExitCodeProcess(process, &code) && code <= 127 && code != 124);
-  printf("{\"complete\":true,\"present\":true,\"identity\":"); identity(process);
-  printf(",\"signaled\":true,\"exitCode\":%lu}", code); need(CloseHandle(process));
+  memset(&reader_cold,0,sizeof(reader_cold));reader_cold.active=TRUE;reader_cold.pid=pid;reader_cold.expected=creation;
+  reader_cold.waited=reader_cold.exitCode=-1;
+  cold_require(preparation_only&&pid&&creation,"arguments",ERROR_SUCCESS);
+  BOOL found=cold_census(pid);
+  if(found){
+    reader_cold.process=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);
+    DWORD error=reader_cold.process?ERROR_SUCCESS:GetLastError();
+    if(!reader_cold.process){
+      cold_require(error==ERROR_INVALID_PARAMETER,"open",error);
+      found=cold_census(pid);cold_require(!found,"open",error);
+    }else{
+      reader_cold.observedPid=GetProcessId(reader_cold.process);error=reader_cold.observedPid?ERROR_SUCCESS:GetLastError();
+      cold_require(reader_cold.observedPid==pid,"pid",error);
+      FILETIME birth,exit,kernel,user;BOOL ok=GetProcessTimes(reader_cold.process,&birth,&exit,&kernel,&user);error=ok?ERROR_SUCCESS:GetLastError();
+      cold_require(ok,"times",error);reader_cold.birth=((ULONGLONG)birth.dwHighDateTime<<32)|birth.dwLowDateTime;
+      cold_require(reader_cold.birth>=creation,"birth",ERROR_SUCCESS);
+      if(reader_cold.birth==creation){
+        DWORD waited=WaitForSingleObject(reader_cold.process,0);error=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;reader_cold.waited=waited;
+        cold_require(waited==WAIT_OBJECT_0,"wait",error);
+        DWORD code;ok=GetExitCodeProcess(reader_cold.process,&code);error=ok?ERROR_SUCCESS:GetLastError();
+        cold_require(ok,"exit",error);reader_cold.exitCode=code;
+        cold_require(code<=127&&code!=124,"exit-code",ERROR_SUCCESS);
+      }else{
+        found=cold_census(pid);
+        ok=GetProcessTimes(reader_cold.process,&birth,&exit,&kernel,&user);error=ok?ERROR_SUCCESS:GetLastError();
+        cold_require(ok,"times",error);
+        cold_require((((ULONGLONG)birth.dwHighDateTime<<32)|birth.dwLowDateTime)==reader_cold.birth,"birth",ERROR_SUCCESS);
+      }
+    }
+  }
+  if(!found)printf("{\"complete\":true,\"present\":false}");
+  else{
+    printf("{\"complete\":true,\"present\":true,\"original\":%s,\"identity\":",reader_cold.birth==creation?"true":"false");reader_cold.operation="identity";identity(reader_cold.process);
+    if(reader_cold.birth==creation)printf(",\"signaled\":true,\"exitCode\":%lld",reader_cold.exitCode);putchar('}');
+  }
+  cold_release();cold_require(!reader_cold.cleanupFailed,"process-close",reader_cold.cleanupError);reader_cold.active=FALSE;
 }
 /* Names come from protected original receipts, not a reopened process handle.
  * Every fixed slot and the controlling Job use the same strict native reader. */

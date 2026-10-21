@@ -475,6 +475,7 @@ export function createWindowsCustodyVerifier(
       after.every(
         (value, index) =>
           !value.present ||
+          (value.original === false && before[index].original !== false) ||
           (before[index].present && same(before[index], value)),
       ),
     );

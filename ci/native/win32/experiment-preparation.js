@@ -564,7 +564,7 @@ async function closedExperimentObserver(files, prepared, expected) {
   return {
     observer,
     owner,
-    nativeEventSha256: observationDigest({ close, birth, result }),
+    nativeEventSha256: owner.receiptsSha256,
   };
 }
 
@@ -596,7 +596,9 @@ export async function verifyWindowsExperimentBuild(
   requireObservation(
     retired(retiredDomains) &&
       retiredDomains.noLiveMembers &&
-      retiredDomains.tasksRemoved,
+      retiredDomains.tasksRemoved &&
+      observationDigest(retiredDomains.originals) ===
+        observationDigest([original.owner]),
   );
   const native = {
     read: (file, sha256) => files.readProtected({ file, sha256 }),

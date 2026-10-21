@@ -124,11 +124,17 @@ and exact-input intent receipts, before live retention. Recovery partitions
 closed and interrupted originals, joining the cold proof and strict live proof
 before settlement. Complete bounded native process censuses surround two fresh
 reads of every original nonce/PID/birth-bound recovery Job slot, compiler and
-controlling Job, plus registered and hidden task absence. Existing PIDs must
-match their complete native identities and have
-signaled readable handles; disappeared PIDs carry protected identities separately
-from native observations. Incomplete or contradictory reads, reused PIDs, live
-members and surviving tasks block. A separate fresh observer must independently
+controlling Job, plus registered and hidden task absence. Present originals must
+match their complete native identities and have signaled readable handles;
+disappeared PIDs carry protected identities separately from native observations.
+The cold lane distinguishes a replacement through its strictly newer held birth
+and a second complete native census and birth read. It retains original
+nonce/birth-derived Job names and refuses older or changing replacement identities.
+Acquisition error 87 requires a fresh complete absence observation; other failed
+acquisitions remain failures. Original bridge closure precedes publication, and
+fresh proof rejoins the original protected receipt declarations. Incomplete or
+contradictory reads, live originals or members and surviving tasks block.
+A separate fresh observer must independently
 settle without emergency cleanup before this proof returns or releases a dependency;
 its own successful finish cannot establish original retirement. Live/reviewed
 verification and latched live-retain failures remain strict. No empty compiler

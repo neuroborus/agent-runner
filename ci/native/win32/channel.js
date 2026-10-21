@@ -177,7 +177,7 @@ export async function waitForWindowsCustodyExit(channel, signal) {
   finish.addEventListener("abort", abort, { once: true });
   if (finish.aborted) abort();
   try {
-    await Promise.race([exited, stopped.promise]);
+    return await Promise.race([exited, stopped.promise]);
   } finally {
     finish.removeEventListener("abort", abort);
   }
@@ -329,6 +329,84 @@ export function windowsCustodyChannel(
           fields.push("lastError");
           requireWindows(
             uint32(value.lastError) && !Object.hasOwn(value, "trust"),
+          );
+        }
+        if (Object.hasOwn(value, "cold")) {
+          fields.push("cold");
+          const cold = value.cold;
+          closed(cold, [
+            "operation",
+            "pid",
+            "creationTime",
+            "observedPid",
+            "observedCreationTime",
+            "census",
+            "count",
+            "found",
+            "wait",
+            "exitCode",
+            "cleanupFailed",
+            "cleanupError",
+          ]);
+          const birth = (text) =>
+            typeof text === "string" &&
+            /^(?:0|[1-9][0-9]{0,19})$/u.test(text) &&
+            BigInt(text) <= 0xffffffffffffffffn;
+          requireWindows(
+            (value.source === "custody-reader.c" ||
+              (value.source === "custody.h" &&
+                cold.operation === "identity")) &&
+              value.command === "verify-cold-process" &&
+              Object.hasOwn(value, "lastError") &&
+              ![
+                "open",
+                "trust",
+                "transfer",
+                "loader",
+                "retain",
+                "scheduler",
+              ].some((field) => Object.hasOwn(value, field)) &&
+              [
+                "arguments",
+                "snapshot",
+                "first",
+                "bound",
+                "duplicate",
+                "next",
+                "census-close",
+                "open",
+                "pid",
+                "times",
+                "birth",
+                "wait",
+                "exit",
+                "exit-code",
+                "process-close",
+                "identity",
+              ].includes(cold.operation) &&
+              uint32(cold.pid) &&
+              cold.pid > 0 &&
+              uint32(cold.observedPid) &&
+              birth(cold.creationTime) &&
+              birth(cold.observedCreationTime) &&
+              Number.isInteger(cold.census) &&
+              cold.census >= 0 &&
+              cold.census <= 2 &&
+              Number.isInteger(cold.count) &&
+              cold.count >= 0 &&
+              cold.count <= 65537 &&
+              Number.isInteger(cold.found) &&
+              cold.found >= 0 &&
+              cold.found <= 2 &&
+              [cold.wait, cold.exitCode].every(
+                (number) =>
+                  Number.isInteger(number) &&
+                  number >= -1 &&
+                  number <= 0xffffffff,
+              ) &&
+              typeof cold.cleanupFailed === "boolean" &&
+              uint32(cold.cleanupError) &&
+              (cold.cleanupFailed || cold.cleanupError === 0),
           );
         }
         if (Object.hasOwn(value, "scheduler")) {

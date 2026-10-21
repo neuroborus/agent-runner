@@ -2588,6 +2588,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       return {
         complete: true,
         present: true,
+        original: true,
         identity: process.identity,
         signaled: process.retired,
         exitCode: exitCodes.get(process.identity.pid) ?? 0,
@@ -5533,7 +5534,20 @@ test("Windows experiment held-image protocol pins exact helpers and keeps instal
 
 test("Windows experiment close coalesces its System publication observer retirement", async () => {
   const f = rawPreparation({ experiment: true }),
-    work = new AbortController();
+    work = new AbortController(),
+    exited = Promise.withResolvers(),
+    retiring = Promise.withResolvers(),
+    open = f.options.openPreparation;
+  f.options.openPreparation = async (...args) => {
+    const channel = await open(...args);
+    return {
+      ...channel,
+      get exited() {
+        retiring.resolve();
+        return exited.promise;
+      },
+    };
+  };
   const native = await openWindowsExperimentNative(f.prepared, {
     ...f.options,
     signal: work.signal,
@@ -5554,6 +5568,18 @@ test("Windows experiment close coalesces its System publication observer retirem
   // Work cancellation after handoff cannot cancel the finite cleanup signal.
   work.abort();
   release.resolve();
+  let completed = false;
+  first.then(() => {
+    completed = true;
+  });
+  await retiring.promise;
+  await Promise.resolve();
+  assert.equal(
+    completed,
+    false,
+    "a retirement frame cannot replace actual bridge closure",
+  );
+  exited.resolve({ code: 0, signal: null });
   const result = await first;
   assert.equal(result.status, "RETIRED");
   assert.equal(await native.close(), result);
@@ -5577,6 +5603,41 @@ test("Windows preparation observer cannot finish while its raw held subject is l
   );
   await assert.rejects(files.settleFiles(), { code: "ERR_ASSERTION" });
   assert.equal(f.actors.get(subject.pid).retired, false);
+});
+
+test("Windows preparation retains deadline exhaustion while awaiting actual bridge exit", async () => {
+  const f = rawPreparation({ experiment: true }),
+    open = f.options.openPreparation,
+    waiting = Promise.withResolvers(),
+    exited = Promise.withResolvers();
+  let clock = 0;
+  f.options.clock = () => clock;
+  f.options.openPreparation = async (...args) => {
+    const channel = await open(...args);
+    return {
+      ...channel,
+      get exited() {
+        waiting.resolve();
+        return exited.promise;
+      },
+    };
+  };
+  const files = createWindowsPreparationFiles(f, f.options);
+  await files.readdir(directory);
+  const closing = files.settleFiles();
+  await waiting.promise;
+  clock = Number.MAX_SAFE_INTEGER;
+  exited.resolve({ code: 0, signal: null });
+  let original;
+  await assert.rejects(closing, (cause) => {
+    original = cause;
+    return true;
+  });
+  await assert.rejects(files.settleFiles(), (cause) => cause === original);
+  assert.equal(
+    f.rawEvents.filter((frame) => /^finish /u.test(frame)).length,
+    1,
+  );
 });
 
 test("Windows fresh file observer cannot consume or release an original observer's pending read", async () => {
