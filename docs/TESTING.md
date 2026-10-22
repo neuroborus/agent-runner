@@ -355,6 +355,16 @@ query/authority and release failures preserve the first refusal and independent
 cleanup cause. Descriptor closure and explicit bootstrap/debug/registered/exception
 sanitation remain covered.
 
+The same actual-body fixture begins reference ownership at child entry, before
+the first observation, and rejects copied parent bookkeeping as cleanup authority.
+Its runtime cache model rejects invalidation, missing/dead or aliased reply names,
+cache replacement before/during census and during release, mixed reply/self/thread
+rights, missing entries and duplicates. An additional receive-only `IKOT_NONE`
+right remains unknown and refuses exec. Partial thread/host acquisition, failed
+access type queries and simultaneous array/getter release failures retain their
+distinct original and cleanup outcomes. These deterministic cases add no native
+execution or slow-tier assignment and identify no historical unknown right.
+
 Custodian lifecycle fixtures retain one checked release per valid getter copy,
 no endpoint contact and unchanged errno, including unavailable type queries. The
 child's observation remains after its alarm and before credential/session changes;

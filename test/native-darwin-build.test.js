@@ -4715,6 +4715,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       "u",
     ).exec(source)?.[1];
   const portRelease = portBody("domain_port_release"),
+    portsBegin = portBody("domain_ports_begin"),
     portCleanup = portBody("domain_port_cleanup"),
     portDiagnostic = portBody("domain_port_diagnostic");
   assert.ok(
@@ -4722,6 +4723,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       observation &&
       releaseBody &&
       portRelease &&
+      portsBegin &&
       portCleanup &&
       portDiagnostic &&
       start > 0 &&
@@ -4764,6 +4766,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         "let ",
       );
   const script = new Script(`
+    function domain_ports_begin() {${translate(portsBegin)}}
     function domain_port_release(held, operation) {${translate(portRelease)}}
     function domain_port_cleanup() {${translate(portCleanup)}}
     function domain_port_diagnostic(name, census_type) {${translate(portDiagnostic)}}
@@ -4780,9 +4783,92 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     DEAD = 0xffffffff;
   for (const [label, options, operation, value, cleanupValue] of [
     ["null", {}],
+    [
+      "new execution discards parent bookkeeping and borrows its own runtime cache",
+      { inheritedOwner: 41, reply: 107 },
+    ],
+    ["missing runtime reply port", { reply: 0 }, "fault-reply-port", 0],
+    ["dead runtime reply sentinel", { reply: DEAD }, "fault-reply-port", 0],
+    [
+      "thread acquisition returns null",
+      { threadPort: 0 },
+      "fault-thread-port",
+      0,
+    ],
+    [
+      "thread acquisition returns dead sentinel",
+      { threadPort: DEAD },
+      "fault-thread-port",
+      0,
+    ],
+    ["reply aliases self", { reply: 101 }, "fault-reply-port", 0],
+    ["reply aliases a getter copy", { reply: 103 }, "fault-reply-port", 0],
+    [
+      "cached reply replaced before census",
+      { replaceReply: "before" },
+      "fault-reply-port",
+      0,
+    ],
+    [
+      "cached reply replaced during census",
+      { replaceReply: "census" },
+      "fault-reply-port",
+      0,
+    ],
+    [
+      "cache refusal survives array and getter release failures",
+      {
+        replaceReply: "census",
+        access: 200,
+        rights: SEND,
+        censusRelease: 15,
+        release: 5,
+        hostRelease: 20,
+      },
+      "fault-reply-port",
+      0,
+    ],
+    [
+      "cached reply replaced during release",
+      { replaceReply: "release" },
+      "fault-reply-port",
+      0,
+    ],
+    [
+      "reply receive right changed",
+      { replyType: RECEIVE | SEND },
+      "fault-port-authority",
+      0,
+    ],
+    ["reply missing from census", { omit: 104 }, "fault-port-authority", 0],
+    [
+      "self authority changed",
+      { selfType: SEND | RECEIVE },
+      "fault-port-authority",
+      0,
+    ],
+    ["self missing from census", { omit: 101 }, "fault-port-authority", 0],
+    [
+      "thread authority changed",
+      { threadType: SEND_ONCE },
+      "fault-port-authority",
+      0,
+    ],
+    ["thread missing from census", { omit: 102 }, "fault-port-authority", 0],
+    ["duplicate reply entry", { duplicate: 104 }, "fault-port-authority", 0],
+    [
+      "another runtime-shaped receive right is unknown",
+      { extraRights: RECEIVE, extraKind: 0, extraObject: 0 },
+      "fault-port-authority",
+      0,
+    ],
     ["null bootstrap", { bootstrap: 0 }],
     ["dead bootstrap sentinel", { bootstrap: DEAD }],
     ["allocated dead bootstrap reference", { bootstrapType: DEAD_NAME }],
+    [
+      "bootstrap send copy aliases the borrowed reply receive right",
+      { bootstrap: 104 },
+    ],
     ["bootstrap aliases the host getter", { bootstrap: 103 }],
     [
       "bootstrap aliases the access getter",
@@ -4926,6 +5012,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     ["invalid name query", { access: 200, query: 15 }, "fault-access-kind", 15],
     ["query refused", { access: 200, query: 5 }, "fault-access-kind", 5],
     [
+      "failed query retains acquired copy and separate release refusal",
+      { access: 200, query: 5, release: 15 },
+      "fault-access-kind",
+      5,
+      15,
+    ],
+    [
       "dead-name release refused",
       { access: 200, rights: DEAD_NAME, release: 15 },
       "fault-access-release",
@@ -4940,6 +5033,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       15,
     ],
     ["host getter refused", { hostGet: 5 }, "fault-host-port", 5],
+    ["host kind query refused", { hostQuery: 5 }, "fault-host-kind", 5],
     ["privileged host", { host: 4 }, "fault-host-kind", 0],
     [
       "ordinary host release refused",
@@ -5131,7 +5225,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     own(bootstrap);
     if (options.bootstrapExtra) own(bootstrap);
     let first,
-      replies = 0,
+      cachedReply = options.reply ?? 104,
       notifyReads = 0,
       observing = true,
       bootstrapReleased = false;
@@ -5159,11 +5253,12 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       EXCEPTION_DEFAULT: 1,
       THREAD_STATE_NONE: 0,
       bootstrap_port: bootstrap,
-      domain_port_owner: 0,
-      domain_bootstrap_local: 0,
-      domain_host_copy: 0,
-      domain_access_copy: 0,
-      domain_thread_copy: 0,
+      domain_port_owner: options.inheritedOwner ?? 0,
+      domain_bootstrap_local: options.inheritedOwner ? 113 : 0,
+      domain_host_copy: options.inheritedOwner ? 112 : 0,
+      domain_access_copy: options.inheritedOwner ? 114 : 0,
+      domain_thread_copy: options.inheritedOwner ? 115 : 0,
+      domain_reply_borrowed: options.inheritedOwner ? 109 : 0,
       resource_uncertain: false,
       RLIMIT_NPROC: 1,
       PROC_PIDLISTFDS: 1,
@@ -5255,7 +5350,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         throw executed;
       },
       mach_task_self: () => 101,
-      mach_thread_self: () => own(102),
+      mach_thread_self: () => own(options.threadPort ?? 102),
       task_get_special_port(self, which, target) {
         assert.equal(self, 101);
         if (which === 1) observing = false;
@@ -5292,7 +5387,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         if (calls.some(([op]) => op === "census")) {
           calls.push(["census-kobject", name]);
           type.value = name === 103 ? 3 : (options.extraKind ?? 0);
-          address.value = 900 + name;
+          address.value = options.extraObject ?? 900 + name;
           context.errno = 22;
           return options.censusObjectQuery ?? 0;
         }
@@ -5300,7 +5395,9 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         type.value =
           name === 103 ? (options.host ?? 3) : (options.serviceKind ?? 0);
         address.value = 0;
-        return name === 103 ? 0 : (options.serviceQuery ?? 0);
+        return name === 103
+          ? (options.hostQuery ?? 0)
+          : (options.serviceQuery ?? 0);
       },
       mach_port_type(self, name, target) {
         assert.equal(self, 101);
@@ -5308,11 +5405,17 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           calls.push(["census-type", name]);
           if (!options.censusQuery)
             target.value =
-              name === 103
-                ? SEND
-                : name === 200
-                  ? (options.accessCensusType ?? SEND)
-                  : (options.extraRights ?? SEND);
+              name === 101
+                ? (options.selfType ?? SEND)
+                : name === 102
+                  ? (options.threadType ?? SEND)
+                  : name === 104
+                    ? (options.replyType ?? RECEIVE)
+                    : name === 103
+                      ? SEND
+                      : name === 200
+                        ? (options.accessCensusType ?? SEND)
+                        : (options.extraRights ?? SEND);
           context.errno = 22;
           return options.censusQuery ?? 0;
         }
@@ -5325,14 +5428,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       mach_port_deallocate(_self, name) {
         assert.ok(
-          observing
-            ? name === childAccess
-            : [bootstrap, 103, 102, 200, 205, 206].includes(name),
+          name === bootstrap ||
+            (observing
+              ? name === childAccess
+              : [103, 102, 200, 205, 206].includes(name)),
           "Only explicitly owned references may be released",
         );
-        calls.push([observing ? "observe-release" : "release", name]);
         const local =
-          !observing &&
           name === bootstrap &&
           context.domain_bootstrap_local === 0 &&
           !bootstrapReleased;
@@ -5342,13 +5444,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           103: ["host", context.domain_host_copy],
           102: ["thread", context.domain_thread_copy],
         }[name];
-        const role = observing
-          ? "child"
-          : local
-            ? "bootstrap"
+        const role = local
+          ? "bootstrap"
+          : observing
+            ? "child"
             : held && held[1] === 0
               ? held[0]
               : "notify";
+        calls.push([role === "child" ? "observe-release" : "release", name]);
         if (role === "access")
           assert.ok(
             !options.noRelease,
@@ -5404,14 +5507,29 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       thread_set_exception_ports: (...args) => {
         calls.push(["thread-exceptions", ...args]);
+        if (options.replaceReply === "before") cachedReply = 105;
         return 0;
       },
-      mig_get_reply_port: () => (++replies === 1 ? 77 : 104),
-      mig_dealloc_reply_port: (name) => calls.push(["reply", name]),
+      mig_get_reply_port: () => cachedReply,
+      mig_dealloc_reply_port: () =>
+        assert.fail("The runtime cache is borrowed, never invalidated"),
       mach_port_names(_self, names, count, types, typeCount) {
         calls.push(["census"]);
-        const actualNames = [101, 102, 104],
-          actualTypes = [SEND, SEND, RECEIVE];
+        const actualNames = [101, 102, cachedReply],
+          actualTypes = [
+            options.selfType ?? SEND,
+            options.threadType ?? SEND,
+            options.replyType ?? RECEIVE,
+          ];
+        if (options.omit) {
+          const index = actualNames.indexOf(options.omit);
+          actualNames.splice(index, 1);
+          actualTypes.splice(index, 1);
+        }
+        if (options.duplicate) {
+          actualNames.push(options.duplicate);
+          actualTypes.push(RECEIVE);
+        }
         if (!options.omitHost) {
           actualNames.push(103);
           actualTypes.push(SEND);
@@ -5436,6 +5554,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         count.value = actualNames.length;
         typeCount.value = options.censusCount ?? actualTypes.length;
         types.value = actualTypes.slice(0, typeCount.value);
+        if (options.replaceReply === "census") cachedReply = 105;
         return options.census ?? 0;
       },
       mach_port_destroy() {
@@ -5449,6 +5568,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           "Census diagnostics preserve errno before cleanup",
         );
         assert.equal(array.length, length);
+        if (options.replaceReply === "release") cachedReply = 105;
         if (options.censusRelease)
           releaseFailures.push({
             operation: "fault-port-list-release",
@@ -5476,6 +5596,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       assert.equal(
         error.kind,
         operation.endsWith("authority") ||
+          [
+            "fault-reply-port",
+            "fault-port-owner",
+            "fault-thread-port",
+          ].includes(operation) ||
           (operation.endsWith("kind") && value === 0) ||
           operation === "fault-gate-value" ||
           operation === "fault-port-count" ||
@@ -5495,7 +5620,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     );
     assert.equal(
       calls.some(([op]) => op === "audit"),
-      !options.childRelease,
+      calls.some(([op]) => op === "observe-get") && !options.childRelease,
       label,
     );
     assert.deepEqual(cleanup, releaseFailures, label);
@@ -5527,24 +5652,30 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     assert.deepEqual(
       lifecycle,
       [
-        [
-          "child-fork",
-          options.childGet ?? 0,
-          options.childGet ? 0 : childAccess,
-          options.childGet
-            ? 0
-            : childAccess === DEAD
-              ? DEAD_NAME
-              : childAccess !== 0 && childAccess !== DEAD && !options.childQuery
-                ? SEND
-                : 0,
-          childAccess !== 0 && childAccess !== DEAD && !options.childGet
-            ? (options.childQuery ?? 0)
-            : -1,
-          childAccess !== 0 && childAccess !== DEAD && !options.childGet
-            ? (options.childRelease ?? 0)
-            : -1,
-        ],
+        ...(calls.some(([op]) => op === "observe-get")
+          ? [
+              [
+                "child-fork",
+                options.childGet ?? 0,
+                options.childGet ? 0 : childAccess,
+                options.childGet
+                  ? 0
+                  : childAccess === DEAD
+                    ? DEAD_NAME
+                    : childAccess !== 0 &&
+                        childAccess !== DEAD &&
+                        !options.childQuery
+                      ? SEND
+                      : 0,
+                childAccess !== 0 && childAccess !== DEAD && !options.childGet
+                  ? (options.childQuery ?? 0)
+                  : -1,
+                childAccess !== 0 && childAccess !== DEAD && !options.childGet
+                  ? (options.childRelease ?? 0)
+                  : -1,
+              ],
+            ]
+          : []),
         ...(got && (!held || normalAccessRelease)
           ? [
               [
@@ -5558,7 +5689,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
                     : (options.rights ??
                       (options.access === 200 ? DEAD_NAME : 0)),
                 queried ? (options.query ?? 0) : -1,
-                released ? (options.release ?? 0) : -1,
+                released && !options.query ? (options.release ?? 0) : -1,
               ],
             ]
           : []),
@@ -5570,11 +5701,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       options.access === 200 && !options.get && !options.childRelease,
       label,
     );
-    assert.equal(
-      released,
-      queried && !options.query && !options.noRelease,
-      label,
-    );
+    assert.equal(released, queried && !options.noRelease, label);
     assert.equal(
       referenceReleases.filter(({ role }) => role === "access").length,
       released ? 1 : 0,
@@ -5615,25 +5742,65 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         label,
       );
     }
+    assert.equal(context.domain_reply_borrowed, 0, label);
+    assert.equal(context.domain_port_owner, 0, label);
+    assert.equal(
+      referenceReleases.filter(({ role }) => role === "bootstrap").length,
+      valid(bootstrap) ? 1 : 0,
+      label,
+    );
+    assert.ok(
+      !referenceReleases.some(
+        ({ role, name }) => name === 104 && role !== "bootstrap",
+      ),
+      label,
+    );
+    if (calls.some(([op]) => op === "census")) {
+      assert.equal(
+        calls.filter(([op]) => op === "census-release").length,
+        options.census ? 0 : 2,
+        label,
+      );
+    }
     if (operation === "fault-port-authority") {
-      const name = options.omitHost
-        ? 103
-        : options.omitAccess || options.accessCensusType
-          ? 200
-          : options.bootstrapExtra
-            ? bootstrap
-            : 111;
+      const name =
+        options.omit ??
+        (options.selfType
+          ? 101
+          : options.threadType
+            ? 102
+            : options.replyType || options.duplicate
+              ? 104
+              : options.omitHost
+                ? 103
+                : options.omitAccess || options.accessCensusType
+                  ? 200
+                  : options.bootstrapExtra
+                    ? bootstrap
+                    : 111);
       const censusType =
-        options.omitHost || options.omitAccess
+        options.omit || options.omitHost || options.omitAccess
           ? 0
-          : (options.accessCensusType ?? options.extraRights ?? SEND);
+          : (options.selfType ??
+            options.threadType ??
+            options.replyType ??
+            (options.duplicate ? RECEIVE : undefined) ??
+            options.accessCensusType ??
+            options.extraRights ??
+            SEND);
       const current = options.censusQuery
         ? 0
-        : name === 103
-          ? SEND
-          : name === 200
-            ? (options.accessCensusType ?? SEND)
-            : (options.extraRights ?? SEND);
+        : name === 101
+          ? (options.selfType ?? SEND)
+          : name === 102
+            ? (options.threadType ?? SEND)
+            : name === 104
+              ? (options.replyType ?? RECEIVE)
+              : name === 103
+                ? SEND
+                : name === 200
+                  ? (options.accessCensusType ?? SEND)
+                  : (options.extraRights ?? SEND);
       const object =
         !options.censusQuery && current & (SEND | SEND_ONCE | RECEIVE);
       assert.deepEqual(
@@ -5646,7 +5813,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
             current,
             object ? (options.censusObjectQuery ?? 0) : -1,
             object ? (name === 103 ? 3 : (options.extraKind ?? 0)) : 0,
-            object ? 900 + name : 0,
+            object ? (options.extraObject ?? 900 + name) : 0,
           ],
         ],
         label,

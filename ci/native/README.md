@@ -3722,27 +3722,46 @@ An allocated name must pass `mach_port_type`. A live service must have exactly
 [`mach_port_kobject`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/osfmk/ipc/mach_debug.c)
 read of type `IKOT_NONE` (0), excluding task/thread control and every other kernel
 object. Mixed, send-once, unknown and empty types refuse exec. Query failures
-remain failures. Only inspected getter references are released; rejected rights
-without a send, send-once or dead-name reference are left untouched until the
-owned child exits. A release failure retains its separate cleanup cause without
-replacing an earlier authority or query refusal. Releasing a getter copy neither
+remain failures. A successful getter's acquired copy enters cleanup before its
+type query, so query refusal cannot leak that reference. A successful query
+exposing no send, send-once or dead-name reference authorizes no deallocation;
+that rejected name remains untouched until the owned child exits. A release
+failure retains its separate cleanup cause without replacing an earlier authority
+or query refusal. Releasing a getter copy neither
 clears the slot nor establishes confinement, and no slot setter or service message
 is introduced.
 
 The accepted service and ordinary host getter copies stay held through the bounded
-Mach-name census. Only this task, its current thread, its owned MIG reply port,
-those two checked local names and dead names are admitted. Unexpected live rights
-refuse exec without destroying unrelated rights to manufacture a safe namespace.
-Missing or changed census entries also refuse. The census arrays, held service,
+Mach-name census. Only this task and its current thread with exact SEND types,
+the runtime's borrowed reply port with exact RECEIVE type, those two checked local
+names and dead names are admitted. Every expected name must appear once; missing,
+duplicate or changed entries refuse. Unexpected live rights refuse exec without
+destroying unrelated rights to manufacture a safe namespace. The census arrays, held service,
 host and thread copies have checked releases; the service's slot reference survives.
-Before sanitation can fail, the child takes responsibility for the explicitly
-owned local `bootstrap_port` reference and nulls that global. Clearing
+Immediately after fork, before its first lifecycle observation, the child takes
+responsibility for the explicitly owned local `bootstrap_port` reference and
+nulls that global. Bookkeeping is bound to the current PID; copied parent entries
+are discarded without operating on names in the child's new IPC namespace.
+Reexec starts with libSystem's new Mach state. Clearing
 `TASK_BOOTSTRAP_PORT` releases the kernel slot's separate reference; it does not
 consume the local one. The local reference is released once before the census,
 including allocated dead names, while null/dead sentinels require no release.
 Each acquired reference retains its own cleanup entry even when bootstrap,
 host, access or resource getter names alias. No name deduplication can discard
 an owned reference or consume another entry's reference.
+
+The same child entry borrows the exact cached port returned by `mig_get_reply_port`
+before its first helper RPC, and requires that cache to remain unchanged before
+and after the census and after checked releases. It no longer calls
+`mig_dealloc_reply_port` to replace the cache. Apple's
+[`mig_reply_port.c`](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/mach/mig_reply_port.c)
+temporarily selects a separate runtime fallback while invalidating the thread
+cache and suppresses native release errors. The helper neither owns that fallback
+nor identifies an unknown census receive right through this source behavior.
+The borrowed cache remains runtime-owned through exec or refusal; it is never
+deallocated as a send reference or destroyed by helper cleanup. Any other live
+receive right still refuses, including `IKOT_NONE` objects. No private runtime
+symbol, additional receive-right allowance or namespace-destruction remedy is used.
 
 Sanitation refusal releases its tracked owned references, including the host and
 thread copies acquired before access admission. Failure cleanup attempts every

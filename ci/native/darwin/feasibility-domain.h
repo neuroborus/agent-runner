@@ -43,6 +43,19 @@ static bool domain_fenced;
  * slots and uninspected census names never enter this cleanup inventory. */
 static pid_t domain_port_owner;
 static mach_port_t domain_bootstrap_local, domain_host_copy, domain_access_copy, domain_thread_copy;
+/* Borrowed from this execution's libSystem thread cache, never a getter copy. */
+static mach_port_t domain_reply_borrowed;
+static void domain_ports_begin(void) {
+  invariant(domain_port_owner != getpid(), "fault-port-owner");
+  /* libSystem reinitializes Mach state after fork and exec. Copied bookkeeping
+   * from another process is not authority over names in this new IPC space. */
+  domain_port_owner = getpid();
+  domain_host_copy = domain_access_copy = domain_thread_copy = MACH_PORT_NULL;
+  extern mach_port_t bootstrap_port;
+  domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
+  domain_reply_borrowed = mig_get_reply_port();
+  invariant(MACH_PORT_VALID(domain_reply_borrowed), "fault-reply-port");
+}
 static kern_return_t domain_port_release(mach_port_t *held, const char *operation) {
   mach_port_t name = *held; *held = MACH_PORT_NULL;
   if (!MACH_PORT_VALID(name)) return KERN_SUCCESS;
@@ -59,6 +72,7 @@ static void domain_port_cleanup(void) {
   domain_port_release(&domain_access_copy, "fault-access-release");
   domain_port_release(&domain_host_copy, "fault-host-release");
   domain_port_release(&domain_thread_copy, "fault-thread-release");
+  domain_reply_borrowed = MACH_PORT_NULL; /* The runtime retains its receive right. */
 }
 static pid_t domain_controller, domain_child = -1;
 static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
@@ -253,17 +267,19 @@ static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_typ
   fflush(stderr); errno = saved;
 }
 static void domain_sanitize(void) {
-  domain_port_owner = getpid();
-  extern mach_port_t bootstrap_port;
-  domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
+  invariant(domain_port_owner == getpid(), "fault-port-owner");
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   domain_thread_copy = thread;
-  mach_port_t host, access; natural_t type; mach_vm_address_t address;
+  invariant(MACH_PORT_VALID(thread) && thread != self, "fault-thread-port");
+  mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL;
+  natural_t type; mach_vm_address_t address;
   kern_return_t host_get = task_get_special_port(self,TASK_HOST_PORT,&host);
   if (host_get == KERN_SUCCESS) domain_host_copy = host;
   domain_mach(host_get, "fault-host-port");
   domain_mach(mach_port_kobject(self,host,&type,&address), "fault-host-kind"); invariant(type == 3, "fault-host-kind");
-  domain_mach(task_get_special_port(self,TASK_ACCESS_PORT,&access), "fault-access-port");
+  kern_return_t access_get = task_get_special_port(self,TASK_ACCESS_PORT,&access);
+  if (access_get == KERN_SUCCESS) domain_access_copy = access;
+  domain_mach(access_get, "fault-access-port");
   /* XNU consults the target task's access port when authorizing task_for_pid.
    * Ordinary hosted execution trusts that inherited authorization service, not
    * arbitrary SEND rights. Require the slot's exact SEND type and IKOT_NONE;
@@ -274,13 +290,17 @@ static void domain_sanitize(void) {
   mach_port_type_t access_type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
   kern_return_t access_query = KERN_SUCCESS;
   if (MACH_PORT_VALID(access)) access_query = mach_port_type(self, access, &access_type);
-  if (MACH_PORT_VALID(access) && access_query == KERN_SUCCESS &&
-      (access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME))) domain_access_copy = access;
+  /* A successful getter transfers a copy before the required type query. Its
+   * failure must not lose that acquired reference. A successful query exposing
+   * no deallocatable reference still cannot authorize a receive-right release. */
+  if (access_query == KERN_SUCCESS &&
+      !(access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
+    domain_access_copy = MACH_PORT_NULL;
   if (access != MACH_PORT_NULL) {
     fprintf(stderr, "native-darwin-fault-access: name=%u type=%#x query=%d\n", access, access_type, access_query);
     fflush(stderr);
   }
-  /* A failed query cannot authorize another operation on an uninspected name. */
+  /* Query refusal authorizes no use of the endpoint; failure only settles copies. */
   if (access_query != KERN_SUCCESS)
     domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query, -1);
   domain_mach(access_query, "fault-access-kind");
@@ -335,29 +355,46 @@ static void domain_sanitize(void) {
   domain_mach(mach_ports_register(self, NULL, 0), "fault-registered-ports");
   domain_mach(task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
   domain_mach(thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
-  mig_dealloc_reply_port(mig_get_reply_port()); mach_port_t reply = mig_get_reply_port();
+  /* Do not invalidate a runtime-owned cache to manufacture a fresh namespace.
+   * mig_dealloc_reply_port temporarily uses a separate runtime fallback and
+   * discards release errors. Neither fallback nor any unknown receive name is
+   * identified by that operation. Retain and type-check the original borrow. */
+  mach_port_t reply = domain_reply_borrowed;
+  invariant(MACH_PORT_VALID(reply) && reply != self && reply != thread &&
+    reply != host && (!access_held || reply != access) && mig_get_reply_port() == reply, "fault-reply-port");
   mach_port_name_array_t names; mach_port_type_array_t types; mach_msg_type_number_t n, nt;
   domain_mach(mach_port_names(self, &names, &n, &types, &nt), "fault-port-list");
   bool census_ok = n == nt && n <= 4096;
   if (!census_ok) remember("fault-port-count", "invariant", 0);
+  if (mig_get_reply_port() != reply) {
+    remember("fault-reply-port", "invariant", 0); census_ok = false;
+  }
+  bool self_seen = false, thread_seen = false, reply_seen = false;
   bool host_seen = false, access_seen = !access_held;
   for (unsigned i = 0; census_ok && i < n; i++) {
-    if (names[i] == self || names[i] == thread || names[i] == reply) continue;
     bool allowed;
-    if (names[i] == host) {
+    if (names[i] == self) {
+      allowed = types[i] == MACH_PORT_TYPE_SEND; self_seen = true;
+    } else if (names[i] == thread) {
+      allowed = types[i] == MACH_PORT_TYPE_SEND; thread_seen = true;
+    } else if (names[i] == reply) {
+      allowed = types[i] == MACH_PORT_TYPE_RECEIVE; reply_seen = true;
+    } else if (names[i] == host) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; host_seen = true;
     } else if (access_held && names[i] == access) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; access_seen = true;
     } else allowed = types[i] == MACH_PORT_TYPE_DEAD_NAME;
+    for (unsigned j = 0; j < i; j++) if (names[j] == names[i]) allowed = false;
     if (!allowed) {
       remember("fault-port-authority", "invariant", 0);
       domain_port_diagnostic(names[i], types[i]); census_ok = false;
     }
   }
   /* Unknown live rights refuse exec; destroying them cannot prove confinement. */
-  if (census_ok && !(host_seen && access_seen)) {
+  if (census_ok && !(self_seen && thread_seen && reply_seen && host_seen && access_seen)) {
     remember("fault-port-authority", "invariant", 0);
-    domain_port_diagnostic(!host_seen ? host : access, MACH_PORT_TYPE_NONE); census_ok = false;
+    mach_port_t missing = !self_seen ? self : !thread_seen ? thread : !reply_seen ? reply : !host_seen ? host : access;
+    domain_port_diagnostic(missing, MACH_PORT_TYPE_NONE); census_ok = false;
   }
   kern_return_t names_release = mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names));
   kern_return_t types_release = mach_vm_deallocate(self, (mach_vm_address_t)types, nt*sizeof(*types));
@@ -371,6 +408,7 @@ static void domain_sanitize(void) {
   if (access_held) domain_access_release(self, access, access_type);
   domain_port_cleanup();
   if (resource_uncertain) failure(126);
+  invariant(mig_get_reply_port() == reply, "fault-reply-port");
 }
 static void domain_denied(int result, const char *operation) {
   int error = errno;
@@ -550,7 +588,7 @@ static void domain_start(int argc, char **argv) {
   domain_access_observe("custodian-fork");
   pid_t child = fork(); posix_check(child, "fault-fork");
   if (!child) {
-    alarm(20); domain_access_observe("child-fork");
+    alarm(20); domain_ports_begin(); domain_access_observe("child-fork");
     posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
     struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}; posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
     posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");
