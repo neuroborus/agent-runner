@@ -379,10 +379,14 @@ export function openDarwinStartupTrace(
     retireObserver,
     parentPid = process.pid,
     coldCommand = false,
+    onFailure,
   } = {},
 ) {
   need(typeof coldCommand === "boolean");
   let boundPid,
+    parkedIdentity,
+    targetIdentity,
+    bindingExec = false,
     child,
     closed,
     armedPid,
@@ -425,6 +429,8 @@ export function openDarwinStartupTrace(
     refuse = reject;
   });
   ready.catch(() => {});
+  const executed = Promise.withResolvers();
+  executed.promise.catch(() => {});
   const fail = (error, reason) => {
     nativeException("darwin/startup-trace.js", error);
     const facts = traceFailure(error, reason);
@@ -432,6 +438,14 @@ export function openDarwinStartupTrace(
     if (reason === "retirement") cleanupFailure ??= facts;
     status = reason === "capture" ? "partial" : "refused";
     refuse(error);
+    executed.reject(error);
+    // Capture can fail after E while the cold request is still running. Let its
+    // existing owner fence work immediately; observer settlement stays separate.
+    try {
+      onFailure?.(error);
+    } catch {
+      /* An owner callback cannot replace the original trace refusal. */
+    }
   };
   const observer = (observed) => {
     need(
@@ -523,6 +537,7 @@ export function openDarwinStartupTrace(
         if (row.kind === "exec") {
           need(!execSeen);
           execSeen = true;
+          executed.resolve();
         } else if (row.kind === "exit") {
           need(execSeen);
           exitSeen = true;
@@ -638,6 +653,7 @@ export function openDarwinStartupTrace(
             typeof retireObserver === "function",
         );
         boundPid = identity.pid;
+        parkedIdentity = identity;
         arming = true;
         const started = Date.now();
         armDeadline = started + 15000;
@@ -649,9 +665,11 @@ export function openDarwinStartupTrace(
             "--",
             "/usr/sbin/dtrace",
             "-q",
-            // -p retains libproc exec tracking and re-enables pid-provider probes
-            // for the replacement image; the private native gate still owns exec.
-            ...(coldCommand ? ["-Z", "-p", String(boundPid)] : []),
+            // pid$1 descriptions acquire their own libproc tracking and retained
+            // matches for replacement images. An explicit -p additionally makes
+            // CLI completion depend on the grabbed helper's process state: it
+            // must not end capture at SETEXEC before the target resumes.
+            ...(coldCommand ? ["-Z"] : []),
             "-n",
             coldCommand ? COLD_PROGRAM : PROGRAM,
             String(boundPid),
@@ -672,6 +690,11 @@ export function openDarwinStartupTrace(
             resolve();
             if (arming)
               fail(new Error("Startup trace closed before binding"), "attach");
+            else if (!exitSeen || (coldCommand && !targetIdentity))
+              fail(
+                new Error("Startup trace closed before target completion"),
+                "capture",
+              );
           }),
         );
         child.on("error", (error) => fail(error, "attach"));
@@ -760,6 +783,53 @@ export function openDarwinStartupTrace(
       }
       return { status };
     },
+    async bindExec(value, signal) {
+      let aborted;
+      try {
+        const target = normalizeDarwinIdentity(value);
+        need(
+          coldCommand &&
+            status === "armed" &&
+            !bindingExec &&
+            !targetIdentity &&
+            !signal?.aborted &&
+            target.pidVersion !== parkedIdentity.pidVersion &&
+            sameDarwinIdentity(parkedIdentity, {
+              ...target,
+              pidVersion: parkedIdentity.pidVersion,
+            }),
+        );
+        bindingExec = true;
+        // The native owner keeps the verified replacement image suspended until
+        // this actual exec row arrives. BEGIN alone cannot release that image.
+        const pending = signal
+          ? Promise.race([
+              executed.promise,
+              new Promise((_, reject) => {
+                aborted = () =>
+                  reject(new Error("Startup trace release interrupted"));
+                signal.addEventListener("abort", aborted, { once: true });
+                if (signal.aborted) aborted();
+              }),
+            ])
+          : executed.promise;
+        await bounded(pending, Math.max(0, captureDeadline - Date.now()));
+        need(
+          !failure &&
+            !exit &&
+            !signal?.aborted &&
+            domainBound &&
+            Date.now() < captureDeadline,
+        );
+        targetIdentity = target;
+        return { status: "bound" };
+      } catch (error) {
+        fail(error, "capture");
+        throw error;
+      } finally {
+        if (aborted) signal.removeEventListener("abort", aborted);
+      }
+    },
     finish() {
       return (finished ??= (async () => {
         if (!child)
@@ -835,7 +905,11 @@ export function openDarwinStartupTrace(
           ).catch((error) => fail(error, "retirement"));
         }
         const mandatory =
-          execSeen && exitSeen && syscallEntrySeen && syscallReturnSeen;
+          execSeen &&
+          exitSeen &&
+          syscallEntrySeen &&
+          syscallReturnSeen &&
+          (!coldCommand || !!targetIdentity);
         if (!invalid && !pending && !mandatory)
           fail(
             new Error("Startup trace missing mandatory observations"),

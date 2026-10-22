@@ -1833,11 +1833,15 @@ The exact vector is
 `/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -n PROGRAM PID`:
 the sole operand is the normalized bound positive PID, used only by `pid == $1`
 predicates. Cold command tracing uses
-`/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -Z -p PID -n PROGRAM PID`.
-The normalized PID is both the explicit process grab and sole macro operand.
-The grab retains libproc tracking across the helper's replacement exec and
-re-establishes pid-provider probes for the target image; the private native gate
-still controls when exec can begin. `-Z` permits optional numeric descriptions
+`/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -Z -n PROGRAM PID`.
+The normalized PID remains the sole macro operand. The `pid$1` numeric
+descriptions retain libdtrace's process tracking and replacement-image probe
+matching without placing the parked helper in the CLI's explicit `-p` completion
+set. The archived run closed the tracer after exec-success while the target was
+still suspended; its precise libproc transition remains unproved. Capture now
+ends through the actual target exit probe rather than that grabbed helper's
+completion. The private native gates still control exec and target resume.
+`-Z` permits optional numeric descriptions
 to match zero probes as documented by Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c).
 Compilation and BEGIN alone cannot prove capture: bound syscall entry and return
@@ -1847,7 +1851,9 @@ capture. Optional numeric records cannot replace any mandatory observation.
 There is no `-c` command, `-W` wait, preprocessing, defaultargs or script
 selection. Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
-routes `-p` through `dtrace_proc_grab`; its
+routes explicit `-p` through `dtrace_proc_grab`; its
+[`dt_pid.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_pid.c)
+owns the pid-provider's own process grab and retained probe matching. Its
 [`dtrace.1` OPERANDS](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.1)
 supports positional macros in command-line programs. The target's `proc:::exit`
 record precedes `exit(0)`, which ends tracing only. XNU's
@@ -1861,7 +1867,11 @@ BEGIN acknowledgement and all observer-chain rechecks share a 15-second arm budg
 within the unchanged 30-second capture deadline, both measured from spawn. Late
 acknowledgement or identity completion cannot arm tracing. Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
-flushes consumed output and emits a final newline; its
+flushes consumed output and emits a final newline. A process-exit notification
+does not finish capture: the owner awaits process close and both drained streams
+before interpreting the final mandatory observations or settling the observer
+chain. An early close refuses the replacement-image handoff even with exit 0.
+Its
 [`dt_work.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_work.c)
 and [`dt_options.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_options.c)
 own consumption scheduling. No tracing rate or scheduling option changes follow from these
@@ -2966,6 +2976,18 @@ it cannot establish successful exec. The broker independently requires the
 suspended target's path/hash, unchanged held executable and policy, unchanged
 PID/birth/session/credentials and a changed native pidversion, then
 rechecks launcher custody, controller presence and expiration before SIGCONT.
+For V/G it keeps the executable and policy descriptions held and waits for a
+second, distinct E acknowledgement. The trace owner joins the independently
+observed replacement epoch to the original PID/birth/credentials/session and
+waits for its actual exec row while the tracer remains live. Missing exec,
+tracer closure, cancellation, duplicate binding or changed authority fences E.
+After E, a trace failure interrupts a still-pending V/G request through the
+existing broker owner instead of waiting for the longer command deadline. That
+callback cannot interrupt later independent domain/observer settlement; its
+failure still remains in the trace report and blocks admission.
+The native owner then rechecks the held image and policy, target image and
+launcher/controller lifetime before resuming. This wait consumes the original
+spawn-based capture budget; it adds no deadline or warm execution.
 The broker's exec frame joins this new identity to the parked helper for each
 V/G request; missing, duplicate or substituted transitions refuse completion.
 The D program emits cold syscall, argument and numeric observations only after
@@ -2981,7 +3003,10 @@ mandatory capture from being observed. Missing mandatory exec/exit or syscall
 entry/return records instead refuse capture and discard all numeric observations.
 Cold admission uses the shared eight-MiB/131072-row and separate 8192-argument
 and 8192-numeric budgets, retaining thread/entry/return pairing, original observer
-custody and independent retirement. V/G admission requires armed and complete
+custody and independent retirement. After wrapper exit and output closure, the
+native owner independently censuses the held target domain before completing V/G;
+surviving members cannot be hidden by a reaped wrapper. Trace drain and outside
+observer-chain retirement remain separate requirements. V/G admission requires armed and complete
 observed capture with mandatory exec/exit and syscall entry/return, a matching
 program digest and independently retired tracers. Optional numeric coverage may
 remain empty or partial, and missing, copy-failed, unsupported or truncated

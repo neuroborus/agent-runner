@@ -445,6 +445,12 @@ static void command_release_ready(void) {
   struct pollfd controller={0,POLLIN,0};command_native(poll(&controller,1,0), >= 0);
   need(!(controller.revents&(POLLHUP|POLLERR|POLLNVAL)));
 }
+static void command_cold_ack(const char *expected) {
+  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};
+  for(;;){command_release_ready();command_native(poll(waiting,2,1000), >= 0);command_drain();
+    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(waiting[0].revents&POLLIN)break;}
+  char acknowledgement[3];need(fgets(acknowledgement,sizeof(acknowledgement),stdin));need(!strcmp(acknowledgement,expected));
+}
 /* SETEXEC keeps the parked PID/birth/session, but advances its audit pidversion.
  * START_SUSPENDED is used only AFTER trace arming, to inspect the new image. */
 static struct identity command_exec(struct identity parked, const char *operation) {
@@ -469,19 +475,22 @@ static struct identity command_exec(struct identity parked, const char *operatio
   for(unsigned i=0;i<7;i++)need(target.token.val[i]==parked.token.val[i]);
   command_executable();command_policy_check();command_image_identity(target,command_exec_path,command_exec_hash);
   command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)target.token.val[5]), == 1);
+  command_release_ready();need(live(command_launch_owner));
+  if(operation){printf("{\"event\":\"exec\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"identity\":",operation,command_exec_hash);emit_identity(target);puts("}");
+    /* E joins the tracer's real exec observation to this inspected new epoch.
+     * Keep the original image/policy descriptions held while the owner waits. */
+    command_cold_ack("E\n");command_executable();command_policy_check();
+    command_image_identity(target,command_exec_path,command_exec_hash);
+    command_release_ready();need(live(command_launch_owner));}
   command_native(close(command_exec_receipt), == 0);command_exec_receipt=-1;
   command_native(close(command_exec_file), == 0);command_exec_file=-1;
   command_release_ready();need(live(command_launch_owner));
-  if(operation){printf("{\"event\":\"exec\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"identity\":",operation,command_exec_hash);emit_identity(target);puts("}");}
   command_continue(target);return target;
 }
 /* The helper is still blocked before exec; BEGIN and tracer custody precede X. */
 static void command_cold_start(struct identity child, const char *operation) {
   printf("{\"event\":\"cold-start\",\"phase\":\"pre-exec\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"policyFileSha256\":\"%s\",\"identity\":",operation,command_image_hash,command_policy_hash);emit_identity(child);puts("}");
-  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};
-  for(;;){need(!command_expired && !command_admissions_closed);command_native(poll(waiting,2,1000), >= 0);command_drain();
-    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(waiting[0].revents&POLLIN)break;}
-  char acknowledgement[3];need(fgets(acknowledgement,sizeof(acknowledgement),stdin));need(!strcmp(acknowledgement,"T\n"));
+  command_cold_ack("T\n");
   (void)command_exec(child,operation);
 }
 static void command_capture(const char *event) {
@@ -495,6 +504,9 @@ static void command_capture(const char *event) {
         err+=(size_t)n;
       }else used+=(size_t)n;need(used+err<65536);}}}
   int status;command_native(waitpid(command_wrappers[command_count-1],&status,0), == command_wrappers[command_count-1]);need(WIFEXITED(status));
+  /* A reaped wrapper and closed output cannot stand in for an empty held
+   * target domain. The outside tracer still drains and retires separately. */
+  if(event)command_native(command_members(command_sessions[command_count-1],false), == 0);
   if(event) printf("{\"event\":\"%s\",\"exitCode\":%d,\"stdout\":\"",event,WEXITSTATUS(status));
   /* The only accepted version text has no JSON escapes except its newline. */
   if(event){for(size_t i=0;i<used;i++){if(output[i]=='\n')printf("\\n");else{need(output[i]>=32&&output[i]<127&&output[i]!='"'&&output[i]!='\\');putchar(output[i]);}}puts("\"}");}

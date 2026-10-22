@@ -2794,6 +2794,8 @@ function traceFixture({
   beforeRead,
   observeState,
   coldCommand = false,
+  bindReplacement = true,
+  onFailure,
 } = {}) {
   const binding = { identity: { ...identity } },
     child = new EventEmitter(),
@@ -2804,23 +2806,26 @@ function traceFixture({
   const tracerPid = unrelated ? 903 : 901;
   const ids = [900, tracerPid].map((pid) => ({ ...IDENTITY, pid }));
   const retired = new Set();
-  let tracerReads = 0;
+  let tracerReads = 0,
+    bindingExec,
+    delivered = "";
   const trace = openDarwinStartupTrace(
     { identity: binding.identity },
     {
       isMatchingCI: true,
       parentPid: 999,
       coldCommand,
+      onFailure,
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
-        const program = args[coldCommand ? 8 : 5];
+        const program = args[coldCommand ? 6 : 5];
         assert.deepEqual(args, [
           "--non-interactive",
           "--",
           "/usr/sbin/dtrace",
           "-q",
-          ...(coldCommand ? ["-Z", "-p", String(identity.pid)] : []),
+          ...(coldCommand ? ["-Z"] : []),
           "-n",
           program,
           String(identity.pid),
@@ -2951,6 +2956,15 @@ function traceFixture({
       },
     },
   );
+  child.stdout.on("data", (chunk) => {
+    if (!coldCommand || !bindReplacement || bindingExec) return;
+    delivered += chunk.toString();
+    if (/(?:^|\n)exec [0-9]+ [0-9]+\n/u.test(delivered))
+      bindingExec = trace
+        .bindExec({ ...identity, pidVersion: identity.pidVersion + 1 })
+        .catch(() => {});
+    else delivered = delivered.slice(-64);
+  });
   return {
     binding,
     trace,
@@ -2958,6 +2972,7 @@ function traceFixture({
     calls,
     acknowledge: () => child.stdout.write(`armed ${tracerPid} 100\n`),
     close: async (code = 0) => {
+      await bindingExec;
       const ended = Promise.all([
         once(child.stdout, "end"),
         once(child.stderr, "end"),
@@ -2969,6 +2984,123 @@ function traceFixture({
     },
   };
 }
+
+test("cold tracing joins the replacement epoch and drains final delivery before observer retirement", async () => {
+  const f = traceFixture({
+    coldCommand: true,
+    bindReplacement: false,
+    live: true,
+  });
+  assert.equal((await f.trace.arm()).status, "armed");
+  const target = { ...IDENTITY, pidVersion: IDENTITY.pidVersion + 1 },
+    binding = f.trace.bindExec(target);
+  f.child.stdout.write("exec 42 100\n");
+  assert.deepEqual(await binding, { status: "bound" });
+  // Process exit is separate from libdtrace's final consume/flush and Node's
+  // stream drain. A zero exit alone cannot authorize capture or retirement.
+  f.child.emit("exit", 0, null);
+  let completed = false;
+  const finishing = f.trace.finish().then((result) => {
+    completed = true;
+    return result;
+  });
+  await Promise.resolve();
+  assert.equal(completed, false);
+  assert.ok(!f.calls.some(([kind]) => kind === "retire"));
+  const rows = [
+    "entry 42 101 mmap",
+    "numeric-entry 42 102 mmap 7 0 4096 3 4098 18446744073709551615 0",
+    "return 42 103 mmap 0 8192",
+    "numeric-return 42 104 mmap 7 0 8192",
+    "exit 42 105",
+  ];
+  const tail = rows.join("\n") + "\n";
+  f.child.stdout.write(tail.slice(0, -5));
+  await Promise.resolve();
+  assert.equal(completed, false);
+  f.child.stdout.write(tail.slice(-5));
+  await f.close();
+  const result = await finishing;
+  assert.equal(result.status, "observed");
+  assert.equal(result.cleanup, "RETIRED");
+  assert.equal(result.runtime.mmap[0].result.value, "8192");
+  assert.equal(
+    result.sha256,
+    createHash("sha256")
+      .update(["exec 42 100", ...rows].join("\n"))
+      .digest("hex"),
+  );
+  assert.equal(assertDarwinColdStartupTrace(result), result);
+  assert.deepEqual(
+    f.calls.filter(([kind]) => kind === "retire").map(([, pid]) => pid),
+    [900, 901],
+  );
+});
+
+test("cold trace failure after replacement binding notifies its owner and still settles every observer", async () => {
+  const failures = [],
+    f = traceFixture({
+      coldCommand: true,
+      bindReplacement: false,
+      live: true,
+      onFailure(error) {
+        failures.push(error);
+        throw new Error("Diagnostic callback failed");
+      },
+    });
+  await f.trace.arm();
+  f.child.stdout.write("exec 42 100\n");
+  await f.trace.bindExec({ ...IDENTITY, pidVersion: IDENTITY.pidVersion + 1 });
+  await f.close();
+  assert.match(failures[0].message, /closed before target completion/u);
+  const result = await f.trace.finish();
+  assert.equal(result.status, "partial");
+  assert.equal(result.failure.reason, "capture");
+  assert.equal(result.cleanup, "RETIRED");
+  assert.deepEqual(
+    f.calls.filter(([kind]) => kind === "retire").map(([, pid]) => pid),
+    [900, 901],
+  );
+});
+
+test("cold replacement binding refuses changed authority, interrupted release and premature tracer closure", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  for (const fault of [
+    "pid",
+    "birth",
+    "version",
+    "credentials",
+    "session",
+    "closed",
+    "abort",
+    "deadline",
+    "duplicate",
+  ]) {
+    const f = traceFixture({ coldCommand: true, bindReplacement: false });
+    await f.trace.arm();
+    const controller = new AbortController(),
+      target = { ...IDENTITY, pidVersion: IDENTITY.pidVersion + 1 };
+    if (fault === "pid") target.pid++;
+    if (fault === "birth") target.startMicroseconds++;
+    if (fault === "version") target.pidVersion = IDENTITY.pidVersion;
+    if (fault === "credentials") target.uid++;
+    if (fault === "session") target.asid++;
+    if (fault === "duplicate") {
+      f.child.stdout.write("exec 42 100\n");
+      await f.trace.bindExec(target);
+    }
+    const refused = assert.rejects(f.trace.bindExec(target, controller.signal));
+    if (fault === "abort") controller.abort();
+    if (fault === "deadline") t.mock.timers.tick(30000);
+    await f.close();
+    await refused;
+    const result = await f.trace.finish();
+    assert.notEqual(result.status, "observed", fault);
+    assert.equal(result.captureComplete, false, fault);
+    assert.equal(result.cleanup, "RETIRED", fault);
+    assert.equal(result.sha256, null, fault);
+  }
+});
 
 test("cold schema capture crosses former byte and record caps without losing pairings or its digest", async () => {
   const f = traceFixture({ coldCommand: true });

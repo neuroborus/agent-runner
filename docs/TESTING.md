@@ -432,6 +432,24 @@ preserved. An actual-body native failure fixture closes the unreleased P gate an
 reaps only its original fork. These portable tests add no native invocation or
 slow-tier assignment and establish no native acceptance of the V/G stall.
 
+Cold trace fixtures additionally execute the replacement-epoch binding and the
+native T/E handoff. A controlled binding promise keeps E fenced until the real
+exec row arrives; changed PID/birth/credentials/session, unchanged generation,
+duplicate binding, early tracer closure and cancellation refuse release. The
+trace's failure callback interrupts an active cold request after E while leaving
+later independent settlement consumable; callback exceptions cannot replace the
+original trace refusal or prevent observer retirement. The
+native exec body retains its original image and policy descriptions through E
+and checks them again before resume. A separate actual-body capture case rejects
+remaining domain members after wrapper exit while retaining the child's original
+stderr. Controlled process-exit and stream-close events deliver the final
+syscall/numeric return and exit in fragments, proving that process completion
+cannot discard buffered observations or retire the observer chain before drain.
+Exec-only output, missing returns and failed independent retirement retain their
+existing refusals. These in-memory regressions use the existing startup and
+command suites, add no command or slow-tier requirement, and establish no native
+probe rebinding, trace delivery or closure. Fresh original macOS CI owns that proof.
+
 The original fault transport matrix also injects pre-exec live-authority refusal
 for both fault roles. An original exit delivered alongside admission must retain
 its diagnostic and reach separate recovery without payload release, fault

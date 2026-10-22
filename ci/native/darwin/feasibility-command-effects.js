@@ -438,7 +438,9 @@ export function observeDarwinCommandBroker(
             );
             const entry = { identity, armed: false, target: null };
             cold.set(frame.operation, entry);
-            await coldStart({ ...frame, identity });
+            await coldStart({ ...frame, identity }, (error) => {
+              if (pending.has(frame.operation)) fail(error);
+            });
             need(!failed && !admissionsClosed && !signal.aborted);
             entry.armed = true;
             send("T\n");
@@ -450,7 +452,10 @@ export function observeDarwinCommandBroker(
               frame,
               value.commandImageSha256,
             );
-            await coldExec?.({ ...frame, identity: entry.target });
+            need(typeof coldExec === "function");
+            await coldExec({ ...frame, identity: entry.target });
+            need(!failed && !admissionsClosed && !signal.aborted);
+            send("E\n");
           } else if (frame.event === "custody") {
             need(
               frame.sessionHeld === true &&
@@ -820,17 +825,18 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         decoder,
         tokens,
         admittedSessions,
-        coldExec: ({ operation, identity }) => {
+        coldExec: async ({ operation, identity }) => {
           const entry = coldTraces.get(operation);
           need(entry && !entry.binding.targetIdentity);
+          need(
+            (await entry.trace.bindExec(identity, signal)).status === "bound",
+          );
           entry.binding.targetIdentity = identity;
         },
-        coldStart: async ({
-          operation,
-          identity,
-          imageSha256,
-          policyFileSha256,
-        }) => {
+        coldStart: async (
+          { operation, identity, imageSha256, policyFileSha256 },
+          onFailure,
+        ) => {
           need(!coldTraces.has(operation) && coldTraces.size < 2);
           const binding = {
               identity,
@@ -845,6 +851,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
               startupObserver(root, selector, value, prepared.helperSha256),
             trace = openDarwinStartupTrace(binding, {
               coldCommand: true,
+              onFailure,
               readObserver: (pid) => observe("startup-observer", pid),
               observeObserver: (value) =>
                 observe("startup-observer-observe", value),

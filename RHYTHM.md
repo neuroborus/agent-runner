@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Keep cold trace completion separate from helper exec
+
+Cold Darwin V/G tracing no longer puts the parked helper in DTrace's explicit
+`-p` completion set. The pid-provider retains its own process tracking, while
+the actual target exit and drained streams determine capture completion. A
+distinct E handoff joins the independently inspected replacement epoch to its
+real exec observation before native resume. Target-domain retirement, final
+trace delivery and outside observer retirement remain separate requirements.
+Portable regressions prove the protocol and refusal behavior; fresh hosted
+execution must establish native rebinding and complete cold capture.
+
 ## 2026-10-22 — Record feasibility reply authority at its producer
 
 Darwin fault feasibility keeps ordinary runtime reply allocator returns separate
