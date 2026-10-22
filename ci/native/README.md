@@ -3800,11 +3800,15 @@ is introduced.
 
 The accepted service and ordinary host getter copies stay held through the bounded
 Mach-name census. Only this task and its current thread with exact SEND types,
-the runtime's borrowed reply port with exact RECEIVE type, those two checked local
-names and dead names are admitted. Every expected name must appear once; missing,
-duplicate or changed entries refuse. Unexpected live rights refuse exec without
-destroying unrelated rights to manufacture a safe namespace. The census arrays, held service,
-host and thread copies have checked releases; the service's slot reference survives.
+the ordinary MIG cache with exact RECEIVE type, the cached special reply with
+exact SEND/RECEIVE type, producer-recorded ordinary reply allocations with exact
+RECEIVE type, those two checked local names and dead names are admitted. Every
+expected name must appear once; missing, duplicate or changed entries refuse.
+Unexpected live rights refuse exec without destroying unrelated rights to
+manufacture a safe namespace. Environment setup finishes before this final census
+so it cannot introduce an uninspected runtime right before exec. The census
+arrays, held service, host and thread copies have checked releases; the service's
+slot reference survives.
 Immediately after fork, before its first lifecycle observation, the child takes
 responsibility for the explicitly owned local `bootstrap_port` reference and
 nulls that global. Bookkeeping is bound to the current PID; copied parent entries
@@ -3817,18 +3821,50 @@ Each acquired reference retains its own cleanup entry even when bootstrap,
 host, access or resource getter names alias. No name deduplication can discard
 an owned reference or consume another entry's reference.
 
-The same child entry borrows the exact cached port returned by `mig_get_reply_port`
-before its first helper RPC, and requires that cache to remain unchanged before
-and after the census and after checked releases. It no longer calls
-`mig_dealloc_reply_port` to replace the cache. Apple's
-[`mig_reply_port.c`](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/mach/mig_reply_port.c)
-temporarily selects a separate runtime fallback while invalidating the thread
-cache and suppresses native release errors. The helper neither owns that fallback
-nor identifies an unknown census receive right through this source behavior.
-The borrowed cache remains runtime-owned through exec or refusal; it is never
-deallocated as a send reference or destroyed by helper cleanup. Any other live
-receive right still refuses, including `IKOT_NONE` objects. No private runtime
-symbol, additional receive-right allowance or namespace-destruction remedy is used.
+The ordinary MIG cache is not a complete inventory of runtime replies. Pinned
+[`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mach_init.c)
+allocates a separate task fallback through `mach_reply_port` at initialization
+and after fork. The helper's own dyld interposition table records ordinary
+allocator returns at that producer in a bounded, PID-bound ledger. The callback
+forwards the original result using fixed storage, without an additional RPC,
+auxiliary allocation, diagnostics or cleanup.
+It ignores null/dead sentinels, discards copied parent bookkeeping at the first
+child allocation, and refuses overflow or duplicate/incompatible provenance.
+PID-aware atomic initialization preserves completed allocations when first
+callers race; a child takes over an unfinished parent's initialization instead
+of waiting on that parent's marker. Atomic slot reservation bounds concurrent
+returns; unpublished slots are null and cannot authorize a name.
+Child entry preserves already recorded allocations from its own process; reexec
+starts with new image bookkeeping. Neither a hidden runtime global nor a private
+TSD offset is inspected. No name from a census can enter the ledger.
+
+Before the child's first identity/audit RPC, it separately borrows the exact
+ordinary cache from `mig_get_reply_port` and the special cache from
+`mig_get_special_reply_port`. Pinned
+[`mach_port.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mach_port.c)
+returns an existing cached special reply, allocating only when that cache is
+absent. The helper never calls the allocating/rebinding
+`thread_get_special_reply_port` trap as a query. Ordinary and special caches
+cannot alias. A cache borrow and a producer record may identify the same ordinary
+receive right without minting an owned reference or duplicate census entry.
+All observed producer names must appear with their exact type; cache replacement
+or a new allocation during census/release invalidates the inspected evidence.
+
+The helper never invalidates either cache. Pinned
+[`mig_reply_port.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mig_reply_port.c)
+uses the task fallback while invalidating the ordinary cache and suppresses
+release errors; that operation supplies no additional provenance. All borrowed
+ordinary and special rights remain runtime-owned through exec or refusal.
+Checked cleanup releases only the independently acquired getter/local copies,
+even when one aliases a borrowed reply name. Unknown receive rights remain
+untouched and fence exec, including `IKOT_NONE` objects. A producer call that
+dyld did not interpose remains unknown; its name is never inferred by exclusion.
+Portable callback fixtures establish no native loader interception, identification
+of the archived unknown right, confinement or retirement success. Fresh original
+hosted execution must prove those facts.
+Special-cache and producer-ledger refusals retain their closed native operation
+through the existing redacted failure decoder; raw port metadata grants no
+authority and is not copied into public failure details.
 
 Sanitation refusal releases its tracked owned references, including the host and
 thread copies acquired before access admission. Failure cleanup attempts every

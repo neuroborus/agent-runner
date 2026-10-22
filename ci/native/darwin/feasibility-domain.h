@@ -3,9 +3,12 @@
 #include <grp.h>
 #include <sys/poll.h>
 #include <sys/resource.h>
+#include <stdatomic.h>
 #include <security/audit/audit_ioctl.h>
 #include <mach/mach_vm.h>
 #include <mach/mig.h>
+#include <mach/mach_sync_ipc.h>
+#include <mach-o/dyld-interposing.h>
 
 static void domain_check(bool ok, const char *operation, const char *kind, int value) {
   if (!ok) { remember(operation, kind, value); failure(126); }
@@ -43,18 +46,68 @@ static bool domain_fenced;
  * slots and uninspected census names never enter this cleanup inventory. */
 static pid_t domain_port_owner;
 static mach_port_t domain_bootstrap_local, domain_host_copy, domain_access_copy, domain_thread_copy;
-/* Borrowed from this execution's libSystem thread cache, never a getter copy. */
-static mach_port_t domain_reply_borrowed;
+/* The runtime owns these receive references. mach_init's task fallback is not
+ * the MIG thread cache, and neither is the cached special reply. Observe the
+ * ordinary allocator's return at its producer, including initialization/fork,
+ * rather than guessing an unnamed receive right from a later census. Only a
+ * PID read and fixed bookkeeping surround the original allocation trap; no
+ * auxiliary allocation, RPC, diagnostics or failure cleanup may reenter it. */
+static _Atomic(pid_t) domain_runtime_reply_owner;
+static _Atomic(mach_port_t) domain_runtime_replies[8];
+static _Atomic(unsigned) domain_runtime_reply_count;
+static _Atomic(bool) domain_runtime_reply_overflow;
+static void domain_runtime_replies_begin(pid_t owner) {
+  for (;;) {
+    pid_t observed = domain_runtime_reply_owner;
+    if (observed == owner) return;
+    /* A negative current PID owns initialization. A fork inherits a different
+     * PID, including an unfinished parent's marker, and must never wait on it. */
+    if (observed == -owner) continue;
+    if (!atomic_compare_exchange_strong(&domain_runtime_reply_owner, &observed, -owner)) continue;
+    domain_runtime_reply_count = 0; domain_runtime_reply_overflow = false;
+    for (unsigned i = 0; i < 8; i++) domain_runtime_replies[i] = MACH_PORT_NULL;
+    domain_runtime_reply_owner = owner;
+    return;
+  }
+}
+static mach_port_t domain_runtime_reply_allocate(void) {
+  pid_t owner = getpid();
+  domain_runtime_replies_begin(owner);
+  mach_port_t reply = mach_reply_port();
+  if (MACH_PORT_VALID(reply)) {
+    /* Reserve before publishing: concurrent runtime callers must never share
+     * an array slot or write past its bound. An unpublished slot still refuses
+     * admission. */
+    unsigned slot = atomic_fetch_add(&domain_runtime_reply_count, 1);
+    if (slot < 8)
+      domain_runtime_replies[slot] = reply;
+    else domain_runtime_reply_overflow = true;
+  }
+  return reply;
+}
+/* dyld applies this only to callers outside this image; the callback calls the
+ * original allocator. A missed producer grants no authority: its right remains
+ * unknown and fences exec. No hidden runtime global or TSD offset is read. */
+DYLD_INTERPOSE(domain_runtime_reply_allocate, mach_reply_port);
+static mach_port_t domain_reply_borrowed, domain_special_reply_borrowed;
 static void domain_ports_begin(void) {
   invariant(domain_port_owner != getpid(), "fault-port-owner");
   /* libSystem reinitializes Mach state after fork and exec. Copied bookkeeping
    * from another process is not authority over names in this new IPC space. */
   domain_port_owner = getpid();
   domain_host_copy = domain_access_copy = domain_thread_copy = MACH_PORT_NULL;
+  domain_runtime_replies_begin(domain_port_owner);
   extern mach_port_t bootstrap_port;
   domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
+  domain_reply_borrowed = domain_special_reply_borrowed = MACH_PORT_NULL;
   domain_reply_borrowed = mig_get_reply_port();
   invariant(MACH_PORT_VALID(domain_reply_borrowed), "fault-reply-port");
+  /* This cached acquisition returns the existing special reply if present;
+   * its producer allocates only for an absent cache. The raw allocating and
+   * rebinding thread_get_special_reply_port trap is never used as a query. */
+  domain_special_reply_borrowed = mig_get_special_reply_port();
+  invariant(MACH_PORT_VALID(domain_special_reply_borrowed) &&
+    domain_special_reply_borrowed != domain_reply_borrowed, "fault-special-reply-port");
 }
 static kern_return_t domain_port_release(mach_port_t *held, const char *operation) {
   mach_port_t name = *held; *held = MACH_PORT_NULL;
@@ -72,7 +125,9 @@ static void domain_port_cleanup(void) {
   domain_port_release(&domain_access_copy, "fault-access-release");
   domain_port_release(&domain_host_copy, "fault-host-release");
   domain_port_release(&domain_thread_copy, "fault-thread-release");
-  domain_reply_borrowed = MACH_PORT_NULL; /* The runtime retains its receive right. */
+  domain_reply_borrowed = domain_special_reply_borrowed = MACH_PORT_NULL;
+  /* All allocator returns and cache borrows remain runtime-owned. Retain the
+   * producer ledger through release RPCs; exec resets it, fork must rebind it. */
 }
 static pid_t domain_controller, domain_child = -1;
 static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
@@ -355,13 +410,25 @@ static void domain_sanitize(void) {
   domain_mach(mach_ports_register(self, NULL, 0), "fault-registered-ports");
   domain_mach(task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
   domain_mach(thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
-  /* Do not invalidate a runtime-owned cache to manufacture a fresh namespace.
-   * mig_dealloc_reply_port temporarily uses a separate runtime fallback and
-   * discards release errors. Neither fallback nor any unknown receive name is
-   * identified by that operation. Retain and type-check the original borrow. */
-  mach_port_t reply = domain_reply_borrowed;
+  /* Cache reads and producer returns are provenance; the census only checks
+   * that those exact names and types survive. Never invalidate a runtime cache
+   * or promote an unknown receive right by its type or IKOT_NONE observation. */
+  mach_port_t reply = domain_reply_borrowed, special = domain_special_reply_borrowed;
   invariant(MACH_PORT_VALID(reply) && reply != self && reply != thread &&
     reply != host && (!access_held || reply != access) && mig_get_reply_port() == reply, "fault-reply-port");
+  invariant(MACH_PORT_VALID(special) && special != self && special != thread &&
+    special != host && special != reply && (!access_held || special != access) &&
+    mig_get_special_reply_port() == special, "fault-special-reply-port");
+  unsigned runtime_count = domain_runtime_reply_count, runtime_seen = 0;
+  invariant(domain_runtime_reply_owner == getpid() && !domain_runtime_reply_overflow &&
+    runtime_count <= 8, "fault-runtime-reply-port");
+  for (unsigned i = 0; i < runtime_count; i++) {
+    mach_port_t name = domain_runtime_replies[i];
+    invariant(MACH_PORT_VALID(name) && name != self && name != thread && name != host &&
+      name != special && (!access_held || name != access), "fault-runtime-reply-port");
+    for (unsigned j = 0; j < i; j++)
+      invariant(name != domain_runtime_replies[j], "fault-runtime-reply-port");
+  }
   mach_port_name_array_t names; mach_port_type_array_t types; mach_msg_type_number_t n, nt;
   domain_mach(mach_port_names(self, &names, &n, &types, &nt), "fault-port-list");
   bool census_ok = n == nt && n <= 4096;
@@ -369,21 +436,34 @@ static void domain_sanitize(void) {
   if (mig_get_reply_port() != reply) {
     remember("fault-reply-port", "invariant", 0); census_ok = false;
   }
-  bool self_seen = false, thread_seen = false, reply_seen = false;
+  if (mig_get_special_reply_port() != special) {
+    remember("fault-special-reply-port", "invariant", 0); census_ok = false;
+  }
+  if (domain_runtime_reply_owner != getpid() || domain_runtime_reply_overflow ||
+      domain_runtime_reply_count != runtime_count) {
+    remember("fault-runtime-reply-port", "invariant", 0); census_ok = false;
+  }
+  bool self_seen = false, thread_seen = false, reply_seen = false, special_seen = false;
   bool host_seen = false, access_seen = !access_held;
   for (unsigned i = 0; census_ok && i < n; i++) {
-    bool allowed;
+    bool allowed, runtime_reply = false;
+    for (unsigned j = 0; j < runtime_count; j++) if (names[i] == domain_runtime_replies[j]) {
+      runtime_reply = true; runtime_seen |= 1u << j;
+    }
     if (names[i] == self) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; self_seen = true;
     } else if (names[i] == thread) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; thread_seen = true;
     } else if (names[i] == reply) {
       allowed = types[i] == MACH_PORT_TYPE_RECEIVE; reply_seen = true;
+    } else if (names[i] == special) {
+      allowed = types[i] == (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_RECEIVE); special_seen = true;
     } else if (names[i] == host) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; host_seen = true;
     } else if (access_held && names[i] == access) {
       allowed = types[i] == MACH_PORT_TYPE_SEND; access_seen = true;
-    } else allowed = types[i] == MACH_PORT_TYPE_DEAD_NAME;
+    } else if (runtime_reply) allowed = types[i] == MACH_PORT_TYPE_RECEIVE;
+    else allowed = types[i] == MACH_PORT_TYPE_DEAD_NAME;
     for (unsigned j = 0; j < i; j++) if (names[j] == names[i]) allowed = false;
     if (!allowed) {
       remember("fault-port-authority", "invariant", 0);
@@ -391,9 +471,13 @@ static void domain_sanitize(void) {
     }
   }
   /* Unknown live rights refuse exec; destroying them cannot prove confinement. */
-  if (census_ok && !(self_seen && thread_seen && reply_seen && host_seen && access_seen)) {
+  if (census_ok && !(self_seen && thread_seen && reply_seen && special_seen && host_seen && access_seen &&
+      runtime_seen == ((1u << runtime_count) - 1))) {
     remember("fault-port-authority", "invariant", 0);
-    mach_port_t missing = !self_seen ? self : !thread_seen ? thread : !reply_seen ? reply : !host_seen ? host : access;
+    mach_port_t missing = !self_seen ? self : !thread_seen ? thread : !reply_seen ? reply :
+      !special_seen ? special : !host_seen ? host : !access_seen ? access : MACH_PORT_NULL;
+    if (!MACH_PORT_VALID(missing)) for (unsigned i = 0; i < runtime_count; i++)
+      if (!(runtime_seen & (1u << i))) { missing = domain_runtime_replies[i]; break; }
     domain_port_diagnostic(missing, MACH_PORT_TYPE_NONE); census_ok = false;
   }
   kern_return_t names_release = mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names));
@@ -409,6 +493,9 @@ static void domain_sanitize(void) {
   domain_port_cleanup();
   if (resource_uncertain) failure(126);
   invariant(mig_get_reply_port() == reply, "fault-reply-port");
+  invariant(mig_get_special_reply_port() == special, "fault-special-reply-port");
+  invariant(domain_runtime_reply_owner == getpid() && !domain_runtime_reply_overflow &&
+    domain_runtime_reply_count == runtime_count, "fault-runtime-reply-port");
 }
 static void domain_denied(int result, const char *operation) {
   int error = errno;
@@ -599,8 +686,11 @@ static void domain_start(int argc, char **argv) {
     int fd_error = errno; domain_check(size > 0, "fault-fd-list", fd_error ? "errno" : "status", fd_error ? fd_error : size);
     invariant(size < sizeof(fds) && !(size % sizeof(fds[0])), "fault-fd-count");
     for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 2) posix_check(close(fds[i].proc_fd), "fault-close");
-    domain_sanitize(); char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
+    char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
     posix_check(setenv("NATIVE_FAULT_PARENT_ASID", parent, 1), "fault-environment"); posix_check(unsetenv("NATIVE_STARTUP_CUSTODY"), "fault-environment");
+    /* Finish libc setup before the final census: an environment allocation
+     * cannot introduce an uninspected runtime right between sanitation and exec. */
+    domain_sanitize();
     execl(domain_helper, domain_helper, "exec", domain_policy, domain_helper, "fault", NULL);
     int exec_error = errno; remember("fault-payload-exec", "errno", exec_error); failure(126);
   }

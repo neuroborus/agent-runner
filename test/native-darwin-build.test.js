@@ -4711,13 +4711,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     )?.[1];
   const portBody = (name) =>
     new RegExp(
-      `static (?:void|kern_return_t) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|kern_return_t|mach_port_t) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)?.[1];
   const portRelease = portBody("domain_port_release"),
     portsBegin = portBody("domain_ports_begin"),
     portCleanup = portBody("domain_port_cleanup"),
-    portDiagnostic = portBody("domain_port_diagnostic");
+    portDiagnostic = portBody("domain_port_diagnostic"),
+    repliesBegin = portBody("domain_runtime_replies_begin"),
+    replyAllocate = portBody("domain_runtime_reply_allocate");
   assert.ok(
     sanitation &&
       observation &&
@@ -4726,8 +4728,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       portsBegin &&
       portCleanup &&
       portDiagnostic &&
+      repliesBegin &&
+      replyAllocate &&
       start > 0 &&
       end > start,
+  );
+  assert.match(
+    source,
+    /DYLD_INTERPOSE\(domain_runtime_reply_allocate, mach_reply_port\)/u,
   );
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
@@ -4747,7 +4755,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       .replaceAll("in[", "input[")
       .replaceAll("*held", "held.value")
       .replace(
-        /&(host|access|type|address|access_type|notify|readback|names|types|n|nt|gate|current|kind|object|domain_bootstrap_local|domain_host_copy|domain_access_copy|domain_thread_copy)\b/gu,
+        /&(host|access|type|address|access_type|notify|readback|names|types|n|nt|gate|current|kind|object|observed|domain_bootstrap_local|domain_host_copy|domain_access_copy|domain_thread_copy|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
         (_, name) =>
           `{get value() {return ${name};}, set value(v) {${name} = v;}}`,
       )
@@ -4761,11 +4769,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         /\(mach_vm_address_t\)|\(unsigned long long\)|\(unsigned\)/gu,
         "",
       )
+      .replace(/\b(\d+)u\b/gu, "$1")
       .replace(
-        /\b(?:task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|unsigned|int) /gu,
+        /\b(?:pid_t|task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|unsigned|int) /gu,
         "let ",
       );
   const script = new Script(`
+    function domain_runtime_replies_begin(owner) {${translate(repliesBegin)}}
+    function domain_runtime_reply_allocate() {${translate(replyAllocate)}}
     function domain_ports_begin() {${translate(portsBegin)}}
     function domain_port_release(held, operation) {${translate(portRelease)}}
     function domain_port_cleanup() {${translate(portCleanup)}}
@@ -4789,6 +4800,153 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     ],
     ["missing runtime reply port", { reply: 0 }, "fault-reply-port", 0],
     ["dead runtime reply sentinel", { reply: DEAD }, "fault-reply-port", 0],
+    [
+      "missing special reply stops after the ordinary borrow",
+      { specialReply: 0 },
+      "fault-special-reply-port",
+      0,
+    ],
+    [
+      "dead special reply sentinel",
+      { specialReply: DEAD },
+      "fault-special-reply-port",
+      0,
+    ],
+    [
+      "special and ordinary caches cannot alias",
+      { specialReply: 104 },
+      "fault-special-reply-port",
+      0,
+    ],
+    [
+      "fresh producer replaces copied parent allocation bookkeeping",
+      { inheritedOwner: 41, runtimeReplies: [119] },
+    ],
+    [
+      "reexec begins with only its own allocation returns",
+      { runtimeReplies: [120, 121] },
+    ],
+    [
+      "interleaved allocation returns retain independent producer slots",
+      { runtimeReplies: [117, 119], concurrentProducer: true },
+    ],
+    [
+      "a racing first producer cannot erase another completed allocation",
+      { runtimeReplies: [119, 117], concurrentInitialization: true },
+    ],
+    [
+      "child discards an unfinished parent's initialization without waiting",
+      {
+        inheritedOwner: 41,
+        producerOwner: -41,
+        inheritedRuntime: [117],
+        runtimeReplies: [119],
+      },
+    ],
+    [
+      "ordinary MIG cache may borrow an observed ordinary allocation",
+      { runtimeReplies: [104] },
+    ],
+    [
+      "allocator forwards null and dead results without recording references",
+      { runtimeReplies: [0, DEAD, 117] },
+    ],
+    [
+      "another process's ledger cannot authorize this process's receive right",
+      {
+        inheritedOwner: 41,
+        inheritedRuntime: [117],
+        unobservedRuntime: true,
+      },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "a missed producer still refuses instead of inferring runtime ownership",
+      { unobservedRuntime: true },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "environment setup cannot introduce a receive right after the final census",
+      { environmentRight: true, extraRights: RECEIVE },
+      "fault-port-authority",
+      0,
+    ],
+    ...[101, 102, 103, 108].map((name) => [
+      `ordinary allocation cannot alias unrelated authority ${name}`,
+      { runtimeReplies: [name] },
+      "fault-runtime-reply-port",
+      0,
+    ]),
+    [
+      "duplicate allocator returns do not mint provenance",
+      { runtimeReplies: [117, 117] },
+      "fault-runtime-reply-port",
+      0,
+    ],
+    [
+      "overflowed allocation provenance refuses exec",
+      { runtimeReplies: Array.from({ length: 9 }, (_, i) => 120 + i) },
+      "fault-runtime-reply-port",
+      0,
+    ],
+    ...["before", "census", "release"].map((replaceSpecial) => [
+      `special cache replacement during ${replaceSpecial} refuses exec`,
+      { replaceSpecial },
+      "fault-special-reply-port",
+      0,
+    ]),
+    ...["census", "release"].map((replaceRuntime) => [
+      `ordinary allocation during ${replaceRuntime} invalidates inspected provenance`,
+      { replaceRuntime },
+      "fault-runtime-reply-port",
+      0,
+    ]),
+    [
+      "special reply must retain its exact send and receive type",
+      { specialType: RECEIVE },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "ordinary producer cannot authorize a mixed receive right",
+      { runtimeType: RECEIVE | SEND },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "borrowed special reply must appear in census",
+      { omitSpecial: true },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "producer-observed runtime reply must appear in census",
+      { omitRuntime: true },
+      "fault-port-authority",
+      0,
+    ],
+    [
+      "partial cache acquisition retains its refusal through bootstrap release failure",
+      { specialReply: 0, bootstrapRelease: 15 },
+      "fault-special-reply-port",
+      0,
+    ],
+    [
+      "producer drift survives array and owned-copy release failures",
+      {
+        replaceRuntime: "census",
+        access: 200,
+        rights: SEND,
+        censusRelease: 15,
+        release: 5,
+        hostRelease: 20,
+        threadRelease: 10,
+      },
+      "fault-runtime-reply-port",
+      0,
+    ],
     [
       "thread acquisition returns null",
       { threadPort: 0 },
@@ -4870,6 +5028,20 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       { bootstrap: 104 },
     ],
     ["bootstrap aliases the host getter", { bootstrap: 103 }],
+    [
+      "bootstrap copy aliases a runtime-owned ordinary receive",
+      { bootstrap: 117 },
+    ],
+    [
+      "bootstrap copy aliases a runtime-owned special reply",
+      { bootstrap: 108 },
+    ],
+    ...[108, 117].map((bootstrap) => [
+      `failed aliased copy release cannot consume the runtime borrow ${bootstrap}`,
+      { bootstrap, bootstrapRelease: 15 },
+      "fault-bootstrap-release",
+      15,
+    ]),
     [
       "bootstrap aliases the access getter",
       { bootstrap: 200, access: 200, rights: SEND },
@@ -5226,6 +5398,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     if (options.bootstrapExtra) own(bootstrap);
     let first,
       cachedReply = options.reply ?? 104,
+      specialReply = options.specialReply ?? 108,
+      allocationReply,
+      nestedProducer = false,
+      racedInitialization = false,
+      environmentReady = false,
       notifyReads = 0,
       observing = true,
       bootstrapReleased = false;
@@ -5259,6 +5436,16 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       domain_access_copy: options.inheritedOwner ? 114 : 0,
       domain_thread_copy: options.inheritedOwner ? 115 : 0,
       domain_reply_borrowed: options.inheritedOwner ? 109 : 0,
+      domain_special_reply_borrowed: options.inheritedOwner ? 116 : 0,
+      domain_runtime_reply_owner:
+        options.producerOwner ?? options.inheritedOwner ?? 0,
+      domain_runtime_replies: options.inheritedOwner
+        ? [...(options.inheritedRuntime ?? [113])]
+        : [],
+      domain_runtime_reply_count: options.inheritedOwner
+        ? (options.inheritedRuntime?.length ?? 1)
+        : 0,
+      domain_runtime_reply_overflow: false,
       resource_uncertain: false,
       RLIMIT_NPROC: 1,
       PROC_PIDLISTFDS: 1,
@@ -5338,6 +5525,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       setenv(name, parent) {
         calls.push(["environment", name, parent.text]);
+        environmentReady = true;
         return 0;
       },
       unsetenv: () => 0,
@@ -5411,11 +5599,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
                   ? (options.threadType ?? SEND)
                   : name === 104
                     ? (options.replyType ?? RECEIVE)
-                    : name === 103
-                      ? SEND
-                      : name === 200
-                        ? (options.accessCensusType ?? SEND)
-                        : (options.extraRights ?? SEND);
+                    : name === 108
+                      ? (options.specialType ?? SEND | RECEIVE)
+                      : (options.runtimeReplies ?? [117]).includes(name)
+                        ? (options.runtimeType ?? RECEIVE)
+                        : name === 103
+                          ? SEND
+                          : name === 200
+                            ? (options.accessCensusType ?? SEND)
+                            : (options.extraRights ?? SEND);
           context.errno = 22;
           return options.censusQuery ?? 0;
         }
@@ -5508,9 +5700,41 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       thread_set_exception_ports: (...args) => {
         calls.push(["thread-exceptions", ...args]);
         if (options.replaceReply === "before") cachedReply = 105;
+        if (options.replaceSpecial === "before") specialReply = 109;
         return 0;
       },
       mig_get_reply_port: () => cachedReply,
+      mig_get_special_reply_port: () => specialReply,
+      thread_get_special_reply_port: () =>
+        assert.fail("The allocating trap cannot query a cached reply"),
+      mach_reply_port: () => allocationReply,
+      atomic_compare_exchange_strong(target, expected, value) {
+        if (options.concurrentInitialization && !racedInitialization) {
+          racedInitialization = true;
+          const pending = allocationReply;
+          allocationReply = 119;
+          context.domain_runtime_reply_allocate();
+          allocationReply = pending;
+        }
+        if (target.value !== expected.value) {
+          expected.value = target.value;
+          return false;
+        }
+        target.value = value;
+        return true;
+      },
+      atomic_fetch_add(target, value) {
+        const previous = target.value;
+        target.value += value;
+        if (options.concurrentProducer && !nestedProducer) {
+          nestedProducer = true;
+          const pending = allocationReply;
+          allocationReply = 119;
+          context.domain_runtime_reply_allocate();
+          allocationReply = pending;
+        }
+        return previous;
+      },
       mig_dealloc_reply_port: () =>
         assert.fail("The runtime cache is borrowed, never invalidated"),
       mach_port_names(_self, names, count, types, typeCount) {
@@ -5521,6 +5745,16 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
             options.threadType ?? SEND,
             options.replyType ?? RECEIVE,
           ];
+        if (!options.omitSpecial && valid(specialReply)) {
+          actualNames.push(specialReply);
+          actualTypes.push(options.specialType ?? SEND | RECEIVE);
+        }
+        if (!options.omitRuntime)
+          for (const name of options.runtimeReplies ?? [117])
+            if (valid(name) && !actualNames.includes(name)) {
+              actualNames.push(name);
+              actualTypes.push(options.runtimeType ?? RECEIVE);
+            }
         if (options.omit) {
           const index = actualNames.indexOf(options.omit);
           actualNames.splice(index, 1);
@@ -5542,7 +5776,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           actualNames.push(200);
           actualTypes.push(options.accessCensusType ?? SEND);
         }
-        if (options.extraRights !== undefined) {
+        if (
+          options.extraRights !== undefined &&
+          (!options.environmentRight || environmentReady)
+        ) {
           actualNames.push(111);
           actualTypes.push(options.extraRights);
         }
@@ -5555,6 +5792,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         typeCount.value = options.censusCount ?? actualTypes.length;
         types.value = actualTypes.slice(0, typeCount.value);
         if (options.replaceReply === "census") cachedReply = 105;
+        if (options.replaceSpecial === "census") specialReply = 109;
+        if (options.replaceRuntime === "census") {
+          allocationReply = 119;
+          context.domain_runtime_reply_allocate();
+        }
         return options.census ?? 0;
       },
       mach_port_destroy() {
@@ -5569,6 +5811,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         );
         assert.equal(array.length, length);
         if (options.replaceReply === "release") cachedReply = 105;
+        if (options.replaceSpecial === "release") specialReply = 109;
+        if (options.replaceRuntime === "release") {
+          allocationReply = 119;
+          context.domain_runtime_reply_allocate();
+        }
         if (options.censusRelease)
           releaseFailures.push({
             operation: "fault-port-list-release",
@@ -5589,6 +5836,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       fflush() {},
     };
     const launch = script.runInNewContext(context);
+    if (!options.unobservedRuntime)
+      for (const name of options.concurrentProducer
+        ? options.runtimeReplies.slice(0, 1)
+        : options.concurrentInitialization
+          ? [117]
+          : (options.runtimeReplies ?? [117])) {
+        allocationReply = name;
+        assert.equal(context.domain_runtime_reply_allocate(), name, label);
+      }
     assert.throws(launch, (error) => {
       if (!operation) return error === executed;
       assert.equal(error.operation, operation, label);
@@ -5598,6 +5854,8 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         operation.endsWith("authority") ||
           [
             "fault-reply-port",
+            "fault-special-reply-port",
+            "fault-runtime-reply-port",
             "fault-port-owner",
             "fault-thread-port",
           ].includes(operation) ||
@@ -5743,6 +6001,40 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       );
     }
     assert.equal(context.domain_reply_borrowed, 0, label);
+    assert.equal(context.domain_special_reply_borrowed, 0, label);
+    const observedReplies = [
+      ...(options.unobservedRuntime
+        ? []
+        : (options.runtimeReplies ?? [117]).filter(valid)),
+      ...(options.replaceRuntime === "census" &&
+      calls.some(([op]) => op === "census")
+        ? [119]
+        : []),
+      ...(options.replaceRuntime === "release"
+        ? calls.filter(([op]) => op === "census-release").map(() => 119)
+        : []),
+    ];
+    assert.equal(context.domain_runtime_reply_owner, 42, label);
+    assert.equal(
+      context.domain_runtime_reply_count,
+      observedReplies.length,
+      label,
+    );
+    assert.deepEqual(
+      Array.from(
+        context.domain_runtime_replies.slice(
+          0,
+          context.domain_runtime_reply_count,
+        ),
+      ),
+      observedReplies.slice(0, 8),
+      label,
+    );
+    assert.equal(
+      context.domain_runtime_reply_overflow,
+      observedReplies.length > 8,
+      label,
+    );
     assert.equal(context.domain_port_owner, 0, label);
     assert.equal(
       referenceReleases.filter(({ role }) => role === "bootstrap").length,
@@ -5765,29 +6057,41 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     if (operation === "fault-port-authority") {
       const name =
         options.omit ??
-        (options.selfType
-          ? 101
-          : options.threadType
-            ? 102
-            : options.replyType || options.duplicate
-              ? 104
-              : options.omitHost
-                ? 103
-                : options.omitAccess || options.accessCensusType
-                  ? 200
-                  : options.bootstrapExtra
-                    ? bootstrap
-                    : 111);
+        (options.omitSpecial || options.specialType
+          ? (options.specialReply ?? 108)
+          : options.omitRuntime ||
+              options.runtimeType ||
+              options.unobservedRuntime
+            ? (options.runtimeReplies?.find(valid) ?? 117)
+            : options.selfType
+              ? 101
+              : options.threadType
+                ? 102
+                : options.replyType || options.duplicate
+                  ? 104
+                  : options.omitHost
+                    ? 103
+                    : options.omitAccess || options.accessCensusType
+                      ? 200
+                      : options.bootstrapExtra
+                        ? bootstrap
+                        : 111);
       const censusType =
-        options.omit || options.omitHost || options.omitAccess
+        options.omit ||
+        options.omitHost ||
+        options.omitAccess ||
+        options.omitSpecial ||
+        options.omitRuntime
           ? 0
-          : (options.selfType ??
+          : (options.specialType ??
+            options.runtimeType ??
+            options.selfType ??
             options.threadType ??
             options.replyType ??
             (options.duplicate ? RECEIVE : undefined) ??
             options.accessCensusType ??
             options.extraRights ??
-            SEND);
+            (options.unobservedRuntime ? RECEIVE : SEND));
       const current = options.censusQuery
         ? 0
         : name === 101
@@ -5796,11 +6100,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
             ? (options.threadType ?? SEND)
             : name === 104
               ? (options.replyType ?? RECEIVE)
-              : name === 103
-                ? SEND
-                : name === 200
-                  ? (options.accessCensusType ?? SEND)
-                  : (options.extraRights ?? SEND);
+              : name === 108
+                ? (options.specialType ?? SEND | RECEIVE)
+                : (options.runtimeReplies ?? [117]).includes(name)
+                  ? (options.runtimeType ?? RECEIVE)
+                  : name === 103
+                    ? SEND
+                    : name === 200
+                      ? (options.accessCensusType ?? SEND)
+                      : (options.extraRights ?? SEND);
       const object =
         !options.censusQuery && current & (SEND | SEND_ONCE | RECEIVE);
       assert.deepEqual(

@@ -357,13 +357,24 @@ sanitation remain covered.
 
 The same actual-body fixture begins reference ownership at child entry, before
 the first observation, and rejects copied parent bookkeeping as cleanup authority.
-Its runtime cache model rejects invalidation, missing/dead or aliased reply names,
-cache replacement before/during census and during release, mixed reply/self/thread
-rights, missing entries and duplicates. An additional receive-only `IKOT_NONE`
-right remains unknown and refuses exec. Partial thread/host acquisition, failed
-access type queries and simultaneous array/getter release failures retain their
-distinct original and cleanup outcomes. These deterministic cases add no native
-execution or slow-tier assignment and identify no historical unknown right.
+Its actual allocator callback records bounded ordinary reply returns before the
+child launch body runs; the existing sanitation fixture separately models the
+ordinary MIG and special reply caches. It covers child PID rebinding, fresh
+reexec bookkeeping, null/dead allocator results, racing initializers, unfinished
+parent initialization, interleaved allocations, overflow,
+duplicate/incompatible provenance and an ordinary cache sharing a producer name.
+Getter/local send copies may alias borrowed ordinary or special replies without
+consuming the runtime's references. Missing/dead or aliased caches, replacement
+before/during census or release, new producer events during census/release,
+changed exact types and missing census entries refuse exec. An unobserved ordinary
+receive and an additional receive-only `IKOT_NONE` right both remain unknown:
+the census cannot supply their provenance. Environment setup precedes the final
+census, which refuses an unknown right introduced by that setup before exec.
+Partial cache/thread/host acquisition, failed access type queries and simultaneous
+array/getter release failures retain
+their distinct original and cleanup outcomes. These deterministic cases add no
+native execution, validation command or slow-tier assignment. They identify no
+historical unknown right and establish no native dyld interception or closure.
 
 Custodian lifecycle fixtures retain one checked release per valid getter copy,
 no endpoint contact and unchanged errno, including unavailable type queries. The
@@ -372,9 +383,10 @@ its optional getter/query cannot replace the authoritative payload sanitation, a
 failed copied-reference release stops before that transition. The custody caller
 still forwards fragmented raw lifecycle and malformed metadata without replacing
 the original refusal or separate release cause when diagnostics throw. Bounded
-classification covers service-query and census-authority failures through the
-existing owner. The existing cancellation/owner-loss and independent retirement
-matrices remain required: primitive cleanup success cannot pass cancellation.
+classification covers service-query, census-authority, special-cache and runtime
+provenance failures through the existing owner. Cancellation/owner-loss and
+independent retirement matrices remain required: primitive cleanup success cannot
+pass cancellation.
 These portable fixtures run no native compiler or macOS tool, supply no native
 acceptance and add no slow-tier assignment.
 

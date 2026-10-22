@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Record feasibility reply authority at its producer
+
+Darwin fault feasibility keeps ordinary runtime reply allocator returns separate
+from ordinary MIG and special-reply cache borrows. A PID-bound producer ledger
+and exact census joins replace the assumption that one MIG cache describes every
+runtime reply. Getter copies remain independently owned and checked even when
+their names alias borrowed rights. Unknown rights still fence exec and remain
+untouched; neither census membership nor a runtime-shaped object grants authority.
+The local dyld callback and portable fixtures do not establish that a hosted
+runtime allocation was intercepted or identify the historical unknown right.
+Only fresh original native execution can establish that functional closure.
+
 ## 2026-10-21 — Admit ordinary Darwin files through held names
 
 Ordinary Darwin filesystem admission now requires the capabilities its actual

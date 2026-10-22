@@ -499,6 +499,8 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-reexec-binding",
     "fault-registered-ports",
     "fault-reply-port",
+    "fault-special-reply-port",
+    "fault-runtime-reply-port",
     "fault-root-create",
     "fault-root-mode",
     "fault-root-open",
