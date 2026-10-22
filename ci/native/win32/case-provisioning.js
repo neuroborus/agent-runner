@@ -1012,6 +1012,13 @@ export function createWindowsCaseProvisioning(state, options) {
         ...accessResources,
       };
     },
+    // Closing the original transport fences its acquired native owners even
+    // when a lost reply prevents another account/policy command. Only fresh
+    // recovery observations can establish settlement in that lane.
+    async closeReader(current, { signal } = {}) {
+      requireObservation(current.repositoryProvisioning && current.reader);
+      return current.reader.close({ signal });
+    },
     async retire(current, { signal, closeFiles = true }) {
       state.guard(signal);
       requireObservation(
@@ -1036,7 +1043,7 @@ export function createWindowsCaseProvisioning(state, options) {
         failures.push(error);
       }
       try {
-        custody = await current.reader.close();
+        custody = await this.closeReader(current, { signal });
         requireObservation(
           custody.status === "RETIRED" &&
             custody.independent &&

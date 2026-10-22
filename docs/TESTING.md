@@ -2075,6 +2075,30 @@ with raw filesystem/IPC transcripts. Repository defaults provision protected
 build/receipt custody, observe parked workers, run the two version queries and
 thirteen compiles, and rejoin prepared bytes and settle the build case without
 another compiler or bootstrap.
+Queued native replies cross an event-loop turn in the raw pipe fixture, matching
+native IPC delivery and allowing retired abort-signal compositions and their
+retained command transcripts to be collected during the complete file run.
+The same suite covers ownership refusal before setup/policy/payload admission,
+lost launch and policy replies, and recovery through the retained original reader
+observer until policy/account/task settlement precedes that observer's retirement.
+The failure fixture refuses first-time acquisition of an exited primary token;
+only the original transferred process/token pairs can be imported after a lost
+reply. It requires unchanged pre-policy baselines, restoration before account
+deletion, exact retained births and
+preservation of the first launcher failure. Substituted births and failed
+restoration retain reservations. Existing complete ownership cases continue to
+cover cancellation, owner/helper loss, final handle close and literal/storage
+behavior. `ci/native/win32/launch.test.js` executes the actual shared Job query
+body with independent query failures, creation errors retained across descriptor
+release, and nonzero assignment history despite empty membership.
+`ci/native/win32/custody.test.js` executes the actual acquired-creator failure fence,
+process/token transfer before birth publication, observer/birth/token-bound import
+and untouched versus installed policy restoration branch,
+scopes shared prelaunch witness claims to
+captured ownership baselines, and retains original stderr transport coverage and
+Job identity through an unlaunched fence. These portable regressions remain in
+the existing native harness, add no check or slow tier, and establish no Windows
+API, native cleanup or hosted PASS.
 Signal handoff coverage ends preparation before verification and preserves the
 original observer deadline, cancellation checks and first transport failure.
 The existing ordinary preparation-to-cold-consumer fixture also calls the real

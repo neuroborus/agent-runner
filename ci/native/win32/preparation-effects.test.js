@@ -11,7 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join, win32 as path } from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
+import { setImmediate } from "node:timers/promises";
+import { inspect, promisify } from "node:util";
 
 import { withNativeDiagnostics } from "../diagnostics.js";
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
@@ -2178,6 +2179,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
     imageSha = digest(signed),
     signatureSha = inspectWindowsPe(signed).signatureSha256,
     actors = new Map(),
+    nativeScopes = new Map(),
     exitCodes = new Map(),
     images = new Map(),
     jobs = new Map(),
@@ -2661,6 +2663,28 @@ function rawPreparation({ experiment = false, environment } = {}) {
       assert.equal(digest(data), args[2]);
       return { hex: data.toString("hex") };
     }
+    if (operation === "verify-ownership-births") {
+      const domain = f.ownershipScopes.get(args[1]);
+      assert.ok(domain);
+      assert.equal(domain.observer, scope);
+      if (f.coldDamage === "ownership-transfer")
+        scope.transferred.delete(domain.owner.pid);
+      for (const original of [domain.launcher, domain.owner]) {
+        const actual = scope.transferred.get(original.pid);
+        assert.ok(
+          actual,
+          "Original process/token pair was transferred before resume",
+        );
+        if (!retained.includes(actual)) retained.push(actual);
+      }
+      return {
+        helper: domain.launcher,
+        owner:
+          f.coldDamage === "ownership-birth"
+            ? { ...domain.owner, creationTime: "999" }
+            : domain.owner,
+      };
+    }
     if (
       [
         "verify-policy-recover",
@@ -2669,19 +2693,44 @@ function rawPreparation({ experiment = false, environment } = {}) {
       ].includes(operation)
     ) {
       const account = f.accounts.get(selected[Number(args[0])].path);
+      const domain = f.ownershipScopes?.get(args[1]);
       assert.ok(
-        !account || account.retired,
+        !account ||
+          account.retired ||
+          (domain &&
+            [domain.launcher, domain.owner, ...domain.members]
+              .filter(Boolean)
+              .every((held) => actors.get(held.pid).retired)),
         "Original creators must retire before recovery setters",
       );
       assert.ok(!account || account.contextSha256 === args[1]);
       if (["partial-restoration", "policy-substitution"].includes(f.coldDamage))
         throw new Error("Native restoration interrupted or changed");
+      if (domain && operation === "verify-policy-recover") {
+        domain.policy = null;
+        domain.restored = true;
+      }
       return operation !== "verify-policy-recover"
         ? { restored: true, admission: "possible" }
         : { restored: true };
     }
     if (operation === "verify-case-recover") {
       const account = f.accounts.get(selected[Number(args[0])].path);
+      const domain = f.ownershipScopes?.get(args[1]);
+      if (account && !account.retired && domain) {
+        assert.equal(
+          domain.policy,
+          null,
+          "Policy restoration precedes account deletion",
+        );
+        assert.ok(
+          domain.jobAbsent &&
+            [domain.launcher, domain.owner, ...domain.members]
+              .filter(Boolean)
+              .every((held) => actors.get(held.pid).retired),
+        );
+        account.retired = true;
+      }
       assert.ok(
         !account || account.retired,
         "Recovery must retire the original account first",
@@ -2752,7 +2801,13 @@ function rawPreparation({ experiment = false, environment } = {}) {
       );
       assert.equal(actual.identity.creationTime, args[1]);
       let slot = retained.indexOf(actual);
-      if (slot < 0) slot = retained.push(actual) - 1;
+      if (slot < 0) {
+        assert.ok(
+          !f.strictRetirement || !actual.retired,
+          "Cannot acquire an exited primary token without original custody",
+        );
+        slot = retained.push(actual) - 1;
+      }
       assert.ok(slot < 128);
       return { slot, process: actual };
     }
@@ -2875,6 +2930,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
           typeof data === "string" ? data : JSON.stringify(data) + "\n",
         ).toString("hex"),
       });
+    (f.ownershipScopes ??= new Map()).set(account.contextSha256, value);
     const add = () => {
       const member = { ...actor(), userSid: account.accountSid };
       actors.get(member.pid).identity = member;
@@ -2897,10 +2953,20 @@ function rawPreparation({ experiment = false, environment } = {}) {
           .map((entry) => digest(f.files.get(entry.path))),
       };
     }
+    if (operation === "ownership-observer") {
+      const observer = nativeScopes.get(Number(values[0]));
+      assert.ok(observer && !actors.get(observer.serving.pid).retired);
+      assert.equal(observer.serving.creationTime, values[1]);
+      value.observer = observer;
+      value.nonce = declaration.nonce;
+      return { bound: true };
+    }
     if (operation === "ownership-launch") {
       assert.equal(value.launcher, undefined);
       value.launcher = actor();
       value.owner = actor();
+      for (const original of [value.launcher, value.owner])
+        value.observer.transferred.set(original.pid, actors.get(original.pid));
       assert.deepEqual(
         values.slice(1).map((value) => (value === "-" ? "" : decode(value))),
         declaration.context.executionId === "package.git-for-windows"
@@ -2916,10 +2982,19 @@ function rawPreparation({ experiment = false, environment } = {}) {
         payload: null,
         accountSid: null,
       });
+      if (f.ownershipDamage === "start-reply") throw f.launcherRefusal;
       return { helper: value.launcher, owner: value.owner };
     }
     if (operation === "ownership-control") {
       const valueFrame = value.frames.shift();
+      if (
+        (f.ownershipDamage === "setup-refusal" &&
+          valueFrame.phase === "setup") ||
+        (f.ownershipDamage === "ready-refusal" && valueFrame.phase === "ready")
+      ) {
+        actors.get(value.launcher.pid).retired = true;
+        throw f.launcherRefusal;
+      }
       if (f.ownershipDamage === "setup-account" && valueFrame.phase === "setup")
         valueFrame.accountSid = "S-1-5-21-9-9-9-1001";
       if (
@@ -3021,6 +3096,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       f.files.set(selected[2].path + "\\policy", data);
       if (f.ownershipDamage === "interrupted-policy")
         throw new Error("Interrupted ownership installation");
+      if (f.ownershipDamage === "policy-reply") throw f.launcherRefusal;
       return { installed: true };
     }
     if (operation === "ownership-receipt") {
@@ -3054,11 +3130,11 @@ function rawPreparation({ experiment = false, environment } = {}) {
     }
     if (operation === "ownership-reconstruct")
       return {
-        helper: value.launcher,
+        helper: value.launcher ?? null,
         owner:
           f.ownershipDamage === "replaced-owner"
             ? { ...value.owner, creationTime: "999" }
-            : value.owner,
+            : (value.owner ?? null),
         jobObjectSha256: hash,
         members: value.members,
       };
@@ -3084,8 +3160,8 @@ function rawPreparation({ experiment = false, environment } = {}) {
     }
     if (operation === "ownership-stop") {
       for (const member of value.members) actors.get(member.pid).retired = true;
-      actors.get(value.launcher.pid).retired = true;
-      actors.get(value.owner.pid).retired = true;
+      if (value.launcher) actors.get(value.launcher.pid).retired = true;
+      if (value.owner) actors.get(value.owner.pid).retired = true;
       value.jobAbsent = true;
       return { creationSealed: true, helpersSettled: true };
     }
@@ -3125,6 +3201,14 @@ function rawPreparation({ experiment = false, environment } = {}) {
           uiRestrictions: 255,
           members: value.members,
         },
+        jobAccounting: {
+          activeProcesses: value.members.filter(
+            (member) => !actors.get(member.pid).retired,
+          ).length,
+          totalProcesses:
+            value.members.length +
+            (f.ownershipDamage === "job-history" ? 1 : 0),
+        },
         enumeration: {
           complete: true,
           accountSid: account.accountSid,
@@ -3141,6 +3225,8 @@ function rawPreparation({ experiment = false, environment } = {}) {
         },
         tokens: value.members.map(() => ({ ...account.token })),
         policyVerified: !!value.policy,
+        policyUnchanged:
+          !value.policy && f.ownershipDamage !== "changed-baseline",
         policyRestored:
           !!value.restored && f.ownershipDamage !== "missing-restoration",
         objects: selected.slice(1, 7).map((entry, i) => ({
@@ -3213,6 +3299,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       ),
       scope = {
         retained: [],
+        transferred: new Map(),
         heldFiles: [],
         heldFilePaths: [],
         entries: selected,
@@ -3224,6 +3311,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       helper = actor(),
       processSlots = [];
     scope.serving = helper;
+    nativeScopes.set(helper.pid, scope);
     scope.processSlots = processSlots;
     const prefix = path.join(directory, `windows-files-${declaration.nonce}-`);
     if (observer)
@@ -3252,11 +3340,36 @@ function rawPreparation({ experiment = false, environment } = {}) {
     return {
       pid: bridge.pid,
       receive: async () => {
+        // Native pipe replies cross an I/O turn. Preserve that boundary so
+        // abort-signal WeakRefs can release retired command transcripts.
+        await setImmediate();
         assert.ok(queue.length, "missing raw frame");
         return JSON.parse(JSON.stringify(queue.shift()));
       },
       completion: Promise.resolve({ code: 0, signal: null }),
-      close: () => {},
+      close: () => {
+        if (
+          ![
+            "start-reply",
+            "setup-refusal",
+            "ready-refusal",
+            "policy-reply",
+          ].includes(f.ownershipDamage) ||
+          observer
+        )
+          return;
+        // Model the sealed reader/control EOF and independent guardian path;
+        // account and policy retirement remain separate native operations.
+        for (const held of [
+          helper,
+          bridge,
+          scope.ownership?.launcher,
+          scope.ownership?.owner,
+          ...(scope.ownership?.members ?? []),
+        ].filter(Boolean))
+          actors.get(held.pid).retired = true;
+        if (scope.ownership) scope.ownership.jobAbsent = true;
+      },
       settle: () => {},
       async send(frame) {
         events.push(frame.trim());
@@ -3364,8 +3477,20 @@ function rawPreparation({ experiment = false, environment } = {}) {
                   Number(sequence),
                 )
               : undefined;
-          if (accessValue !== undefined) value = accessValue;
-          else if (observer && operation !== "finish")
+          if (accessValue !== undefined) {
+            value = accessValue;
+            if (operation === "ownership-launch") {
+              Object.assign(scope.ownership, {
+                launcher: value.helper,
+                owner: value.owner,
+              });
+              for (const original of [value.helper, value.owner])
+                scope.ownership.observer.transferred.set(
+                  original.pid,
+                  actors.get(original.pid),
+                );
+            }
+          } else if (observer && operation !== "finish")
             value = await rawNative(operation, values, scope);
           else if (operation.startsWith("ownership-"))
             value = ownershipNative(operation, values, scope, declaration);
@@ -3555,6 +3680,23 @@ function rawPreparation({ experiment = false, environment } = {}) {
               writerClosed: true,
             };
           } else if (operation === "finish") {
+            if (observer && f.strictRetirement) {
+              for (const [context, domain] of f.ownershipScopes ?? [])
+                if (domain.observer === scope) {
+                  assert.equal(domain.policy, null);
+                  assert.ok(
+                    [...f.accounts.values()].find(
+                      (account) => account.contextSha256 === context,
+                    )?.retired,
+                  );
+                  assert.ok(!tasks.has(domain.nonce));
+                }
+              for (const original of scope.transferred.values())
+                assert.ok(
+                  scope.retained.includes(original) && original.retired,
+                );
+              scope.transferred.clear();
+            }
             if (observer)
               assert.ok(
                 !scope.upload &&
@@ -3562,6 +3704,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
                   scope.retained.every((subject) => subject.retired),
               );
             actors.get(helper.pid).retired = true;
+            if (observer && f.strictRetirement) scope.retained.length = 0;
             value = { closed: true };
             queue.push(
               { sequence: Number(sequence), value },
@@ -7365,7 +7508,7 @@ async function recoverRecordedCase(f, owner, expected = "RETIRED") {
   assert.equal(
     result.status,
     expected,
-    system.cause?.stack +
+    inspect(system.cause, { depth: 4 }) +
       "\nObserver command counts: " +
       JSON.stringify([...sequences.values()]),
   );
@@ -8717,10 +8860,6 @@ test("Windows ownership rejects missing controls, substituted objects and ambigu
     });
     if (
       [
-        "malformed-control",
-        "prefixed-control",
-        "setup-account",
-        "helper-payload",
         "replaced-owner",
         "malformed-receipt",
         "live-member",
@@ -8730,12 +8869,26 @@ test("Windows ownership rejects missing controls, substituted objects and ambigu
         "substituted-object",
         "missing-witness",
         "wrong-token",
-        "wrong-job",
       ].includes(damage)
     )
       assert.ok(
         Object.values(settled).every(
           (value) => value.settlement.status !== "RETIRED",
+        ),
+        damage,
+      );
+    else if (
+      [
+        "malformed-control",
+        "prefixed-control",
+        "setup-account",
+        "helper-payload",
+        "wrong-job",
+      ].includes(damage)
+    )
+      assert.ok(
+        Object.values(settled).every(
+          (value) => value.settlement.status === "RETIRED",
         ),
         damage,
       );
@@ -8802,6 +8955,140 @@ test("Windows ownership reconstructs held interrupted admission without a final 
       (value) => value.settlement.status === "RETIRED",
     ),
   );
+});
+
+test("Windows ownership settles an unlaunched provisioned subset and rejects changed baselines or prior Job history before P", async () => {
+  for (const fault of [null, "changed-baseline", "job-history"]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f, "ownership.detached", true);
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () => assert.fail("No policy was installed"),
+      });
+    f.ownershipDamage = fault;
+    if (fault) await assert.rejects(prepared.effects.admit());
+    assert.ok(
+      !f.rawEvents.some((frame) => frame.startsWith("ownership-launch ")),
+    );
+    const result = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((name) => [
+            name,
+            { admission: "possible" },
+          ]),
+        ),
+      },
+    });
+    assert.equal(
+      Object.values(result).every(
+        (value) => value.settlement.status === "RETIRED",
+      ),
+      fault !== "changed-baseline",
+    );
+    assert.equal(
+      [...f.accounts.values()].every((account) => account.retired),
+      fault !== "changed-baseline",
+    );
+    assert.ok(
+      !f.rawEvents.some((frame) => frame.startsWith("ownership-policy ")),
+    );
+  }
+});
+
+test("Windows partial launch recovery restores possible policy before account retirement and preserves the launcher refusal", async () => {
+  for (const stage of [
+    "start-reply",
+    "setup-refusal",
+    "policy-reply",
+    "ready-refusal",
+    "restoration-refusal",
+    "birth-substitution",
+    "transfer-missing",
+    "watchdog-exit",
+  ]) {
+    const f = rawPreparation(),
+      { recipe, binding } = provisionCase(f, "ownership.detached", true);
+    f.strictRetirement = true;
+    await buildRawPreparation(f);
+    const system = await createSystemEffects(f, f.options),
+      prepared = await system.prepare(recipe, {
+        policyBinding: binding,
+        recordPolicy: () => {},
+      });
+    f.ownershipDamage =
+      stage === "restoration-refusal"
+        ? "policy-reply"
+        : ["birth-substitution", "transfer-missing", "watchdog-exit"].includes(
+              stage,
+            )
+          ? "start-reply"
+          : stage;
+    if (stage === "restoration-refusal") f.coldDamage = "partial-restoration";
+    if (stage === "birth-substitution") f.coldDamage = "ownership-birth";
+    if (stage === "transfer-missing") f.coldDamage = "ownership-transfer";
+    if (stage === "watchdog-exit") f.preSetupExitCode = 124;
+    f.launcherRefusal = Object.assign(new Error("Original launcher refusal"), {
+      stderr: Buffer.from("native-windows-job: phase=adopt active=0 total=1\n"),
+    });
+    await assert.rejects(
+      prepared.effects.admit(),
+      (cause) => cause === f.launcherRefusal,
+    );
+    const end = f.rawEvents.length;
+    assert.ok(
+      !f.rawEvents.some(
+        (frame) =>
+          frame.startsWith("ownership-send ") &&
+          Buffer.from(frame.split(" ")[2], "hex").toString() === "R",
+      ),
+    );
+    const refused = [
+      "restoration-refusal",
+      "birth-substitution",
+      "transfer-missing",
+      "watchdog-exit",
+    ].includes(stage);
+    await recoverRecordedCase(f, system, refused ? "RETAINED" : "RETIRED");
+    await assert.rejects(
+      prepared.effects.admit(),
+      (cause) => cause === f.launcherRefusal,
+    );
+    assert.equal(
+      [...f.accounts.values()].every((account) => account.retired),
+      !refused,
+    );
+    const events = f.rawEvents.slice(end),
+      policy = events.findIndex((frame) =>
+        frame.startsWith("verify-policy-recover "),
+      ),
+      account = events.findIndex((frame) =>
+        frame.startsWith("verify-case-recover "),
+      );
+    if (stage === "restoration-refusal") {
+      assert.ok(policy >= 0);
+      assert.equal(account, -1);
+      assert.equal(system.cause.cause.cause, f.launcherRefusal);
+      continue;
+    }
+    if (
+      ["birth-substitution", "transfer-missing", "watchdog-exit"].includes(
+        stage,
+      )
+    ) {
+      assert.equal(account, -1);
+      assert.equal(policy, -1);
+      continue;
+    }
+    assert.ok(account >= 0);
+    if (["start-reply", "setup-refusal"].includes(stage))
+      assert.equal(policy, -1);
+    else assert.ok(policy >= 0 && policy < account);
+  }
 });
 
 test("Windows ownership requires acknowledged results and fresh unchanged outside and restoration evidence", async () => {

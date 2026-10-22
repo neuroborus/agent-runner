@@ -1384,6 +1384,15 @@ export function createWindowsCustodyReader(value, options = {}) {
     },
     async startOwnership(args) {
       requireWindows(!cleanup && args.length >= 2 && args.length <= 64);
+      requireWindows(
+        (
+          await observe(
+            "ownership-observer",
+            verifier.pid,
+            verifier.creationTime,
+          )
+        ).bound === true,
+      );
       const value = await observe(
         "ownership-launch",
         args.length,
@@ -1393,6 +1402,13 @@ export function createWindowsCustodyReader(value, options = {}) {
       const helper = systemIdentity(value.helper),
         owner = systemIdentity(value.owner);
       requireWindows(helper.pid !== owner.pid);
+      const proof = await verify("retainOwnershipCreators", input, {
+        helper,
+        owner,
+      });
+      requireWindows(
+        proof.independent === true && hash(proof.nativeEventSha256),
+      );
       return { helper, owner };
     },
     async bindPackage() {
@@ -1544,9 +1560,13 @@ export function createWindowsCustodyReader(value, options = {}) {
     async reconstructOwnership() {
       const actual = await observe("ownership-reconstruct");
       closed(actual, ["helper", "owner", "jobObjectSha256", "members"]);
-      const helper = systemIdentity(actual.helper),
-        owner = systemIdentity(actual.owner);
-      requireWindows(helper.pid !== owner.pid && hash(actual.jobObjectSha256));
+      const helper =
+          actual.helper === null ? null : systemIdentity(actual.helper),
+        owner = actual.owner === null ? null : systemIdentity(actual.owner);
+      requireWindows(
+        (!helper || !owner || helper.pid !== owner.pid) &&
+          hash(actual.jobObjectSha256),
+      );
       const members = dense(actual.members, 32).map(normalizeWindowsIdentity);
       requireWindows(
         new Set(members.map(({ pid }) => pid)).size === members.length,

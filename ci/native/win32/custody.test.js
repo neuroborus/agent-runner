@@ -2313,6 +2313,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
         ownership_failure_write: () => false,
+        ownership_failure_fence: () => {},
         reader_cold_failure: () => false,
         reader_scheduler_failure: () => false,
         reader_context_failure: () => false,
@@ -2470,6 +2471,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           ownership_failure_write: () => false,
+          ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure: () => false,
@@ -4411,6 +4413,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           signature_trust: { active: false },
           strrchr,
           ownership_failure_write: () => false,
+          ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure() {
@@ -4486,6 +4489,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       return false;
     },
     ownership_failure_write: () => false,
+    ownership_failure_fence: () => {},
     reader_cold_failure: () => false,
     reader_scheduler_failure: () => false,
     reader_context_failure(source, line, error) {
@@ -8260,6 +8264,662 @@ test("cold account recovery cannot signal a Job reopened by name or remove a sur
     body.indexOf("need(!members)") < body.indexOf("LsaRemoveAccountRights"),
   );
   assert.match(body, /operation_empty\(job\)/u);
+});
+
+test("the actual ownership failure fence covers suspended acquired creators without admitting cleanup", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body =
+      /static void ownership_failure_fence\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+        source,
+      )?.[1];
+  assert.ok(body);
+  const program = new Script(
+    `(error) => {${body
+      .replace(
+        "HANDLE creators[] = {ownership_launcher.hProcess, ownership_owner.hProcess};",
+        "const creators = [ownership_launcher.hProcess, ownership_owner.hProcess];",
+      )
+      .replace("unsigned i", "let i")
+      .replace("DWORD waited", "const waited")}}`,
+  );
+  for (const phase of [
+    "unlaunched",
+    "launcher-only",
+    "both",
+    "signaled",
+    "failure",
+  ]) {
+    const calls = [];
+    let error = 5;
+    program.runInNewContext({
+      ownership_launcher: {
+        hProcess: phase === "unlaunched" ? null : "launcher",
+      },
+      ownership_owner: {
+        hProcess: ["both", "signaled", "failure"].includes(phase)
+          ? "custodian"
+          : null,
+      },
+      case_job: "original-job",
+      WAIT_TIMEOUT: 258,
+      WAIT_OBJECT_0: 0,
+      stderr: {},
+      WaitForSingleObject: () => (phase === "signaled" ? 0 : 258),
+      TerminateJobObject: (job, code) => {
+        assert.equal(job, "original-job");
+        assert.equal(code, 126);
+        calls.push(job);
+        error = 6;
+        return phase !== "failure";
+      },
+      TerminateProcess: (process, code) => {
+        assert.equal(code, 126);
+        calls.push(process);
+        error = 7;
+        return phase !== "failure";
+      },
+      fprintf: () => {},
+      fflush: () => {},
+      GetLastError: () => error,
+      SetLastError: (value) => {
+        error = value;
+      },
+    })(5);
+    assert.equal(error, 5);
+    assert.deepEqual(
+      calls,
+      phase === "unlaunched"
+        ? []
+        : phase === "signaled"
+          ? ["original-job"]
+          : phase === "launcher-only"
+            ? ["original-job", "launcher"]
+            : ["original-job", "launcher", "custodian"],
+    );
+  }
+});
+
+test("the actual ownership producer transfers original process/token custody before publishing a birth", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static void ownership_birth_save\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const program = new Script(
+    `(leaf, process, token) => {${body
+      .replace("struct ownership_birth birth = {0};", "const birth = {};")
+      .replace(
+        "FILETIME created, ended, kernel, user;",
+        "const created = {}, ended = {}, kernel = {}, user = {};",
+      )
+      .replace("TOKEN_STATISTICS *statistics", "const statistics")
+      .replaceAll("statistics->", "statistics.")
+      .replaceAll("*token", "token.value")
+      .replace(/&(created|ended|kernel|user)\b/gu, "$1")
+      .replace(
+        /&birth\.(process|token)\b/gu,
+        (_, field) => `{set value(v){birth.${field}=v}}`,
+      )
+      .replace("(BYTE *)&birth", "birth")
+      .replaceAll("(ULONGLONG)", "")
+      .replace("sizeof(birth)", "1")}}`,
+  );
+  for (const failure of [null, "token", "process-transfer", "token-transfer"]) {
+    const calls = [],
+      transferred = new Map();
+    let published;
+    const run = () =>
+      program.runInNewContext({
+        ownership_observer: "admitted-observer",
+        ownership_observer_birth: 90,
+        TOKEN_QUERY: 8,
+        TOKEN_DUPLICATE: 2,
+        TokenStatistics: 1,
+        PROCESS_QUERY_INFORMATION: 0x400,
+        PROCESS_VM_READ: 16,
+        READ_CONTROL: 0x20000,
+        SYNCHRONIZE: 0x100000,
+        FALSE: false,
+        case_custody: 2,
+        need: assert.ok,
+        system_process: () => true,
+        GetCurrentProcess: () => "creator",
+        GetProcessTimes: (_process, created) => {
+          Object.assign(created, { dwHighDateTime: 0, dwLowDateTime: 91 });
+          return true;
+        },
+        GetProcessId: (process) => (process === "original-process" ? 20 : 10),
+        OpenProcessToken: (process, _access, output) => {
+          assert.equal(process, "original-process");
+          calls.push("acquire-token");
+          output.value = "original-token";
+          return failure !== "token";
+        },
+        token_info: (token) => {
+          assert.equal(token, "original-token");
+          return { TokenId: "original-token-id" };
+        },
+        free: () => {},
+        DuplicateHandle: (
+          creator,
+          original,
+          observer,
+          output,
+          access,
+          inherit,
+        ) => {
+          assert.equal(creator, "creator");
+          assert.equal(observer, "admitted-observer");
+          assert.equal(inherit, false);
+          const kind =
+            original === "original-process"
+              ? "process-transfer"
+              : "token-transfer";
+          calls.push(kind);
+          if (failure === kind) return false;
+          assert.equal(access, kind === "token-transfer" ? 10 : 0x120410);
+          output.value = kind;
+          transferred.set(kind, original);
+          return true;
+        },
+        operation_record: (leaf, custody, birth) => {
+          assert.equal(leaf, "ownership-launcher.birth");
+          assert.equal(custody, 2);
+          assert.equal(transferred.size, 2);
+          assert.equal(birth.observer, 10);
+          assert.equal(birth.observerCreation, 90);
+          assert.equal(birth.pid, 20);
+          assert.equal(birth.creation, 91);
+          assert.equal(birth.tokenId, "original-token-id");
+          published = true;
+          calls.push("publish");
+        },
+      })("ownership-launcher.birth", "original-process", {});
+    if (failure) assert.throws(run, undefined, failure);
+    else run();
+    assert.equal(!!published, !failure);
+    if (!failure)
+      assert.deepEqual(calls, [
+        "acquire-token",
+        "process-transfer",
+        "token-transfer",
+        "publish",
+      ]);
+  }
+});
+
+test("the actual birth import admits only the original observer and transferred process/token pair", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf("    struct ownership_birth *birth = &births[i];"),
+    end = source.indexOf("    slots[i] = index;", start),
+    body = source
+      .slice(start, end + "    slots[i] = index;".length)
+      .replace(
+        "struct ownership_birth *birth = &births[i];",
+        "const birth = record;",
+      )
+      .replace("TOKEN_STATISTICS *statistics", "const statistics")
+      .replace("wchar_t *sid", "const sid")
+      .replace("DWORD *session", "const session")
+      .replaceAll("->", ".")
+      .replaceAll('L"', '"')
+      .replaceAll("!*session", "!session.value")
+      .replace(
+        /&(created|ended|kernel|user|statistics\.TokenId|birth\.tokenId)\b/gu,
+        "$1",
+      )
+      .replaceAll("(ULONGLONG)", "")
+      .replace("sizeof(LUID)", "1")
+      .replaceAll("unsigned ", "let "),
+    program = new Script(`(record) => {${body} return slots[i];}`);
+  assert.ok(start > 0 && end > start);
+  for (const fault of [
+    null,
+    "observer",
+    "observer-birth",
+    "process-type",
+    "process-birth",
+    "token-id",
+    "sid",
+    "session",
+    "alias",
+  ]) {
+    const processes = [],
+      tokens = [],
+      sessions = [],
+      context = {
+        process_count: 0,
+        processes,
+        tokens,
+        sessions,
+        i: 0,
+        slots: [],
+        observerBirth: 90,
+        created: {},
+        ended: {},
+        kernel: {},
+        user: {},
+        TokenStatistics: 1,
+        TokenSessionId: 2,
+        need: assert.ok,
+        GetCurrentProcessId: () => 10,
+        object_type: (handle, type) =>
+          handle === (type === "Process" ? "process" : "token") &&
+          fault !== "process-type",
+        GetProcessId: () => 20,
+        GetProcessTimes: (_process, created) => {
+          Object.assign(created, {
+            dwHighDateTime: 0,
+            dwLowDateTime: fault === "process-birth" ? 92 : 91,
+          });
+          return true;
+        },
+        OpenProcessToken: assert.fail,
+        token_info: (_token, kind) =>
+          kind === 1
+            ? { TokenId: fault === "token-id" ? "changed" : "original" }
+            : { value: fault === "session" ? 1 : 0 },
+        token_sid: () => (fault === "sid" ? "S-1-5-19" : "S-1-5-18"),
+        memcmp: (a, b) => Number(a !== b),
+        wcscmp: (a, b) => Number(a !== b),
+        free: () => {},
+        LocalFree: () => {},
+      },
+      record = {
+        pid: 20,
+        creation: 91,
+        observer: fault === "observer" ? 11 : 10,
+        observerCreation: fault === "observer-birth" ? 89 : 90,
+        process: "process",
+        token: "token",
+        tokenId: "original",
+      },
+      run = program.runInNewContext(context);
+    if (fault === "alias") {
+      context.process_count = 1;
+      processes[0] = "different-process-handle";
+      tokens[0] = "different-token-handle";
+    }
+    if (fault) assert.throws(() => run(record), undefined, fault);
+    else {
+      assert.equal(run(record), 0);
+      assert.equal(run(record), 0);
+      assert.equal(context.process_count, 1);
+      assert.deepEqual(processes, ["process"]);
+      assert.deepEqual(tokens, ["token"]);
+      assert.deepEqual(sessions, [0]);
+    }
+  }
+});
+
+test("actual provisioning retirement closes proven token and Job subsets before removing the account", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static void case_retire\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const program = new Script(
+    body
+      .replace("struct case_account_record held = {0};", "const held = {};")
+      .replace("wchar_t name[21];", "const name = {};")
+      .replace("PSID user;", "let user;")
+      .replace(
+        "LSA_OBJECT_ATTRIBUTES attributes = {0};",
+        "const attributes = {};",
+      )
+      .replace("LSA_HANDLE policy;", "let policy;")
+      .replace(
+        "JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};",
+        "const accounting = {};",
+      )
+      .replaceAll("&accounting", "accounting")
+      .replace(/\b(?:BOOL|DWORD)\b/gu, "const")
+      .replaceAll("(unsigned)", "")
+      .replaceAll("unsigned i", "let i")
+      .replace(/sizeof\(\w+\)/gu, "1")
+      .replaceAll("&held", "held")
+      .replaceAll("&case_record", "case_record")
+      .replaceAll("&attributes", "attributes")
+      .replace(/&(user|policy)\b/gu, (_, name) => `{set value(v){${name}=v}}`)
+      .replaceAll('L"', '"'),
+  );
+  for (const subset of ["token", "job", "both"])
+    for (const failure of [null, "close", "rights", "query", "history"]) {
+      const calls = [],
+        api = {
+          case_token: subset === "job" ? null : "token",
+          case_job: subset === "token" ? null : "job",
+          helpers: [{ process: null }, { process: null }],
+          audit_owned: false,
+          entries: [{ path: "custody" }],
+          case_custody: 0,
+          case_record: {
+            nonce: "c".repeat(32),
+            accountSid: "S-1-5-21-1-2-3-1001",
+          },
+          case_sockets: [],
+          case_socket_count: 0,
+          NULL: null,
+          TRUE: true,
+          POLICY_LOOKUP_NAMES: 1,
+          NERR_Success: 0,
+          need: assert.ok,
+          account_record: () => {},
+          memcmp: () => 0,
+          JobObjectBasicAccountingInformation: 1,
+          ERROR_SUCCESS: 0,
+          ERROR_INVALID_DATA: 13,
+          stderr: "stderr",
+          SetLastError: () => {},
+          GetLastError: () => 5,
+          fprintf: () => {},
+          fflush: () => {},
+          QueryInformationJobObject: (job, _kind, accounting) => {
+            assert.equal(job, "job");
+            calls.push("unused-job");
+            accounting.ActiveProcesses = 0;
+            accounting.TotalProcesses = failure === "history" ? 1 : 0;
+            return failure !== "query";
+          },
+          recovery_principal_empty: () => calls.push("census"),
+          swprintf_s: () => 1,
+          account_check: () => calls.push("account-check"),
+          closesocket: assert.fail,
+          WSACleanup: assert.fail,
+          CloseHandle: (handle) => {
+            calls.push("close-" + handle);
+            return failure !== "close";
+          },
+          ConvertStringSidToSidW: (_sid, out) => {
+            out.value = "sid";
+            return true;
+          },
+          LsaOpenPolicy: (_server, _attributes, _access, out) => {
+            out.value = "policy";
+            return 0;
+          },
+          LsaRemoveAccountRights: () => {
+            calls.push("rights");
+            return failure === "rights" ? 5 : 0;
+          },
+          LsaClose: () => {
+            calls.push("close-policy");
+            return 0;
+          },
+          LocalFree: () => {},
+          NetUserDel: () => {
+            calls.push("delete-account");
+            return 0;
+          },
+          printf: () => calls.push("retired"),
+        };
+      const refused =
+        failure &&
+        (subset !== "token" || !["query", "history"].includes(failure));
+      if (refused) assert.throws(() => program.runInNewContext(api));
+      else program.runInNewContext(api);
+      assert.equal(calls.includes("retired"), !refused);
+      assert.equal(calls.includes("unused-job"), subset !== "token");
+      if (!refused) {
+        assert.ok(calls.indexOf("census") < calls.indexOf("rights"));
+        assert.ok(
+          calls.indexOf("close-" + (subset === "token" ? "token" : "job")) <
+            calls.indexOf("rights"),
+        );
+        assert.ok(
+          calls.indexOf("close-policy") < calls.indexOf("delete-account"),
+        );
+        assert.equal(api.case_token, null);
+        assert.equal(api.case_job, null);
+      } else assert.ok(!calls.includes("delete-account"));
+    }
+});
+
+test("actual reconstruction retains the held Job identity through an unlaunched fence", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      '} else if (!strcmp(values[0], "ownership-reconstruct")) {',
+    ),
+    body = source
+      .slice(source.indexOf("\n", start), source.indexOf("BYTE bytes[", start))
+      .replace("static char jobPin[65];", 'const jobPin = {text: ""};'),
+    fresh = source
+      .split("\n")
+      .find((line) =>
+        line.includes("strcpy_s(view.payloadPin, 65, entries[6].pin)"),
+      );
+  assert.ok(start > 0 && fresh);
+  const pin = "a".repeat(64),
+    calls = [],
+    result = new Script(
+      `(() => {${body}} case_job = NULL; ${fresh} return view.jobPin.text;})()`,
+    ).runInNewContext({
+      case_job: "original-job",
+      case_token: "token",
+      n: 2,
+      NULL: null,
+      ownership_last_job_pin: { text: "" },
+      view: { payloadPin: {}, jobPin: {} },
+      entries: Array.from({ length: 7 }, () => ({ pin: "payload" })),
+      need: assert.ok,
+      ownership_job_pin: (job, output) => {
+        assert.equal(job, "original-job");
+        calls.push(job);
+        output.text = pin;
+      },
+      strcpy_s: (output, _size, input) => {
+        output.text = input.text ?? input;
+      },
+    });
+  assert.equal(result, pin);
+  assert.deepEqual(calls, ["original-job"]);
+});
+
+test("the actual shared witness scopes unchanged-policy evidence to a captured ownership baseline", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    census = source.indexOf("  ownership_census(&view);"),
+    start = source.indexOf("\n", census),
+    end = source.indexOf("  BOOL launcherSignaled =", start),
+    claim =
+      /view\.restored \? "true" : "false", ([^?\n]+) \? "true" : "false", suspended/u.exec(
+        source,
+      )?.[1];
+  assert.ok(census > 0 && start > census && end > start && claim);
+  const body = source
+      .slice(start, end)
+      .replace("BOOL baselineOwned", "const baselineOwned")
+      .replace("unsigned i", "let i")
+      .replace("char hash[65];", 'const hash = {text: ""};')
+      .replace("&entries[i+1].file.id", "entries[i+1].file.id")
+      .replace("sizeof(FILE_ID_INFO)", "1"),
+    program = new Script(`(view) => {${body} return ${claim};}`);
+  for (const phase of [
+    "access-before-launch",
+    "ownership-before-launch",
+    "ownership-partial",
+    "ownership-restored",
+    "access",
+    "missing-baseline",
+    "changed-baseline",
+    "incomplete-baseline",
+  ]) {
+    const reads = [],
+      captured = ![
+        "access-before-launch",
+        "access",
+        "missing-baseline",
+      ].includes(phase),
+      text = "a".repeat(64),
+      baseline = Array.from({ length: 6 }, (_, i) => {
+        const value =
+          captured && !(phase === "incomplete-baseline" && i === 4) ? text : "";
+        return { 0: value ? 97 : 0, text: value };
+      }),
+      view = {
+        files: Array.from({ length: 6 }, (_, i) => i),
+        baseline,
+        access: phase === "access",
+        installed: false,
+        restored: ["ownership-restored", "missing-baseline"].includes(phase),
+        possible: phase === "ownership-partial",
+      },
+      run = () =>
+        program.runInNewContext({
+          view,
+          entries: Array.from({ length: 7 }, () => ({ file: { id: {} } })),
+          FileIdInfo: 1,
+          SE_FILE_OBJECT: 1,
+          TRUE: true,
+          FALSE: false,
+          GetFileInformationByHandleEx: () => true,
+          security: () => {},
+          need: assert.ok,
+          strlen: (value) => value.text.length,
+          strcmp: (a, b) => Number(a.text !== b.text),
+          ownership_baseline_read: (i, hash) => {
+            reads.push(i);
+            hash.text = phase === "changed-baseline" ? "b".repeat(64) : text;
+          },
+          ownership_acl: assert.fail,
+          ownership_network: assert.fail,
+          ownership_network_absent: () => reads.push("filters-absent"),
+        })(view);
+    if (
+      ["missing-baseline", "changed-baseline", "incomplete-baseline"].includes(
+        phase,
+      )
+    )
+      assert.throws(run, undefined, phase);
+    else {
+      assert.equal(
+        run(),
+        ["ownership-before-launch", "ownership-restored"].includes(phase),
+        phase,
+      );
+      assert.deepEqual(
+        reads,
+        captured && !view.possible ? [0, 1, 2, 3, 4, 5, "filters-absent"] : [],
+        phase,
+      );
+    }
+  }
+});
+
+test("actual ownership restoration distinguishes an untouched baseline from possible or installed policy", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      '} else if (!strcmp(values[0], "ownership-restore")) {',
+    ),
+    end = source.indexOf(
+      '} else if (!strcmp(values[0], "ownership-account-retire")) {',
+      start,
+    ),
+    body = source
+      .slice(start, end)
+      .slice(source.slice(start, end).indexOf("\n"))
+      .replaceAll("unsigned i", "let i")
+      .replaceAll("char hash[65];", 'const hash = {value: ""};')
+      .replaceAll("&ownership_policy_file", "ownership_policy_file"),
+    program = new Script(`${body}\nownership_policy_restored;`);
+  assert.ok(start > 0 && end > start);
+  for (const fault of [
+    null,
+    "possible",
+    "changed",
+    "missing-baseline",
+    "installed",
+    "live-job",
+    "filters",
+    "close",
+  ]) {
+    const calls = [],
+      baseline = Array(6).fill("a".repeat(64)),
+      api = {
+        n: 2,
+        case_job: fault === "live-job" ? "job" : null,
+        ownership_policy_installed: ["installed", "close"].includes(fault),
+        ownership_policy_possible: fault === "possible",
+        ownership_policy_restored: false,
+        ownership_policy_file: {},
+        ownership_before: Array(6).fill("before"),
+        ownership_installed: Array(6).fill("wanted"),
+        ownership_baseline: baseline,
+        TRUE: true,
+        FALSE: false,
+        NULL: null,
+        need: assert.ok,
+        strlen: (value) => value.length,
+        strcmp: (a, b) => Number((a.value ?? a) !== (b.value ?? b)),
+        LocalFree: () => {},
+        ownership_network_absent: () => {
+          calls.push("absent");
+          assert.notEqual(fault, "filters");
+        },
+        ownership_baseline_read: (index, hash) => {
+          calls.push("baseline-" + index);
+          hash.value =
+            fault === "changed" && index === 4
+              ? "b".repeat(64)
+              : "a".repeat(64);
+        },
+        ownership_network: (remove, observe) => {
+          calls.push(remove ? "remove" : "inspect-network");
+          assert.equal(observe, !remove);
+        },
+        ownership_acl: (index, restore, inspect) => {
+          calls.push((restore ? "restore-" : "inspect-") + index);
+          assert.equal(inspect, !restore);
+        },
+        close_file: () => {
+          calls.push("close-policy");
+          assert.notEqual(fault, "close");
+        },
+        printf: () => calls.push("restored"),
+      };
+    if (fault === "missing-baseline") baseline[0] = "";
+    if (fault && fault !== "installed")
+      assert.throws(() => program.runInNewContext(api), undefined, fault);
+    else assert.equal(program.runInNewContext(api), true);
+    assert.equal(
+      calls.includes("restored"),
+      !fault || fault === "installed",
+      fault,
+    );
+    if (!fault)
+      assert.deepEqual(calls, [
+        "absent",
+        ...Array.from({ length: 6 }, (_, i) => "baseline-" + i),
+        "restored",
+      ]);
+    if (fault === "possible") assert.deepEqual(calls, []);
+    if (fault === "installed")
+      assert.ok(
+        calls.indexOf("inspect-5") < calls.indexOf("remove") &&
+          calls.indexOf("remove") < calls.indexOf("restore-0") &&
+          calls.indexOf("restore-5") < calls.indexOf("close-policy"),
+      );
+  }
 });
 
 test("the native ownership error drain preserves launcher facts through fragmented control refusal and EOF", async () => {

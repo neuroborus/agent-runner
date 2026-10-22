@@ -318,7 +318,8 @@ export async function recoverWindowsCases(
 ) {
   requireObservation(signal instanceof AbortSignal && !signal.aborted);
   joinPackageDeclaration(state);
-  const results = [];
+  const results = [],
+    unfinished = new Map();
   const failures = [],
     remember = (cause) => {
       if (!failures.includes(cause)) failures.push(cause);
@@ -334,7 +335,7 @@ export async function recoverWindowsCases(
   const pending = [...active.values()].some((current) => !current.retired);
   // Safe retained owners know their original bindings even when a protected
   // record has become unreadable. Attempt every owner before parsing evidence.
-  for (const current of active.values()) {
+  for (const [id, current] of active) {
     try {
       if (!current.retired) {
         const result =
@@ -345,7 +346,26 @@ export async function recoverWindowsCases(
         current.retired = true;
       }
     } catch (cause) {
-      remember(cause);
+      // The original refusal remains available to the failed case. A dead
+      // transport cannot supply retirement commands or successful admission,
+      // but it must not prevent the independent observer from proving cleanup.
+      current.retirementFailure ??= cause;
+      const causes = [cause];
+      unfinished.set(id, causes);
+      if (current.repositoryProvisioning) {
+        try {
+          const custody = await provisioning.closeReader(current, { signal });
+          if (
+            !retired(custody) &&
+            !retired(custody?.observerSettlement) &&
+            custody?.cause &&
+            !causes.includes(custody.cause)
+          )
+            causes.push(custody.cause);
+        } catch (cleanup) {
+          if (!causes.includes(cleanup)) causes.push(cleanup);
+        }
+      }
     }
   }
   let inventory;
@@ -354,6 +374,8 @@ export async function recoverWindowsCases(
     inventory = cases(state, records);
     validateObservers(state, records);
   } catch (cause) {
+    for (const causes of unfinished.values())
+      for (const original of causes) remember(original);
     remember(cause);
     throw refusal();
   }
@@ -381,14 +403,24 @@ export async function recoverWindowsCases(
     try {
       // Also read a finished owner independently. An old RETIRED receipt, an
       // absent task or a fixture exit code alone is never settlement evidence.
-      results.push(await observeCase(state, options, group, signal));
+      const current = active.get(id);
+      results.push(
+        unfinished.has(id) && typeof current?.reader?.recoverCase === "function"
+          ? await current.reader.recoverCase(group, { signal })
+          : await observeCase(state, options, group, signal),
+      );
+      if (current) current.retired = true;
+      unfinished.delete(id);
     } catch (cause) {
+      for (const original of unfinished.get(id) ?? []) remember(original);
       remember(cause);
     }
   }
   try {
     requireObservation([...active.keys()].every((id) => inventory.has(id)));
   } catch (cause) {
+    for (const causes of unfinished.values())
+      for (const original of causes) remember(original);
     remember(cause);
   }
   if (failures.length) throw refusal();

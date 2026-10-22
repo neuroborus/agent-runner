@@ -105,6 +105,7 @@ export function windowsVerificationArguments(name, values) {
         /^[1-9][0-9]{0,19}$/u.test(args[3]);
       break;
     case "case-retired":
+    case "ownership-births":
       valid = args.length === 2 && slot(args[0]) && hash(args[1]);
       break;
     case "policy-recover":

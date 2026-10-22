@@ -7578,6 +7578,56 @@ Access, file/Git/release execution and complete cold reconstruction remain separ
 owners; these injected ownership regressions cannot produce full system PASS or
 native Windows acceptance.
 
+The account producer checks the newly configured payload Job's limits, UI flags
+and cumulative accounting before publishing it. A provisioned launcher opens that
+existing protected Job; it cannot create a replacement or reset its configuration.
+Producer and adopter both require flags `0x2008`, process limit 32, UI restrictions
+255, `ActiveProcesses == 0` and `TotalProcesses == 0`. Each adoption query retains
+its own immediate result/error. Creation also retains its error across descriptor
+release. Refusal reports all sampled fields through the original launcher stderr
+carrier before process cleanup can change them. Empty current membership never
+authorizes reuse of a previously assigned Job. The original conjunction failure
+did not identify its failed query or field; these repairs do not establish its
+native cause or hosted closure.
+Provisioning retirement checks unused accounting and principal absence for its
+acquired token/Job subset even when Job configuration has not finished.
+
+The private ownership owner captures complete held-file security baselines before
+launch. A refusal before policy installation can settle the acquired account/Job
+and helper subset only after independent principal/Job retirement, baseline
+equality and owned-filter absence; it needs no successful payload observation or
+installed-policy receipt. Reconstruction retains the held Job identity through
+closure even when no prelaunch witness ran. Possible installation remains distinct
+from untouched state. The shared prelaunch witness also serves access cases before
+their launch mode is set; it claims unchanged ownership policy only for a
+captured, fully verified ownership baseline. Recovery reconstructs protected
+descriptor/filter records and restores possibly installed policy before removing
+account rights or the account. Missing or changed recovery evidence retains
+custody. Before each launcher/custodian thread resumes, the producer duplicates
+its original process and primary-token handles into the already admitted System
+observer. Protected records bind those handles to the observer birth, original
+process birth, token ID, context and custody object. Import checks the actual
+held objects; a lost launch reply never requires reopening an exited primary
+token. Reading a birth record alone supplies no current exit or fresh native
+observation. A missing transfer or a different observer retains custody.
+Acquisition refusal fences only already acquired creator/Job handles, including a
+creator still suspended before control EOF can run. It preserves the first native
+failure and separate fence errors; this fence alone proves no policy restoration
+or account retirement.
+
+A failed reader's already admitted observer retains the original process/token
+handles through complete case recovery. That same independent owner proves
+creator/whole-Job retirement and non-watchdog exits, restores possible policy,
+proves account/rights/Job absence and removes the exact task before releasing the
+reader dependency and completing its own finish. Its own retirement remains a
+separate proof. A fresh observer can still revalidate acknowledged closed owners;
+it cannot replace original token custody after a terminal reader failure.
+Reader closure alone still returns retained custody; it does not settle policy or
+erase the original launcher refusal. Independent case recovery may settle a failed
+retained owner, while unresolved observer, restoration or identity failures remain
+separate cleanup failures. Cancellation, helper/owner loss, final handle close,
+literal argv and storage guarantees retain their original owners and bounds.
+
 Preparation persists case intent before provisioning, validates approved concrete
 parameters before dependent custody, and supplies the existing launch, policy,
 ownership, access, file, fixed Git, release and retirement owners. Native held

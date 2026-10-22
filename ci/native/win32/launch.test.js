@@ -1308,3 +1308,197 @@ test("the native ownership producer carries the exact literal argv and existing 
     ]);
   }
 });
+
+test("actual Job adoption samples every query and rejects assignment history even with no active members", async () => {
+  const source = await readFile(new URL("account.h", import.meta.url), "utf8"),
+    body = /static void account_job_unused\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  const program = new Script(
+    `(job, phase) => {${body
+      .replace(
+        /JOBOBJECT_\w+ (limits|ui|accounting) = \{0\};/gu,
+        (_, name) =>
+          `const ${name} = ${name === "limits" ? "{BasicLimitInformation:{LimitFlags:0,ActiveProcessLimit:0}}" : name === "ui" ? "{UIRestrictionsClass:0}" : "{ActiveProcesses:0,TotalProcesses:0,TotalTerminatedProcesses:0}"};`,
+      )
+      .replace(/\b(?:BOOL|DWORD)\b/gu, "const")
+      .replace(/sizeof\(\w+\)/gu, "1")
+      .replace(/&(limits|ui|accounting)\b/gu, "$1")
+      .replace(/\(unsigned\)/gu, "")}}`,
+  );
+  for (const fault of [
+    null,
+    "limits",
+    "ui",
+    "accounting",
+    "flags",
+    "limit",
+    "restrictions",
+    "active",
+    "history",
+  ]) {
+    let error = 999;
+    const calls = [],
+      diagnostics = [],
+      run = () =>
+        program.runInNewContext({
+          ERROR_SUCCESS: 0,
+          ERROR_INVALID_DATA: 13,
+          JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: 0x2000,
+          JOB_OBJECT_LIMIT_ACTIVE_PROCESS: 8,
+          JobObjectExtendedLimitInformation: "limits",
+          JobObjectBasicUIRestrictions: "ui",
+          JobObjectBasicAccountingInformation: "accounting",
+          NULL: null,
+          stderr: "stderr",
+          SetLastError: (value) => {
+            error = value;
+          },
+          GetLastError: () => error,
+          QueryInformationJobObject: (job, kind, value) => {
+            assert.equal(job, "original-job");
+            calls.push(kind);
+            if (kind === "limits")
+              Object.assign(value.BasicLimitInformation, {
+                LimitFlags: fault === "flags" ? 0x2808 : 0x2008,
+                ActiveProcessLimit: fault === "limit" ? 1 : 32,
+              });
+            if (kind === "ui")
+              value.UIRestrictionsClass = fault === "restrictions" ? 0 : 255;
+            if (kind === "accounting")
+              Object.assign(value, {
+                ActiveProcesses: fault === "active" ? 1 : 0,
+                TotalProcesses: fault === "history" ? 1 : 0,
+                TotalTerminatedProcesses: fault === "history" ? 1 : 0,
+              });
+            error = fault === kind ? 5 : 777;
+            return fault !== kind;
+          },
+          fprintf: (_stream, format, ...values) => {
+            diagnostics.push(values);
+            assert.match(format, /active=%lu total=%lu terminated=%lu/u);
+            error = 6; // Reporting cannot replace the sampled API failure.
+          },
+          fflush: () => {},
+          need: (accepted) => {
+            if (!accepted) throw new Error("adoption refused: " + error);
+          },
+        })("original-job", "adopt");
+    if (fault)
+      assert.throws(
+        run,
+        new RegExp(
+          `adoption refused: ${["limits", "ui", "accounting"].includes(fault) ? 5 : 13}`,
+          "u",
+        ),
+      );
+    else run();
+    assert.deepEqual(calls, ["limits", "ui", "accounting"], String(fault));
+    assert.equal(diagnostics.length, fault ? 1 : 0);
+    if (fault === "history")
+      assert.deepEqual(diagnostics[0].slice(-3), [0, 1, 1]);
+  }
+});
+
+test("the actual Job producer preserves creation errors across descriptor release", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    begin = source.indexOf(
+      '  need(swprintf_s(jobName, 96, L"Local\\\\NativeProof-%hs"',
+    ),
+    end = source.indexOf("JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits", begin),
+    body = source
+      .slice(begin, end)
+      .replace("DWORD jobError", "const jobError")
+      .replace("&sa", "sa")
+      .replaceAll('L"', '"'),
+    program = new Script(body);
+  assert.ok(begin > 0 && end > begin);
+  for (const status of [0, 5, 183]) {
+    let error = 0;
+    const api = {
+      case_job: null,
+      jobName: {},
+      nonce: "c".repeat(32),
+      sa: {},
+      sd: {},
+      ERROR_ALREADY_EXISTS: 183,
+      swprintf_s: () => 1,
+      SetLastError: (value) => {
+        error = value;
+      },
+      GetLastError: () => error,
+      CreateJobObjectW: () => {
+        error = status;
+        return status === 5 ? null : "job";
+      },
+      LocalFree: () => {
+        error = 6;
+      },
+      need: (ok) => {
+        if (!ok) throw new Error("Job creation refused: " + error);
+      },
+    };
+    if (status)
+      assert.throws(
+        () => program.runInNewContext(api),
+        new RegExp(`Job creation refused: ${status}`, "u"),
+      );
+    else program.runInNewContext(api);
+    assert.equal(error, status);
+  }
+});
+
+test("the actual named Job handoff opens provisioned authority and never resets its limits", async () => {
+  const source = await readFile(new URL("launcher.c", import.meta.url), "utf8"),
+    begin = source.indexOf(
+      "  SetLastError(ERROR_SUCCESS);\n  HANDLE createdJob",
+    ),
+    body = source
+      .slice(begin, source.indexOf("  if (provisioned) {", begin))
+      .replace("&protectedSa", "protectedSa")
+      .replace(/\b(?:HANDLE|DWORD)\b/gu, "const");
+  assert.ok(begin > 0);
+  const program = new Script(`${body}\ncreatedJob;`);
+  for (const provisioned of [false, true]) {
+    const calls = [];
+    const result = program.runInNewContext({
+      provisioned,
+      protectedSa: {},
+      jobName: "Local\\NativeProof-fixture",
+      JOB_OBJECT_ALL_ACCESS: 0x1f003f,
+      ERROR_SUCCESS: 0,
+      FALSE: false,
+      NULL: null,
+      SetLastError: () => {},
+      GetLastError: () => 0,
+      OpenJobObjectW: (_access, inherit, name) => {
+        assert.equal(inherit, false);
+        calls.push(["open", name]);
+        return "original";
+      },
+      CreateJobObjectW: (_attributes, name) => {
+        calls.push(["create", name]);
+        return "new";
+      },
+      checked: assert.ok,
+      SetInformationJobObject: assert.fail,
+    });
+    assert.equal(result, provisioned ? "original" : "new");
+    assert.deepEqual(calls, [
+      [provisioned ? "open" : "create", "Local\\NativeProof-fixture"],
+    ]);
+  }
+  const adopted = source.slice(
+    source.indexOf("  if (provisioned) {", begin),
+    source.indexOf("  wchar_t stationName", begin),
+  );
+  assert.match(adopted, /account_job_unused\(createdJob, "adopt"\)/u);
+  assert.match(
+    adopted,
+    /if \(!provisioned\) \{[\s\S]*SetInformationJobObject/u,
+  );
+});

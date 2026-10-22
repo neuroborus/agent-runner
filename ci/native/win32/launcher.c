@@ -295,7 +295,7 @@ int wmain(int argc, wchar_t **argv) {
   }
   PSID capability; need(ConvertStringSidToSidW(argv[2], &capability));
   PSID user; need(ConvertStringSidToSidW(userSid, &user) && !EqualSid(user, capability)); LocalFree(user);
-  HANDLE token = restrict_token(base, capability); CloseHandle(base);
+  HANDLE token = restrict_token(base, capability); checked(CloseHandle(base), "CloseHandle(base-token)");
   if (ownership) {
     PACL dacl; BOOL present, defaulted; need(GetSecurityDescriptorDacl(protectedSd, &present, &dacl, &defaulted) && present && dacl);
     TOKEN_DEFAULT_DACL creation = {dacl}; need(SetTokenInformation(token, TokenDefaultDacl, &creation, sizeof(creation)));
@@ -304,27 +304,29 @@ int wmain(int argc, wchar_t **argv) {
   if (!provisioned) need(CreateDirectoryW(argv[5], &fileSa)); LocalFree(fileSd);
   HANDLE workspace = held(argv[5], TRUE, FILE_LIST_DIRECTORY); if (provisioned) private_dacl(workspace);
   wchar_t jobName[128]; need(swprintf_s(jobName, 128, L"Local\\NativeProof-%ls", nonce) > 0);
-  SetLastError(ERROR_SUCCESS); HANDLE createdJob = CreateJobObjectW(&protectedSa, jobName); DWORD jobError = GetLastError();
-  if (createdJob && jobError == ERROR_ALREADY_EXISTS) {
+  SetLastError(ERROR_SUCCESS);
+  HANDLE createdJob = provisioned ? OpenJobObjectW(JOB_OBJECT_ALL_ACCESS, FALSE, jobName) : CreateJobObjectW(&protectedSa, jobName);
+  DWORD jobError = GetLastError();
+  checked(createdJob != NULL, provisioned ? "OpenJobObjectW(payload)" : "CreateJobObjectW(payload)");
+  if (provisioned) {
     /* Adoption requires the protected native account record and an unchanged,
      * empty System-owned Job. There is still no create-then-assign fallback. */
-    need(provisioned); PSID owner, system; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
+    PSID owner, system; PACL dacl; PSECURITY_DESCRIPTOR sd; SECURITY_DESCRIPTOR_CONTROL flags; DWORD revision;
     need(ConvertStringSidToSidW(L"S-1-5-18", &system) && GetSecurityInfo(createdJob, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL, &dacl, NULL, &sd) == ERROR_SUCCESS &&
       EqualSid(owner, system) && dacl && dacl->AceCount == 1 && GetSecurityDescriptorControl(sd, &flags, &revision) && (flags & SE_DACL_PROTECTED));
     ACCESS_ALLOWED_ACE *ace; need(GetAce(dacl, 0, (void **)&ace) && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE && !ace->Header.AceFlags && EqualSid(&ace->SidStart, system) && (ace->Mask == GENERIC_ALL || ace->Mask == JOB_OBJECT_ALL_ACCESS));
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION prior; JOBOBJECT_BASIC_UI_RESTRICTIONS ui; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounts;
-    need(QueryInformationJobObject(createdJob, JobObjectExtendedLimitInformation, &prior, sizeof(prior), NULL) && prior.BasicLimitInformation.LimitFlags == (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS) && prior.BasicLimitInformation.ActiveProcessLimit == 32 &&
-      QueryInformationJobObject(createdJob, JobObjectBasicUIRestrictions, &ui, sizeof(ui), NULL) && ui.UIRestrictionsClass == JOB_OBJECT_UILIMIT_ALL &&
-      QueryInformationJobObject(createdJob, JobObjectBasicAccountingInformation, &accounts, sizeof(accounts), NULL) && !accounts.ActiveProcesses && !accounts.TotalProcesses);
+    account_job_unused(createdJob, "adopt");
     LocalFree(sd); LocalFree(system);
-  }
-  need(createdJob != NULL);
+  } else need(jobError != ERROR_ALREADY_EXISTS);
   AcquireSRWLockExclusive(&jobLock); job = createdJob; ReleaseSRWLockExclusive(&jobLock); noninherit(job);
-  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
-  limits.BasicLimitInformation.ActiveProcessLimit = 32;
-  need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
-  JOBOBJECT_BASIC_UI_RESTRICTIONS ui = { JOB_OBJECT_UILIMIT_ALL };
-  need(SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+  if (!provisioned) {
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+    limits.BasicLimitInformation.ActiveProcessLimit = 32;
+    need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
+    JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {255};
+    need(SetInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui)));
+    account_job_unused(job, "create");
+  }
   wchar_t stationName[128], desktopName[256], uiSddl[2048];
   need(swprintf_s(stationName, 128, L"np_%ls", nonce) > 0 && swprintf_s(desktopName, 256, L"%ls\\payload", stationName) > 0);
   /* The low-label objects are private. No WinSta0, host clipboard, desktop,
@@ -387,9 +389,12 @@ int wmain(int argc, wchar_t **argv) {
     CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
     environment, argv[5], &startup.StartupInfo, &child), "CreateProcessAsUserW");
   BOOL member; checked(IsProcessInJob(child.hProcess, job, &member), "IsProcessInJob"); need(member); noninherit(child.hProcess); noninherit(child.hThread);
-  DeleteProcThreadAttributeList(attributes); free(attributes); CloseHandle(inputRead); CloseHandle(outputWrite); if (provider) CloseHandle(errorWrite); CloseHandle(token); LocalFree(capability);
+  DeleteProcThreadAttributeList(attributes); free(attributes);
+  checked(CloseHandle(inputRead), "CloseHandle(child-input)"); checked(CloseHandle(outputWrite), "CloseHandle(child-output)");
+  if (provider) checked(CloseHandle(errorWrite), "CloseHandle(child-error)");
+  checked(CloseHandle(token), "CloseHandle(payload-token)"); LocalFree(capability);
   frame("ready", child.hProcess, userSid); acknowledge('R');
-  need(ResumeThread(child.hThread) == 1); CloseHandle(child.hThread);
+  need(ResumeThread(child.hThread) == 1); checked(CloseHandle(child.hThread), "CloseHandle(payload-thread)");
   need(CreateThread(NULL, 0, forward, outputRead, 0, NULL) != NULL);
   char unexpected; DWORD size;
   /* The owner closes control only after independent recovery/retirement. Loss
@@ -408,7 +413,9 @@ int wmain(int argc, wchar_t **argv) {
   AcquireSRWLockExclusive(&jobLock);
   BOOL terminated = !job || TerminateJobObject(job, 126), closed = !job || CloseHandle(job); job = NULL;
   ReleaseSRWLockExclusive(&jobLock); need(terminated && closed);
-  CloseHandle(child.hProcess); CloseHandle(executable); CloseHandle(policy); CloseHandle(workspace); CloseHandle(storage); CloseHandle(custody);
-  CloseDesktop(desktop); CloseWindowStation(station); LocalFree(userSid); LocalFree(protectedSd);
+  checked(CloseHandle(child.hProcess), "CloseHandle(payload-process)"); checked(CloseHandle(executable), "CloseHandle(executable)");
+  checked(CloseHandle(policy), "CloseHandle(policy)"); checked(CloseHandle(workspace), "CloseHandle(workspace)");
+  checked(CloseHandle(storage), "CloseHandle(storage)"); checked(CloseHandle(custody), "CloseHandle(custody)");
+  checked(CloseDesktop(desktop), "CloseDesktop"); checked(CloseWindowStation(station), "CloseWindowStation"); LocalFree(userSid); LocalFree(protectedSd);
   return 0;
 }

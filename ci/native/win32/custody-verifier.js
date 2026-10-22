@@ -492,6 +492,22 @@ export function createWindowsCustodyVerifier(
     };
   };
   const api = {
+    async retainOwnershipCreators(declaration, expected) {
+      bind(declaration);
+      const actual = await call("ownership-births", [
+        2,
+        observationDigest(input.context),
+      ]);
+      closed(actual, ["helper", "owner"]);
+      for (const role of ["helper", "owner"]) {
+        requireWindows(
+          sameWindowsIdentity(actual[role], systemIdentity(expected[role])),
+        );
+        await retain(actual[role]);
+      }
+      requireWindows(actual.helper.pid !== actual.owner.pid);
+      return { ...retired(actual), verifier: verifier() };
+    },
     read,
     async verifyRestoration(value) {
       requireWindows(
@@ -1060,14 +1076,21 @@ export function createWindowsCustodyVerifier(
       }
       // A stopped task or restored policy cannot stand in for an audit drain.
       // Interrupted installation has an independently read absent observer lane.
-      if (records.some((record) => record.phase === "ownership-launch"))
-        requireWindows(
-          nativeRecords.some(
-            (record) =>
-              record.helpers?.some((helper) => helper.role === "launcher") &&
-              record.helpers.some((helper) => helper.role === "custodian"),
-          ),
-        );
+      if (
+        records.some((record) => record.phase === "ownership-launch") &&
+        !nativeRecords.some(
+          (record) =>
+            record.helpers?.some((helper) => helper.role === "launcher") &&
+            record.helpers.some((helper) => helper.role === "custodian"),
+        )
+      ) {
+        const births = await call("ownership-births", [2, contextSha256]);
+        closed(births, ["helper", "owner"]);
+        const helper = systemIdentity(births.helper),
+          owner = systemIdentity(births.owner);
+        requireWindows(helper.pid !== owner.pid);
+        identities.push(helper, owner);
+      }
       if (records.some((record) => record.phase === "access-peers-park"))
         requireWindows(
           nativeRecords.some(
@@ -1117,6 +1140,14 @@ export function createWindowsCustodyVerifier(
             hash(birth.taskSha256) &&
             intent.argumentsHex?.[6] === encode(birth.nonce),
         );
+        if (birth.nonce === observerInput.nonce) {
+          // The retained observer is performing recovery with its original
+          // process/token handles. It retires separately after this proof.
+          requireWindows(
+            sameWindowsIdentity(birth.helper, verifier()) && !result,
+          );
+          continue;
+        }
         identities.push(
           systemIdentity(birth.helper),
           normalizeWindowsIdentity(birth.bridge),
@@ -1164,6 +1195,11 @@ export function createWindowsCustodyVerifier(
       );
       for (const identity of live) {
         observations.push(await empty(identity), await empty(identity));
+        const held = await retain(identity),
+          exit = await call("process-exit", [held.slot]);
+        closed(exit, ["exitCode"]);
+        requireWindows(integer(exit.exitCode) && exit.exitCode !== 124);
+        observations.push(exit);
       }
       if (
         nativeRecords.some(
@@ -1268,7 +1304,10 @@ export function createWindowsCustodyVerifier(
           ),
         );
       for (const { birth } of observers)
-        if (!closedNonces.has(birth.nonce))
+        if (
+          birth.nonce !== observerInput.nonce &&
+          !closedNonces.has(birth.nonce)
+        )
           observations.push(
             await recoverTask(birth.nonce, birth.taskSha256, birth.bridge),
           );

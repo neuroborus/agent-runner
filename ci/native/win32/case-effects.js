@@ -95,7 +95,8 @@ export function createWindowsCaseEffects(state, current, save) {
     outside,
     retirement,
     fault,
-    failure;
+    failure,
+    launchPossible = false;
   const known = [],
     witnesses = new Set();
   const persist = async (kind, record) => {
@@ -151,16 +152,23 @@ export function createWindowsCaseEffects(state, current, save) {
         result.contextSha256 === observationDigest(binding.context),
     );
     requireObservation(same(result.accountToken, provisioned.native.token));
-    if (admitted)
+    if (admitted) {
+      const helpers = admitted.helpers.filter(({ role }) =>
+        ["launcher", "custodian"].includes(role),
+      );
       requireObservation(
         result.jobObjectSha256 === admitted.setup.job.heldObjectSha256 &&
-          ["launcher", "custodian"].every((role) =>
-            sameWindowsIdentity(
-              result.helpers.find((helper) => helper.role === role)?.identity,
-              admitted.helpers.find((helper) => helper.role === role).identity,
-            ),
+          result.helpers.length === helpers.length &&
+          helpers.every(
+            ({ role, identity }) =>
+              result.helpers.filter(
+                (helper) =>
+                  helper.role === role &&
+                  sameWindowsIdentity(helper.identity, identity),
+              ).length === 1,
           ),
       );
+    }
     const members = assessWindowsDomain(
       {
         ...result.enumeration,
@@ -278,18 +286,34 @@ export function createWindowsCaseEffects(state, current, save) {
   };
   const retire = async () => {
     if (retirement) return structuredClone(retirement);
-    const record = await recoverReceipt();
+    // With no launch intent, the provisioned account/Job still need retirement.
+    // An attempted launch with a missing receipt stays in independent recovery.
+    if (!pin) requireObservation(!launchPossible && !admitted);
+    const record = pin
+      ? await recoverReceipt()
+      : {
+          schemaVersion: 1,
+          candidateSha: request.candidateSha,
+          nonce: request.nonce,
+          requestSha256,
+          admission: "possible",
+          accountSid: parameters.accountSid,
+          setup: { job: { heldObjectSha256: null } },
+          helpers: [],
+          payload: null,
+        };
     const held = await reader.reconstructOwnership();
-    requireObservation(
-      sameWindowsIdentity(
-        held.helper,
-        record.helpers.find(({ role }) => role === "launcher")?.identity,
-      ) &&
-        sameWindowsIdentity(
-          held.owner,
-          record.helpers.find(({ role }) => role === "custodian")?.identity,
-        ),
-    );
+    for (const [role, identity] of [
+      ["launcher", held.helper],
+      ["custodian", held.owner],
+    ]) {
+      const expected = record.helpers.find(
+        (helper) => helper.role === role,
+      )?.identity;
+      requireObservation(
+        expected ? sameWindowsIdentity(identity, expected) : identity === null,
+      );
+    }
     if (record.setup.job.heldObjectSha256 !== null)
       requireObservation(
         record.setup.job.heldObjectSha256 === held.jobObjectSha256,
@@ -302,6 +326,7 @@ export function createWindowsCaseEffects(state, current, save) {
         ),
       );
     record.payload ??= held.members[0] ?? null;
+    admitted ??= record;
     await persist("admission", record);
     retirement = await retireWindowsOwnership(request, requestSha256, record, {
       persist: (record) => persist("retirement", record),
@@ -313,8 +338,16 @@ export function createWindowsCaseEffects(state, current, save) {
   };
   const admit = checked(async () => {
     requireObservation(!admitted);
-    const before = await witness(),
-      { helper, owner } = await reader.startOwnership(args);
+    const before = await witness();
+    requireObservation(
+      before.policyVerified === false &&
+        before.policyUnchanged === true &&
+        before.enumeration.processes.length === 0 &&
+        before.jobAccounting?.activeProcesses === 0 &&
+        before.jobAccounting.totalProcesses === 0,
+    );
+    launchPossible = true;
+    const { helper, owner } = await reader.startOwnership(args);
     admitted = {
       schemaVersion: 1,
       candidateSha: request.candidateSha,
@@ -653,14 +686,31 @@ export function createWindowsCaseEffects(state, current, save) {
       };
     },
     async finish({ signal }) {
-      await reader.beginCleanup({ signal });
+      try {
+        await reader.beginCleanup({ signal });
+      } catch (cause) {
+        if (failure && cause !== failure)
+          throw new AggregateError(
+            [failure, cause],
+            "Windows launch and cleanup handoff failed",
+            { cause: failure },
+          );
+        throw cause;
+      }
       const payload = await retire();
       await unchanged();
-      policyProof(await witness());
+      const policy = await witness();
+      if (policy.policyVerified === true) policyProof(policy);
+      else
+        requireObservation(
+          policy.policyVerified === false && policy.policyUnchanged === true,
+        );
       await reader.restoreOwnershipPolicy();
       const restored = await witness();
       requireObservation(
-        restored.policyRestored === true && restored.policyVerified === false,
+        restored.policyRestored === true &&
+          restored.policyVerified === false &&
+          restored.policyUnchanged === true,
       );
       await unchanged();
       const account = await reader.retireOwnershipAccount(),

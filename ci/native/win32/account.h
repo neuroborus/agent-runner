@@ -23,6 +23,35 @@
 #pragma pop_macro("PUNICODE_STRING")
 #pragma pop_macro("UNICODE_STRING")
 #pragma comment(lib, "netapi32.lib")
+/* Opening an existing Job is adoption, never an opportunity to reset its
+ * limits or accounting. Sample every query before reporting or refusing. */
+static void account_job_unused(HANDLE job, const char *phase) {
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+  JOBOBJECT_BASIC_UI_RESTRICTIONS ui = {0};
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
+  SetLastError(ERROR_SUCCESS);
+  BOOL limitsOk = QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits), NULL);
+  DWORD limitsError = limitsOk ? ERROR_SUCCESS : GetLastError();
+  SetLastError(ERROR_SUCCESS);
+  BOOL uiOk = QueryInformationJobObject(job, JobObjectBasicUIRestrictions, &ui, sizeof(ui), NULL);
+  DWORD uiError = uiOk ? ERROR_SUCCESS : GetLastError();
+  SetLastError(ERROR_SUCCESS);
+  BOOL accountingOk = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL);
+  DWORD accountingError = accountingOk ? ERROR_SUCCESS : GetLastError();
+  BOOL accepted = limitsOk && uiOk && accountingOk &&
+    limits.BasicLimitInformation.LimitFlags == (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_ACTIVE_PROCESS) &&
+    limits.BasicLimitInformation.ActiveProcessLimit == 32 && ui.UIRestrictionsClass == 255 &&
+    !accounting.ActiveProcesses && !accounting.TotalProcesses;
+  if (!accepted) {
+    fprintf(stderr, "native-windows-job: phase=%s limits-ok=%u limits-error=%lu flags=%lu process-limit=%lu ui-ok=%u ui-error=%lu ui=%lu accounting-ok=%u accounting-error=%lu active=%lu total=%lu terminated=%lu\n",
+      phase, (unsigned)limitsOk, limitsError, limits.BasicLimitInformation.LimitFlags, limits.BasicLimitInformation.ActiveProcessLimit,
+      (unsigned)uiOk, uiError, ui.UIRestrictionsClass, (unsigned)accountingOk, accountingError,
+      accounting.ActiveProcesses, accounting.TotalProcesses, accounting.TotalTerminatedProcesses);
+    fflush(stderr);
+    SetLastError(!limitsOk ? limitsError : !uiOk ? uiError : !accountingOk ? accountingError : ERROR_INVALID_DATA);
+  }
+  need(accepted);
+}
 static void rights(PSID user) {
   LSA_OBJECT_ATTRIBUTES attrs = {0}; attrs.Length = sizeof(attrs); LSA_HANDLE policy;
   need(LsaOpenPolicy(NULL, &attrs, POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES, &policy) == 0);
@@ -168,7 +197,10 @@ static HANDLE account_adopt(const wchar_t *custody, const struct case_account_re
   wchar_t name[21]; need(swprintf_s(name, 21, L"np_%.16hs", record->nonce) > 0); account_check(name, record->accountSid);
   HANDLE file = account_file(custody, L"account.secret", GENERIC_READ, OPEN_EXISTING); wchar_t password[65]; DWORD used; LARGE_INTEGER size;
   need(GetFileSizeEx(file, &size) && size.QuadPart == sizeof(password) && ReadFile(file, password, sizeof(password), &used, NULL) && used == sizeof(password) && !password[64] && CloseHandle(file));
-  HANDLE token; need(LogonUserW(name, L".", password, LOGON32_LOGON_BATCH, LOGON32_PROVIDER_DEFAULT, &token)); SecureZeroMemory(password, sizeof(password));
-  wchar_t *actual = token_sid(token); need(!wcscmp(actual, record->accountSid)); LocalFree(actual); return token;
+  HANDLE token; BOOL loggedOn = LogonUserW(name, L".", password, LOGON32_LOGON_BATCH, LOGON32_PROVIDER_DEFAULT, &token);
+  DWORD error = loggedOn ? ERROR_SUCCESS : GetLastError(); SecureZeroMemory(password, sizeof(password));
+  SetLastError(error); need(loggedOn);
+  wchar_t *actual = token_sid(token); need(!wcscmp(actual, record->accountSid)); LocalFree(actual);
+  need(SetHandleInformation(token, HANDLE_FLAG_INHERIT, 0)); return token;
 }
 #endif
