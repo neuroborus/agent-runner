@@ -311,6 +311,32 @@ function signature(value) {
   );
   return value;
 }
+function caseDirectories(value) {
+  const directories = observationList(value, 2);
+  requireDarwin(directories.length === 2);
+  const identities = new Set();
+  return directories.map((item, index) => {
+    observationObject(item, ["role", "fd", "object"]);
+    const object = snapshot(item.object, {
+        uid: item.object.uid,
+        gid: item.object.gid,
+      }),
+      parts = object.identity.split(":"),
+      identity = `${parts[0]}:${parts[3]}`;
+    requireDarwin(
+      item.role === ["workspace", "build"][index] &&
+        item.fd === index + 3 &&
+        object.directory &&
+        object.bytes === 0 &&
+        (index === 0
+          ? object.uid > 500 && object.mode === 0o700
+          : object.uid === 0 && object.gid === 0 && object.mode === 0o555) &&
+        !identities.has(identity),
+    );
+    identities.add(identity);
+    return { role: item.role, fd: item.fd, object };
+  });
+}
 function macho(value) {
   observationObject(value, [
     "headerSha256",
@@ -400,7 +426,14 @@ export function createDarwinCustodyReader(value, options = {}) {
     started = false,
     closing = false,
     fileActive = false;
-  let domain, reservationNonce, reservationIndex;
+  let domain, reservationNonce, reservationIndex, directoryBindings;
+  requireDarwin(
+    options.directoryBindings === undefined || options.caseContextSha256,
+  );
+  const originalDirectories =
+    options.directoryBindings === undefined
+      ? undefined
+      : caseDirectories(options.directoryBindings);
   const held = new Map();
   // These paths come from the exact plan bytes checked by case provisioning;
   // native admission independently classifies the sealed plan's actual paths.
@@ -528,6 +561,7 @@ export function createDarwinCustodyReader(value, options = {}) {
         );
         signature(result.subject.signature);
         const descriptors = new Set();
+        const expected = pid === helper?.pid ? directoryBindings : undefined;
         for (const directory of observationList(
           result.subject.directories,
           2,
@@ -545,12 +579,31 @@ export function createDarwinCustodyReader(value, options = {}) {
               !descriptors.has(directory.fd) &&
               /^[0-9]+$/u.test(directory.dev) &&
               /^[1-9][0-9]*$/u.test(directory.ino) &&
-              directory.uid === 0 &&
-              directory.gid === 0 &&
-              directory.mode === 0o700,
+              integer(directory.uid, 0xffffffff) &&
+              integer(directory.gid, 0xffffffff) &&
+              integer(directory.mode, 0o7777),
           );
+          if (expected) {
+            const binding = expected.find(({ fd }) => fd === directory.fd),
+              object = binding?.object,
+              parts = object?.identity.split(":");
+            requireDarwin(
+              object &&
+                directory.dev === parts[0] &&
+                directory.ino === parts[3] &&
+                directory.uid === object.uid &&
+                directory.gid === object.gid &&
+                directory.mode === object.mode,
+            );
+          } else
+            requireDarwin(
+              directory.uid === 0 &&
+                directory.gid === 0 &&
+                directory.mode === 0o700,
+            );
           descriptors.add(directory.fd);
         }
+        if (expected) requireDarwin(descriptors.size === expected.length);
       }
       const exit = await observer.completion;
       requireDarwin(
@@ -781,6 +834,7 @@ export function createDarwinCustodyReader(value, options = {}) {
           "entries",
           "uid",
           "gid",
+          ...(options.caseContextSha256 ? ["directories"] : []),
         ]);
         requireDarwin(
           (plan.purpose ?? "reviewed") === (input.purpose ?? "reviewed") &&
@@ -793,6 +847,22 @@ export function createDarwinCustodyReader(value, options = {}) {
             plan.gid > 500,
         );
         domain = { uid: plan.uid, gid: plan.gid };
+        if (options.caseContextSha256) {
+          directoryBindings = caseDirectories(plan.directories);
+          requireDarwin(
+            !originalDirectories ||
+              JSON.stringify(directoryBindings) ===
+                JSON.stringify(originalDirectories),
+          );
+          await save("directories-bound", { directories: directoryBindings });
+          const actual = await probe(helper.pid);
+          requireDarwin(
+            actual.subject.status === "live" &&
+              sameDarwinIdentity(actual.subject.identity, helper) &&
+              actual.subject.sha256 === input.reader.sha256 &&
+              actual.subject.signature.cdhash === input.reader.cdhash,
+          );
+        }
         for (const pin of pendingReceipts) await verifyReceipt(pin);
         pendingReceipts.length = 0;
         return {
@@ -1091,6 +1161,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     async verifyOwnership(asid) {
       requireDarwin(
         options.caseContextSha256 &&
+          directoryBindings &&
           integer(asid, 2147483647) &&
           (!asid || ownershipSessions.get(asid)?.held),
       );
@@ -1099,6 +1170,26 @@ export function createDarwinCustodyReader(value, options = {}) {
         actual.subject.status === "live" &&
           sameDarwinIdentity(actual.subject.identity, helper) &&
           actual.subject.sha256 === input.reader.sha256,
+      );
+      const census = actual.enumeration;
+      observationObject(census, [
+        "uid",
+        "asid",
+        "scope",
+        "complete",
+        "capacity",
+        "live",
+        "zombies",
+      ]);
+      requireDarwin(
+        census.uid === domain.uid &&
+          census.asid === asid &&
+          census.scope === (asid ? "audit-session" : "reserved-uid") &&
+          census.complete === true &&
+          census.capacity === 33 &&
+          observationList(census.live, 32).length +
+            observationList(census.zombies, 32).length <=
+            32,
       );
       return actual;
     },
@@ -2044,7 +2135,11 @@ export function createDarwinCustodyReader(value, options = {}) {
         rootObject.directory &&
           baseObject.directory &&
           rootObject.identity === file.root &&
-          baseObject.identity === file.base,
+          baseObject.identity === file.base &&
+          (rootObject.identity.split(":")[0] !==
+            baseObject.identity.split(":")[0] ||
+            rootObject.identity.split(":")[3] !==
+              baseObject.identity.split(":")[3]),
       );
       fileActive = true;
       const child = await command(
@@ -2084,7 +2179,13 @@ export function createDarwinCustodyReader(value, options = {}) {
             (item) => item.fd === fd,
           ),
           parts = object.identity.split(":");
-        requireDarwin(observed?.dev === parts[0] && observed.ino === parts[3]);
+        requireDarwin(
+          observed?.dev === parts[0] &&
+            observed.ino === parts[3] &&
+            observed.uid === object.uid &&
+            observed.gid === object.gid &&
+            observed.mode === object.mode,
+        );
       }
       const requestSha256 = digest(JSON.stringify(file));
       requireDarwin(root(authority.verifier).pid !== identity.pid);
@@ -2188,6 +2289,13 @@ export function createDarwinCustodyReader(value, options = {}) {
         requireDarwin(!fileActive && helper && !closing);
         for (const custody of ownershipSessions.values())
           if (custody.held) await this.finishOwnershipSession(custody.asid);
+        if (options.caseContextSha256) {
+          const actual = await this.verifyOwnership(0);
+          requireDarwin(
+            !actual.enumeration.live.length &&
+              !actual.enumeration.zombies.length,
+          );
+        }
         for (const index of held.keys()) {
           await command("close", index);
           held.delete(index);

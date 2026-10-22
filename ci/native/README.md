@@ -6845,6 +6845,29 @@ the approved template and trusted provisioning bindings. Source/release/build
 approval references remain separate. Each admitted resource operation has a
 write-ahead receipt; raw file bytes and paths remain in private transport.
 
+Case-plan admission also binds the reader's two held directory roles before
+case setup. Descriptor 3 is the prepared private report/workspace root, with
+its sampled preparing UID/GID and mode `0700`; descriptor 4 is the immutable
+build root, root:wheel and mode `0555`. These are distinct from the reserved
+payload UID/GID and from the file helper's two root-owned mode-`0700` directory
+descriptors. The native owner joins held and named identities and preserves the
+workspace's prepared metadata without chown or resealing. It returns each role,
+descriptor and full volume/birth identity with its metadata. The custody owner
+persists those expectations and independently compares the complete applicable
+descriptor inventory, device/inode, UID/GID and mode before accepting setup,
+during `verifyOwnership`, and before closure. Missing, duplicate, swapped,
+aliased or substituted directories and changed metadata retain custody.
+
+Fresh case recovery obtains these expectations from the original sealed custody
+ledger and requires newly held directories to match; current observations cannot
+redefine an earlier role or identity. Missing, malformed or inconsistent original
+bindings refuse recovery. The native `finish` path rechecks the held
+build/workspace identities, metadata and ACLs before closing them. Directory
+agreement and an empty reserved-UID census never replace original-subject/domain
+retirement, verified policy restoration or the independent read proving the
+reader itself absent. Reviewed/protected admission and unrelated probe rules
+remain strict.
+
 The reader reuses the launcher's `custody.h` audit-token/BSD identity, signature
 and protected-byte routines, and the file helper's `file-identity.h` volume/birth
 identity routines. It retains no-follow descriptors and audit-session references,

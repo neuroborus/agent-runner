@@ -1180,6 +1180,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
     ["slot", "text"],
     ["build_directory", "encoded"],
     ["build_root_open", "name"],
+    ["case_directories", ""],
     ["reservation_contents", "entry"],
     ["reservation_guard", ""],
     ["reserve", "entry, nonce"],
@@ -1210,6 +1211,10 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       .replace(
         "struct entry value = {.fd = build_root};",
         "const value = {fd: build_root, kind: {}, path: {}};",
+      )
+      .replace(
+        "struct entry parent = {.fd = build_parent, .stat = report_identity}, root = {.fd = build_root, .stat = build_identity};",
+        "const parent = {fd: build_parent, stat: report_identity}, root = {fd: build_root, stat: build_identity};",
       )
       .replace(/struct stat (\w+) = value->stat;/gu, "const $1 = value.stat;")
       .replace(
@@ -1282,7 +1287,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
   assert.ok(start > 0 && end > start);
   assert.ok(admissionStart > 0 && readStart > 0 && readEnd > readStart);
   const script = new Script(
-    `${declarations.join("\n")} ({build_directory, ancestors, stable, slot, reserve, reservation_guard, reservation_close, admitPlan() {${project(admission)}}, openEntry() {${project(open)}}, readEntry() {${project(read)}}});`,
+    `${declarations.join("\n")} ({build_directory, case_directories, ancestors, stable, slot, reserve, reservation_guard, reservation_close, admitPlan() {${project(admission)}}, openEntry() {${project(open)}}, readEntry() {${project(read)}}});`,
   );
   const bytes = Buffer.from("generated helper bytes"),
     output = "/fixture/report/platform-build",
@@ -1487,7 +1492,21 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       printf(format, value) {
         if (format === '{"hex":"%s"}') env.lastRead = text(value);
       },
-      identity() {},
+      wire: "",
+      identity(value) {
+        const s = value.stat;
+        env.wire += JSON.stringify({
+          identity: fileId(s.st_ino),
+          bytes: 0,
+          uid: s.st_uid,
+          gid: s.st_gid,
+          mode: s.st_mode & 0o7777,
+          directory: true,
+        });
+      },
+      fputs(value) {
+        env.wire += value;
+      },
       fprintf() {},
       fflush() {},
       input_refusal() {},
@@ -1506,6 +1525,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
     nodes.set(file, image);
     // A new consumer joins the published root without inheriting or resealing it.
     held.clear();
+    nextFd = 3;
     env.build_root = env.build_parent = -1;
     env.build_identity = {};
     env.report_identity = {};
@@ -1522,6 +1542,48 @@ async function boundCustodyFixture({ experiment = true } = {}) {
   };
   return { fixture, bytes, output, file };
 }
+
+test("Darwin native case directory frames retain held roles without resealing metadata", async () => {
+  const { fixture } = await boundCustodyFixture();
+  const f = fixture();
+  f.native.admitPlan();
+  f.env.wire = "";
+  f.native.case_directories();
+  assert.deepEqual(
+    JSON.parse(f.env.wire).map(({ role, fd, object }) => [
+      role,
+      fd,
+      object.uid,
+      object.gid,
+      object.mode,
+    ]),
+    [
+      ["workspace", 3, 1001, 20, 0o700],
+      ["build", 4, 0, 0, 0o555],
+    ],
+  );
+  for (const [target, key, value] of [
+    ["parent", "st_uid", 1002],
+    ["parent", "st_gid", 21],
+    ["parent", "st_mode", 0o40700 | 0o10],
+    ["root", "st_uid", 1],
+    ["root", "st_gid", 20],
+    ["root", "st_mode", 0o40700],
+    ["root", "st_ino", 99],
+  ]) {
+    const changed = fixture();
+    changed.native.admitPlan();
+    changed[target].stat[key] = value;
+    assert.throws(
+      () => changed.native.case_directories(),
+      /Native bound custody refused/,
+      `${target}/${key}`,
+    );
+    assert.ok(
+      !changed.events.some((name) => ["chown", "chmod"].includes(name)),
+    );
+  }
+});
 
 test("Darwin generated custody joins the real build producer and consuming guards beneath a private report parent", async () => {
   const { fixture, bytes, output, file } = await boundCustodyFixture();
@@ -2070,6 +2132,8 @@ export function fixture({
   entries = [],
   caseContextSha256,
   caseRead,
+  directoryBindings,
+  onProbe,
 } = {}) {
   const loaderBytes = loaderFormat
     ? loaderImage(loaderFormat === "universal" ? "fat32-be" : loaderFormat)
@@ -2096,6 +2160,7 @@ export function fixture({
     frames = [{ helper: identity(20) }];
   let helperLive = true,
     fileLive = true,
+    planRead = false,
     finishing = false,
     reserved = false;
   const object = (index) => ({
@@ -2117,7 +2182,7 @@ export function fixture({
   });
   const transport = async (_, args) => {
     events.push(args[0]);
-    if (args[0] === "--probe") {
+    if (["--probe", "--probe-domain"].includes(args[0])) {
       const pid = Number(args[1]);
       probed.push(pid);
       const subject = (pid === 20 ? helperLive : fileLive)
@@ -2133,20 +2198,48 @@ export function fixture({
               valid: true,
             },
             directories:
-              pid === 30
-                ? [3, 4].map((fd) => ({
+              pid === 20 && caseContextSha256 && planRead
+                ? caseDirectoryBindings().map(({ fd, object }) => ({
                     fd,
-                    dev: "1",
-                    ino: String(fd === 3 ? 2 : 3),
-                    uid: 0,
-                    gid: 0,
-                    mode: 0o700,
+                    dev: object.identity.split(":")[0],
+                    ino: object.identity.split(":")[3],
+                    uid: object.uid,
+                    gid: object.gid,
+                    mode: object.mode,
                   }))
-                : [],
+                : pid === 30
+                  ? [3, 4].map((fd) => ({
+                      fd,
+                      dev: "1",
+                      ino: String(fd === 3 ? 2 : 3),
+                      uid: 0,
+                      gid: 0,
+                      mode: 0o700,
+                    }))
+                  : [],
           }
         : { status: "absent" };
       return {
-        receive: async () => ({ verifier: identity(40), subject }),
+        receive: async () => {
+          await onProbe?.(subject, pid);
+          return {
+            verifier: identity(40),
+            subject,
+            ...(args[0] === "--probe-domain"
+              ? {
+                  enumeration: {
+                    uid: failure === "census-uid" ? 1002 : 1001,
+                    asid: Number(args[4]),
+                    scope: Number(args[4]) ? "audit-session" : "reserved-uid",
+                    complete: failure !== "incomplete-census",
+                    capacity: failure === "census-capacity" ? 32 : 33,
+                    live: [],
+                    zombies: [],
+                  },
+                }
+              : {}),
+          };
+        },
         completion: Promise.resolve({ code: 0, signal: null }),
         close() {},
       };
@@ -2155,6 +2248,7 @@ export function fixture({
       async send(line) {
         events.push(line.trim());
         if (line === "P\n") {
+          planRead = true;
           frames.push({
             ...(purpose === "experiment" && failure !== "purpose"
               ? { purpose }
@@ -2163,6 +2257,9 @@ export function fixture({
             entries: 4,
             uid: 1001,
             gid: 1002,
+            ...(caseContextSha256
+              ? { directories: caseDirectoryBindings() }
+              : {}),
           });
           return;
         }
@@ -2375,9 +2472,18 @@ export function fixture({
       },
     };
   };
+  const caseDirectoryBindings = () => [
+    {
+      role: "workspace",
+      fd: 3,
+      object: { ...object(1), uid: 701, gid: 32 },
+    },
+    { role: "build", fd: 4, object: { ...object(2), mode: 0o555 } },
+  ];
   const reader = createDarwinCustodyReader(selectedInput, {
     entries,
     caseContextSha256,
+    directoryBindings,
     runtime: {
       platform: "darwin",
       arch: "x64",
@@ -2408,6 +2514,131 @@ export function fixture({
     loaderBytes,
   };
 }
+test("Darwin case directory roles bind prepared ownership and sealed builds through independent closure", async () => {
+  for (const directoryBindings of [null, false, 0, ""]) {
+    assert.throws(() =>
+      fixture({ caseContextSha256: hash, directoryBindings }),
+    );
+  }
+  for (const purpose of ["reviewed", "experiment"]) {
+    const f = fixture({ purpose, caseContextSha256: hash });
+    await f.reader.start();
+    const bindings = f.receipts.find(
+      ({ phase }) => phase === "directories-bound",
+    ).request.directories;
+    assert.deepEqual(
+      bindings.map(({ role, fd, object: { uid, gid, mode } }) => ({
+        role,
+        fd,
+        uid,
+        gid,
+        mode,
+      })),
+      [
+        { role: "workspace", fd: 3, uid: 701, gid: 32, mode: 0o700 },
+        { role: "build", fd: 4, uid: 0, gid: 0, mode: 0o555 },
+      ],
+    );
+    const observation = await f.reader.verifyOwnership(0);
+    assert.equal(observation.subject.directories.length, 2);
+    assert.equal((await f.reader.close()).status, "RETIRED");
+    const fresh = fixture({
+      purpose,
+      caseContextSha256: hash,
+      directoryBindings: bindings,
+    });
+    await fresh.reader.start();
+    assert.equal((await fresh.reader.close()).status, "RETIRED");
+    for (const key of ["identity", "uid", "gid", "mode"]) {
+      const original = structuredClone(bindings);
+      if (key === "identity") original[0].object.identity = fileId(99);
+      else if (key === "mode") original[0].object.mode = 0o710;
+      else original[0].object[key]++;
+      const construct = () =>
+        fixture({
+          purpose,
+          caseContextSha256: hash,
+          directoryBindings: original,
+        });
+      if (key === "mode") assert.throws(construct);
+      else
+        await assert.rejects(
+          construct().reader.start(),
+          /admission unavailable/,
+        );
+    }
+  }
+});
+
+test("Darwin directory probes reject incomplete, swapped, aliased and changed held roles", async () => {
+  for (const fault of [
+    "missing",
+    "duplicate",
+    "extra",
+    "swapped",
+    "aliased",
+    "device",
+    "inode",
+    "workspace-owner",
+    "workspace-group",
+    "workspace-mode",
+    "build-owner",
+    "build-group",
+    "build-mode",
+  ]) {
+    let damaged = false;
+    const f = fixture({
+      purpose: "experiment",
+      caseContextSha256: hash,
+      onProbe(subject) {
+        if (
+          !damaged ||
+          subject.status !== "live" ||
+          !subject.directories.length
+        )
+          return;
+        const directories = subject.directories;
+        if (fault === "missing") directories.pop();
+        else if (fault === "duplicate") directories[1] = { ...directories[0] };
+        else if (fault === "extra")
+          directories.push({ ...directories[0], fd: 5 });
+        else if (fault === "swapped")
+          [directories[0].fd, directories[1].fd] = [4, 3];
+        else if (fault === "aliased") directories[1].ino = directories[0].ino;
+        else if (fault === "device") directories[0].dev = "2";
+        else if (fault === "inode") directories[1].ino = "99";
+        else {
+          const [role, key] = fault.split("-"),
+            directory = directories[role === "workspace" ? 0 : 1];
+          directory[{ owner: "uid", group: "gid", mode: "mode" }[key]]++;
+        }
+      },
+    });
+    await f.reader.start();
+    damaged = true;
+    await assert.rejects(f.reader.verifyOwnership(0), /Unverified/, fault);
+    assert.equal((await f.reader.close()).status, "RETAINED", fault);
+    assert.ok(!f.events.some((event) => event.startsWith("finish ")), fault);
+  }
+  const live = fixture({ caseContextSha256: hash, failure: "live-retirement" });
+  await live.reader.start();
+  assert.equal(
+    (await live.reader.verifyOwnership(0)).enumeration.live.length,
+    0,
+  );
+  assert.equal((await live.reader.close()).status, "RETAINED");
+  for (const failure of [
+    "incomplete-census",
+    "census-uid",
+    "census-capacity",
+  ]) {
+    const f = fixture({ caseContextSha256: hash, failure });
+    await f.reader.start();
+    await assert.rejects(f.reader.verifyOwnership(0), /Unverified/);
+    assert.equal((await f.reader.close()).status, "RETAINED");
+  }
+});
+
 test("Darwin native case admission censuses numeric identities without borrowing reviewed accounts", async () => {
   const source = await readFile(
       new URL("custody-reader.c", import.meta.url),

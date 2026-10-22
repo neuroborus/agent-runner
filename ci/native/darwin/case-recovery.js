@@ -251,6 +251,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           : []),
         "entry",
         "admitted",
+        "directories-bound",
         "probe-intent",
         "probe-created",
         "probe-retired",
@@ -354,9 +355,27 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           ).length === 1,
         );
       let sequence = entries.length;
+      // Only the sealed original owner ledger supplies recovery expectations.
+      // A fresh probe or newly opened reader cannot redefine a directory role.
+      const original = custody.slice(
+          0,
+          launch.length > 1 ? custody.indexOf(launch[1]) : custody.length,
+        ),
+        bindings = original.filter(
+          ({ phase }) => phase === "directories-bound",
+        );
+      requireObservation(
+        bindings.length === 1 &&
+          custody
+            .filter(({ phase }) => phase === "directories-bound")
+            .every(({ request }) => same(request, bindings[0].request)),
+      );
+      observationObject(bindings[0].request, ["directories"]);
+      requireObservation(bindings[0].request.directories !== undefined);
       const native = state.createReader(declared.custody, {
         ...options.readerOptions,
         caseContextSha256: observationDigest(declared.custody.context),
+        directoryBindings: bindings[0].request.directories,
         persist: (record) =>
           state.write(`${prefix}${sequence++}.json`, {
             phase: "custody",

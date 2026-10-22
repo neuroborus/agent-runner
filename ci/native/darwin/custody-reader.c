@@ -198,7 +198,8 @@ static void build_guard(void) {
   need(build_root >= 0 && build_parent >= 0 && !fstat(build_root, &root) && !lstat(build_path, &named) &&
     S_ISDIR(root.st_mode) && root.st_dev == build_identity.st_dev && root.st_ino == build_identity.st_ino &&
     root.st_birthtimespec.tv_sec == build_identity.st_birthtimespec.tv_sec && root.st_birthtimespec.tv_nsec == build_identity.st_birthtimespec.tv_nsec &&
-    root.st_uid == 0 && root.st_gid == 0 && ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0555));
+    root.st_uid == 0 && root.st_gid == 0 && ((root.st_mode & 07777) == 0700 || (root.st_mode & 07777) == 0555) &&
+    (!case_mode || (root.st_mode == build_identity.st_mode && (root.st_mode & 07777) == 0555)));
   same_stat(root, named);
   need(!fstat(build_parent, &parent) && !lstat(report_path, &named) && S_ISDIR(parent.st_mode) &&
     parent.st_dev == report_identity.st_dev && parent.st_ino == report_identity.st_ino &&
@@ -289,6 +290,15 @@ static void identity(struct entry *value) {
   char result[192]; text(result, id);
   printf("{\"identity\":\"%s\",\"bytes\":%llu,\"uid\":%u,\"gid\":%u,\"mode\":%u,\"directory\":%s}", result,
     (unsigned long long)(S_ISDIR(s->st_mode) ? 0 : s->st_size), s->st_uid, s->st_gid, s->st_mode & 07777, S_ISDIR(s->st_mode) ? "true" : "false");
+}
+static void case_directories(void) {
+  /* Plan admission opened these before any case slots. Their roles, metadata
+   * and held identities are expectations for the independent process probe. */
+  need(case_mode && build_parent == 3 && build_root == 4 && (build_identity.st_mode & 07777) == 0555);
+  build_guard();
+  struct entry parent = {.fd = build_parent, .stat = report_identity}, root = {.fd = build_root, .stat = build_identity};
+  fputs("[{\"role\":\"workspace\",\"fd\":3,\"object\":", stdout); identity(&parent);
+  fputs("},{\"role\":\"build\",\"fd\":4,\"object\":", stdout); identity(&root); fputs("}]", stdout);
 }
 static void signing_check(const char *path, bool report) {
   CFDictionaryRef info = signature_information(path, false);
@@ -2572,7 +2582,9 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
     "\"purpose\":\"experiment\","
 #endif
-    "\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u}\n", candidate, count, subject_uid, subject_gid); fflush(stdout);
+    "\"candidateSha\":\"%s\",\"entries\":%u,\"uid\":%u,\"gid\":%u", candidate, count, subject_uid, subject_gid);
+  if (case_mode) { fputs(",\"directories\":", stdout); case_directories(); }
+  puts("}"); fflush(stdout);
   for (;;) {
     line(0, input, sizeof(input)); char *tokens[32], *next; unsigned n = 0;
     for (char *p = strtok_r(input, " ", &next); p; p = strtok_r(NULL, " ", &next)) { need(n < 32); tokens[n++] = p; }
@@ -2763,6 +2775,8 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "finish")) {
       need(n == 2 && !file_pid); for (unsigned i = 0; i < count; i++) need(entries[i].fd < 0);
       if (build_root >= 0) {
+        build_guard();
+        if (case_mode) need((build_identity.st_mode & 07777) == 0555);
         struct entry value = {.fd = build_root}; strcpy(value.kind, "build"); strcpy(value.path, build_path);
         need(!fstat(build_root, &value.stat)); stable(&value);
         need(!close(build_root) && !close(build_parent)); build_root = build_parent = -1;

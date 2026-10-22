@@ -2133,6 +2133,20 @@ extra authority/principals/endpoints, undeclared SIDs, substituted objects and
 wrong job/attempt contexts. Interrupted account or observer reads and cleanup
 cancellation retain possible custody; completed pre-execution setup retires only
 with independent account/rights/Job and custodian closure.
+
+Darwin's existing custody and preparation-effects fixtures carry the native
+case producer's directory frames through normal completion and fresh recovery.
+The actual-body native guard distinguishes the prepared UID/GID mode-0700
+workspace from the root-owned mode-0555 build root without metadata repair.
+Independent probes reject missing, duplicate, swapped, aliased or changed
+descriptors and device/inode/metadata substitutions. Recovery must rejoin the
+original sealed role bindings even when fresh owner and probe observations
+agree with a replacement. A live original reader still retains custody despite
+an empty reserved-UID census. Existing cancellation, owner-loss, policy
+restoration and independent retirement cases remain required. This coverage
+uses the existing fast/native harness assignments and establishes no native
+acceptance.
+
 Experiment case recovery regressions reuse the original protected ledger and
 closed-custody observations. They cover acknowledged disappeared readers and
 children, mixed closed observers and live custody, damaged births/task bindings,

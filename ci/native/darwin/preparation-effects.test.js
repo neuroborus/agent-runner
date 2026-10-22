@@ -2665,6 +2665,7 @@ function buildTranscripts(experiment = false, complete = false) {
     files = new Map(),
     events = [],
     processes = new Map(),
+    directoryOwners = new Map(),
     auditRecords = new Map(),
     auditCustodies = new Map();
   let leaseHolder;
@@ -2743,7 +2744,9 @@ function buildTranscripts(experiment = false, complete = false) {
     ...Object.values(plan.bootstrap.tools),
   ])
     put(tool.path, bytes, 0o555);
-  const directories = new Map([[directory, { uid: 1001, mode: 0o700 }]]);
+  const directories = new Map([
+    [directory, { uid: 1001, gid: 20, mode: 0o700, ino: 899 }],
+  ]);
   const observerFailure = new Error("Audit observer remains live");
   let nextPid = 1000,
     survivor = false,
@@ -2764,10 +2767,10 @@ function buildTranscripts(experiment = false, complete = false) {
       convert = (value) => (bigint ? BigInt(value) : value);
     return {
       uid: convert(entry?.uid ?? dir?.uid ?? 0),
-      gid: convert(0),
+      gid: convert(entry?.gid ?? dir?.gid ?? 0),
       mode: convert(entry?.mode ?? dir?.mode ?? 0o555),
       dev: convert(1),
-      ino: convert(entry?.ino ?? 900),
+      ino: convert(entry?.ino ?? dir?.ino ?? 900),
       nlink: convert(1),
       size: convert(entry?.bytes.length ?? 0),
       mtimeNs: convert(entry?.tick ?? 1),
@@ -2860,7 +2863,26 @@ function buildTranscripts(experiment = false, complete = false) {
       return {
         receive: async () => ({
           verifier,
-          subject: processes.get(pid) ?? { status: "absent" },
+          subject: processes.has(pid)
+            ? {
+                ...processes.get(pid),
+                ...(directoryOwners.has(pid)
+                  ? {
+                      directories: directoryOwners.get(pid).map((file, i) => {
+                        const object = snapshot(file, true);
+                        return {
+                          fd: i + 3,
+                          dev: object.identity.split(":")[0],
+                          ino: object.identity.split(":")[3],
+                          uid: object.uid,
+                          gid: object.gid,
+                          mode: object.mode,
+                        };
+                      }),
+                    }
+                  : {}),
+              }
+            : { status: "absent" },
           ...(enumeration ? { enumeration } : {}),
         }),
         completion: Promise.resolve({ code: 0, signal: null }),
@@ -3119,6 +3141,10 @@ function buildTranscripts(experiment = false, complete = false) {
               0o700,
             );
             reportRoot = snapshot(report.path, true);
+            directoryOwners.set(helper.pid, [
+              path.dirname(report.path),
+              report.path,
+            ]);
           }
           queue.push({
             ...(entry.purpose === "experiment"
@@ -3128,6 +3154,17 @@ function buildTranscripts(experiment = false, complete = false) {
             uid,
             gid,
             entries: 1,
+            ...(caseMode
+              ? {
+                  directories: directoryOwners
+                    .get(helper.pid)
+                    .map((file, i) => ({
+                      role: ["workspace", "build"][i],
+                      fd: i + 3,
+                      object: snapshot(file, true),
+                    })),
+                }
+              : {}),
           });
           return;
         }
@@ -4272,7 +4309,7 @@ test("fixed provider helper preparation rejoins Darwin ACL custody and helpers w
         identity: `1:2:3:${entry?.ino ?? dir?.ino ?? 900}:100:0:${"d".repeat(32)}`,
         bytes: directory ? 0 : entry.bytes.length,
         uid: entry?.uid ?? dir?.uid ?? 0,
-        gid: 0,
+        gid: entry?.gid ?? dir?.gid ?? 0,
         mode: entry?.mode ?? dir?.mode ?? 0o555,
         directory,
       };
@@ -6098,6 +6135,16 @@ test("Darwin partial case recovery rejoins protected births and objects without 
     ]),
     [true, "missing"],
     [true, "writer"],
+    ...[
+      "workspace-inode",
+      "workspace-group",
+      "build-inode",
+      "build-mode",
+      "bindings-missing",
+      "bindings-swapped",
+      "bindings-aliased",
+      "bindings-null",
+    ].map((fault) => [true, fault]),
   ]) {
     const f = buildTranscripts(experiment),
       binding = experiment
@@ -6135,6 +6182,30 @@ test("Darwin partial case recovery rejoins protected births and objects without 
     const caseRoot =
       "/private/var/run/native-poc/cases/" + observationDigest(binding.context);
     if (fault === "substituted") f.directories.get(caseRoot).ino++;
+    if (fault.startsWith("workspace-"))
+      f.directories.get(directory)[fault.endsWith("inode") ? "ino" : "gid"]++;
+    if (fault === "build-inode") f.directories.get(output).ino++;
+    if (fault === "build-mode") f.directories.get(output).mode = 0o700;
+    if (fault.startsWith("bindings-")) {
+      const entry = [...f.files.values()].find((value) => {
+          if (!value.bytes.toString().startsWith("{")) return false;
+          const record = JSON.parse(value.bytes);
+          return (
+            record.phase === "custody" &&
+            record.record.phase === "directories-bound"
+          );
+        }),
+        value = JSON.parse(entry.bytes),
+        directories = value.record.request.directories;
+      if (fault === "bindings-missing") directories.pop();
+      if (fault === "bindings-swapped")
+        [directories[0], directories[1]] = [directories[1], directories[0]];
+      if (fault === "bindings-aliased")
+        directories[1].object.identity = directories[0].object.identity;
+      if (fault === "bindings-null") value.record.request.directories = null;
+      value.record.requestSha256 = digest(JSON.stringify(value.record.request));
+      entry.bytes = Buffer.from(JSON.stringify(value) + "\n");
+    }
     if (fault === "surviving") {
       const record = [...f.files.values()]
         .filter((entry) => entry.bytes.toString().startsWith("{"))
