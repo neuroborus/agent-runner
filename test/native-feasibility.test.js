@@ -5701,7 +5701,7 @@ function windowsSessionFixture(
   diagnostics,
   probeCase,
   rootedLaunch = false,
-  { launchCase = "null-probe", onSend } = {},
+  { launchCase = "null-probe", onSend, writeFailure } = {},
 ) {
   const sent = [];
   const child = Object.assign(new EventEmitter(), {
@@ -5711,7 +5711,7 @@ function windowsSessionFixture(
         const value = bytes.toString();
         sent.push(value);
         onSend?.(value, child);
-        done();
+        done(writeFailure?.(value));
       },
     }),
     stdout: new PassThrough(),
@@ -5876,15 +5876,18 @@ test("TCP setup and observer failures retain native causes and close each acquir
         /\(struct diagnosis\)\{"([a-z-]+)", "(win32|invariant)", ([^}]+)\}/gu,
         '{operation:"$1",domain:"$2",value:$3}',
       )
-      .replace(/\(struct sockaddr \*\)&local/gu, "local")
+      .replace(/\(struct sockaddr \*\)&(local|endpoint)/gu, "$1")
       .replace(/\((?:DWORD|int)\)/gu, "")
       .replace(/sizeof\(local\)/gu, "16")
       .replace(
         /struct diagnosis acknowledgment = \{0\};/u,
         "let acknowledgment = {};",
       )
-      .replace(/&(socket|problem|transferred|acknowledgment)/gu, "$1")
-      .replace(/\b(?:int|BOOL)\b/gu, "let")
+      .replace(
+        /&(socket|problem|transferred|acknowledgment|selected|completed|size)/gu,
+        "$1",
+      )
+      .replace(/\b(?:int|BOOL|unsigned)\b/gu, "let")
       .replace(/goto done;/gu, "return false;");
   const setup = translate(
     tcp
@@ -5902,9 +5905,32 @@ test("TCP setup and observer failures retain native causes and close each acquir
   )
     .replace(/fprintf\(stderr, TCP_PREFIX " end\\n"\); fflush\(stderr\);/u, "")
     .replace(/#(?:ifndef NATIVE_COMMAND_EXPERIMENT|endif)/gu, "");
+  const connection = translate(
+    tcp.slice(
+      tcp.indexOf('tcp_observe("connect", "enter", 0);'),
+      tcp.indexOf("done:"),
+    ),
+  )
+    .replace(
+      /\(struct diagnosis\)\{([^,]+), "(win32|invariant)", ([^}]+)\}/gu,
+      '{operation:$1,domain:"$2",value:$3}',
+    )
+    .replace("sizeof(endpoint)", "16")
+    .replace(
+      "let completed = 0, size = sizeof(completed);",
+      "const completed = {value:0}, size = {value:4};",
+    )
+    .replace("(char *)completed", "completed")
+    .replace("size != sizeof(completed)", "size.value != 4")
+    .replaceAll("if (completed)", "if (completed.value)")
+    .replace("value:completed}", "value:completed.value}")
+    .replace("char reply[32];", "const reply = new Uint8Array(32);")
+    .replaceAll("reply + at", "reply.subarray(at)")
+    .replaceAll("text + at", "text.subarray(at)");
   const exercise =
-    new Script(`function prepare() {${setup} return true;} function close() {${cleanup}}
-    if (prepare()) { attempted = true; connect(socket); } result = close();`);
+    new Script(`function prepare() {${setup} return true;} function connect_once() {${connection}}
+    function close() {${cleanup}}
+    if (prepare()) connect_once(); result = close();`);
   for (const {
     bindError = 0,
     now = 4999,
@@ -5913,8 +5939,14 @@ test("TCP setup and observer failures retain native causes and close each acquir
     expireAfterTransfer = false,
     acknowledged = true,
     connectError = 0,
+    completedError = 0,
+    completionError = 0,
   } of [
     {},
+    { connectError: 10013 },
+    { connectError: 10035 },
+    { connectError: 10035, completedError: 10013 },
+    { connectError: 10035, completionError: 10038 },
     { bindError: 10013 },
     { bindError: 10022 },
     { bindError: 10013, closeError: 10038 },
@@ -5928,14 +5960,23 @@ test("TCP setup and observer failures retain native causes and close each acquir
   ]) {
     const events = [],
       failures = [],
-      secondary = [];
-    let actualError = bindError;
+      secondary = [],
+      sent = [];
+    let actualError = bindError,
+      received = 0;
     const api = {
       socket: 17,
       started: 1,
       end: 5000,
+      endpoint: {
+        sin_family: 2,
+        sin_addr: { s_addr: 0x7f000001 },
+        sin_port: 32100,
+      },
+      text: new Uint8Array(Buffer.from("0123456789abcdef".repeat(2))),
       attempted: false,
       transferred: false,
+      selected: false,
       problem: {},
       nativeReceipt: false,
       AF_INET: 2,
@@ -5943,11 +5984,17 @@ test("TCP setup and observer failures retain native causes and close each acquir
       SOCKET_ERROR: -1,
       INVALID_SOCKET: -1,
       FALSE: false,
+      TRUE: true,
+      WSAEWOULDBLOCK: 10035,
+      SOL_SOCKET: 0xffff,
+      SO_ERROR: 0x1007,
+      Uint8Array,
       htonl: (value) => value,
       htons: (value) => value,
       GetTickCount64: () =>
         expireAfterTransfer && api.transferred ? 5000 : now,
       WSAGetLastError: () => actualError,
+      wfp_now: () => 1100,
       tcp_observe: (name, phase) => {
         events.push(`${name}:${phase}`);
         actualError = 10057;
@@ -5961,18 +6008,39 @@ test("TCP setup and observer failures retain native causes and close each acquir
         actualError = bindError;
         return bindError ? -1 : 0;
       },
-      connect: (socket) => {
+      connect: (socket, endpoint, size) => {
         assert.equal(socket, 17);
+        assert.equal(endpoint, api.endpoint);
+        assert.equal(size, 16);
         events.push("connect");
-        if (connectError) {
-          api.problem = {
-            operation: "tcp-connect",
-            domain: "win32",
-            value: connectError,
-          };
-          api.nativeReceipt = true;
-        }
+        actualError = connectError;
+        return connectError ? -1 : 0;
       },
+      tcp_wait: () => 1,
+      getsockopt(socket, level, option, completed, size) {
+        assert.deepEqual(
+          [socket, level, option, size.value],
+          [17, 0xffff, 0x1007, 4],
+        );
+        completed.value = completedError;
+        actualError = completionError;
+        return completionError ? -1 : 0;
+      },
+      send(socket, text, size) {
+        assert.equal(socket, 17);
+        assert.ok(size > 0 && size <= 32);
+        const used = Math.min(7, size);
+        sent.push(...text.subarray(0, used));
+        return used;
+      },
+      recv(socket, reply, size) {
+        assert.equal(socket, 17);
+        const used = Math.min(9, size);
+        reply.set(api.text.subarray(received, received + used));
+        received += used;
+        return used;
+      },
+      memcmp: (reply, text) => Buffer.compare(reply, text),
       wfp_transfer: () => {
         events.push("observer-transfer");
         if (transferError) {
@@ -6020,11 +6088,18 @@ test("TCP setup and observer failures retain native causes and close each acquir
     };
     const unattempted =
       bindError || now >= 5000 || transferError || expireAfterTransfer;
-    if (unattempted || !acknowledged)
+    if (unattempted || !acknowledged || completionError)
       assert.throws(() => exercise.runInNewContext(api), /Native refusal/u);
     else {
       exercise.runInNewContext(api);
-      assert.equal(api.result, 0);
+      assert.equal(
+        api.result,
+        completedError || (connectError === 10013 ? 10013 : 0),
+      );
+      if (!api.result) {
+        assert.deepEqual(sent, [...api.text]);
+        assert.equal(received, 32);
+      }
     }
     assert.equal(
       events.filter((event) => event === "connect").length,
@@ -6044,7 +6119,13 @@ test("TCP setup and observer failures retain native causes and close each acquir
         "win32",
         transferError,
       ]);
-    else if (connectError)
+    else if (completionError)
+      assert.deepEqual(failures[0], [
+        "tcp-completion",
+        "win32",
+        completionError,
+      ]);
+    else if (!acknowledged && connectError)
       assert.deepEqual(failures[0], ["tcp-connect", "win32", connectError]);
     else if (!acknowledged)
       assert.deepEqual(failures[0], ["ack-read", "win32", 109]);
@@ -6462,6 +6543,9 @@ test("socket creation and observer admission bind the actual child primary token
     .replace("bytes + 1", "bytes")
     .replace("let sent = 0;", "const sent = {value:0};")
     .replace("sent == 1393", "sent.value == 1393");
+  const ownerWrite = native(body("owner_write"))
+    .replace("let sent = 0;", "const sent = {value:0};")
+    .replace(/\bsent (==|!=) size/gu, "sent.value $1 size");
   const tcp = source.slice(source.indexOf("static int tcp_connection("));
   const create = native(
     tcp.slice(
@@ -6477,6 +6561,7 @@ test("socket creation and observer admission bind the actual child primary token
     function socket_target_binding(expected) {${native(body("socket_target_binding")).replace("struct socket_target actual", "const actual").replaceAll("sizeof(actual)", "40")}}
     function socket_destination_binding() {${destination}}
     function socket_original(packet) {${original}}
+    function owner_write(bytes,size) {${ownerWrite}}
     function socket_export() {${exported}}
     function begin_socket() {${create}}
     function wfp_close() {${native(body("wfp_close"))}}
@@ -9469,6 +9554,201 @@ test("socket export refusals retain distinct self/destination evidence and bound
   }
 });
 
+test("native launcher delivers each TCP phase once to the child's sole input reader", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:BOOL|void) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const native = (text) =>
+    text
+      .replace(/\b(?:BOOL|DWORD|HANDLE|char)\b/gu, "let")
+      .replaceAll('L"', '"')
+      .replace(/&(?=[a-zA-Z_])/gu, "");
+  const write = native(body("owner_write"))
+    .replace("let sent = 0;", "const sent = {value:0};")
+    .replace(/\bsent (==|!=) size/gu, "sent.value $1 size");
+  const ack = native(body("tcp_ack"))
+    .replace("let available = 0;", "const available = {value:0};")
+    .replace(
+      "let value = 0; let size = 0;",
+      "const value = {value:0}, size = {value:0};",
+    )
+    .replace(/\bavailable(?=\)| >=| >|\s*\{)/gu, "available.value")
+    .replace(
+      "size != 1 || value != expected",
+      "size.value != 1 || value.value != expected",
+    )
+    .replace(
+      /\*problem = \(struct diagnosis\)\{"([a-z-]+)", "(win32|invariant)", ([^}]+)\};/gu,
+      'Object.assign(problem,{operation:"$1",domain:"$2",value:$3});',
+    );
+  const closure = source.slice(
+    source.indexOf(
+      "  if (wfpPreparedAt && InterlockedCompareExchange(&wfpAttemptReleased",
+    ),
+    source.indexOf(
+      "  AcquireSRWLockExclusive(&diagnosticOutputLock);",
+      source.indexOf(
+        "  if (wfpPreparedAt && InterlockedCompareExchange(&wfpAttemptReleased",
+      ),
+    ),
+  );
+  const preparation = body("wfp_prepare");
+  const ready = preparation.slice(
+    preparation.indexOf("  wfpOwnerBirth ="),
+    preparation.indexOf("  fputs("),
+  );
+  const script = new Script(`function owner_write(bytes,size){${write}}
+    function socket_command(command){${native(body("socket_command"))}}
+    function tcp_ack(expected,end,problem){${ack}}
+    function observer(){${native(ready)}}
+    function closure(){${closure.replaceAll("&wfp", "wfp")}}
+    ({send:socket_command,read:tcp_ack,observer,closure});`);
+  for (const fault of [
+    null,
+    "write",
+    "short",
+    "owner-loss",
+    "expired",
+    "token",
+  ]) {
+    const bytes = [],
+      writes = [],
+      failures = [];
+    const context = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      transport: { write: 55 },
+      transportLock: {},
+      failing: { value: 0 },
+      workspaceRole: "read",
+      wfpTarget: {},
+      wfpTransferEnd: 5000,
+      wfpPreparedAt: 0,
+      ...Object.fromEntries(
+        [
+          "wfpTargetReady",
+          "wfpTransferReady",
+          "wfpDuplicateReleased",
+          "wfpObserverReady",
+          "wfpAttemptReleased",
+          "wfpClosureReady",
+          "wfpClosureReleased",
+        ].map((key) => [key, { value: 0 }]),
+      ),
+      strchr: (text, value) => text.includes(value),
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      GetTickCount64: () => (fault === "expired" ? 5000 : 10),
+      GetLastError: () => 109,
+      GetCurrentProcess: () => 41,
+      creation: () => 90,
+      wfp_now: () => 1100,
+      GetStdHandle: () => 56,
+      STD_INPUT_HANDLE: -10,
+      InterlockedCompareExchange(slot, value, expected) {
+        const before = slot.value;
+        if (before === expected) slot.value = value;
+        return before;
+      },
+      InterlockedExchange(slot, value) {
+        slot.value = value;
+      },
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      invariant(ok, operation) {
+        if (!ok) throw new Error(operation);
+      },
+      remember: (...value) => failures.push(value),
+      failure: () => {
+        throw new Error("Native refusal");
+      },
+      socket_target_binding: () => {},
+      socket_destination_binding() {
+        if (fault === "token") throw new Error("observer-token");
+      },
+      // The actual exporter/packet is exercised above. Use its fixed size here
+      // to join launcher delivery to the same stdin reader, not a TCP receipt.
+      socket_export() {
+        actualWrite("D" + "x".repeat(1392), 1393);
+      },
+      WriteFile(pipe, value, size, sent) {
+        assert.equal(pipe, 55);
+        assert.equal(value.length, size);
+        writes.push(value[0]);
+        sent.value = fault === "short" && value[0] === "D" ? 7 : size;
+        bytes.push(...value.slice(0, sent.value));
+        return !(fault === "write" && value[0] === "D");
+      },
+      PeekNamedPipe(pipe, buffer, size, used, available) {
+        assert.equal(pipe, 56);
+        available.value = bytes.length;
+        return true;
+      },
+      ReadFile(pipe, value, size, used) {
+        assert.deepEqual([pipe, size], [56, 1]);
+        value.value = bytes.shift();
+        used.value = 1;
+        return true;
+      },
+      Sleep: () => assert.fail("No acknowledgment was delivered"),
+    };
+    const api = script.runInNewContext(context);
+    const actualWrite = new Script(`(bytes,size)=>{${write}}`).runInNewContext(
+      context,
+    );
+    assert.equal(api.send("G"), false);
+    for (const command of ["D", "T", "U"])
+      assert.throws(() => api.send(command), /observer-owner-once/u);
+    assert.equal(api.send("O"), true);
+    assert.equal(api.read("O", 5000, {}), fault !== "expired");
+    assert.throws(() => api.send("O"), /observer-owner-once/u);
+    context.wfpTransferReady.value = 1;
+    if (fault === "owner-loss") context.failing.value = 1;
+    if (["write", "short", "owner-loss"].includes(fault)) {
+      assert.throws(() => api.send("D"), /Native refusal|owner-write-size/u);
+      assert.equal(context.wfpDuplicateReleased.value, 1);
+      const count = writes.length;
+      assert.throws(() => api.send("D"), /observer-owner-once/u);
+      assert.equal(writes.length, count, "A partial packet cannot be replayed");
+      if (fault === "write")
+        assert.deepEqual(failures[0], ["owner-write", "win32", 109]);
+      if (fault === "short")
+        assert.deepEqual(failures[0], ["owner-write-size", "invariant", 0]);
+      continue;
+    }
+    api.send("D");
+    if (fault !== "expired") {
+      assert.equal(api.read("D", 5000, {}), true);
+      assert.equal(bytes.splice(0).join(""), "x".repeat(1392));
+    }
+    assert.throws(() => api.send("T"), /observer-owner-once/u);
+    api.closure();
+    assert.equal(context.wfpClosureReady.value, 0);
+    api.observer();
+    if (["expired", "token"].includes(fault)) {
+      assert.throws(() => api.send("T"), /tcp-deadline|observer-token/u);
+      assert.equal(context.wfpAttemptReleased.value, 0);
+      continue;
+    }
+    api.send("T");
+    assert.equal(api.read("T", 5000, {}), true);
+    assert.throws(() => api.send("T"), /observer-owner-once/u);
+    assert.throws(() => api.send("U"), /observer-owner-once/u);
+    api.closure();
+    api.send("U");
+    assert.equal(api.read("U", 15000, {}), true);
+    assert.throws(() => api.send("U"), /observer-owner-once/u);
+    assert.deepEqual(writes, ["O", "D", "T", "U"]);
+    assert.deepEqual(bytes, []);
+  }
+});
+
 test("original TCP operation loop uses the guarded session and withholds unpersisted acknowledgments", async () => {
   const driver = await readFile(
     new URL("../ci/native/win32/feasibility.js", import.meta.url),
@@ -9600,6 +9880,87 @@ test("original TCP operation loop uses the guarded session and withholds unpersi
       }
     }
   }
+});
+
+test("TCP delivery failures consume the phase and retain the original transport error", async () => {
+  for (const command of "ODTU")
+    for (const kind of ["throw", "callback"]) {
+      const original = new Error("Interrupted private input delivery");
+      const f = tcpDenialFixture();
+      const rows = [
+        { event: "attempt", operation: "tcp" },
+        f.transfer,
+        f.prepared,
+        f.attribution,
+      ];
+      const transport = windowsSessionFixture(
+        windowsCallerEnvironment,
+        () => {},
+        undefined,
+        true,
+        {
+          launchCase: "read",
+          writeFailure: (value) =>
+            kind === "callback" && value === command ? original : undefined,
+        },
+      );
+      let received = 0,
+        closed = false;
+      try {
+        for (const value of "ODTU") {
+          assert.throws(
+            () => transport.session.send(value),
+            "No unread frame permits release",
+          );
+          transport.child.stdout.write(JSON.stringify(rows[received]) + "\n");
+          assert.throws(
+            () => transport.session.send(value),
+            "The frame must be consumed first",
+          );
+          await transport.session.next();
+          received++;
+          if (value !== command) {
+            transport.session.send(value);
+            assert.throws(
+              () => transport.session.send(value),
+              "No replay after delivery",
+            );
+            continue;
+          }
+          if (kind === "throw") {
+            transport.child.stdin.write = (bytes) => {
+              transport.sent.push(bytes);
+              throw original;
+            };
+            assert.throws(
+              () => transport.session.send(value),
+              (error) => error === original,
+            );
+          } else {
+            const failed = once(transport.child.stdin, "error");
+            transport.session.send(value);
+            assert.equal((await failed)[0], original);
+          }
+          const delivered = [...transport.sent];
+          for (const retry of "ODTU")
+            assert.throws(
+              () => transport.session.send(retry),
+              (error) => error === original,
+            );
+          assert.deepEqual(transport.sent, delivered);
+          transport.close();
+          closed = true;
+          await assert.rejects(
+            transport.session.finish(received),
+            (error) => error === original,
+          );
+          break;
+        }
+      } finally {
+        transport.session.stop();
+        if (!closed) transport.close();
+      }
+    }
 });
 
 test("TCP transport acknowledgments remain unavailable to unrelated helper roles", async () => {
@@ -11166,6 +11527,126 @@ test("Windows relayed payload failure survives owner loss without becoming a JSO
   invalidCleanup.close();
 });
 
+test("bundle principal storage survives Git completion through its last TCP consumer", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const bundle = source.slice(
+    source.indexOf("static void bundle("),
+    source.indexOf("static void fault("),
+  );
+  const acquisition = bundle.slice(
+    bundle.indexOf("  TOKEN_USER *ownUser"),
+    bundle.indexOf("  HANDLE executable"),
+  );
+  const input = bundle.slice(
+    bundle.indexOf("  win32_check(SetHandleInformation"),
+    bundle.indexOf("  puts("),
+  );
+  const completion = bundle.slice(bundle.lastIndexOf("  BOOL closed = "));
+  const probe = bundle.slice(
+    bundle.indexOf("    BOOL closed = "),
+    bundle.indexOf("  if (code != 0)"),
+  );
+  const native = (text) =>
+    text
+      .replace(/\bTOKEN_USER \*|\bTOKEN_APPCONTAINER_INFORMATION \*/gu, "let ")
+      .replaceAll("->", ".")
+      .replace(/\bBOOL\b/gu, "let")
+      .replace(/&transport\.([\w.]+)/gu, (_, slot) => JSON.stringify(slot))
+      .replace(/&(userText|appText)/gu, 'globalThis, "$1"')
+      .replaceAll('L"', '"')
+      .replace(/#(?:ifndef NATIVE_COMMAND_EXPERIMENT|endif)/gu, "");
+  for (const mode of ["read", "edit", "null-probe"]) {
+    const user = { User: { Sid: { live: true } } },
+      app = { TokenAppContainer: { live: true } },
+      allocations = [user.User.Sid, app.TokenAppContainer],
+      order = [];
+    let inherited = true;
+    const context = {
+      token: 91,
+      TokenUser: 1,
+      TokenAppContainerSid: 31,
+      workspaceRole: mode,
+      FALSE: false,
+      TRUE: true,
+      NULL: null,
+      code: 0,
+      port: "32100",
+      pipe: "unused",
+      nonce: "a".repeat(32),
+      GetStdHandle: () => 56,
+      STD_INPUT_HANDLE: -10,
+      HANDLE_FLAG_INHERIT: 1,
+      SetHandleInformation(handle, mask, flags) {
+        assert.deepEqual([handle, mask, flags], [56, 1, 0]);
+        inherited = false;
+        return true;
+      },
+      info: (token, kind) => {
+        assert.equal(token, 91);
+        return kind === 1 ? user : app;
+      },
+      IsValidSid: (sid) => sid?.live,
+      ConvertSidToStringSidW(sid, globals, key) {
+        globals[key] = { live: true, sid };
+        allocations.push(globals[key]);
+        return true;
+      },
+      CloseHandle: (token) => token === 91,
+      win32_check: assert.ok,
+      invariant: assert.ok,
+      failure: () => assert.fail("Unexpected native refusal"),
+      release_handle: () => true,
+      wcscmp: (left, right) => (left === right ? 0 : 1),
+      receipt: (operation) => order.push(operation),
+      write_attempt: () => {},
+      attempt: () => {},
+      ack: (command) => order.push(command),
+      connection(tcp) {
+        assert.equal(context.userSid, user.User.Sid);
+        assert.equal(context.appSid, app.TokenAppContainer);
+        assert.ok(allocations.every((value) => value.live));
+        assert.equal(
+          inherited,
+          false,
+          "Git cannot inherit the bundle's input reader",
+        );
+        order.push(tcp ? "tcp-token-read" : "pipe");
+        return tcp ? 10013 : 5;
+      },
+      free(value) {
+        const allocation =
+          value === user ? user.User.Sid : app.TokenAppContainer;
+        assert.equal(allocation.live, true);
+        allocation.live = false;
+      },
+      LocalFree(value) {
+        assert.equal(value.live, true);
+        value.live = false;
+      },
+    };
+    const tail = (mode === "null-probe" ? probe : completion).replace(
+      /\n\s*\}\s*$/u,
+      "",
+    );
+    new Script(
+      `(function(){${native(input + acquisition + tail)}})()`,
+    ).runInNewContext(context);
+    assert.equal(inherited, false);
+    assert.ok(allocations.every((value) => !value.live));
+    assert.equal(context.userSid, null);
+    assert.equal(context.appSid, null);
+    assert.deepEqual(
+      order,
+      mode === "null-probe"
+        ? []
+        : ["git-status", "O", "tcp-token-read", "tcp", "pipe", "pipe"],
+    );
+  }
+});
+
 test("original Git completion clears retained handles before refusal cleanup", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
@@ -11177,7 +11658,7 @@ test("original Git completion clears retained handles before refusal cleanup", a
   );
   assert.ok(begin >= 0);
   const cleanup = source
-    .slice(begin, source.indexOf("  LocalFree(userText);", begin))
+    .slice(begin, source.indexOf('  receipt("git-status", 0);', begin))
     .replace(/\bBOOL\b/gu, "let")
     .replace(/\bFALSE\b/gu, "false")
     .replace(/&transport\.([\w.]+)/gu, (_, slot) => JSON.stringify(slot));
@@ -11654,12 +12135,17 @@ test("Windows first-launch source guards distinguish API statuses, held objects 
     /HANDLE handles\[\] = \{transport.in, transport.out, transport.errorWrite, gitInput, gitOutput, gitDiagnosticRead, gitDiagnosticWrite\}/u,
   );
   assert.match(launch, /\(gitIo \? 7 : 3\) \* sizeof\(HANDLE\)/u);
-  for (const operation of [
-    "ResumeThread(transport.child.hThread)",
-    "WriteFile(transport.write",
+  assert.match(launch, /owner_write\(&command, 1\)/u);
+  const inputWriter = source.slice(
+    source.indexOf("static void owner_write("),
+    source.indexOf("static void launch("),
+  );
+  for (const [owner, operation] of [
+    [launch, "ResumeThread(transport.child.hThread)"],
+    [inputWriter, "WriteFile(transport.write"],
   ]) {
-    assert.ok(launch.includes(operation));
-    const before = launch.slice(0, launch.indexOf(operation));
+    assert.ok(owner.includes(operation));
+    const before = owner.slice(0, owner.indexOf(operation));
     assert.match(
       before.slice(
         before.lastIndexOf("AcquireSRWLockExclusive(&transportLock)"),

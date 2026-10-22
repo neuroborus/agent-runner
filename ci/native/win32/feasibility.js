@@ -1875,7 +1875,8 @@ export function windowsFeasibilityHelperSession(
   const cwdObservation = cwdCapture(rootedLaunch);
   const tcpObservation = tcpCapture();
   const wfpObservation = wfpCapture();
-  let targetSent = false;
+  let targetSent = false,
+    tcpCommand = 0;
   let bytes = Buffer.alloc(0),
     parsed = 0,
     stderr = Buffer.alloc(0),
@@ -2309,13 +2310,35 @@ export function windowsFeasibilityHelperSession(
     send: (value) => {
       if (exit && !error) reject(new Error("Native stream ended"), "eof");
       if (error) throw attach(error);
+      need(!inputEnded);
       need(
         /^[RAGFWQNS]$/u.test(value) ||
           (rootedLaunch &&
             ["read", "edit"].includes(args[0]) &&
             /^[ODTU]$/u.test(value)),
       );
-      child.stdin.write(value);
+      if (/^[ODTU]$/u.test(value)) {
+        const event = [
+          "attempt",
+          "tcp-transfer-ready",
+          "tcp-observer-ready",
+          "tcp-attribution",
+        ][tcpCommand];
+        const row = rows[cursor - 1];
+        need(
+          value === "ODTU"[tcpCommand] &&
+            row?.event === event &&
+            (value !== "O" || row.operation === "tcp"),
+        );
+        // Consume before delivery: even a partial or failed write is one-shot.
+        tcpCommand++;
+      }
+      try {
+        child.stdin.write(value);
+      } catch (problem) {
+        reject(problem);
+        throw attach(error);
+      }
     },
     sendTarget: (started) => {
       if (error) throw attach(error);

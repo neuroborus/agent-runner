@@ -1198,6 +1198,11 @@ For each original read/edit bundle, the restricted child creates the original
 nonblocking, exclusive loopback socket under its own primary token. It rejects
 an existing thread token and checks the exact package/user SIDs, AppContainer
 state, zero capabilities, process birth and token/authentication/modified IDs.
+The bundle owns its user/package SID buffers through Git completion and the
+later TCP and named-pipe consumers. A Git receipt releases the Git handles,
+not that principal. The child clears inheritance on its protocol stdin before
+launching Git; Git's explicit handle list contains only its NUL and diagnostic
+handles, leaving the bundle as the sole protocol reader.
 The privileged observer never creates a replacement socket under impersonation:
 thread-token reads alone do not prove which identity ALE enforces.
 
@@ -1222,6 +1227,20 @@ with its actual socket held until `U`, including when no connect was attempted.
 The independent observer retains the child process, token and immutable image;
 its read-only kernel event census must join the same exclusive tuple and child
 identity before any genuine native denial can be accepted.
+
+The launcher consumes `O` before delivering it to the child's input; `D` owns
+the single acknowledgment plus fixed binary packet. Observer readiness is
+published before `T` can release the connect, and completed census/cleanup
+attempts precede `U`. Each release rejoins the applicable original identities.
+Serialized writes retain immediate native errors and reject short delivery;
+a consumed phase cannot be retried. The JS session likewise requires the
+corresponding consumed frame in `O/D/T/U` order and consumes each phase before
+writing. Persistence still precedes `D`, `T` and `U`.
+`U` authorizes settlement, including an unproved observation, so the actual
+completion can retain an escape or denial and separate cleanup uncertainty.
+It supplies no denial evidence: native `10013`, exact socket/tuple/WFP joins
+and independent whole-domain retirement remain required. Connection,
+observation and response bounds are unchanged.
 
 The creator uses its already held, suspended child-process handle to grant the
 exact AppContainer SID `PROCESS_DUP_HANDLE` (`0x40`) on that process alone. The

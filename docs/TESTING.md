@@ -609,6 +609,21 @@ success. Every acquired socket retains checked closure, including a failed
 original close after import. The child parks its held socket until independent
 observation completes; the observer receives no socket or duplication grant.
 
+Bundle lifetime fixtures execute the actual principal acquisition and completion
+bodies across Git into TCP and named-pipe consumers, then check one release per
+owned allocation, including the Git-only probe. The bundle's protocol input
+loses inheritance before Git; only the separate NUL/diagnostic handles are
+inherited by Git. The actual connect/completion/partial send/receive bodies cover
+allowed and denied attempts, pending completion, native API refusal and loss of
+the final acknowledgment before checked socket closure.
+Launcher command and acknowledgment bodies join `O/D/T/U` through one private
+input reader, with distinct observer/settlement readiness, token drift, expiry,
+owner loss, short packets and failed writes. Session regressions reject early,
+unconsumed or replayed frames and retain both synchronous and asynchronous write
+failures without redelivery. Persistence remains a prerequisite for release.
+Settlement permits the original completion after an unproved observation;
+existing receipt, escape and independent-retirement assertions still apply.
+
 Native WFP fixtures resolve the actual filter provider and terminating callout,
 including different filter/callout providers, exact key/layer joins, partial
 lookup failures and one release per acquired SDK allocation. A lookup finishing

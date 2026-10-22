@@ -84,6 +84,7 @@ static struct socket_target wfpDestination, wfpEffective, socketCreation;
 static struct sockaddr_in wfpLocal;
 static WSAPROTOCOL_INFOW wfpProtocol;
 static volatile LONG wfpTargetReady, wfpTransferReady, wfpDuplicateReleased;
+static volatile LONG wfpObserverReady, wfpAttemptReleased, wfpClosureReady, wfpClosureReleased;
 static volatile LONG wfpControlSeen;
 static DWORD wfpTransferError;
 static WORD socketVersion, socketHighVersion;
@@ -598,6 +599,7 @@ static void socket_control_receive(const BYTE *line, DWORD size);
 static void socket_transfer_refusal(const BYTE *line, DWORD size);
 static void wfp_prepare(const BYTE *line, DWORD size);
 static void socket_export(void);
+static BOOL socket_command(char command);
 static void socket_transfer_controls(const struct socket_offer *original, DWORD error, ULONGLONG end);
 static void wfp_snapshot(const BYTE *line, DWORD size);
 #endif
@@ -920,6 +922,20 @@ static const char *git_stderr_shape(const char *text, DWORD captured) {
   return selected < 3 ? (complete ? classes[selected].complete : classes[selected].partial)
     : complete ? "git-stderr-other" : "git-stderr-other-partial";
 }
+/* Serialize delivery to the private child stdin. A short write consumes its phase;
+ * neither the command nor a partial binary carrier may be replayed. */
+static void owner_write(const void *bytes, DWORD size) {
+  DWORD sent = 0; AcquireSRWLockExclusive(&transportLock);
+  if (InterlockedCompareExchange(&failing, 0, 0)) {
+    ReleaseSRWLockExclusive(&transportLock); failure(126);
+  }
+  BOOL written = WriteFile(transport.write, bytes, size, &sent, NULL); DWORD error = written ? 0 : GetLastError();
+  if (!written) remember("owner-write", "win32", error);
+  else if (sent != size) remember("owner-write-size", "invariant", 0);
+  ReleaseSRWLockExclusive(&transportLock);
+  if (!written) failure(126);
+  invariant(sent == size, "owner-write-size");
+}
 static void launch(int argc, WCHAR **argv) {
   WCHAR environment[8192] = {0}; child_environment(environment);
   owned_profile(); const WCHAR *caseId = argv[4], *image = argv[5];
@@ -1039,24 +1055,9 @@ static void launch(int argc, WCHAR **argv) {
       if (!closed || InterlockedCompareExchange(&failing, 0, 0)) failure(126); puts("{\"event\":\"closed\"}"); return;
     }
 #ifndef NATIVE_COMMAND_EXPERIMENT
-    if (command == 'O' && workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
-      invariant(!InterlockedCompareExchange(&wfpTargetReady, 0, 0), "observer-owner-once");
-      socket_target_binding(&wfpTarget); InterlockedExchange(&wfpTargetReady, 1);
-    }
-    if (command == 'D' && workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit"))) {
-      invariant(InterlockedCompareExchange(&wfpTransferReady, 0, 0) && !InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
-      socket_target_binding(&wfpTarget); InterlockedExchange(&wfpDuplicateReleased, 1);
-      socket_export(); continue;
-    }
+    if (socket_command(command)) continue;
 #endif
-    AcquireSRWLockExclusive(&transportLock);
-    if (InterlockedCompareExchange(&failing, 0, 0)) {
-      ReleaseSRWLockExclusive(&transportLock); failure(126);
-    }
-    DWORD sent; BOOL written = WriteFile(transport.write, &command, 1, &sent, NULL); DWORD writeError = written ? 0 : GetLastError();
-    if (!written) remember("owner-write", "win32", writeError);
-    ReleaseSRWLockExclusive(&transportLock);
-    if (!written) failure(126); invariant(sent == 1, "owner-write-size");
+    owner_write(&command, 1);
   }
   invariant(FALSE, "owner-channel"); /* Unacknowledged owner loss retains unsettled cleanup. */
 }
@@ -1435,15 +1436,7 @@ static void socket_export(void) {
   socket_destination_binding(); socket_target_binding(&wfpTarget);
   invariant(GetTickCount64() < wfpTransferEnd, "tcp-deadline");
   BYTE bytes[1 + sizeof(packet)]; bytes[0] = 'D'; memcpy(bytes + 1, &packet, sizeof(packet));
-  DWORD sent = 0; AcquireSRWLockExclusive(&transportLock);
-  if (InterlockedCompareExchange(&failing, 0, 0)) {
-    ReleaseSRWLockExclusive(&transportLock); failure(126);
-  }
-  BOOL written = WriteFile(transport.write, bytes, sizeof(bytes), &sent, NULL); DWORD error = written ? 0 : GetLastError();
-  if (!written) remember("owner-write", "win32", error);
-  ReleaseSRWLockExclusive(&transportLock);
-  if (!written) failure(126);
-  invariant(sent == sizeof(bytes), "owner-write-size");
+  owner_write(bytes, sizeof(bytes));
 }
 static void wfp_prepare(const BYTE *line, DWORD size) {
   invariant(!wfpTransferError, "observer-once");
@@ -1482,8 +1475,34 @@ static void wfp_prepare(const BYTE *line, DWORD size) {
   BOOL enabled = !status && collection && collection->type == FWP_UINT32 && collection->uint32 == 1;
   if (collection) FwpmFreeMemory0((void **)&collection); status_check(status, "observer-collection"); invariant(enabled, "observer-collection");
   wfpOwnerBirth = creation(GetCurrentProcess()); wfpPreparedAt = wfp_now(); wfpPreparedTick = GetTickCount64();
+  InterlockedExchange(&wfpObserverReady, 1);
   fputs("{\"event\":\"tcp-observer-ready\",", stdout); wfp_identity(stdout);
   printf(",\"local\":{\"address\":2130706433,\"port\":%u},\"requested\":{\"address\":2130706433,\"port\":%u},\"collectionEnabled\":true,\"peerStatus\":%lu}\n", wfpLocalPort, wfpRemotePort, peerStatus); fflush(stdout);
+}
+static BOOL socket_command(char command) {
+  if (!strchr("ODTU", command) || !command) return FALSE;
+  invariant(workspaceRole && (!wcscmp(workspaceRole, L"read") || !wcscmp(workspaceRole, L"edit")), "observer-owner-once");
+  if (command == 'O') {
+    invariant(!InterlockedCompareExchange(&wfpTargetReady, 0, 0), "observer-owner-once");
+    socket_target_binding(&wfpTarget); InterlockedExchange(&wfpTargetReady, 1);
+  } else if (command == 'D') {
+    invariant(InterlockedCompareExchange(&wfpTransferReady, 0, 0) && !InterlockedCompareExchange(&wfpDuplicateReleased, 0, 0), "observer-owner-once");
+    socket_target_binding(&wfpTarget); InterlockedExchange(&wfpDuplicateReleased, 1);
+    socket_export(); return TRUE;
+  } else {
+    if (command == 'T') {
+      invariant(InterlockedCompareExchange(&wfpObserverReady, 0, 0) && !InterlockedCompareExchange(&wfpAttemptReleased, 0, 0), "observer-owner-once");
+      invariant(GetTickCount64() < wfpTransferEnd, "tcp-deadline");
+      socket_destination_binding(); socket_target_binding(&wfpTarget);
+      InterlockedExchange(&wfpAttemptReleased, 1);
+    } else {
+      invariant(InterlockedCompareExchange(&wfpAttemptReleased, 0, 0) &&
+        InterlockedCompareExchange(&wfpClosureReady, 0, 0) && !InterlockedCompareExchange(&wfpClosureReleased, 0, 0), "observer-owner-once");
+      socket_destination_binding(); socket_target_binding(&wfpTarget);
+      InterlockedExchange(&wfpClosureReleased, 1);
+    }
+  }
+  owner_write(&command, 1); return TRUE;
 }
 /* Anonymous stdin has one reader. Check availability and the existing budget
  * before the one-byte read, so an interrupted observer cannot strand a socket. */
@@ -1866,6 +1885,11 @@ closed:
   if (enumClose) { remember("observer-enum-close", "win32", enumClose); cleanup_error("observer-enum-close", "win32", enumClose); }
   if (engineClose) { remember("observer-engine-close", "win32", engineClose); cleanup_error("observer-engine-close", "win32", engineClose); }
   BOOL observed = complete && matched && !status && !enumClose && !engineClose && tokenClose;
+  /* Publish settlement readiness before the frame, after the census and its
+   * cleanup attempts. U permits closure even for an unproved result, never
+   * denial admission; retain the actual completion and separate uncertainty. */
+  if (wfpPreparedAt && InterlockedCompareExchange(&wfpAttemptReleased, 0, 0))
+    InterlockedExchange(&wfpClosureReady, 1);
   AcquireSRWLockExclusive(&diagnosticOutputLock);
   for (unsigned output = 0; output < (wfpPreparedAt ? 2u : 1u); output++) {
     FILE *stream = output ? stdout : stderr;
@@ -2078,6 +2102,8 @@ static void workspace_cwd(const WCHAR *workspace) {
 }
 static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput, const WCHAR *nullOutput, const WCHAR *errorRead, const WCHAR *errorWrite) {
   BOOL probe = !wcscmp(role, L"null-probe"), owned = probe || workspaceRole;
+  /* Git receives only its admitted NUL/diagnostic handles, never this reader. */
+  win32_check(SetHandleInformation(GetStdHandle(STD_INPUT_HANDLE), HANDLE_FLAG_INHERIT, 0), "stdin-inherit");
   puts("{\"event\":\"ready\"}"); ack('A');
   if (!probe) { attempt("inspect"); WCHAR path[4096]; name(path, L"workspace\\inspection.txt");
   HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL); char bytes[32]; DWORD used;
@@ -2094,6 +2120,8 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   size_t offset = 0; for (unsigned i = 0; i < sizeof(args) / sizeof(args[0]); i++) argument(line, &offset, args[i]);
   DWORD environmentSize = git_environment(environment, workspace, metadata);
   HANDLE token; win32_check(OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token), "container-token");
+  /* The global SID views alias these owned buffers through the later TCP
+   * primary-token/self-import checks, not just the Git launch. */
   TOKEN_USER *ownUser = info(token, TokenUser); TOKEN_APPCONTAINER_INFORMATION *ownApp = info(token, TokenAppContainerSid);
   userSid = ownUser->User.Sid; appSid = ownApp->TokenAppContainer;
   invariant(IsValidSid(userSid) && appSid && IsValidSid(appSid), "container-identity");
@@ -2183,7 +2211,8 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
     if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
     if (!release_handle(&transport.workspacePhysical, "file-close")) closed = FALSE;
     if (!release_handle(&transport.workspaceLogical, "file-close")) closed = FALSE;
-    if (!closed) failure(126); return;
+    if (!closed) failure(126);
+    LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; return;
   }
   if (code != 0) {
     const char *reason = "git-process-exit";
@@ -2275,7 +2304,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   if (!release_handle(&transport.executable, "executable-close")) closed = FALSE;
   if (code || !closed) failure(126);
   if (!release_handle(&transport.workspacePhysical, "file-close") || !release_handle(&transport.workspaceLogical, "file-close")) failure(126);
-  LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL; receipt("git-status", 0);
+  receipt("git-status", 0);
   write_attempt("git-index", L"workspace\\.git\\index.lock", TRUE); write_attempt("git-ref", L"workspace\\.git\\refs\\heads\\fixture", FALSE);
   write_attempt("control", L"control\\sentinel", FALSE); write_attempt("outside", L"outside\\sentinel", FALSE);
   attempt("tcp");
@@ -2283,6 +2312,7 @@ static void bundle(const WCHAR *port, const WCHAR *pipe, const WCHAR *nullInput,
   if (workspaceRole && wcscmp(workspaceRole, L"null-probe")) ack('O');
 #endif
   receipt("tcp", connection(TRUE, port, nonce)); attempt("pipe"); receipt("pipe", connection(FALSE, pipe, nonce));
+  LocalFree(userText); LocalFree(appText); free(ownUser); free(ownApp); userSid = appSid = NULL; userText = appText = NULL;
 }
 static void fault(void) {
   WCHAR image[4096], line[8192]; need(GetModuleFileNameW(NULL, image, 4096));
