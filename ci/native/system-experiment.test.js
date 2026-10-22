@@ -34,11 +34,11 @@ import {
   runExperimentProofs,
 } from "./experiment-ci.js";
 import { nativePreparationError } from "./first-failure.js";
-import { runDarwinExperimentProofs } from "./darwin/index.js";
 import {
+  runDarwinExperimentProofs,
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
-} from "./darwin/experiment-build-inputs.js";
+} from "./darwin/index.js";
 import {
   runWindowsExperimentProofs,
   recoverWindowsExperimentProofs,

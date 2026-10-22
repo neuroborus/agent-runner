@@ -162,6 +162,10 @@ export {
 } from "./startup-crash.js";
 
 export {
+  DARWIN_EXPERIMENT_SOURCES,
+  DARWIN_PF_ABI_REFERENCE,
+} from "./experiment-build-inputs.js";
+export {
   prepareDarwinExperiment,
   loadDarwinExperiment,
   recoverDarwinExperimentPreparation,
