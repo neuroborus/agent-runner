@@ -192,6 +192,12 @@ larger state and recovery containers. Journals roll over into bounded segments
 while retaining the complete authoritative history and crash-recovery ordering;
 capacity exhaustion preserves the last accepted state. See the exact
 [storage and result budgets](../ARCHITECTURE.md#structured-result-headroom).
+One leased recovery can repair an incomplete active tail and durably retire
+interrupted observation accounting using the verified repair result. It keeps
+the complete original history and publishes matching state and progress;
+observation retirement still waits for process and resource ownership settlement.
+Repair verification failure leaves retirement pending. A successful subsequent
+recovery neither repeats truncation nor adds another retirement event.
 Repeated reads may reuse bounded process-local validation checkpoints only after
 fresh byte and identity verification of their complete cached prefixes. Current
 snapshots still require exact journal matches; cold reads and uncertain bindings

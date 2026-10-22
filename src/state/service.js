@@ -903,8 +903,10 @@ export function createRunStore({
 
   async function recoverRun(lease) {
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
-      const snapshot = await loadSnapshot(runDirectory, record.runId);
-      await journal.recover(runDirectory, snapshot);
+      const snapshot = await journal.recover(
+        runDirectory,
+        await loadSnapshot(runDirectory, record.runId),
+      );
       // Diagnostic retirement cannot precede proof that owned work is settled.
       if (
         snapshot.state.executionProcess !== null ||

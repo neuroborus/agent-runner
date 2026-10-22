@@ -55,6 +55,40 @@ export async function journalFileUnchanged(filePath, expected) {
   }
 }
 
+// The caller proves the complete captured prefix and namespace on both sides
+// of repair. This handle binds the authorized size change to that capture.
+export async function truncateJournalTail(filePath, size, expected) {
+  const invalid = () => {
+    throw new RunStoreError("Run changed during event tail repair.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  };
+  const handle = await openRegularFile(filePath, constants.O_RDWR);
+  try {
+    const before = observation(await handle.stat({ bigint: true }));
+    if (
+      !isDeepStrictEqual(before, expected) ||
+      before.links !== 1 ||
+      size >= before.size ||
+      !(await journalFileUnchanged(filePath, before))
+    )
+      invalid();
+    await handle.truncate(size);
+    await handle.sync();
+    const after = observation(await handle.stat({ bigint: true }));
+    if (
+      after.size !== size ||
+      after.links !== 1 ||
+      !sameJournalIdentity(before, after) ||
+      !(await journalFileUnchanged(filePath, after))
+    )
+      invalid();
+    return after;
+  } finally {
+    await handle.close();
+  }
+}
+
 // Hash the exact opened bytes, normally retaining only the uncached suffix.
 // Canonical snapshot matching can also decode the prefix without dropping its
 // byte proof. Bindings require stable handle/path observations, not timestamps.

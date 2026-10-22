@@ -3406,8 +3406,21 @@ existing safety error.
 Post-publication snapshot verification remains bound to that certificate and
 never passes null evidence as a reusable checkpoint. Recovery repairs partial
 tails and lagging snapshots before atomically regenerating progress from the
-same certified prefix. Failed publication or recovery discards retained
-evidence, including callback reads.
+same certified prefix. Tail repair retains bounded filesystem observations
+separately from the immutable semantic certificate. Before truncation it proves
+the original consumed ranges and digests, exact recognized namespace, directory
+identity and captured file observations through safe file access. It truncates
+and syncs only the incomplete active tail, then proves that same prefix and
+namespace with stable handle/path observations and the exact repaired size.
+Only successful verification returns an immutable snapshot with post-truncation
+observations and `hasPartialTail: false`; the original capture, certificate,
+state and revision endpoint remain unchanged. The journal recovery wrapper
+returns this value to `recoverRun`, which uses it for ownership checks and
+observation retirement through `persistObservations` and `appendTransition`.
+Independent appends also consume their own repair result. No latest-history
+reload or callback-populated checkpoint substitutes for the original proof,
+and read-only observers never authorize repair. Failed publication or recovery
+discards retained evidence, including callback reads.
 Runner monitoring and MCP activity/wait consumers continue using the state
 capability; they own no projection cache or additional polling.
 

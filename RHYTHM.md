@@ -7,6 +7,20 @@ remain in the owning documentation.
 
 ## 2026-10-22
 
+- **Verified tail repair returns the value its callers consume.** Journal
+  recovery now returns an immutable snapshot carrying verified post-truncation
+  filesystem observations while preserving the original semantic certificate,
+  consumed ranges and digests, state and revision endpoint. The wrapper and
+  service propagate it through ownership checks and observation retirement;
+  independent appends consume their repair result too. Exact namespace,
+  identity, original-prefix and repaired-size verification precede retiring the
+  partial-tail flag. This removes stale-capture reuse and redundant truncation
+  without relying on cache admission, callback reads or replacement history.
+  The controlled regression guards the accepted base's redundant truncation;
+  the stricter `ERR_INVALID_EVENT_LOG` reproduction belongs only to the supplied
+  unaccepted candidate. Existing ordering, ownership precedence and bounds stay
+  unchanged; broader read evolution remains separate.
+
 - **Unrelated live custody has its own positive proof.** Both external recovery
   and the embedded supervisor bind inaccessible candidates to a live unrelated
   session leader whose exact identity is in the frozen pre-launch baseline.

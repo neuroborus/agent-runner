@@ -104,6 +104,15 @@ publication cannot substitute for or invalidate that proof through directory
 timestamps alone. Namespace, replacement, link, ownership and restored-mtime
 tamper checks remain mandatory. Certificates are independent of optional bounded
 checkpoint retention; absent cache evidence requires canonical validation.
+Authorized tail repair proves the original prefix, namespace, directory and
+captured file observations before truncation, then the same prefix and exact
+repaired size through stable handle/path observations after syncing. Only that
+proof produces an immutable recovery value with updated filesystem evidence;
+the semantic certificate, state, revision endpoint and original capture stay
+unchanged. Recovery and subsequent observation retirement consume this value
+without redundant repair or replacement history. Failed verification grants no
+repaired proof or diagnostic retirement, and ownership settlement retains
+precedence.
 
 Operator-stop acceptance has its own short state mutation boundary, separate
 from execution ownership. A durable request preserves the exact suspended

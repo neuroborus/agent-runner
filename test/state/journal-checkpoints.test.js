@@ -29,6 +29,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { createRunStore } from "../../src/state/index.js";
+import { createStateJournal } from "../../src/state/journal.js";
 
 async function fixture(t, options = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-checkpoint-"));
@@ -445,6 +446,169 @@ test("snapshot mismatch, old lagging snapshots, and partial tails require canoni
       await readFile(join(created.directoryPath, "events.jsonl"), "utf8")
     ).endsWith("\n"),
   );
+});
+
+test("journal recovery returns its verified immutable value while preserving the original capture", async (t) => {
+  const { store, created } = await fixture(t);
+  const directory = created.directoryPath;
+  const { runId } = created.state;
+  const latest = await store.transitionRun(created.lease, {
+    counters: { rounds: 1 },
+  });
+  const journal = createStateJournal({ onTransitionBoundary: async () => {} });
+  const eventsPath = join(directory, "events.jsonl");
+  const statePath = join(directory, "state.json");
+  const prefix = await readFile(eventsPath, "utf8");
+  const handle = await open(eventsPath, "r");
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const nativeStat = prototype.stat;
+  const nativeTruncate = prototype.truncate;
+  const inode = (await stat(eventsPath)).ino;
+  let truncations = 0;
+  const truncateMock = t.mock.method(
+    prototype,
+    "truncate",
+    async function (...args) {
+      if ((await nativeStat.call(this)).ino === inode) truncations += 1;
+      return nativeTruncate.apply(this, args);
+    },
+  );
+  try {
+    for (const lagged of [false, true]) {
+      if (lagged) await writeFile(statePath, JSON.stringify(created.state));
+      const capture = await journal.loadSnapshot(directory, runId);
+      assert.equal(capture.stateLagged, lagged);
+      const recovered = await journal.recover(directory, capture);
+      assert.equal(recovered, capture, "no tail requires no replacement proof");
+      assert.equal(recovered.hasPartialTail, false);
+      assert.equal(Object.isFrozen(recovered), true);
+      assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), latest);
+      assert.equal(await readFile(eventsPath, "utf8"), prefix);
+      assert.equal(truncations, 0);
+    }
+    await appendFile(eventsPath, '{"partial":');
+    const capture = await journal.loadSnapshot(directory, runId);
+    const original = structuredClone(capture);
+    assert.equal(capture.hasPartialTail, true);
+    const recovered = await journal.recover(directory, capture);
+    assert.notEqual(recovered, capture);
+    assert.equal(recovered.hasPartialTail, false);
+    assert.equal(recovered.certificate, capture.certificate);
+    assert.equal(recovered.state, capture.state);
+    assert.equal(recovered.lastEvent, capture.lastEvent);
+    assert.equal(recovered.validByteLength, capture.validByteLength);
+    assert.deepEqual(capture, original);
+    assert.equal(Object.isFrozen(recovered), true);
+    assert.equal(Object.isFrozen(recovered.fileObservations), true);
+    assert.equal(Object.isFrozen(recovered.fileObservations[0]), true);
+    assert.equal(recovered.fileObservations[0].size, Buffer.byteLength(prefix));
+    assert.equal(
+      capture.fileObservations[0].size,
+      Buffer.byteLength(prefix + '{"partial":'),
+    );
+    assert.equal(truncations, 1);
+    assert.equal(await journal.recover(directory, recovered), recovered);
+    assert.equal(truncations, 1);
+    assert.equal(await readFile(eventsPath, "utf8"), prefix);
+
+    // Independently invoked appends also repair using their own returned value.
+    await appendFile(eventsPath, '{"partial":');
+    const appendCapture = await journal.loadSnapshot(directory, runId);
+    const next = {
+      ...latest,
+      revision: latest.revision + 1,
+      counters: { rounds: 2 },
+    };
+    await journal.appendTransition(directory, next, appendCapture, null);
+    assert.equal(truncations, 2);
+    assert.equal(appendCapture.hasPartialTail, true);
+    const source = await readFile(eventsPath, "utf8");
+    assert.equal(source.slice(0, prefix.length), prefix);
+    assert.deepEqual(JSON.parse(source.slice(prefix.length)).state, next);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), next);
+    assert.match(
+      await readFile(join(directory, "progress.md"), "utf8"),
+      new RegExp(`Revision: ${next.revision}\\n`, "u"),
+    );
+  } finally {
+    truncateMock.mock.restore();
+  }
+});
+
+test("tail repair rejects changed original proof and unverified post-truncation evidence", async (t) => {
+  for (const change of [
+    "before-prefix",
+    "before-namespace",
+    "after-prefix",
+    "after-namespace",
+    "after-size",
+  ]) {
+    await t.test(change, async (t) => {
+      const { created } = await fixture(t);
+      const directory = created.directoryPath;
+      const eventsPath = join(directory, "events.jsonl");
+      const statePath = join(directory, "state.json");
+      const progressPath = join(directory, "progress.md");
+      const prefix = await readFile(eventsPath, "utf8");
+      const state = await readFile(statePath, "utf8");
+      const progress = await readFile(progressPath, "utf8");
+      await appendFile(eventsPath, '{"partial":');
+      const journal = createStateJournal({
+        onTransitionBoundary: async () => {},
+      });
+      const capture = await journal.loadSnapshot(
+        directory,
+        created.state.runId,
+      );
+      const original = structuredClone(capture);
+      const mutate = async () => {
+        if (change.endsWith("prefix")) {
+          const source = await readFile(eventsPath, "utf8");
+          await writeFile(eventsPath, source.replace("IMPLEMENT", "CORRUPTED"));
+        } else if (change.endsWith("namespace")) {
+          await writeFile(join(directory, "events-000001.jsonl"), "");
+        }
+      };
+      const handle = await open(eventsPath, "r");
+      const prototype = Object.getPrototypeOf(handle);
+      await handle.close();
+      const nativeStat = prototype.stat;
+      const nativeTruncate = prototype.truncate;
+      const inode = (await stat(eventsPath)).ino;
+      let truncations = 0;
+      const truncateMock = t.mock.method(
+        prototype,
+        "truncate",
+        async function (...args) {
+          if ((await nativeStat.call(this)).ino !== inode)
+            return nativeTruncate.apply(this, args);
+          truncations += 1;
+          if (change === "after-size") return;
+          await nativeTruncate.apply(this, args);
+          await mutate();
+        },
+      );
+      try {
+        if (change.startsWith("before")) await mutate();
+        await assert.rejects(journal.recover(directory, capture), {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+        assert.equal(truncations, change.startsWith("before") ? 0 : 1);
+        assert.deepEqual(capture, original);
+        assert.equal(capture.hasPartialTail, true);
+        assert.equal(await readFile(statePath, "utf8"), state);
+        assert.equal(await readFile(progressPath, "utf8"), progress);
+        if (change.endsWith("size"))
+          assert.equal(
+            await readFile(eventsPath, "utf8"),
+            prefix + '{"partial":',
+          );
+      } finally {
+        truncateMock.mock.restore();
+      }
+    });
+  }
 });
 
 test("bounded checkpoint retention evicts older runs without losing canonical history", async (t) => {

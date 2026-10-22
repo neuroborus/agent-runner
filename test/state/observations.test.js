@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -454,6 +463,177 @@ test("observation publication recovers at every write-ahead boundary and retires
       recovered,
     );
     assert.deepEqual(await f.store.recoverRun(f.lease), recovered);
+  }
+});
+
+test("one leased recovery hands repaired history directly to interrupted observation retirement", async (t) => {
+  const f = await fixture(t);
+  const started = await f.store.startObservationAttempt(f.lease, selected);
+  const active = await f.store.recordObservationBatch(
+    f.lease,
+    identity(started),
+    [observation],
+  );
+  const eventsPath = join(f.directoryPath, "events.jsonl");
+  const statePath = join(f.directoryPath, "state.json");
+  const prefix = await readFile(eventsPath, "utf8");
+  await appendFile(eventsPath, '{"partial":');
+  const eventsInode = (await stat(eventsPath)).ino;
+  const stateInode = (await stat(statePath)).ino;
+  const handle = await open(eventsPath, "r");
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const nativeStat = prototype.stat;
+  const nativeTruncate = prototype.truncate;
+  const nativeReadFile = prototype.readFile;
+  const nativeWriteFile = prototype.writeFile;
+  let truncations = 0;
+  let repaired = false;
+  let appended = false;
+  const truncateMock = t.mock.method(
+    prototype,
+    "truncate",
+    async function (...args) {
+      if ((await nativeStat.call(this)).ino === eventsInode) {
+        // Controlled equivalent of the later strict-verification interaction.
+        // ERR_INVALID_EVENT_LOG was reproduced only in the unaccepted candidate;
+        // the accepted base instead attempts this redundant truncation.
+        assert.equal(
+          ++truncations,
+          1,
+          "retirement must consume the repaired value",
+        );
+        await nativeTruncate.apply(this, args);
+        repaired = true;
+        return;
+      }
+      return nativeTruncate.apply(this, args);
+    },
+  );
+  const readMock = t.mock.method(
+    prototype,
+    "readFile",
+    async function (...args) {
+      if (
+        repaired &&
+        !appended &&
+        (await nativeStat.call(this)).ino === stateInode
+      )
+        assert.fail(
+          "recovery must not reload canonical state before retirement append",
+        );
+      return nativeReadFile.apply(this, args);
+    },
+  );
+  const writeMock = t.mock.method(
+    prototype,
+    "writeFile",
+    async function (...args) {
+      if ((await nativeStat.call(this)).ino === eventsInode) {
+        assert.equal(repaired, true);
+        assert.equal(
+          JSON.parse(args[0]).activity.kind,
+          "observations-interrupted",
+        );
+        appended = true;
+      }
+      return nativeWriteFile.apply(this, args);
+    },
+  );
+  let recovered;
+  try {
+    recovered = await f.store.recoverRun(f.lease);
+    assert.equal(truncations, 1);
+    assert.equal(appended, true);
+    const events = await readFile(eventsPath, "utf8");
+    assert.equal(events.slice(0, prefix.length), prefix);
+    const retirement = JSON.parse(events.slice(prefix.length));
+    assert.equal(recovered.revision, active.revision + 1);
+    assert.deepEqual(retirement.state, recovered);
+    assert.equal(recovered.observations.attempts[0].status, "interrupted");
+    assert.equal(recovered.observations.attempts[0].accounting, "incomplete");
+    assert.equal(
+      recovered.observations.attempts[0].incomplete,
+      active.observations.attempts[0].incomplete,
+    );
+    assert.deepEqual(recovered.observations.attempts[0].observations, [
+      observation,
+    ]);
+    assert.deepEqual(recovered.activeTurn, active.activeTurn);
+    assert.deepEqual(recovered.pipelineState, active.pipelineState);
+    assert.deepEqual(recovered.counters, active.counters);
+    assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")), recovered);
+    const progress = await readFile(
+      join(f.directoryPath, "progress.md"),
+      "utf8",
+    );
+    assert.ok(progress.includes(`Revision: ${recovered.revision}\n`));
+    assert.match(progress, /observations-interrupted/u);
+    assert.deepEqual(await f.store.recoverRun(f.lease), recovered);
+    assert.equal(truncations, 1);
+    assert.equal(await readFile(eventsPath, "utf8"), events);
+    assert.equal(
+      await readFile(join(f.directoryPath, "progress.md"), "utf8"),
+      progress,
+    );
+  } finally {
+    truncateMock.mock.restore();
+    readMock.mock.restore();
+    writeMock.mock.restore();
+  }
+  assert.deepEqual(
+    await createRunStore({ stateRoot: f.stateRoot }).loadRun(active.runId),
+    recovered,
+  );
+});
+
+test("repair and sync failures cannot retire an interrupted observation", async (t) => {
+  for (const phase of ["truncate", "sync"]) {
+    await t.test(phase, async (t) => {
+      const f = await fixture(t);
+      const active = await f.store.startObservationAttempt(f.lease, selected);
+      const eventsPath = join(f.directoryPath, "events.jsonl");
+      const prefix = await readFile(eventsPath, "utf8");
+      const progressPath = join(f.directoryPath, "progress.md");
+      const progress = await readFile(progressPath, "utf8");
+      await appendFile(eventsPath, '{"partial":');
+      const inode = (await stat(eventsPath)).ino;
+      const handle = await open(eventsPath, "r");
+      const prototype = Object.getPrototypeOf(handle);
+      await handle.close();
+      const nativeStat = prototype.stat;
+      const failure = new Error(`Interrupted tail ${phase}.`);
+      const nativeOperation = prototype[phase];
+      const operation = t.mock.method(
+        prototype,
+        phase,
+        async function (...args) {
+          if ((await nativeStat.call(this)).ino === inode) throw failure;
+          return nativeOperation.apply(this, args);
+        },
+      );
+      try {
+        await assert.rejects(
+          f.store.recoverRun(f.lease),
+          (cause) => cause === failure,
+        );
+      } finally {
+        operation.mock.restore();
+      }
+      assert.equal(
+        await readFile(eventsPath, "utf8"),
+        prefix + (phase === "truncate" ? '{"partial":' : ""),
+      );
+      assert.equal(await readFile(progressPath, "utf8"), progress);
+      assert.deepEqual(
+        JSON.parse(await readFile(join(f.directoryPath, "state.json"), "utf8")),
+        active,
+      );
+      assert.deepEqual(
+        await createRunStore({ stateRoot: f.stateRoot }).loadRun(active.runId),
+        active,
+      );
+    });
   }
 });
 

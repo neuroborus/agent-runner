@@ -334,16 +334,6 @@ export async function removeFile(filePath) {
   await syncDirectory(dirname(filePath));
 }
 
-export async function truncateDurableFile(filePath, size) {
-  const handle = await openRegularFile(filePath, constants.O_RDWR);
-  try {
-    await handle.truncate(size);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (

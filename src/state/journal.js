@@ -11,6 +11,7 @@ import {
   readJournalSegment,
   sameJournalIdentity,
   streamJournalPrefix,
+  truncateJournalTail,
 } from "./journal-files.js";
 import {
   collectProjection,
@@ -21,7 +22,6 @@ import {
   appendDurableLine,
   atomicWriteFile,
   readOptionalText,
-  truncateDurableFile,
 } from "./files.js";
 import { resolveCommitBoundary, assertStopProgress } from "./stop-policy.js";
 import {
@@ -591,6 +591,7 @@ async function* readEvents(
   stable = stable && sameJournalIdentity(directory, directoryAfter);
   if (proof && !stable) throw new CheckpointInvalid();
   Object.assign(metadata, {
+    fileObservations: stable ? deepFreeze(observations) : null,
     // Certification belongs to this validated operation even when its snapshot
     // is too large for optional checkpoint retention.
     certificate:
@@ -819,15 +820,6 @@ async function writeState(runDirectory, state) {
   );
 }
 
-async function removePartialEventTail(runDirectory, snapshot) {
-  if (snapshot.hasPartialTail) {
-    await truncateDurableFile(
-      join(runDirectory, snapshot.eventFilename ?? EVENTS_FILENAME),
-      snapshot.validByteLength,
-    );
-  }
-}
-
 export function createStateJournal({
   onTransitionBoundary,
   resolveStopBoundary,
@@ -918,6 +910,63 @@ export function createStateJournal({
     }
   }
 
+  async function verifyRepairCapture(directory, snapshot) {
+    const bindings = snapshot.certificate?.bindings;
+    if (!bindings || snapshot.fileObservations?.length !== bindings.length)
+      throw changedProjection();
+    const verifyObservations = async () => {
+      if (
+        !sameJournalIdentity(
+          await observeJournalDirectory(directory),
+          snapshot.certificate.directory,
+        ) ||
+        !isDeepStrictEqual(
+          await readJournalFilenames(directory),
+          bindings.map((binding) => binding.filename),
+        )
+      )
+        throw changedProjection();
+      for (const [index, binding] of bindings.entries())
+        if (
+          !(await journalFileUnchanged(
+            join(directory, binding.filename),
+            snapshot.fileObservations[index],
+          ))
+        )
+          throw changedProjection();
+    };
+    await verifyObservations();
+    await verifyPrefix(directory, snapshot);
+    await verifyObservations();
+  }
+
+  async function removePartialEventTail(directory, snapshot) {
+    if (!snapshot.hasPartialTail) return snapshot;
+    await verifyRepairCapture(directory, snapshot);
+    const binding = snapshot.certificate.bindings.at(-1);
+    if (
+      binding.filename !== snapshot.eventFilename ||
+      binding.length !== snapshot.validByteLength
+    )
+      throw changedProjection();
+    const observation = await truncateJournalTail(
+      join(directory, binding.filename),
+      binding.length,
+      snapshot.fileObservations.at(-1),
+    );
+    // Only filesystem observations change. The semantic certificate continues
+    // to own exactly the original consumed bytes, state and revision endpoint.
+    const repaired = {
+      ...snapshot,
+      fileObservations: [
+        ...snapshot.fileObservations.slice(0, -1),
+        observation,
+      ],
+    };
+    await verifyRepairCapture(directory, repaired);
+    return deepFreeze({ ...repaired, hasPartialTail: false });
+  }
+
   async function* publicActivities(directory, snapshot, afterRevision = 0) {
     try {
       snapshot = await certifiedSnapshot(directory, snapshot);
@@ -961,7 +1010,7 @@ export function createStateJournal({
   }
 
   async function appendTransition(runDirectory, state, snapshot, activity) {
-    await removePartialEventTail(runDirectory, snapshot);
+    snapshot = await removePartialEventTail(runDirectory, snapshot);
 
     const event = {
       schemaVersion: state.schemaVersion,
@@ -1055,13 +1104,14 @@ export function createStateJournal({
   async function recover(runDirectory, snapshot) {
     snapshot = await certifiedSnapshot(runDirectory, snapshot);
     try {
-      await removePartialEventTail(runDirectory, snapshot);
+      snapshot = await removePartialEventTail(runDirectory, snapshot);
       if (snapshot.stateLagged) {
         await writeState(runDirectory, snapshot.state);
       }
 
       await writeProgress(runDirectory, snapshot);
       await verifyPrefix(runDirectory, snapshot);
+      return deepFreeze(snapshot);
     } catch (cause) {
       await verifyFailure(runDirectory, snapshot, cause);
     }
@@ -1089,7 +1139,7 @@ export function createStateJournal({
     publicActivities,
     recover: async (directory, snapshot) => {
       try {
-        await recover(directory, snapshot);
+        return await recover(directory, snapshot);
       } catch (cause) {
         forget(directory);
         throw cause;
