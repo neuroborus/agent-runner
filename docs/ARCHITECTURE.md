@@ -1589,8 +1589,10 @@ session and token evidence first, so an anchor cannot skip known ownership. A
 stable inaccessible intermediate environment may be crossed only if the
 lineage subsequently reaches an unchanged anchor; inaccessible current-process
 environment is excluded only when its lineage reaches no owned evidence and its
-stable control-group identity differs from the recorded owner. A missing or matching control-group identity, a stale
-or reused anchor, a missing baseline, a boot mismatch, a cycle, malformed
+stable control-group identity differs from the recorded owner, or the separate
+fully exited candidate proof below succeeds. A missing or matching control-group
+identity without that exit proof, a stale or reused anchor, a missing baseline,
+a boot mismatch, a cycle, malformed
 identity evidence, and otherwise unproven candidates remain unverifiable
 during both live execution and recovery. Recovery also rejects a
 recorded PID namespace that differs from its own because the envelope does not
@@ -1603,6 +1605,20 @@ closed. Reusing the enclosing trusted namespace neither retries without
 containment nor widens its policy; its namespace init remains responsible for
 otherwise detached descendants.
 Ordinary processes never receive the initial-host session fallback.
+
+Both inspectors use the same narrow fully exited candidate proof after checking
+observed ownership and reaching a frozen baseline anchor. It requires the exact
+PID/start and parent/session, `Z` state, Linux `PF_EXITING`, a valid kernel exit
+code, and one reported thread. Two task views must each contain only that same
+dead leader with matching termination evidence and no children. Every ancestry
+hop through the anchor is revalidated, followed by the candidate's identity and
+termination evidence. Missing, malformed, reused, or unstable evidence cannot
+supply this exclusion. Invalidated candidate, task, or lineage evidence blocks
+classification even when the candidate's control group differs from the owner.
+A bare zombie state is insufficient; failed exit proof supplies no authority to
+exclude live work. Exclusion applies only to that snapshot entry: every other
+PID, including descendants, is classified independently before a complete empty
+scan can support process-tree retirement.
 
 Live and recovery shared-host scans additionally share a 65,536-operation and
 250-millisecond inspection budget. Reads, snapshot entries, baseline indexing,

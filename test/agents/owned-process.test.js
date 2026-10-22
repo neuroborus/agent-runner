@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 import {
   assertOwnedProcessLauncherProtected,
@@ -263,6 +264,105 @@ function processRaceOptions(sequences = {}) {
     reads,
   };
 }
+
+function exitedStat({
+  pid = 101,
+  parent = 202,
+  session = 3,
+  start = "1234",
+  fields = {},
+} = {}) {
+  const values = Array(50).fill("0");
+  Object.assign(values, {
+    0: "Z",
+    1: String(parent),
+    3: String(session),
+    6: "4",
+    17: "1",
+    19: start,
+    ...fields,
+  });
+  return `${pid} (process) ${values.join(" ")}`;
+}
+
+function exitedCandidateFixture({
+  reads = {},
+  lists = {},
+  pids = ["101"],
+} = {}) {
+  const group = "0::/shared.scope\n";
+  const fixture = processRaceOptions({
+    "/proc/101/stat": [exitedStat()],
+    "/proc/101/environ": [processRaceError("EACCES")],
+    "/proc/101/cgroup": [group],
+    "/proc/101/task/101/stat": [exitedStat()],
+    "/proc/101/task/101/children": [""],
+    ...reads,
+  });
+  fixture.options.controlGroup = createHash("sha256")
+    .update(group)
+    .digest("hex");
+  fixture.options.now = () => 0;
+  const counts = new Map();
+  fixture.options.list = (path) => {
+    const count = counts.get(path) ?? 0;
+    counts.set(path, count + 1);
+    const sequence = lists[path] ?? [path === "/proc" ? pids : ["101"]];
+    const value = sequence[Math.min(count, sequence.length - 1)];
+    if (value instanceof Error) throw value;
+    return value;
+  };
+  return fixture;
+}
+
+// Run the actual launcher payload with an injected procfs and clock, without
+// starting a supervisor, provider, timer, or any host process.
+function inspectEmbeddedSession(ownerToken, options) {
+  const source = hostSessionLauncher(process.cwd(), {
+    ownershipMode: "native-sandbox-provider",
+  }).arguments[1];
+  const context = {
+    Buffer,
+    baseline: options.ancestryBaseline,
+    group: options.controlGroup,
+    performance: { now: options.now },
+    process: {
+      argv: ["node", "session", "1000", "unused", "[]", "0", ownerToken],
+      pid: 44,
+      getuid: options.getuid,
+      on() {},
+      connected: false,
+    },
+    require(name) {
+      if (name === "node:fs")
+        return { readFileSync: options.read, readdirSync: options.list };
+      if (name === "node:crypto") return { createHash };
+      if (name === "node:child_process")
+        return {
+          spawn() {
+            assert.fail("unexpected spawn");
+          },
+        };
+      assert.fail(`Unexpected supervisor import: ${name}`);
+    },
+  };
+  runInNewContext(
+    `${source}
+ancestryBaseline = normalizedAncestryBaseline(baseline, { bootId: ${JSON.stringify(BOOT_ID)} });
+controlGroup = group;
+globalThis.result = ownedMembers();`,
+    context,
+  );
+  return context.result === null ? null : Array.from(context.result);
+}
+
+const EXIT_INSPECTORS = [
+  [
+    "recovery",
+    (token, options) => inspectOwnedSessionProcesses(44, token, options),
+  ],
+  ["embedded supervisor", inspectEmbeddedSession],
+];
 
 async function waitForFile(path, timeoutMs = 1_000) {
   const deadline = Date.now() + timeoutMs;
@@ -771,6 +871,329 @@ function inaccessibleProcessOptions(startTicks = ["1234"]) {
     },
   };
 }
+
+test("excludes only a fully exited anchored candidate in the owner's control group", async (t) => {
+  for (const [name, inspect] of EXIT_INSPECTORS) {
+    await t.test(name, () => {
+      for (const fields of [{}, { 6: "4194308", 49: "256" }]) {
+        const { options, ownerToken } = exitedCandidateFixture({
+          reads: {
+            "/proc/101/stat": [exitedStat({ fields })],
+            "/proc/101/task/101/stat": [exitedStat({ fields })],
+          },
+        });
+        assert.deepEqual(inspect(ownerToken, options), []);
+      }
+    });
+  }
+});
+
+test("invalidated exited-candidate evidence cannot fall back to control-group exclusion", async (t) => {
+  for (const [name, inspect] of EXIT_INSPECTORS) {
+    await t.test(name, () => {
+      const group = { "/proc/101/cgroup": ["0::/unrelated.scope\n"] };
+      const live = exitedCandidateFixture({
+        reads: { ...group, "/proc/101/stat": [processStat(101, 202, 3)] },
+      });
+      assert.deepEqual(inspect(live.ownerToken, live.options), []);
+      for (const [path, stable, count, changed] of [
+        [
+          "/proc/1/stat",
+          processStat(1, 0, 1, "1"),
+          2,
+          processStat(1, 0, 1, "9999"),
+        ],
+        [
+          "/proc/202/stat",
+          processStat(202, 1, 3, "5678"),
+          2,
+          processStat(202, 1, 3, "9999"),
+        ],
+        [
+          "/proc/1/stat",
+          processStat(1, 0, 1, "1"),
+          2,
+          processStat(404, 0, 1, "1"),
+        ],
+        [
+          "/proc/202/stat",
+          processStat(202, 1, 3, "5678"),
+          2,
+          processStat(404, 1, 3, "5678"),
+        ],
+        ["/proc/101/stat", exitedStat(), 3, exitedStat({ start: "9999" })],
+        [
+          "/proc/101/task/101/stat",
+          exitedStat(),
+          1,
+          exitedStat({ start: "9999" }),
+        ],
+      ]) {
+        const fixture = exitedCandidateFixture({
+          reads: { ...group, [path]: [...Array(count).fill(stable), changed] },
+        });
+        assert.equal(inspect(fixture.ownerToken, fixture.options), null, path);
+      }
+    });
+  }
+});
+
+test("exited-candidate proof rejects missing, malformed, live, reused, or unstable evidence", async (t) => {
+  const dead = exitedStat();
+  const cases = [
+    [
+      "bare zombie",
+      { "/proc/101/stat": [processStat(101, 202, 3).replace(") S", ") Z")] },
+    ],
+    [
+      "no kernel exit flag",
+      { "/proc/101/stat": [exitedStat({ fields: { 6: "0" } })] },
+    ],
+    [
+      "malformed exit flags",
+      { "/proc/101/stat": [exitedStat({ fields: { 6: "invalid" } })] },
+    ],
+    [
+      "missing exit code",
+      { "/proc/101/stat": [dead.split(" ").slice(0, -1).join(" ")] },
+    ],
+    [
+      "malformed exit code",
+      { "/proc/101/stat": [exitedStat({ fields: { 49: "invalid" } })] },
+    ],
+    [
+      "out of range exit code",
+      { "/proc/101/stat": [exitedStat({ fields: { 49: "4294967296" } })] },
+    ],
+    [
+      "multiple reported threads",
+      { "/proc/101/stat": [exitedStat({ fields: { 17: "2" } })] },
+    ],
+    [
+      "live task",
+      { "/proc/101/task/101/stat": [exitedStat({ fields: { 0: "S" } })] },
+    ],
+    ["malformed task", { "/proc/101/task/101/stat": ["invalid"] }],
+    [
+      "inaccessible task",
+      { "/proc/101/task/101/stat": [processRaceError("EACCES")] },
+    ],
+    ["missing task", { "/proc/101/task/101/stat": [processRaceError()] }],
+    [
+      "reused task",
+      { "/proc/101/task/101/stat": [exitedStat({ start: "9999" })] },
+    ],
+    [
+      "task view changes",
+      {
+        "/proc/101/task/101/stat": [
+          dead,
+          exitedStat({ fields: { 49: "256" } }),
+        ],
+      },
+    ],
+    ["live child", { "/proc/101/task/101/children": ["404\n"] }],
+    ["child appears", { "/proc/101/task/101/children": ["", "404\n"] }],
+    [
+      "missing children",
+      { "/proc/101/task/101/children": [processRaceError("EACCES")] },
+    ],
+    ["malformed children", { "/proc/101/task/101/children": ["invalid"] }],
+    [
+      "reused candidate",
+      { "/proc/101/stat": [dead, dead, dead, exitedStat({ start: "9999" })] },
+    ],
+    ["mismatched stat PID", { "/proc/101/stat": [exitedStat({ pid: 404 })] }],
+    [
+      "termination changes",
+      {
+        "/proc/101/stat": [
+          dead,
+          dead,
+          dead,
+          exitedStat({ fields: { 49: "256" } }),
+        ],
+      },
+    ],
+    ["ancestry gap", { "/proc/202/stat": [processRaceError()] }],
+    [
+      "ancestry cycle",
+      { "/proc/202/stat": [processStat(202, 101, 3, "5678")] },
+    ],
+    ["reused baseline", { "/proc/1/stat": [processStat(1, 0, 1, "9999")] }],
+    [
+      "baseline changes after tasks",
+      {
+        "/proc/1/stat": [
+          processStat(1, 0, 1, "1"),
+          processStat(1, 0, 1, "1"),
+          processStat(1, 0, 1, "9999"),
+        ],
+      },
+    ],
+    [
+      "ancestor changes after tasks",
+      {
+        "/proc/202/stat": [
+          processStat(202, 1, 3, "5678"),
+          processStat(202, 1, 3, "5678"),
+          processStat(202, 1, 3, "9999"),
+        ],
+      },
+    ],
+    [
+      "live candidate gains no custody authority",
+      { "/proc/101/stat": [exitedStat({ fields: { 0: "S", 6: "0" } })] },
+    ],
+  ];
+  for (const [pid, parent, session, start] of [
+    [202, 1, 3, "5678"],
+    [1, 0, 1, "1"],
+  ]) {
+    for (const [phase, stableReads] of [
+      ["collection", 0],
+      ["stabilization", 1],
+      ["final recheck", 2],
+    ]) {
+      const stable = processStat(pid, parent, session, start);
+      cases.push([
+        `${pid} stat PID mismatch during ${phase}`,
+        {
+          [`/proc/${pid}/stat`]: [
+            ...Array(stableReads).fill(stable),
+            processStat(404, parent, session, start),
+            stable,
+          ],
+        },
+      ]);
+    }
+  }
+  for (const [label, lists] of [
+    ["live sibling task", [["101", "404"]]],
+    ["sibling appears", [["101"], ["101", "404"]]],
+    ["missing sole task", [[]]],
+    ["inaccessible task list", [processRaceError("EACCES")]],
+  ])
+    cases.push([label, {}, { "/proc/101/task": lists }]);
+  for (const [name, inspect] of EXIT_INSPECTORS) {
+    await t.test(name, async (t) => {
+      for (const [label, reads, lists] of cases) {
+        await t.test(label, () => {
+          const fixture = exitedCandidateFixture({ reads, lists });
+          assert.equal(inspect(fixture.ownerToken, fixture.options), null);
+        });
+      }
+      for (const field of ["parent", "session"]) {
+        for (const pid of [101, 202]) {
+          await t.test(`${pid} ${field} churn`, () => {
+            let count = 0;
+            const fixture = exitedCandidateFixture({
+              reads: {
+                [`/proc/${pid}/stat`]: [
+                  () => {
+                    const value = count++ % 2;
+                    return pid === 101
+                      ? exitedStat({
+                          [field]: (field === "parent" ? 202 : 3) + value,
+                        })
+                      : processStat(
+                          202,
+                          field === "parent" ? 1 + value : 1,
+                          field === "session" ? 3 + value : 3,
+                          "5678",
+                        );
+                  },
+                ],
+              },
+            });
+            assert.equal(inspect(fixture.ownerToken, fixture.options), null);
+            assert.equal(count, 6, "churn keeps the existing three attempts");
+          });
+        }
+      }
+    });
+  }
+});
+
+test("exited-candidate exclusion preserves observed ownership and independent descendant scanning", async (t) => {
+  const marker = `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`;
+  for (const [name, inspect] of EXIT_INSPECTORS) {
+    await t.test(name, () => {
+      for (const reads of [
+        { "/proc/101/environ": [marker] },
+        { "/proc/101/stat": [exitedStat({ session: 44 })] },
+        { "/proc/1/environ": [marker] },
+        { "/proc/202/stat": [processStat(202, 1, 44, "5678")] },
+      ]) {
+        const fixture = exitedCandidateFixture({ reads });
+        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
+        assert.equal(fixture.reads.has("/proc/101/task/101/stat"), false);
+      }
+      const parent = processStat(202, 1, 3, "5678");
+      const changed = exitedCandidateFixture({
+        reads: {
+          "/proc/202/stat": [parent, parent, processStat(202, 1, 44, "5678")],
+        },
+      });
+      assert.deepEqual(
+        inspect(changed.ownerToken, changed.options),
+        [101],
+        "an owned relationship discovered after task inspection restarts classification",
+      );
+      for (const [environment, session, expected] of [
+        [marker, 3, [404]],
+        ["", 44, [404]],
+        [processRaceError("EACCES"), 3, null],
+      ]) {
+        const fixture = exitedCandidateFixture({
+          pids: ["101", "404"],
+          reads: {
+            "/proc/404/stat": [processStat(404, 101, session, "7890")],
+            "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
+            "/proc/404/environ": [environment],
+            "/proc/404/cgroup": ["0::/shared.scope\n"],
+          },
+        });
+        assert.deepEqual(
+          inspect(fixture.ownerToken, fixture.options),
+          expected,
+        );
+        assert.equal(fixture.reads.has("/proc/404/stat"), true);
+      }
+    });
+  }
+});
+
+test("exited-candidate inspection shares work and elapsed bounds through the final read", async (t) => {
+  for (const [name, inspect] of EXIT_INSPECTORS) {
+    await t.test(name, () => {
+      const exhausted = exitedCandidateFixture({
+        pids: Array(3000).fill("101"),
+      });
+      assert.equal(inspect(exhausted.ownerToken, exhausted.options), null);
+      assert.ok(exhausted.reads.get("/proc/101/task/101/stat") > 2);
+      const successful = exitedCandidateFixture();
+      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
+      const finalRead = successful.reads.get("/proc/101/stat");
+      const fixture = exitedCandidateFixture();
+      const read = fixture.options.read;
+      let elapsed = 0;
+      fixture.options.now = () => elapsed;
+      fixture.options.read = (path) => {
+        const value = read(path);
+        if (path === "/proc/101/stat" && fixture.reads.get(path) === finalRead)
+          elapsed = 250;
+        return value;
+      };
+      assert.equal(inspect(fixture.ownerToken, fixture.options), null);
+      assert.equal(
+        elapsed,
+        250,
+        "the final read crosses the unchanged elapsed bound",
+      );
+    });
+  }
+});
 
 test("ignores a proven pre-existing inaccessible process", () => {
   assert.deepEqual(

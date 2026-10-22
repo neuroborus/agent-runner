@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-22
 
+- **Fully exited candidates have a separate narrow exclusion proof.** External
+  recovery and the embedded supervisor now require stabilized frozen ancestry,
+  observed ownership precedence, matching identity and parent/session, kernel
+  exit evidence, and two views of a sole dead task without children before
+  disregarding an inaccessible post-launch zombie in the owner's control group.
+  The lineage and candidate are rechecked. Every descendant remains independently
+  classified; a zombie state or failed exit proof supplies no live-custody or
+  complete process-tree retirement authority. Existing inspection, churn, and
+  cleanup bounds remain unchanged.
+
 - **Overflowed projections stream certified records.** Old activity cursors and
   complete progress use one record at a time without normalizing unchanged
   private historical states. The original operation-local prefix certificate

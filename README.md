@@ -956,10 +956,16 @@ its complete, stabilized lineage reaches an unchanged entry in the frozen
 launch baseline.
 Every observed session and ownership token is checked before accepting that
 anchor. An inaccessible current environment is excluded only when its stable
-control-group identity differs from the recorded owner. Replaced or reused
-PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
-control-group evidence, surviving descendants, and otherwise unverifiable
-evidence remain blocked and must not be bypassed by killing a persisted PID. A
+control-group identity differs from the recorded owner, or a narrow fully
+exited candidate proof succeeds after the anchored ownership checks. That proof
+requires matching identity, parent/session and kernel termination evidence,
+with two stable views of a sole dead task without children. Zombie state alone
+is insufficient. It excludes only that entry, even in the owner's control
+group; descendants remain independently inspected before complete process-tree
+retirement. Failed exit proof grants no authority over live work. Replaced or
+reused PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
+control-group evidence without exit proof, surviving descendants, and otherwise
+unverifiable evidence remain blocked and must not be bypassed by killing a persisted PID. A
 stable inaccessible intermediate may be crossed only when the same walk reaches
 its exact baseline anchor. If a snapshot PID exits or
 reparents during inspection, the runner retries that PID and its new ancestry

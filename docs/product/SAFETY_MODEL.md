@@ -210,9 +210,17 @@ recovery traverse the same frozen evidence, checking observed session and token
 ownership before accepting an anchor. An inaccessible intermediate environment
 may be crossed only when the walk still reaches that exact anchor.
 An inaccessible current environment is excluded only when its lineage reaches no
-owned evidence and its stable control-group identity differs. PID reuse, a stale or missing anchor, a boot mismatch,
-missing or matching current control-group evidence, cycles, owned evidence,
-malformed identities, a recovery namespace mismatch, or otherwise unproven
+owned evidence and its stable control-group identity differs, or a separate
+fully exited candidate proof succeeds after complete stabilized ancestry reaches
+the frozen baseline. That proof binds PID/start, parent/session, kernel exit
+flags and exit code to two stable views of a sole dead task without children,
+then rechecks the lineage and candidate. Zombie state alone never suffices.
+It excludes only that entry, including when it shares the owner's control group;
+all descendants remain independently inspected. Missing exit proof grants no
+live-custody authority and cannot establish complete process-tree retirement.
+PID reuse, a stale or missing anchor, a boot mismatch, missing or matching current
+control-group evidence without exit proof, cycles, owned evidence, malformed
+identities, a recovery namespace mismatch, or otherwise unproven
 candidates fail closed whenever the session scan is needed. Legacy records do
 not gain baseline or control-group authority through migration or recovery.
 A recorded previous boot remains independent proof that the old process tree

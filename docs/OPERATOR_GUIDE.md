@@ -410,21 +410,22 @@ client timeout nor disconnect cancels the durable continuation or its receipt.
 Unrelated revision movement and retained lease reservations are not launch proof.
 Inspection-budget exhaustion preserves exclusion just like incomplete evidence.
 
-Shared-host recovery uses the bounded boot/PID/start ancestry baseline captured
-before supervisor launch and journaled before provider work. A post-launch
-unrelated process is excluded only after its stabilized lineage reaches an
-unchanged baseline identity without crossing observed owned-session or token
-evidence. A stable inaccessible intermediate environment is acceptable only
-when that walk reaches the exact anchor. An inaccessible current environment is
-excluded only when its stable control-group identity differs from the recorded
-owner. A new or reused PID, stale or missing anchor, missing or matching
-control-group evidence, boot or namespace mismatch, cycle, surviving
-descendant, or incomplete evidence remains blocked. Legacy runs that never
-stored the evidence report a compatibility diagnosis and cannot gain it during
-recovery. Transient process exit or reparenting receives a fixed per-PID retry
-and is ignored only when a fresh read proves that snapshot entry absent;
-exhausted churn still blocks. Do not delete the process or lease records
-manually.
+Shared-host recovery uses the bounded boot/PID/start baseline captured before
+supervisor launch and journaled before provider work. Unrelated post-launch
+candidates require stabilized ancestry to an unchanged frozen anchor, with
+observed session/token ownership taking precedence. Inaccessible intermediate
+environments are allowed only on that complete walk. An inaccessible candidate
+requires a different stable control group or the
+[fully exited proof](product/SAFETY_MODEL.md). The latter excludes one entry,
+including in the owner's group; `Z` alone is insufficient. Descendants remain
+independently scanned; failed exit proof grants no live-custody or complete tree
+retirement authority. Unproved or reused identities, missing or stale anchors,
+missing or matching control groups without exit proof, boot/namespace mismatch,
+cycles, survivors, and incomplete evidence still block. Legacy runs report a
+compatibility diagnosis for missing evidence and cannot gain it during recovery.
+Transient exit or reparenting gets the fixed per-PID retry; only a fresh read can
+prove that entry absent. Exhausted churn still blocks. Never delete process or
+lease records manually.
 
 To stop active work, use `agent-run pause --run <run-id>` or
 `agent-run cancel --run <run-id>`. The shorthand reads status once and binds
