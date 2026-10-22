@@ -1138,7 +1138,7 @@ export async function observeWindowsFeasibilityWfp(run, persist) {
               event.layerId > 0 &&
               event.layerId <= 65535 &&
               [0, 1].includes(event.direction) &&
-              event.actionType === 0x1001 &&
+              [0x1001, 0x5003].includes(event.actionType) &&
               wfpUint(event.flags) &&
               (event.flags & 0x57f) === 0x57f &&
               !(event.flags & ~0x7ff) &&
@@ -1246,6 +1246,7 @@ function assertTcpTransfer(row, receipt) {
   need(
     wfpClosed(transfer, [
       "direction",
+      "socket",
       "creator",
       "effective",
       "appContainer",
@@ -1258,6 +1259,7 @@ function assertTcpTransfer(row, receipt) {
       "protocol",
     ]) &&
       transfer.direction === "child-self" &&
+      transfer.socket === "original" &&
       transfer.appContainer === true &&
       identity(transfer.creator, receipt.child) &&
       identity(transfer.effective, receipt.child) &&
@@ -1325,6 +1327,7 @@ function assertWindowsFeasibilityTcpAttribution(
       "local",
       "localStatus",
       "peerStatus",
+      "peer",
       "startedAt",
       "endedAt",
       "socketHeld",
@@ -1345,7 +1348,8 @@ function assertWindowsFeasibilityTcpAttribution(
       row.socketHeld === true &&
       row.tokenClosed === true &&
       row.localStatus === 0 &&
-      row.peerStatus === 10057 &&
+      ((row.peerStatus === 10057 && row.peer === null) ||
+        (row.peerStatus === 0 && tcpEndpoint(row.peer, Number(endpoint)))) &&
       tcpEndpoint(row.local, prepared.local.port) &&
       tcpEndpoint(row.requested, Number(endpoint)) &&
       wfpTime(row.startedAt) &&
@@ -1605,7 +1609,11 @@ function tcpCapture() {
         value = Number(digits);
       if (
         value > 0xffffffff ||
-        (["enter", "complete"].includes(phase) && value !== 0) ||
+        (phase === "enter" && value !== 0) ||
+        (phase === "complete" &&
+          (api === "select"
+            ? value > 2
+            : api !== "getsockopt" && value !== 0)) ||
         (phase === "pending" && (api !== "connect" || value !== 10035)) ||
         (phase === "failed" && api !== "transaction" && value === 0)
       )
@@ -3588,8 +3596,8 @@ export async function runWindowsFeasibility(
             run.session.send("O");
             const transfer = await nextRun();
             assertWindowsFeasibilityTcpTransfer(transfer, run.receipt);
-            // Bind the child's primary identity, self-transfer destination and
-            // provider before releasing its single self-import.
+            // Bind the child's primary identity, original socket and provider
+            // before releasing the self-import control and observer setup.
             run.tcpAttribution = {
               transfer,
               requestedEndpoint: tcpEndpoint,

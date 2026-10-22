@@ -1228,26 +1228,31 @@ The privileged observer never creates a replacement socket under impersonation:
 thread-token reads alone do not prove which identity ALE enforces.
 
 `tcp-transfer-ready` binds the held child primary identity and actual public
-provider/catalog/chain to the independent owner PID/birth. Its transfer direction
-is `child-self`; creator, effective and destination identities must all equal
-the child. The driver persists that record before `D`. One bounded private
-packet through the existing child pipe rejoins that identity, the original local
-endpoint and provider; it must contain no external import ticket. The child
-calls `WSADuplicateSocketW` once for its own PID, imports that ticket once with
-`WSASocketW`, and closes the original descriptor independently. The imported
-descriptor must retain the exact provider, exclusive local endpoint and
-unconnected state; nonblocking mode is explicitly checked. Creation/import
-flags remain zero. Both descriptors receive checked closure on partial failure.
-No socket or duplication authority is transferred into the privileged observer.
+provider/catalog/chain to the independent owner PID/birth. Its transfer
+direction is `child-self` with `socket: "original"`; creator, effective and
+destination identities must all equal the child. The driver persists that
+record before `D`. One bounded private packet through the existing child pipe
+rejoins that identity, the original local endpoint and provider; it must
+contain no external import ticket. The child calls `WSADuplicateSocketW` once
+for its own PID, imports that ticket once with `WSASocketW` as a separate
+control. Its provider is checked and that control descriptor is closed before
+observer readiness; it never replaces the original restricted-owned descriptor.
+The original must retain the exact provider, exclusive local endpoint and
+unconnected state. Its original nonblocking mode remains in effect.
+Creation/import flags remain zero. Both descriptors receive checked closure on
+partial failure, with the original cause retained separately from a failed
+control close. No socket or duplication authority is transferred into the
+privileged observer.
 
-The child reads its primary identity again before acknowledging the import.
-Birth/token drift, PID-only input, partial packets, injected tickets and changed
-provider/catalog/chain or local tuple refuse admission without replay. `O/D/T/U`
-remain limited to the original rooted read/edit roles. The trusted child parks
-with its actual socket held until `U`, including when no connect was attempted.
-The independent observer retains the child process, token and immutable image;
-its read-only kernel event census must join the same exclusive tuple and child
-identity before any genuine native denial can be accepted.
+The child reads its primary identity again before observer readiness and after
+`T`, immediately before connect. Birth/token drift, PID-only input, partial
+packets, injected tickets and changed provider/catalog/chain or local tuple
+refuse admission without replay. `O/D/T/U` remain limited to the original
+rooted read/edit roles. The trusted child parks with its actual socket held
+until `U`, including when no connect was attempted. The independent observer
+retains the child process, token and immutable image; its read-only kernel
+event census must join the same exclusive tuple and child identity before any
+genuine native denial can be accepted.
 
 The launcher consumes `O` before delivering it to the child's input; `D` owns
 the single acknowledgment plus fixed binary packet. Observer readiness is
@@ -1382,41 +1387,62 @@ native acceptance.
 
 The launcher rechecks the retained child's birth, Job, zero-capability
 package/user, exact token and native image. The child verifies its actual held
-loopback endpoint, exclusive option and unconnected peer after import; the
-observer rejoins these native observations and requires already-enabled WFP
-event collection. It changes no collection setting, audit setting, policy or
-capability. Disabled or unreadable collection refuses admission.
+original loopback endpoint, exclusive option and unconnected peer after the
+self-import control closes; the observer rejoins these native observations and
+requires already-enabled WFP event collection. It changes no collection
+setting, audit setting, policy or capability. Disabled or unreadable collection
+refuses admission.
 
-The driver acknowledges the original TCP attempt, persists the observer's actual
-socket/identity binding and frozen remote endpoint, and only then releases its
-single connect. The socket remains held until independent observation finishes,
-including transfers whose connect was never attempted. Transfer and acknowledgment
-failures reach checked socket closure; pipe acknowledgments obey the original
-5000 ms transaction and 15000 ms response windows.
-The installed SDK AppId/window enum reads pre-enumerator logged events through
-`FwpmNetEventCreateEnumHandle0` and `FwpmNetEventEnum2`: at most 256 events, eight
-matches and a finite deadline. Actual SDK flags, IPv4/TCP tuple, AppId, user and
-package SIDs, outbound `ALE_AUTH_CONNECT_V4`, filter/layer identities and native
-action must all match. A literal BLOCK must resolve its actual provider. A
-terminating-callout DROP must additionally resolve that exact callout, its
-applicable layer and independently resolved provider. The callout and filter
-may have different providers; each returned provider key must match its native
-reference. Provider/callout lookup failures, missing providers, identity
-mismatches and other action types refuse success; all acquired SDK allocations
-are freed even after partial lookup failure. Lookups completing at or beyond the
-observation deadline refuse the match. The requested remote address comes from
-the frozen connect vector; it is never fabricated as a successful connected-peer read.
-Actual `getsockname`/`getpeername` statuses remain separate diagnostics, and the
-observer joins the parked child's exact exclusive local tuple. A connected peer
-cannot become a denial receipt. The birth, token and image must remain unchanged.
+The driver acknowledges the original TCP attempt, persists the observer's
+actual socket/identity binding and frozen remote endpoint, and only then
+releases its single connect. The socket remains held until independent
+observation finishes, including transfers whose connect was never attempted.
+Transfer and acknowledgment failures reach checked socket closure; pipe
+acknowledgments obey the original 5000 ms transaction and 15000 ms response
+windows. The installed SDK AppId/window enum reads pre-enumerator logged events
+through `FwpmNetEventCreateEnumHandle0` and `FwpmNetEventEnum2`. Empty
+snapshots are closed and reopened against the exact same AppId/time query to
+allow buffered delivery while the socket and token remain held. All snapshots
+share the existing five-second observation deadline, a total limit of 256
+examined events, at most 64 per page and eight matches. Failed queries,
+exhausted scans and failed snapshot closure refuse success. The final enum,
+engine and token close independently on normal and partial capture paths. Live
+process/Job/package/token/image checks precede acquisition of local observer
+resources; the retained prepared engine also closes when AppId lookup fails.
+Actual SDK flags, IPv4/TCP tuple, AppId, user and package SIDs, outbound
+`ALE_AUTH_CONNECT_V4`, filter/layer identities and native action must all
+match. A literal BLOCK must resolve its actual provider. A terminating-callout
+DROP must additionally resolve that exact callout, its applicable layer and
+independently resolved provider. The callout and filter may have different
+providers; each returned provider key must match its native reference.
+Provider/callout lookup failures, missing providers, identity mismatches and
+other action types refuse success; all acquired SDK allocations are freed even
+after partial lookup failure. Lookups completing at or beyond the observation
+deadline refuse the match. The requested remote address comes from the frozen
+connect vector; it is never fabricated as a successful connected-peer read.
+Actual `getsockname`/`getpeername` statuses remain separate diagnostics, and
+the observer joins the parked child's exact exclusive local tuple. The actual
+peer is either absent with `WSAENOTCONN` or a successful read of the exact
+requested endpoint; pending connects can expose that endpoint. The acceptance
+frame records that read as `peer`, separately from `requested`. A peer read
+supplies no completion or denial evidence: actual native `10013` and the
+matching DROP remain mandatory. A successful transaction, timeout, refusal,
+missing event or different peer still fails. The birth, complete primary-token
+identity (including ModifiedId) and image must remain unchanged. Immediate
+connect errors, actual `select` results and `SO_ERROR` values survive diagnostic
+collection and later settlement errors. Allowed TCP and pipe listeners remain
+live through each restricted attempt, attribution, independent retirement and the
+subsequent positive transactions.
 
 The acceptance record is separate from the 4 KiB WFP diagnostic snapshot. Both
-retain actual enum/engine closure statuses. Acceptance records `socketHeld`
-while the child is parked, rather than claiming an observer socket close that
-never occurred. Checked child descriptor closure, token closure and independent
-retirement remain mandatory. The actual 10013 must complete within the original
-5000 ms transaction budget. Nonzero `SO_ERROR` is an actual completion error for
-write, exception or combined readiness; readiness alone supplies no refusal.
+retain actual enum/engine closure statuses. The diagnostic reader preserves
+both literal-block and terminating-callout action types emitted by the native
+observer; only the acceptance record supplies the required provider/callout joins.
+Acceptance records `socketHeld` while the child is parked. Checked child
+descriptor closure, token closure and independent retirement remain mandatory.
+The actual 10013 must complete within the original 5000 ms transaction budget.
+Nonzero `SO_ERROR` is an actual completion error for write, exception or combined
+readiness; readiness alone supplies no refusal.
 Pending 10035, closed-port 10061, timeout, empty snapshots, unrelated events,
 lookup failure, missing fields and exhausted enumeration remain unsuccessful.
 Uncertain observer or Job/map retirement fences progress. Outside nonce-echo

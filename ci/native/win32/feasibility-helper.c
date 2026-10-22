@@ -1355,7 +1355,7 @@ static void socket_transfer_identity(FILE *output) {
   fputs("\"transfer\":{\"direction\":\"child-self\",\"creator\":", output); socket_target_write(output, &wfpDestination);
   fputs(",\"effective\":", output); socket_target_write(output, &wfpEffective);
   fputs(",\"appContainer\":true,\"destination\":", output); socket_target_write(output, &wfpDestination);
-  fputs(",\"providerId\":\"", output); wfp_key(output, &wfpProtocol.ProviderId);
+  fputs(",\"socket\":\"original\",\"providerId\":\"", output); wfp_key(output, &wfpProtocol.ProviderId);
   fprintf(output, "\",\"catalogId\":%lu,\"creationFlags\":0,\"addressFamily\":%d,\"socketType\":%d,\"protocol\":%d}",
     wfpProtocol.dwCatalogEntryId, wfpProtocol.iAddressFamily, wfpProtocol.iSocketType, wfpProtocol.iProtocol);
 }
@@ -1468,7 +1468,7 @@ static void wfp_prepare(const BYTE *line, DWORD size) {
     !memcmp(&packet.effective, &wfpDestination, sizeof(wfpDestination)) &&
     !memcmp(&packet.local, &wfpLocal, sizeof(wfpLocal)), "observer-owner-binding");
   socket_destination_binding(); socket_target_binding(&offer.target);
-  DWORD peerStatus = WSAENOTCONN; /* The child checked its held import before this carrier. */
+  DWORD peerStatus = WSAENOTCONN; /* The child checked its original socket before this carrier. */
   status_check(FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &wfpEngine), "observer-engine");
   invariant(wfpEngine != NULL, "observer-engine");
   FWP_VALUE0 *collection = NULL; DWORD status = FwpmEngineGetOption0(wfpEngine, FWPM_ENGINE_COLLECT_NET_EVENTS, &collection);
@@ -1746,12 +1746,16 @@ static BOOL wfp_transfer(SOCKET *socket, ULONGLONG end, struct diagnosis *proble
   if (!socket_protocol_same(&shared.source, &shared.protocol)) { *problem = (struct diagnosis){"observer-protocol", "invariant", 0}; return FALSE; }
   SOCKET imported = WSASocketW(FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, FROM_PROTOCOL_INFO, &shared.protocol, 0, 0);
   if (imported == INVALID_SOCKET) { *problem = (struct diagnosis){"observer-socket", "win32", WSAGetLastError()}; return FALSE; }
-  SOCKET previous = *socket; *socket = imported;
-  if (closesocket(previous) == SOCKET_ERROR) {
-    DWORD error = WSAGetLastError(); cleanup_error("tcp-close", "win32", error); *problem = (struct diagnosis){"tcp-close", "win32", error}; return FALSE;
+  /* Self-import is a control, never the descriptor used by the attempt. Keep
+   * the original creation/token association through connect and observation. */
+  WSAPROTOCOL_INFOW importedProtocol = {0};
+  DWORD importedStatus = socket_control_protocol(imported, &shared.source, &importedProtocol);
+  if (importedStatus) remember("observer-protocol", "win32", importedStatus);
+  if (closesocket(imported) == SOCKET_ERROR) {
+    DWORD error = WSAGetLastError(); cleanup_error("tcp-close", "win32", error);
+    *problem = importedStatus ? (struct diagnosis){"observer-protocol", "win32", importedStatus} : (struct diagnosis){"tcp-close", "win32", error}; return FALSE;
   }
-  u_long nonblocking = 1;
-  if (ioctlsocket(*socket, FIONBIO, &nonblocking) == SOCKET_ERROR) { *problem = (struct diagnosis){"tcp-nonblocking", "win32", WSAGetLastError()}; return FALSE; }
+  if (importedStatus) { *problem = (struct diagnosis){"observer-protocol", "win32", importedStatus}; return FALSE; }
   status = socket_control_protocol(*socket, &packet.offer.source, &offer.source);
   if (status) { *problem = (struct diagnosis){"observer-protocol", "win32", status}; return FALSE; }
   BOOL exclusive = FALSE; int size = sizeof(exclusive); struct sockaddr_in local = {0}, remote = {0};
@@ -1771,7 +1775,13 @@ static BOOL wfp_transfer(SOCKET *socket, ULONGLONG end, struct diagnosis *proble
   observed.offer.protocol = shared.protocol;
   fputs(SOCKET_PREFIX, stderr); for (unsigned i = 0; i < sizeof(observed); i++) fprintf(stderr, "%02x", ((BYTE *)&observed)[i]); fputc('\n', stderr); fflush(stderr);
   if (ferror(stderr)) { *problem = (struct diagnosis){"observer-carrier", "invariant", 0}; return FALSE; }
-  return tcp_ack('T', end, problem);
+  if (!tcp_ack('T', end, problem)) return FALSE;
+  /* T may have been delayed or interrupted. Check the effective identity at
+   * the actual connect boundary, not just at socket creation or observer setup. */
+  status = socket_primary_identity(&after);
+  if (status) { *problem = (struct diagnosis){"observer-token", "win32", status}; return FALSE; }
+  if (memcmp(&current, &after, sizeof(after))) { *problem = (struct diagnosis){"observer-owner-binding", "invariant", 0}; return FALSE; }
+  return TRUE;
 }
 static void wfp_snapshot(const BYTE *line, DWORD size) {
   const char *prefix = WFP_PREFIX " tuple="; DWORD offset = (DWORD)strlen(prefix);
@@ -1795,10 +1805,15 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
   DWORD childPid = GetProcessId(transport.child.hProcess); if (!childPid) { status = GetLastError(); goto closed; }
   if (wfp_time(born) != tuple.birth || childPid != tuple.pid) goto closed;
   WCHAR image[4096]; name(image, L"build\\helper.exe");
+  /* Verify live custody before acquiring local observer resources. Refusal
+   * here still leaves the engine/token with their ordinary cleanup owner. */
+  if (wfpPreparedAt) {
+    socket_destination_binding(); socket_target_binding(&wfpTarget);
+    engine = wfpEngine; wfpEngine = NULL;
+  }
   status = FwpmGetAppIdFromFileName0(image, &appId); if (status) { reason = "api"; goto closed; }
   if (!wfp_blob(appId)) { reason = "fields"; goto closed; }
-  if (wfpPreparedAt) { engine = wfpEngine; wfpEngine = NULL; }
-  else status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &engine);
+  if (!wfpPreparedAt) status = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, NULL, &engine);
   if (status) { reason = "api"; goto closed; }
   if (!engine) { reason = "fields"; goto closed; }
   FWPM_FILTER_CONDITION0 condition = {0}; condition.fieldKey = FWPM_CONDITION_ALE_APP_ID;
@@ -1806,74 +1821,86 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
   FWPM_NET_EVENT_ENUM_TEMPLATE0 query = {0}; query.startTime.dwLowDateTime = (DWORD)tuple.started; query.startTime.dwHighDateTime = (DWORD)(tuple.started >> 32);
   query.endTime.dwLowDateTime = (DWORD)tuple.ended; query.endTime.dwHighDateTime = (DWORD)(tuple.ended >> 32);
   query.numFilterConditions = 1; query.filterCondition = &condition;
-  status = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration); if (status) { reason = "api"; goto closed; }
-  if (!enumeration) { reason = "fields"; goto closed; }
   tupleBound = tuple.attempted == TRUE && !tuple.localStatus && !tuple.remoteStatus && tuple.localSize == sizeof(struct sockaddr_in) &&
     tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.localFamily == AF_INET && tuple.remoteFamily == AF_INET &&
     tuple.localAddress == INADDR_LOOPBACK && tuple.remoteAddress == INADDR_LOOPBACK && tuple.localPort && tuple.remotePort;
   if (wfpPreparedAt) {
-    socket_destination_binding(); socket_target_binding(&wfpTarget); TOKEN_STATISTICS token; DWORD used; HANDLE current = NULL;
-    win32_check(OpenProcessToken(transport.child.hProcess, TOKEN_QUERY, &current), "observer-token");
-    BOOL read = GetTokenInformation(current, TokenStatistics, &token, sizeof(token), &used); DWORD error = read ? 0 : GetLastError();
-    if (!read) remember("observer-token", "win32", error);
-    BOOL tokenClosed = close_handle(current, "observer-token-close");
-    if (!read || !tokenClosed) failure(126);
-    invariant(used == sizeof(token) && !memcmp(&token.TokenId, &wfpTokenIdentity.TokenId, sizeof(LUID)) &&
-      !memcmp(&token.AuthenticationId, &wfpTokenIdentity.AuthenticationId, sizeof(LUID)), "observer-token");
     /* The trusted child is parked on the same exclusive socket until U. Its
      * primary birth/token and the kernel DROP independently join this tuple. */
     BOOL localBound = tuple.localAddress == ntohl(wfpLocal.sin_addr.s_addr) && tuple.localPort == ntohs(wfpLocal.sin_port);
-    BOOL peerBound = tuple.remoteStatus == WSAENOTCONN && !tuple.remoteSize && !tuple.remoteFamily && !tuple.remoteAddress && !tuple.remotePort;
+    /* A pending connect may expose its requested peer through getpeername.
+     * Neither that read nor ENOTCONN supplies a connect completion or denial. */
+    BOOL peerBound = (tuple.remoteStatus == WSAENOTCONN && !tuple.remoteSize && !tuple.remoteFamily && !tuple.remoteAddress && !tuple.remotePort) ||
+      (!tuple.remoteStatus && tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.remoteFamily == AF_INET &&
+        tuple.remoteAddress == INADDR_LOOPBACK && tuple.remotePort == wfpRemotePort);
     socketBound = tuple.attempted == TRUE && localBound && peerBound && !tuple.localStatus && tuple.localSize == sizeof(struct sockaddr_in) &&
       tuple.localFamily == AF_INET && tuple.localAddress == INADDR_LOOPBACK && tuple.localPort == wfpLocalPort && tuple.started >= wfpPreparedAt &&
       tuple.ended - tuple.started <= 50000000 && GetTickCount64() - wfpPreparedTick < 5000;
   }
-  ULONGLONG deadline = GetTickCount64() + 5000; reason = tupleBound || socketBound ? "empty" : "binding";
-  for (unsigned page = 0; page < 4; page++) {
-    UINT32 count = 0; status = FwpmNetEventEnum2(engine, enumeration, 64, &events, &count);
-    if (status) { reason = "api"; goto closed; }
-    if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
-    if (count > 64 || (count && !events)) { reason = "fields"; goto closed; }
-    for (UINT32 i = 0; i < count; i++) {
+  ULONGLONG deadline = GetTickCount64() + 5000; UINT32 scanned = 0;
+  reason = tupleBound || socketBound ? "empty" : "binding";
+  for (;;) {
+    status = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration); if (status) { reason = "api"; goto closed; }
+    if (!enumeration) { reason = "fields"; goto closed; }
+    for (unsigned page = 0; page < 4; page++) {
+      if (scanned == 256) { reason = "exhausted"; goto closed; }
+      UINT32 limit = 256 - scanned; if (limit > 64) limit = 64;
+      UINT32 count = 0; status = FwpmNetEventEnum2(engine, enumeration, limit, &events, &count);
+      if (status) { reason = "api"; goto closed; }
       if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
-      FWPM_NET_EVENT2 *event = events[i]; if (!event) { reason = "fields"; goto closed; }
-      if ((unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) { reason = "fields"; goto closed; }
-      if ((!tupleBound && !socketBound) || event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) continue;
-      const FWPM_NET_EVENT_HEADER2 *h = &event->header;
-      const UINT32 required = FWPM_NET_EVENT_FLAG_IP_VERSION_SET | FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
-        FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
-        FWPM_NET_EVENT_FLAG_APP_ID_SET | FWPM_NET_EVENT_FLAG_USER_ID_SET | FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET;
-      if ((h->flags & required) != required || (h->flags & ~(required | FWPM_NET_EVENT_FLAG_SCOPE_ID_SET | FWPM_NET_EVENT_FLAG_REAUTH_REASON_SET))) { reason = "fields"; goto closed; }
-      /* SDK event addresses/ports are host order; socket values were normalized above. */
-      if (h->ipVersion != FWP_IP_VERSION_V4 || h->ipProtocol != IPPROTO_TCP || h->localAddrV4 != tuple.localAddress ||
-          h->remoteAddrV4 != (socketBound ? INADDR_LOOPBACK : tuple.remoteAddress) || h->localPort != tuple.localPort || h->remotePort != (socketBound ? wfpRemotePort : tuple.remotePort)) continue;
-      ULONGLONG time = wfp_time(h->timeStamp); if (time < tuple.started || time > tuple.ended) continue;
-      if (!wfp_blob(&h->appId) || !h->userId || !h->packageSid || !IsValidSid(h->userId) || !IsValidSid(h->packageSid) ||
-          GetLengthSid(h->userId) > SECURITY_MAX_SID_SIZE || GetLengthSid(h->packageSid) > SECURITY_MAX_SID_SIZE) { reason = "fields"; goto closed; }
-      if (h->appId.size != appId->size || memcmp(h->appId.data, appId->data, appId->size) || !EqualSid(h->userId, userSid) || !EqualSid(h->packageSid, appSid)) continue;
-      const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
-      if (!drop || !drop->filterId || !drop->layerId || drop->isLoopback != TRUE ||
-          (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) || drop->vSwitchId.size) { reason = "fields"; goto closed; }
-      status = FwpmFilterGetById0(engine, drop->filterId, &filter); if (status) { reason = "lookup"; goto closed; }
-      status = FwpmLayerGetById0(engine, drop->layerId, &layer); if (status) { reason = "lookup"; goto closed; }
-      if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
-      if (!filter || !layer || filter->filterId != drop->filterId || layer->layerId != drop->layerId ||
-          memcmp(&filter->layerKey, &layer->layerKey, sizeof(GUID))) { reason = "fields"; goto closed; }
-      if (socketBound && (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND || memcmp(&layer->layerKey, &FWPM_LAYER_ALE_AUTH_CONNECT_V4, sizeof(GUID)))) {
-        FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer); continue;
+      if (count > limit || (count && !events)) { reason = "fields"; goto closed; }
+      scanned += count;
+      for (UINT32 i = 0; i < count; i++) {
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        FWPM_NET_EVENT2 *event = events[i]; if (!event) { reason = "fields"; goto closed; }
+        if ((unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) { reason = "fields"; goto closed; }
+        if ((!tupleBound && !socketBound) || event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) continue;
+        const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+        const UINT32 required = FWPM_NET_EVENT_FLAG_IP_VERSION_SET | FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET | FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET |
+          FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET | FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET | FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET |
+          FWPM_NET_EVENT_FLAG_APP_ID_SET | FWPM_NET_EVENT_FLAG_USER_ID_SET | FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET;
+        if ((h->flags & required) != required || (h->flags & ~(required | FWPM_NET_EVENT_FLAG_SCOPE_ID_SET | FWPM_NET_EVENT_FLAG_REAUTH_REASON_SET))) { reason = "fields"; goto closed; }
+        /* SDK event addresses/ports are host order; socket values were normalized above. */
+        if (h->ipVersion != FWP_IP_VERSION_V4 || h->ipProtocol != IPPROTO_TCP || h->localAddrV4 != tuple.localAddress ||
+            h->remoteAddrV4 != (socketBound ? INADDR_LOOPBACK : tuple.remoteAddress) || h->localPort != tuple.localPort || h->remotePort != (socketBound ? wfpRemotePort : tuple.remotePort)) continue;
+        ULONGLONG time = wfp_time(h->timeStamp); if (time < tuple.started || time > tuple.ended) continue;
+        if (!wfp_blob(&h->appId) || !h->userId || !h->packageSid || !IsValidSid(h->userId) || !IsValidSid(h->packageSid) ||
+            GetLengthSid(h->userId) > SECURITY_MAX_SID_SIZE || GetLengthSid(h->packageSid) > SECURITY_MAX_SID_SIZE) { reason = "fields"; goto closed; }
+        if (h->appId.size != appId->size || memcmp(h->appId.data, appId->data, appId->size) || !EqualSid(h->userId, userSid) || !EqualSid(h->packageSid, appSid)) continue;
+        const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
+        if (!drop || !drop->filterId || !drop->layerId || drop->isLoopback != TRUE ||
+            (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) || drop->vSwitchId.size) { reason = "fields"; goto closed; }
+        status = FwpmFilterGetById0(engine, drop->filterId, &filter); if (status) { reason = "lookup"; goto closed; }
+        status = FwpmLayerGetById0(engine, drop->layerId, &layer); if (status) { reason = "lookup"; goto closed; }
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        if (!filter || !layer || filter->filterId != drop->filterId || layer->layerId != drop->layerId ||
+            memcmp(&filter->layerKey, &layer->layerKey, sizeof(GUID))) { reason = "fields"; goto closed; }
+        if (socketBound && (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND || memcmp(&layer->layerKey, &FWPM_LAYER_ALE_AUTH_CONNECT_V4, sizeof(GUID)))) {
+          FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer); continue;
+        }
+        GUID providerKey = {0}, calloutKey = {0}, calloutProviderKey = {0};
+        if (socketBound) {
+          status = wfp_filter(engine, filter, layer, &providerKey, &calloutKey, &calloutProviderKey); if (status) { reason = "lookup"; goto closed; }
+        } else if (filter->action.type != FWP_ACTION_BLOCK) { reason = "fields"; goto closed; }
+        if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
+        if (matched == 8) { reason = "exhausted"; goto closed; }
+        matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, providerKey, calloutKey, calloutProviderKey, drop->msFwpDirection, filter->action.type, h->flags, time};
+        FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer);
       }
-      GUID providerKey = {0}, calloutKey = {0}, calloutProviderKey = {0};
-      if (socketBound) {
-        status = wfp_filter(engine, filter, layer, &providerKey, &calloutKey, &calloutProviderKey); if (status) { reason = "lookup"; goto closed; }
-      } else if (filter->action.type != FWP_ACTION_BLOCK) { reason = "fields"; goto closed; }
-      if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
-      if (matched == 8) { reason = "exhausted"; goto closed; }
-      matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, providerKey, calloutKey, calloutProviderKey, drop->msFwpDirection, filter->action.type, h->flags, time};
-      FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer);
+      if (events) FwpmFreeMemory0((void **)&events);
+      if (count < limit) { complete = TRUE; reason = tupleBound || socketBound ? "empty" : "binding"; break; }
+      reason = "exhausted";
     }
-    if (events) FwpmFreeMemory0((void **)&events);
-    if (count < 64) { complete = TRUE; reason = tupleBound || socketBound ? "empty" : "binding"; break; }
-    reason = "exhausted";
+    if (!complete || matched || !socketBound) break;
+    /* An enum is a snapshot of events logged before its creation. An empty
+     * snapshot is not a delivery barrier. Reopen the same AppId/time query while
+     * the original socket and token are still held, within the existing bound. */
+    enumClose = FwpmNetEventDestroyEnumHandle0(engine, enumeration); enumeration = NULL; enumClosed = TRUE;
+    if (enumClose) { reason = "api"; goto closed; }
+    if (GetTickCount64() >= deadline) break;
+    Sleep(1);
+    if (GetTickCount64() >= deadline) break;
+    complete = FALSE;
   }
 closed:
   if (filter) FwpmFreeMemory0((void **)&filter); if (layer) FwpmFreeMemory0((void **)&layer);
@@ -1895,7 +1922,11 @@ closed:
     FILE *stream = output ? stdout : stderr;
     if (output) {
       fputs("{\"event\":\"tcp-attribution\",", stream); wfp_identity(stream);
-      fprintf(stream, ",\"requested\":{\"address\":2130706433,\"port\":%u},\"local\":{\"address\":%lu,\"port\":%u},\"localStatus\":%lu,\"peerStatus\":%lu,\"startedAt\":\"%llu\",\"endedAt\":\"%llu\",\"socketHeld\":%s,\"tokenClosed\":%s,", wfpRemotePort, tuple.localAddress, tuple.localPort, tuple.localStatus, tuple.remoteStatus, tuple.started, tuple.ended, socketBound ? "true" : "false", tokenClose ? "true" : "false");
+      fprintf(stream, ",\"requested\":{\"address\":2130706433,\"port\":%u},\"local\":{\"address\":%lu,\"port\":%u},\"localStatus\":%lu,\"peerStatus\":%lu,\"peer\":", wfpRemotePort, tuple.localAddress, tuple.localPort, tuple.localStatus, tuple.remoteStatus);
+      if (!tuple.remoteStatus && tuple.remoteSize == sizeof(struct sockaddr_in) && tuple.remoteFamily == AF_INET)
+        fprintf(stream, "{\"address\":%lu,\"port\":%u}", tuple.remoteAddress, tuple.remotePort);
+      else fputs("null", stream);
+      fprintf(stream, ",\"startedAt\":\"%llu\",\"endedAt\":\"%llu\",\"socketHeld\":%s,\"tokenClosed\":%s,", tuple.started, tuple.ended, socketBound ? "true" : "false", tokenClose ? "true" : "false");
     } else fputs(WFP_PREFIX " snapshot={", stream);
     BOOL accepted = observed && (output ? socketBound : tupleBound);
     fprintf(stream, "\"status\":\"%s\",\"reason\":\"%s\",\"nativeStatus\":%lu,\"enumClose\":", accepted ? "matched" : status == FWP_E_NET_EVENTS_DISABLED ? "disabled" : "unproved", accepted ? "none" : reason, status);
@@ -1942,7 +1973,7 @@ static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis
   int result = select(0, writing ? NULL : &ready, writing ? &ready : NULL, &exceptional, &wait);
   int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
   if (result == SOCKET_ERROR) *problem = (struct diagnosis){"tcp-select", "win32", (DWORD)error};
-  if (!*observed) { tcp_observe("select", result == SOCKET_ERROR ? "failed" : "complete", (DWORD)error); *observed = TRUE; }
+  if (!*observed) { tcp_observe("select", result == SOCKET_ERROR ? "failed" : "complete", (DWORD)(result == SOCKET_ERROR ? error : result)); *observed = TRUE; }
   if (result == SOCKET_ERROR) return 0;
   if (!result || GetTickCount64() >= end) { *problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; return 0; }
   int flags = (FD_ISSET(socket, &ready) ? 1 : 0) | (FD_ISSET(socket, &exceptional) ? 2 : 0);
@@ -1990,13 +2021,13 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   started = wfp_now(); attempted = TRUE;
   if (connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint)) == SOCKET_ERROR) {
     int error = WSAGetLastError();
-    if (error != WSAEWOULDBLOCK) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)error}; nativeReceipt = error != 0 && GetTickCount64() < end; goto done; }
+    if (error != WSAEWOULDBLOCK) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)error}; tcp_observe("connect", "failed", (DWORD)error); nativeReceipt = error != 0 && GetTickCount64() < end; goto done; }
     tcp_observe("connect", "pending", (DWORD)error);
     int ready = tcp_wait(socket, TRUE, end, &problem, &selected); if (!ready) goto done;
     int completed = 0, size = sizeof(completed);
     tcp_observe("getsockopt", "enter", 0);
     if (getsockopt(socket, SOL_SOCKET, SO_ERROR, (char *)&completed, &size) == SOCKET_ERROR) { int actual = WSAGetLastError(); problem = (struct diagnosis){"tcp-completion", "win32", (DWORD)actual}; goto done; }
-    tcp_observe("getsockopt", "complete", 0);
+    tcp_observe("getsockopt", "complete", (DWORD)completed);
     if (size != sizeof(completed)) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
     if (completed) { problem = (struct diagnosis){"tcp-connect", "win32", (DWORD)completed}; nativeReceipt = GetTickCount64() < end; goto done; }
     if (ready != 1) { problem = (struct diagnosis){"tcp-ready", "invariant", 0}; goto done; }
@@ -2029,7 +2060,7 @@ done:
 #ifndef NATIVE_COMMAND_EXPERIMENT
   if (transferred) {
     struct diagnosis acknowledgment = {0};
-    /* Keep transferred but unattempted sockets alive through independent
+    /* Keep original but unattempted sockets alive through independent
      * observer closure too. The original response window ends at 15000 ms. */
     if (!tcp_ack('U', end + 10000, &acknowledgment)) {
       if (problem.operation) remember(problem.operation, problem.domain, problem.value);

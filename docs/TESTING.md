@@ -641,11 +641,14 @@ Creation must use the child's exact primary AppContainer token with no thread
 token. Failed or short token reads, zero-error query failures, wrong package,
 user or capabilities, token drift and uncertain closure refuse admission.
 The production operation loop persists the exact child/provider record before
-`D`. Actual self-duplication/import bodies rejoin birth/token/local endpoint and
-provider/catalog/chain; PID-only carriers, injected tickets, partial input,
+`D`. Actual self-duplication/import bodies rejoin birth/token/local endpoint
+and provider/catalog/chain; PID-only carriers, injected tickets, partial input,
 changed providers, connected peers and lost `D/T/U` acknowledgments refuse
-success. Every acquired socket retains checked closure, including a failed
-original close after import. The child parks its held socket until independent
+success. Every acquired socket retains checked closure. The self-import is a
+separate control, closed before observer readiness; it cannot replace the
+original socket used by connect and held through `U`. Control close failures
+retain the first protocol failure. A second identity check after `T` fences
+token drift at connect. The child parks its held socket until independent
 observation completes; the observer receives no socket or duplication grant.
 
 Bundle lifetime fixtures execute the actual principal acquisition and completion
@@ -667,10 +670,28 @@ Native WFP fixtures resolve the actual filter provider and terminating callout,
 including different filter/callout providers, exact key/layer joins, partial
 lookup failures and one release per acquired SDK allocation. A lookup finishing
 at or beyond the original observation deadline cannot admit the final match.
-Receipt consumers reject a connected peer, empty or mismatched events, wrong
-filter/layer/direction/window and unsupported actions. Only native `10013`
+The actual WFP enumeration/drain and cleanup bodies cover initially empty and
+unrelated snapshots followed by final delivery, permanently absent events, the
+shared 256-record scan limit, API/lookup/deadline failures and intermediate/final
+snapshot, engine and token closure failures. Injected clocks drive delivery
+without real sleeps. Snapshot refresh preserves the exact query and existing
+five-second bound while the original socket and token remain held.
+Receipt consumers join both actual `WSAENOTCONN` and exact requested-peer reads;
+missing, mismatched or fabricated peers refuse success. The real operation-loop
+fixture carries both peer forms through `O/D/T/U`, completion and independent
+retirement, rejecting successful, pending, refused or timed-out connects and
+wrong endpoints. Empty or mismatched events, wrong filter/layer/direction/window
+and unsupported actions also refuse success. Only native `10013`
 completion plus matching attribution and complete independent retirement can
 pass. Pending operations and deadlines supply no denial receipt.
+The diagnostic reader retains both native block and terminating-callout DROP
+actions without confusing a supported action with unobserved cleanup; its
+snapshot still supplies no denial authority or provider/callout join.
+The actual TCP wait body retains readiness counts and timeout/error facts before
+diagnostic collection; exceptional readiness still requires checked `SO_ERROR`,
+and inconsistent ready sets refuse a receipt. These fixtures keep the original
+remaining transaction budget and verify closure after both native and observer
+failures.
 
 The refused-call fixture preserves the saved `10022` through query-only source,
 destination, effective-token, QoS and exclusive-option observations. Failed or

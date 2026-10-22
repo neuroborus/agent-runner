@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Keep restricted TCP on its original socket
+
+Windows feasibility retains the primary AppContainer-created, bound socket
+through connect and independent WFP collection. The self-import remains a
+separate checked control and cannot replace that descriptor. Token identity is
+rechecked after release, and empty event snapshots are refreshed under the same
+query, deadline and record limit before closure. Actual requested-peer reads
+remain distinct from completion: only native access denied plus a matching
+kernel DROP can prove denial. Portable fixtures establish the lifecycle contract;
+fresh hosted Windows execution must establish mediation and attribution.
+
 ## 2026-10-22 — Separate completed build reads from native evidence
 
 Ordinary Darwin experiments revalidate completed build bytes and receipts through
