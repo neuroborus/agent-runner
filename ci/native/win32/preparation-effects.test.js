@@ -2919,7 +2919,15 @@ function rawPreparation({ experiment = false, environment } = {}) {
       return { helper: value.launcher, owner: value.owner };
     }
     if (operation === "ownership-control") {
-      const frame = bytes(value.frames.shift());
+      const valueFrame = value.frames.shift();
+      if (f.ownershipDamage === "setup-account" && valueFrame.phase === "setup")
+        valueFrame.accountSid = "S-1-5-21-9-9-9-1001";
+      if (
+        f.ownershipDamage === "helper-payload" &&
+        valueFrame.phase === "helper"
+      )
+        valueFrame.payload = value.launcher;
+      const frame = bytes(valueFrame);
       if (f.ownershipDamage === "malformed-control") frame.hex += "zz";
       if (f.ownershipDamage === "prefixed-control")
         frame.hex = "efbbbf" + frame.hex;
@@ -3047,6 +3055,10 @@ function rawPreparation({ experiment = false, environment } = {}) {
     if (operation === "ownership-reconstruct")
       return {
         helper: value.launcher,
+        owner:
+          f.ownershipDamage === "replaced-owner"
+            ? { ...value.owner, creationTime: "999" }
+            : value.owner,
         jobObjectSha256: hash,
         members: value.members,
       };
@@ -3894,7 +3906,14 @@ test("Windows default experiment bootstrap admits installed links and binds priv
 });
 
 test("Windows experiment case recovery rejoins closed original receipts and separates cancellation and observer cleanup failure", async () => {
-  for (const fault of [null, "source", "object", "cleanup", "cancel"]) {
+  for (const fault of [
+    null,
+    "source",
+    "object",
+    "cleanup",
+    "cancel",
+    "original-and-recovery",
+  ]) {
     const f = experimentBootstrapFixture();
     Object.assign(f.bootstrapOptions.binding, {
       candidateSha,
@@ -4008,6 +4027,7 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
       state = windowsPreparationContext(input, native),
       cleanup = new AbortController(),
       cleanupCause = new Error("Independent case observer finish failed"),
+      originalCause = new Error("Original ownership refusal"),
       cancellation = new Error("Case census canceled"),
       entered = Promise.withResolvers(),
       blocked = Promise.withResolvers();
@@ -4035,7 +4055,11 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
           entered.resolve();
           await blocked.promise;
         }
-        if (operation === "finish" && fault === "cleanup") throw cleanupCause;
+        if (
+          operation === "finish" &&
+          ["cleanup", "original-and-recovery"].includes(fault)
+        )
+          throw cleanupCause;
       };
       let closed = 0;
       if (fault === "cancel") {
@@ -4052,14 +4076,20 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
           };
         };
       }
-      if (fault === "cleanup") f.coldDamage = "rights";
+      if (["cleanup", "original-and-recovery"].includes(fault))
+        f.coldDamage = "rights";
       const recover = () =>
         recoverWindowsCases(
           state,
           options,
           records,
-          new Map(),
-          () => assert.fail("No live case is available for replay"),
+          fault === "original-and-recovery"
+            ? new Map([[recipe.id, { retired: false }]])
+            : new Map(),
+          () => {
+            if (fault === "original-and-recovery") throw originalCause;
+            assert.fail("No live case is available for replay");
+          },
           {},
           cleanup.signal,
         );
@@ -4080,6 +4110,10 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
           assert.equal(cause.cause, cause.errors[0]);
           if (fault === "cleanup") assert.equal(cause.errors[1], cleanupCause);
           if (fault === "cancel") assert.equal(cause.cause, cancellation);
+          if (fault === "original-and-recovery") {
+            assert.equal(cause.cause, originalCause);
+            assert.equal(cause.errors[1].errors[1], cleanupCause);
+          }
           return true;
         });
         if (fault === "cancel") assert.ok(closed > 0);
@@ -8558,6 +8592,27 @@ test("Windows fixed entry executes every ownership recipe with raw IPC and indep
       );
     }
     assert.ok(policyRecords.length > 0);
+    const launchProtocol = f.rawEvents
+      .map((frame) => frame.split(" "))
+      .filter(([operation]) =>
+        /^ownership-(?:launch|control|policy|send)$/u.test(operation),
+      )
+      .map(([operation, , bytes]) =>
+        operation === "ownership-send"
+          ? "send " + Buffer.from(bytes, "hex").subarray(0, 1).toString()
+          : operation.slice(10),
+      );
+    assert.deepEqual(
+      launchProtocol.slice(0, 7),
+      ["launch", "control", "send P", "control", "policy", "send C", "control"],
+      name,
+    );
+    if (
+      !["admission-interruption", "receipt-before", "receipt-after"].includes(
+        name,
+      )
+    )
+      assert.equal(launchProtocol[7], "send R", name);
     const settled = await system.settle(recipe, prepared, {
       signal: new AbortController().signal,
       execution: {
@@ -8597,6 +8652,9 @@ test("Windows ownership rejects missing controls, substituted objects and ambigu
   for (const damage of [
     "malformed-control",
     "prefixed-control",
+    "setup-account",
+    "helper-payload",
+    "replaced-owner",
     "malformed-receipt",
     "missing-control",
     "wrong-job",
@@ -8634,6 +8692,20 @@ test("Windows ownership rejects missing controls, substituted objects and ambigu
       assert.notEqual(result.status, "OBSERVED", damage);
       assert.equal(result.reservation, "RETAINED");
     }
+    if (["setup-account", "helper-payload"].includes(damage))
+      assert.ok(
+        !f.rawEvents.some(
+          (frame) =>
+            frame.startsWith("ownership-policy ") ||
+            (frame.startsWith("ownership-send ") &&
+              ["C", "R"].includes(
+                Buffer.from(frame.split(" ")[2], "hex")
+                  .subarray(0, 1)
+                  .toString(),
+              )),
+        ),
+        damage,
+      );
     const settled = await system.settle(recipe, prepared, {
       signal: new AbortController().signal,
       execution: {
@@ -8647,6 +8719,9 @@ test("Windows ownership rejects missing controls, substituted objects and ambigu
       [
         "malformed-control",
         "prefixed-control",
+        "setup-account",
+        "helper-payload",
+        "replaced-owner",
         "malformed-receipt",
         "live-member",
         "foreign-holder",
@@ -9289,24 +9364,40 @@ test("fixed prerequisite extraction reconstructs partial setup, pre-admission an
       f.files.delete(path.join(output, helper.name + ".exe"));
     const open = f.options.openPreparation,
       closedObservers = new Set(),
+      closeObservers = [],
       originalOwners = [...f.actors.values()].filter((actor) => !actor.retired);
     assert.ok(originalOwners.length > 0);
     f.options.openPreparation = async (...args) => {
       const channel = await open(...args),
         nonce = args[1][6];
-      return {
-        ...channel,
-        close: () => {
-          if (closedObservers.has(nonce)) return;
-          channel.close();
-          // Model the failed cold observer's eventual EOF exit, leaving its
-          // task and the original owners for fresh independent retirement.
-          for (const pid of [channel.pid, f.rawTasks.get(nonce).pid]) {
-            f.actors.get(pid).retired = true;
+      let helper;
+      const close = () => {
+        if (closedObservers.has(nonce)) return;
+        channel.close();
+        assert.ok(helper);
+        // Retain the original birth before task removal. A late close cannot
+        // change an already observed exit into the failed observer's EOF exit.
+        for (const pid of [channel.pid, helper.pid]) {
+          const actor = f.actors.get(pid);
+          if (!actor.retired) {
+            actor.retired = true;
             f.rawExitCodes.set(pid, 126);
           }
-          closedObservers.add(nonce);
+        }
+        closedObservers.add(nonce);
+      };
+      closeObservers.push(close);
+      return {
+        ...channel,
+        async send(frame) {
+          await channel.send(frame);
+          if (frame === "T") {
+            assert.equal(helper, undefined);
+            helper = f.rawTasks.get(nonce);
+            assert.ok(helper);
+          }
         },
+        close,
       };
     };
     const before = f.rawEvents.length,
@@ -9345,6 +9436,14 @@ test("fixed prerequisite extraction reconstructs partial setup, pre-admission an
         .some((value) => value.startsWith("ownership-launch ")),
     );
     await assert.rejects(reconstructed.extractionEffects.verifyPublication());
+    const exits = [...f.rawExitCodes];
+    for (const close of closeObservers) {
+      close();
+      close();
+    }
+    assert.equal(f.rawTasks.size, 0);
+    assert.ok([...f.actors.values()].every((actor) => actor.retired));
+    assert.deepEqual([...f.rawExitCodes], exits);
   }
 });
 

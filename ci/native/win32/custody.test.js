@@ -2312,6 +2312,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
+        ownership_failure_write: () => false,
         reader_cold_failure: () => false,
         reader_scheduler_failure: () => false,
         reader_context_failure: () => false,
@@ -2468,6 +2469,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
+          ownership_failure_write: () => false,
           reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure: () => false,
@@ -4408,6 +4410,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           strrchr,
+          ownership_failure_write: () => false,
           reader_cold_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure() {
@@ -4482,6 +4485,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       fallback.push("open");
       return false;
     },
+    ownership_failure_write: () => false,
     reader_cold_failure: () => false,
     reader_scheduler_failure: () => false,
     reader_context_failure(source, line, error) {
@@ -7706,6 +7710,11 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
   for (const fault of [
     null,
     "observer-only",
+    "lost-completion",
+    "lost-completion-live",
+    "lost-completion-task",
+    "lost-completion-error-87",
+    "lost-completion-missing-finish",
     "missing-ack",
     "duplicate-ack",
     "missing-finish",
@@ -7811,8 +7820,15 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
       ];
     for (const actor of k.states.values()) actor.retired = true;
     if (fault !== "observer-only") k.states.clear();
-    else records.pop();
-    k.state.absent = fault !== "task";
+    else {
+      records.splice(
+        records.findIndex(({ phase }) => phase === "finish-acknowledged"),
+        1,
+      );
+      records.pop();
+    }
+    if (fault?.startsWith("lost-completion")) records.pop();
+    k.state.absent = !["task", "lost-completion-task"].includes(fault);
     const acknowledgement = records.findIndex(
         (record) => record.phase === "finish-acknowledged",
       ),
@@ -7820,7 +7836,8 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
     if (fault === "missing-ack") records.splice(acknowledgement, 1);
     if (fault === "duplicate-ack")
       records.splice(acknowledgement, 0, { ...records[acknowledgement] });
-    if (fault === "missing-finish") records.splice(command, 1);
+    if (["missing-finish", "lost-completion-missing-finish"].includes(fault))
+      records.splice(command, 1);
     if (fault === "finish-order")
       [records[command], records[acknowledgement]] = [
         records[acknowledgement],
@@ -7840,20 +7857,21 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
       f.input.reviewSha256 = f.input.bindingSha256;
       delete f.input.bindingSha256;
     }
-    if (["live", "pid-reuse"].includes(fault))
+    if (["live", "pid-reuse", "lost-completion-live"].includes(fault))
       k.states.set(f.helper.pid, {
         ...f.process,
         identity: {
           ...f.helper,
           creationTime: fault === "pid-reuse" ? "999" : f.helper.creationTime,
         },
-        retired: fault !== "live",
+        retired: !["live", "lost-completion-live"].includes(fault),
       });
     const refused = new Error("Original census refusal");
     k.state.damage = (operation, frame) => {
       if (operation === "verify-cold-process") {
         if (fault === "incomplete") frame.value.complete = false;
-        if (fault === "error-87") throw Object.assign(refused, { code: 87 });
+        if (["error-87", "lost-completion-error-87"].includes(fault))
+          throw Object.assign(refused, { code: 87 });
       }
       if (operation === "verify-cold-jobs") {
         if (fault === "job-count") frame.value.jobs.pop();
@@ -7874,7 +7892,7 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
       return Buffer.from(JSON.stringify(frame) + "\n");
     };
     const recover = () => k.verifier.recoverCase(f.input, records, observers);
-    if (fault && fault !== "observer-only") {
+    if (fault && !["observer-only", "lost-completion"].includes(fault)) {
       let original;
       await assert.rejects(
         recover,
@@ -7884,7 +7902,8 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
         },
         fault,
       );
-      if (fault === "error-87") assert.equal(original, refused);
+      if (["error-87", "lost-completion-error-87"].includes(fault))
+        assert.equal(original, refused);
       const count = k.events.length;
       k.state.damage = null;
       await assert.rejects(recover, (cause) => cause === original);
@@ -7913,7 +7932,7 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
     const retains = k.events.filter(
       ({ operation }) => operation === "verify-retain",
     );
-    if (!fault) {
+    if (!fault || fault === "lost-completion") {
       assert.equal(retains.length, 0);
       assert.equal(
         k.events.filter(({ operation }) => operation === "verify-cold-process")
@@ -8241,4 +8260,157 @@ test("cold account recovery cannot signal a Job reopened by name or remove a sur
     body.indexOf("need(!members)") < body.indexOf("LsaRemoveAccountRights"),
   );
   assert.match(body, /operation_empty\(job\)/u);
+});
+
+test("the native ownership error drain preserves launcher facts through fragmented control refusal and EOF", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = /static BOOL ownership_failure_write\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace("BYTE bytes[4096];", "const bytes=Buffer.alloc(4096);")
+      .replace(
+        "char frame[9216], encoded[8193];",
+        'const frame={text:""},encoded={text:""};',
+      )
+      .replaceAll("sizeof(bytes)", "bytes.length")
+      .replaceAll("sizeof(frame)", "9216")
+      .replaceAll("sizeof(encoded)", "8193")
+      .replaceAll("bytes+total", "bytes.subarray(total)")
+      .replaceAll("encoded+i*2", "{target:encoded,offset:i*2}")
+      .replace(/\(DWORD\)/gu, "")
+      .replace(/\b(?:BOOL|DWORD|int)\b/gu, "let")
+      .replace(/&(available|used)\b/gu, "value=>$1=value");
+  for (const fault of [
+    null,
+    "read",
+    "peek",
+    "pending",
+    "bound",
+    "empty",
+    "released",
+    "other-command",
+  ]) {
+    const raw =
+        fault === "bound"
+          ? "x".repeat(4097)
+          : fault === "empty"
+            ? ""
+            : "native-windows-api: operation=CreateProcessAsUserW last-error=5\nnative-windows-guard: file=launcher.c line=321 last-error=5\n",
+      writes = [];
+    let remaining = Buffer.from(raw),
+      error = 109,
+      reads = 0;
+    const api = {
+      Buffer,
+      FALSE: false,
+      TRUE: true,
+      NULL: null,
+      ERROR_BROKEN_PIPE: 109,
+      ownership_output: "launcher-error",
+      ownership_released: fault === "released",
+      source: "custody.h",
+      line: 421,
+      error: 109,
+      sequence: 32,
+      reader_command:
+        fault === "other-command" ? "verify-retain" : "ownership-control",
+      control: "control",
+      STD_ERROR_HANDLE: 2,
+      strncmp: (a, b, length) =>
+        a.slice(0, length) === b.slice(0, length) ? 0 : 1,
+      GetLastError: () => error,
+      SetLastError: (value) => {
+        error = value;
+      },
+      GetStdHandle: () => "stderr",
+      PeekNamedPipe: (_, __, ___, ____, available) => {
+        if (!remaining.length && fault === "pending") {
+          available(0);
+          return true;
+        }
+        if (!remaining.length || (fault === "peek" && reads)) {
+          error = fault === "peek" ? 87 : 109;
+          return false;
+        }
+        available(remaining.length);
+        return true;
+      },
+      ReadFile: (_, out, maximum, used) => {
+        if (fault === "read" && reads) {
+          error = 5;
+          return false;
+        }
+        const size = Math.min(maximum, 17, remaining.length);
+        remaining.copy(out, 0, 0, size);
+        remaining = remaining.subarray(size);
+        used(size);
+        reads++;
+        return true;
+      },
+      sprintf_s: (out, maximum, format, ...args) => {
+        let i = 0;
+        const text = format.replace(/%(?:02)?l?[usx]/gu, (specifier) => {
+          const value = args[i++];
+          return specifier === "%02x"
+            ? value.toString(16).padStart(2, "0")
+            : String(value?.text ?? value);
+        });
+        assert.ok(text.length < maximum);
+        if (out.target)
+          out.target.text = out.target.text.slice(0, out.offset) + text;
+        else out.text = text;
+        return text.length;
+      },
+      WriteFile: (handle, bytes, size, used) => {
+        writes.push({
+          handle,
+          data: Buffer.isBuffer(bytes)
+            ? bytes.subarray(0, size)
+            : Buffer.from(bytes.text.slice(0, size)),
+        });
+        used(size);
+        return true;
+      },
+    };
+    const observed = new Script(`(function(){${body}})()`).runInNewContext(api);
+    assert.equal(error, 109);
+    if (["empty", "released", "other-command"].includes(fault)) {
+      assert.equal(observed, false);
+      assert.deepEqual(writes, []);
+      continue;
+    }
+    assert.equal(observed, true);
+    const frame = JSON.parse(writes[0].data.subarray(1)),
+      expected =
+        fault === "bound"
+          ? raw.slice(0, 4096)
+          : ["read", "peek"].includes(fault)
+            ? raw.slice(0, 17)
+            : raw;
+    assert.equal(frame.launcher.hex, Buffer.from(expected).toString("hex"));
+    assert.equal(frame.launcher.complete, !fault);
+    assert.equal(writes[1].data.toString(), expected);
+    assert.equal(frame.lastError, 109);
+    const f = transport(),
+      pending = f.channel.receive().catch((cause) => cause),
+      completion = f.channel.completion.catch((cause) => cause);
+    try {
+      f.child.stdout.write('{"sequence":32,"value":');
+      for (let offset = 0; offset < writes[0].data.length; offset += 113)
+        f.child.stdout.write(writes[0].data.subarray(offset, offset + 113));
+      const original = await pending;
+      assert.deepEqual(original.custodyReaderFailure, frame);
+      f.child.stdout.end();
+      f.child.emit("close", 126, null);
+      assert.equal(await completion, original);
+      await assert.rejects(f.channel.receive(), (cause) => cause === original);
+    } finally {
+      f.channel.close();
+      f.child.stdin.destroy();
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
+    }
+  }
 });

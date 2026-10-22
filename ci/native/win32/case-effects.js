@@ -253,7 +253,13 @@ export function createWindowsCaseEffects(state, current, save) {
       value.nonce === request.nonce &&
         value.phase === phase &&
         sameWindowsIdentity(value.helper, admitted.helpers[0].identity) &&
-        (phase !== "ready" || value.accountSid === parameters.accountSid),
+        (phase === "helper"
+          ? value.accountSid === null
+          : value.accountSid === parameters.accountSid) &&
+        (phase === "ready"
+          ? value.payload?.userSid === parameters.accountSid &&
+            value.payload.sessionId === 0
+          : value.payload === null),
     );
     return value;
   };
@@ -275,7 +281,14 @@ export function createWindowsCaseEffects(state, current, save) {
     const record = await recoverReceipt();
     const held = await reader.reconstructOwnership();
     requireObservation(
-      sameWindowsIdentity(held.helper, record.helpers[0].identity),
+      sameWindowsIdentity(
+        held.helper,
+        record.helpers.find(({ role }) => role === "launcher")?.identity,
+      ) &&
+        sameWindowsIdentity(
+          held.owner,
+          record.helpers.find(({ role }) => role === "custodian")?.identity,
+        ),
     );
     if (record.setup.job.heldObjectSha256 !== null)
       requireObservation(

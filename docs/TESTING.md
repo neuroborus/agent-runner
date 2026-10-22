@@ -2060,6 +2060,10 @@ live after per-observer custody stopped a fresh finish from discarding its held
 subjects. The regression retains every original live owner after the rejected
 cold pass, leaves observer tasks for independent removal, and requires fresh
 complete recovery to retire all actors and tasks without admitting publication.
+Each injected observer retains its original helper at task registration, before
+independent recovery can remove the task. The fixture invokes every pending close
+callback twice after complete retirement, preserving observed exit codes and
+requiring no timer delay or surviving task lookup.
 The access matrix's cold recovery first settles the actual preparation owner.
 The public factory deliberately reuses a live observer; leaving that owner open
 incorrectly spent its shared 32,768-command budget on reconstruction and retained
@@ -2121,6 +2125,26 @@ successful helper builds and separately injects case-observer retirement failure
 closed reader custody cannot erase the original preparation cause or prove the
 observer retired. These cases use the existing portable suites and introduce no
 additional validation command or native acceptance claim.
+
+The Windows launch fixture executes the actual native trust decision for both
+experiment and reviewed builds, including unsigned held bytes, malformed
+certificate-directory state, digest refusal, verification failure and independently
+failed trust closure. The native producer body carries the real literal request
+and existing finite mode vectors without executing Windows tools. Existing raw
+ownership fixtures require helper/P/setup/policy-C/ready/R ordering, reject a
+changed setup account or premature payload, and rejoin the original custodian
+birth during reconstruction. All literal/storage, cancellation, owner/helper-loss,
+creation-time Job and non-emergency retirement cases remain active.
+The actual native error-drain body preserves bounded original launcher bytes
+through fragmented failure frames and later EOF; partial reads, failed inspection,
+overflow, idle and post-release paths cannot become delivery evidence. Custody
+recovery covers a lost final append after a complete finish acknowledgement,
+retaining fresh census/Job/task requirements and refusing live originals, missing
+finish proof and raw error 87. Combined original-owner, proof and observer cleanup
+failures retain the first cause and separate uncertainty. These portable suites
+add no slow-tier assignment; both fresh original hosted workflows on the final
+candidate, all three platforms, all 69 records and exact provenance remain the
+supervisor's external acceptance requirement.
 The existing raw experiment preparation fixture also reaches the actual
 `experiment-runtime.js` consumer through the normal system factory and independent
 admission verifier. Repeated observations retain the same owner slots while

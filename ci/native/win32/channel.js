@@ -260,9 +260,12 @@ export function windowsCustodyChannel(
         const openContext = buffer
           .subarray(diagnostic + 1, end < 0 ? undefined : end)
           .includes('"open":{');
+        const launcherContext = buffer
+          .subarray(diagnostic + 1, end < 0 ? undefined : end)
+          .includes('"launcher":{');
         requireWindows(
           (end < 0 ? buffer.length : end + 1) - diagnostic <=
-            (openContext ? 17408 : 2048),
+            (openContext ? 17408 : launcherContext ? 9216 : 2048),
         );
         if (end < 0) return;
         const value = JSON.parse(
@@ -273,7 +276,12 @@ export function windowsCustodyChannel(
         const fields = ["phase", "sequence", "command", "source", "line"];
         const uint32 = (n) => Number.isInteger(n) && n >= 0 && n <= 0xffffffff;
         requireWindows(
-          Object.hasOwn(value, "open") || end + 1 - diagnostic <= 2048,
+          end + 1 - diagnostic <=
+            (Object.hasOwn(value, "open")
+              ? 17408
+              : Object.hasOwn(value, "launcher")
+                ? 9216
+                : 2048),
         );
         if (Object.hasOwn(value, "open")) {
           fields.push("open");
@@ -329,6 +337,20 @@ export function windowsCustodyChannel(
           fields.push("lastError");
           requireWindows(
             uint32(value.lastError) && !Object.hasOwn(value, "trust"),
+          );
+        }
+        if (Object.hasOwn(value, "launcher")) {
+          fields.push("launcher");
+          closed(value.launcher, ["hex", "complete"]);
+          requireWindows(
+            value.command.startsWith("ownership-") &&
+              Object.hasOwn(value, "lastError") &&
+              typeof value.launcher.complete === "boolean" &&
+              typeof value.launcher.hex === "string" &&
+              /^(?:[a-f0-9]{2}){1,4096}$/u.test(value.launcher.hex) &&
+              !["trust", "transfer", "loader", "retain", "open", "cold"].some(
+                (field) => Object.hasOwn(value, field),
+              ),
           );
         }
         if (Object.hasOwn(value, "cold")) {

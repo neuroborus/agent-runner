@@ -319,7 +319,18 @@ export async function recoverWindowsCases(
   requireObservation(signal instanceof AbortSignal && !signal.aborted);
   joinPackageDeclaration(state);
   const results = [];
-  let failure;
+  const failures = [],
+    remember = (cause) => {
+      if (!failures.includes(cause)) failures.push(cause);
+    },
+    refusal = () =>
+      failures.length === 1
+        ? failures[0]
+        : new AggregateError(
+            failures,
+            "Windows case retirement and independent recovery failed",
+            { cause: failures[0] },
+          );
   const pending = [...active.values()].some((current) => !current.retired);
   // Safe retained owners know their original bindings even when a protected
   // record has become unreadable. Attempt every owner before parsing evidence.
@@ -334,7 +345,7 @@ export async function recoverWindowsCases(
         current.retired = true;
       }
     } catch (cause) {
-      failure ??= cause;
+      remember(cause);
     }
   }
   let inventory;
@@ -343,7 +354,8 @@ export async function recoverWindowsCases(
     inventory = cases(state, records);
     validateObservers(state, records);
   } catch (cause) {
-    throw failure ?? cause;
+    remember(cause);
+    throw refusal();
   }
   for (const [id, group] of inventory) {
     group.recoverySequence = records.length;
@@ -371,15 +383,15 @@ export async function recoverWindowsCases(
       // absent task or a fixture exit code alone is never settlement evidence.
       results.push(await observeCase(state, options, group, signal));
     } catch (cause) {
-      failure ??= cause;
+      remember(cause);
     }
   }
   try {
     requireObservation([...active.keys()].every((id) => inventory.has(id)));
   } catch (cause) {
-    failure ??= cause;
+    remember(cause);
   }
-  if (failure) throw failure;
+  if (failures.length) throw refusal();
   return {
     status: "RETIRED",
     independent: true,

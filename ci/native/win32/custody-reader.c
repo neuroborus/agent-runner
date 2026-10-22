@@ -9,6 +9,7 @@
 #include <mswsock.h>
 #include <iphlpapi.h>
 static void reader_failure(const char *file, unsigned line, DWORD error);
+static BOOL ownership_failure_write(const char *source, unsigned line, DWORD error);
 #define NATIVE_CUSTODY_FAILURE reader_failure
 #include "custody.h"
 #include "account.h"
@@ -271,6 +272,7 @@ static BOOL reader_cold_failure(const char *source, unsigned line, DWORD error) 
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  if(ownership_failure_write(source,line,error))return;
   if(reader_cold_failure(source,line,error))return;
   if(reader_scheduler_failure(source,line,error))return;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
@@ -1289,6 +1291,27 @@ static struct held_file ownership_policy_file, ownership_sentinel;
 static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
 static char ownership_baseline[6][65];
 static BOOL ownership_policy_restored;
+/* Before R there is no payload output. Preserve the launcher's existing error
+ * pipe before the control EOF guard can obscure its original native refusal. */
+static BOOL ownership_failure_write(const char *source, unsigned line, DWORD error) {
+  if (!ownership_output || ownership_released || strncmp(reader_command,"ownership-",10)) return FALSE;
+  BYTE bytes[4096]; DWORD total = 0, available, used; BOOL complete = FALSE;
+  for (;;) {
+    if (!PeekNamedPipe(ownership_output,NULL,0,NULL,&available,NULL)) { complete = GetLastError()==ERROR_BROKEN_PIPE; break; }
+    if (!available) break; /* An idle writer is not a fully captured EOF. */
+    if (total == sizeof(bytes)) break;
+    DWORD size = available < sizeof(bytes)-total ? available : (DWORD)sizeof(bytes)-total;
+    if (!ReadFile(ownership_output,bytes+total,size,&used,NULL) || !used) break;
+    total += used;
+  }
+  if (!total) { SetLastError(error); return FALSE; }
+  /* Raw native facts are context, never admission or retirement authority. */
+  char frame[9216], encoded[8193];
+  for (DWORD i=0;i<total;i++) sprintf_s(encoded+i*2,sizeof(encoded)-i*2,"%02x",bytes[i]);
+  int size = sprintf_s(frame,sizeof(frame),"\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"launcher\":{\"hex\":\"%s\",\"complete\":%s}}\n",sequence,reader_command,source,line,error,encoded,complete ? "true" : "false");
+  if(size>0)WriteFile(control,frame,(DWORD)size,&used,NULL);
+  WriteFile(GetStdHandle(STD_ERROR_HANDLE),bytes,total,&used,NULL); SetLastError(error); return TRUE;
+}
 static BOOL package_mode;
 static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
 static GUID ownership_provider, ownership_layer, ownership_filters[4];
@@ -4325,7 +4348,7 @@ int wmain(int argc, wchar_t **argv) {
           need(process && GetProcessTimes(process, &created, &ended, &kernel, &user)); ownership_retain(GetProcessId(process), ((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime); need(CloseHandle(process));
         }
       } else strcpy_s(jobPin, 65, ownership_last_job_pin);
-      printf("{\"helper\":"); retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); printf(",\"jobObjectSha256\":\"%s\",\"members\":[", jobPin);
+      printf("{\"helper\":"); retained_identity(ownership_launcher.hProcess, ownership_launcher_token, 0); printf(",\"owner\":"); retained_identity(ownership_owner.hProcess, ownership_owner_token, 0); printf(",\"jobObjectSha256\":\"%s\",\"members\":[", jobPin);
       for (unsigned i = 0; i < ownership_count; i++) { if (i) putchar(','); retained_identity(ownership_processes[i], ownership_tokens[i], 0); } printf("]}");
     } else if (!strcmp(values[0], "ownership-witness")) { need(n == 2 && case_token); ownership_fresh(FALSE);
     } else if (!strcmp(values[0], "ownership-receipt")) {

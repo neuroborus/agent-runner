@@ -1541,7 +1541,23 @@ export function createWindowsCustodyReader(value, options = {}) {
       }
     },
     ownershipWitness: () => observe("ownership-witness"),
-    reconstructOwnership: () => observe("ownership-reconstruct"),
+    async reconstructOwnership() {
+      const actual = await observe("ownership-reconstruct");
+      closed(actual, ["helper", "owner", "jobObjectSha256", "members"]);
+      const helper = systemIdentity(actual.helper),
+        owner = systemIdentity(actual.owner);
+      requireWindows(helper.pid !== owner.pid && hash(actual.jobObjectSha256));
+      const members = dense(actual.members, 32).map(normalizeWindowsIdentity);
+      requireWindows(
+        new Set(members.map(({ pid }) => pid)).size === members.length,
+      );
+      return {
+        helper,
+        owner,
+        jobObjectSha256: actual.jobObjectSha256,
+        members,
+      };
+    },
     ownershipOutside: () => observe("ownership-outside"),
     ownershipOutsideControl: (mode) =>
       observe("ownership-outside-control", encode(mode)),

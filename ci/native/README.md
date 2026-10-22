@@ -8974,6 +8974,28 @@ to protected external owners. Missing review, observer or retirement owners
 produce BLOCKED before any native admission intent. No Windows compiler/build,
 installer, account provisioning or native probe runs through local discovery.
 
+The ordinary `NATIVE_CI_EXPERIMENT` build instead uses the existing hosted-image/
+toolchain trust boundary. Custody independently binds the payload's PE purpose,
+digest and held identity before P. The launcher rejoins those exact held bytes
+and permits an absent certificate directory only in that experiment build;
+it makes no Authenticode claim. Reviewed launch retains `WinVerifyTrust`, and
+signed images in either build retain verification and independent trust-state
+closure. A failed verification retains its returned status even if closure also
+fails. Native file-open, private UI and process-creation failures record their
+immediate API/error facts before refusal.
+
+Ownership launch carries the exact literal vector, including empty, Unicode,
+quoted and trailing-backslash values, through the private request and UCRT command
+line. Helper/P/setup/policy-C/ready/R remain separate barriers. Setup and ready
+bind the prepared account SID, and only ready may identify a payload. Creation
+still uses the private station/desktop, restricted primary token, explicit private
+handle list and existing Job at creation; no shell or create-then-assign path is
+introduced. Before R, the serving reader drains the launcher's existing error
+pipe when a native guard refuses. Up to 4096 raw error bytes accompany the existing
+failure frame, with capture complete only at the error pipe's EOF, so a later
+control EOF cannot erase them. This bounded context never supplies admission or
+retirement evidence.
+
 The inspected Codex revision in `WINDOWS_CREATION_PRECEDENT` supplies only the
 source precedent for installing `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` before `CreateProcessAsUserW`. This helper
@@ -10090,6 +10112,14 @@ live PID retention. Matching protected observer birth/result records, or a
 complete ordered case closure, permit reuse of the build cold-custody lane.
 Normal closure requires parked/admitted identities, finish intent, the matching
 sequenced finish command and acknowledgement, and final task-removal proof.
+The final `retired` journal append may be missing after that complete finish
+acknowledgement. This selects the same cold lane before any live process/token
+acquisition; fresh complete process censuses, all original Jobs and actual task
+absence still must establish settlement. It supplies no fallback after a failed
+live retain, no task-removal authority by name and no waiver for an unacknowledged
+original. Normal ownership reconstruction independently rejoins both original
+launcher and custodian identities, the held Job identity and retained member
+births before fencing creation or settling the domain.
 Pre-setup closure instead requires its bound abort, helper-retirement and final
 task-removal acknowledgements with the original helper/bridge births, task hash,
 process DACL and instance; it cannot contain setup work or normal finish records.
@@ -10122,8 +10152,9 @@ the current native process/Job/task observations. Observer closure remains order
 after dependent-reader retirement and neither kills a process nor extends a bound.
 Unacknowledged originals keep live custody requirements, and a failed live call
 cannot fall back to cold recovery. Account, rights, object/security, policy and
-audit cleanup remain independently required. A proof failure and a separate
-fresh-observer retirement failure retain both causes; no cleanup success can
+audit cleanup remain independently required. Original-owner failure, independent
+case proof failure and separate fresh-observer retirement failure retain their
+distinct causes, with the first refusal primary; no cleanup success can
 erase the original case failure. Fresh matching Windows CI remains necessary.
 Preparation cleanup PASS remains separate from all 23 system cases when setup
 prevented their execution. Native acceptance still requires both fresh original

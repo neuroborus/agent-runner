@@ -833,8 +833,8 @@ export function createWindowsCustodyVerifier(
           (record) => record.phase === "finish-acknowledged",
         ),
         finish = records.find((record) => record.phase === "finish-possible");
-      if (original.purpose === "experiment" && completed) {
-        const preSetup = completed.preSetup === true,
+      if (original.purpose === "experiment" && (completed || acknowledged)) {
+        const preSetup = completed?.preSetup === true,
           phases = preSetup
             ? [
                 "task-register-possible",
@@ -853,7 +853,7 @@ export function createWindowsCustodyVerifier(
                 "finish-possible",
                 "finish",
                 "finish-acknowledged",
-                "retired",
+                ...(completed ? ["retired"] : []),
               ],
           lifecycle = phases.map((phase) =>
             records.find((record) => record.phase === phase),
@@ -861,7 +861,7 @@ export function createWindowsCustodyVerifier(
         requireWindows(
           registered &&
             run &&
-            (preSetup || completed.preSetup === undefined) &&
+            (preSetup || completed?.preSetup === undefined) &&
             phases.every(
               (phase) =>
                 records.filter((record) => record.phase === phase).length === 1,
@@ -927,20 +927,21 @@ export function createWindowsCustodyVerifier(
               sameWindowsIdentity(parked.helper, helper) &&
               sameWindowsIdentity(parked.bridge, registered.bridge) &&
               hash(parked.processDaclSha256) &&
-              windowsTaskInstance(parked.instance) &&
-              [run, parked, completed].every(
+              windowsTaskInstance(parked.instance).enginePid === helper.pid &&
+              [run, parked, ...(completed ? [completed] : [])].every(
                 (record) => record.taskSha256 === admitted.taskSha256,
               ) &&
               command.commandSequence === acknowledged.commandSequence &&
               command.argumentsSha256 === observationDigest([]) &&
-              [finish, acknowledged, completed].every(
+              [finish, acknowledged, ...(completed ? [completed] : [])].every(
                 (record) =>
                   sameWindowsIdentity(record.helper, admitted.helper) &&
                   hash(record.nativeEventSha256),
               ) &&
               finish.nativeEventSha256 === acknowledged.nativeEventSha256 &&
               sameWindowsIdentity(finish.verifier, admitted.verifier) &&
-              sameWindowsIdentity(completed.verifier, admitted.verifier) &&
+              (!completed ||
+                sameWindowsIdentity(completed.verifier, admitted.verifier)) &&
               integer(acknowledged.commandSequence, 32768) &&
               acknowledged.commandSequence > 0,
           );
@@ -952,6 +953,9 @@ export function createWindowsCustodyVerifier(
           receiptsSha256: observationDigest(lifecycle),
         });
       }
+      // A lost final receipt after the original finish acknowledgement does not
+      // justify reopening an exited process/token. The same independent cold
+      // census, complete Job inventory and absent-task checks still must pass.
       // A run without a complete admission or bound pre-setup close remains
       // excluded. A later exit cannot choose a different retirement lane.
       requireWindows(!run || admitted || closedOwners.length > 0);

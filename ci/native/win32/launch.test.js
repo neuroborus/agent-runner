@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 import { createHash } from "node:crypto";
 import { EventEmitter, once } from "node:events";
 import { PassThrough } from "node:stream";
@@ -1086,5 +1088,223 @@ test("Windows malformed or expired control channels cannot grant payload release
     } finally {
       f.teardown();
     }
+  }
+});
+
+test("the actual launcher keeps experiment image admission separate from reviewed trust and preserves trust failures", async () => {
+  const source = await readFile(new URL("launcher.c", import.meta.url), "utf8"),
+    body = /static void image\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(source)[1],
+    head = body.slice(0, body.indexOf("  LARGE_INTEGER zero")),
+    tail = body.slice(body.indexOf("#ifdef NATIVE_CI_EXPERIMENT"));
+  // The held file/hash and PE parser have their own admission fixtures. Execute
+  // the actual trust decision with the independently observed PE directory.
+  for (const experiment of [false, true])
+    for (const fault of [
+      "unsigned",
+      "signed",
+      "verify",
+      "close",
+      "both",
+      "digest",
+      "directory",
+    ]) {
+      const calls = [],
+        diagnostics = [];
+      let error = 87;
+      const status = 0x800b0100,
+        cert = {
+          Size: ["unsigned", "directory", "digest"].includes(fault) ? 0 : 16,
+          VirtualAddress: fault === "directory" ? 128 : 0,
+        },
+        program = head + tail;
+      const actual = program
+        .replace(
+          /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu,
+          (_, text) => (experiment ? text : ""),
+        )
+        .replace("LARGE_INTEGER length;", "const length={};")
+        .replace(
+          "IMAGE_DATA_DIRECTORY cert = pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];",
+          "const cert=pe.OptionalHeader.DataDirectory[0];",
+        )
+        .replace(/(?:GUID|LONG) (action|result|closed)/gu, "let $1")
+        .replace("WINTRUST_FILE_INFO info = {0}", "const info = {}")
+        .replace("WINTRUST_DATA trust = {0}", "const trust = {}")
+        .replace(/sizeof\((?:info|trust)\)/gu, "1")
+        .replace(/\((?:DWORD|ULONGLONG)\)/gu, "")
+        .replace(/&(action|trust|info|length)/gu, "$1");
+      const run = () =>
+        new Script(`(function(){${actual}})()`).runInNewContext({
+          NULL: null,
+          FALSE: false,
+          ERROR_SUCCESS: 0,
+          WINTRUST_ACTION_GENERIC_VERIFY_V2: 1,
+          WTD_UI_NONE: 2,
+          WTD_REVOKE_NONE: 4,
+          WTD_CHOICE_FILE: 8,
+          WTD_STATEACTION_VERIFY: 16,
+          WTD_STATEACTION_CLOSE: 32,
+          WTD_CACHE_ONLY_URL_RETRIEVAL: 64,
+          WTD_REVOCATION_CHECK_NONE: 128,
+          file: "held",
+          name: "C:\\Fixture\\payload.exe",
+          pin: HASH,
+          maximum: 2048,
+          exact: true,
+          pe: { OptionalHeader: { DataDirectory: [cert] } },
+          file_hash: (...args) => {
+            calls.push(["hash", ...args]);
+            assert.notEqual(fault, "digest");
+          },
+          GetFileSizeEx: (_, length) => {
+            length.QuadPart = 2048;
+            return true;
+          },
+          WinVerifyTrust: (_, __, trust) => {
+            const closing = trust.dwStateAction === 32;
+            calls.push([closing ? "close" : "verify"]);
+            error = 5; // WinVerifyTrust returns its status; LastError supplies no cause.
+            return closing
+              ? ["close", "both"].includes(fault)
+                ? 6
+                : 0
+              : ["unsigned", "directory", "verify", "both"].includes(fault)
+                ? status
+                : 0;
+          },
+          stderr: {},
+          fprintf: (_, ...values) => diagnostics.push(values),
+          fflush: () => {
+            error = 90;
+          },
+          SetLastError: (value) => {
+            error = value;
+          },
+          need: (value) => {
+            if (!value) throw new Error(String(error));
+          },
+        });
+      const skipped =
+          experiment &&
+          !cert.Size &&
+          fault !== "directory" &&
+          fault !== "digest",
+        accepted = skipped || fault === "signed";
+      if (accepted) run();
+      else
+        assert.throws(
+          run,
+          fault === "digest" || (experiment && fault === "directory")
+            ? undefined
+            : new RegExp(String(fault === "close" ? 6 : status), "u"),
+        );
+      assert.equal(calls[0][0], "hash");
+      assert.deepEqual(
+        calls.filter(([name]) => name !== "hash").map(([name]) => name),
+        skipped || fault === "digest" || (experiment && fault === "directory")
+          ? []
+          : ["verify", "close"],
+      );
+      if (["verify", "close", "both"].includes(fault))
+        assert.equal(diagnostics.length, 1);
+    }
+});
+
+test("the native ownership producer carries the exact literal argv and existing finite modes as data", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf(
+      "  need(case_token && case_job",
+      source.indexOf("static void ownership_launch("),
+    ),
+    body = source
+      .slice(start, source.indexOf("  char sig[65];", start))
+      .replace(
+        'wchar_t command[32767] = L"", temp[4096];',
+        'const command=[],temp={text:""};',
+      )
+      .replace("wchar_t first[4096];", 'const first={text:""};')
+      .replace(
+        /const wchar_t \*corpus\[\] = \{([^}]+)\};/u,
+        "const corpus=[$1];",
+      )
+      .replaceAll("sizeof(corpus)/sizeof(corpus[0])", "corpus.length")
+      .replace(/\b(?:unsigned|BOOL)\b/gu, "let")
+      .replace(/\bL(?=["'])/gu, "")
+      .replace(/\\x([a-f0-9]{4})/giu, "\\u$1")
+      .replace(/(temp|first)\[0\] = 0/gu, '$1.text = ""')
+      .replace(/temp\[([ij0-9]+)\]/gu, "temp.text[$1]");
+  for (const args of [
+    WINDOWS_LITERAL_ARGUMENTS,
+    ["detached", "c".repeat(32)],
+    ["suite", "c".repeat(32)],
+  ]) {
+    const text = (value) => (typeof value === "object" ? value.text : value),
+      entries = Array.from({ length: 7 }, (_, i) => ({
+        path: `C:\\Fixture\\Private Root\\slot-${i}`,
+        pin: HASH,
+      })),
+      values = [
+        "ownership-launch",
+        "31",
+        String(args.length),
+        ...args.map((arg) =>
+          arg === "" ? "-" : Buffer.from(arg, "utf16le").toString("hex"),
+        ),
+      ],
+      api = {
+        values,
+        n: values.length,
+        entries,
+        nonce: "c".repeat(32),
+        case_record: { restrictingSid: ACCOUNT },
+        case_token: true,
+        case_job: true,
+        ownership_launcher: { hProcess: null },
+        helpers: [{}, {}],
+        package_mode: false,
+        ownership_literal: false,
+        ownership_spoofed: false,
+        access_mode: false,
+        need: assert.ok,
+        bounded_number: (value, maximum) => {
+          const n = Number(value);
+          assert.ok(n >= 0 && n <= maximum);
+          return n;
+        },
+        decode: (value, out) => {
+          out.text = Buffer.from(value, "hex").toString("utf16le");
+        },
+        strcmp: (a, b) => (a === b ? 0 : 1),
+        wcscmp: (a, b) => (text(a) === text(b) ? 0 : 1),
+        wcslen: (value) => text(value).length,
+        swprintf_s: (out, _, format, ...args) => {
+          let i = 0;
+          out.text = format.replace(/%[hl]s/gu, () => text(args[i++]));
+          return out.text.length;
+        },
+        quoted: (out, _, value) => out.push(text(value)),
+      };
+    const command = new Script(`${body}\ncommand;`).runInNewContext(api);
+    assert.deepEqual(Array.from(command), [
+      entries[5].path,
+      api.nonce,
+      ACCOUNT,
+      entries[2].path,
+      entries[3].path,
+      entries[4].path,
+      entries[6].path,
+      HASH,
+      entries[2].path + "\\policy",
+      "pending",
+      args === WINDOWS_LITERAL_ARGUMENTS
+        ? "--ownership-literal"
+        : args[0] === "suite"
+          ? "--access"
+          : "--ownership",
+      ...args,
+    ]);
   }
 });

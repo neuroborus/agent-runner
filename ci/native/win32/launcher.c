@@ -45,6 +45,13 @@ static void need_at(bool ok, const char *file, unsigned line) {
   }
 }
 #define need(ok) need_at(!!(ok), __FILE__, __LINE__)
+static void checked_at(BOOL ok, const char *operation, unsigned line) {
+  if (ok) return;
+  DWORD error = GetLastError();
+  fprintf(stderr, "native-windows-api: operation=%s last-error=%lu\n", operation, error);
+  fflush(stderr); SetLastError(error); need_at(false, __FILE__, line);
+}
+#define checked(ok, operation) checked_at(!!(ok), operation, __LINE__)
 static DWORD providerLifetime = 60000;
 static DWORD WINAPI deadline(void *unused) {
   (void)unused;
@@ -94,7 +101,7 @@ static void private_dacl(HANDLE handle) {
 static HANDLE held(const wchar_t *name, BOOL directory, DWORD access) {
   HANDLE handle = CreateFileW(name, access | READ_CONTROL, FILE_SHARE_READ | (directory ? FILE_SHARE_WRITE : 0),
     NULL, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), NULL);
-  need(handle != INVALID_HANDLE_VALUE);
+  checked(handle != INVALID_HANDLE_VALUE, "CreateFileW");
   FILE_ATTRIBUTE_TAG_INFO tag;
   need(GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &tag, sizeof(tag)) &&
     !(tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && !!(tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == directory);
@@ -129,15 +136,24 @@ static void image(HANDLE file, const wchar_t *name, const wchar_t *pin, ULONGLON
   need(dos->e_magic == IMAGE_DOS_SIGNATURE && dos->e_lfanew >= 64 && (DWORD)dos->e_lfanew <= size - sizeof(IMAGE_NT_HEADERS64));
   IMAGE_NT_HEADERS64 *pe = (IMAGE_NT_HEADERS64 *)(bytes + dos->e_lfanew);
   need(pe->Signature == IMAGE_NT_SIGNATURE && pe->FileHeader.Machine == IMAGE_FILE_MACHINE_AMD64 &&
-    pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && !(pe->FileHeader.Characteristics & IMAGE_FILE_DLL));
+    pe->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC && pe->OptionalHeader.NumberOfRvaAndSizes >= 5 && !(pe->FileHeader.Characteristics & IMAGE_FILE_DLL));
+#ifdef NATIVE_CI_EXPERIMENT
+  /* P admits these same held, digest-bound bytes through custody's PE/purpose
+   * reader. Unsigned ordinary experiment images supply no Authenticode claim. */
+  IMAGE_DATA_DIRECTORY cert = pe->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_SECURITY];
+  if (!cert.Size) { need(!cert.VirtualAddress); return; }
+#endif
   GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
   WINTRUST_FILE_INFO info = {0}; info.cbStruct = sizeof(info); info.pcwszFilePath = name; info.hFile = file;
   WINTRUST_DATA trust = {0}; trust.cbStruct = sizeof(trust); trust.dwUIChoice = WTD_UI_NONE;
   trust.fdwRevocationChecks = WTD_REVOKE_NONE; trust.dwUnionChoice = WTD_CHOICE_FILE; trust.pFile = &info;
   trust.dwStateAction = WTD_STATEACTION_VERIFY; trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL | WTD_REVOCATION_CHECK_NONE;
   LONG result = WinVerifyTrust(NULL, &action, &trust);
-  trust.dwStateAction = WTD_STATEACTION_CLOSE; WinVerifyTrust(NULL, &action, &trust);
-  need(result == ERROR_SUCCESS); /* Exact signature/issuer and trust store are independently bound, too. */
+  trust.dwStateAction = WTD_STATEACTION_CLOSE; LONG closed = WinVerifyTrust(NULL, &action, &trust);
+  if (result != ERROR_SUCCESS || closed != ERROR_SUCCESS) {
+    fprintf(stderr, "native-windows-trust: result=0x%08lx close-result=0x%08lx\n", (DWORD)result, (DWORD)closed);
+    fflush(stderr); SetLastError((DWORD)(result != ERROR_SUCCESS ? result : closed)); need(FALSE);
+  } /* Reviewed signature/issuer and trust-store bindings remain independent. */
 }
 static void *token_info(HANDLE token, TOKEN_INFORMATION_CLASS kind) {
   DWORD size = 0; GetTokenInformation(token, kind, NULL, 0, &size);
@@ -317,7 +333,9 @@ int wmain(int argc, wchar_t **argv) {
   PSECURITY_DESCRIPTOR stationSd = descriptor(uiSddl); SECURITY_ATTRIBUTES stationSa = attributes(stationSd);
   HWINSTA original = GetProcessWindowStation(), station = CreateWindowStationW(stationName, CWF_CREATE_ONLY, WINSTA_ALL_ACCESS, &stationSa);
   USEROBJECTFLAGS flags; DWORD returned;
-  need(station && GetUserObjectInformationW(station, UOI_FLAGS, &flags, sizeof(flags), &returned) && !(flags.dwFlags & WSF_VISIBLE) && SetProcessWindowStation(station));
+  checked(station != NULL, "CreateWindowStationW");
+  checked(GetUserObjectInformationW(station, UOI_FLAGS, &flags, sizeof(flags), &returned), "GetUserObjectInformationW");
+  need(!(flags.dwFlags & WSF_VISIBLE)); checked(SetProcessWindowStation(station), "SetProcessWindowStation");
   need(swprintf_s(uiSddl, 2048, L"O:SYG:SYD:P(A;;GA;;;SY)(A;;0x000000c7;;;%ls)(A;;0x000000c7;;;%ls)S:(ML;;NW;;;LW)", userSid, argv[2]) > 0);
   PSECURITY_DESCRIPTOR desktopSd = descriptor(uiSddl); SECURITY_ATTRIBUTES desktopSa = attributes(desktopSd);
   /* Name the documented desktop rights; payload DACL grants remain separate. */
@@ -325,7 +343,7 @@ int wmain(int argc, wchar_t **argv) {
     DESKTOP_CREATEMENU | DESKTOP_HOOKCONTROL | DESKTOP_JOURNALRECORD | DESKTOP_JOURNALPLAYBACK |
     DESKTOP_ENUMERATE | DESKTOP_WRITEOBJECTS | DESKTOP_SWITCHDESKTOP;
   HDESK desktop = CreateDesktopW(L"payload", NULL, NULL, 0, desktopAccess, &desktopSa);
-  need(desktop && SetProcessWindowStation(original)); LocalFree(stationSd); LocalFree(desktopSd);
+  checked(desktop != NULL, "CreateDesktopW"); checked(SetProcessWindowStation(original), "SetProcessWindowStation/restore"); LocalFree(stationSd); LocalFree(desktopSd);
   HANDLE inputRead, inputWrite, outputRead, outputWrite;
   SECURITY_ATTRIBUTES pipeSa = protectedSa; pipeSa.bInheritHandle = TRUE;
   need(CreatePipe(&inputRead, &inputWrite, ownership ? &pipeSa : NULL, 0) && CreatePipe(&outputRead, &outputWrite, ownership ? &pipeSa : NULL, 0));
@@ -365,10 +383,10 @@ int wmain(int argc, wchar_t **argv) {
   startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES; startup.StartupInfo.hStdInput = inputRead;
   startup.StartupInfo.hStdOutput = outputWrite; startup.StartupInfo.hStdError = errorWrite; startup.lpAttributeList = attributes;
   PROCESS_INFORMATION child = {0};
-  need(CreateProcessAsUserW(token, argv[6], command, &protectedSa, &protectedSa, TRUE,
+  checked(CreateProcessAsUserW(token, argv[6], command, &protectedSa, &protectedSa, TRUE,
     CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT,
-    environment, argv[5], &startup.StartupInfo, &child));
-  BOOL member; need(IsProcessInJob(child.hProcess, job, &member) && member); noninherit(child.hProcess); noninherit(child.hThread);
+    environment, argv[5], &startup.StartupInfo, &child), "CreateProcessAsUserW");
+  BOOL member; checked(IsProcessInJob(child.hProcess, job, &member), "IsProcessInJob"); need(member); noninherit(child.hProcess); noninherit(child.hThread);
   DeleteProcThreadAttributeList(attributes); free(attributes); CloseHandle(inputRead); CloseHandle(outputWrite); if (provider) CloseHandle(errorWrite); CloseHandle(token); LocalFree(capability);
   frame("ready", child.hProcess, userSid); acknowledge('R');
   need(ResumeThread(child.hThread) == 1); CloseHandle(child.hThread);
