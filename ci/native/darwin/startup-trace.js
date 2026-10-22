@@ -124,7 +124,7 @@ const need = (value) => {
   if (!value) throw new Error("Unproved startup trace");
 };
 /** Cold-command admission consumes the same bounds as the streaming producer.
- * Optional zero-match numeric probes remain empty, never invented observations. */
+ * Optional coverage stays diagnostic; retained numeric entries require results. */
 export function assertDarwinColdStartupTrace(trace) {
   need(
     trace?.status === "observed" &&
@@ -137,8 +137,15 @@ export function assertDarwinColdStartupTrace(trace) {
       trace.events > 0 &&
       trace.events <= DARWIN_STARTUP_TRACE_LIMITS.rows &&
       /^[a-f0-9]{64}$/u.test(trace.sha256) &&
-      ["complete", "empty", "unsupported"].includes(trace.argumentStatus) &&
-      ["complete", "empty"].includes(trace.numericStatus) &&
+      [
+        "complete",
+        "empty",
+        "unsupported",
+        "missing",
+        "copy-failed",
+        "truncated",
+      ].includes(trace.argumentStatus) &&
+      ["complete", "empty", "missing"].includes(trace.numericStatus) &&
       Array.isArray(trace.arguments) &&
       trace.arguments.length <= DARWIN_STARTUP_TRACE_LIMITS.arguments,
   );

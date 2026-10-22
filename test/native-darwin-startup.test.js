@@ -3010,8 +3010,9 @@ test("cold schema capture crosses former byte and record caps without losing pai
     { status: "partial" },
     { captureComplete: false },
     { cleanup: "UNCERTAIN" },
-    { argumentStatus: "missing" },
-    { numericStatus: "missing" },
+    { argumentStatus: "malformed" },
+    { argumentStatus: "unavailable" },
+    { numericStatus: "unavailable" },
     { sha256: null },
     {
       arguments: Array(DARWIN_STARTUP_TRACE_LIMITS.arguments + 1).fill(
@@ -3120,12 +3121,35 @@ test("unmatched optional cold probes retain unknown values without replacing man
       "numeric-return 42 102 mmap 7 0 8192",
     ],
   ]) {
-    for (const cleanupFailure of [false, true]) {
+    for (const [argumentStatus, text, cleanupFailure] of [
+      ["empty", null, false],
+      ["empty", null, true],
+      ["missing", "\\0", false],
+      ["copy-failed", "", false],
+      [
+        "truncated",
+        "x".repeat(DARWIN_STARTUP_TRACE_LIMITS.argumentBytes) + "\\0",
+        false,
+      ],
+    ]) {
       const f = traceFixture({ coldCommand: true, cleanupFailure });
       assert.equal((await f.trace.arm()).status, "armed");
-      f.child.stdout.write(
-        [...TRACE_START, ...numeric, "exit 42 103", ""].join("\n"),
-      );
+      const argumentsObserved =
+        text === null
+          ? []
+          : [
+              "entry 42 103 open",
+              `argument-entry 42 103 open 8 ${argumentStatus} 0 0 ${text}`,
+              "return 42 104 open 1 -1",
+              "argument-return 42 104 open 8 1 -1",
+            ];
+      const rows = [
+        ...TRACE_START,
+        ...numeric,
+        ...argumentsObserved,
+        "exit 42 105",
+      ];
+      f.child.stdout.write(rows.join("\n") + "\n");
       await f.close();
       const result = await f.trace.finish();
       assert.equal(result.captureComplete, true);
@@ -3143,9 +3167,35 @@ test("unmatched optional cold probes retain unknown values without replacing man
       ])
         assert.equal(result.runtime[name], null);
       if (numeric.length && !cleanupFailure)
-        assert.equal(result.runtime.mmap[0].result.value, "8192");
+        assert.deepEqual(result.runtime.mmap[0], {
+          operation: "mmap",
+          thread: "7",
+          timestamp: "101",
+          arguments: {
+            address: "0",
+            length: "4096",
+            protection: "3",
+            flags: "4098",
+            descriptorBits: "18446744073709551615",
+            offsetBits: "0",
+          },
+          result: { timestamp: "102", errno: 0, value: "8192" },
+        });
       else assert.equal(result.runtime.mmap, null);
-      assert.equal(result.sha256 === null, cleanupFailure);
+      if (cleanupFailure) {
+        assert.equal(result.sha256, null);
+        assert.throws(() => assertDarwinColdStartupTrace(result));
+      } else {
+        assert.equal(result.argumentStatus, argumentStatus);
+        assert.equal(result.arguments.length, text === null ? 0 : 1);
+        assert.ok(result.arguments.every((record) => record.text === null));
+        assert.equal(result.events, rows.length);
+        assert.equal(
+          result.sha256,
+          createHash("sha256").update(rows.join("\n")).digest("hex"),
+        );
+        assert.equal(assertDarwinColdStartupTrace(result), result);
+      }
     }
   }
 });
@@ -3217,11 +3267,14 @@ test("cold startup numeric gaps stay unknown and malformed or foreign observatio
       assert.equal(result.status, "partial");
       assert.ok(Object.values(result.runtime).every((value) => value === null));
     } else {
+      assert.equal(result.status, "observed");
+      assert.equal(result.captureComplete, true);
       assert.equal(result.numericStatus, "missing");
       assert.equal(result.runtime.sysconf[0].result, null);
       assert.equal(result.runtime.pthread_get_stackaddr_np, null);
       assert.equal(result.runtime.pthread_get_stacksize_np, null);
       assert.equal(result.runtime.mmap, null);
+      assert.throws(() => assertDarwinColdStartupTrace(result));
     }
   }
 });

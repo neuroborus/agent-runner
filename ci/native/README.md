@@ -2941,8 +2941,11 @@ Cold admission uses the shared eight-MiB/131072-row and separate 8192-argument
 and 8192-numeric budgets, retaining thread/entry/return pairing, original observer
 custody and independent retirement. V/G admission requires armed and complete
 observed capture with mandatory exec/exit and syscall entry/return, a matching
-program digest and independently retired tracers. Missing pairs, malformed or
-overflowed capture refuse success; zero-match numeric probes may remain empty.
+program digest and independently retired tracers. Optional numeric coverage may
+remain empty or partial, and missing, copy-failed, unsupported or truncated
+argument acquisition does not block complete mandatory capture or establish an
+exact object. Every retained numeric entry still requires its matching result;
+malformed or overflowed capture refuses success.
 Capture refusal remains separate from successful independent trace cleanup.
 Missing values are null, never filled from the warmed launcher. Refused or
 incomplete tracing supplies no runtime
