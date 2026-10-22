@@ -199,9 +199,13 @@ use full validation. Reuse never removes history or changes recovery, revision,
 progress, activity, or exclusive mutation guarantees.
 Validated public records may also serve progress regeneration and activity
 pagination within explicit record and byte caps. Overflow or an older activity
-cursor falls back to canonical history; every activity, event-specific stop
-summary, revision, and progress line remains available. Publication callbacks
-grant no reuse without fresh byte and identity verification.
+cursor streams the certified history without revalidating unchanged historical
+states; every activity, event-specific stop summary, revision, and progress line
+remains available. Even early-limit pages and atomic progress replacement
+require proof of the entire original prefix. Missing evidence requires bounded
+canonical validation before streaming; uncertain evidence returns no page or
+replacement. Publication callbacks cannot replace the original certificate
+with different history, including through snapshot rollback or nested reads.
 Public projections remain bounded and exclude private results. These byte
 limits are headroom, never token budgets or evidence of a native output ceiling.
 Bounded diagnostic observations retain the latest 32 runner attempts, identified

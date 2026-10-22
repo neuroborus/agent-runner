@@ -1638,10 +1638,11 @@ export function createRunStore({
       snapshot,
       afterRevision,
     )) {
+      // Drain the certified prefix even after filling the bounded page.
+      if (activities.length === limit) continue;
       activities.push(activity);
       if (activities.length === limit) {
         cursor = activity.revision;
-        break;
       }
     }
 

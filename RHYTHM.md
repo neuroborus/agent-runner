@@ -7,6 +7,16 @@ remain in the owning documentation.
 
 ## 2026-10-22
 
+- **Overflowed projections stream certified records.** Old activity cursors and
+  complete progress use one record at a time without normalizing unchanged
+  private historical states. The original operation-local prefix certificate
+  survives optional cache rejection and must be proved before returning even a
+  limited page or replacing progress. Missing evidence requires bounded canonical
+  validation; callback reads, snapshot rollback and publication failure cannot
+  substitute a different history. Complete partial-tail prefixes remain provable
+  without cache admission. Retention limits and canonical history/recovery scans
+  are unchanged.
+
 - **Journal certificates follow the relevant namespace.** Validated scans bind
   run and revision endpoints, ordered segments, file identities, exact ranges
   and digests independently of optional checkpoint admission. Fresh prefix

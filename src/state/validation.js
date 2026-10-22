@@ -783,7 +783,7 @@ function normalizeActiveTurn(value, schemaVersion = RUN_STATE_SCHEMA_VERSION) {
   };
 }
 
-function normalizeStopRequest(value, state) {
+export function normalizeStopRequest(value, state) {
   if (value === undefined && state.schemaVersion < 4) return null;
   if (value === null) return null;
   if (state.schemaVersion < 4)

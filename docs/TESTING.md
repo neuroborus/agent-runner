@@ -111,6 +111,17 @@ partial-tail recovery, publication interruption and complete projection coverage
 Journal changes also require the state/operator-stop and legacy-confirmation
 slow coverage, plus the affected MCP workflow and control-plane composition
 listed above; focused namespace fixtures do not replace those durable gates.
+The same focused suite separates projection decoding from state normalization
+and exercises record-count and byte-tail eviction separately and together,
+checkpoint entry/combined-byte eviction, oversized unretained checkpoints,
+missing evidence before/during/after streaming, and repeated real control claims
+during overflow reads. Early-limit pages prove unread ranges; atomic progress,
+callback failure, historical tampering with snapshot rollback, partial tails,
+and legacy/redaction equivalence retain their original-prefix checks. A controlled
+historical edit during lagging-snapshot matching also proves that canonical
+validation cannot replace the original publication certificate. The state
+slow suite's bounded-heap journal case also covers overflowed projections,
+complete progress, old cursors and repeated transitions across segments.
 
 Claude restricted-host launcher changes use deterministic public-adapter tests
 with controlled bubblewrap processes for the commit gate. That coverage must

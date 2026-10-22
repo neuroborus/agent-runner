@@ -10,11 +10,12 @@ import {
   journalFileUnchanged,
   readJournalSegment,
   sameJournalIdentity,
+  streamJournalPrefix,
 } from "./journal-files.js";
 import {
   collectProjection,
   createProjection,
-  projectPublicActivity,
+  projectCertifiedActivity,
 } from "./projections.js";
 import {
   appendDurableLine,
@@ -447,16 +448,17 @@ async function* readEvents(
   resolveStopBoundary,
   metadata = {},
   checkpoint = null,
+  proof = checkpoint,
 ) {
   const directory = await observeJournalDirectory(runDirectory);
   const filenames = await readJournalFilenames(runDirectory);
-  const certificate = checkpoint?.certificate;
+  const certificate = proof?.certificate;
   if (
-    checkpoint &&
+    proof &&
     (!certificate ||
       certificate.runId !== runId ||
       certificate.firstRevision !== 1 ||
-      certificate.lastRevision !== checkpoint.lastEvent.revision ||
+      certificate.lastRevision !== proof.lastEvent.revision ||
       !sameJournalIdentity(directory, certificate.directory) ||
       certificate.bindings.length > filenames.length ||
       certificate.bindings.some(
@@ -481,10 +483,11 @@ async function* readEvents(
         join(runDirectory, filename),
         MAX_EVENT_LOG_BYTES,
         prefix,
+        checkpoint === null,
       );
     } catch (cause) {
       if (cause?.code !== "ENOENT") throw cause;
-      if (checkpoint) throw new CheckpointInvalid();
+      if (proof) throw new CheckpointInvalid();
       throw new RunStoreError("Run event log is missing.", {
         code: "ERR_INVALID_EVENT_LOG",
       });
@@ -561,7 +564,8 @@ async function* readEvents(
     Object.assign(metadata, {
       hasPartialTail,
       validByteLength:
-        (prefix?.length ?? 0) + Buffer.byteLength(source.slice(0, completeEnd)),
+        (checkpoint ? (prefix?.length ?? 0) : 0) +
+        Buffer.byteLength(source.slice(0, completeEnd)),
       eventFilename: filename,
       segmentCount: filenames.length,
       versionBarrier,
@@ -585,12 +589,12 @@ async function* readEvents(
   }
   const directoryAfter = await observeJournalDirectory(runDirectory);
   stable = stable && sameJournalIdentity(directory, directoryAfter);
-  if (checkpoint && !stable) throw new CheckpointInvalid();
+  if (proof && !stable) throw new CheckpointInvalid();
   Object.assign(metadata, {
     // Certification belongs to this validated operation even when its snapshot
     // is too large for optional checkpoint retention.
     certificate:
-      stable && bindings.every(Boolean) && !metadata.hasPartialTail
+      stable && bindings.every(Boolean)
         ? deepFreeze({
             runId,
             firstRevision: 1,
@@ -600,6 +604,86 @@ async function* readEvents(
           })
         : null,
   });
+}
+
+// The snapshot supplies certificates from complete semantic validation. Fresh
+// projection digests alone never certify new history. Consumers must drain this
+// iterator before returning a page or committing an atomic progress replacement.
+async function* streamSnapshotProjection(
+  runDirectory,
+  snapshot,
+  project = true,
+) {
+  const invalid = () => {
+    throw new RunStoreError("Run changed during projection streaming.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  };
+  const directory = await observeJournalDirectory(runDirectory);
+  const filenames = await readJournalFilenames(runDirectory);
+  const certificate = snapshot.certificate;
+  const bindings = certificate?.bindings;
+  if (
+    !certificate ||
+    certificate.runId !== snapshot.state.runId ||
+    certificate.firstRevision !== 1 ||
+    certificate.lastRevision !== snapshot.state.revision ||
+    !sameJournalIdentity(directory, certificate.directory) ||
+    bindings.length > filenames.length ||
+    bindings.some((binding, index) => binding.filename !== filenames[index])
+  )
+    invalid();
+  const observations = [];
+  let revision = 0;
+  for (const binding of bindings) {
+    if (binding.firstRevision !== revision + 1) invalid();
+    const metadata = {};
+    for await (const line of streamJournalPrefix(
+      join(runDirectory, binding.filename),
+      MAX_EVENT_LOG_BYTES,
+      binding,
+      metadata,
+      binding === bindings.at(-1),
+      project,
+    )) {
+      if (!project) continue;
+      const event = parseJson(
+        line,
+        "Projection event",
+        "ERR_INVALID_EVENT_LOG",
+      );
+      revision += 1;
+      if (event?.runId !== snapshot.state.runId || event.revision !== revision)
+        invalid();
+      let activity;
+      try {
+        activity = projectCertifiedActivity(event);
+      } catch (cause) {
+        throw new RunStoreError("Invalid event during projection streaming.", {
+          cause,
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+      }
+      if (activity !== null) yield activity;
+    }
+    if (!project) revision = binding.lastRevision;
+    if (binding.lastRevision !== revision) invalid();
+    observations.push(metadata.observation);
+  }
+  if (project && revision !== snapshot.state.revision) invalid();
+  for (const [index, binding] of bindings.entries())
+    if (
+      !(await journalFileUnchanged(
+        join(runDirectory, binding.filename),
+        observations[index],
+      ))
+    )
+      invalid();
+  if (
+    !isDeepStrictEqual(filenames, await readJournalFilenames(runDirectory)) ||
+    !sameJournalIdentity(directory, await observeJournalDirectory(runDirectory))
+  )
+    invalid();
 }
 
 // Replays a validated snapshot's exact prefix. Later append-only publications
@@ -655,8 +739,10 @@ async function loadSnapshot(
   checkpoint = null,
 ) {
   const storedState = await readStoredState(runDirectory, runId);
+  const proof = checkpoint;
   // A lagging snapshot outside the adjacent retained pair needs canonical
-  // replay to prove its exact event, even when the newer prefix is unchanged.
+  // replay to prove its exact event. Retain its byte proof through that scan;
+  // different valid history cannot replace an operation's original prefix.
   if (
     storedState &&
     checkpoint &&
@@ -679,6 +765,7 @@ async function loadSnapshot(
     resolveStopBoundary,
     eventLog,
     checkpoint,
+    proof,
   )) {
     if (event.revision === storedState?.revision) {
       storedStateMatched = isDeepStrictEqual(storedState, event.state);
@@ -754,7 +841,7 @@ export function createStateJournal({
   }
   function remember(directory, snapshot) {
     forget(directory);
-    if (snapshot.certificate === null) return;
+    if (snapshot.certificate === null || snapshot.hasPartialTail) return;
     // Measure bounded components separately and stop on overflow rather than
     // materializing a string containing several copies of a large state.
     let bytes = 0;
@@ -798,39 +885,79 @@ export function createStateJournal({
       throw cause;
     }
   }
-  async function* publicActivities(directory, snapshot, afterRevision = 0) {
-    // Callers supply a freshly validated snapshot. Publication must reload it
-    // after callbacks, so a callback's nested reads or edits grant no reuse.
+  function changedProjection() {
+    return new RunStoreError("Run changed during projection publication.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  }
+
+  async function certifiedSnapshot(directory, snapshot) {
+    if (snapshot.certificate !== null) return snapshot;
+    // One canonical scan may establish missing evidence. It must certify the
+    // same snapshot before streaming; cache retention is never a prerequisite.
+    const certified = await loadSnapshot(
+      directory,
+      snapshot.state.runId,
+      resolveStopBoundary,
+    );
     if (
-      snapshot.certificate !== null &&
-      snapshot.projection.afterRevision <= afterRevision
-    ) {
-      for (const activity of snapshot.projection.activities)
-        if (activity.revision > afterRevision) yield activity;
-      return;
-    }
-    for await (const event of replaySnapshot(
+      certified.certificate === null ||
+      !isDeepStrictEqual(certified.state, snapshot.state)
+    )
+      throw changedProjection();
+    return certified;
+  }
+
+  async function verifyPrefix(directory, snapshot) {
+    for await (const unused of streamSnapshotProjection(
       directory,
       snapshot,
-      resolveStopBoundary,
+      false,
     )) {
-      if (event.revision <= afterRevision) continue;
-      const activity = projectPublicActivity(event);
-      if (activity !== null) yield activity;
+      void unused;
     }
   }
 
-  async function writeProgress(directory, state) {
-    const snapshot = await loadCheckpoint(directory, state.runId);
-    if (!isDeepStrictEqual(snapshot.state, state)) {
-      throw new RunStoreError("Run changed during progress publication.", {
-        code: "ERR_INVALID_EVENT_LOG",
-      });
+  async function* publicActivities(directory, snapshot, afterRevision = 0) {
+    try {
+      snapshot = await certifiedSnapshot(directory, snapshot);
+      if (snapshot.projection.afterRevision <= afterRevision) {
+        for (const activity of snapshot.projection.activities)
+          if (activity.revision > afterRevision) yield activity;
+        await verifyPrefix(directory, snapshot);
+      } else {
+        for await (const activity of streamSnapshotProjection(
+          directory,
+          snapshot,
+        ))
+          if (activity.revision > afterRevision) yield activity;
+      }
+    } catch (cause) {
+      forget(directory);
+      throw cause;
     }
+  }
+
+  async function writeProgress(directory, snapshot) {
     await atomicWriteFile(
       join(directory, PROGRESS_FILENAME),
-      renderProgress(state, publicActivities(directory, snapshot)),
+      renderProgress(snapshot.state, publicActivities(directory, snapshot)),
     );
+  }
+
+  async function verifyFailure(directory, snapshot, cause) {
+    try {
+      await verifyPrefix(directory, snapshot);
+    } catch (proofError) {
+      if (!(cause instanceof RunStoreError)) throw proofError;
+    }
+    throw cause;
+  }
+
+  async function publicationBoundary(directory, boundary, snapshot) {
+    await onTransitionBoundary(boundary);
+    // Callback-populated checkpoints never replace the original certificate.
+    await verifyPrefix(directory, snapshot);
   }
 
   async function appendTransition(runDirectory, state, snapshot, activity) {
@@ -880,30 +1007,79 @@ export function createStateJournal({
         serializedEvent,
       );
     }
-    await onTransitionBoundary("event-appended");
-    await writeState(runDirectory, state);
-    await onTransitionBoundary("state-replaced");
-    await writeProgress(runDirectory, state);
-    await onTransitionBoundary("progress-replaced");
+    if (snapshot.lastEvent != null) await verifyPrefix(runDirectory, snapshot);
+    const published = await certifiedSnapshot(
+      runDirectory,
+      await loadSnapshot(
+        runDirectory,
+        state.runId,
+        resolveStopBoundary,
+        snapshot.lastEvent == null ? null : snapshot,
+      ),
+    );
+    if (!isDeepStrictEqual(published.lastEvent, event))
+      throw changedProjection();
+    try {
+      await publicationBoundary(runDirectory, "event-appended", published);
+      await writeState(runDirectory, state);
+      await publicationBoundary(runDirectory, "state-replaced", published);
+      await writeProgress(runDirectory, published);
+      await publicationBoundary(runDirectory, "progress-replaced", published);
+      // Snapshot rollback may require canonical matching, but never changes the
+      // original byte certificate against which publication must be verified.
+      const verified = await loadSnapshot(
+        runDirectory,
+        state.runId,
+        resolveStopBoundary,
+        published,
+      );
+      if (
+        !verified.certificate ||
+        !sameJournalIdentity(
+          verified.certificate.directory,
+          published.certificate.directory,
+        ) ||
+        !isDeepStrictEqual(
+          verified.certificate.bindings,
+          published.certificate.bindings,
+        ) ||
+        !isDeepStrictEqual(verified.state, state)
+      )
+        throw changedProjection();
+      remember(runDirectory, verified);
+    } catch (cause) {
+      await verifyFailure(runDirectory, published, cause);
+    }
   }
 
   async function recover(runDirectory, snapshot) {
-    await removePartialEventTail(runDirectory, snapshot);
-    if (snapshot.stateLagged) {
-      await writeState(runDirectory, snapshot.state);
-    }
+    snapshot = await certifiedSnapshot(runDirectory, snapshot);
+    try {
+      await removePartialEventTail(runDirectory, snapshot);
+      if (snapshot.stateLagged) {
+        await writeState(runDirectory, snapshot.state);
+      }
 
-    await writeProgress(runDirectory, snapshot.state);
+      await writeProgress(runDirectory, snapshot);
+      await verifyPrefix(runDirectory, snapshot);
+    } catch (cause) {
+      await verifyFailure(runDirectory, snapshot, cause);
+    }
   }
 
   return Object.freeze({
-    appendTransition: async (directory, ...args) => {
+    appendTransition: async (directory, state, snapshot, activity) => {
       try {
-        await appendTransition(directory, ...args);
+        if (snapshot.lastEvent != null)
+          snapshot = await certifiedSnapshot(directory, snapshot);
+        await appendTransition(directory, state, snapshot, activity);
       } catch (cause) {
         // Only prepublication checkpoints can survive successful publication;
         // failed callbacks must not leave evidence populated by nested reads.
         forget(directory);
+        if (cause instanceof CheckpointInvalid) cause = changedProjection();
+        if (snapshot.certificate)
+          await verifyFailure(directory, snapshot, cause);
         throw cause;
       }
     },

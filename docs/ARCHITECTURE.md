@@ -3346,18 +3346,33 @@ activity data, also counted within the combined checkpoint cap. Overflow evicts
 the oldest activities and retains their last revision as a coverage boundary;
 it never drops authoritative events or retains historical states. Activity
 pagination uses the retained range only when it covers the requested cursor.
-Older requests and uncertain bindings replay the canonical snapshot prefix.
+Older requests stream one byte-certified record at a time, decoding only its
+public projection through the owning activity and legacy stop normalizers.
+They do not repeat semantic validation of unchanged historical states. A page
+drains and verifies the entire original prefix even after reaching its limit;
+no partial page escapes a failed digest, identity, or namespace observation.
 Cursors still advance across revisions without activity and stop at the last
 returned activity when a page is full.
 
-Progress publication uses these records only when they cover the complete run;
-overflow falls back to streamed canonical replay with identical text. After
-event and state publication callbacks, the journal reloads the snapshot and
-freshly verifies prefix bytes and identities before generating progress. A
-changed snapshot rejects publication, and a changed prefix receives complete
-validation. Recovery likewise revalidates after repairing a partial tail or
-lagging snapshot and atomically regenerates stale or missing progress. Failed
-publication or recovery discards retained evidence, including callback reads.
+Progress publication uses retained records when they cover the complete run;
+overflow uses the same certified record stream with identical text. An
+operation-local certificate survives cache eviction or oversized checkpoint
+rejection. Missing bindings require one bounded canonical scan to certify the
+same snapshot before projection streaming; unavailable proof rejects publication.
+Certificates cover only complete consumed records, so partial tails stay
+uncached while their complete prefix can still serve a verified projection.
+Publication certifies the appended event before callbacks, then checks its
+original prefix after every callback, including failures. Snapshot rollback or
+callback-populated checkpoints cannot substitute different history. Canonical
+matching of a lagging snapshot retains the original prefix's byte proof through
+the same scan. Progress replacement occurs only after the complete stream's
+proof; publication failure rechecks the original certificate without masking an
+existing safety error.
+Post-publication snapshot verification remains bound to that certificate and
+never passes null evidence as a reusable checkpoint. Recovery repairs partial
+tails and lagging snapshots before atomically regenerating progress from the
+same certified prefix. Failed publication or recovery discards retained
+evidence, including callback reads.
 Runner monitoring and MCP activity/wait consumers continue using the state
 capability; they own no projection cache or additional polling.
 

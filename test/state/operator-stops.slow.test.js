@@ -190,6 +190,34 @@ test("replays many large journal segments under a bounded heap", async (t) => {
       })}\n`,
     );
   }
+  // Keep the large-history heap proof, then exceed both projection tail caps
+  // with small current states so byte-certified checkpoints remain available.
+  for (let index = 0; index < 1030; index += 1) {
+    const state = {
+      ...f.state,
+      revision: index + 37,
+      updatedAt: new Date(
+        Date.parse(f.state.updatedAt) + index + 36,
+      ).toISOString(),
+      counters: { rounds: index + 36 },
+    };
+    await appendFile(
+      join(f.directoryPath, "events-000005.jsonl"),
+      `${JSON.stringify({
+        schemaVersion: state.schemaVersion,
+        revision: state.revision,
+        runId: state.runId,
+        recordedAt: state.updatedAt,
+        state,
+        activity: {
+          actor: "runner",
+          phase: "runtime",
+          kind: "recorded",
+          message: "\u{1f642}".repeat(500),
+        },
+      })}\n`,
+    );
+  }
   const program = `
     import assert from "node:assert/strict";
     import { readFile } from "node:fs/promises";
@@ -197,25 +225,47 @@ test("replays many large journal segments under a bounded heap", async (t) => {
     const { createRunStore } = await import(process.argv[1]);
     const store = createRunStore({ stateRoot: process.argv[2] });
     const runId = process.argv[3];
-    assert.equal((await store.loadRun(runId)).revision, 36);
+    assert.equal((await store.loadRun(runId)).revision, 1066);
     const history = await store.loadRunHistory(runId, { stream: true });
-    assert.deepEqual(await Array.fromAsync(history.events, event => event.revision),
-      Array.from({ length: 36 }, (_, index) => index + 1));
+    assert.deepEqual(await Array.fromAsync(history.events, event => {
+      if (event.revision === 36) assert.equal(event.state.pipelineState.results.length, 4);
+      return event.revision;
+    }),
+      Array.from({ length: 1066 }, (_, index) => index + 1));
+    // Settle the lagging snapshot before measuring warm reuse. Its old event
+    // still requires canonical validation under the same bounded heap.
+    const recoveryLease = await store.acquireRunLease(runId);
+    try {
+      assert.equal((await store.recoverRun(recoveryLease)).revision, 1066);
+    } finally {
+      await recoveryLease.release();
+    }
+    const parse = JSON.parse;
+    let historicalNormalizations = 0;
+    JSON.parse = (...args) => {
+      const value = parse(...args);
+      if (value?.state?.runId && value.revision <= 1066) {
+        const projectPath = value.state.projectPath;
+        Object.defineProperty(value.state, "projectPath", { enumerable: true,
+          get() { historicalNormalizations += 1; return projectPath; } });
+      }
+      return value;
+    };
     const page = await store.readPublicActivity(runId, { afterRevision: 20, limit: 2 });
     assert.deepEqual(page.activities.map(activity => activity.revision), [21, 22]);
     assert.equal(page.cursor, 22);
     const lease = await store.acquireRunLease(runId);
     try {
-      assert.equal((await store.recoverRun(lease)).revision, 36);
-      assert.equal((await store.transitionRun(lease, { counters: { rounds: 36 } })).revision, 37);
-      assert.equal((await store.loadRun(runId)).pipelineState.results.length, 4);
-      const tail = await store.readPublicActivity(runId, { afterRevision: 34 });
-      assert.deepEqual(tail.activities.map(activity => activity.revision), [35, 36]);
-      assert.equal(tail.cursor, 37);
+      assert.equal((await store.recoverRun(lease)).revision, 1066);
+      assert.equal((await store.transitionRun(lease, { counters: { rounds: 1066 } })).revision, 1067);
+      const tail = await store.readPublicActivity(runId, { afterRevision: 1064 });
+      assert.deepEqual(tail.activities.map(activity => activity.revision), [1065, 1066]);
+      assert.equal(tail.cursor, 1067);
       const progress = await readFile(join(await store.getRunDirectory(runId), "progress.md"), "utf8");
-      assert.match(progress, /Revision: 37/u);
-      assert.equal(progress.split("\\n").filter(line => line.startsWith("- ")).length, 36);
+      assert.match(progress, /Revision: 1067/u);
+      assert.equal(progress.split("\\n").filter(line => line.startsWith("- ")).length, 1066);
       assert.doesNotMatch(progress, /pipelineState|results/u);
+      assert.equal(historicalNormalizations, 0);
     } finally {
       await lease.release();
     }
@@ -233,7 +283,7 @@ test("replays many large journal segments under a bounded heap", async (t) => {
     ],
     { cwd: f.directoryPath },
   );
-  assert.equal((await f.store.loadRun(f.state.runId)).revision, 37);
+  assert.equal((await f.store.loadRun(f.state.runId)).revision, 1067);
   assert.equal(
     (await readdir(f.directoryPath)).filter((name) =>
       /^events.*\.jsonl$/u.test(name),
