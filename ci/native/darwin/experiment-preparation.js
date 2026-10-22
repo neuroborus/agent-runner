@@ -18,6 +18,7 @@ import {
   recoverDarwinExperimentBuild,
   darwinExperimentBuildInput,
   assertDarwinExperimentBuild,
+  observeDarwinExperimentImages,
 } from "./experiment-build.js";
 import { acquireDarwinExperimentInputs } from "./experiment-inputs.js";
 import { prepareDarwinExperimentCases } from "./experiment-cases.js";
@@ -25,6 +26,7 @@ import { darwinExperimentCaseDeclarations } from "./case-provisioning.js";
 import {
   darwinPreparationContext,
   darwinPreparationReceiptLimit,
+  readDarwinPreparationReceipt,
 } from "./preparation.js";
 import { createDarwinSystemEffects } from "./effects.js";
 import { darwinSystemRecipes } from "./system.js";
@@ -175,7 +177,14 @@ function selectors(preparation, options) {
   };
 }
 // Hosted libraries stay outside this inventory; the build retains actual load commands.
-function observation(prepared, build, readSha256) {
+function observation(prepared, build, native) {
+  requireObservation(
+    native?.source === "native" &&
+      native.purpose === "experiment" &&
+      /^[a-f0-9]{64}$/u.test(native.readSha256) &&
+      observationDigest(native.helpers) === observationDigest(build.helpers),
+  );
+  const readSha256 = native.readSha256;
   const bindings = (source) => ({
       source,
       build: observationDigest(build),
@@ -282,7 +291,12 @@ export async function prepareDarwinExperiment(
         build: built.build,
         inputs: acquisition.inputs,
         system,
-        observation: observation(built.prepared, built.build, built.readSha256),
+        observation: observation(built.prepared, built.build, {
+          source: "native",
+          purpose: "experiment",
+          helpers: built.build.helpers,
+          readSha256: built.readSha256,
+        }),
         recipes: darwinSystemRecipes(),
       };
     systemInput(job, preparation);
@@ -336,7 +350,7 @@ export async function prepareDarwinExperiment(
   } finally {
     if (state && !closed)
       try {
-        requireObservation(retired(await state.releaseBootstrap()));
+        requireObservation(retired(await state.settleBootstrap()));
       } catch (cause) {
         if (!primary) throw cause;
         nativeException("darwin-experiment-preparation-cleanup", cause);
@@ -351,10 +365,18 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
   requireObservation(
     job.preparation && retired(job.preparationEffects.settlement),
   );
-  const preparationBytes = await fs.readFile(
+  const readReceipt =
+    options.readReceipt ??
+    ((file) =>
+      readDarwinPreparationReceipt(
+        file,
+        fs,
+        options.ownerUid ?? (() => process.getuid()),
+      ));
+  const preparationBytes = await readReceipt(
       path.join(directory, "darwin-experiment-preparation.json"),
     ),
-    closeBytes = await fs.readFile(
+    closeBytes = await readReceipt(
       path.join(directory, "darwin-experiment-preparation-close.json"),
     );
   requireObservation(
@@ -390,14 +412,14 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
     state = darwinPreparationContext(declaration, settings);
   let primary;
   try {
-    // Rejoin the protected original preparation receipts through a distinct native reader.
-    await state.receipt(
-      path.join(directory, "darwin-experiment-preparation.json"),
-    );
-    await state.receipt(
-      path.join(directory, "darwin-experiment-preparation-close.json"),
-    );
+    // The input observer is required for the v7 runtime closure. Reuse it for
+    // held helper reads; completed-build loading itself creates no native owner.
     const { reader } = await state.bootstrap(options.signal);
+    const images = await observeDarwinExperimentImages(
+      fresh.prepared,
+      reader,
+      fresh.build,
+    );
     for (const { path, sha256 } of preparation.system.uploads)
       await reader.readBuildInput(path, sha256);
     for (const value of [
@@ -429,15 +451,15 @@ export async function loadDarwinExperiment(input, directory, options = {}) {
         );
       }
     }
-    const runtime = observation(fresh.prepared, fresh.build, fresh.readSha256)
-      .observed.components;
+    const runtime = observation(fresh.prepared, fresh.build, images).observed
+      .components;
     return { job, preparation: { ...preparation, close }, runtime };
   } catch (cause) {
     primary = cause;
     throw cause;
   } finally {
     try {
-      requireObservation(retired(await state.releaseBootstrap()));
+      requireObservation(retired(await state.settleBootstrap()));
     } catch (cause) {
       if (!primary) throw cause;
       nativeException("darwin-experiment-load-cleanup", cause);
@@ -548,17 +570,19 @@ export async function recoverDarwinExperimentPreparation(
       },
       options,
     );
-    result = names.some((name) => name.startsWith("darwin-case-"))
-      ? {
-          status: "RETAINED",
-          independent: false,
-          emergencyCleanup: false,
-          nativeEventSha256: observationDigest({ missingCaseSelectors: true }),
-        }
-      : {
-          ...build.preparationEffects.settlement,
-          nativeEventSha256: build.preparationEffects.receiptSha256,
-        };
+    result =
+      job.cases.length > 0 ||
+      names.some((name) => name.startsWith("darwin-case-"))
+        ? {
+            status: "RETAINED",
+            independent: false,
+            emergencyCleanup: false,
+            missingCaseSelectors: true,
+          }
+        : {
+            ...build.preparationEffects.settlement,
+            buildReceiptSha256: build.preparationEffects.receiptSha256,
+          };
   }
   const settled =
     retired(result) && !job.preparationEffects.settlement.emergencyCleanup;

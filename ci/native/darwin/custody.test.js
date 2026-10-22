@@ -305,6 +305,11 @@ test("Darwin experiment installed reads retain canonical parents, held identitie
       "/Library/Developer/Fixture.sdk/usr/include/bsm/audit_kevents.h",
     ].map((file) => ["experiment", file, null, true]),
     ["experiment", cache, "file-owner", true],
+    ...[
+      "/Library/Developer/CommandLineTools/usr/bin/clang",
+      "/Library/Developer/CommandLineTools/SDKs/Fixture.sdk/SDKSettings.json",
+      "/usr/bin/codesign",
+    ].map((file) => ["experiment", file, "file-owner", true]),
     [
       "experiment",
       "/Library/native-poc-" + "a".repeat(64) + "/dyld_shared_cache_x86_64",

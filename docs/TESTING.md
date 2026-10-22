@@ -137,6 +137,15 @@ or enumeration. The helper-only inventory retains all ten images, held identitie
 signatures and native ABI, plus the separately held dyld input. Existing regressions
 reject old or mixed private records, incomplete builds and substituted helpers;
 recovery preserves uncertainty and the original failure without rebuilding.
+The existing preparation/custody fixtures distinguish completed-build file
+revalidation from retained ABI/read/retirement observations. Repeated cold loads
+and per-case verification check current source/tool/SDK/helper bytes without new
+build effects, recovery replay or original-domain census. They reject substituted,
+oversized, missing or unsettled inputs and file-read digests presented as fresh
+native events. The required runtime input observer supplies fresh held helper
+observations; native build policy and actual case admission retain independent
+identity, signature, installed-policy and retirement checks. Malformed original
+journals remain recovery refusals rather than triggers for normal cold loading.
 A deterministic process-group fixture verifies cancellation, stream-read failure,
 reaped closure and unsuccessful completion when descendants remain. Injected streams
 retain successful diagnostics above 64 KiB, including split multibyte chunks, and

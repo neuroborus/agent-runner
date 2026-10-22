@@ -284,6 +284,9 @@ export function createDarwinCaseProvisioning(state, options) {
               image.sha256 === expected.sha256 &&
               image.signature?.valid === true &&
               image.signature.cdhash === expected.cdhash &&
+              image.identity === expected.identity &&
+              image.rootIdentity === expected.rootIdentity &&
+              same(image.macho, expected.macho) &&
               hash(image.nativeEventSha256),
           );
           images.push({

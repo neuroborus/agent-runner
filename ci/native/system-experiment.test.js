@@ -36,6 +36,10 @@ import {
 import { nativePreparationError } from "./first-failure.js";
 import { runDarwinExperimentProofs } from "./darwin/index.js";
 import {
+  DARWIN_EXPERIMENT_SOURCES,
+  DARWIN_PF_ABI_REFERENCE,
+} from "./darwin/experiment-build-inputs.js";
+import {
   runWindowsExperimentProofs,
   recoverWindowsExperimentProofs,
   loadWindowsExperiment,
@@ -204,8 +208,9 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       purpose: "experiment",
       schemaVersion: 3,
       binding: expected.binding,
-      sources: inventory.helpers.map((name) => ({
-        name: name + ".c",
+      sourceDirectory: "/synthetic/sources",
+      sources: DARWIN_EXPERIMENT_SOURCES.map((name) => ({
+        name,
         sha256: H,
       })),
       tools: expected.tools,
@@ -238,7 +243,14 @@ function fixture(platform, fault, osBuild = "synthetic-build") {
       commands: prepared.commands,
       compilerVersion: prepared.compilerVersion,
       abi: { purpose: "experiment", osBuild },
-      pfAbi: { runtimeCompatibility: "UNPROVED" },
+      pfAbi: {
+        reference: DARWIN_PF_ABI_REFERENCE,
+        adapter: {
+          path: path.join(prepared.sourceDirectory, "pf-abi.h"),
+          sha256: H,
+        },
+        runtimeCompatibility: "UNPROVED",
+      },
     };
   }
   const saves = [],

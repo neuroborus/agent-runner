@@ -493,10 +493,24 @@ readers independently inspect published helper/source bytes, signatures
 and ABI. The build recipe inspects this completed
 build and fresh output identities, without parked compiler domains or compiler
 policy receipts. Every other recipe retains its native policy and retirement
-requirements. Cold loading verifies the existing output, source, tool and SDK
-observations without discovery, acquisition or recompilation, then requires
-equality with the original complete build, including its native ABI. Incompatible,
-mixed, incomplete and substituted records fail.
+requirements. Completed-build loading rejoins the original candidate/job binding,
+Git sources, tool/SDK hashes, output bytes, command results and settled receipt
+through bounded file readers. It retains the original native ABI, helper identities,
+read digest and reader-close evidence; it neither rediscovers nor recompiles them.
+It returns current `revalidation: { source: "file", readSha256 }` separately from
+`retained` native read/close evidence. File reads make no fresh `held`, `independent`
+or `nativeEventSha256` claim. Incompatible, mixed, incomplete, changed and unsettled
+records refuse admission; no cached PASS replaces current byte checks.
+
+Ordinary cold loading and per-case `verifyBuild` no longer replay completed-build
+recovery, create another build-only reader, run its original-process/domain census,
+repeat the native ABI command or queue protected receipt re-observation. They write
+no new build effects or recovery journals. `verifyBuild` without a native policy
+observation returns `REVALIDATED`. The actual build policy still rereads held helper
+bytes, signatures, identities and the protected output directory through its admitted
+native owner before recording independent `OBSERVED` evidence. Compilation, signing
+and initial native ABI/output observation run once; explicit recovery of genuinely
+unfinished effects retains its original native journals and independent census.
 
 Ordinary Darwin preparation explicitly trusts the disposable hosted system runtime.
 Installed experiment case inputs use that same assumption through acquisition,
@@ -872,10 +886,17 @@ the separate loader and native build/ABI. These local
 hashes establish no publication, provider or licensing approval;
 `observeDarwinRelease` retains its reviewed closure requirements.
 
-Cold loading rejoins the original protected preparation/build receipts and fresh
-held inputs without compilation. Bootstrap receipts bind their fixed build inputs;
-case declarations retain separate admission pins, so repeated full loads and
-per-case build verification can rejoin the same original bootstrap inventory.
+Cold loading rejoins bounded original preparation/build receipts without a second
+protected native receipt pass. Version-7 runtime components still require fresh
+held inputs: the already required input observer now also reads and compares all
+ten helper identities, signatures and Mach-O observations with the original build.
+Its runtime components come from those native reads, never from file revalidation
+or the retained preparation observation. That owner closes and independently
+retires on success; failed acquisition or a lost close acknowledgement uses its
+existing settlement/recovery path while preserving the original failure. Case
+assets, UID/GID reservations, installed policy, ownership controls and payload
+admission keep their separate native held checks and independent cleanup. Case
+declarations retain separate admission pins and unchanged execution deadlines.
 Indexed recovery also accepts later cold-reader admissions after successful
 preparation. Unavailable retirement reopens cleanup; a fresh successful join retains
 the original preparation observations and receipt. Recovery history binds the

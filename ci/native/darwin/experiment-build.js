@@ -21,10 +21,12 @@ import {
 import { DARWIN_HELPER_NAMES, darwinDeveloperDirectory } from "./build.js";
 import {
   darwinBuildRecords as recordsFor,
+  readDarwinPreparationReceipt,
   darwinPreparationContext,
   recoverDarwinBuild,
 } from "./preparation.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
+import { protectedBytes, isDarwinInstalledPath } from "./private-files.js";
 
 const hash = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
@@ -315,6 +317,17 @@ export function assertDarwinExperimentBuild(prepared, build) {
           observationDigest(build[key]) === observationDigest(prepared[key]),
       ) &&
       Array.isArray(build.helpers) &&
+      build.abi?.purpose === "experiment" &&
+      observationDigest(build.pfAbi) ===
+        observationDigest({
+          reference: DARWIN_PF_ABI_REFERENCE,
+          adapter: {
+            path: path.join(prepared.sourceDirectory, "pf-abi.h"),
+            sha256: prepared.sources.find(({ name }) => name === "pf-abi.h")
+              .sha256,
+          },
+          runtimeCompatibility: "UNPROVED",
+        }) &&
       build.helpers.length === DARWIN_HELPER_NAMES.length &&
       new Set(build.helpers.map(({ name }) => name)).size ===
         DARWIN_HELPER_NAMES.length,
@@ -342,36 +355,15 @@ export function assertDarwinExperimentBuild(prepared, build) {
     );
   }
 }
-async function observe(prepared, reader, options, previous) {
+/** Fresh held-image evidence belongs to the admitted native observer. ABI and
+ * retirement receipts remain observations of the original build lifecycle. */
+export async function observeDarwinExperimentImages(
+  prepared,
+  reader,
+  previous,
+) {
   const reads = [],
-    helpers = [],
-    fs = options.fs ?? filesystem;
-  for (const tool of prepared.tools)
-    requireObservation(
-      digest(await (options.readInstalled ?? fs.readFile)(tool.path)) ===
-        tool.sha256,
-    );
-  requireObservation(
-    digest(
-      await (options.readInstalled ?? fs.readFile)(
-        path.join(prepared.sdk.path, "SDKSettings.json"),
-      ),
-    ) === prepared.sdk.settingsSha256,
-  );
-  for (const source of prepared.sources) {
-    const value = await reader.readBuildInput(
-      path.join(prepared.sourceDirectory, source.name),
-      source.sha256,
-    );
-    requireObservation(
-      value.independent &&
-        value.held &&
-        value.unchanged &&
-        value.sha256 === source.sha256 &&
-        hash(value.nativeEventSha256),
-    );
-    reads.push(value.nativeEventSha256);
-  }
+    helpers = [];
   for (const name of DARWIN_HELPER_NAMES) {
     const expected = prepared.helpers.find((helper) => helper.name === name),
       image = await reader.readBuildImage(
@@ -404,6 +396,51 @@ async function observe(prepared, reader, options, previous) {
       macho: image.macho,
     });
   }
+  if (previous)
+    requireObservation(
+      observationDigest(helpers) === observationDigest(previous.helpers),
+    );
+  return {
+    purpose: "experiment",
+    source: "native",
+    helpers,
+    readSha256: observationDigest(reads),
+  };
+}
+
+async function observe(prepared, reader, options) {
+  const reads = [],
+    helpers = [],
+    fs = options.fs ?? filesystem;
+  for (const tool of prepared.tools)
+    requireObservation(
+      digest(await (options.readInstalled ?? fs.readFile)(tool.path)) ===
+        tool.sha256,
+    );
+  requireObservation(
+    digest(
+      await (options.readInstalled ?? fs.readFile)(
+        path.join(prepared.sdk.path, "SDKSettings.json"),
+      ),
+    ) === prepared.sdk.settingsSha256,
+  );
+  for (const source of prepared.sources) {
+    const value = await reader.readBuildInput(
+      path.join(prepared.sourceDirectory, source.name),
+      source.sha256,
+    );
+    requireObservation(
+      value.independent === true &&
+        value.held === true &&
+        value.unchanged === true &&
+        value.sha256 === source.sha256 &&
+        hash(value.nativeEventSha256),
+    );
+    reads.push(value.nativeEventSha256);
+  }
+  const images = await observeDarwinExperimentImages(prepared, reader);
+  helpers.push(...images.helpers);
+  reads.push(images.readSha256);
   const installed = await reader.build();
   requireObservation(installed.purpose === "experiment");
   const sdk = { ...prepared.sdk };
@@ -433,10 +470,6 @@ async function observe(prepared, reader, options, previous) {
     },
   };
   assertDarwinExperimentBuild(prepared, build);
-  if (previous)
-    requireObservation(
-      observationDigest(build) === observationDigest(previous),
-    );
   return { purpose: "experiment", build, readSha256: observationDigest(reads) };
 }
 
@@ -536,11 +569,17 @@ export async function prepareDarwinExperimentBuild(
   }
 }
 
-async function selected(job, directory, options) {
+async function selected(job, directory, options, recovery = false) {
   const fs = options.fs ?? filesystem;
-  const bytes = await (options.readSelector ?? fs.readFile)(
-    path.join(directory, "darwin-experiment-build-selector.json"),
-  );
+  const bytes = await (
+    options.readSelector ??
+    ((file) =>
+      readDarwinPreparationReceipt(
+        file,
+        fs,
+        options.ownerUid ?? (() => process.getuid()),
+      ))
+  )(path.join(directory, "darwin-experiment-build-selector.json"));
   requireObservation(Buffer.isBuffer(bytes) && bytes.length <= 1048576);
   const prepared = JSON.parse(bytes);
   darwinExperimentWorker(job, prepared.binding, options);
@@ -551,19 +590,25 @@ async function selected(job, directory, options) {
   );
   const declaration = darwinExperimentBuildInput(prepared, job, directory);
   await candidateSources(prepared, options);
-  const state = darwinPreparationContext(declaration, options);
-  requireObservation(
-    observationDigest(
-      JSON.parse(
-        await state.receipt(
-          path.join(directory, "darwin-experiment-build-selector.json"),
+  const state = darwinPreparationContext(declaration, options),
+    readReceipt = recovery
+      ? state.receipt
+      : (options.readReceipt ?? state.stockReceipt);
+  if (recovery)
+    requireObservation(
+      observationDigest(
+        JSON.parse(
+          await readReceipt(
+            path.join(directory, "darwin-experiment-build-selector.json"),
+          ),
         ),
-      ),
-    ) === observationDigest(prepared),
-  );
-  return { prepared, state };
+      ) === observationDigest(prepared),
+    );
+  return { prepared, state, readReceipt };
 }
 
+/** Rejoin a settled build through bounded file reads. This creates no native
+ * owner, recovery journal, ABI event or independent held-image observation. */
 export async function loadDarwinExperimentBuild(
   input,
   directory,
@@ -575,48 +620,100 @@ export async function loadDarwinExperimentBuild(
     retired(job.preparationEffects.settlement) &&
       hash(job.preparationEffects.receiptSha256),
   );
-  const { prepared, state } = await selected(job, directory, options);
-  let primary;
-  try {
-    const observed = JSON.parse(
-        await state.receipt(
-          path.join(directory, "darwin-experiment-build.json"),
-        ),
-      ),
-      close = JSON.parse(
-        await state.receipt(
-          path.join(directory, "darwin-experiment-build-close.json"),
-        ),
-      );
+  if (options.signal?.aborted) throw options.signal.reason;
+  const { prepared, state, readReceipt } = await selected(
+    job,
+    directory,
+    options,
+  );
+  await state.admit(options.signal);
+  const record = async (name) => {
+    const bytes = await readReceipt(path.join(directory, name));
     requireObservation(
-      observed.build.schemaVersion === 3 &&
-        observationDigest({ observed, close }) ===
-          job.preparationEffects.receiptSha256 &&
-        observed.build.preparationSha256 === observationDigest(prepared) &&
-        retired(close) &&
-        close.closed === true,
+      Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= 1048576,
     );
-    assertDarwinExperimentBuild(prepared, observed.build);
-    await recoverDarwinBuild(state, await recordsFor(state), options.signal);
-    const { reader } = await state.bootstrap(options.signal);
-    return {
-      job,
-      prepared,
-      ...(await observe(prepared, reader, options, observed.build)),
-    };
-  } catch (cause) {
-    primary = cause;
-    throw cause;
-  } finally {
-    try {
-      requireObservation(
-        retired(await state.settleBootstrap({ recover: !!primary })),
-      );
-    } catch (cause) {
-      if (!primary) throw cause;
-      nativeException("darwin-experiment-load-cleanup", cause);
-    }
+    return JSON.parse(bytes);
+  };
+  const observed = await record("darwin-experiment-build.json"),
+    close = await record("darwin-experiment-build-close.json");
+  observationObject(observed, ["purpose", "build", "readSha256"]);
+  requireObservation(
+    observed.purpose === "experiment" &&
+      hash(observed.readSha256) &&
+      observationDigest({ observed, close }) ===
+        job.preparationEffects.receiptSha256 &&
+      close.purpose === "experiment" &&
+      retired(close) &&
+      close.closed === true &&
+      hash(close.nativeEventSha256),
+  );
+  assertDarwinExperimentBuild(prepared, observed.build);
+  const reads = [];
+  const read = async (file, pin, maximum = 134217728, installed = false) => {
+    state.guard(options.signal);
+    let bytes;
+    if (installed) {
+      // Ordinary installed toolchains retain hosted-image eligibility. Private
+      // source/output reads below keep their protected metadata requirements.
+      requireObservation(isDarwinInstalledPath(file));
+      bytes = options.readInstalled
+        ? await options.readInstalled(file)
+        : await protectedBytes(
+            { path: file, sha256: pin },
+            0,
+            0,
+            maximum,
+            state.fs,
+            true,
+            "experiment",
+          );
+    } else bytes = await state.read(file, pin, maximum);
+    requireObservation(
+      Buffer.isBuffer(bytes) &&
+        bytes.length > 0 &&
+        bytes.length <= maximum &&
+        digest(bytes) === pin,
+    );
+    reads.push({ path: file, sha256: pin });
+    return bytes;
+  };
+  for (const tool of prepared.tools)
+    await read(tool.path, tool.sha256, 134217728, true);
+  await read(
+    path.join(prepared.sdk.path, "SDKSettings.json"),
+    prepared.sdk.settingsSha256,
+    1048576,
+    true,
+  );
+  for (const source of prepared.sources)
+    await read(
+      path.join(prepared.sourceDirectory, source.name),
+      source.sha256,
+      1048576,
+    );
+  for (const helper of observed.build.helpers) {
+    const bytes = await read(
+      path.join(prepared.output, helper.name),
+      helper.sha256,
+    );
+    const macho = inspectDarwinMachO(bytes, 134217728, "experiment");
+    requireObservation(
+      macho.sha256 === helper.sha256 &&
+        macho.libraries.length > 0 &&
+        helper.macho.rpaths.length === 0 &&
+        observationDigest(helper.macho.dependencies.slice().sort()) ===
+          observationDigest([...macho.libraries, macho.loader].sort()),
+    );
   }
+  await state.admit(options.signal);
+  return {
+    job,
+    purpose: "experiment",
+    prepared,
+    build: observed.build,
+    retained: { readSha256: observed.readSha256, close },
+    revalidation: { source: "file", readSha256: observationDigest(reads) },
+  };
 }
 
 /** Interrupted compiler/publication work has no replacement receipt. Only an
@@ -690,7 +787,7 @@ export async function recoverDarwinExperimentBuild(
       }) + "\n",
       { flag: "wx", mode: 0o400 },
     );
-    ({ state, prepared } = await selected(job, directory, options));
+    ({ state, prepared } = await selected(job, directory, options, true));
     state.fence();
     await state.receipt(fence);
     const observed = JSON.parse(
@@ -703,8 +800,13 @@ export async function recoverDarwinExperimentBuild(
           path.join(directory, "darwin-experiment-build-close.json"),
         ),
       );
+    observationObject(observed, ["purpose", "build", "readSha256"]);
     requireObservation(
-      observed.build.schemaVersion === 3 &&
+      observed.purpose === "experiment" &&
+        hash(observed.readSha256) &&
+        close.purpose === "experiment" &&
+        hash(close.nativeEventSha256) &&
+        observed.build.schemaVersion === 3 &&
         observed.build.preparationSha256 ===
           observationDigest(
             JSON.parse(

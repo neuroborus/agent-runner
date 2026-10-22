@@ -614,6 +614,13 @@ function experimentBuildFixture(failure = null) {
     nodeVersion: "v24.21.0",
     readCandidate: async () => bytes,
     readInstalled: async () => bytes,
+    read: async (file) => {
+      f.events.push("file-read:" + file);
+      return DARWIN_HELPER_NAMES.includes(path.basename(file)) &&
+        path.dirname(file) === prepared.output
+        ? image
+        : bytes;
+    },
     env: {
       ...f.options.env,
       RUNNER_ENVIRONMENT: "github-hosted",
@@ -1124,6 +1131,15 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
     (record) => {
       record.build.helpers.pop();
     },
+    (record) => {
+      record.build.abi.purpose = "reviewed";
+    },
+    (record) => {
+      record.build.pfAbi.reference.sha256 = "f".repeat(64);
+    },
+    (record) => {
+      record.build.pfAbi.adapter.sha256 = "f".repeat(64);
+    },
   ]) {
     const changed = structuredClone(original);
     mutate(changed);
@@ -1147,38 +1163,28 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
     );
     assert.equal(recovered.preparationEffects.settlement.status, "RETAINED");
     assert.equal(recovered.failure, stale.failure);
+    await assert.rejects(
+      loadDarwinExperimentBuild(built.job, directory, f.options),
+    );
+    // Each next mutation is a separate pre-recovery snapshot. A real recovery
+    // fence is permanent and must keep ordinary admission closed.
+    for (const file of f.files.keys())
+      if (path.basename(file).startsWith("darwin-recovery-"))
+        f.files.delete(file);
   }
   f.files.set(buildPath, original);
-  const create = f.options.createReader;
-  f.options.createReader = (...args) => {
-    const reader = create(...args);
-    return {
-      ...reader,
-      build: async () => ({
-        ...(await reader.build()),
-        osBuild: "24A101",
-      }),
-    };
-  };
-  await assert.rejects(
-    loadDarwinExperimentBuild(built.job, directory, f.options),
-    /Unverified native tool observation/u,
-  );
-  f.options.createReader = (...args) => {
-    const reader = create(...args),
-      read = reader.readBuildImage;
-    return {
-      ...reader,
-      readBuildImage: async (...values) => ({
-        ...(await read(...values)),
-        sha256: "f".repeat(64),
-      }),
-    };
-  };
+  f.options.createReader = () =>
+    assert.fail("Completed loading must create no native owner");
+  await loadDarwinExperimentBuild(built.job, directory, f.options);
+  const read = f.options.read;
+  f.options.read = async (file, ...args) =>
+    file === path.join(output, DARWIN_HELPER_NAMES[0])
+      ? Buffer.from("substituted helper")
+      : read(file, ...args);
   await assert.rejects(
     loadDarwinExperimentBuild(built.job, directory, f.options),
   );
-  f.options.createReader = create;
+  f.options.read = read;
   for (const target of ["compiler", "SDKSettings.json"]) {
     await assert.rejects(
       loadDarwinExperimentBuild(built.job, directory, {
@@ -1207,6 +1213,136 @@ test("Darwin versioned build loading needs no cache and rejects substituted evid
       readCandidate: async () => Buffer.from("substituted source"),
     }),
   );
+});
+
+test("Darwin completed build revalidation owns no native effects and keeps original evidence distinct", async () => {
+  const f = experimentBuildFixture(),
+    built = await prepareDarwinExperimentBuild(
+      f.job,
+      directory,
+      f.persist,
+      f.options,
+    ),
+    files = [...f.files.keys()],
+    before = f.events.length,
+    installed = [];
+  f.options.createReader =
+    f.options.acquire =
+    f.options.command =
+      () => assert.fail("A completed file read cannot acquire native effects");
+  f.options.readInstalled = async (file) => {
+    installed.push(file);
+    return bytes;
+  };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const loaded = await loadDarwinExperimentBuild(
+      built.job,
+      directory,
+      f.options,
+    );
+    assert.deepEqual(loaded.build, built.build);
+    assert.deepEqual(loaded.retained, {
+      readSha256: built.readSha256,
+      close: f.files.get(
+        path.join(directory, "darwin-experiment-build-close.json"),
+      ),
+    });
+    assert.equal(loaded.revalidation.source, "file");
+    for (const claim of [
+      "held",
+      "independent",
+      "nativeEventSha256",
+      "readSha256",
+    ])
+      assert.equal(Object.hasOwn(loaded, claim), false);
+  }
+  assert.deepEqual([...f.files.keys()], files);
+  assert.ok(
+    f.events.slice(before).every((event) => event.startsWith("file-read:")),
+  );
+  for (const tool of built.prepared.tools)
+    assert.equal(installed.filter((file) => file === tool.path).length, 2);
+  for (const file of [
+    ...built.prepared.sources.map(({ name }) =>
+      path.join(built.prepared.sourceDirectory, name),
+    ),
+    ...built.build.helpers.map(({ name }) =>
+      path.join(built.prepared.output, name),
+    ),
+  ])
+    assert.equal(
+      f.events.slice(before).filter((event) => event === "file-read:" + file)
+        .length,
+      2,
+    );
+  const read = f.options.read;
+  for (const replacement of [
+    Buffer.alloc(0),
+    Buffer.from("changed source"),
+    Buffer.alloc(1048577),
+  ]) {
+    f.options.read = (file, ...args) =>
+      file ===
+      path.join(built.prepared.sourceDirectory, built.prepared.sources[0].name)
+        ? replacement
+        : read(file, ...args);
+    await assert.rejects(
+      loadDarwinExperimentBuild(built.job, directory, f.options),
+    );
+  }
+  f.options.read = read;
+  const receipt = f.options.readReceipt;
+  f.options.readReceipt = async (file) =>
+    file.endsWith("/darwin-experiment-build.json")
+      ? Buffer.alloc(1048577)
+      : receipt(file);
+  await assert.rejects(
+    loadDarwinExperimentBuild(built.job, directory, f.options),
+  );
+});
+
+test("Darwin case build verification refuses file evidence presented as a fresh native observation", async () => {
+  for (const claim of [
+    null,
+    "held",
+    "independent",
+    "nativeEventSha256",
+    "readSha256",
+    "nested-native",
+    "native-source",
+  ]) {
+    const f = buildTranscripts(true),
+      original = f.options.loadExperimentBuild;
+    f.options.loadExperimentBuild = async (...args) => {
+      const value = await original(...args);
+      if (claim === "nested-native")
+        value.revalidation.nativeEventSha256 = hash;
+      else if (claim === "native-source") value.revalidation.source = "native";
+      else if (claim) value[claim] = claim.endsWith("Sha256") ? hash : true;
+      return value;
+    };
+    f.options.createReader = () =>
+      assert.fail("File verification cannot start a reader");
+    const owner = createDarwinSystemEffects(f.input, f.options);
+    if (claim) await assert.rejects(owner.verifyBuild(f.input.preparation));
+    else {
+      const verified = await owner.verifyBuild(f.input.preparation);
+      assert.deepEqual(verified, {
+        purpose: "experiment",
+        status: "REVALIDATED",
+        revalidation: { source: "file", readSha256: hash },
+      });
+    }
+    assert.equal(
+      f.events.filter((event) => event === "experiment-build-read").length,
+      1,
+    );
+    assert.equal(
+      f.events.some((event) => event.startsWith("darwin-bootstrap-")),
+      false,
+    );
+    assert.equal(f.processes.size, 0);
+  }
 });
 
 test("Darwin initial preparation rejects non-experiment native build observations", async () => {
@@ -4152,7 +4288,10 @@ function buildTranscripts(experiment = false, complete = false) {
     };
     options.loadExperimentBuild = async () => {
       events.push("experiment-build-read");
-      return { ...f.input.preparation, readSha256: hash };
+      return {
+        ...f.input.preparation,
+        revalidation: { source: "file", readSha256: hash },
+      };
     };
     directories.set(output, { uid: 0, mode: 0o555, ino: 900 });
     for (const helper of f.manifest.helpers)
@@ -9573,6 +9712,14 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
   const commands = f.events.filter((event) =>
     event.startsWith("compile-owner:"),
   ).length;
+  const originalRetirements = f.events.filter(
+    (event) => event === "original-retirement",
+  ).length;
+  const bootstraps = () =>
+    [...f.files.keys()].filter((file) =>
+      /darwin-bootstrap-[0-9]+-intent\.json$/u.test(file),
+    ).length;
+  const nativeOwners = bootstraps();
   const loaded = await loadDarwinExperiment(
     result.job,
     reportDirectory,
@@ -9585,6 +9732,16 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
   );
   assert.equal(observationDigest(reloaded), observationDigest(loaded));
   assert.equal(
+    bootstraps() - nativeOwners,
+    2,
+    "Exactly the required runtime input owner per load",
+  );
+  assert.equal(
+    f.events.filter((event) => event === "original-retirement").length,
+    originalRetirements,
+  );
+
+  assert.equal(
     f.events.filter((event) => event.startsWith("compile-owner:")).length,
     commands,
   );
@@ -9592,7 +9749,7 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
     observationDigest(loaded.preparation),
     observationDigest(result.preparation),
   );
-  const readFile = f.options.fs.readFile,
+  const readFile = f.options.readReceipt,
     bounds = [
       ["darwin-experiment-preparation.json", 4194304],
       ["darwin-experiment-preparation-close.json", 1048576],
@@ -9606,15 +9763,15 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
   // Trailing JSON whitespace preserves every digest and semantic observation:
   // only the real size predicate can reject these otherwise valid records.
   for (const [name, limit] of bounds) {
-    f.options.fs.readFile = paddedRead(name, limit);
+    f.options.readReceipt = paddedRead(name, limit);
     await loadDarwinExperiment(result.job, reportDirectory, f.options);
-    f.options.fs.readFile = paddedRead(name, limit + 1);
+    f.options.readReceipt = paddedRead(name, limit + 1);
     await assert.rejects(
       loadDarwinExperiment(result.job, reportDirectory, f.options),
       /Unverified/,
     );
   }
-  f.options.fs.readFile = readFile;
+  f.options.readReceipt = readFile;
   const preparationPath = path.join(
       reportDirectory,
       "darwin-experiment-preparation.json",
@@ -9678,6 +9835,24 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
     );
   }
   f.files.set(preparationPath, original);
+  const nativeReader = f.options.createReader;
+  for (const claim of ["held", "independent", "unchanged"]) {
+    f.options.createReader = (...args) => {
+      const reader = nativeReader(...args),
+        read = reader.readBuildImage;
+      return {
+        ...reader,
+        readBuildImage: async (...values) => ({
+          ...(await read(...values)),
+          [claim]: false,
+        }),
+      };
+    };
+    await assert.rejects(
+      loadDarwinExperiment(result.job, reportDirectory, f.options),
+    );
+  }
+  f.options.createReader = nativeReader;
   const before = [...f.events];
   const owner = createDarwinExperimentSystemEffects(
     loaded.job,
@@ -9686,10 +9861,17 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
   );
   assert.equal(typeof owner.prepare, "function");
   assert.deepEqual(f.events, before);
-  assert.equal(
-    (await owner.verifyBuild(loaded.preparation)).status,
-    "OBSERVED",
-  );
+  const beforeVerification = bootstraps(),
+    writes = [...f.files.keys()];
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const verified = await owner.verifyBuild(loaded.preparation);
+    assert.equal(verified.status, "REVALIDATED");
+    assert.equal(verified.revalidation.source, "file");
+    assert.equal(Object.hasOwn(verified, "independent"), false);
+    assert.equal(Object.hasOwn(verified, "nativeEventSha256"), false);
+  }
+  assert.equal(bootstraps(), beforeVerification);
+  assert.deepEqual([...f.files.keys()], writes);
   const binding = darwinExperimentBuildBinding(loaded.preparation);
   let compilerPolicy;
   await owner.build({
@@ -10143,6 +10325,14 @@ test("Darwin preparation recovery preserves failure and cannot settle admitted c
       f.events.filter((event) => event.startsWith("compile-owner:")).length,
       commands,
     );
+    if (!admitted)
+      assert.equal(
+        result.preparationEffects.receiptSha256,
+        observationDigest({
+          ...built.job.preparationEffects.settlement,
+          buildReceiptSha256: built.job.preparationEffects.receiptSha256,
+        }),
+      );
     if (admitted)
       assert.ok(
         published.every(
@@ -10468,8 +10658,9 @@ test("Darwin acquired PF requests cold-load through their original custody journ
     f.options,
   );
   assert.deepEqual(loaded.build, f.built.build);
-  assert.ok(
-    f.events.filter((event) => event === "original-retirement").length > before,
+  assert.equal(
+    f.events.filter((event) => event === "original-retirement").length,
+    before,
   );
   assert.equal(
     f.native.events.filter((event) => event === "pf-read").length,
@@ -10569,11 +10760,21 @@ test("Darwin build recovery rejects malformed PF requests and unrelated phases",
     mutate(changed);
     changed.requestSha256 = observationDigest(changed.request);
     f.files.set(file, changed);
-    await assert.rejects(
-      loadDarwinExperimentBuild(f.built.job, directory, f.options),
-      /Unverified/,
+    await loadDarwinExperimentBuild(f.built.job, directory, f.options);
+    const recovered = await recoverDarwinExperimentBuild(
+      f.built.job,
+      directory,
+      f.persist,
+      f.options,
+    );
+    assert.equal(
+      recovered.preparationEffects.settlement.status,
+      "RETAINED",
       label,
     );
+    for (const name of f.files.keys())
+      if (path.basename(name).startsWith("darwin-recovery-"))
+        f.files.delete(name);
     f.files.set(file, original);
   }
   const reviewed = buildTranscripts(),

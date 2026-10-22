@@ -48,7 +48,7 @@ export function darwinPreparationReceiptLimit(file) {
     : 1048576;
 }
 
-async function readReceipt(file, fs, ownerUid) {
+export async function readDarwinPreparationReceipt(file, fs, ownerUid) {
   requireObservation((await fs.realpath(file)) === file);
   const handle = await fs.open(
     file,
@@ -347,7 +347,7 @@ export function darwinPreparationContext(input, options) {
     receipt =
       options.readReceipt ??
       (async (file) => {
-        const bytes = await readReceipt(file, fs, ownerUid),
+        const bytes = await readDarwinPreparationReceipt(file, fs, ownerUid),
           pin = { path: file, sha256: digest(bytes) };
         if (activeReader) await activeReader.verifyBuildReceipt(pin);
         else pendingReceipts.push(pin);
@@ -571,7 +571,7 @@ export function darwinPreparationContext(input, options) {
     guard,
     admit,
     fence,
-    stockReceipt: (file) => readReceipt(file, fs, ownerUid),
+    stockReceipt: (file) => readDarwinPreparationReceipt(file, fs, ownerUid),
     bootstrap,
     releaseBootstrap,
     settleBootstrap,

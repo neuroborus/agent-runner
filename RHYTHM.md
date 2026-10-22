@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Separate completed build reads from native evidence
+
+Ordinary Darwin experiments revalidate completed build bytes and receipts through
+bounded file readers without replaying native recovery or acquiring more build
+owners. Original ABI/read/retirement evidence remains explicitly retained; current
+file hashes cannot become fresh held or independent observations. The required
+runtime input observer supplies fresh helper reads, while publication, payload
+admission and unfinished-effect recovery keep their existing native owners.
+This removes demonstrated repeated bootstrap work without changing case deadlines
+or claiming that it was the timeout's sole cause. Fresh hosted observations still
+own functional closure.
+
 ## 2026-10-22 — Keep cold trace completion separate from helper exec
 
 Cold Darwin V/G tracing no longer puts the parked helper in DTrace's explicit

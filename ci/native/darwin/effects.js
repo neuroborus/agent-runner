@@ -176,9 +176,15 @@ export function createDarwinSystemEffects(input, options = {}) {
           ...options,
           signal,
         });
+        observationObject(fresh.revalidation, ["source", "readSha256"]);
         requireObservation(
           fresh.purpose === "experiment" &&
-            hash(fresh.readSha256) &&
+            fresh.revalidation?.source === "file" &&
+            hash(fresh.revalidation.readSha256) &&
+            !Object.hasOwn(fresh, "nativeEventSha256") &&
+            !Object.hasOwn(fresh, "independent") &&
+            !Object.hasOwn(fresh, "held") &&
+            !Object.hasOwn(fresh, "readSha256") &&
             observationDigest(fresh.build) ===
               observationDigest(preparation.build) &&
             state.manifest.helpers.every((helper) =>
@@ -216,10 +222,15 @@ export function createDarwinSystemEffects(input, options = {}) {
         }
         return {
           purpose: "experiment",
-          status: "OBSERVED",
-          independent: true,
-          nativeEventSha256: fresh.readSha256,
-          ...(policyProof ? { policyProof } : {}),
+          status: policyProof ? "OBSERVED" : "REVALIDATED",
+          revalidation: fresh.revalidation,
+          ...(policyProof
+            ? {
+                independent: true,
+                nativeEventSha256: policyProof.observed.nativeEventSha256,
+                policyProof,
+              }
+            : {}),
         };
       }
       const binding = policyBinding && normalizePolicyBinding(policyBinding);
