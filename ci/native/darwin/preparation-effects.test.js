@@ -770,6 +770,410 @@ const jobContextForTest = (job) =>
     ),
   );
 
+async function defaultInstalledBuildFixture(compilerPath = null) {
+  const f = experimentBuildFixture();
+  if (compilerPath) {
+    const original = f.prepared.tools[0].path;
+    f.prepared.tools[0].path = compilerPath;
+    for (const command of f.prepared.commands)
+      if (command.file === original) command.file = compilerPath;
+  }
+  const installed = new Map(f.prepared.tools.map(({ path }) => [path, bytes])),
+    opened = [],
+    closed = [],
+    io = [],
+    metadata = new Map();
+  installed.set(path.join(f.prepared.sdk.path, "SDKSettings.json"), bytes);
+  delete f.options.readInstalled;
+  const originalStat = f.options.fs.lstat,
+    originalRealpath = f.options.fs.realpath;
+  const stat = (file) => ({
+    dev: 1n,
+    ino: BigInt([...installed.keys()].indexOf(file) + 10),
+    uid: 501n,
+    gid: 20n,
+    mode: installed.has(file) ? 0o100755n : 0o40777n,
+    nlink: 2n,
+    size: BigInt(installed.get(file)?.length ?? 0),
+    mtimeMs: 1n,
+    ctimeMs: 1n,
+    mtimeNs: 1000000n,
+    ctimeNs: 1000000n,
+    isFile: () => installed.has(file),
+    isDirectory: () => !installed.has(file),
+    isSymbolicLink: () => false,
+    ...metadata.get(file),
+  });
+  f.options.fs = {
+    ...f.options.fs,
+    readFile: async (file) => {
+      io.push(["readFile", file]);
+      assert.ok(installed.has(file));
+      return installed.get(file);
+    },
+    realpath: async (file) => {
+      io.push(["realpath", file]);
+      return originalRealpath(file);
+    },
+    lstat: async (file, settings) => {
+      io.push(["lstat", file]);
+      return file === directory || file.startsWith(directory + "/")
+        ? originalStat(file, settings)
+        : stat(file);
+    },
+    open: async (file, flags) => {
+      assert.ok(installed.has(file));
+      assert.equal(
+        flags,
+        constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      );
+      opened.push(file);
+      io.push(["open", file]);
+      return {
+        stat: async (settings) => {
+          io.push(["stat", file]);
+          assert.equal(settings.bigint, true);
+          return stat(file);
+        },
+        read: async (buffer, offset, length, position) => {
+          io.push(["read", file]);
+          const chunk = installed
+            .get(file)
+            .subarray(position, position + length);
+          chunk.copy(buffer, offset);
+          return { bytesRead: chunk.length };
+        },
+        close: async () => {
+          io.push(["close", file]);
+          closed.push(file);
+        },
+      };
+    },
+  };
+  const built = await prepareDarwinExperimentBuild(
+    f.job,
+    directory,
+    f.persist,
+    f.options,
+  );
+  f.options.createReader =
+    f.options.acquire =
+    f.options.command =
+      () =>
+        assert.fail(
+          "Cold installed reads cannot create native or build effects",
+        );
+  return { ...f, built, installed, opened, closed, io, metadata };
+}
+
+test("Darwin cold default installed reader reuses unchanged canonical tools without native effects", async () => {
+  const f = await defaultInstalledBuildFixture(),
+    files = [...f.files.keys()],
+    events = f.events.length;
+  const loaded = await loadDarwinExperimentBuild(
+    f.built.job,
+    directory,
+    f.options,
+  );
+  assert.deepEqual(loaded.build, f.built.build);
+  assert.equal(loaded.revalidation.source, "file");
+  assert.deepEqual([...f.files.keys()], files);
+  assert.deepEqual(f.opened, [...f.installed.keys()]);
+  assert.deepEqual(f.closed, f.opened);
+  assert.ok(
+    f.events.slice(events).every((event) => event.startsWith("file-read:")),
+  );
+});
+
+test("Darwin cold default installed reads reject substitutions, unsafe metadata and failed closure without replacing the first cause", async () => {
+  const f = await defaultInstalledBuildFixture(),
+    compiler = f.prepared.tools[0].path,
+    sdk = path.join(f.prepared.sdk.path, "SDKSettings.json"),
+    originalOpen = f.options.fs.open,
+    originalRealpath = f.options.fs.realpath,
+    originalStat = f.options.fs.lstat;
+  for (const [file, change, predicate, installedPredicate] of [
+    [compiler, { dev: -1n }, "identity"],
+    [compiler, { isFile: () => false }, "regular"],
+    [compiler, { nlink: 0n }, "installed", "links"],
+    [compiler, { size: 134217729n }, "maximum-size"],
+    [sdk, { size: 1048577n }, "maximum-size"],
+    [
+      path.dirname(compiler),
+      { isDirectory: () => false },
+      "installed",
+      "ancestor-directory",
+    ],
+  ]) {
+    f.metadata.set(file, change);
+    const diagnostics = [],
+      output = [],
+      writer = createNativeDiagnosticWriter((chunk) => output.push(chunk));
+    let stopped;
+    await assert.rejects(
+      withNativeDiagnostics(
+        () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+        (owner, value) => {
+          diagnostics.push({ owner, value });
+          if (owner === "darwin-file-read")
+            stopped = { io: f.io.length, events: f.events.length };
+          writer(owner, value);
+        },
+      ),
+    );
+    const failure = diagnostics.find(
+      ({ owner }) => owner === "darwin-file-read",
+    ).value.exception;
+    assert.equal(failure.path, file === sdk ? sdk : compiler);
+    assert.equal(failure.predicate, predicate);
+    assert.deepEqual(failure.expected, {
+      source: "recorded-binding",
+      sha256:
+        file === sdk
+          ? f.prepared.sdk.settingsSha256
+          : f.prepared.tools[0].sha256,
+    });
+    assert.equal(failure.maximum, file === sdk ? 1048576 : 134217728);
+    assert.equal(failure.stat.size, change.size ?? BigInt(bytes.length));
+    assert.equal(failure.installed.predicate, installedPredicate);
+    if (installedPredicate) {
+      assert.equal(failure.installed.path, file);
+      assert.equal(failure.installed.stat.nlink, change.nlink ?? 2n);
+    }
+    const rendered = Buffer.concat(output).toString();
+    assert.ok(rendered.includes("[native-ci darwin-file-read] exception"));
+    assert.ok(rendered.includes(failure.path));
+    assert.ok(rendered.includes("source: 'recorded-binding'"));
+    assert.ok(rendered.includes(failure.expected.sha256));
+    assert.ok(rendered.includes(`predicate: '${predicate}'`));
+    if (installedPredicate)
+      assert.ok(rendered.includes(`predicate: '${installedPredicate}'`));
+    assert.deepEqual(f.io.slice(stopped.io), [["close", failure.path]]);
+    assert.equal(f.events.length, stopped.events);
+    f.metadata.clear();
+  }
+  for (const file of [compiler, sdk]) {
+    f.installed.set(file, Buffer.alloc(bytes.length));
+    await assert.rejects(
+      loadDarwinExperimentBuild(f.built.job, directory, f.options),
+    );
+    f.installed.set(file, bytes);
+  }
+  f.options.fs.realpath = async (file) =>
+    file === path.dirname(compiler) ? "/fixture/alias" : originalRealpath(file);
+  await assert.rejects(
+    loadDarwinExperimentBuild(f.built.job, directory, f.options),
+  );
+  f.options.fs.realpath = originalRealpath;
+  f.options.fs.lstat = async (file, settings) => {
+    const value = await originalStat(file, settings);
+    return file === compiler ? { ...value, ino: value.ino + 1n } : value;
+  };
+  const namedDiagnostics = [];
+  await assert.rejects(
+    withNativeDiagnostics(
+      () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+      (owner, value) => namedDiagnostics.push({ owner, value }),
+    ),
+  );
+  const namedFailure = namedDiagnostics[0].value.exception.installed;
+  assert.equal(namedFailure.predicate, "named-stability");
+  assert.equal(namedFailure.recheck.ino, namedFailure.stat.ino + 1n);
+  f.options.fs.lstat = originalStat;
+  const stabilityDiagnostics = [];
+  let stabilityStopped;
+  f.options.fs.open = async (...args) => {
+    const held = await originalOpen(...args);
+    return {
+      ...held,
+      read: async (...readArgs) => {
+        const result = await held.read(...readArgs);
+        f.metadata.set(compiler, { ino: 90n });
+        return result;
+      },
+    };
+  };
+  await assert.rejects(
+    withNativeDiagnostics(
+      () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+      (owner, value) => {
+        stabilityDiagnostics.push({ owner, value });
+        stabilityStopped = f.io.length;
+      },
+    ),
+  );
+  const stabilityFailure = stabilityDiagnostics[0].value.exception;
+  assert.equal(stabilityFailure.predicate, "stability");
+  assert.notEqual(stabilityFailure.stat.ino, 90n);
+  assert.equal(stabilityFailure.recheck.held.ino, 90n);
+  assert.equal(stabilityFailure.recheck.named.ino, 90n);
+  assert.deepEqual(f.io.slice(stabilityStopped), [["close", compiler]]);
+  f.metadata.clear();
+  f.options.fs.open = originalOpen;
+  assert.deepEqual(f.closed, f.opened);
+  const closeOnly = Object.assign(
+      new Error("Installed close acknowledgement failure"),
+      { code: "EBADF" },
+    ),
+    closeDiagnostics = [];
+  f.options.fs.open = async (...args) => {
+    const held = await originalOpen(...args);
+    return {
+      ...held,
+      close: async () => {
+        await held.close();
+        throw closeOnly;
+      },
+    };
+  };
+  await assert.rejects(
+    withNativeDiagnostics(
+      () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+      (owner, value) => closeDiagnostics.push({ owner, value }),
+    ),
+    (cause) => cause === closeOnly,
+  );
+  assert.equal(closeDiagnostics.length, 1);
+  assert.equal(closeDiagnostics[0].owner, "darwin-file-read-cleanup");
+  assert.equal(closeDiagnostics[0].value.exception.path, compiler);
+  assert.equal(closeDiagnostics[0].value.exception.predicate, "close");
+  assert.equal(closeDiagnostics[0].value.exception.cause.code, "EBADF");
+  await assert.rejects(
+    withNativeDiagnostics(
+      () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+      () => {
+        throw new Error("Diagnostic sink failure");
+      },
+    ),
+    (cause) => cause === closeOnly,
+  );
+  for (const phase of [
+    "read",
+    "ancestor-stat",
+    "metadata-recheck",
+    "named-recheck",
+  ]) {
+    const primary = Object.assign(
+        new Error("Original installed read failure: " + "x".repeat(600)),
+        {
+          code: "EACCES",
+        },
+      ),
+      cleanup = Object.assign(new Error("Separate installed close failure"), {
+        code: "EBADF",
+      }),
+      diagnostics = [],
+      output = [],
+      writer = createNativeDiagnosticWriter((chunk) => output.push(chunk));
+    let stopped,
+      readCompleted = false;
+    f.options.fs.lstat = async (file, settings) => {
+      if (
+        (phase === "ancestor-stat" && file === path.dirname(compiler)) ||
+        (phase === "named-recheck" && readCompleted && file === compiler)
+      ) {
+        f.io.push(["lstat", file]);
+        throw primary;
+      }
+      return originalStat(file, settings);
+    };
+    f.options.fs.open = async (...args) => {
+      const held = await originalOpen(...args);
+      return {
+        ...held,
+        stat: async (settings) => {
+          if (phase === "metadata-recheck" && readCompleted) {
+            f.io.push(["stat", compiler]);
+            throw primary;
+          }
+          return held.stat(settings);
+        },
+        read: async (...readArgs) => {
+          if (phase === "read") {
+            f.io.push(["read", compiler]);
+            throw primary;
+          }
+          const result = await held.read(...readArgs);
+          readCompleted = true;
+          return result;
+        },
+        close: async () => {
+          await held.close();
+          throw cleanup;
+        },
+      };
+    };
+    await assert.rejects(
+      withNativeDiagnostics(
+        () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+        (owner, value) => {
+          diagnostics.push({ owner, value });
+          if (owner === "darwin-file-read")
+            stopped = { io: f.io.length, events: f.events.length };
+          writer(owner, value);
+        },
+      ),
+      (cause) => cause === primary,
+    );
+    assert.deepEqual(
+      diagnostics.map(({ owner }) => owner),
+      ["darwin-file-read", "darwin-file-read-cleanup"],
+    );
+    const failure = diagnostics[0].value.exception;
+    assert.equal(failure.cause.code, "EACCES");
+    assert.equal(failure.cause.message, primary.message.slice(0, 512));
+    assert.equal(diagnostics[1].value.exception.cause.code, "EBADF");
+    assert.equal(diagnostics[1].value.exception.cause.message, cleanup.message);
+    if (phase === "ancestor-stat") {
+      assert.equal(failure.installed.path, path.dirname(compiler));
+      assert.equal(failure.installed.predicate, phase);
+      assert.equal(failure.installed.code, "EACCES");
+      assert.equal(failure.installed.stat, undefined);
+    } else assert.equal(failure.predicate, phase);
+    if (phase === "named-recheck")
+      assert.equal(failure.recheck.held.size, BigInt(bytes.length));
+    const rendered = Buffer.concat(output).toString();
+    assert.ok(rendered.includes("EACCES"));
+    assert.ok(rendered.includes(failure.cause.message));
+    assert.ok(!rendered.includes(primary.message));
+    assert.ok(
+      rendered.includes("[native-ci darwin-file-read-cleanup] exception"),
+    );
+    assert.ok(rendered.includes(cleanup.message));
+    assert.ok(
+      rendered.indexOf(failure.cause.message) <
+        rendered.indexOf(cleanup.message),
+    );
+    assert.deepEqual(f.io.slice(stopped.io), [["close", compiler]]);
+    assert.equal(f.events.length, stopped.events);
+    readCompleted = false;
+    await assert.rejects(
+      withNativeDiagnostics(
+        () => loadDarwinExperimentBuild(f.built.job, directory, f.options),
+        (owner) => {
+          if (owner === "darwin-file-read")
+            stopped = { io: f.io.length, events: f.events.length };
+          throw new Error("Diagnostic sink failure");
+        },
+      ),
+      (cause) => cause === primary,
+    );
+    assert.deepEqual(f.io.slice(stopped.io), [["close", compiler]]);
+    assert.equal(f.events.length, stopped.events);
+  }
+  assert.deepEqual(f.closed, f.opened);
+});
+
+test("Darwin cold default installed reader refuses a private compiler path", async () => {
+  const f = await defaultInstalledBuildFixture(
+    "/Library/native-poc-" + "a".repeat(64) + "/compiler",
+  );
+  await assert.rejects(
+    loadDarwinExperimentBuild(f.built.job, directory, f.options),
+  );
+  assert.deepEqual(f.opened, []);
+});
+
 function hostedAcquisitionFixture(diagnostic = "") {
   const f = experimentBuildFixture(),
     files = new Map(),

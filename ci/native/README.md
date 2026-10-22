@@ -502,6 +502,22 @@ It returns current `revalidation: { source: "file", readSha256 }` separately fro
 or `nativeEventSha256` claim. Incompatible, mixed, incomplete, changed and unsettled
 records refuse admission; no cached PASS replaces current byte checks.
 
+Cold revalidation of ordinary installed build tools retains its 128 MiB bound;
+SDK settings retain their one MiB bound. Complete byte hashes remain bound to the
+recorded canonical targets. The held file reader diagnoses failed metadata,
+installed-path/ancestry, stability, size or byte predicates using bounded paths and
+already captured scalar metadata, including available ancestor and stability
+snapshots. Held and named recheck API failures have distinct predicates.
+The ordinary CI sink identifies the expected input hash as a `recorded-binding`,
+not a new observation, and includes bounded originating error name, code and
+message. Reporting performs no further filesystem, hashing, native or privileged
+I/O after refusal, apart from required descriptor closure.
+Diagnostic sink failures cannot replace the originating refusal; a later failed
+descriptor close is reported separately and cannot erase it. A close-only failure
+is also reported and rejects the read. These diagnostics and portable regressions
+do not establish the cause of an uninstrumented hosted failure or provide native
+acceptance.
+
 Ordinary cold loading and per-case `verifyBuild` no longer replay completed-build
 recovery, create another build-only reader, run its original-process/domain census,
 repeat the native ABI command or queue protected receipt re-observation. They write

@@ -520,9 +520,19 @@ reject missing complete declarations, substituted loader/ABI observations and
 promotion into reviewed release acceptance. Public prepare/load coverage joins
 all fixed declarations, original build receipts and complete version-7 preparation,
 checks repeated cold loading and subsequent build verification without
-compilation, and verifies effect-free indexed factory construction. Installed audit
-mapping coverage retains Git open variants within the original class mask. Missing
-case selectors keep recovery retained despite retired build receipts.
+compilation, and verifies effect-free indexed factory construction.
+Default installed-file build regressions also revalidate unchanged canonical tools
+through cold loading, without a `readInstalled` override. They preserve existing
+tool, SDK and private bounds, exact byte and identity refusal, bounded
+ordinary-sink predicate/error diagnostics, recorded expected-hash labeling, and
+separate primary/descriptor-close failures despite sink exceptions. They retain
+captured stability snapshots and distinguish held and named recheck API failures.
+Refused reads permit descriptor closure but no subsequent file reads or native
+effects. These remain in the existing explicit native harness and add no durable
+slow-tier requirement.
+Installed audit mapping coverage retains Git open variants within the original
+class mask. Missing case selectors keep recovery retained despite retired build
+receipts.
 Interrupted cold reads exercise uncertain recovery after preparation retirement,
 a fresh independent retry, preservation of the original receipt/failure, and
 refusal of a substituted preparation-close receipt.
