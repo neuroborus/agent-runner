@@ -3284,30 +3284,47 @@ cleanup and asynchronous closure. C/N/T controls, broker protection, audit joins
 and independent restoration remain required. These attribution repairs select no
 underlying control API or handshake fix and establish no Windows native acceptance.
 
-The command pull subscription uses an initially signaled manual-reset event
-and drains it after publishing the `ready` frame, before installation or any
-control. Queued audit frames therefore follow decoder initialization. This
-primes enumeration even when no first notification has arrived;
-an empty initial drain supplies no delivery evidence. Preflight's separate
-interface-only event remains initially nonsignaled.
-`command_capture` alone owns readiness waits, enumeration and checked reset:
-nonblocking pumps return without `EvtNext` when not ready; terminal delivery
-retains 1-ms waits and barriers retain 10-ms waits. Notified batches drain through
-`ERROR_NO_MORE_ITEMS`, then one query after `ResetEvent` catches arrivals between
-exhaustion and reset. A second empty result returns to notification waiting;
-later signals remain pending instead of repeatedly enumerating an exhausted
-subscription. Every returned event retains render, attribution, bookmark-update
-and checked-close order. Shared capture cleanup independently attempts remaining
+The command pull subscription owns the `EvtSubscribe` result handle, a separate
+bookmark and an initially nonsignaled manual-reset notification event. Its local
+session, null callback and nonnull signal select the pull model; the structured
+Security query supplies the channel paths. Future-only strict subscription has
+no oldest-record backlog to prime. The service supplies readiness, including
+events queued between subscription creation and the first pump. Publishing the
+`ready` frame precedes every pump so queued audit frames follow decoder
+initialization. Preflight's separate interface-only event is also initially
+nonsignaled and supplies no capture evidence.
+
+`command_capture` alone owns readiness waits, enumeration and checked reset.
+Following the Microsoft
+[pull lifecycle](https://learn.microsoft.com/en-us/windows/win32/wes/subscribing-to-events),
+it waits for service notification before enumerating the subscription result
+with [EvtNext](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtnext).
+Unlike the oldest-record example's initial signal, this future-only subscription
+does not force an initial drain. Nonblocking pumps return without enumeration
+when idle; terminal delivery retains 1-ms waits and barriers retain 10-ms waits.
+Each bounded query clears the notification immediately before enumeration while
+the drain is live: earlier arrivals remain queued for that query, and arrivals
+after an empty result retain their notification. Batches drain through
+`ERROR_NO_MORE_ITEMS`, then a zero-time readiness wait is the only recheck before
+another drain. There is no reset after exhaustion or blind query of an exhausted
+result set. Only the first readiness wait in a pump may block. Existing record,
+byte and operation/cleanup bounds still apply throughout draining.
+
+Every returned event retains render, attribution, bookmark-update and
+checked-close order. Shared capture cleanup independently attempts remaining
 batch, subscription, bookmark and notification closures on retirement or partial
-failure, including inactive preflight. Immediate primary errors and separate
-cleanup uncertainty remain intact; 4317 and other unexpected API errors stay fatal.
+failure, including inactive preflight and failed creation or readiness output.
+Immediate primary errors and separate cleanup uncertainty remain intact; 4317
+and other unexpected API errors stay fatal. Neither a readiness signal nor an
+empty drain supplies the required actual target, marker or terminal audit record.
 The Security channel, exact selection scope, strict/future flags, missing-record
 requirements and 10-second barrier/terminal-delivery and 120/30-second
 operation/cleanup bounds remain unchanged.
 
 Fresh hosted Windows CI must establish whether the observed
 `command-capture-next`/Win32 4317 is closed and broker coverage succeeds.
-Portable controlled APIs supply no native proof or error-causality claim.
+Portable controlled APIs supply no native proof or error-causality claim;
+changing initial signaling alone does not establish the cause of 4317.
 Windows TCP denial proof, observed Darwin cancellation/owner-loss escapes with
 uncertain cleanup, and absent full-system reviewed inputs/source closure remain
 unresolved.

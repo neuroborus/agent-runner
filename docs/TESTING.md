@@ -983,12 +983,16 @@ wrong-principal/logon/PID/mask, loss, window and cleanup regressions remain the
 delivery and retirement proof. Zero records still fail. Portable coverage proves
 no native delivery or hosted failure causality and adds no slow-tier assignment.
 
-The actual subscription startup primes the initially signaled manual-reset
-event after the readiness frame and before any control. A queued first batch
-follows decoder initialization; an empty drain still cannot acknowledge a
-marker. A failed initial enumeration preserves its original error and separately
-failed subscription closure. Controlled arrivals during draining and reset retain
-the existing notification-race coverage. Actual native target/marker predicates
+The actual future-only subscription startup creates a nonsignaled manual-reset
+event and waits for service readiness. The capture fixture distinguishes idle,
+notified, enumerating and exhausted subscription states; a forced initial signal
+does not authorize enumeration in that model. An arrival between subscription
+creation and the first pump follows decoder initialization. Idle startup performs
+no enumeration and still cannot acknowledge a marker. Failed event, bookmark or
+subscription creation and failed readiness output retain partial ownership and
+separate cleanup errors. A failed notified enumeration preserves its original
+error, including unexpected 4317, and separately failed subscription closure.
+Actual native target/marker predicates
 cover inspection, permitted and denied edits, denied outside access and the
 permitted outside control, joining the operating logon, subject, mask, release
 window and live held birth.
@@ -1147,12 +1151,15 @@ metadata cannot supply a cause or proof or change the 4-KiB carrier bound.
 Source-executed gate/retirement regressions protect immediate error capture,
 independent closure and impersonation reversal within the existing deadlines.
 Controlled capture APIs execute the actual notification, enumeration, rendering,
-bookmark and closure flow with XML projection isolated. They cover no enumeration
-before readiness, ordered multiple batches, exhaustion/checked reset, later
-notifications and arrivals during draining, exhaustion/reset and post-reset
-rechecking. Fatal wait, enumeration (including 4317), render, bookmark, reset and
-close failures retain immediate first causes and independently retire partial
-batch/subscription/bookmark/notification resources, including inactive preflight.
+bookmark and closure flow with XML projection isolated. They cover ordered
+multiple batches, checked reset before each query and renewed service readiness
+after exhaustion. Controlled arrivals before and after reset, during draining,
+at exhaustion and after the readiness recheck retain delivery without querying
+an exhausted subscription. Rechecks use zero-time waits within the original
+pump budget. Fatal wait, first or later notified enumeration (including 4317),
+render, bookmark, first or later reset and close failures retain immediate first
+causes and independently retire partial batch/subscription/bookmark/notification
+resources, including inactive preflight.
 These regressions replace superseded capture text assertions while retaining
 distinct admission and retirement coverage. They execute no Windows/macOS tool
 or compiler. Hosted Windows CI must establish whether 4317 is closed and broker

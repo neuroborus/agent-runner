@@ -6887,6 +6887,17 @@ async function commandCaptureProgram() {
     /command_(?:preflight_owned\.event|event)=CreateEventW\([^;]+\);/gu,
   );
   assert.equal(creations.length, 2);
+  const setup = source.match(
+      /command_event=CreateEventW[^\n]+win32_check\(command_bookmark!=NULL,"command-bookmark"\);/u,
+    )[0],
+    subscribe = source
+      .match(
+        /command_subscription=EvtSubscribe[^\n]+win32_check\(command_subscription!=NULL,"command-subscription-create"\);/u,
+      )[0]
+      .replace(/\bDWORD\b/gu, "let"),
+    ready = source.match(
+      /invariant\(!ferror\(stdout\),"command-ready-output"\);command_capture\(0\);/u,
+    )[0];
   const selectionBody =
       /\n  (BOOL selected=[\s\S]*?)\n  if\(selected\)\{/u.exec(source)[1],
     caseBody =
@@ -6895,21 +6906,9 @@ async function commandCaptureProgram() {
       )[1];
   return {
     dispatch,
-    subscribe: new Script(
-      source
-        .match(/command_subscription=EvtSubscribe\([^;]+\);/u)[0]
-        .replace(/\bL(?=")/gu, ""),
-    ),
-    arm: new Script(
-      source
-        .match(
-          /command_subscription=EvtSubscribe[^\n]+win32_check\(command_subscription!=NULL,"command-subscription-create"\);/u,
-        )[0]
-        .replace(/\bDWORD\b/gu, "let") +
-        source.match(
-          /invariant\(!ferror\(stdout\),"command-ready-output"\);command_capture\(0\);/u,
-        )[0],
-    ),
+    setup: new Script(setup),
+    subscribe: new Script(subscribe),
+    arm: new Script(setup + subscribe + ready),
     subscriptionFlags: new Script(
       `command_subscription_flags=${/static const DWORD command_subscription_flags = ([^;]+);/u.exec(source)[1]};`,
     ),
@@ -6937,13 +6936,19 @@ async function commandCaptureProgram() {
   };
 }
 
-function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
+function commandCaptureFixture(
+  program,
+  { fault, closeFailures = [], start = true } = {},
+) {
   const calls = [],
+    lifecycle = [],
     closed = [],
     projected = [],
     cleanup = [],
     queue = [];
   let signaled = false,
+    state = "unsubscribed",
+    decoderReady = false,
     lastError = 0,
     emptyCount = 0,
     clockRead = 0,
@@ -7033,9 +7038,9 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     command_closing: false,
     command_retirement_seen: false,
     command_barriers: 0,
-    command_subscription: "subscription",
-    command_bookmark: "bookmark",
-    command_event: "notification",
+    command_subscription: null,
+    command_bookmark: null,
+    command_event: null,
     command_records: 0,
     command_bytes: 0,
     command_scanned: 0,
@@ -7085,6 +7090,25 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
       buffer.text = format(text, args);
       return buffer.text.length;
     },
+    CreateEventW: (attributes, manual, initial, name) => {
+      assert.deepEqual([attributes, manual, name], [null, true, null]);
+      lifecycle.push("event");
+      signaled = initial;
+      if (fault === "event") {
+        lastError = 5;
+        return null;
+      }
+      return "notification";
+    },
+    EvtCreateBookmark: (xml) => {
+      assert.equal(xml, null);
+      lifecycle.push("bookmark");
+      if (fault === "create-bookmark") {
+        lastError = 5;
+        return null;
+      }
+      return "bookmark";
+    },
     EvtSubscribe: (
       session,
       signal,
@@ -7100,6 +7124,14 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
         [null, "notification", null, null, null, null, 0x10001],
       );
       assert.equal(query, api.command_subscription_query);
+      assert.equal(state, "unsubscribed");
+      lifecycle.push("subscribe");
+      if (fault === "subscribe") {
+        lastError = 5;
+        return null;
+      }
+      state = "idle";
+      api.onSubscribe?.();
       return "subscription";
     },
     diagnosticOutputLock: {},
@@ -7107,7 +7139,11 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     ReleaseSRWLockExclusive: () => {},
     stderr: {},
     stdout: {},
-    ferror: () => false,
+    ferror: () => {
+      decoderReady = true;
+      lifecycle.push("ready");
+      return fault === "ready-output";
+    },
     fprintf: (_stream, text, ...args) => {
       output += format(text, args);
       lastError = 90;
@@ -7124,7 +7160,9 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
         return api.WAIT_FAILED;
       }
       if (fault === "wait-result") return 0x80;
-      return signaled ? api.WAIT_OBJECT_0 : api.WAIT_TIMEOUT;
+      const result = signaled ? api.WAIT_OBJECT_0 : api.WAIT_TIMEOUT;
+      api.onWait?.(result);
+      return result;
     },
     EvtNext: (subscription, size, events, timeout, flags, count) => {
       assert.deepEqual(
@@ -7132,20 +7170,23 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
         ["subscription", 16, 0, 0],
       );
       calls.push(["next"]);
+      assert.ok(
+        state === "notified" || state === "enumerating",
+        `EvtNext without service readiness: ${state}`,
+      );
+      state = "enumerating";
       const batch = queue.shift();
       count(batch?.length ?? 0);
       batch?.forEach((event, index) => {
         events[index] = event;
       });
-      if (
-        fault === "next" ||
-        (fault === "rearm-next" && calls.some(([name]) => name === "reset"))
-      ) {
+      if (fault === "next" || (fault === "later-next" && emptyCount > 0)) {
         lastError = 4317;
         return false;
       }
       if (!batch) {
         lastError = api.ERROR_NO_MORE_ITEMS;
+        state = "exhausted";
         api.onEmpty?.(++emptyCount);
         return false;
       }
@@ -7154,7 +7195,11 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     ResetEvent: (event) => {
       assert.equal(event, "notification");
       calls.push(["reset"]);
-      if (fault === "reset") {
+      if (
+        fault === "reset" ||
+        (fault === "later-reset" &&
+          calls.filter(([name]) => name === "reset").length === 2)
+      ) {
         lastError = 5;
         return false;
       }
@@ -7184,6 +7229,7 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
       lastError = 8;
     },
     project: (bytes) => {
+      assert.equal(decoderReady, true, "ready must precede every audit frame");
       calls.push(["project", bytes.event]);
       const selected = api.onProject?.(bytes.event) ?? true;
       if (selected) projected.push(bytes.event);
@@ -7201,6 +7247,7 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
     EvtClose: (handle) => {
       calls.push(["event-close", handle]);
       closed.push(handle);
+      if (handle === "subscription") state = "closed";
       lastError = 6;
       return !closeFailures.includes(handle);
     },
@@ -7215,36 +7262,39 @@ function commandCaptureFixture(program, { fault, closeFailures = [] } = {}) {
   program.dispatch.runInNewContext(api);
   program.subscriptionFlags.runInNewContext(api);
   api.command_audit_query(api.command_subscription_query, "");
-  program.subscribe.runInNewContext(api);
+  if (start) {
+    program.setup.runInNewContext(api);
+    program.subscribe.runInNewContext(api);
+    decoderReady = true;
+  }
   return {
     api,
     calls,
+    lifecycle,
     closed,
     projected,
     cleanup,
     output: () => output,
     replies: () => replies,
     notify: (...batches) => {
+      assert.ok(
+        ["idle", "notified", "enumerating", "exhausted"].includes(state),
+      );
       queue.push(...batches);
       signaled = true;
+      state = "notified";
     },
     capture: (timeout = 0) => api.command_capture(timeout),
     arm: () => {
-      api.CreateEventW = (_attributes, manual, initial, name) => {
-        assert.equal(manual, true);
-        assert.equal(name, null);
-        signaled = initial;
-        return "notification";
-      };
-      program.createEvents.runInNewContext(api);
+      assert.equal(start, false);
       program.arm.runInNewContext(api);
     },
   };
 }
 
-test("the original pull subscription drains once before controls and refuses missing selected delivery", async () => {
+test("the future-only pull subscription waits for service readiness after decoder setup", async () => {
   const program = await commandCaptureProgram(),
-    f = commandCaptureFixture(program);
+    f = commandCaptureFixture(program, { start: false });
   const subscription = program.source.indexOf(
       "command_subscription=EvtSubscribe",
     ),
@@ -7254,21 +7304,33 @@ test("the original pull subscription drains once before controls and refuses mis
     readyEnd > subscription && readyEnd < firstDrain,
     "the decoder readiness frame must precede any queued audit frame",
   );
-  const queued = commandCaptureFixture(program);
-  queued.notify(["queued"]);
+  const queued = commandCaptureFixture(program, { start: false });
+  queued.api.onSubscribe = () => queued.notify(["queued"]);
   queued.arm();
   assert.deepEqual(queued.projected, ["queued"]);
+  assert.deepEqual(queued.lifecycle, [
+    "event",
+    "bookmark",
+    "subscribe",
+    "ready",
+  ]);
   assert.equal(queued.api.command_target_seen, false);
   assert.equal(queued.api.command_marker_seen, false);
   f.arm();
   assert.deepEqual(
     f.calls.filter(([name]) => ["wait", "next", "reset"].includes(name)),
-    [["wait", 0], ["next"], ["reset"], ["next"]],
+    [["wait", 0]],
   );
   assert.equal(f.api.command_records, 0);
   assert.equal(f.api.command_target_seen, false);
   assert.equal(f.api.command_marker_seen, false);
+  assert.equal(f.api.command_next_error, -1);
+  f.notify();
+  f.capture(1);
   assert.equal(f.api.command_next_error, 259);
+  assert.equal(f.api.command_records, 0);
+  assert.equal(f.api.command_target_seen, false);
+  assert.equal(f.api.command_marker_seen, false);
   assert.throws(
     () => f.api.command_barrier(),
     (code) => code === 126,
@@ -7276,19 +7338,69 @@ test("the original pull subscription drains once before controls and refuses mis
   assert.equal(f.replies(), "");
   assert.deepEqual(f.api.first, ["command-marker-barrier", "invariant", 0]);
   const failed = commandCaptureFixture(program, {
+    start: false,
     fault: "next",
     closeFailures: ["subscription"],
   });
+  failed.api.onSubscribe = () => failed.notify(["queued"]);
   assert.throws(
     () => failed.arm(),
     (code) => code === 126,
   );
   assert.deepEqual(failed.api.first, ["command-capture-next", "win32", 4317]);
-  assert.deepEqual(failed.closed, ["subscription", "bookmark", "notification"]);
+  assert.deepEqual(failed.closed, [
+    "queued",
+    "subscription",
+    "bookmark",
+    "notification",
+  ]);
   assert.equal(failed.cleanup.length, 1);
 });
 
-test("actual capture waits, drains ordered batches, rearms once and accepts later notifications", async () => {
+test("actual subscription setup retains partial ownership and refuses failed readiness output", async () => {
+  const program = await commandCaptureProgram();
+  for (const [fault, operation, domain, held] of [
+    ["event", "command-capture-event", "win32", []],
+    ["create-bookmark", "command-bookmark", "win32", ["notification"]],
+    [
+      "subscribe",
+      "command-subscription-create",
+      "win32",
+      ["bookmark", "notification"],
+    ],
+    [
+      "ready-output",
+      "command-ready-output",
+      "invariant",
+      ["subscription", "bookmark", "notification"],
+    ],
+  ]) {
+    const f = commandCaptureFixture(program, {
+      start: false,
+      fault,
+      closeFailures: held,
+    });
+    assert.throws(
+      () => f.arm(),
+      (code) => code === 126,
+      fault,
+    );
+    assert.deepEqual(
+      f.api.first,
+      [operation, domain, domain === "win32" ? 5 : 0],
+      fault,
+    );
+    assert.deepEqual(f.closed, held, fault);
+    assert.equal(f.cleanup.length, held.length, fault);
+    assert.equal(
+      f.calls.some(([name]) => name === "next"),
+      false,
+      fault,
+    );
+  }
+});
+
+test("actual capture waits, drains ordered batches and accepts later service notifications", async () => {
   const program = await commandCaptureProgram(),
     f = commandCaptureFixture(program);
   const creations = [],
@@ -7306,7 +7418,7 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
   program.createEvents.runInNewContext(creationContext);
   assert.deepEqual(creations, [
     [null, true, false, null],
-    [null, true, true, null],
+    [null, true, false, null],
   ]);
   assert.equal(owned.event, "notification-1");
   assert.equal(creationContext.command_event, "notification-2");
@@ -7380,7 +7492,7 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
     );
   assert.deepEqual(
     f.calls.filter(([name]) => ["next", "reset"].includes(name)),
-    [["next"], ["next"], ["next"], ["reset"], ["next"]],
+    [["reset"], ["next"], ["reset"], ["next"], ["reset"], ["next"]],
   );
   const nextCount = f.calls.filter(([name]) => name === "next").length;
   f.capture();
@@ -7390,7 +7502,7 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
   f.capture(10);
   assert.deepEqual(f.projected, ["a", "b", "c", "later"]);
   assert.equal(f.api.command_records, 4);
-  assert.deepEqual(f.api.command_observed.audit.slice(2, 7), [2, 7, 4, 2, 4]);
+  assert.deepEqual(f.api.command_observed.audit.slice(2, 7), [2, 5, 4, 5, 4]);
   assert.equal(f.api.command_bytes, 32);
   assert.equal(f.api.command_capture_close(), true);
   assert.deepEqual(f.closed, [
@@ -7404,25 +7516,51 @@ test("actual capture waits, drains ordered batches, rearms once and accepts late
   ]);
 });
 
-test("actual capture preserves arrivals during draining and across exhaustion/reset rearming", async () => {
+test("actual capture preserves arrivals before and after reset, exhaustion and readiness rechecks", async () => {
   const program = await commandCaptureProgram();
-  for (const boundary of ["drain", "exhaustion", "reset", "after-recheck"]) {
+  for (const boundary of [
+    "before-reset",
+    "drain",
+    "exhaustion",
+    "reset",
+    "after-recheck",
+  ]) {
     const f = commandCaptureFixture(program);
     f.notify(["first"]);
+    if (boundary === "before-reset")
+      f.api.onWait = (result) => {
+        if (result === f.api.WAIT_OBJECT_0) {
+          f.api.onWait = null;
+          f.notify(["raced"]);
+        }
+      };
     if (boundary === "drain")
       f.api.onProject = (event) => {
         if (event === "first") f.notify(["raced"]);
       };
-    if (boundary === "exhaustion" || boundary === "after-recheck")
+    if (boundary === "exhaustion")
       f.api.onEmpty = (count) => {
-        if (count === (boundary === "exhaustion" ? 1 : 2)) f.notify(["raced"]);
+        if (count === 1) f.notify(["raced"]);
+      };
+    if (boundary === "after-recheck")
+      f.api.onWait = (result) => {
+        if (result === f.api.WAIT_TIMEOUT) {
+          f.api.onWait = null;
+          f.notify(["raced"]);
+        }
       };
     if (boundary === "reset")
       f.api.onReset = () => {
         f.api.onReset = null;
         f.notify(["raced"]);
       };
-    f.capture();
+    f.capture(10);
+    const waits = f.calls.filter(([name]) => name === "wait");
+    assert.deepEqual(waits[0], ["wait", 10], boundary);
+    assert.ok(
+      waits.slice(1).every(([, timeout]) => timeout === 0),
+      boundary,
+    );
     if (boundary === "after-recheck") assert.deepEqual(f.projected, ["first"]);
     f.capture();
     assert.deepEqual(f.projected, ["first", "raced"], boundary);
@@ -7442,11 +7580,12 @@ test("actual capture failures retain immediate causes and independently retire e
     ["wait", "command-capture-wait", "win32", 5],
     ["wait-result", "command-capture-wait", "invariant", 0],
     ["next", "command-capture-next", "win32", 4317],
-    ["rearm-next", "command-capture-next", "win32", 4317],
+    ["later-next", "command-capture-next", "win32", 4317],
     ["query", "command-capture-query", "win32", 5],
     ["render", "command-capture-render", "win32", 5],
     ["bookmark", "command-capture-bookmark", "win32", 5],
     ["reset", "command-capture-reset", "win32", 5],
+    ["later-reset", "command-capture-reset", "win32", 5],
     ["close", "command-metadata-close", "win32", 6],
   ]) {
     const f = commandCaptureFixture(program, {
@@ -7459,6 +7598,10 @@ test("actual capture failures retain immediate causes and independently retire e
       ],
     });
     f.notify(["a", "b", "c"]);
+    if (fault === "later-next")
+      f.api.onEmpty = (count) => {
+        if (count === 1) f.notify(["raced"]);
+      };
     assert.throws(
       () => f.capture(),
       (code) => code === 126,
@@ -7472,18 +7615,19 @@ test("actual capture failures retain immediate causes and independently retire e
     assert.equal(f.api.command_capture_wait_error, fault === "wait" ? 5 : 0);
     assert.equal(
       f.api.command_next_error,
-      fault.startsWith("wait")
+      fault.startsWith("wait") || fault === "reset"
         ? -1
         : fault.includes("next")
           ? 4317
-          : fault === "reset"
-            ? 259
-            : 0,
+          : 0,
     );
     assert.deepEqual(
       f.closed,
       [
-        ...(fault.startsWith("wait") ? [] : ["a", "b", "c"]),
+        ...(fault.startsWith("wait") || fault === "reset"
+          ? []
+          : ["a", "b", "c"]),
+        ...(fault === "later-next" ? ["raced"] : []),
         "subscription",
         "bookmark",
         "notification",

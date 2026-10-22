@@ -548,37 +548,38 @@ static BOOL command_audit_project(BYTE *bytes, DWORD length) {
   free(parsed.fields);free(encoded);return selected;
 }
 static void command_capture(DWORD timeout) {
-  DWORD waited=WaitForSingleObject(command_event,timeout);
-  DWORD waitError=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;command_capture_wait=waited;command_capture_wait_error=waitError;
-  if(waited==WAIT_FAILED){SetLastError(waitError);win32_check(FALSE,"command-capture-wait");}
-  invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-capture-wait");
-  if(waited==WAIT_TIMEOUT)return;
-  command_observed.audit[2]++;
-  BOOL rearmed=FALSE;
-  for(;;){ EVT_HANDLE *events=command_preflight_owned.capture; DWORD count=0;
-    BOOL next=EvtNext(command_subscription,16,events,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
-    command_next_error=error;
-    command_observed.audit[3]++;command_observed.audit[4]+=next?count:0;
-    if(!next){
-      if(error!=ERROR_NO_MORE_ITEMS){remember("command-capture-next","win32",error);failure(126);}
-      if(rearmed)return;
-      win32_check(ResetEvent(command_event),"command-capture-reset");
-      command_observed.audit[5]++;
-      /* One query after reset catches arrivals between exhaustion and reset.
-       * A second empty result returns to notification waiting, never polling. */
-      rearmed=TRUE;continue;
+  for(;;){
+    DWORD waited=WaitForSingleObject(command_event,timeout);
+    timeout=0; /* Only the first readiness wait may consume the caller's budget. */
+    DWORD waitError=waited==WAIT_FAILED?GetLastError():ERROR_SUCCESS;command_capture_wait=waited;command_capture_wait_error=waitError;
+    if(waited==WAIT_FAILED){SetLastError(waitError);win32_check(FALSE,"command-capture-wait");}
+    invariant(waited==WAIT_OBJECT_0||waited==WAIT_TIMEOUT,"command-capture-wait");
+    if(waited==WAIT_TIMEOUT)return;
+    command_observed.audit[2]++;
+    for(;;){ EVT_HANDLE *events=command_preflight_owned.capture; DWORD count=0;
+      command_bound();
+      /* Reset while enumeration is live, before querying. Arrivals before the
+       * reset remain in the result set; arrivals after an empty result retain
+       * their notification. Never reset after exhaustion and blindly query it. */
+      win32_check(ResetEvent(command_event),"command-capture-reset");command_observed.audit[5]++;
+      BOOL next=EvtNext(command_subscription,16,events,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+      command_next_error=error;
+      command_observed.audit[3]++;command_observed.audit[4]+=next?count:0;
+      if(!next){
+        if(error!=ERROR_NO_MORE_ITEMS){remember("command-capture-next","win32",error);failure(126);}
+        break; /* Recheck only the service notification before another drain. */
+      }
+      invariant(count>0&&count<=16,"command-capture-bound");
+      for(DWORD i=0;i<count;i++){DWORD length=0,counted;
+        BOOL measured=EvtRender(NULL,events[i],EvtRenderEventXml,0,NULL,&length,&counted);error=measured?ERROR_SUCCESS:GetLastError();
+        if(!measured&&error!=ERROR_INSUFFICIENT_BUFFER){remember("command-capture-query","win32",error);failure(126);}invariant(!measured,"command-capture-query");
+        invariant(length>=4 && length<=65536 && !(length%2) && ++command_scanned<=4096 && command_scanned_bytes+length<=8388608,"command-capture-bound");
+        BYTE *bytes=calloc(1,length);invariant(bytes!=NULL,"command-capture-allocation");BOOL rendered=EvtRender(NULL,events[i],EvtRenderEventXml,length,bytes,&length,&counted);error=rendered?ERROR_SUCCESS:GetLastError();
+        if(!rendered){remember("command-capture-render","win32",error);free(bytes);failure(126);}command_scanned_bytes+=length;
+        BOOL selected=command_audit_project(bytes,length);if(selected){command_records++;command_bytes+=length;}free(bytes);BOOL updated=!selected||EvtUpdateBookmark(command_bookmark,events[i]);error=updated?ERROR_SUCCESS:GetLastError();
+        if(selected&&updated)command_observed.audit[6]++;
+        if(!updated)remember("command-capture-bookmark","win32",error);BOOL closed=command_event_close(&events[i]);if(!updated||!closed)failure(126); }
     }
-    rearmed=FALSE;
-    invariant(count>0&&count<=16,"command-capture-bound");
-    for(DWORD i=0;i<count;i++){DWORD length=0,counted;
-      BOOL measured=EvtRender(NULL,events[i],EvtRenderEventXml,0,NULL,&length,&counted);error=measured?ERROR_SUCCESS:GetLastError();
-      if(!measured&&error!=ERROR_INSUFFICIENT_BUFFER){remember("command-capture-query","win32",error);failure(126);}invariant(!measured,"command-capture-query");
-      invariant(length>=4 && length<=65536 && !(length%2) && ++command_scanned<=4096 && command_scanned_bytes+length<=8388608,"command-capture-bound");
-      BYTE *bytes=calloc(1,length);invariant(bytes!=NULL,"command-capture-allocation");BOOL rendered=EvtRender(NULL,events[i],EvtRenderEventXml,length,bytes,&length,&counted);error=rendered?ERROR_SUCCESS:GetLastError();
-      if(!rendered){remember("command-capture-render","win32",error);free(bytes);failure(126);}command_scanned_bytes+=length;
-      BOOL selected=command_audit_project(bytes,length);if(selected){command_records++;command_bytes+=length;}free(bytes);BOOL updated=!selected||EvtUpdateBookmark(command_bookmark,events[i]);error=updated?ERROR_SUCCESS:GetLastError();
-      if(selected&&updated)command_observed.audit[6]++;
-      if(!updated)remember("command-capture-bookmark","win32",error);BOOL closed=command_event_close(&events[i]);if(!updated||!closed)failure(126); }
   }
 }
 /* Query the installed producer inputs once at the original impersonated read.
@@ -973,9 +974,9 @@ static int command_main(int argc,WCHAR **argv) {
   command_protect(GetCurrentProcess(),PROCESS_ALL_ACCESS,"command-protect-process");ownedJob=CreateJobObjectW(NULL,NULL);win32_check(ownedJob!=NULL,"command-job-create");command_protect(ownedJob,JOB_OBJECT_ALL_ACCESS,"command-protect-job");JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits={0};limits.BasicLimitInformation.LimitFlags=JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE|JOB_OBJECT_LIMIT_ACTIVE_PROCESS;limits.BasicLimitInformation.ActiveProcessLimit=32;
   win32_check(SetInformationJobObject(ownedJob,JobObjectExtendedLimitInformation,&limits,sizeof(limits)),"command-job-config");command_limits(ownedJob);BOOL member;win32_check(IsProcessInJob(GetCurrentProcess(),ownedJob,&member),"command-job-membership");invariant(!member,"command-job-membership");
   win32_check(OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY|TOKEN_DUPLICATE|TOKEN_IMPERSONATE,&command_broker_token),"command-broker-token");command_broker_events();
-  /* Pull subscriptions start with a drain, not a wait for the first signal.
-   * Publish ready before that drain can emit queued event frames. */
-  command_event=CreateEventW(NULL,TRUE,TRUE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
+  /* Future-only pull results have no oldest-record backlog to prime. Let the
+   * service signal readiness; publish ready before emitting queued frames. */
+  command_event=CreateEventW(NULL,TRUE,FALSE,NULL);win32_check(command_event!=NULL,"command-capture-event");command_bookmark=EvtCreateBookmark(NULL);win32_check(command_bookmark!=NULL,"command-bookmark");
   WCHAR admissionLine[8192];invariant(swprintf_s(admissionLine,8192,L"\"%ls\" command-case",command_helper)>0,"command-admission-line");PROCESS_INFORMATION admission=command_spawn(admissionLine,root);command_image_read(admission.hProcess,command_helper_hash,FALSE);
   command_observed.pid=admission.dwProcessId;command_observed.thread=admission.dwThreadId;
   DWORD saved=GetLastError();FILETIME born,exited,kernel,user;BOOL timed=GetProcessTimes(admission.hProcess,&born,&exited,&kernel,&user);command_observed.status[0]=timed?0:GetLastError();
