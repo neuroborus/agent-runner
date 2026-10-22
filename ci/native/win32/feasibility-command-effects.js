@@ -197,9 +197,13 @@ const operatingCommandAudit = (audit, identity, token) =>
   audit.operating.userSid === identity.userSid &&
   token !== undefined &&
   JSON.stringify(audit.operating.token) === JSON.stringify(token);
-function commandCaseAuditing(value, row, action) {
+function commandCaseAuditing(value, row, action, completed) {
   const audit = row.auditing,
     indices = [["inspect", "edit", "outside"].indexOf(action), 3];
+  commandEvidence(
+    row.ioCompleted === completed,
+    "The command token observation is out of phase with checked I/O completion.",
+  );
   commandEvidence(
     operatingCommandAudit(audit, row.identity, row.token),
     "The operating context did not join the held command token.",
@@ -1376,7 +1380,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         "helper",
         signal,
       );
-    commandCaseAuditing(prepared, before, spec.action);
+    commandCaseAuditing(prepared, before, spec.action, false);
     await call("T");
     const after = await call("F"),
       independentAfter = await verifier(
@@ -1384,7 +1388,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         "helper",
         signal,
       );
-    commandCaseAuditing(prepared, after, spec.action);
+    commandCaseAuditing(prepared, after, spec.action, true);
     // Join delivery while the original command is still parked and held.
     // Releasing it first loses native birth/liveness authority for the marker.
     const end = await call("B"),
@@ -1417,7 +1421,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
       if (broker) {
         await closed;
         await reading.catch(fail);
-        // U closes the control pipes after its final pump. Otherwise collect
+        // The native exit frame follows pipe EOF. Otherwise collect
         // the complete broker transcript, never a merely complete-looking prefix.
         if (controlStderr !== null) {
           controlStderrInvalid ||=
@@ -1575,7 +1579,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             const diagnosis = incomplete
               ? null
               : windowsFeasibilityDiagnostics(brokerStderr);
-            const first = failed;
+            const first = failed,
+              brokerOriginal =
+                diagnosis &&
+                (brokerDiagnosticFirst ||
+                  (first === controlError &&
+                    controlError?.nativeDiagnosticInvalid));
             const error = Object.assign(
               new Error("Native broker closed", { cause: first }),
               {
@@ -1586,14 +1595,13 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                   incomplete || (brokerStderr.length > 0 && !diagnosis),
               },
             );
-            const origin =
-              diagnosis && brokerDiagnosticFirst
-                ? (brokerDiagnosticPhase ?? failurePhase ?? phase)
-                : (failurePhase ?? brokerDiagnosticPhase ?? phase);
+            const origin = brokerOriginal
+              ? (brokerDiagnosticPhase ?? failurePhase ?? phase)
+              : (failurePhase ?? brokerDiagnosticPhase ?? phase);
             const brokerCause = windowsFeasibilityCause(origin, error);
             error.feasibilityCause = windowsFeasibilityCause(
               origin,
-              diagnosis && brokerDiagnosticFirst ? error : (first ?? error),
+              brokerOriginal ? error : (first ?? error),
             );
             if (diagnosis?.cleanup) {
               const { operation, domain, value } = diagnosis.cleanup;
@@ -1615,8 +1623,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             // real close facts must validate before it can outrank a later failure.
             // Keep an already retained, valid earlier child as the original cause.
             if (
-              diagnosis &&
-              brokerDiagnosticFirst &&
+              brokerOriginal &&
               !(
                 controlError &&
                 first === controlError &&
@@ -1690,10 +1697,26 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                   setupVerified &&
                   ["audit", "capture-end"].includes(frame.event)
                 ) &&
-                !(frame.event === "probe-stderr" && controlStderr !== null)
+                !(
+                  ["probe-output", "probe-stderr", "probe-exit"].includes(
+                    frame.event,
+                  ) && controlStderr !== null
+                )
               )
                 continue;
-              if (frame.event === "audit") {
+              if (frame.event === "probe-exit") {
+                need(
+                  controlStderr !== null &&
+                    Object.keys(frame).length === 2 &&
+                    controlExitCode === undefined &&
+                    Number.isInteger(frame.exitCode) &&
+                    frame.exitCode >= 0 &&
+                    frame.exitCode <= 0xffffffff,
+                );
+                controlExitCode = frame.exitCode;
+                const child = controlFailure();
+                if (child) fail(child);
+              } else if (frame.event === "audit") {
                 need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
                 const raw = Buffer.from(frame.hex, "hex"),
                   header = Buffer.alloc(4);
@@ -1749,7 +1772,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                   need(
                     Number.isInteger(frame.exitCode) &&
                       frame.exitCode >= 0 &&
-                      frame.exitCode <= 0xffffffff,
+                      frame.exitCode <= 0xffffffff &&
+                      controlExitCode === frame.exitCode,
                   );
                   controlExitCode = frame.exitCode;
                 }
@@ -1771,7 +1795,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             } catch (error) {
               if (
                 controlStderr !== null &&
-                (!frame || frame.event === "probe-stderr")
+                (!frame || ["probe-stderr", "probe-exit"].includes(frame.event))
               )
                 controlStderrInvalid = true;
               nativeException(

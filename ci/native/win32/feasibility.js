@@ -474,7 +474,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
     command-ready-output command-owner-bound command-coverage-state command-deadline command-marker-barrier command-admission-slot command-retirement-slot command-retirement-delivery command-retirement-state command-retirement-records
     command-case-arguments command-case-nonce command-case-nonce-size command-case-ready-write-size command-case-ready-read-size command-case-ready-ack
     command-case-target-read-size command-case-target-nonce
-    command-case-target-write-size command-case-edit-size command-case-output command-case-marker-size
+    command-case-target-write-size command-case-edit-size command-case-output command-case-marker-size command-case-marker-nonce
     command-case-finish-write-size command-case-finish-read-size command-case-finish-ack`
       .split(/\s+/u)
       .map((operation) => [operation, ["invariant"]]),
@@ -767,6 +767,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "command-algorithm-close",
         "command-environment-close",
         "command-protect-free",
+        "command-case-marker-close",
         "null-close",
         "null-remove",
         "null-retirement",

@@ -3346,15 +3346,52 @@ The command child names native pipe/file/encoding failures separately from nonce
 byte-count/content, broker-access-denial and acknowledgement invariants. Unexpected
 broker authority is closed without replacing the original control refusal.
 Control `probe-stderr` fragments retain the same 4096-byte diagnostic bound and
-strict parser; the existing U completion pumps the child's final stderr before
-closing its pipes. Otherwise failure collection waits for the drained broker
+strict parser; U completion follows the child's pipe EOF and matching exit
+frame. Otherwise failure collection waits for the drained broker
 transcript. Partial, malformed, oversized or prematurely closed carriers remain
 explicitly invalid. A validated earlier child refusal can remain primary through
 later broker failure, with broker completion and cleanup causes retained
 separately. The known originating phase, including `permitted-control`, survives
-cleanup and asynchronous closure. C/N/T controls, broker protection, audit joins
-and independent restoration remain required. These attribution repairs select no
-underlying control API or handshake fix and establish no Windows native acceptance.
+cleanup and asynchronous closure. C/N/T/F controls, broker protection, audit joins
+and independent restoration remain required.
+
+The SACL producer places the owned explicit read/write success/failure audit
+ACE before copied baseline entries, including the mandatory label and any
+inherited ACEs. Existing baseline ACE bytes and order remain intact, independently read
+installed SACL hashes bind the resulting layout, and restoration still uses the
+original baseline. Placement alone supplies no event-generation proof.
+
+The command child's marker open uses `FILE_FLAG_OPEN_REPARSE_POINT`. Its
+read must return the exact 32-byte nonce before it can write the finishing nonce
+to the broker. The marker handle closes on read, size and nonce failures, with
+the original refusal retained separately from a failed close. The broker accepts
+one `N/T/F` exchange for the held child and exposes `ioCompleted: false` at `N`
+and `ioCompleted: true` only after the checked finishing nonce at `F`. The
+independent operating-token and installed target/marker SACL reads remain
+mandatory on both sides of the actual action. This I/O state does not claim
+Security delivery or process exit.
+
+The marker barrier pumps child output and error while the command stays parked;
+it checks the held birth and liveness before and after capture. A dead control
+drains both child pipes to EOF and reports its real `probe-exit` before the
+broker refuses it. The same complete output/exit exchange precedes normal `U`
+completion; conflicting or repeated exit frames refuse admission. A partial
+gate read also collects available child output before failing. Child carriers
+remain available through a later broker refusal, without replacing an earlier
+validated cause or supplying retirement evidence. Delivery diagnostics report
+`io-completed` separately from the exit-dependent `control-completed`.
+
+Only matching target then marker Security events can finish the original
+10-second barrier. The existing `D` stop remains consumable during that wait;
+queued ordinary protocol input stays with the owning loop. Owner-pipe loss
+fences release immediately. Stop uses the original complete Job,
+capture, independent restoration and terminal-witness owners. Missing events,
+marker mismatches, completed I/O alone and exit zero cannot authorize `U` or `X`.
+After matching delivery, `U` releases the child and collects its actual exit;
+`X` additionally requires assessed I/O, decoded events and restored control
+target content. These portable lifecycle repairs establish no hosted Windows
+event-delivery proof, and change no Security query, subscription flags, policy,
+privilege, credential or deadline.
 
 The command pull subscription owns the `EvtSubscribe` result handle, a separate
 bookmark and an initially nonsignaled manual-reset notification event. Its local

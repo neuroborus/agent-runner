@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Keep command completion and audit delivery distinct
+
+Windows command feasibility records checked target/marker I/O separately from
+Security delivery and the later process exit. The original child stays parked
+through independent inspection and event collection, while its output and
+failures remain available. Marker bytes must match before the finishing nonce;
+neither that nonce nor exit zero supplies audit evidence. The existing stop and
+restoration owners remain responsible for interrupted settlement. Portable
+fixtures protect the lifecycle; hosted Windows events remain the native proof.
+
 ## 2026-10-22 — Keep restricted TCP on its original socket
 
 Windows feasibility retains the primary AppContainer-created, bound socket

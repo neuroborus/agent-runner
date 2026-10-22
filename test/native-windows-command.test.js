@@ -961,6 +961,141 @@ test("native subscription and capture retain case-variant real control names thr
   }
 });
 
+test("completed command I/O keeps output live while target then marker delivery gates release", async () => {
+  const program = await commandCaptureProgram();
+  for (const fault of [
+    null,
+    "absent",
+    "target-only",
+    "wrong-marker",
+    "unfinished",
+    "child-exit",
+    "child-zero",
+    "stop",
+    "owner-loss",
+    "queued-input",
+  ]) {
+    const f = commandCaptureFixture(program),
+      api = f.api,
+      exited = fault === "child-exit" || fault === "child-zero";
+    api.command_control_completed = false;
+    api.command_case_finished = fault !== "unfinished";
+    api.command_paths = ["inspect", "edit", "outside", "marker"];
+    let retired = false;
+    api.ownerInput =
+      fault === "stop" ? "D\n" : fault === "queued-input" ? "J 00\n" : "";
+    api.ownerPresent = fault !== "owner-loss";
+    api.command_retire_domain = () => {
+      retired = true;
+    };
+    api.wcscmp = (a, b) => Number(a !== b);
+    api._wcsicmp = (a, b) => Number(a.toLowerCase() !== b.toLowerCase());
+    api.onProject = (row) => {
+      Object.assign(api, {
+        process: String(api.command_case_pid),
+        object:
+          row === "target"
+            ? "outside"
+            : fault === "wrong-marker"
+              ? "other"
+              : "marker",
+        eventId: "4663",
+        mask: row === "target" ? "2" : "1",
+        stamp: row === "target" ? "100" : "101",
+        subject: api.userText,
+        logon: "1",
+        keywords: "0x8020000000000000",
+        record: row === "target" ? "10" : "11",
+      });
+      program.caseProjection.runInNewContext(api);
+      return true;
+    };
+    let delivered = false;
+    api.onWait = () => {
+      if (delivered || fault === "absent" || f.calls.at(-1)?.[1] !== 10) return;
+      delivered = true;
+      f.notify(fault === "target-only" ? ["target"] : ["target", "marker"]);
+    };
+    if (exited) {
+      const wait = api.WaitForSingleObject,
+        remaining = { "child-output": 2, "child-error": 3 },
+        print = api.printf;
+      api.WaitForSingleObject = (handle, timeout) =>
+        handle === "client" ? 0 : wait(handle, timeout);
+      api.GetExitCodeProcess = (_process, code) => {
+        api.controlExited = true;
+        code(fault === "child-zero" ? 0 : 126);
+        return true;
+      };
+      api.command_pump = (slot, event) => {
+        if (!slot.value) return;
+        f.calls.push(["pump", event]);
+        if (api.controlExited && --remaining[slot.value] === 0)
+          slot.value = null;
+      };
+      api.printf = (format, ...values) => {
+        if (format.includes("probe-exit"))
+          assert.deepEqual(remaining, { "child-output": 0, "child-error": 0 });
+        print(format, ...values);
+      };
+    }
+    if (fault === "stop") {
+      api.command_barrier();
+      assert.equal(retired, true);
+      assert.equal(f.replies(), "", "Cancellation cannot acknowledge capture");
+    } else if (fault && fault !== "queued-input") {
+      assert.throws(
+        () => api.command_barrier(),
+        (code) => code === 126,
+        fault,
+      );
+      assert.equal(f.replies().includes('"event":"B"'), false, fault);
+      assert.equal(
+        api.first[0],
+        fault === "unfinished"
+          ? "command-coverage-state"
+          : exited
+            ? "command-case-lifetime"
+            : fault === "owner-loss"
+              ? "command-owner-read"
+              : "command-marker-barrier",
+      );
+      if (exited)
+        assert.deepEqual(JSON.parse(f.replies()), {
+          event: "probe-exit",
+          exitCode: fault === "child-zero" ? 0 : 126,
+        });
+      if (fault === "absent")
+        assert.match(f.output(), /scanned=0.*io-completed=1/u);
+    } else {
+      api.command_barrier();
+      assert.equal(JSON.parse(f.replies()).event, "B");
+      assert.deepEqual(f.projected, ["target", "marker"]);
+      assert.equal(api.command_target_seen && api.command_marker_seen, true);
+      assert.equal(
+        api.command_control_completed,
+        false,
+        "Event delivery does not invent the later process exit",
+      );
+      assert.ok(
+        f.calls.findIndex(([name]) => name === "pump") <
+          f.calls.findIndex(([name]) => name === "project"),
+      );
+      if (fault === "queued-input") {
+        assert.equal(api.ownerInput, "J 00\n");
+        assert.equal(api.ownerReads, 0);
+      }
+    }
+    api.command_capture_close();
+    for (const handle of ["subscription", "bookmark", "notification"])
+      assert.equal(
+        f.closed.filter((value) => value === handle).length,
+        1,
+        `${fault}:${handle}`,
+      );
+  }
+});
+
 test("native structured audit query selects only loss and exact subject/type Event nodes", async () => {
   const program = await commandCaptureProgram(),
     f = commandCaptureFixture(program);
@@ -1270,6 +1405,8 @@ test("actual command token and held SACL reads precede control I/O and remain re
     "operating-level",
     "operating-token",
     "operating-after",
+    "before-completed",
+    "after-incomplete",
   ]) {
     const prepared = {
       nonce: "a".repeat(32),
@@ -1285,9 +1422,17 @@ test("actual command token and held SACL reads precede control I/O and remain re
         saclSha256: sha("owned-acl"),
       })),
     };
-    const before = { identity, token: {}, auditing: structuredClone(audit) },
+    const before = {
+        identity,
+        token: {},
+        ioCompleted: false,
+        auditing: structuredClone(audit),
+      },
       after = structuredClone(before),
       calls = [];
+    after.ioCompleted = true;
+    if (fault === "before-completed") before.ioCompleted = true;
+    if (fault === "after-incomplete") after.ioCompleted = false;
     if (fault === "missing") delete before.auditing;
     if (fault === "query") before.auditing.effective.error = 5;
     if (fault === "success" || fault === "failure")
@@ -1333,7 +1478,9 @@ test("actual command token and held SACL reads precede control I/O and remain re
       );
       assert.deepEqual(
         calls,
-        ["after", "operating-after"].includes(fault) ? ["N", "T", "F"] : ["N"],
+        ["after", "operating-after", "after-incomplete"].includes(fault)
+          ? ["N", "T", "F"]
+          : ["N"],
       );
     } else {
       const result = await program.runInNewContext(context);
@@ -1852,11 +1999,13 @@ test("native setup permits the parked control while release and forwarding requi
   for (const missing of [
     null,
     "command_client",
+    "command_case_finished",
     "command_target_seen",
     "command_marker_seen",
   ]) {
     const api = {
       command_client: 73,
+      command_case_finished: true,
       command_target_seen: true,
       command_marker_seen: true,
     };
@@ -4827,6 +4976,7 @@ test("actual command-case guards attribute native calls and control invariants w
     ["target-denial", "outside", "win32"],
     ["output", "edit", "invariant"],
     ["marker-size", "edit", "invariant"],
+    ["marker-nonce", "edit", "invariant"],
     ["finish-write-size", "edit", "invariant"],
     ["finish-read-size", "edit", "invariant"],
     ["finish-ack", "edit", "invariant"],
@@ -4850,11 +5000,14 @@ test("actual command-case guards attribute native calls and control invariants w
     ["target-open", "inspect", "win32"],
     ["target-read", "inspect", "win32"],
   ];
-  for (const [fault, mode, domain] of [
+  for (const [fault, mode, domain, markerCloseFails] of [
     [null, "inspect"],
     [null, "edit"],
     [null, "outside"],
     ...cases,
+    ["marker-read", "edit", "win32", true],
+    ["marker-size", "edit", "invariant", true],
+    ["marker-nonce", "edit", "invariant", true],
   ]) {
     let first,
       lastError = 0,
@@ -4890,6 +5043,7 @@ test("actual command-case guards attribute native calls and control invariants w
       PROCESS_DUP_HANDLE: 64,
       PROCESS_TERMINATE: 1,
       ERROR_ACCESS_DENIED: 5,
+      ERROR_SUCCESS: 0,
       CP_UTF8: 65001,
       WC_ERR_INVALID_CHARS: 128,
       wcslen: (value) => value.length,
@@ -4914,6 +5068,7 @@ test("actual command-case guards attribute native calls and control invariants w
           assert.equal(sharing, 7);
           assert.equal(flags, 0x200000);
         }
+        if (name === "marker") assert.equal(flags, 0x200000);
         if (name === "pipe") assert.equal(flags, 0x160000);
         if (!call(operation)) return -1;
         if (name === "target" && mode === "outside") {
@@ -4964,6 +5119,7 @@ test("actual command-case guards attribute native calls and control invariants w
         else {
           target.write(nonce);
           if (fault === "target-nonce" && handle === "target") target[0]++;
+          if (fault === "marker-nonce" && handle === "marker") target[0]++;
         }
         return call(operation);
       },
@@ -4980,6 +5136,10 @@ test("actual command-case guards attribute native calls and control invariants w
           : null;
       },
       CloseHandle(handle) {
+        if (handle === "marker" && markerCloseFails) {
+          call("marker-close");
+          return false;
+        }
         if (handle !== "unexpected-authority") return call(`${handle}-close`);
         lastError = 6;
         return !fault?.endsWith("-close");
@@ -5046,8 +5206,29 @@ test("actual command-case guards attribute native calls and control invariants w
     );
     assert.deepEqual(
       cleanup,
-      broker && fault.endsWith("-close") ? [["process-close", "win32", 6]] : [],
+      broker && fault.endsWith("-close")
+        ? [["process-close", "win32", 6]]
+        : markerCloseFails || fault === "marker-close"
+          ? [["command-case-marker-close", "win32", 5]]
+          : [],
     );
+    if (cleanup.length) {
+      const [operation, domain, value] = cleanup[0],
+        diagnosis = windowsFeasibilityDiagnostics(
+          carrier +
+            `native-windows-cleanup: operation=${operation} domain=${domain} value=${value}\n`,
+        );
+      assert.deepEqual(diagnosis?.cleanup, { operation, domain, value });
+      assert.equal(diagnosis.failure.operation, first[0]);
+    }
+    if (fault.startsWith("marker-")) {
+      assert.equal(pipeWrites, 1, "Failed marker checks cannot send F");
+      if (fault !== "marker-open")
+        assert.equal(
+          calls.filter((value) => value === "marker-close").length,
+          1,
+        );
+    }
     if (broker) {
       assert.deepEqual(
         brokerRights,
@@ -5090,7 +5271,7 @@ async function brokerCloseBoundary({ control = false, read = false } = {}) {
   );
   const boundary = new Script(`(() => {
     let closed, failed, brokerDiagnosticFirst, brokerDiagnosticPhase, retiring = false, retirementFailure, bytes = 0, reading = Promise.resolve();
-    let phase = ${JSON.stringify(control ? "permitted-control" : "broker-setup")}, failurePhase,
+    let phase = ${JSON.stringify(control ? "permitted-control" : "broker-setup")}, failurePhase, probeOutput = "",
       controlStderr = ${control ? "Buffer.alloc(0)" : "null"}, controlStderrInvalid = false,
       controlDiagnosticFirst, controlBeforeBroker, controlExitCode, controlError;
     const pending = new Map();
@@ -5100,7 +5281,7 @@ async function brokerCloseBoundary({ control = false, read = false } = {}) {
     const effects = {${source.slice(source.indexOf("retainFailure: fail,"), source.indexOf("prepare(nonce, components, signal)"))}};
     return { closed, pending, outcome: ready.catch(error => error), failure: () => failed,
       retainFailure: effects.retainFailure, collectFailure: effects.failure,
-      controlFailure, reading: () => reading, setPhase: value => {phase=value;} };
+      controlFailure, output: () => probeOutput, reading: () => reading, setPhase: value => {phase=value;} };
   })()`);
   return () => {
     const broker = new EventEmitter(),
@@ -5372,6 +5553,92 @@ test("post-ready broker refusal survives later watcher and cleanup failures thro
   }
 });
 
+test("an early control exit retains complete output and its first cause while fencing the barrier", async () => {
+  const open = await brokerCloseBoundary({ control: true, read: true }),
+    diagnostic =
+      "native-windows: operation=command-case-marker-nonce domain=invariant value=0\n";
+  for (const prior of [false, true]) {
+    const f = open(),
+      original = new Error("Earlier capture failure"),
+      rejected = [];
+    f.pending.get("ready").resolve({ event: "ready" });
+    f.pending.delete("ready");
+    f.pending.set("B", {
+      resolve: assert.fail,
+      reject: (error) => rejected.push(error),
+    });
+    if (prior) f.retainFailure(original);
+    const frames = [
+      {
+        event: "probe-output",
+        hex: Buffer.from("attempt:written").toString("hex"),
+      },
+      ...[diagnostic.slice(0, 13), diagnostic.slice(13)].map((text) => ({
+        event: "probe-stderr",
+        hex: Buffer.from(text).toString("hex"),
+      })),
+      { event: "probe-exit", exitCode: 126 },
+    ];
+    f.broker.stdout.end(
+      frames.map((frame) => JSON.stringify(frame) + "\n").join(""),
+    );
+    await f.reading();
+    const child = f.controlFailure();
+    assert.equal(child.code, 126);
+    assert.deepEqual(child.stderr, Buffer.from(diagnostic));
+    assert.equal(child.nativeDiagnosticInvalid, false);
+    assert.equal(f.output(), "attempt:written");
+    assert.equal(rejected.length, 1);
+    assert.equal(rejected[0], prior ? original : child);
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end(
+      "native-windows: operation=command-case-lifetime domain=invariant value=0\n" +
+        "native-windows-cleanup: operation=pipe-close domain=win32 value=6\n",
+    );
+    await ended;
+    f.broker.emit("close", 126, null);
+    const first = await f.collectFailure();
+    assert.equal(first, prior ? original : child);
+    assert.ok(first.feasibilityCleanup);
+  }
+});
+
+test("control release requires one completed pipe drain and the matching real exit", async () => {
+  const open = await brokerCloseBoundary({ control: true, read: true });
+  for (const fault of [null, "missing", "repeated", "mismatch", "invalid"]) {
+    const f = open(),
+      rejected = [];
+    let released = false;
+    f.pending.get("ready").resolve({ event: "ready" });
+    f.pending.delete("ready");
+    f.pending.set("U", {
+      resolve: () => {
+        released = true;
+      },
+      reject: (error) => rejected.push(error),
+    });
+    const exit = {
+        event: "probe-exit",
+        exitCode: fault === "invalid" ? -1 : 0,
+      },
+      frames = fault === "missing" ? [] : [exit];
+    if (fault === "repeated") frames.push(exit);
+    frames.push({ event: "U", exitCode: fault === "mismatch" ? 126 : 0 });
+    f.broker.stdout.end(
+      frames.map((frame) => JSON.stringify(frame) + "\n").join(""),
+    );
+    await f.reading();
+    assert.equal(released, !fault);
+    assert.equal(rejected.length, fault ? 1 : 0);
+    assert.equal(Boolean(f.failure()), Boolean(fault));
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", fault ? 126 : 0, null);
+    await f.closed;
+  }
+});
+
 test("post-ready invalid broker carriers and earlier transport rejection cannot become primary native evidence", async () => {
   const open = await brokerCloseBoundary(),
     diagnostic =
@@ -5535,7 +5802,9 @@ test("control and broker carriers keep validated arrival precedence and their or
         hex: Buffer.from(childValid ? child : child.trimEnd()).toString("hex"),
       }) +
         "\n" +
-        (retainedControl ? '{"event":"U","exitCode":126}\n' : ""),
+        (retainedControl
+          ? '{"event":"probe-exit","exitCode":126}\n{"event":"U","exitCode":126}\n'
+          : ""),
     );
     await f.reading();
     if (!brokerFirst) f.broker.stderr.write(broker);
@@ -5594,6 +5863,7 @@ test("control carriers reject partial, malformed, oversized and incomplete trans
     [diagnostic, false, true],
     [diagnostic, false, false, "hex"],
     [diagnostic, false, false, "json"],
+    [diagnostic, false, false, "exit"],
   ]) {
     const f = open(),
       first = Object.assign(new Error("Original transport refusal"), {
@@ -5613,7 +5883,11 @@ test("control carriers reject partial, malformed, oversized and incomplete trans
       );
     if (framing)
       f.broker.stdout.write(
-        framing === "hex" ? '{"event":"probe-stderr","hex":"zz"}\n' : "{\n",
+        framing === "hex"
+          ? '{"event":"probe-stderr","hex":"zz"}\n'
+          : framing === "exit"
+            ? '{"event":"probe-exit","exitCode":-1}\n'
+            : "{\n",
       );
     if (incomplete) {
       await parsed;
@@ -6823,7 +7097,7 @@ async function commandCaptureProgram() {
   );
   const body = (text, name) => {
     const match = new RegExp(
-      `static (?:void|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|BOOL|DWORD) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(text);
     assert.ok(match, name);
@@ -6855,22 +7129,34 @@ async function commandCaptureProgram() {
         'ref(globals,"$1")',
       )
       .replace(/,&(count|length|counted)\b/gu, ",value=>$1=value");
+  const progress = (text) =>
+    text
+      .replace(/&(command_output|command_error)\b/gu, 'ref(globals,"$1")')
+      .replace(/,&code\b/gu, ",value=>code=value");
   const preflight = body(source, "command_preflight_close").split(
     "if (!command_preflight_owned.active) return ok;",
   )[0];
-  const barrier = source
-    .slice(
-      source.indexOf("static void command_barrier(void)"),
-      source.indexOf("static void command_pump("),
-    )
-    .replace("static void command_barrier(void)", "function command_barrier()")
-    .replace("ULONGLONG wait", "let wait")
-    .replace("FILETIME ft;", "const ft={};")
-    .replace(
-      "ULARGE_INTEGER time;",
-      "const time={get QuadPart(){return this.LowPart+this.HighPart*0x100000000;}};",
-    )
-    .replaceAll("&ft", "ft");
+  const barrier = progress(
+    source
+      .slice(
+        source.indexOf("static void command_barrier(void)"),
+        source.indexOf(
+          "static void command_pump(",
+          source.indexOf("static void command_barrier(void)"),
+        ),
+      )
+      .replace(
+        "static void command_barrier(void)",
+        "function command_barrier()",
+      )
+      .replace("ULONGLONG wait", "let wait")
+      .replace("FILETIME ft;", "const ft={};")
+      .replace(
+        "ULARGE_INTEGER time;",
+        "const time={get QuadPart(){return this.LowPart+this.HighPart*0x100000000;}};",
+      )
+      .replaceAll("&ft", "ft"),
+  );
   const dispatch = new Script(`
     function close_handle(handle,operation) {${translate(body(helper, "close_handle"))}}
     function release_handle(slot,operation) {${translate(body(helper, "release_handle"))}}
@@ -6878,7 +7164,15 @@ async function commandCaptureProgram() {
     function command_capture_close() {${translate(body(source, "command_capture_close"))}}
     function command_preflight_close(keepBroker) {${translate(preflight)} return ok;}
     function command_capture(timeout) {${translate(capture)}}
-    function command_case_live() {${translate(body(source, "command_case_live"))}}
+    function command_control_output() {${progress(translate(body(source, "command_control_output")))}}
+    function command_control_exit(child) {${progress(translate(body(source, "command_control_exit")))}}
+    function command_case_live() {${progress(translate(body(source, "command_case_live")))}}
+    function command_stop_requested() {${translate(
+      body(source, "command_stop_requested"),
+    )
+      .replace("char request[2];", "const request=[];")
+      .replaceAll("sizeof(request)", "2")
+      .replace(/,&(available|copied|count)\b/gu, ",value=>$1=value")}}
     function command_observe_failure() {${translate(body(source, "command_observe_failure")).replaceAll("&diagnosticOutputLock", "diagnosticOutputLock")}}
     function command_audit_query(query,interval) {${body(source, "command_audit_query").replace(/\bL(?=")/gu, "")}}
     ${barrier}
@@ -7028,6 +7322,7 @@ function commandCaptureFixture(
     creation: () => 50n,
     command_action: 2,
     command_case_permit: true,
+    command_case_finished: true,
     command_ids: ["inspect-id", "edit-id", "outside-id", "marker-id"],
     command_target_seen: false,
     command_marker_seen: false,
@@ -7036,6 +7331,39 @@ function commandCaptureFixture(
     command_control_completed: true,
     command_control_verified: false,
     command_closing: false,
+    command_output: "child-output",
+    command_error: "child-error",
+    command_pump: (slot, event) => {
+      calls.push(["pump", event]);
+      if (api.controlExited) slot.value = null;
+    },
+    command_retire_domain: assert.fail,
+    STD_INPUT_HANDLE: -10,
+    GetStdHandle: () => "owner-input",
+    ownerReads: 0,
+    PeekNamedPipe: (handle, buffer, size, read, available) => {
+      assert.equal(handle, "owner-input");
+      const bytes = (api.ownerInput ?? "").slice(0, size);
+      buffer.push(...bytes);
+      read(bytes.length);
+      available(api.ownerInput?.length ?? 0);
+      lastError = 109;
+      return api.ownerPresent !== false;
+    },
+    ReadFile: (handle, bytes, size, count) => {
+      assert.equal(handle, "owner-input");
+      assert.equal(size, 2);
+      api.ownerReads++;
+      bytes.splice(0, bytes.length, ...api.ownerInput.slice(0, size));
+      api.ownerInput = api.ownerInput.slice(size);
+      count(2);
+      return true;
+    },
+    GetExitCodeProcess: (_process, code) => {
+      api.controlExited = true;
+      code(126);
+      return true;
+    },
     command_retirement_seen: false,
     command_barriers: 0,
     command_subscription: null,
@@ -7458,7 +7786,7 @@ test("actual capture waits, drains ordered batches and accepts later service not
   );
   assert.match(
     delivery,
-    /scanned=0 scanned-bytes=0 selected=0 selected-bytes=0 pid=43 action=2 target-id=outside-id marker-id=marker-id target-seen=0 marker-seen=0 setup=1 control=1 control-completed=1 control-verified=0 closing=0 retirement-seen=0\n/u,
+    /scanned=0 scanned-bytes=0 selected=0 selected-bytes=0 pid=43 action=2 target-id=outside-id marker-id=marker-id target-seen=0 marker-seen=0 io-completed=1 setup=1 control=1 control-completed=1 control-verified=0 closing=0 retirement-seen=0\n/u,
   );
   assert.deepEqual(windowsFeasibilityDiagnostics(refusal + delivery).failure, {
     operation: "command-marker-barrier",
@@ -8244,6 +8572,105 @@ test("native audit ACE sizing counts SidStart once and excludes unused baseline 
       assert.equal(length, (old ? 28 : 8) + 8 + sidBytes);
       assert.equal(queried, old !== null);
     }
+  }
+});
+
+test("the owned audit ACE precedes retained SACL entries without changing their restoration authority", async () => {
+  const source = await readFile(
+      new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+      "utf8",
+    ),
+    start = source.indexOf("    win32_check(AddAuditAccessAceEx("),
+    end = source.indexOf("\n  }\n}", start);
+  assert.ok(start > 0 && end > start);
+  const program = new Script(
+    source
+      .slice(start, end)
+      .replace("unsigned j", "let j")
+      .replace("ACE_HEADER *ace", "let ace")
+      .replaceAll("->", ".")
+      .replace("(void **)&ace", "value=>ace=value"),
+  );
+  for (const fault of [null, "empty", "audit", "read", "copy"]) {
+    const baseline = [
+        { type: "mandatory-label", AceSize: 20, bytes: "label-bytes" },
+        { type: "inherited-audit", AceSize: 24, bytes: "inherited-bytes" },
+      ],
+      before = structuredClone(baseline),
+      acl = [],
+      old = { AceCount: baseline.length },
+      operations = [];
+    const build = () =>
+      program.runInNewContext({
+        i: 0,
+        command_sacls: [acl],
+        present: fault !== "empty",
+        old,
+        ACL_REVISION: 2,
+        MAXDWORD: 0xffffffff,
+        FILE_READ_DATA: 1,
+        FILE_WRITE_DATA: 2,
+        userSid: "command-user",
+        TRUE: true,
+        AddAuditAccessAceEx: (
+          target,
+          revision,
+          flags,
+          mask,
+          sid,
+          success,
+          failure,
+        ) => {
+          assert.deepEqual(
+            [target, revision, flags, mask, sid, success, failure],
+            [acl, 2, 0, 3, "command-user", true, true],
+          );
+          if (fault === "audit") return false;
+          target.push({ type: "owned-audit", mask, sid, success, failure });
+          return true;
+        },
+        GetAce: (value, index, result) => {
+          assert.equal(value, old);
+          if (fault === "read" && index === 1) return false;
+          result(baseline[index]);
+          return true;
+        },
+        AddAce: (target, revision, position, ace, size) => {
+          assert.deepEqual(
+            [target, revision, position, size],
+            [acl, 2, 0xffffffff, ace.AceSize],
+          );
+          if (fault === "copy" && ace === baseline[1]) return false;
+          target.push(structuredClone(ace));
+          return true;
+        },
+        win32_check: (ok, operation) => {
+          operations.push(operation);
+          if (!ok) throw new Error(operation);
+        },
+      });
+    if (fault && fault !== "empty") {
+      const operation = `command-audit-${fault === "audit" ? "ace" : `ace-${fault}`}`;
+      assert.throws(build, { message: operation });
+      assert.equal(operations.at(-1), operation);
+    } else {
+      build();
+      assert.deepEqual(acl, [
+        {
+          type: "owned-audit",
+          mask: 3,
+          sid: "command-user",
+          success: true,
+          failure: true,
+        },
+        ...(fault === "empty" ? [] : before),
+      ]);
+    }
+    assert.deepEqual(
+      baseline,
+      before,
+      "The independent restorer retains the original SACL",
+    );
   }
 });
 

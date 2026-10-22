@@ -1014,6 +1014,25 @@ immediate Win32 cause. Successful inspect/edit/outside controls and event joins
 retain their existing coverage. Finite diagnostic tests reject unrelated domains
 and malformed values without weakening independent inspection or restoration.
 These portable cases run no Windows tool and add no slow-tier requirement.
+The same actual command body now checks marker nonce bytes and closes the marker
+after read, size or nonce refusal, including a second close failure. No failed
+marker may write the finishing nonce. Actual effects reject reversed `N/F`
+completion state before the event barrier or child release. Controlled native
+barriers retain output pumping and held-process checks through delayed delivery,
+completed I/O with no events, target-only or mismatched-marker events, early
+child exit and the existing `D` stop or owner loss. Queued ordinary protocol
+input stays unconsumed during the barrier. The exact original Security
+query, service notification/reset flow and 10-second bound remain exercised.
+The actual child-exit collector drains both pipes to EOF before publishing the
+real exit; reader fixtures retain fragmented child diagnostics and output after
+an earlier broker refusal, with separate cleanup uncertainty. Event delivery
+alone leaves process completion unset. Release rejects missing, repeated or
+conflicting exit frames. Existing restoration-failure and separate
+terminal-witness tests remain required; these fixtures supply no native events.
+The actual SACL builder places the owned explicit audit ACE before baseline
+labels and inherited entries. Controlled native ACL calls protect the exact
+read/write success/failure mask, byte-preserving baseline copies and partial
+insertion/read/copy refusal; baseline restoration remains unchanged.
 Bounded native transcripts distinguish verified setup from real command delivery.
 System-success-disabled cases still require both effective per-user outcomes and
 all original token/object/SACL joins. Setup admits only schema/version probes,
