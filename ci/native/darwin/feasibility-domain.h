@@ -7,7 +7,6 @@
 #include <security/audit/audit_ioctl.h>
 #include <mach/mach_vm.h>
 #include <mach/mig.h>
-#include <mach/mach_sync_ipc.h>
 #include <mach-o/dyld-interposing.h>
 
 static void domain_check(bool ok, const char *operation, const char *kind, int value) {
@@ -89,6 +88,19 @@ static mach_port_t domain_runtime_reply_allocate(void) {
  * original allocator. A missed producer grants no authority: its right remains
  * unknown and fences exec. No hidden runtime global or TSD offset is read. */
 DYLD_INTERPOSE(domain_runtime_reply_allocate, mach_reply_port);
+/* XNU xnu-11417.140.69's libsyscall/mach/mach/mach_sync_ipc.h declares
+ * mach_port_t mig_get_special_reply_port(void); mach_port.c implements its
+ * cached acquisition. That private header is absent from the hosted 15.5 SDK.
+ * The declaration establishes the type, not installed libSystem availability:
+ * require its actual export without a guessed extern or allocating-trap fallback. */
+typedef mach_port_t (*domain_special_reply_fn)(void);
+static domain_special_reply_fn domain_special_reply;
+static void domain_special_reply_load(void) {
+  dlerror();
+  domain_special_reply = (domain_special_reply_fn)dlsym(RTLD_DEFAULT, "mig_get_special_reply_port");
+  if (dlerror()) domain_special_reply = NULL;
+  invariant(domain_special_reply != NULL, "fault-special-reply-binding");
+}
 static mach_port_t domain_reply_borrowed, domain_special_reply_borrowed;
 static void domain_ports_begin(void) {
   invariant(domain_port_owner != getpid(), "fault-port-owner");
@@ -100,12 +112,13 @@ static void domain_ports_begin(void) {
   extern mach_port_t bootstrap_port;
   domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
   domain_reply_borrowed = domain_special_reply_borrowed = MACH_PORT_NULL;
+  domain_special_reply_load();
   domain_reply_borrowed = mig_get_reply_port();
   invariant(MACH_PORT_VALID(domain_reply_borrowed), "fault-reply-port");
   /* This cached acquisition returns the existing special reply if present;
    * its producer allocates only for an absent cache. The raw allocating and
    * rebinding thread_get_special_reply_port trap is never used as a query. */
-  domain_special_reply_borrowed = mig_get_special_reply_port();
+  domain_special_reply_borrowed = domain_special_reply();
   invariant(MACH_PORT_VALID(domain_special_reply_borrowed) &&
     domain_special_reply_borrowed != domain_reply_borrowed, "fault-special-reply-port");
 }
@@ -418,7 +431,7 @@ static void domain_sanitize(void) {
     reply != host && (!access_held || reply != access) && mig_get_reply_port() == reply, "fault-reply-port");
   invariant(MACH_PORT_VALID(special) && special != self && special != thread &&
     special != host && special != reply && (!access_held || special != access) &&
-    mig_get_special_reply_port() == special, "fault-special-reply-port");
+    domain_special_reply() == special, "fault-special-reply-port");
   unsigned runtime_count = domain_runtime_reply_count, runtime_seen = 0;
   invariant(domain_runtime_reply_owner == getpid() && !domain_runtime_reply_overflow &&
     runtime_count <= 8, "fault-runtime-reply-port");
@@ -436,7 +449,7 @@ static void domain_sanitize(void) {
   if (mig_get_reply_port() != reply) {
     remember("fault-reply-port", "invariant", 0); census_ok = false;
   }
-  if (mig_get_special_reply_port() != special) {
+  if (domain_special_reply() != special) {
     remember("fault-special-reply-port", "invariant", 0); census_ok = false;
   }
   if (domain_runtime_reply_owner != getpid() || domain_runtime_reply_overflow ||
@@ -493,7 +506,7 @@ static void domain_sanitize(void) {
   domain_port_cleanup();
   if (resource_uncertain) failure(126);
   invariant(mig_get_reply_port() == reply, "fault-reply-port");
-  invariant(mig_get_special_reply_port() == special, "fault-special-reply-port");
+  invariant(domain_special_reply() == special, "fault-special-reply-port");
   invariant(domain_runtime_reply_owner == getpid() && !domain_runtime_reply_overflow &&
     domain_runtime_reply_count == runtime_count, "fault-runtime-reply-port");
 }

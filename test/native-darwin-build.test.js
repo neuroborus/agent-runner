@@ -4719,7 +4719,8 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     portCleanup = portBody("domain_port_cleanup"),
     portDiagnostic = portBody("domain_port_diagnostic"),
     repliesBegin = portBody("domain_runtime_replies_begin"),
-    replyAllocate = portBody("domain_runtime_reply_allocate");
+    replyAllocate = portBody("domain_runtime_reply_allocate"),
+    specialReplyLoad = portBody("domain_special_reply_load");
   assert.ok(
     sanitation &&
       observation &&
@@ -4730,6 +4731,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       portDiagnostic &&
       repliesBegin &&
       replyAllocate &&
+      specialReplyLoad &&
       start > 0 &&
       end > start,
   );
@@ -4737,11 +4739,17 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     source,
     /DYLD_INTERPOSE\(domain_runtime_reply_allocate, mach_reply_port\)/u,
   );
+  assert.match(
+    source,
+    /typedef mach_port_t \(\*domain_special_reply_fn\)\(void\);/u,
+  );
+  assert.doesNotMatch(source, /#include <mach\/mach_sync_ipc\.h>/u);
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
   const translate = (body) =>
     body
       .replace("extern mach_port_t bootstrap_port;", "")
+      .replaceAll("(domain_special_reply_fn)", "")
       .replace(
         "struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32};",
         "const limit = {rlim_cur:32, rlim_max:32};",
@@ -4777,6 +4785,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
   const script = new Script(`
     function domain_runtime_replies_begin(owner) {${translate(repliesBegin)}}
     function domain_runtime_reply_allocate() {${translate(replyAllocate)}}
+    function domain_special_reply_load() {${translate(specialReplyLoad)}}
     function domain_ports_begin() {${translate(portsBegin)}}
     function domain_port_release(held, operation) {${translate(portRelease)}}
     function domain_port_cleanup() {${translate(portCleanup)}}
@@ -4800,6 +4809,34 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     ],
     ["missing runtime reply port", { reply: 0 }, "fault-reply-port", 0],
     ["dead runtime reply sentinel", { reply: DEAD }, "fault-reply-port", 0],
+    [
+      "missing installed cached accessor refuses before either borrow",
+      { specialBindingMissing: true },
+      "fault-special-reply-binding",
+      0,
+    ],
+    [
+      "lookup error refuses even when the installed accessor is nonnull",
+      { specialBindingError: true },
+      "fault-special-reply-binding",
+      0,
+    ],
+    [
+      "a stale loader error is cleared before resolving the installed accessor",
+      { specialBindingStaleError: true },
+    ],
+    [
+      "forked child cannot reuse a copied accessor when its lookup fails",
+      { inheritedOwner: 41, specialBindingMissing: true },
+      "fault-special-reply-binding",
+      0,
+    ],
+    [
+      "missing accessor retains its first cause through bootstrap release failure",
+      { specialBindingMissing: true, bootstrapRelease: 15 },
+      "fault-special-reply-binding",
+      0,
+    ],
     [
       "missing special reply stops after the ordinary borrow",
       { specialReply: 0 },
@@ -5404,12 +5441,14 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       racedInitialization = false,
       environmentReady = false,
       notifyReads = 0,
+      loaderError = options.specialBindingStaleError ? "stale" : null,
       observing = true,
       bootstrapReleased = false;
     const context = {
       errno: 0,
       stderr: {},
       NULL: null,
+      RTLD_DEFAULT: -2,
       KERN_SUCCESS: 0,
       KERN_INVALID_ARGUMENT: 4,
       KERN_FAILURE: 5,
@@ -5437,6 +5476,8 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       domain_thread_copy: options.inheritedOwner ? 115 : 0,
       domain_reply_borrowed: options.inheritedOwner ? 109 : 0,
       domain_special_reply_borrowed: options.inheritedOwner ? 116 : 0,
+      domain_special_reply: () =>
+        assert.fail("A copied binding is not used before lookup"),
       domain_runtime_reply_owner:
         options.producerOwner ?? options.inheritedOwner ?? 0,
       domain_runtime_replies: options.inheritedOwner
@@ -5703,8 +5744,29 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         if (options.replaceSpecial === "before") specialReply = 109;
         return 0;
       },
-      mig_get_reply_port: () => cachedReply,
-      mig_get_special_reply_port: () => specialReply,
+      dlerror() {
+        calls.push(["loader-error"]);
+        const error = loaderError;
+        loaderError = null;
+        return error;
+      },
+      dlsym(scope, symbol) {
+        calls.push(["lookup", scope, symbol]);
+        assert.equal(scope, context.RTLD_DEFAULT);
+        assert.equal(symbol, "mig_get_special_reply_port");
+        assert.equal(loaderError, null);
+        if (options.specialBindingError) loaderError = "lookup refused";
+        return options.specialBindingMissing
+          ? null
+          : () => {
+              calls.push(["special-reply"]);
+              return specialReply;
+            };
+      },
+      mig_get_reply_port: () => {
+        calls.push(["ordinary-reply"]);
+        return cachedReply;
+      },
       thread_get_special_reply_port: () =>
         assert.fail("The allocating trap cannot query a cached reply"),
       mach_reply_port: () => allocationReply,
@@ -5854,6 +5916,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         operation.endsWith("authority") ||
           [
             "fault-reply-port",
+            "fault-special-reply-binding",
             "fault-special-reply-port",
             "fault-runtime-reply-port",
             "fault-port-owner",
@@ -5882,6 +5945,28 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       label,
     );
     assert.deepEqual(cleanup, releaseFailures, label);
+    assert.deepEqual(
+      calls.filter(([op]) => op === "lookup" || op === "loader-error"),
+      [
+        ["loader-error"],
+        ["lookup", context.RTLD_DEFAULT, "mig_get_special_reply_port"],
+        ["loader-error"],
+      ],
+      label,
+    );
+    if (operation === "fault-special-reply-binding") {
+      assert.equal(context.domain_special_reply, null, label);
+      assert.equal(
+        calls.some(([op]) => op === "ordinary-reply" || op === "special-reply"),
+        false,
+        label,
+      );
+      assert.equal(
+        calls.some(([op]) => op === "observe-get" || op === "census"),
+        false,
+        label,
+      );
+    }
     assert.equal(notifyCopies.length, 0, label);
     if (cleanupValue !== undefined)
       assert.ok(

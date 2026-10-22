@@ -385,6 +385,18 @@ their distinct original and cleanup outcomes. These deterministic cases add no
 native execution, validation command or slow-tier assignment. They identify no
 historical unknown right and establish no native dyld interception or closure.
 
+The same fixture executes the cached special-reply loader body with injected
+`dlsym` and `dlerror`. It protects the pinned zero-argument `mach_port_t` call
+type without the unavailable private SDK header, clears a stale loader error,
+and refuses missing exports or a nonnull result accompanied by a lookup error
+before either cache borrow or native observation. A copied parent pointer cannot
+bypass the child's lookup. Refusal still releases its owned bootstrap reference;
+a release failure remains separate from the original binding failure. Existing
+cache, producer, census and retirement matrices remain intact. The public failure
+decoder retains the bounded binding operation without raw loader output. These
+portable regressions establish no installed macOS export availability and add no
+native execution, validation command or slow-tier assignment.
+
 Custodian lifecycle fixtures retain one checked release per valid getter copy,
 no endpoint contact and unchanged errno, including unavailable type queries. The
 child's observation remains after its alarm and before credential/session changes;

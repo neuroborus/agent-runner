@@ -13334,6 +13334,7 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     ["fault-host-port", "mach", 5],
     ["fault-port-owner", "invariant", 0],
     ["fault-reply-port", "invariant", 0],
+    ["fault-special-reply-binding", "invariant", 0],
     ["fault-special-reply-port", "invariant", 0],
     ["fault-runtime-reply-port", "invariant", 0],
     ["fault-thread-port", "invariant", 0],

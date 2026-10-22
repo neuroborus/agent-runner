@@ -3959,6 +3959,22 @@ receive right without minting an owned reference or duplicate census entry.
 All observed producer names must appear with their exact type; cache replacement
 or a new allocation during census/release invalidates the inspected evidence.
 
+The pinned
+[`mach_sync_ipc.h`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach/mach_sync_ipc.h)
+declares the cached accessor as `mach_port_t mig_get_special_reply_port(void)`.
+The hosted Xcode 16.4 macOS 15.5 SDK does not install that private header. The
+helper therefore uses the declared function-pointer type with the SDK's public
+`dlfcn.h` interface to resolve the installed `mig_get_special_reply_port` export.
+Each child clears the loader error, performs one lookup and checks its own error
+before borrowing either cache; a null result or lookup error refuses admission
+as `fault-special-reply-binding`. A copied parent binding cannot bypass this
+lookup. The checked pointer supplies all subsequent special-cache reads.
+The source declaration establishes the call ABI, not installed availability:
+the native lookup must succeed on the declared hosted runtime. No speculative
+external declaration, private offset, replacement allocator or trap fallback is
+used. Portable fixtures supply no SDK/linker or hosted export evidence; fresh
+original native execution must establish availability and the existing controls.
+
 The helper never invalidates either cache. Pinned
 [`mig_reply_port.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mig_reply_port.c)
 uses the task fallback while invalidating the ordinary cache and suppresses
