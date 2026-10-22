@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-22 — Retry trusted polishing failures only by explicit resume
+
+Polishing can repeat complete finalization from an unchanged environment-blocked
+finding-resolution pause when accepted candidate proof and the exact ordered
+Runner-generated failure issues exclude every other blocker. Existing ownership,
+frozen-input, guidance, configuration and Git guards remain in force, and failed
+content and infrastructure fingerprints must match before new effects. Each
+explicit resume authorizes one attempt without resetting correction budgets,
+candidate proof or historical records. This closes the polishing dead end already
+handled by plan execution without automatic retry or dependence on diagnostic
+availability. Success still needs a distinct read-only terminal confirmation
+before the runner alone stages the handoff; polishing agents never stage or
+commit. Injected regressions establish workflow policy, not native validation.
+
 ## 2026-10-22 — Keep command completion and audit delivery distinct
 
 Windows command feasibility records checked target/marker I/O separately from

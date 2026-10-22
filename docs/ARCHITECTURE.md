@@ -5495,21 +5495,26 @@ may pass on the host yet fail closed in trusted isolation; unsupported failures
 retain the generic outcome and bounded omission explanation. Increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
-Plan execution can retry eligible runner-trusted failures through an explicit
-null-action resume from an `environment_blocked` finding-resolution pause.
-Pipeline policy recognizes only a complete persisted match between failed runner
-checks and their generated issues, with no agent failure or other unresolved work.
-After input, repository, and failure-fingerprint revalidation, one write-ahead transition clears terminal
-evidence and enters complete `FINALIZE`, repeating Worker finalization and all
-applicable runner-trusted checks to generate fresh diagnostics while retaining
-candidate acceptance and correction accounting. A repeated failure rejoins
-resolution and does not retry automatically. The trusted executor's authority,
+Plan execution and polishing can retry eligible runner-trusted failures through
+an explicit null-action resume from an `environment_blocked` finding-resolution
+pause. Pipeline policy requires at least one failed check, all failures Runner-executed,
+and an exact ordered match between the complete issue list and generated IDs,
+commands, fixed problem text and evidence. Agent-authored, mixed or additional
+issues exclude retry. Candidate acceptance must remain proven, without a pending
+edit, ordinary or primary findings, disputes or reconsideration.
+After input, repository, and failure-fingerprint revalidation, one write-ahead
+transition clears terminal evidence and enters complete `FINALIZE`, repeating
+Worker finalization and all applicable runner-trusted checks to generate fresh
+diagnostics while retaining candidate acceptance and correction accounting. A
+repeated failure rejoins resolution and does not retry automatically. The trusted executor's authority,
 output-retention policy, and mode-specific confirmation gates remain unchanged.
 Normalized diagnostics do not change eligibility, budgets or bindings.
 Historical records remain unchanged;
 an authorized normal retry produces fresh evidence but cannot recover discarded
 historical output. The [execution specification](../pipelines/plan-execution/docs/SPEC.md)
-owns eligibility.
+and [polishing specification](../pipelines/polishing/docs/SPEC.md) own eligibility.
+Polishing still requires fresh mode-specific terminal confirmation before one
+runner-owned handoff; its agents gain no staging or commit authority.
 
 Before plan execution or polishing accepts a producing role's bootstrap or
 legacy validation-migration inventory, and before either pipeline fingerprints

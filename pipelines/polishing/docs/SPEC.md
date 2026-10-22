@@ -849,11 +849,34 @@ environments retry the frozen request after cleanup. Status remains observationa
 
 ### Review And Findings
 
-Finalization failures enter finding resolution in both modes. They must be
-fixed, never disputed; in lazy mode their no-progress path cannot invoke an
-Arbiter. A content-changing fix invalidates candidate, finalization, and
-terminal-confirmation evidence and returns through mode-specific candidate
+Finalization failures enter finding resolution in every mode. They must be
+fixed, never disputed; lazy and combined no-progress paths cannot invoke an
+Arbiter for these failures. A content-changing fix invalidates candidate,
+finalization, and terminal-confirmation evidence and returns through mode-specific candidate
 convergence before the complete finalization gate runs again.
+
+An explicit null-action resume from `WAITING_FOR_USER`, paused as
+`environment_blocked` at `RESOLVE_FINDINGS`, may instead authorize one complete
+`FINALIZE` retry. The failed result must contain at least one failed check, every
+failed check must be Runner-executed, and the complete issue list must exactly
+match the ordered generated issues, including IDs, commands, fixed problem text
+and evidence. Agent-authored, mixed, additional or mismatched issues exclude this
+route; normalized diagnostic availability does not affect eligibility. Candidate
+acceptance must remain proven, with no pending edit, ordinary or primary findings,
+disputes or reconsideration.
+
+Existing resume ownership, leases, frozen-input, configuration, guidance and Git
+guards still apply. Before any retry agent or check, current content and
+validation-infrastructure fingerprints must match the failed result; drift fails
+closed. One write-ahead transition clears terminal evidence and enters complete
+Worker finalization followed by exact Runner-trusted execution. It preserves
+candidate proof, counters, budgets, correction history and immutable failed
+journal records. Another failure returns to ordinary resolution; another unchanged
+blocked retry requires another explicit resume. Success requires a distinct
+read-only terminal `CONFIRM` over the finalized content and fresh validation
+evidence, by Worker in lazy mode or Reviewer in independent and combined modes,
+before the one runner-owned `HANDOFF`. Retry grants no agent staging or commit
+authority.
 
 Ordinary terminal findings without validation-evidence rejection clear candidate
 and terminal-confirmation attestations while retaining a successful finalization
@@ -1521,6 +1544,11 @@ semantics, and handoff behavior. Cover at least:
   execution only during `FINALIZE`;
 - successful, blocked, failed, non-allowlisted, fingerprint-drifting, mutating,
   and resumed runner-trusted checks with the durable selected snapshot;
+- explicit Runner-only failed-finalization retries in every mode, one resume per
+  attempt, formatter-bound terminal confirmation before one handoff, preserved
+  candidate and accounting history, exact trusted vectors and bindings, and
+  rejection of agent/mixed or mismatched issues, pending blockers and input,
+  guidance, content or infrastructure drift before retry effects;
 - source-projection discovery, correction, migration, execution in every mode,
   content-change invalidation, evidence recovery, and matching handoff binding
   without duplicating root sandbox or Git-materialization proofs;

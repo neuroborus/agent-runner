@@ -313,15 +313,22 @@ under the lease without losing completed effects or resetting budgets.
 ## Failure and blocking behavior
 
 A legitimate nonzero check result is a finalization failure and returns to
-Worker correction. In plan execution, an explicit resume of an unchanged
-environment-blocked resolution may repeat complete finalization when every
-blocker is solely a runner-trusted failure with its matching generated issue.
+Worker correction. In plan execution and polishing, an explicit resume of an
+unchanged environment-blocked resolution may repeat complete finalization when
+every blocker is solely a runner-trusted failure and the complete issue list
+exactly matches the ordered generated issues. Candidate acceptance remains
+required, without a pending edit or unresolved findings, disputes or reconsideration;
+frozen-input, configuration, guidance, Git and failed-fingerprint guards still
+apply before retry effects.
 Normalized diagnostics do not change that existing eligibility or budgets;
 historical opaque results receive no synthesized detail. Mixed or agent-authored
 failures remain on the ordinary resolution path.
 This does not accept host evidence or enable automatic retries: another failure
 returns to resolution and requires another explicit resume if blocked again.
-Mode-specific terminal confirmation and correction accounting remain intact.
+Candidate proof, correction accounting, budgets and failed historical records
+remain intact. Mode-specific terminal confirmation still follows successful
+complete finalization before commit or handoff; polishing never grants agent
+staging or commit authority.
 Timing and safe failing-file identities reach finding resolution on failure and
 the complete finalization tuple reaches terminal confirmation on success. Both
 remain observations; neither permits a failure to advance or revives evidence

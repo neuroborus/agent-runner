@@ -320,13 +320,20 @@ run, frozen inputs/configuration and leases. Never hot-reload an active owner or
 edit durable state to simulate loading new code.
 A host pass can still fail closed in isolation. Diagnose using the safe evidence
 and current actions; diagnostics grant no extra retry or completion authority.
-For an eligible unchanged runner-only failure, explicit null-action resume
-revalidates frozen inputs, repository safety and failed fingerprints, then
-repeats complete `FINALIZE`, including Worker finalization and applicable
-runner-trusted checks, to generate fresh evidence. Existing eligibility,
-correction accounting and terminal confirmation still apply; another blocked
+In plan execution and polishing, an eligible unchanged runner-only failure can
+be retried by explicit null-action resume from `environment_blocked` at
+`RESOLVE_FINDINGS`. Eligibility requires accepted candidate evidence, no pending
+edit or other unresolved findings, disputes or reconsideration, and exclusively
+Runner-executed failed checks with their exact complete ordered generated issues.
+Resume revalidates frozen inputs, configuration, guidance, repository safety and
+failed fingerprints, then repeats complete `FINALIZE`, including Worker
+finalization and applicable runner-trusted checks, to generate fresh evidence.
+Correction accounting and terminal confirmation still apply; another blocked
 failure requires another explicit resume. Historical results remain unchanged,
-and discarded historical output cannot be recovered.
+and discarded historical output cannot be recovered. Diagnostic availability
+does not determine retry eligibility. Successful complete finalization still
+needs a distinct read-only terminal confirmation before commit or runner-owned
+polishing handoff; polishing agents never stage or commit.
 Preserve that boundary and investigate the isolated environment
 rather than using the timeout as a containment or diagnostics workaround.
 
