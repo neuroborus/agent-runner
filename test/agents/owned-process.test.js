@@ -315,6 +315,27 @@ function exitedCandidateFixture({
   return fixture;
 }
 
+function liveCustodyFixture({ reads = {}, pids = ["101"] } = {}) {
+  const fixture = exitedCandidateFixture({
+    pids,
+    reads: {
+      "/proc/101/stat": [processStat(101, 202, 303)],
+      "/proc/202/stat": [processStat(202, 303, 303, "5678")],
+      "/proc/202/environ": [processRaceError("EPERM")],
+      "/proc/303/stat": [processStat(303, 1, 303, "6789")],
+      "/proc/303/environ": [processRaceError("EACCES")],
+      ...reads,
+    },
+  });
+  // An intermediate baseline entry must not short-circuit the custody walk.
+  fixture.options.ancestryBaseline = ancestryBaseline(
+    [1, "1"],
+    [202, "5678"],
+    [303, "6789"],
+  );
+  return fixture;
+}
+
 // Run the actual launcher payload with an injected procfs and clock, without
 // starting a supervisor, provider, timer, or any host process.
 function inspectEmbeddedSession(ownerToken, options) {
@@ -356,7 +377,7 @@ globalThis.result = ownedMembers();`,
   return context.result === null ? null : Array.from(context.result);
 }
 
-const EXIT_INSPECTORS = [
+const SESSION_INSPECTORS = [
   [
     "recovery",
     (token, options) => inspectOwnedSessionProcesses(44, token, options),
@@ -873,7 +894,7 @@ function inaccessibleProcessOptions(startTicks = ["1234"]) {
 }
 
 test("excludes only a fully exited anchored candidate in the owner's control group", async (t) => {
-  for (const [name, inspect] of EXIT_INSPECTORS) {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
       for (const fields of [{}, { 6: "4194308", 49: "256" }]) {
         const { options, ownerToken } = exitedCandidateFixture({
@@ -889,7 +910,7 @@ test("excludes only a fully exited anchored candidate in the owner's control gro
 });
 
 test("invalidated exited-candidate evidence cannot fall back to control-group exclusion", async (t) => {
-  for (const [name, inspect] of EXIT_INSPECTORS) {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
       const group = { "/proc/101/cgroup": ["0::/unrelated.scope\n"] };
       const live = exitedCandidateFixture({
@@ -1075,7 +1096,7 @@ test("exited-candidate proof rejects missing, malformed, live, reused, or unstab
     ["inaccessible task list", [processRaceError("EACCES")]],
   ])
     cases.push([label, {}, { "/proc/101/task": lists }]);
-  for (const [name, inspect] of EXIT_INSPECTORS) {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, async (t) => {
       for (const [label, reads, lists] of cases) {
         await t.test(label, () => {
@@ -1117,7 +1138,7 @@ test("exited-candidate proof rejects missing, malformed, live, reused, or unstab
 
 test("exited-candidate exclusion preserves observed ownership and independent descendant scanning", async (t) => {
   const marker = `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`;
-  for (const [name, inspect] of EXIT_INSPECTORS) {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
       for (const reads of [
         { "/proc/101/environ": [marker] },
@@ -1165,7 +1186,7 @@ test("exited-candidate exclusion preserves observed ownership and independent de
 });
 
 test("exited-candidate inspection shares work and elapsed bounds through the final read", async (t) => {
-  for (const [name, inspect] of EXIT_INSPECTORS) {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
     await t.test(name, () => {
       const exhausted = exitedCandidateFixture({
         pids: Array(3000).fill("101"),
@@ -1191,6 +1212,196 @@ test("exited-candidate inspection shares work and elapsed bounds through the fin
         250,
         "the final read crosses the unchanged elapsed bound",
       );
+    });
+  }
+});
+
+test("proves inaccessible live custody through the exact baseline session leader in the shared control group", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      const fixture = liveCustodyFixture({
+        pids: ["101", "404"],
+        reads: {
+          "/proc/404/stat": [processStat(404, 101, 303, "7890")],
+          "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
+          "/proc/404/environ": [processRaceError("EACCES")],
+          "/proc/404/cgroup": ["0::/shared.scope\n"],
+        },
+      });
+      assert.deepEqual(inspect(fixture.ownerToken, fixture.options), []);
+      assert.ok(fixture.reads.get("/proc/303/stat") >= 3);
+      assert.ok(fixture.reads.get("/proc/404/stat") >= 3);
+      assert.equal(fixture.reads.has("/proc/101/task/101/stat"), false);
+    });
+  }
+});
+
+test("live custody retains owned and delegated evidence before every anchor and scans descendants independently", async (t) => {
+  const marker = `AGENT_RUNNER_OWNED_PROCESS=${"a".repeat(64)}\0`;
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      for (const reads of [
+        { "/proc/101/environ": [marker] },
+        { "/proc/101/stat": [processStat(101, 202, 44)] },
+        { "/proc/202/environ": [marker] },
+        { "/proc/202/stat": [processStat(202, 303, 44, "5678")] },
+        { "/proc/303/environ": [marker] },
+      ]) {
+        const fixture = liveCustodyFixture({ reads });
+        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
+      }
+      for (const pid of [101, 202, 303]) {
+        const fixture = liveCustodyFixture({
+          reads: {
+            [`/proc/${pid}/environ`]: [processRaceError("EACCES"), marker],
+          },
+        });
+        assert.deepEqual(inspect(fixture.ownerToken, fixture.options), [101]);
+      }
+      for (const [environment, session, expected] of [
+        [marker, 303, [404]],
+        ["", 44, [404]],
+        [processRaceError("EACCES"), 505, null],
+      ]) {
+        const fixture = liveCustodyFixture({
+          pids: ["101", "404"],
+          reads: {
+            "/proc/404/stat": [processStat(404, 101, session, "7890")],
+            "/proc/404/status": ["Uid:\t1000\t1000\t1000\t1000\n"],
+            "/proc/404/environ": [environment],
+            "/proc/404/cgroup": ["0::/shared.scope\n"],
+          },
+        });
+        assert.deepEqual(
+          inspect(fixture.ownerToken, fixture.options),
+          expected,
+        );
+        assert.equal(fixture.reads.has("/proc/404/stat"), true);
+      }
+    });
+  }
+});
+
+test("live custody rejects baseline ancestry without a live leader, incomplete or cyclic lineage, and unstable evidence", async (t) => {
+  const cases = [
+    ["missing leader", { "/proc/303/stat": [processRaceError()] }],
+    [
+      "inaccessible leader identity",
+      { "/proc/303/stat": [processRaceError("EACCES")] },
+    ],
+    ["reused leader", { "/proc/303/stat": [processStat(303, 1, 303, "9999")] }],
+    [
+      "dead leader",
+      {
+        "/proc/303/stat": [
+          exitedStat({ pid: 303, parent: 1, session: 303, start: "6789" }),
+        ],
+      },
+    ],
+    ["malformed leader", { "/proc/303/stat": ["invalid"] }],
+    ["session gap", { "/proc/202/stat": [processStat(202, 303, 505, "5678")] }],
+    ["parent gap", { "/proc/202/stat": [processStat(202, 505, 303, "5678")] }],
+    [
+      "incomplete ancestry with a different control group",
+      {
+        "/proc/202/stat": [processRaceError("EACCES")],
+        "/proc/101/cgroup": ["0::/unrelated.scope\n"],
+      },
+    ],
+    [
+      "cycle",
+      {
+        "/proc/101/stat": [processStat(101, 202, 505)],
+        "/proc/202/stat": [processStat(202, 101, 505, "5678")],
+      },
+    ],
+    [
+      "cycle through the baseline leader",
+      { "/proc/303/stat": [processStat(303, 101, 303, "6789")] },
+    ],
+  ];
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      const unanchored = liveCustodyFixture();
+      unanchored.options.ancestryBaseline = ancestryBaseline(
+        [1, "1"],
+        [202, "5678"],
+      );
+      assert.equal(inspect(unanchored.ownerToken, unanchored.options), null);
+      const groupAlone = liveCustodyFixture({
+        reads: { "/proc/101/cgroup": ["0::/unrelated.scope\n"] },
+      });
+      groupAlone.options.ancestryBaseline = null;
+      assert.equal(inspect(groupAlone.ownerToken, groupAlone.options), null);
+      for (const [label, reads] of cases) {
+        const fixture = liveCustodyFixture({ reads });
+        assert.equal(inspect(fixture.ownerToken, fixture.options), null, label);
+      }
+      // Invalidate each observation, including the last read of every hop.
+      const successful = liveCustodyFixture();
+      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
+      for (const [pid, parent, start] of [
+        [101, 202, "1234"],
+        [202, 303, "5678"],
+        [303, 1, "6789"],
+      ]) {
+        const path = `/proc/${pid}/stat`;
+        const stable = processStat(pid, parent, 303, start);
+        for (let count = 1; count < successful.reads.get(path); count += 1) {
+          for (const [changed, churn] of [
+            [processStat(pid, parent, 303, "9999"), false],
+            [exitedStat({ pid, parent, session: 303, start }), false],
+            [processStat(pid, 505, 303, start), true],
+            [processStat(pid, parent, 505, start), true],
+          ]) {
+            let changedView = false;
+            const fixture = liveCustodyFixture({
+              reads: {
+                "/proc/101/cgroup": ["0::/unrelated.scope\n"],
+                [path]: [
+                  ...Array(count).fill(stable),
+                  () => {
+                    changedView = !changedView;
+                    return !churn || changedView ? changed : stable;
+                  },
+                ],
+              },
+            });
+            assert.equal(
+              inspect(fixture.ownerToken, fixture.options),
+              null,
+              `${path} read ${count + 1}`,
+            );
+          }
+        }
+      }
+    });
+  }
+});
+
+test("live custody shares the unchanged work and elapsed bounds through its final read", async (t) => {
+  for (const [name, inspect] of SESSION_INSPECTORS) {
+    await t.test(name, () => {
+      const exhausted = liveCustodyFixture({ pids: Array(3000).fill("101") });
+      assert.equal(inspect(exhausted.ownerToken, exhausted.options), null);
+      assert.ok(exhausted.reads.get("/proc/303/stat") > 3);
+      const successful = liveCustodyFixture();
+      assert.deepEqual(inspect(successful.ownerToken, successful.options), []);
+      const fixture = liveCustodyFixture();
+      const read = fixture.options.read;
+      let elapsed = 0;
+      fixture.options.now = () => elapsed;
+      fixture.options.read = (path) => {
+        const value = read(path);
+        if (
+          path === "/proc/101/stat" &&
+          fixture.reads.get(path) === successful.reads.get(path)
+        )
+          elapsed = 250;
+        return value;
+      };
+      assert.equal(inspect(fixture.ownerToken, fixture.options), null);
+      assert.equal(elapsed, 250);
     });
   }
 });
@@ -1436,12 +1647,14 @@ test("rejects inaccessible new processes but retains an owned session", () => {
   );
 });
 
-test("ignores an unowned inaccessible process in a different control group", () => {
+test("excludes an inaccessible process only with complete unrelated ancestry and a different control group", () => {
   const ownerSource = "0::/owned.scope\n";
   const ownerControlGroup = createHash("sha256")
     .update(ownerSource)
     .digest("hex");
-  const options = inaccessibleProcessOptions();
+  const { options } = processRaceOptions({
+    "/proc/101/environ": [processRaceError("EACCES")],
+  });
   const read = options.read;
   const inspect = (source, sessionId = "44") =>
     inspectOwnedSessionProcesses(sessionId, "a".repeat(64), {

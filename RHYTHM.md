@@ -7,6 +7,23 @@ remain in the owning documentation.
 
 ## 2026-10-22
 
+- **Unrelated live custody has its own positive proof.** Both external recovery
+  and the embedded supervisor bind inaccessible candidates to a live unrelated
+  session leader whose exact identity is in the frozen pre-launch baseline.
+  They stabilize the parent/session chain, preserve earlier identity observations,
+  check owned/delegated evidence before every anchor, and revalidate every hop
+  and custodian. This supports shared-control-group live trees without granting
+  exclusion from a different session or baseline ancestor alone. Control-group
+  exclusion also requires complete anchored ancestry; invalidated custody evidence
+  cannot fall back to it. Each descendant remains independently inspected under
+  the unchanged work, time and churn
+  bounds. Normal same-run recovery journals ownership retirement before
+  checkpoint continuation while preserving frozen run state and pending requests.
+  Synthetic coverage does not replace the supervising operator's two distinct
+  same-run recoveries using a separately frozen accepted runtime; unavailable
+  original recovery leaves the prerequisite incomplete. Owner loss remains
+  unexplained.
+
 - **Fully exited candidates have a separate narrow exclusion proof.** External
   recovery and the embedded supervisor now require stabilized frozen ancestry,
   observed ownership precedence, matching identity and parent/session, kernel

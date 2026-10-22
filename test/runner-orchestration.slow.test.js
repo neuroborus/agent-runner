@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readlinkSync } from "node:fs";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -14,6 +16,7 @@ import {
   RUN_STATE_SCHEMA_VERSION,
   RunnerError,
 } from "../src/index.js";
+import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
 import {
   configurationLoader,
   createAdapter,
@@ -520,6 +523,148 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     assert.doesNotMatch(serialized, /Example Agent Runner/u);
     assert.ok(!serialized.includes(paused.run.clientAttributionFingerprint));
   }
+});
+
+test("same-run recovery journals retirement after proving unrelated live custody and preserves its pending request", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const bootId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+  const executionPid = 2_000_000_001;
+  const identity = { bootId, startTicks: "9000" };
+  const baseline = [{ bootId, pid: 303, startTicks: "6789" }];
+  const group = "0::/shared.scope\n";
+  const storeOptions = {
+    stateRoot: fixture.stateRoot,
+    hostName: "recovery-host",
+    processId: 100,
+    processIsAlive: () => true,
+    processIdentity: (pid) =>
+      pid === executionPid ? identity : { bootId, startTicks: String(pid) },
+  };
+  const store = createRunStore(storeOptions);
+  const { run } = await runnerFor(
+    fixture,
+    { codex: createExecutionAdapter() },
+    { runStore: store },
+  ).create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+    proactiveClarification: false,
+    roleOverrides: {},
+    sourceSession: null,
+  });
+  const lease = await store.acquireRunLease(run.runId);
+  await store.acquireWorktreeLease(fixture.projectPath, run.runId);
+  const checkpoint = await store.recordExecutionProcess(lease, executionPid, {
+    processIdentity: identity,
+    namespaceId: readlinkSync("/proc/self/ns/pid"),
+    ancestryBaseline: baseline,
+    controlGroup: createHash("sha256").update(group).digest("hex"),
+  });
+  await assert.rejects(lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+  const request = {
+    key: "pending-resume",
+    tool: "run_resume",
+    arguments: {
+      runId: run.runId,
+      action: null,
+      expectedRevision: checkpoint.revision,
+    },
+    context: { runId: run.runId },
+  };
+  const pending = await store.beginAction(request);
+  const intent = pending.record;
+  await pending.release();
+  const git = createGitService();
+  const repository = await git.snapshot({ projectPath: fixture.projectPath });
+  const replacement = createRunStore({
+    ...storeOptions,
+    processId: 200,
+    processIsAlive: (pid) => pid === 200,
+  });
+  let inspected = false;
+  let continued = false;
+  const runner = runnerFor(
+    fixture,
+    {
+      codex: {
+        ...createExecutionAdapter(),
+        async run() {
+          assert.equal(inspected, true);
+          assert.equal(
+            (await replacement.loadRun(run.runId)).executionProcess,
+            null,
+          );
+          assert.deepEqual(await replacement.readAction(request), intent);
+          continued = true;
+          throw outputExhaustion({ effect: "none" });
+        },
+      },
+    },
+    {
+      runStore: replacement,
+      inspectSessionProcesses(sessionId, token, options) {
+        assert.equal(sessionId, executionPid);
+        assert.deepEqual(options.ancestryBaseline, baseline);
+        inspected = true;
+        return inspectOwnedSessionProcesses(sessionId, token, {
+          ...options,
+          getuid: () => 1000,
+          now: () => 0,
+          list: () => ["101", "202", "303"],
+          read(path) {
+            if (path === "/proc/sys/kernel/random/boot_id")
+              return `${bootId}\n`;
+            if (path.endsWith("/stat")) {
+              const pid = Number(path.split("/")[2]);
+              const fields = Array(20).fill("0");
+              fields[0] = "S";
+              fields[1] = String({ 101: 202, 202: 303, 303: 1 }[pid]);
+              fields[3] = "303";
+              fields[19] = { 101: "1234", 202: "5678", 303: "6789" }[pid];
+              return `${pid} (process) ${fields.join(" ")}`;
+            }
+            if (path.endsWith("/status"))
+              return "Uid:\t1000\t1000\t1000\t1000\n";
+            if (path.endsWith("/cgroup")) return group;
+            throw Object.assign(new Error("inaccessible environment"), {
+              code: "EACCES",
+            });
+          },
+        });
+      },
+    },
+  );
+  const dispatch = {
+    id: REVIEWER_SESSION,
+    expectedRevision: checkpoint.revision,
+  };
+  const resumed = await runner.resume({
+    ...request.arguments,
+    dispatch,
+    expectedRuntimeCompatibility: DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  });
+  assert.equal(resumed.run.runId, run.runId);
+  assert.equal(resumed.run.pause.reason, "output_exhausted");
+  assert.equal(continued, true);
+  const history = await replacement.loadRunHistory(run.runId);
+  const retirement = history.events.find(
+    ({ activity }) =>
+      activity.phase === "execution" && activity.kind === "stopped",
+  );
+  assert.ok(retirement);
+  const unchanged = ({ revision, updatedAt, executionProcess, ...state }) =>
+    state;
+  assert.deepEqual(unchanged(retirement.state), unchanged(checkpoint));
+  assert.equal(retirement.state.executionProcess, null);
+  assert.deepEqual(await replacement.readAction(request), intent);
+  assert.equal(
+    (await replacement.inspectRecoveryDispatch(run.runId, dispatch)).ready,
+    true,
+  );
+  await git.assertUnchanged(repository);
 });
 
 test("migrates legacy authoring line targets under the lease without configuration reload", async (t) => {

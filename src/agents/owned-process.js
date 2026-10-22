@@ -135,6 +135,108 @@ function inspectExitedCandidate(pid, details, lineage, read, list) {
   }
 }
 
+// A baseline ancestor alone is not custody. Follow the candidate's session all
+// the way to its live, pre-launch leader, checking ownership before any anchor.
+function inspectLiveCustody(
+  pid,
+  details,
+  ancestry,
+  ownerSession,
+  ownerToken,
+  isBaseline,
+  read,
+) {
+  const lineage = [];
+  const pinned = new Map(ancestry.map((entry) => [entry.pid, entry.details]));
+  const seen = new Set();
+  const observe = (currentPid, expected) => {
+    const current = processStatDetails(
+      read(`/proc/${currentPid}/stat`, "utf8"),
+      currentPid,
+    );
+    if (current === null || current.startTicks !== expected.startTicks)
+      return "invalid";
+    if (
+      current.parentPid !== expected.parentPid ||
+      current.sessionId !== expected.sessionId
+    )
+      return "retry";
+    let owned =
+      String(currentPid) === ownerSession || current.sessionId === ownerSession;
+    try {
+      const environment = read(`/proc/${currentPid}/environ`, "utf8").split(
+        "\0",
+      );
+      owned ||= environment.includes(
+        `AGENT_RUNNER_OWNED_PROCESS=${ownerToken}`,
+      );
+    } catch (cause) {
+      if (!["EACCES", "EPERM"].includes(cause?.code)) throw cause;
+    }
+    const verification = verifyProcessDetails(currentPid, current, read);
+    if (verification !== "stable") return verification ?? "invalid";
+    if (owned) return "current";
+    if (!["R", "S", "D", "T", "t", "W", "K", "P", "I"].includes(current.state))
+      return "invalid";
+    return current.sessionId === details.sessionId ? "stable" : null;
+  };
+  try {
+    let currentPid = pid;
+    let current = details;
+    while (currentPid > 0 && !seen.has(currentPid)) {
+      seen.add(currentPid);
+      const observation = observe(currentPid, current);
+      if (observation !== "stable") return observation;
+      lineage.push({ pid: currentPid, details: current });
+      if (seen.has(current.parentPid)) return "invalid";
+      if (String(currentPid) === details.sessionId) {
+        if (!isBaseline(currentPid, current.startTicks)) return "invalid";
+        for (const entry of lineage) {
+          const verification = observe(entry.pid, entry.details);
+          if (verification !== "stable") return verification;
+        }
+        // The last environment read must not hide a changed identity or exit.
+        for (const entry of lineage.toReversed()) {
+          const final = processStatDetails(
+            read(`/proc/${entry.pid}/stat`, "utf8"),
+            entry.pid,
+          );
+          if (final === null || final.startTicks !== entry.details.startTicks)
+            return "invalid";
+          if (
+            final.parentPid !== entry.details.parentPid ||
+            final.sessionId !== entry.details.sessionId
+          )
+            return "retry";
+          if (
+            !["R", "S", "D", "T", "t", "W", "K", "P", "I"].includes(final.state)
+          )
+            return "invalid";
+        }
+        return "unrelated";
+      }
+      currentPid = current.parentPid;
+      current = processStatDetails(
+        read(`/proc/${currentPid}/stat`, "utf8"),
+        currentPid,
+      );
+      if (current === null) return "invalid";
+      if (pinned.has(currentPid)) {
+        const expected = pinned.get(currentPid);
+        if (current.startTicks !== expected.startTicks) return "invalid";
+        if (
+          current.parentPid !== expected.parentPid ||
+          current.sessionId !== expected.sessionId
+        )
+          return "retry";
+      }
+    }
+    return "invalid";
+  } catch (cause) {
+    return ["ENOENT", "ESRCH"].includes(cause?.code) ? "retry" : "invalid";
+  }
+}
+
 const OWNERSHIP_MODES = new Set(["ordinary", "native-sandbox-provider"]);
 // Linux reserves this procfs inode for the initial PID namespace.
 const INITIAL_PID_NAMESPACE = "pid:[4026531836]";
@@ -162,6 +264,7 @@ let retentionTimer;
 const inspectionBudget = ${inspectionBudget.toString()};
 const exitedProcessEvidence = ${exitedProcessEvidence.toString()};
 const inspectExitedCandidate = ${inspectExitedCandidate.toString()};
+const inspectLiveCustody = ${inspectLiveCustody.toString()};
 let charge;
 function readProc(path, encoding) {
   charge();
@@ -188,6 +291,7 @@ function processStatDetails(stat, pid) {
     !/^(?:0|[1-9]\d{0,31})$/.test(fields[19])
   ) return null;
   return {
+    state: fields[0],
     parentPid: Number(fields[1]),
     sessionId: fields[3],
     startTicks: fields[19],
@@ -381,9 +485,16 @@ function inspectSessionProcess(pid, session) {
           if (classification === "exited") return "unrelated";
           if (classification === "invalid") return null;
           if (["current", "retry"].includes(classification)) ownership = classification;
-          else if (processControlGroup(pid) !== controlGroup) {
-            ownership = "unrelated";
-          } else ownership = null;
+          else {
+            ownership = ancestry === "anchored"
+              ? inspectLiveCustody(pid, details, lineage, session, ownerToken, isBaselineIdentity, readProc)
+              : null;
+            if (ownership === "unrelated") return "unrelated";
+            if (ownership === "invalid") return null;
+            if (ownership === null && ancestry === "anchored" && processControlGroup(pid) !== controlGroup) {
+              ownership = "unrelated";
+            }
+          }
         }
       } else return null;
     }
@@ -807,6 +918,7 @@ function processStatDetails(stat, pid) {
   )
     return null;
   return {
+    state: fields[0],
     parentPid: Number(fields[1]),
     sessionId: fields[3],
     startTicks: fields[19],
@@ -1096,9 +1208,34 @@ function inspectSessionProcess(
           if (classification === "invalid") return null;
           if (["current", "retry"].includes(classification))
             ownership = classification;
-          else if (hasDifferentControlGroup(pid, controlGroup, read)) {
-            ownership = "unrelated";
-          } else ownership = null;
+          else {
+            ownership =
+              ancestry === "anchored"
+                ? inspectLiveCustody(
+                    pid,
+                    details,
+                    lineage,
+                    includeSession ? String(sessionId) : null,
+                    ownerToken,
+                    (candidate, startTicks) =>
+                      isBaselineIdentity(
+                        ancestryBaseline,
+                        candidate,
+                        startTicks,
+                      ),
+                    read,
+                  )
+                : null;
+            if (ownership === "unrelated") return "unrelated";
+            if (ownership === "invalid") return null;
+            if (
+              ownership === null &&
+              ancestry === "anchored" &&
+              hasDifferentControlGroup(pid, controlGroup, read)
+            ) {
+              ownership = "unrelated";
+            }
+          }
         }
       } else return null;
     }

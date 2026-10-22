@@ -410,22 +410,23 @@ client timeout nor disconnect cancels the durable continuation or its receipt.
 Unrelated revision movement and retained lease reservations are not launch proof.
 Inspection-budget exhaustion preserves exclusion just like incomplete evidence.
 
-Shared-host recovery uses the bounded boot/PID/start baseline captured before
-supervisor launch and journaled before provider work. Unrelated post-launch
-candidates require stabilized ancestry to an unchanged frozen anchor, with
-observed session/token ownership taking precedence. Inaccessible intermediate
-environments are allowed only on that complete walk. An inaccessible candidate
-requires a different stable control group or the
-[fully exited proof](product/SAFETY_MODEL.md). The latter excludes one entry,
-including in the owner's group; `Z` alone is insufficient. Descendants remain
-independently scanned; failed exit proof grants no live-custody or complete tree
-retirement authority. Unproved or reused identities, missing or stale anchors,
-missing or matching control groups without exit proof, boot/namespace mismatch,
-cycles, survivors, and incomplete evidence still block. Legacy runs report a
-compatibility diagnosis for missing evidence and cannot gain it during recovery.
-Transient exit or reparenting gets the fixed per-PID retry; only a fresh read can
-prove that entry absent. Exhausted churn still blocks. Never delete process or
-lease records manually.
+Shared-host recovery uses the pre-launch boot/PID/start baseline journaled
+before provider work. Stabilized ancestry must reach an unchanged frozen anchor;
+observed session/token ownership takes precedence. Inaccessible intermediate
+environments require that complete walk. An inaccessible candidate also needs a
+different stable control group or a
+[fully exited or separate live-custody proof](product/SAFETY_MODEL.md).
+Live custody rechecks a consistent parent/session chain to a live unrelated
+session leader with its exact frozen identity. `Z`, baseline ancestry, a different
+session or permission denial alone is insufficient. Exclusion covers only that
+entry; every descendant is independently scanned. Missing, reused, unstable,
+cyclic or incomplete evidence, boot/namespace mismatch and exhausted bounds block
+recovery. Legacy records gain no proof retroactively. Exit/reparenting retries
+stay bounded; absence requires a fresh read. Never delete process or lease records.
+
+After both fixes pass review and commit gates, follow the operator-owned
+[operational acceptance procedure](product/SAFETY_MODEL.md#ownership-repair-operational-acceptance)
+before dependent work.
 
 To stop active work, use `agent-run pause --run <run-id>` or
 `agent-run cancel --run <run-id>`. The shorthand reads status once and binds

@@ -957,15 +957,24 @@ launch baseline.
 Every observed session and ownership token is checked before accepting that
 anchor. An inaccessible current environment is excluded only when its stable
 control-group identity differs from the recorded owner, or a narrow fully
-exited candidate proof succeeds after the anchored ownership checks. That proof
-requires matching identity, parent/session and kernel termination evidence,
+exited or separate positive live-custody proof succeeds after the anchored
+ownership checks. The exit proof requires matching identity, parent/session and
+kernel termination evidence,
 with two stable views of a sole dead task without children. Zombie state alone
 is insufficient. It excludes only that entry, even in the owner's control
 group; descendants remain independently inspected before complete process-tree
-retirement. Failed exit proof grants no authority over live work. Replaced or
+retirement. Live custody instead requires a consistent stabilized parent/session
+chain to a live unrelated session leader with an exact pre-launch baseline
+identity, then rechecks the candidate, every hop and custodian. Known owned or
+delegated evidence takes precedence even at a baseline ancestor or leader.
+It supports inaccessible live trees in the owner's group while still inspecting
+each descendant independently. Different sessions, baseline ancestry,
+control-group differences or permission denial alone do not establish custody.
+Failed exit proof grants no authority over live work. Replaced or
 reused PIDs, a stale or missing anchor, a boot mismatch, cycles, missing or matching
-control-group evidence without exit proof, surviving descendants, and otherwise
-unverifiable evidence remain blocked and must not be bypassed by killing a persisted PID. A
+control-group evidence without either proof, missing or dead custodians,
+surviving descendants, and otherwise unverifiable evidence remain blocked and
+must not be bypassed by killing a persisted PID. A
 stable inaccessible intermediate may be crossed only when the same walk reaches
 its exact baseline anchor. If a snapshot PID exits or
 reparents during inspection, the runner retries that PID and its new ancestry

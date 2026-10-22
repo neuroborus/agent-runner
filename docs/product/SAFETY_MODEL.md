@@ -211,16 +211,29 @@ ownership before accepting an anchor. An inaccessible intermediate environment
 may be crossed only when the walk still reaches that exact anchor.
 An inaccessible current environment is excluded only when its lineage reaches no
 owned evidence and its stable control-group identity differs, or a separate
-fully exited candidate proof succeeds after complete stabilized ancestry reaches
-the frozen baseline. That proof binds PID/start, parent/session, kernel exit
-flags and exit code to two stable views of a sole dead task without children,
+fully exited or positive live-custody candidate proof succeeds after complete
+stabilized ancestry reaches the frozen baseline. The exit proof binds PID/start,
+parent/session, kernel exit flags and exit code to two stable views of a sole
+dead task without children,
 then rechecks the lineage and candidate. Zombie state alone never suffices.
 It excludes only that entry, including when it shares the owner's control group;
 all descendants remain independently inspected. Missing exit proof grants no
 live-custody authority and cannot establish complete process-tree retirement.
+Live custody separately requires a consistent, stabilized parent/session chain
+to a live unrelated session leader whose exact boot/PID/start identity was
+frozen before launch. Intermediate baseline ancestors cannot substitute for
+that custodian. Candidate, every hop and leader are rechecked, with all observed
+owned session/token evidence taking precedence over exclusion. Inaccessible
+environments and a shared control group are supported only with that positive
+proof. A different session, baseline ancestry, control-group difference or
+permission denial alone supplies no live-custody authority. Missing or dead
+leaders, identity reuse, incomplete or cyclic ancestry, session inconsistency,
+unstable evidence and exhausted bounds remain conservative. Live-custody
+exclusion also covers only the inspected entry; descendants remain independently
+classified before complete retirement can clear a process record.
 PID reuse, a stale or missing anchor, a boot mismatch, missing or matching current
-control-group evidence without exit proof, cycles, owned evidence, malformed
-identities, a recovery namespace mismatch, or otherwise unproven
+control-group evidence without either candidate proof, cycles, owned evidence,
+malformed identities, a recovery namespace mismatch, or otherwise unproven
 candidates fail closed whenever the session scan is needed. Legacy records do
 not gain baseline or control-group authority through migration or recovery.
 A recorded previous boot remains independent proof that the old process tree
@@ -348,6 +361,23 @@ resulting fingerprint. A commit or handoff proceeds only when current content
 and validation infrastructure still match the accepted fingerprints and no
 mutation can occur between the final read-only gate and the runner-owned
 effect.
+
+### Ownership-repair operational acceptance
+
+After both ownership fixes have passed their review and commit gates, the
+supervising operator freezes a separate immutable runtime at a clean, quiescent
+boundary, including all accepted prerequisites and both fixes. Before dependent
+work, recheck the original repository's current user/worktree ownership and
+frozen guards, then recover the
+original interrupted ownership case through its unchanged pending idempotent
+request. Separately recover the interrupted read/readiness case with its existing
+key and arguments. Preserve frozen inputs, configuration, completed commits,
+accounting and budgets in both cases. Synthetic tests, replacement runs and one
+case's recovery do not establish the other's operational acceptance. If original
+recovery is unavailable, the ownership prerequisite remains incomplete and
+dependent work stops. Only normal journaled reconciliation may clear ownership;
+never kill unknown processes or delete/rewrite records to pass this gate. The
+original execution owner's disappearance remains unexplained.
 
 ## Redaction and provider isolation
 

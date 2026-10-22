@@ -1590,9 +1590,9 @@ stable inaccessible intermediate environment may be crossed only if the
 lineage subsequently reaches an unchanged anchor; inaccessible current-process
 environment is excluded only when its lineage reaches no owned evidence and its
 stable control-group identity differs from the recorded owner, or the separate
-fully exited candidate proof below succeeds. A missing or matching control-group
-identity without that exit proof, a stale or reused anchor, a missing baseline,
-a boot mismatch, a cycle, malformed
+fully exited or live-custody candidate proof below succeeds. A missing or
+matching control-group identity without either proof, a stale or reused anchor,
+a missing baseline, a boot mismatch, a cycle, malformed
 identity evidence, and otherwise unproven candidates remain unverifiable
 during both live execution and recovery. Recovery also rejects a
 recorded PID namespace that differs from its own because the envelope does not
@@ -1619,6 +1619,25 @@ A bare zombie state is insufficient; failed exit proof supplies no authority to
 exclude live work. Exclusion applies only to that snapshot entry: every other
 PID, including descendants, is classified independently before a complete empty
 scan can support process-tree retirement.
+
+The separate positive live-custody proof follows the candidate's parent chain
+through a consistent session to that session's live leader. The leader's exact
+boot/PID/start identity must be in the frozen pre-launch baseline; an earlier
+baseline ancestor cannot end this walk. Candidate and hop identities already
+observed by the ancestry scan remain pinned. Every hop checks observed owned
+session and token evidence before accepting custody, including inaccessible
+intermediate environments and the leader itself. The entire lineage and leader
+are revalidated for identity, parent/session and live state, followed by final
+stat reads. Parent/session churn restarts the existing bounded classification;
+reuse or invalidated identity evidence blocks exclusion. This proof can exclude
+inaccessible live candidates and descendants in the owner's control group.
+Invalidated live-custody evidence cannot fall back to control-group exclusion;
+that separate exclusion also requires complete anchored ancestry.
+A different session, baseline ancestor, permission denial or control-group
+difference alone is not this proof. Missing or dead leaders, incomplete or
+cyclic lineages, inconsistent sessions and exhausted bounds cannot establish
+custody. Each descendant must independently satisfy classification; excluding a
+parent never establishes complete process-tree retirement.
 
 Live and recovery shared-host scans additionally share a 65,536-operation and
 250-millisecond inspection budget. Reads, snapshot entries, baseline indexing,
