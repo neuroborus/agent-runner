@@ -2814,13 +2814,13 @@ function traceFixture({
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
-        const program = args[coldCommand ? 6 : 5];
+        const program = args[coldCommand ? 8 : 5];
         assert.deepEqual(args, [
           "--non-interactive",
           "--",
           "/usr/sbin/dtrace",
           "-q",
-          ...(coldCommand ? ["-Z"] : []),
+          ...(coldCommand ? ["-Z", "-p", String(identity.pid)] : []),
           "-n",
           program,
           String(identity.pid),
@@ -2852,7 +2852,9 @@ function traceFixture({
             "pthread_get_stackaddr_np",
             "pthread_get_stacksize_np",
           ])
-            assert.ok(program.includes(`${name}:return /pid == $1/`));
+            assert.ok(
+              program.includes(`${name}:return /pid == $1 && target_exec/`),
+            );
           assert.ok(program.includes('probefunc == "mmap"'));
           assert.ok(program.includes('probefunc == "mprotect"'));
           assert.ok(program.includes("(uint64_t)arg5"));
@@ -2865,7 +2867,7 @@ function traceFixture({
           );
         assert.equal(
           program.match(/\/pid == \$1\//gu)?.length,
-          coldCommand ? 10 : 4,
+          coldCommand ? 2 : 4,
         );
         for (const probe of [
           "syscall:::entry",
@@ -2873,7 +2875,16 @@ function traceFixture({
           "proc:::exec-success",
           "proc:::exit",
         ])
-          assert.ok(program.includes(`${probe} /pid == $1/ {`));
+          assert.ok(
+            program.includes(
+              `${probe} /pid == $1${coldCommand && probe.startsWith("syscall") ? " && target_exec" : ""}/ {`,
+            ),
+          );
+        if (coldCommand)
+          assert.match(
+            program,
+            /proc:::exec-success \/pid == \$1\/ \{ target_exec = 1; printf/u,
+          );
         assert.match(
           program,
           /^dtrace:::BEGIN \{ printf\("armed %d %llu\\n", pid, timestamp\); \}$/mu,
@@ -3040,6 +3051,26 @@ test("cold capture overflow and missing exec or exit refuse admission while inde
     const f = traceFixture({ coldCommand: true });
     await f.trace.arm();
     f.child.stdout.write(bytes);
+    await f.close();
+    const result = await f.trace.finish();
+    assert.notEqual(result.status, "observed");
+    assert.equal(result.sha256, null);
+    assert.equal(result.cleanup, "RETIRED");
+    assert.throws(() => assertDarwinColdStartupTrace(result));
+  }
+});
+
+test("cold tracing refuses helper observations as target coverage even with a later valid exec", async () => {
+  for (const prefix of [
+    "entry 42 100 getpid",
+    "return 42 100 read 0 1",
+    "numeric-entry 42 100 sysconf 7 29",
+  ]) {
+    const f = traceFixture({ coldCommand: true });
+    await f.trace.arm();
+    f.child.stdout.write(
+      prefix + "\n" + TRACE_START.join("\n") + "\nexit 42 103\n",
+    );
     await f.close();
     const result = await f.trace.finish();
     assert.notEqual(result.status, "observed");

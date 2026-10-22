@@ -44,11 +44,13 @@ const probes = (names) =>
 // No fallback, generic argument decoding, destructive action or unrelated-process
 // predicate. Cold numeric descriptions may match zero probes; core observations
 // are required independently of compilation and BEGIN acknowledgement.
-const startupProgram = (argumentBytes) => `#pragma D option quiet
+const startupProgram = (argumentBytes, cold = false) => {
+  const started = cold ? " && target_exec" : "";
+  return `#pragma D option quiet
 #pragma D option strsize=${argumentBytes + 1}
-dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
-syscall:::entry /pid == $1/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
-syscall:::entry /pid == $1 && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_with_payload"])})/ {
+${cold ? "int target_exec;\n" : ""}dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
+syscall:::entry /pid == $1${started}/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
+syscall:::entry /pid == $1${started} && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_with_payload"])})/ {
   self->operation = probefunc; self->namespace = probefunc == "abort_with_payload" ? (uint32_t)arg0 : 0;
   self->code = probefunc == "abort_with_payload" ? (uint64_t)arg1 : 0;
   self->pointer = probefunc == "abort_with_payload" ? arg4 : (${probes(Object.keys(PATH_ARGUMENTS).filter((name) => PATH_ARGUMENTS[name] === 1))}) ? arg1 : arg0;
@@ -57,14 +59,15 @@ syscall:::entry /pid == $1 && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_
   printf("argument-entry %d %llu %s %llu %s %u %llu %S\\n", pid, timestamp, probefunc, (uint64_t)tid, self->pointer == 0 ? "missing" : strlen(self->text) < ${argumentBytes} ? "complete" : "truncated", (uint32_t)self->namespace, (uint64_t)self->code, self->text);
   self->text = 0; self->operation = 0;
 }
-syscall:::entry /pid == $1 && probefunc == "csrctl"/ { printf("argument-entry %d %llu %s %llu complete %u 0 \\n", pid, timestamp, probefunc, (uint64_t)tid, (uint32_t)arg0); }
-syscall:::entry /pid == $1 && (probefunc == "sysctl" || probefunc == "sysctlbyname")/ { printf("argument-entry %d %llu %s %llu unsupported 0 0 \\n", pid, timestamp, probefunc, (uint64_t)tid); }
-dtrace:::ERROR /pid == $1 && self->copying/ { printf("argument-entry %d %llu %s %llu copy-failed %u %llu \\n", pid, timestamp, self->operation, (uint64_t)tid, (uint32_t)self->namespace, (uint64_t)self->code); self->copying = 0; self->operation = 0; }
-syscall:::return /pid == $1/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
-syscall:::return /pid == $1 && (${probes(ARGUMENT_FUNCTIONS.filter((name) => name !== "abort_with_payload"))})/ { printf("argument-return %d %llu %s %llu %d %lld\\n", pid, timestamp, probefunc, (uint64_t)tid, errno, (int64_t)arg0); }
-proc:::exec-success /pid == $1/ { printf("exec %d %llu\\n", pid, timestamp); }
+syscall:::entry /pid == $1${started} && probefunc == "csrctl"/ { printf("argument-entry %d %llu %s %llu complete %u 0 \\n", pid, timestamp, probefunc, (uint64_t)tid, (uint32_t)arg0); }
+syscall:::entry /pid == $1${started} && (probefunc == "sysctl" || probefunc == "sysctlbyname")/ { printf("argument-entry %d %llu %s %llu unsupported 0 0 \\n", pid, timestamp, probefunc, (uint64_t)tid); }
+dtrace:::ERROR /pid == $1${started} && self->copying/ { printf("argument-entry %d %llu %s %llu copy-failed %u %llu \\n", pid, timestamp, self->operation, (uint64_t)tid, (uint32_t)self->namespace, (uint64_t)self->code); self->copying = 0; self->operation = 0; }
+syscall:::return /pid == $1${started}/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
+syscall:::return /pid == $1${started} && (${probes(ARGUMENT_FUNCTIONS.filter((name) => name !== "abort_with_payload"))})/ { printf("argument-return %d %llu %s %llu %d %lld\\n", pid, timestamp, probefunc, (uint64_t)tid, errno, (int64_t)arg0); }
+proc:::exec-success /pid == $1/ { ${cold ? "target_exec = 1; " : ""}printf("exec %d %llu\\n", pid, timestamp); }
 proc:::exit /pid == $1/ { printf("exit %d %llu\\n", pid, timestamp); exit(0); }
 `;
+};
 const PROGRAM = startupProgram(128);
 export const DARWIN_STARTUP_TRACE_INTENT = Object.freeze({
   tool: "/usr/sbin/dtrace",
@@ -88,7 +91,7 @@ const NUMERIC_ARGUMENTS = Object.freeze({
   mprotect: ["address", "length", "protection"],
 });
 const COLD_PROGRAM =
-  startupProgram(DARWIN_STARTUP_TRACE_LIMITS.argumentBytes) +
+  startupProgram(DARWIN_STARTUP_TRACE_LIMITS.argumentBytes, true) +
   Object.entries(NUMERIC_ARGUMENTS)
     .map(([name, args]) => {
       const syscall = name === "mmap" || name === "mprotect",
@@ -96,7 +99,7 @@ const COLD_PROGRAM =
           ? "syscall::"
           : `pid$1:${name === "sysconf" ? "libsystem_c.dylib" : "libsystem_pthread.dylib"}:`,
         probe = syscall ? `${provider}:` : `${provider}${name}:`,
-        predicate = `pid == $1${syscall ? ` && probefunc == "${name}"` : ""}`;
+        predicate = `pid == $1 && target_exec${syscall ? ` && probefunc == "${name}"` : ""}`;
       return `${probe}entry /${predicate}/ { printf("numeric-entry %d %llu ${name} %llu${args.map(() => " %llu").join("")}\\n", pid, timestamp, (uint64_t)tid, ${args.map((_, i) => `(uint64_t)arg${i}`).join(", ")}); }
 ${probe}return /${predicate}/ { printf("numeric-return %d %llu ${name} %llu %d %lld\\n", pid, timestamp, (uint64_t)tid, ${syscall ? "errno, (int64_t)arg0" : "-1, (int64_t)arg1"}); }
 `;
@@ -510,6 +513,13 @@ export function openDarwinStartupTrace(
                 row.timestamp - armTime <= 30000000000n,
         );
         need(!exitSeen);
+        // A pre-exec helper syscall cannot satisfy target startup coverage.
+        need(
+          !coldCommand ||
+            row.kind === "armed" ||
+            row.kind === "exec" ||
+            execSeen,
+        );
         if (row.kind === "exec") {
           need(!execSeen);
           execSeen = true;
@@ -639,7 +649,9 @@ export function openDarwinStartupTrace(
             "--",
             "/usr/sbin/dtrace",
             "-q",
-            ...(coldCommand ? ["-Z"] : []),
+            // -p retains libproc exec tracking and re-enables pid-provider probes
+            // for the replacement image; the private native gate still owns exec.
+            ...(coldCommand ? ["-Z", "-p", String(boundPid)] : []),
             "-n",
             coldCommand ? COLD_PROGRAM : PROGRAM,
             String(boundPid),

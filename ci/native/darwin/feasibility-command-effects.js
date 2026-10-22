@@ -32,7 +32,11 @@ import {
 } from "./startup-trace.js";
 import { feasibilityFailureCause } from "../feasibility/index.js";
 import { createDarwinAuditDecoder } from "./audit.js";
-import { digest, normalizeDarwinIdentity } from "./protocol.js";
+import {
+  digest,
+  normalizeDarwinIdentity,
+  sameDarwinIdentity,
+} from "./protocol.js";
 
 const execute = diagnosticCommand(
   "darwin/feasibility-command-effects.js",
@@ -199,14 +203,26 @@ function commandWait(promise, signal) {
   });
 }
 
+// Exec changes pidversion, not the admitted birth, credentials or audit domain.
+function commandExecIdentity(parked, frame, imageSha256) {
+  const target = normalizeDarwinIdentity(frame.identity);
+  need(
+    frame.imageSha256 === imageSha256 &&
+      target.pidVersion !== parked.pidVersion &&
+      sameDarwinIdentity(parked, { ...target, pidVersion: parked.pidVersion }),
+  );
+  return target;
+}
+
 /** Keep the original stream and native custody through cancellation. A rejected
  * request, closed stream or reaped broker supplies no independent retirement. */
 export function observeDarwinCommandBroker(
   broker,
   value,
-  { signal, decoder, tokens, admittedSessions, coldStart },
+  { signal, decoder, tokens, admittedSessions, coldStart, coldExec },
 ) {
   const pending = new Map(),
+    cold = new Map(),
     rpc = new PassThrough(),
     errorOutput = new PassThrough(),
     input = new PassThrough();
@@ -407,6 +423,8 @@ export function observeDarwinCommandBroker(
             const identity = normalizeDarwinIdentity(frame.identity);
             need(
               ["V", "G"].includes(frame.operation) &&
+                frame.phase === "pre-exec" &&
+                !cold.has(frame.operation) &&
                 pending.has(frame.operation) &&
                 admittedSessions.has(identity.asid) &&
                 ["uid", "ruid", "svuid", "auid"].every(
@@ -418,9 +436,21 @@ export function observeDarwinCommandBroker(
                 frame.imageSha256 === value.commandImageSha256 &&
                 typeof coldStart === "function",
             );
+            const entry = { identity, armed: false, target: null };
+            cold.set(frame.operation, entry);
             await coldStart({ ...frame, identity });
             need(!failed && !admissionsClosed && !signal.aborted);
+            entry.armed = true;
             send("T\n");
+          } else if (frame.event === "exec") {
+            const entry = cold.get(frame.operation);
+            need(entry?.armed && !entry.target && pending.has(frame.operation));
+            entry.target = commandExecIdentity(
+              entry.identity,
+              frame,
+              value.commandImageSha256,
+            );
+            await coldExec?.({ ...frame, identity: entry.target });
           } else if (frame.event === "custody") {
             need(
               frame.sessionHeld === true &&
@@ -441,6 +471,8 @@ export function observeDarwinCommandBroker(
               );
               await decoder.push(Buffer.alloc(4));
             }
+            if (["V", "G"].includes(frame.event))
+              need(cold.get(frame.event)?.target);
             const entry = pending.get(frame.event);
             need(
               entry ||
@@ -522,6 +554,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
     decoder,
     sequence = 0,
     prepared,
+    serverParked,
     active = false;
   const tokens = new Map(),
     admittedSessions = new Set(),
@@ -787,7 +820,17 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         decoder,
         tokens,
         admittedSessions,
-        coldStart: async ({ operation, identity, imageSha256 }) => {
+        coldExec: ({ operation, identity }) => {
+          const entry = coldTraces.get(operation);
+          need(entry && !entry.binding.targetIdentity);
+          entry.binding.targetIdentity = identity;
+        },
+        coldStart: async ({
+          operation,
+          identity,
+          imageSha256,
+          policyFileSha256,
+        }) => {
           need(!coldTraces.has(operation) && coldTraces.size < 2);
           const binding = {
               identity,
@@ -808,6 +851,7 @@ export function createDarwinCommandEffects(dispatch, inputs) {
               retireObserver: (value) =>
                 observe("startup-observer-retire", value),
             });
+          need(policyFileSha256 === binding.policyFileSha256);
           coldTraces.set(operation, { trace, binding });
           need((await trace.arm()).status === "armed");
         },
@@ -841,7 +885,15 @@ export function createDarwinCommandEffects(dispatch, inputs) {
     async arm(value) {
       need((await readdir(value.home)).length === 0);
       const response = await call("A");
-      value.asid = response.identity.asid;
+      need(
+        !serverParked &&
+          response.phase === "pre-exec" &&
+          response.imageSha256 === inputs.packages.codex.component.sha256 &&
+          response.policyFileSha256 ===
+            digest(await readFile(path.join(root, "admission.sb"))),
+      );
+      serverParked = normalizeDarwinIdentity(response.identity);
+      value.asid = serverParked.asid;
       return {
         ...response,
         captureReady: true,
@@ -849,7 +901,17 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         transport: value.transport,
       };
     },
-    release: () => call("R"),
+    async release() {
+      need(serverParked);
+      const response = await call("R");
+      commandExecIdentity(
+        serverParked,
+        response,
+        inputs.packages.codex.component.sha256,
+      );
+      serverParked = null;
+      return response;
+    },
     async control() {
       const start = await call("B"),
         response = await call("C"),

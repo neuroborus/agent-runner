@@ -1813,15 +1813,20 @@ native observation, denial cause or permission remedy; matching hosted CI owns t
 The exact vector is
 `/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -n PROGRAM PID`:
 the sole operand is the normalized bound positive PID, used only by `pid == $1`
-predicates. Cold command tracing adds only `-Z` before `-n`, permitting optional
-numeric descriptions to match zero probes as documented by Apple's
+predicates. Cold command tracing uses
+`/usr/bin/sudo --non-interactive -- /usr/sbin/dtrace -q -Z -p PID -n PROGRAM PID`.
+The normalized PID is both the explicit process grab and sole macro operand.
+The grab retains libproc tracking across the helper's replacement exec and
+re-establishes pid-provider probes for the target image; the private native gate
+still controls when exec can begin. `-Z` permits optional numeric descriptions
+to match zero probes as documented by Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c).
 Compilation and BEGIN alone cannot prove capture: bound syscall entry and return
 records, one exec-success and its subsequent exit must actually arrive within the
 existing bounds. Duplicate exec, exit before exec, or records after exit refuse
 capture. Optional numeric records cannot replace any mandatory observation.
-There is no `-p` target grab, `-c` command, `-W` wait, preprocessing,
-defaultargs or script selection. Apple's
+There is no `-c` command, `-W` wait, preprocessing, defaultargs or script
+selection. Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
 routes `-p` through `dtrace_proc_grab`; its
 [`dtrace.1` OPERANDS](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.1)
@@ -2874,9 +2879,16 @@ completion. Native failures still use the original failure/cleanup owner and
 separate observer settlement, with the existing 120/30-second deadlines. Portable
 regressions establish no matching-host command acceptance.
 The native broker arms capture first, holds each launcher's audit-session right
-before it can spawn a suspended Codex child, and independently checks live image,
-credentials and effective Seatbelt policy before release. The enclosing admission
-policy permits fixture writes but denies network. A separate outside-write control
+before it can fork a policy-applied helper child. That child blocks on a private
+exec pipe; only the root broker retains its write end. Each owner checks closure
+of unused pipe ends before advancing, preserving gate EOF and exec-receipt EOF.
+The broker binds the
+helper's image, credentials, parent birth and effective Seatbelt policy, and
+holds the selected executable descriptor before release. The policy is applied
+from the broker's bounded held bytes, with its descriptor, named identity,
+metadata and bytes rechecked through release. The cold trace binding independently
+joins that policy digest. The enclosing admission policy permits fixture writes
+but denies network. A separate outside-write control
 must actually succeed under it; an enclosing denial cannot prove Codex's stock
 command sandbox.
 
@@ -2923,13 +2935,24 @@ record supplies none of the cold process's page-size result, stack address/exten
 or exact mapping inputs/result beyond the panic's `EINVAL`. These remain unknown;
 the source-derived permission repair does not establish native crash causality.
 
-V/G now expose the already suspended, image/policy-checked cold child through the
-existing broker reader before its fixed T acknowledgement. The native owner
+V/G expose a `pre-exec` helper through the existing broker reader. The fixed T
+acknowledgement follows BEGIN and independent tracer custody. The native owner
 keeps draining audit capture while waiting, rejects controller loss, and rechecks
-that same image, birth and applied sandbox before resume. Expiration and closed
-admission are checked again after those observations. The existing
-startup trace owner records bounded numeric `sysconf`, libpthread stack-address
-and stack-size returns, and the separate `mmap` and `mprotect` inputs/returns for
+the original helper, launcher, held executable, exact policy and applied sandbox
+before writing its one-shot X byte. EOF or an unexpected byte cannot exec.
+The child then uses `POSIX_SPAWN_SETEXEC | POSIX_SPAWN_START_SUSPENDED` to replace
+itself without running target user code. Suspended spawn completion is never
+used as a pre-exec barrier. A close-on-exec receipt only advances observation;
+it cannot establish successful exec. The broker independently requires the
+suspended target's path/hash, unchanged held executable and policy, unchanged
+PID/birth/session/credentials and a changed native pidversion, then
+rechecks launcher custody, controller presence and expiration before SIGCONT.
+The broker's exec frame joins this new identity to the parked helper for each
+V/G request; missing, duplicate or substituted transitions refuse completion.
+The D program emits cold syscall, argument and numeric observations only after
+the actual target exec-success probe. The consumer rejects pre-exec observations;
+a helper syscall cannot satisfy target capture. The existing startup trace owner
+records bounded numeric `sysconf`, libpthread stack-address and stack-size returns, and the separate `mmap` and `mprotect` inputs/returns for
 that PID. Arguments retain unsigned 64-bit integer bits (including the descriptor
 and offset), returns retain signed values, and unavailable libc errno is null.
 Unavailable or uncalled numeric probes leave their function observations null.
@@ -2950,8 +2973,9 @@ Capture refusal remains separate from successful independent trace cleanup.
 Missing values are null, never filled from the warmed launcher. Refused or
 incomplete tracing supplies no runtime
 values and requires no host-policy change or alternate trace program. Reports
-join operation, original cold-child identity, image hash, policy-file hash
-and fixed trace intent in the existing command evidence/diagnostic owners.
+join operation, parked helper and independently observed target identities, image
+hash, policy-file hash and fixed trace intent in the existing command
+evidence/diagnostic owners.
 New numeric observations are future hosted evidence, not already observed facts.
 Existing hosted cold installed-Codex version/schema probes,
 model-free command execution, positive controls and independent cleanup remain
@@ -2959,13 +2983,20 @@ the native verification path; a warm helper's cached page size cannot replace it
 
 The existing broker reader now owns pending requests through operation cancellation
 and closure. The traced path is ready, V/G, launcher birth and held-session custody,
-private P release, suspended spawn and identity-checked resume, then capture/reap.
+private P release, pre-exec helper receipt, trace arming, private X release,
+suspended replacement exec and independently checked target resume, then
+capture/reap. App Server and permitted target/marker controls use the same
+pre-exec gate and verified transition; App Server R returns the target identity.
 The 120-second operation signal rejects pending work, fences further admission and
 interrupts pending native requests through the existing native failure owner.
 Native failure retains an unreleased P gate and its original direct fork for
 closure and bounded reaping before session acquisition; it never signals an
-unbound PID. D/S requests and observer
-closure instead use the distinct 30-second cleanup signal. Cancellation does not
+unbound PID. The exec gate, receipt, executable and policy descriptors also retain
+explicit failure ownership. An observed launch domain is registered before
+acquiring its audit-session right. Failure closes gates, settles children and
+releases only acquired session references, retaining separate cleanup failures;
+normal settlement still requires independent, non-emergency retirement. D/S
+requests and observer closure instead use the distinct 30-second cleanup signal. Cancellation does not
 discard the shared reader, late ready/custody frames, original session rights or
 the first operation failure. Broker closure drains that reader before rejecting
 unanswered requests, and every cleanup wait remains bounded. Expiration retains

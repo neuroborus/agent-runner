@@ -18,6 +18,10 @@ import {
 import { feasibilityCommandParameters } from "../ci/native/providers/index.js";
 import { withNativeDiagnostics } from "../ci/native/index.js";
 import { assertDarwinColdStartupTrace } from "../ci/native/darwin/startup-trace.js";
+import {
+  normalizeDarwinIdentity,
+  sameDarwinIdentity,
+} from "../ci/native/darwin/protocol.js";
 
 const sha = (value) => createHash("sha256").update(value).digest("hex"),
   PIN = sha("fixture");
@@ -47,6 +51,19 @@ function commandGuards(header, helper, body, caller, options = {}) {
     project = (value) =>
       value
         .replaceAll("->", ".")
+        .replace("const char *previous_cleanup=", "const previous_cleanup=")
+        .replace(
+          /int \*owned\[\]=\{([^}]+)\};/gu,
+          (_, names) =>
+            `const owned=[${names
+              .split(",")
+              .map((name) => {
+                const key = name.slice(1);
+                return `{get value(){return ${key}},set value(v){${key}=v}}`;
+              })
+              .join(",")}];`,
+        )
+        .replaceAll("*owned[i]", "owned[i].value")
         .replace(/^#(?:ifdef|endif).*$/gmu, "")
         .replace("pid_t pids[4096];", "const pids=[];")
         .replace(
@@ -66,6 +83,11 @@ function commandGuards(header, helper, body, caller, options = {}) {
           "const $1={token:{val:[]},bsd:{}};",
         )
         .replace("struct proc_bsdinfo bsd;", "const bsd={};")
+        .replace(
+          "struct pollfd controller={0,POLLIN,0};",
+          "const controller={revents:0};",
+        )
+        .replaceAll(/(?<!&)&controller\b/gu, "controller")
         .replace("char byte;", "let byte;")
         .replace("struct timeval time;", "const time={};")
         .replace(
@@ -115,7 +137,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
         .replace(/\((?:int|unsigned|void|size_t|uint64_t|pid_t)\)/gu, "")
         .replace(/\blong long /gu, "let ")
         .replace(
-          /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t|ssize_t|size_t|uint32_t|uint64_t) /gu,
+          /\b(?:unsigned|int|bool|pid_t|uid_t|au_asid_t|mach_port_t|kern_return_t|ssize_t|size_t|uint32_t|uint64_t) /gu,
           "let ",
         )
         .replace(
@@ -168,10 +190,17 @@ function commandGuards(header, helper, body, caller, options = {}) {
       command_expired: 0,
       command_in: -1,
       command_release: -1,
+      command_exec_gate: -1,
+      command_exec_receipt: -1,
+      command_exec_file: -1,
+      command_policy_file: -1,
       command_pending_wrapper: -1,
       command_count: 0,
       command_wrappers: [],
       command_sessions: [],
+      command_rights: [],
+      MACH_PORT_NULL: 0,
+      KERN_SUCCESS: 0,
       strcmp: (a, b) => Number(a !== b),
       getpid: () => 42,
       getuid: () => 0,
@@ -219,6 +248,12 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
     ...(options.audit ? [[header, "command_drain", ""]] : []),
+    ...(options.exec
+      ? [
+          [header, "command_release_ready", ""],
+          [header, "command_continue", "identity"],
+        ]
+      : []),
     ...(options.membership ? [[header, "command_absent", "pid"]] : []),
     ...(options.lifecycle
       ? [
@@ -283,7 +318,13 @@ function commandImageFixture(header, helper, options = {}) {
       st_mtimespec: { tv_sec: 100, tv_nsec: 1 },
     };
   assert.ok(body);
+  const fileBody =
+    /static void command_image_file\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(fileBody);
   const projected = body
+      .replace("command_image_file(fd,path,expected);", fileBody)
       .replace("char actual[4096];", 'const actual={value:""};')
       .replace(
         "struct stat before,after,named;",
@@ -321,6 +362,8 @@ function commandImageFixture(header, helper, options = {}) {
     command_image: "/fixture/codex",
     command_image_hash: PIN,
     command_uid: 501,
+    SEEK_SET: 0,
+    lseek: () => 0,
     O_RDONLY: 0,
     O_NOFOLLOW: 1,
     O_CLOEXEC: 2,
@@ -448,7 +491,7 @@ test("Darwin command image streams retain complete hashes, kernel paths and held
     assert.equal(f.diagnostics[0][0], "command_image_identity");
     if (options.actualDigest) {
       assert.equal(f.counters.hashed, 8);
-      assert.equal(f.counters.closes, 1);
+      assert.equal(f.counters.closes, 0);
     }
     if (options.streamSize === 9) assert.equal(f.counters.updates, 0);
   }
@@ -745,7 +788,7 @@ test("Darwin command admission proves positive-signal permission before its priv
   const gateStart = header.indexOf(
       '    char byte;command_native(write(birth[1],"W",1)',
     ),
-    gateEnd = header.indexOf("    posix_spawnattr_t attributes;", gateStart);
+    gateEnd = header.indexOf("    pid_t child=fork();", gateStart);
   assert.ok(gateStart > 0 && gateEnd > gateStart);
   for (const [count, byte] of [
     [1, "P"],
@@ -1957,6 +2000,33 @@ test("Darwin cold exec consumes the generated admission policy with both page-si
     },
   });
   let consumed;
+  const applyBody =
+    /static void command_policy_apply\([^)]*\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(applyBody);
+  const apply = commandGuards(
+    header,
+    helper,
+    applyBody
+      .replace("char *error=NULL;", "const error={};")
+      .replaceAll(/(?<!&)&error\b/gu, "error"),
+    "command_policy_apply",
+    {
+      context: {
+        command_policy_bytes: files.get(path.join(root, policyLeaf)),
+        command_policy_check() {
+          assert.ok(files.has(path.join(root, policyLeaf)));
+        },
+        sandbox_init(bytes, flags) {
+          assert.equal(flags, 0);
+          consumed = bytes;
+          return 0;
+        },
+        sandbox_free_error() {},
+      },
+    },
+  );
   const launch = commandGuards(
     header,
     helper,
@@ -1974,12 +2044,8 @@ test("Darwin cold exec consumes the generated admission policy with both page-si
           assert.equal(cwd.value, path.join(root, "workspace"));
           return 0;
         },
-        policy(file) {
-          assert.ok(
-            files.has(file),
-            "Cold exec must consume the published policy",
-          );
-          consumed = files.get(file);
+        command_policy_apply() {
+          apply.run();
         },
       },
     },
@@ -2001,7 +2067,7 @@ test("Darwin cold exec consumes the generated admission policy with both page-si
   ]);
 });
 
-test("Darwin cold child release follows trace acknowledgement and fresh image/policy checks", async () => {
+test("Darwin cold child exec gate follows trace acknowledgement while capture remains live", async () => {
   const [header, helper] = await Promise.all(
       ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
         readFile(
@@ -2019,12 +2085,9 @@ test("Darwin cold child release follows trace acknowledgement and fresh image/po
     "eof",
     "wrong-ack",
     "expired",
-    "expired-late",
-    "closed-late",
     "owner-loss",
     "capture",
-    "image",
-    "policy",
+    "exec",
   ]) {
     const calls = [],
       child = { token: { val: [501, 501, 20, 20, 501, 123, 17, 2] } },
@@ -2042,6 +2105,7 @@ test("Darwin cold child release follows trace acknowledgement and fresh image/po
           operation: "V",
           command_image: "/fixture/codex",
           command_image_hash: PIN,
+          command_policy_hash: PIN,
           stdin: {},
           command_audit: 6,
           POLLIN: 1,
@@ -2078,30 +2142,18 @@ test("Darwin cold child release follows trace acknowledgement and fresh image/po
           },
           strcmp: (a, b) => Number((a.value ?? a) !== b),
           command_expired: refusal === "expired" ? 1 : 0,
-          command_image_identity(value, file, hash) {
+          command_exec(value, operation) {
             assert.equal(value, child);
-            assert.equal(file, "/fixture/codex");
-            assert.equal(hash, PIN);
-            calls.push("image");
-            if (refusal === "image") throw new Error("Changed image");
-          },
-          feasibility_sandbox_active(_binding, pid) {
-            assert.equal(pid, 123);
-            calls.push("policy");
-            if (refusal === "expired-late") f.context.command_expired = 1;
-            if (refusal === "closed-late")
-              f.context.command_admissions_closed = true;
-            return refusal === "policy" ? 0 : 1;
-          },
-          command_continue(value) {
-            assert.equal(value, child);
-            calls.push("resume");
+            assert.equal(operation, "V");
+            calls.push("exec");
+            if (refusal === "exec")
+              throw new Error("Changed execution authority");
           },
         },
       });
     if (refusal) {
       assert.throws(() => f.run());
-      assert.ok(!calls.includes("resume"));
+      assert.equal(calls.includes("exec"), refusal === "exec");
     } else {
       f.run();
       assert.deepEqual(calls, [
@@ -2111,11 +2163,536 @@ test("Darwin cold child release follows trace acknowledgement and fresh image/po
         "poll",
         "drain",
         "ack",
-        "image",
+        "exec",
+      ]);
+    }
+  }
+});
+
+test("Darwin launch checks unused pipe ends before advancing either owner", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const closes = [
+    ...header.matchAll(
+      /command_native\(close\(exec_gate\[([01])\]\), == 0\);command_native\(close\(receipt\[([01])\]\), == 0\);/gu,
+    ),
+  ];
+  assert.equal(closes.length, 3); // Wrapper, wrapper after fork, and root.
+  for (const [body, gate, receipt] of new Map(
+    closes.map((match) => [match[0], match]),
+  ).values()) {
+    for (const failure of [null, 41 + Number(gate), 43 + Number(receipt)]) {
+      const calls = [],
+        f = commandGuards(
+          header,
+          helper,
+          `${body}advance();`,
+          "command_spawn",
+          {
+            context: {
+              command_prerequisite: false,
+              command_owner: 0,
+              exec_gate: [41, 42],
+              receipt: [43, 44],
+              close(fd) {
+                calls.push(fd);
+                f.context.errno = 5;
+                return fd === failure ? -1 : 0;
+              },
+              advance: () => calls.push("advance"),
+            },
+          },
+        );
+      if (failure === null) {
+        f.run();
+        assert.deepEqual(calls, [
+          41 + Number(gate),
+          43 + Number(receipt),
+          "advance",
+        ]);
+      } else {
+        assert.throws(
+          f.run,
+          (error) =>
+            error.code === 126 && error.kind === "errno" && error.value === 5,
+        );
+        assert.equal(calls.at(-1), failure);
+      }
+    }
+  }
+});
+
+test("Darwin pre-exec child needs its private one-shot byte before replacing itself", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = header.indexOf('    command_native(write(receipt[1],"B",1)'),
+    end = header.indexOf("\n    }", start),
+    flags = /command_native\(posix_spawnattr_setflags\([^;]+;/u.exec(
+      header,
+    )?.[0];
+  assert.ok(start > 0 && end > start && flags);
+  for (const [count, byte] of [
+    [1, "X"],
+    [1, "T"],
+    [0, ""],
+    [-1, ""],
+  ]) {
+    const calls = [],
+      executed = new Error("Exec replaced helper"),
+      f = commandGuards(
+        header,
+        helper,
+        `let byte;${(flags + header.slice(start, end)).replaceAll(/&(files|attributes)\b/gu, "$1")}`,
+        "command_spawn",
+        {
+          context: {
+            command_prerequisite: false,
+            POSIX_SPAWN_SETEXEC: 1,
+            POSIX_SPAWN_START_SUSPENDED: 2,
+            POSIX_SPAWN_CLOEXEC_DEFAULT: 4,
+            posix_spawnattr_setflags(_attributes, flags) {
+              assert.equal(flags, 7);
+              calls.push("flags");
+              return 0;
+            },
+            receipt: [41, 42],
+            exec_gate: [43, 44],
+            args: ["/fixture/codex"],
+            files: {},
+            attributes: {},
+            environment: [],
+            write(fd, value) {
+              assert.deepEqual([fd, value], [42, "B"]);
+              calls.push("ready");
+              return 1;
+            },
+            read(fd, value) {
+              assert.equal(fd, 43);
+              value.value = byte;
+              calls.push("gate");
+              return count;
+            },
+            close(fd) {
+              assert.equal(fd, 43);
+              calls.push("close");
+              return 0;
+            },
+            posix_spawn(pid, image) {
+              assert.equal(pid, null);
+              assert.equal(image, "/fixture/codex");
+              calls.push("exec");
+              throw executed;
+            },
+          },
+        },
+      );
+    assert.throws(
+      () => f.run("/fixture/codex"),
+      (error) =>
+        count === 1 && byte === "X" ? error === executed : error.code === 126,
+    );
+    assert.deepEqual(
+      calls,
+      count === 1 && byte === "X"
+        ? ["flags", "ready", "gate", "close", "exec"]
+        : ["flags", "ready", "gate"],
+    );
+  }
+});
+
+test("Darwin exec verifies the held image, policy and new epoch before target resume", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const body =
+    /static struct identity command_exec\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+      header,
+    )?.[1];
+  assert.ok(body);
+  for (const fault of [
+    null,
+    "controller",
+    "owner-loss",
+    "owner-loss-late",
+    "expired",
+    "closed",
+    "helper",
+    "held",
+    "policy",
+    "write",
+    "receipt",
+    "birth",
+    "version",
+    "credentials",
+    "session",
+    "tracer-parent",
+    "saved",
+    "image",
+    "sandbox",
+    "expired-late",
+    "closed-late",
+    "resume",
+  ]) {
+    const calls = [],
+      parked = {
+        token: { val: [501, 501, 20, 501, 20, 123, 17, 2] },
+        bsd: {
+          pbi_start_tvsec: 90,
+          pbi_start_tvusec: 1,
+          pbi_ppid: 80,
+          pbi_svuid: 501,
+          pbi_svgid: 20,
+        },
+      },
+      target = structuredClone(parked);
+    target.token.val[7] = 3;
+    target.bsd.pbi_status = 4;
+    if (fault === "version") target.token.val[7] = 2;
+    if (fault === "birth") target.bsd.pbi_start_tvsec++;
+    if (fault === "credentials") target.token.val[1]++;
+    if (fault === "session") target.token.val[6]++;
+    if (fault === "tracer-parent") target.bsd.pbi_ppid = 900;
+    if (fault === "saved") target.bsd.pbi_svuid++;
+    const projected = body
+      .replace("struct proc_bsdinfo state;", "const state={};")
+      .replace(
+        "struct identity target;",
+        "const target={token:{val:[]},bsd:{}};",
+      )
+      .replace(
+        "struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0},{command_exec_receipt,POLLIN,0}};",
+        "const waiting=[{revents:0},{revents:0},{revents:0}];",
+      )
+      .replaceAll(/(?<!&)&(state|target)\b/gu, "$1")
+      .replaceAll("sizeof(state)", "1");
+    const f = commandGuards(header, helper, projected, "command_exec", {
+      exec: true,
+      context: {
+        parked,
+        command_launch_owner: {
+          token: { val: [501, 501, 20, 501, 20, 80, 17, 2] },
+        },
+        operation: "V",
+        command_exec_gate: 41,
+        command_exec_receipt: 42,
+        command_exec_file: 43,
+        command_exec_path: "/fixture/codex",
+        command_exec_hash: PIN,
+        command_helper: "/fixture/helper",
+        command_helper_hash: sha("helper"),
+        command_audit: 44,
+        sandbox_binding: {},
+        POLLIN: 1,
+        POLLHUP: 16,
+        POLLERR: 8,
+        POLLNVAL: 32,
+        PROC_PIDTBSDINFO: 1,
+        SSTOP: 4,
+        SZOMB: 5,
+        command_expired: fault === "expired" ? 1 : 0,
+        command_admissions_closed: fault === "closed",
+        poll(waiting, size) {
+          if (size === 1) {
+            waiting.revents = fault === "controller" ? 16 : 0;
+            return 0;
+          }
+          calls.push("wait-exec");
+          waiting[2].revents = 16;
+          return 1;
+        },
+        command_drain: () => calls.push("drain"),
+        command_poll: () => assert.fail("Expected suspended target"),
+        command_image_identity(value, file) {
+          calls.push(value === parked ? "helper" : "image");
+          assert.equal(
+            file,
+            value === parked ? "/fixture/helper" : "/fixture/codex",
+          );
+          if (fault === (value === parked ? "helper" : "image"))
+            throw new Error("Image changed");
+        },
+        command_executable() {
+          calls.push("held");
+          if (fault === "held") throw new Error("Held executable changed");
+        },
+        command_policy_check() {
+          calls.push("policy");
+          if (fault === "policy") throw new Error("Policy changed");
+        },
+        live(value) {
+          return (
+            value !== f.context.command_launch_owner ||
+            !(
+              fault === "owner-loss" ||
+              (fault === "owner-loss-late" && calls.includes("image"))
+            )
+          );
+        },
+        feasibility_sandbox_active() {
+          calls.push("sandbox");
+          if (calls.includes("image")) {
+            if (fault === "expired-late") f.context.command_expired = 1;
+            if (fault === "closed-late")
+              f.context.command_admissions_closed = true;
+          }
+          return fault === "sandbox" ? 0 : 1;
+        },
+        write(fd, value) {
+          assert.deepEqual([fd, value], [41, "X"]);
+          calls.push("X");
+          return fault === "write" ? -1 : 1;
+        },
+        close(fd) {
+          calls.push(`close:${fd}`);
+          return 0;
+        },
+        read(fd) {
+          assert.equal(fd, 42);
+          calls.push("receipt");
+          return fault === "receipt" ? 1 : 0;
+        },
+        proc_pidinfo(pid, _kind, _arg, value) {
+          assert.equal(pid, 123);
+          Object.assign(value, target.bsd);
+          return 1;
+        },
+        inspect(pid, value) {
+          assert.equal(pid, 123);
+          Object.assign(value, structuredClone(target));
+          calls.push("identity");
+          return true;
+        },
+        printf() {},
+        emit_identity: () => calls.push("announce"),
+        puts() {},
+        audit_signal(token, signal) {
+          assert.deepEqual([...token.val], target.token.val);
+          assert.equal(signal, 19);
+          calls.push("resume");
+          return fault === "resume" ? -1 : 0;
+        },
+      },
+    });
+    if (fault && fault !== "tracer-parent") {
+      assert.throws(f.run);
+      assert.equal(calls.includes("resume"), fault === "resume", fault);
+      if (
+        [
+          "controller",
+          "owner-loss",
+          "expired",
+          "closed",
+          "helper",
+          "held",
+          "policy",
+        ].includes(fault)
+      )
+        assert.ok(!calls.includes("X"), fault);
+    } else {
+      const result = f.run();
+      assert.deepEqual([...result.token.val], target.token.val);
+      assert.deepEqual(calls, [
+        "helper",
+        "held",
         "policy",
+        "sandbox",
+        "X",
+        "close:41",
+        "wait-exec",
+        "drain",
+        "receipt",
+        "identity",
+        "held",
+        "policy",
+        "image",
+        "sandbox",
+        "close:42",
+        "close:43",
+        "announce",
         "resume",
       ]);
     }
+  }
+});
+
+test("Darwin held executable and policy refuse substitution before release", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  for (const kind of ["executable", "policy"]) {
+    const body = (
+      kind === "policy"
+        ? /static void command_policy_check\([^\n]+\) \{([\s\S]*?)\n\}/u
+        : /static void command_executable\([^\n]+\) \{([\s\S]*?)\n\}/u
+    ).exec(header)?.[1];
+    assert.ok(body);
+    for (const fault of [
+      null,
+      "named",
+      "bytes",
+      "stat",
+      "inode",
+      "size",
+      "mode",
+      "uid",
+      "gid",
+      "links",
+      "time",
+    ]) {
+      if (kind === "executable" && fault === "bytes") continue; // Full hashing is covered by the image-stream fixture.
+      const expected = {
+          st_dev: 1,
+          st_ino: 2,
+          st_size: 7,
+          st_mode: 0o100600,
+          st_uid: 501,
+          st_gid: 20,
+          st_nlink: 1,
+          st_mtimespec: { tv_sec: 10, tv_nsec: 0 },
+        },
+        f = commandGuards(
+          header,
+          helper,
+          body
+            .replace(
+              "struct stat held,named,after;char bytes[16385];",
+              "const held={},named={},after={},bytes=Buffer.alloc(16385);",
+            )
+            .replace("struct stat held,named;", "const held={},named={};")
+            .replaceAll(/&(held|named|after)\b/gu, "$1")
+            .replaceAll("sizeof(bytes)", "bytes.length")
+            .replace(/\b0600\b/gu, "0o600")
+            .replace(/\b07777\b/gu, "0o7777"),
+          "command_binding",
+          {
+            context: {
+              Buffer,
+              command_exec_file: 41,
+              command_exec_path: "/fixture/codex",
+              command_exec_hash: PIN,
+              command_exec_stat: expected,
+              command_policy_file: 42,
+              command_policy: "/fixture/admission.sb",
+              command_policy_bytes: Buffer.from("policy\n"),
+              command_policy_stat: expected,
+              command_uid: 501,
+              command_gid: 20,
+              command_image_file(fd, file, hash) {
+                assert.deepEqual([fd, file, hash], [41, "/fixture/codex", PIN]);
+              },
+              fstat(_fd, value) {
+                Object.assign(value, structuredClone(expected));
+                if (fault === "stat") return -1;
+                const field = {
+                  inode: "st_ino",
+                  size: "st_size",
+                  mode: "st_mode",
+                  uid: "st_uid",
+                  gid: "st_gid",
+                  links: "st_nlink",
+                }[fault];
+                if (field) value[field]++;
+                if (fault === "time") value.st_mtimespec.tv_nsec++;
+                return 0;
+              },
+              lstat(_file, value) {
+                Object.assign(value, structuredClone(expected));
+                if (fault === "named") value.st_ino++;
+                return 0;
+              },
+              pread(_fd, bytes) {
+                Buffer.from(fault === "bytes" ? "change!" : "policy\n").copy(
+                  bytes,
+                );
+                return 7;
+              },
+              memcmp: (a, b, size) =>
+                Buffer.compare(a.subarray(0, size), b.subarray(0, size)),
+              S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+            },
+          },
+        );
+      if (fault) assert.throws(f.run, undefined, `${kind}: ${fault}`);
+      else f.run();
+    }
+  }
+});
+
+test("Darwin App Server release joins its target epoch and cannot replay the held admission", async () => {
+  const source = await readFile(
+      new URL(
+        "../ci/native/darwin/feasibility-command-effects.js",
+        import.meta.url,
+      ),
+      "utf8",
+    ),
+    start = source.indexOf("    async arm(value) {"),
+    end = source.indexOf("    async control()", start),
+    transition = /function commandExecIdentity\([^\n]+\) \{[\s\S]*?\n\}/u.exec(
+      source,
+    )?.[0];
+  assert.ok(start > 0 && end > start && transition);
+  for (const fault of [null, "phase", "policy", "image", "version", "birth"]) {
+    const calls = [],
+      script = new Script(
+        `(context)=>{const {normalizeDarwinIdentity,sameDarwinIdentity,path,digest,need,root,inputs,readdir,readFile,call}=context;
+        ${transition} let serverParked; return {${source.slice(start, end)}};}`,
+      ),
+      // Strict identity records require this realm's ordinary object prototype.
+      effects = script.runInThisContext()({
+        normalizeDarwinIdentity,
+        sameDarwinIdentity,
+        path,
+        digest: sha,
+        need: (ok) => assert.ok(ok),
+        root: "/fixture",
+        inputs: { packages: { codex: { component: { sha256: PIN } } } },
+        readdir: async () => [],
+        readFile: async () => "fixture",
+        call: async (operation) => {
+          calls.push(operation);
+          return operation === "A"
+            ? {
+                phase: fault === "phase" ? "post-exec" : "pre-exec",
+                identity,
+                sessionHeld: true,
+                imageSha256: PIN,
+                policyFileSha256: fault === "policy" ? sha("other") : PIN,
+              }
+            : {
+                identity: {
+                  ...identity,
+                  pidVersion: fault === "version" ? 2 : 3,
+                  startSeconds: fault === "birth" ? 91 : 90,
+                },
+                imageSha256: fault === "image" ? sha("other") : PIN,
+              };
+        },
+      }),
+      value = { home: "/fixture/home" };
+    if (["phase", "policy"].includes(fault)) {
+      await assert.rejects(effects.arm(value));
+      assert.deepEqual(calls, ["A"]);
+      continue;
+    }
+    await effects.arm(value);
+    assert.equal(value.asid, identity.asid);
+    if (fault) await assert.rejects(effects.release());
+    else {
+      assert.equal((await effects.release()).identity.pidVersion, 3);
+      await assert.rejects(effects.release());
+    }
+    assert.deepEqual(calls, ["A", "R"]);
   }
 });
 
@@ -2744,6 +3321,31 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
               const { bytes, reply } = captures.get(operation);
               replies.push(reply);
               f.broker.stderr.write(bytes);
+              frame({
+                event: "custody",
+                identity: { ...identity, asid: operation === "V" ? 17 : 18 },
+                sessionHeld: true,
+              });
+              frame({
+                event: "cold-start",
+                phase: "pre-exec",
+                operation,
+                identity: { ...identity, asid: operation === "V" ? 17 : 18 },
+                imageSha256: PIN,
+              });
+            }
+            if (operation === "T") {
+              const reply = replies.at(-1);
+              frame({
+                event: "exec",
+                operation: reply.event,
+                identity: {
+                  ...identity,
+                  asid: reply.event === "V" ? 17 : 18,
+                  pidVersion: 3,
+                },
+                imageSha256: PIN,
+              });
               frame(reply);
             }
             if (operation === "S") {
@@ -2752,6 +3354,7 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
               finish();
             }
           },
+          async () => {},
         );
         try {
           await assert.rejects(
@@ -2767,7 +3370,10 @@ test("Darwin capture preserves original child bytes and V/G outcomes through sch
         } finally {
           await f.owner.close(signal);
         }
-        assert.deepEqual(f.sent, failed === "V" ? ["V", "S"] : ["V", "G", "S"]);
+        assert.deepEqual(
+          f.sent,
+          failed === "V" ? ["V", "T", "S"] : ["V", "T", "G", "T", "S"],
+        );
         assert.equal(f.owner.captureFailure, undefined);
         assert.deepEqual(traceFinishes, failed === "V" ? [] : ["V"]);
       },
@@ -2881,8 +3487,15 @@ test("Darwin broker binds a cold trace to the held child before acknowledging re
       t,
       new AbortController().signal,
       (operation, { frame }) => {
-        if (operation === "T")
+        if (operation === "T") {
+          frame({
+            event: "exec",
+            operation: "V",
+            identity: { ...identity, pidVersion: 3 },
+            imageSha256: PIN,
+          });
           frame({ event: "V", stdout: "fixture\n", exitCode: 0 });
+        }
       },
       async (binding) => {
         entered.resolve(binding);
@@ -2891,7 +3504,13 @@ test("Darwin broker binds a cold trace to the held child before acknowledging re
     ),
     response = f.owner.call("V");
   f.frame({ event: "custody", identity, sessionHeld: true });
-  f.frame({ event: "cold-start", operation: "V", identity, imageSha256: PIN });
+  f.frame({
+    event: "cold-start",
+    phase: "pre-exec",
+    operation: "V",
+    identity,
+    imageSha256: PIN,
+  });
   const binding = await entered.promise;
   assert.deepEqual(binding.identity, identity);
   assert.equal(binding.operation, "V");
@@ -2902,7 +3521,13 @@ test("Darwin broker binds a cold trace to the held child before acknowledging re
 });
 
 test("Darwin broker refuses an unjoined cold child without releasing it", async (t) => {
-  for (const mismatch of ["image", "credentials", "session", "operation"]) {
+  for (const mismatch of [
+    "image",
+    "credentials",
+    "session",
+    "operation",
+    "phase",
+  ]) {
     const f = await commandBrokerFixture(
         t,
         new AbortController().signal,
@@ -2914,6 +3539,7 @@ test("Darwin broker refuses an unjoined cold child without releasing it", async 
       f.frame({ event: "custody", identity, sessionHeld: true });
     f.frame({
       event: "cold-start",
+      phase: mismatch === "phase" ? "post-exec" : "pre-exec",
       operation: mismatch === "operation" ? "G" : "V",
       identity: {
         ...identity,
@@ -2925,6 +3551,101 @@ test("Darwin broker refuses an unjoined cold child without releasing it", async 
     assert.deepEqual(f.sent, ["V"]);
     assert.deepEqual(f.signals, ["SIGTERM"]);
   }
+});
+
+test("Darwin broker requires a unique executed target joined to each cold helper", async (t) => {
+  for (const operation of ["V", "G"])
+    for (const fault of [
+      null,
+      "missing",
+      "version",
+      "pid",
+      "birth",
+      "credential",
+      "session",
+      "image",
+      "duplicate",
+    ]) {
+      const f = await commandBrokerFixture(
+        t,
+        new AbortController().signal,
+        (request, { frame }) => {
+          if (request !== "T") return;
+          const target = { ...identity, pidVersion: 3 };
+          if (fault === "version") target.pidVersion = identity.pidVersion;
+          if (fault === "pid") target.pid++;
+          if (fault === "birth") target.startMicroseconds++;
+          if (fault === "credential") target.uid++;
+          if (fault === "session") target.asid++;
+          const executed = {
+            event: "exec",
+            operation,
+            identity: target,
+            imageSha256: fault === "image" ? sha("other") : PIN,
+          };
+          if (fault !== "missing") frame(executed);
+          if (fault === "duplicate") frame(executed);
+          frame({ event: operation, exitCode: 0, stdout: "fixture" });
+        },
+        async () => {},
+      );
+      const response = f.owner.call(operation);
+      f.frame({ event: "custody", identity, sessionHeld: true });
+      f.frame({
+        event: "cold-start",
+        phase: "pre-exec",
+        operation,
+        identity,
+        imageSha256: PIN,
+      });
+      if (fault) {
+        await assert.rejects(response);
+        assert.ok(f.owner.captureFailure);
+        assert.deepEqual(f.signals, ["SIGTERM"]);
+      } else {
+        assert.equal((await response).exitCode, 0);
+        assert.equal(f.owner.captureFailure, undefined);
+      }
+      assert.deepEqual(f.sent, [operation, "T"]);
+    }
+});
+
+test("Darwin cancellation during trace arming fences T and preserves held custody for settlement", async (t) => {
+  const controller = new AbortController(),
+    entered = Promise.withResolvers(),
+    armed = Promise.withResolvers(),
+    f = await commandBrokerFixture(
+      t,
+      controller.signal,
+      (operation, { frame, finish }) => {
+        if (operation === "S") {
+          frame({ event: "capture-end", bytes: 0, records: 0 });
+          frame({ event: "S" });
+          finish();
+        }
+      },
+      async () => {
+        entered.resolve();
+        await armed.promise;
+      },
+    );
+  const response = assert.rejects(f.owner.call("G"));
+  f.frame({ event: "custody", identity, sessionHeld: true });
+  f.frame({
+    event: "cold-start",
+    phase: "pre-exec",
+    operation: "G",
+    identity,
+    imageSha256: PIN,
+  });
+  await entered.promise;
+  controller.abort();
+  await response;
+  armed.resolve();
+  await f.owner.close(new AbortController().signal);
+  assert.deepEqual(f.sent, ["G", "S"]);
+  assert.deepEqual(f.signals, ["SIGTERM"]);
+  assert.deepEqual([...f.sessions], [identity.asid]);
 });
 
 test("cold admission refuses missing or partial trace reports while retirement remains independently consumable", async () => {
@@ -3229,6 +3950,10 @@ test("Darwin native cancellation closes an unreleased launch gate and reaps its 
       context: {
         command_prerequisite: false,
         command_release: 41,
+        command_exec_gate: 42,
+        command_exec_receipt: 43,
+        command_exec_file: 44,
+        command_policy_file: 45,
         command_pending_wrapper: 51,
       },
     });
@@ -3250,10 +3975,102 @@ test("Darwin native cancellation closes an unreleased launch gate and reaps its 
   f.run();
   assert.deepEqual(calls, [
     ["close", 41],
+    ["close", 42],
+    ["close", 43],
+    ["close", 44],
+    ["close", 45],
     ["wait", 51],
     ["wait", 51],
   ]);
   assert.equal(f.context.command_release, -1);
+  for (const name of [
+    "command_exec_gate",
+    "command_exec_receipt",
+    "command_exec_file",
+    "command_policy_file",
+  ])
+    assert.equal(f.context[name], -1);
   assert.equal(f.context.command_pending_wrapper, -1);
   assert.equal(f.context.command_admissions_closed, true);
+});
+
+test("Darwin interrupted launch releases acquired session rights and preserves cleanup uncertainty", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  for (const fault of [null, "close", "release"]) {
+    const calls = [],
+      f = commandGuards(
+        header,
+        helper,
+        'remember("fixture-primary","errno",5);failure(126);',
+        "command_entry",
+        {
+          context: {
+            command_prerequisite: false,
+            command_exec_gate: 41,
+            command_exec_receipt: 42,
+            command_exec_file: 43,
+            command_policy_file: 44,
+            command_count: 2,
+            command_sessions: [17, 18],
+            command_wrappers: [80, 81],
+            command_rights: [91, 0],
+            close(fd) {
+              calls.push(`close:${fd}`);
+              if (fault === "close" && fd === 41) {
+                f.context.errno = 16;
+                return -1;
+              }
+              return 0;
+            },
+            waitpid: (pid) => pid,
+            command_members: () => 0,
+            mach_task_self: () => 1,
+            mach_port_deallocate(task, right) {
+              assert.deepEqual([task, right], [1, 91]);
+              calls.push("release");
+              return fault === "release" ? 7 : 0;
+            },
+          },
+        },
+      );
+    assert.throws(f.run, (error) => {
+      assert.equal(error.code, 126);
+      assert.deepEqual(
+        [error.operation, error.kind, error.value],
+        ["fixture-primary", "errno", 5],
+      );
+      assert.deepEqual(
+        error.cleanup,
+        fault === "close"
+          ? ["command-launch-close", "errno", 16]
+          : fault === "release"
+            ? ["command-session-release", "mach", 7]
+            : null,
+      );
+      return true;
+    });
+    assert.deepEqual(calls, [
+      "close:41",
+      "close:42",
+      "close:43",
+      "close:44",
+      "release",
+    ]);
+    assert.deepEqual(
+      f.context.command_rights,
+      fault === "release" ? [91, 0] : [0, 0],
+    );
+    assert.equal(
+      f.reports.some(
+        (row) =>
+          row[0] === "command-session-release" ||
+          row[0] === "command-launch-close",
+      ),
+      fault !== null,
+    );
+  }
 });

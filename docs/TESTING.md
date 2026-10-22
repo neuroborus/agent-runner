@@ -683,16 +683,26 @@ injected effects. It captures the bytes selected by the broker and requires the
 exact `hw.pagesize` and numeric-consumer `hw.pagesize_compat` read grants plus the
 complete retained policy, including default denial, bounded fixture writes and
 absence of network or broader sysctl grants. Actual-body release tests require
-the cold-child trace acknowledgement followed by fresh image/policy checks;
-the existing injected broker fixture retains held-session, image and credential
-joins before acknowledgement. Capture continues while arming; controller loss,
-capture refusal, EOF, bad acknowledgement, expiration or closed admission after
-the image/policy recheck, and changed authority cannot resume the child.
+a genuine private pre-exec byte gate, trace acknowledgement, held executable and
+policy bindings, then the suspended replacement image and native identity
+transition before resume. The injected broker fixture joins each V/G helper to
+one target with unchanged birth/session/credentials and changed pidversion;
+missing exec despite exit zero, duplicate transitions and substituted identities
+refuse admission. Capture continues while arming and across exec observation;
+controller or launcher loss, capture refusal, EOF, bad acknowledgement,
+interrupted release, expiration or closed admission after the image/policy
+recheck, and changed authority cannot resume the target. Unused pipe-end close
+failures must stop either launch owner before it advances. Refusal cleanup closes
+acquired gates/descriptors and retains session-release failures separately.
 Startup trace fixtures in
 `test/native-darwin-startup.test.js` exercise bounded numeric page-size and
 libpthread stack observations, all six `mmap` inputs and its result separately
 from `mprotect`, thread pairing, unknown missing values, malformed bounds and
-foreign PID rejection. These regressions compile/run no Darwin binaries and
+foreign PID rejection. Cold trace attachment retains explicit process tracking
+across exec; its probes gate syscall/argument/numeric rows on actual exec-success,
+and its consumer rejects helper observations as target coverage. Missing exec
+or exit still refuses complete capture while independent tracer retirement runs.
+These regressions compile/run no Darwin binaries and
 establish no hosted values, Rust crash causality or installed-build equivalence.
 Existing hosted cold version/schema probes, model-free commands, positive
 controls and independent cleanup remain required; no slow-tier assignment changes.

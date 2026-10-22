@@ -25,6 +25,13 @@ static pid_t command_wrappers[16];
 static pid_t command_server_wrapper;
 /* Own the unreleased fork even before its audit session can be acquired. */
 static int command_release = -1;
+/* Root alone releases the pre-exec child. The receipt closes across SETEXEC. */
+static int command_exec_gate = -1, command_exec_receipt = -1, command_exec_file = -1;
+static const char *command_exec_path, *command_exec_hash;
+static struct stat command_exec_stat, command_policy_stat;
+static struct identity command_launch_owner;
+static int command_policy_file = -1;
+static char command_policy_bytes[16385], command_policy_hash[65];
 static pid_t command_pending_wrapper = -1;
 static bool command_server_clean;
 static unsigned command_count, command_records, command_bytes, command_barriers;
@@ -117,12 +124,18 @@ static unsigned command_members(au_asid_t asid, bool signal_members) {
 static void command_failure(void) {
   if(command_prerequisite) _exit(78);
   if(command_failing || getpid()!=command_owner || getuid()!=0) return;
+  const char *previous_cleanup=cleanup_operation;
   command_failing=true; command_admissions_closed=true;
   if(!command_cleanup_started){command_cleanup_started=true;command_expired=0;alarm(30);}
   if(command_in>=0) {close(command_in);command_in=-1;}
   if(command_release>=0) {
     if(close(command_release)) remember_cleanup("command-launch-close","errno",errno);
     else command_release=-1;}
+  int *owned[]={&command_exec_gate,&command_exec_receipt,&command_exec_file,&command_policy_file};
+  for(unsigned i=0;i<4;i++)if(*owned[i]>=0){
+    if(close(*owned[i]))remember_cleanup("command-launch-close","errno",errno);
+    else *owned[i]=-1;}
+  bool settled=false;
   for(unsigned pass=0;pass<2000 && !command_expired;pass++) {
     bool empty=true;
     if(command_pending_wrapper>0) {
@@ -134,15 +147,49 @@ static void command_failure(void) {
       int status;(void)waitpid(command_wrappers[i],&status,WNOHANG);
       if(command_members(command_sessions[i],pass>=100)) empty=false;
     }
-    if(empty) break;
+    if(empty){settled=true;break;}
     (void)poll(NULL,0,10);
   }
+  if(!settled)remember_cleanup("command-domain-retirement","invariant",0);
+  for(unsigned i=0;i<command_count;i++)if(command_rights[i]!=MACH_PORT_NULL){
+    kern_return_t error=mach_port_deallocate(mach_task_self(),command_rights[i]);
+    if(error!=KERN_SUCCESS)remember_cleanup("command-session-release","mach",error);
+    else command_rights[i]=MACH_PORT_NULL;}
+  if(!previous_cleanup && cleanup_operation)fprintf(stderr,"native-darwin-cleanup: operation=%s domain=%s value=%d effects=possible settlement=unsettled\n",cleanup_operation,cleanup_domain,cleanup_value);
 }
-static void command_image_identity(struct identity value, const char *path, const char *expected) {
-  char actual[4096]; need(live(value));int length=proc_pidpath((pid_t)value.token.val[5],actual,sizeof(actual)), path_error=errno;
-  command_observed(length>0, length, path_error);need(!strcmp(actual,path));
-  int fd=open(actual,O_RDONLY|O_NOFOLLOW|O_CLOEXEC), open_error=errno;struct stat before,after,named;unsigned char bytes[8192],sum[32];
-  command_observed(fd>=0, fd, open_error);command_native(fstat(fd,&before), == 0);
+/* Apply the same bounded held bytes in every launcher, and retain their named
+ * binding through release. A later path read cannot silently replace policy. */
+static void command_policy_check(void) {
+  struct stat held,named,after;char bytes[16385];
+  command_native(fstat(command_policy_file,&held), == 0);command_native(lstat(command_policy,&named), == 0);
+  need(held.st_dev==command_policy_stat.st_dev && held.st_ino==command_policy_stat.st_ino &&
+    held.st_size==command_policy_stat.st_size && held.st_uid==command_uid && held.st_gid==command_gid &&
+    S_ISREG(held.st_mode) && (held.st_mode&07777)==0600 && held.st_nlink==1 &&
+    held.st_mtimespec.tv_sec==command_policy_stat.st_mtimespec.tv_sec && held.st_mtimespec.tv_nsec==command_policy_stat.st_mtimespec.tv_nsec &&
+    named.st_dev==held.st_dev && named.st_ino==held.st_ino);
+  command_native(pread(command_policy_file,bytes,sizeof(bytes),0), == held.st_size);
+  need(!memcmp(bytes,command_policy_bytes,(size_t)held.st_size));
+  command_native(fstat(command_policy_file,&after), == 0);
+  need(after.st_size==held.st_size && after.st_mtimespec.tv_sec==held.st_mtimespec.tv_sec && after.st_mtimespec.tv_nsec==held.st_mtimespec.tv_nsec);
+}
+static void command_policy_bind(void) {
+  need(command_policy_file<0);command_policy_file=open(command_policy,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);need(command_policy_file>=0);
+  command_native(fstat(command_policy_file,&command_policy_stat), == 0);
+  need(command_policy_stat.st_size>0 && command_policy_stat.st_size<(off_t)sizeof(command_policy_bytes));
+  command_native(pread(command_policy_file,command_policy_bytes,sizeof(command_policy_bytes),0), == command_policy_stat.st_size);
+  need(!memchr(command_policy_bytes,0,(size_t)command_policy_stat.st_size));command_policy_bytes[command_policy_stat.st_size]=0;
+  command_policy_check();unsigned char sum[32];need(CC_SHA256(command_policy_bytes,(CC_LONG)command_policy_stat.st_size,sum)!=NULL);
+  for(unsigned i=0;i<32;i++)snprintf(command_policy_hash+i*2,3,"%02x",sum[i]);
+}
+static void command_policy_apply(void) {
+  fprintf(stderr,"native-darwin-phase: phase=policy-enter\n");fflush(stderr);
+  command_policy_check();char *error=NULL;int result=sandbox_init(command_policy_bytes,0,&error);
+  if(error)sandbox_free_error(error);if(result){remember("sandbox-apply","status",result);failure(126);}
+  fprintf(stderr,"native-darwin-phase: phase=policy-applied\n");fflush(stderr);
+}
+static void command_image_file(int fd, const char *path, const char *expected) {
+  struct stat before,after,named;unsigned char bytes[8192],sum[32];
+  command_native(lseek(fd,0,SEEK_SET), == 0);command_native(fstat(fd,&before), == 0);
   uint64_t maximum=!strcmp(path,command_image)&&!strcmp(expected,command_image_hash)?536870912:134217728;
   need(S_ISREG(before.st_mode) && before.st_nlink==1 && before.st_uid==command_uid &&
     before.st_size>0 && (uint64_t)before.st_size<=maximum && !(before.st_mode&022));
@@ -152,12 +199,26 @@ static void command_image_identity(struct identity value, const char *path, cons
     command_native(CC_SHA256_Update(&context,bytes,(CC_LONG)n), != 0);
   }
   int read_error=errno;command_observed(!n, n, read_error);need(total==(uint64_t)before.st_size);command_native(CC_SHA256_Final(sum,&context), != 0);
-  command_native(fstat(fd,&after), == 0);command_native(lstat(actual,&named), == 0);
+  command_native(fstat(fd,&after), == 0);command_native(lstat(path,&named), == 0);
   need(before.st_dev==after.st_dev && before.st_ino==after.st_ino && before.st_size==after.st_size &&
     before.st_mtimespec.tv_sec==after.st_mtimespec.tv_sec && before.st_mtimespec.tv_nsec==after.st_mtimespec.tv_nsec &&
     named.st_dev==before.st_dev && named.st_ino==before.st_ino);
-  command_native(close(fd), == 0);need(live(value));
   char hex[65]; for(unsigned i=0;i<32;i++) snprintf(hex+i*2,3,"%02x",sum[i]); need(!strcmp(hex,expected));
+}
+static void command_image_identity(struct identity value, const char *path, const char *expected) {
+  char actual[4096];need(live(value));int length=proc_pidpath((pid_t)value.token.val[5],actual,sizeof(actual)), path_error=errno;
+  command_observed(length>0, length, path_error);need(!strcmp(actual,path));
+  int fd=open(path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC), open_error=errno;command_observed(fd>=0, fd, open_error);
+  command_image_file(fd,path,expected);command_native(close(fd), == 0);need(live(value));
+}
+static void command_executable(void) {
+  struct stat held,named;command_image_file(command_exec_file,command_exec_path,command_exec_hash);
+  command_native(fstat(command_exec_file,&held), == 0);command_native(lstat(command_exec_path,&named), == 0);
+  need(held.st_dev==command_exec_stat.st_dev && held.st_ino==command_exec_stat.st_ino &&
+    held.st_size==command_exec_stat.st_size && held.st_mode==command_exec_stat.st_mode &&
+    held.st_uid==command_exec_stat.st_uid && held.st_gid==command_exec_stat.st_gid && held.st_nlink==command_exec_stat.st_nlink &&
+    held.st_mtimespec.tv_sec==command_exec_stat.st_mtimespec.tv_sec && held.st_mtimespec.tv_nsec==command_exec_stat.st_mtimespec.tv_nsec &&
+    named.st_dev==held.st_dev && named.st_ino==held.st_ino);
 }
 static void command_object(unsigned index, char *out) {
   struct stat st,named,after; struct statfs fs; int fd=command_objects[index];
@@ -310,15 +371,23 @@ static void command_barrier(void) {
   do{command_poll();}while(command_clock(&time)<=stamp);
 }
 static void command_continue(struct identity identity) {
-  need(live(identity));command_native(audit_signal(&identity.token,SIGCONT), == 0);
+  need(live(identity));need(!command_expired && !command_admissions_closed);command_native(audit_signal(&identity.token,SIGCONT), == 0);
 }
 static struct identity command_spawn(char **args, const char *home_leaf) {
-  need(command_count<16 && !command_expired && !command_admissions_closed); int input[2],output[2],errors[2],birth[2],release[2];
+  need(command_count<16 && !command_expired && !command_admissions_closed && command_exec_gate<0 && command_exec_receipt<0 && command_exec_file<0);
+  if(command_policy_file<0)command_policy_bind();command_policy_check();
+  command_exec_path=args[0];command_exec_hash=!strcmp(args[0],command_image)?command_image_hash:command_helper_hash;
+  command_exec_file=open(command_exec_path,O_RDONLY|O_NOFOLLOW|O_CLOEXEC);need(command_exec_file>=0);
+  command_image_file(command_exec_file,command_exec_path,command_exec_hash);command_native(fstat(command_exec_file,&command_exec_stat), == 0);
+  int input[2],output[2],errors[2],birth[2],release[2],exec_gate[2],receipt[2];
   command_native(pipe(input), == 0);command_native(pipe(output), == 0);command_native(pipe(errors), == 0);
   command_native(pipe(birth), == 0);command_native(pipe(release), == 0);
   command_release=release[1];
+  command_native(pipe(exec_gate), == 0);command_exec_gate=exec_gate[1];
+  command_native(pipe(receipt), == 0);command_exec_receipt=receipt[0];
+  command_native(fcntl(receipt[1],F_SETFD,FD_CLOEXEC), == 0);
   pid_t wrapper=fork();int fork_error=errno;command_observed(wrapper>=0, wrapper, fork_error);
-  if(!wrapper){close(input[1]);close(output[0]);close(errors[0]);close(birth[0]);close(release[1]);
+  if(!wrapper){close(input[1]);close(output[0]);close(errors[0]);close(birth[0]);close(release[1]);command_native(close(exec_gate[1]), == 0);command_native(close(receipt[0]), == 0);
     auditinfo_addr_t audit={0};audit.ai_auid=command_uid;audit.ai_asid=AU_ASSIGN_ASID;audit.ai_termid.at_type=AU_IPv4;
     unsigned selected_classes=command_classes();audit.ai_mask.am_success=audit.ai_mask.am_failure=selected_classes;
     command_native(setaudit_addr(&audit,sizeof(audit)), == 0);
@@ -327,28 +396,36 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
       audit.ai_mask.am_success==selected_classes && audit.ai_mask.am_failure==selected_classes);
     command_native(setgroups(0,NULL), == 0);
     command_native(setgid(command_gid), == 0);command_native(setuid(command_uid), == 0);
-    char cwd[4096];command_path(cwd,"workspace");command_native(chdir(cwd), == 0);policy(command_policy);
+    char cwd[4096];command_path(cwd,"workspace");command_native(chdir(cwd), == 0);command_policy_apply();
     /* The normal-UID launcher cannot create Codex until the root owner holds
      * and independently inspects its fresh inherited audit-session domain. */
     char byte;command_native(write(birth[1],"W",1), == 1);command_native(read(release[0],&byte,1), == 1);need(byte=='P');command_native(close(release[0]), == 0);
-    posix_spawnattr_t attributes;posix_spawn_file_actions_t files;
-    command_native(posix_spawnattr_init(&attributes), == 0);command_native(posix_spawn_file_actions_init(&files), == 0);
-    command_native(posix_spawnattr_setflags(&attributes,POSIX_SPAWN_START_SUSPENDED|POSIX_SPAWN_CLOEXEC_DEFAULT), == 0);
-    command_native(posix_spawn_file_actions_adddup2(&files,input[0],0), == 0);command_native(posix_spawn_file_actions_adddup2(&files,output[1],1), == 0);
-    command_native(posix_spawn_file_actions_adddup2(&files,errors[1],2), == 0);
-    char home[4120],codex_home[4128],path_env[8192];need(snprintf(home,sizeof(home),"HOME=%s/%s",command_root,home_leaf)<(int)sizeof(home)&&snprintf(codex_home,sizeof(codex_home),"CODEX_HOME=%s/%s",command_root,home_leaf)<(int)sizeof(codex_home));
-    char directory[4096];need(strlen(command_image)<sizeof(directory));strcpy(directory,command_image);char *last=strrchr(directory,'/');need(last);*last=0;
-    need(snprintf(path_env,sizeof(path_env),"PATH=%s/codex-path:/usr/bin:/bin",directory)<(int)sizeof(path_env));
-    char *environment[]={home,codex_home,path_env,"LANG=C","CI=true","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted","RUNNER_OS=macOS",NULL};
-    pid_t child;command_native(posix_spawn(&child,args[0],&files,&attributes,args,environment), == 0);command_native(write(birth[1],&child,sizeof(child)), == sizeof(child));
+    pid_t child=fork();command_observed(child>=0, child, errno);
+    if(!child){
+      command_native(close(birth[1]), == 0);
+      posix_spawnattr_t attributes;posix_spawn_file_actions_t files;
+      command_native(posix_spawnattr_init(&attributes), == 0);command_native(posix_spawn_file_actions_init(&files), == 0);
+      command_native(posix_spawnattr_setflags(&attributes,POSIX_SPAWN_SETEXEC|POSIX_SPAWN_START_SUSPENDED|POSIX_SPAWN_CLOEXEC_DEFAULT), == 0);
+      command_native(posix_spawn_file_actions_adddup2(&files,input[0],0), == 0);command_native(posix_spawn_file_actions_adddup2(&files,output[1],1), == 0);
+      command_native(posix_spawn_file_actions_adddup2(&files,errors[1],2), == 0);
+      char home[4120],codex_home[4128],path_env[8192];need(snprintf(home,sizeof(home),"HOME=%s/%s",command_root,home_leaf)<(int)sizeof(home)&&snprintf(codex_home,sizeof(codex_home),"CODEX_HOME=%s/%s",command_root,home_leaf)<(int)sizeof(codex_home));
+      char directory[4096];need(strlen(command_image)<sizeof(directory));strcpy(directory,command_image);char *last=strrchr(directory,'/');need(last);*last=0;
+      need(snprintf(path_env,sizeof(path_env),"PATH=%s/codex-path:/usr/bin:/bin",directory)<(int)sizeof(path_env));
+      char *environment[]={home,codex_home,path_env,"LANG=C","CI=true","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted","RUNNER_OS=macOS",NULL};
+      /* No target exec is possible before the root's one-shot X. EOF refuses. */
+      command_native(write(receipt[1],"B",1), == 1);
+      command_native(read(exec_gate[0],&byte,1), == 1);need(byte=='X');command_native(close(exec_gate[0]), == 0);
+      command_native(posix_spawn(NULL,args[0],&files,&attributes,args,environment), == 0);need(0);_exit(126);
+    }
+    command_native(close(exec_gate[0]), == 0);command_native(close(receipt[1]), == 0);command_native(write(birth[1],&child,sizeof(child)), == sizeof(child));
     close(birth[1]);close(input[0]);close(output[1]);close(errors[1]);int status;command_native(waitpid(child,&status,0), == child);_exit(WIFEXITED(status)?WEXITSTATUS(status):126);
   }
   command_pending_wrapper=wrapper;
-  close(input[0]);close(output[1]);close(errors[1]);close(birth[1]);close(release[0]);char byte;command_native(read(birth[0],&byte,1), == 1);need(byte=='W');
+  close(input[0]);close(output[1]);close(errors[1]);close(birth[1]);close(release[0]);command_native(close(exec_gate[0]), == 0);command_native(close(receipt[1]), == 0);char byte;command_native(read(birth[0],&byte,1), == 1);need(byte=='W');
   struct identity owner;need(inspect(wrapper,&owner));need(owner.token.val[0]==command_uid&&owner.token.val[1]==command_uid&&owner.token.val[2]==command_gid&&owner.token.val[6]>0);
-  command_native(audit_session_port(owner.token.val[6],&command_rights[command_count]), == 0);need(command_rights[command_count]!=MACH_PORT_NULL);
-  command_sessions[command_count]=owner.token.val[6];command_wrappers[command_count++]=wrapper;
-  command_pending_wrapper=-1;
+  unsigned slot=command_count++;command_sessions[slot]=owner.token.val[6];command_wrappers[slot]=wrapper;command_pending_wrapper=-1;
+  command_native(audit_session_port(owner.token.val[6],&command_rights[slot]), == 0);need(command_rights[slot]!=MACH_PORT_NULL);
+  command_launch_owner=owner;
   command_image_identity(owner,command_helper,command_helper_hash);command_native(feasibility_sandbox_active(sandbox_binding,wrapper), == 1);
   /* libproc requires a positive signal. SIGCONT checks permission on this exact
    * launcher without satisfying its private P gate or spawning provider code. */
@@ -356,26 +433,56 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   printf("{\"event\":\"custody\",\"identity\":");emit_identity(owner);puts(",\"sessionHeld\":true}");
   command_native(write(release[1],"P",1), == 1);command_native(close(release[1]), == 0);command_release=-1;pid_t child;
   command_native(read(birth[0],&child,sizeof(child)), == sizeof(child));command_native(close(birth[0]), == 0);
-  struct identity identity;need(inspect(child,&identity));need(identity.token.val[0]==command_uid&&identity.token.val[1]==command_uid&&identity.token.val[2]==command_gid&&identity.token.val[6]==owner.token.val[6]);
-  command_image_identity(identity,args[0],!strcmp(args[0],command_image)?command_image_hash:command_helper_hash);
+  struct identity identity;need(inspect(child,&identity));need(identity.bsd.pbi_ppid==wrapper && identity.bsd.pbi_svuid==command_uid && identity.bsd.pbi_svgid==command_gid && identity.token.val[6]==owner.token.val[6]);
+  for(unsigned i=0;i<5;i++)need(identity.token.val[i]==owner.token.val[i]);
+  command_native(read(command_exec_receipt,&byte,1), == 1);need(byte=='B');
+  command_image_identity(identity,command_helper,command_helper_hash);command_executable();
   command_native(feasibility_sandbox_active(sandbox_binding,child), == 1);
   command_in=input[1];command_out=output[0];command_err=errors[0];return identity;
 }
-/* The trace observes this cold image, never the warmed policy launcher. The
- * held audit-session domain owns the suspended child through every refusal. */
+static void command_release_ready(void) {
+  need(!command_expired && !command_admissions_closed);
+  struct pollfd controller={0,POLLIN,0};command_native(poll(&controller,1,0), >= 0);
+  need(!(controller.revents&(POLLHUP|POLLERR|POLLNVAL)));
+}
+/* SETEXEC keeps the parked PID/birth/session, but advances its audit pidversion.
+ * START_SUSPENDED is used only AFTER trace arming, to inspect the new image. */
+static struct identity command_exec(struct identity parked, const char *operation) {
+  command_release_ready();need(live(command_launch_owner));need(parked.bsd.pbi_ppid==(pid_t)command_launch_owner.token.val[5]);need(command_exec_gate>=0 && command_exec_receipt>=0 && command_exec_file>=0);
+  command_image_identity(parked,command_helper,command_helper_hash);command_executable();command_policy_check();
+  command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)parked.token.val[5]), == 1);
+  command_release_ready();need(live(command_launch_owner) && live(parked));
+  command_native(write(command_exec_gate,"X",1), == 1);command_native(close(command_exec_gate), == 0);command_exec_gate=-1;
+  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0},{command_exec_receipt,POLLIN,0}};
+  for(;;){command_release_ready();command_native(poll(waiting,3,1000), >= 0);command_drain();
+    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)) && !(waiting[2].revents&(POLLERR|POLLNVAL)));
+    if(waiting[2].revents&(POLLIN|POLLHUP))break;}
+  char byte;command_native(read(command_exec_receipt,&byte,1), == 0);
+  struct proc_bsdinfo state;
+  for(;;){command_release_ready();command_native(proc_pidinfo((pid_t)parked.token.val[5],PROC_PIDTBSDINFO,0,&state,sizeof(state)), == sizeof(state));
+    need(state.pbi_start_tvsec==parked.bsd.pbi_start_tvsec && state.pbi_start_tvusec==parked.bsd.pbi_start_tvusec && state.pbi_status!=SZOMB);
+    if(state.pbi_status==SSTOP)break;command_poll();}
+  struct identity target;need(inspect((pid_t)parked.token.val[5],&target));
+  need(target.bsd.pbi_status==SSTOP && target.bsd.pbi_start_tvsec==parked.bsd.pbi_start_tvsec && target.bsd.pbi_start_tvusec==parked.bsd.pbi_start_tvusec &&
+    target.bsd.pbi_svuid==parked.bsd.pbi_svuid && target.bsd.pbi_svgid==parked.bsd.pbi_svgid &&
+    target.token.val[7]!=parked.token.val[7]);
+  for(unsigned i=0;i<7;i++)need(target.token.val[i]==parked.token.val[i]);
+  command_executable();command_policy_check();command_image_identity(target,command_exec_path,command_exec_hash);
+  command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)target.token.val[5]), == 1);
+  command_native(close(command_exec_receipt), == 0);command_exec_receipt=-1;
+  command_native(close(command_exec_file), == 0);command_exec_file=-1;
+  command_release_ready();need(live(command_launch_owner));
+  if(operation){printf("{\"event\":\"exec\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"identity\":",operation,command_exec_hash);emit_identity(target);puts("}");}
+  command_continue(target);return target;
+}
+/* The helper is still blocked before exec; BEGIN and tracer custody precede X. */
 static void command_cold_start(struct identity child, const char *operation) {
-  printf("{\"event\":\"cold-start\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"identity\":",operation,command_image_hash);emit_identity(child);puts("}");
-  /* Trace arming must not stop capture or hide the controller's disappearance. */
+  printf("{\"event\":\"cold-start\",\"phase\":\"pre-exec\",\"operation\":\"%s\",\"imageSha256\":\"%s\",\"policyFileSha256\":\"%s\",\"identity\":",operation,command_image_hash,command_policy_hash);emit_identity(child);puts("}");
   struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};
   for(;;){need(!command_expired && !command_admissions_closed);command_native(poll(waiting,2,1000), >= 0);command_drain();
     need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(waiting[0].revents&POLLIN)break;}
   char acknowledgement[3];need(fgets(acknowledgement,sizeof(acknowledgement),stdin));need(!strcmp(acknowledgement,"T\n"));
-  need(!command_expired && !command_admissions_closed);
-  command_image_identity(child,command_image,command_image_hash);
-  command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)child.token.val[5]), == 1);
-  /* Cancellation may arrive during the full installed-image hash/readback. */
-  need(!command_expired && !command_admissions_closed);
-  command_continue(child);
+  (void)command_exec(child,operation);
 }
 static void command_capture(const char *event) {
   unsigned char output[65536],errors[65536];size_t used=0,err=0;int fds[]={command_out,command_err};
@@ -501,8 +608,8 @@ static int command_entry(int argc,char **argv) {
     need(!(fds[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(!(fds[0].revents&POLLIN))continue;need(fgets(line,sizeof(line),stdin)&&strchr(line,'\n'));line[strlen(line)-1]=0;
     need((!command_expired && !command_admissions_closed) || !strcmp(line,"D") || !strcmp(line,"S"));
     if(!strcmp(line,"V")||!strcmp(line,"G")){char directory[4096];command_path(directory,"schema");char *v[]={(char*)command_image,"--version",NULL},*g[]={(char*)command_image,"app-server","generate-json-schema","--out",directory,NULL};struct identity child=command_spawn(line[0]=='V'?v:g,"schema-home");command_cold_start(child,line);command_capture(line);}
-    else if(!strcmp(line,"A")){char *args[]={(char*)command_image,"-c","web_search=\"disabled\"","-c","mcp_servers={}","app-server","--listen","stdio://",NULL};server=command_spawn(args,"home");command_server_wrapper=command_wrappers[command_count-1];command_case_asid=server.token.val[6];printf("{\"event\":\"A\",\"identity\":");emit_identity(server);printf(",\"sessionHeld\":true,\"imageSha256\":\"%s\"}\n",command_image_hash);}
-    else if(!strcmp(line,"R")){command_continue(server);puts("{\"event\":\"R\"}");}
+    else if(!strcmp(line,"A")){char *args[]={(char*)command_image,"-c","web_search=\"disabled\"","-c","mcp_servers={}","app-server","--listen","stdio://",NULL};server=command_spawn(args,"home");command_server_wrapper=command_wrappers[command_count-1];command_case_asid=server.token.val[6];printf("{\"event\":\"A\",\"identity\":");emit_identity(server);printf(",\"phase\":\"pre-exec\",\"sessionHeld\":true,\"imageSha256\":\"%s\",\"policyFileSha256\":\"%s\"}\n",command_image_hash,command_policy_hash);}
+    else if(!strcmp(line,"R")){server=command_exec(server,NULL);printf("{\"event\":\"R\",\"imageSha256\":\"%s\",\"identity\":",command_image_hash);emit_identity(server);puts("}");}
     else if(!strncmp(line,"J ",2)){size_t n=strlen(line+2);need(command_in>=0&&n>0&&n<=131072&&n%2==0);unsigned char bytes[65536];for(size_t i=0;i<n/2;i++){char hex[3]={line[2+i*2],line[3+i*2],0};char *end;unsigned long b=strtoul(hex,&end,16);need(!*end);bytes[i]=(unsigned char)b;}command_native(write(command_in,bytes,n/2), == (ssize_t)(n/2));}
     else if(!strcmp(line,"E")){need(command_in>=0);command_native(close(command_in), == 0);command_in=-1;}
     else if(!strcmp(line,"B"))command_barrier();
@@ -510,17 +617,17 @@ static int command_entry(int argc,char **argv) {
     else if(!strcmp(line,"N"))command_case_ready();else if(!strcmp(line,"F"))command_case_finish();
     else if(!strcmp(line,"C")){/* The same outer policy must permit this control. Preserve the server's RPC pipes. */
       int in=command_in,out=command_out,err=command_err;command_control=true;command_action=2;command_attempt_seen=false;command_marker_seen=false;char *args[]={command_helper,"command-case",command_gate,command_target[2],"control",(char*)command_nonce,NULL};
-      struct identity child=command_spawn(args,"home");command_case_asid=child.token.val[6];command_continue(child);command_case_ready();command_case_finish();command_capture(NULL);need(command_attempt_permitted);
+      struct identity child=command_spawn(args,"home");command_case_asid=child.token.val[6];child=command_exec(child,NULL);command_case_ready();command_case_finish();command_capture(NULL);need(command_attempt_permitted);
       printf("{\"event\":\"C\",\"permitted\":true,\"exitCode\":0,\"stdout\":\"attempt:written\",\"before\":");emit_identity(command_case_identity);printf(",\"after\":");emit_identity(command_case_identity);
       printf(",\"sandboxed\":true,\"imageSha256\":\"%s\",\"object\":{\"before\":%s,\"after\":%s},\"gate\":{\"before\":%s,\"after\":%s}}\n",command_helper_hash,command_control_before,command_control_after,command_control_gate_before,command_control_gate_after);
       command_in=in;command_out=out;command_err=err;command_control=false;command_case_asid=server.token.val[6];}
-    else if(!strcmp(line,"D")){need(!command_cleanup_started);command_cleanup_started=true;command_admissions_closed=true;command_expired=0;alarm(30);if(command_in>=0){close(command_in);command_in=-1;}bool empty=false,emergency=false;for(unsigned pass=0;pass<2000&&!empty;pass++){empty=true;for(unsigned i=0;i<command_count;i++){int status;pid_t reaped=waitpid(command_wrappers[i],&status,WNOHANG);
+    else if(!strcmp(line,"D")){need(!command_cleanup_started);command_cleanup_started=true;command_admissions_closed=true;command_expired=0;alarm(30);if(command_exec_gate>=0){command_native(close(command_exec_gate), == 0);command_exec_gate=-1;}if(command_exec_receipt>=0){command_native(close(command_exec_receipt), == 0);command_exec_receipt=-1;}if(command_exec_file>=0){command_native(close(command_exec_file), == 0);command_exec_file=-1;}if(command_in>=0){close(command_in);command_in=-1;}bool empty=false,emergency=false;for(unsigned pass=0;pass<2000&&!empty;pass++){empty=true;for(unsigned i=0;i<command_count;i++){int status;pid_t reaped=waitpid(command_wrappers[i],&status,WNOHANG);
       if(reaped>0&&reaped==command_server_wrapper)command_server_clean=WIFEXITED(status)&&WEXITSTATUS(status)==0;if(command_members(command_sessions[i],false))empty=false;}
       if(!empty && pass==100){emergency=true;for(unsigned i=0;i<command_count;i++)(void)command_members(command_sessions[i],true);}if(!empty)command_poll();}
       need(empty);printf("{\"event\":\"D\",\"empty\":true,\"emergency\":%s,\"serverClean\":%s,\"sessions\":[",emergency?"true":"false",!command_server_wrapper||command_server_clean?"true":"false");for(unsigned i=0;i<command_count;i++)printf("%s%u",i?",":"",command_sessions[i]);puts("]}");}
-    else if(!strcmp(line,"S")){for(unsigned i=0;i<command_count;i++)command_native(command_members(command_sessions[i],false), == 0);command_drain();need(!command_pending);command_native(close(command_audit), == 0);
+    else if(!strcmp(line,"S")){for(unsigned i=0;i<command_count;i++)command_native(command_members(command_sessions[i],false), == 0);command_drain();need(!command_pending);command_native(close(command_audit), == 0);if(command_policy_file>=0){command_native(close(command_policy_file), == 0);command_policy_file=-1;}
       printf("{\"event\":\"capture-end\",\"bytes\":%u,\"records\":%u}\n",command_bytes,command_records);
-      for(unsigned i=0;i<command_count;i++)command_native(mach_port_deallocate(mach_task_self(),command_rights[i]), == KERN_SUCCESS);puts("{\"event\":\"S\"}");stopping=true;}
+      for(unsigned i=0;i<command_count;i++){command_native(mach_port_deallocate(mach_task_self(),command_rights[i]), == KERN_SUCCESS);command_rights[i]=MACH_PORT_NULL;}puts("{\"event\":\"S\"}");stopping=true;}
     else need(0);
   }
   return 0;
