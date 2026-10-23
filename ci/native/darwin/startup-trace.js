@@ -19,6 +19,8 @@ export const DARWIN_STARTUP_TRACE_LIMITS = Object.freeze({
   arguments: 8192,
   numeric: 8192,
 });
+// Producer storage is independent of capture bounds; hosted sufficiency is unproved.
+const COLD_PRODUCER_BYTES = 16 * 1024 * 1024;
 
 // XNU syscalls.master and systrace.c establish these entry argument positions.
 const PATH_ARGUMENTS = Object.freeze({
@@ -48,7 +50,7 @@ const startupProgram = (argumentBytes, cold = false) => {
   const started = cold ? " && target_exec" : "";
   return `#pragma D option quiet
 #pragma D option strsize=${argumentBytes + 1}
-${cold ? "int target_exec;\n" : ""}dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
+${cold ? `#pragma D option dynvarsize=${COLD_PRODUCER_BYTES}\nint target_exec;\n` : ""}dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
 syscall:::entry /pid == $1${started}/ { printf("entry %d %llu %s\\n", pid, timestamp, probefunc); }
 syscall:::entry /pid == $1${started} && (${probes([...Object.keys(PATH_ARGUMENTS), "abort_with_payload"])})/ {
   self->operation = probefunc; self->namespace = probefunc == "abort_with_payload" ? (uint32_t)arg0 : 0;
@@ -57,11 +59,11 @@ syscall:::entry /pid == $1${started} && (${probes([...Object.keys(PATH_ARGUMENTS
   self->copying = self->pointer != 0; self->text = self->pointer ? copyinstr(self->pointer, ${argumentBytes}) : "";
   self->copying = 0;
   printf("argument-entry %d %llu %s %llu %s %u %llu %S\\n", pid, timestamp, probefunc, (uint64_t)tid, self->pointer == 0 ? "missing" : strlen(self->text) < ${argumentBytes} ? "complete" : "truncated", (uint32_t)self->namespace, (uint64_t)self->code, self->text);
-  self->text = 0; self->operation = 0;
+  self->text = 0; self->operation = 0; self->pointer = 0; self->namespace = 0; self->code = 0;
 }
 syscall:::entry /pid == $1${started} && probefunc == "csrctl"/ { printf("argument-entry %d %llu %s %llu complete %u 0 \\n", pid, timestamp, probefunc, (uint64_t)tid, (uint32_t)arg0); }
 syscall:::entry /pid == $1${started} && (probefunc == "sysctl" || probefunc == "sysctlbyname")/ { printf("argument-entry %d %llu %s %llu unsupported 0 0 \\n", pid, timestamp, probefunc, (uint64_t)tid); }
-dtrace:::ERROR /pid == $1${started} && self->copying/ { printf("argument-entry %d %llu %s %llu copy-failed %u %llu \\n", pid, timestamp, self->operation, (uint64_t)tid, (uint32_t)self->namespace, (uint64_t)self->code); self->copying = 0; self->operation = 0; }
+dtrace:::ERROR /pid == $1${started} && self->copying/ { printf("argument-entry %d %llu %s %llu copy-failed %u %llu \\n", pid, timestamp, self->operation, (uint64_t)tid, (uint32_t)self->namespace, (uint64_t)self->code); self->copying = 0; self->operation = 0; self->text = 0; self->pointer = 0; self->namespace = 0; self->code = 0; }
 syscall:::return /pid == $1${started}/ { printf("return %d %llu %s %d %lld\\n", pid, timestamp, probefunc, errno, (int64_t)arg0); }
 syscall:::return /pid == $1${started} && (${probes(ARGUMENT_FUNCTIONS.filter((name) => name !== "abort_with_payload"))})/ { printf("argument-return %d %llu %s %llu %d %lld\\n", pid, timestamp, probefunc, (uint64_t)tid, errno, (int64_t)arg0); }
 proc:::exec-success /pid == $1/ { ${cold ? "target_exec = 1; " : ""}printf("exec %d %llu\\n", pid, timestamp); }

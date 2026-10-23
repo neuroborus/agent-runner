@@ -1952,10 +1952,18 @@ A capture admits at most 8192 argument observations, 8192 numeric observations,
 131072 target rows and eight MiB of stdout. Ordinary startup retains its
 128-byte argument and 1024-byte row bounds; cold V/G capture uses 1024-byte
 arguments and 8192-byte rows, including bounded escaped text. These shared
-producer/consumer bounds cover the schema workload without truncation. Rows are
-validated and hashed incrementally; no full raw-row copy or digest concatenation
-is retained. Copy faults have a target/thread-bound ERROR record. DTrace stderr
-still refuses complete capture. Arguments stay diagnostic; public causes expose
+producer/consumer bounds refuse overflow instead of retaining a partial prefix.
+Cold programs separately request a finite 16-MiB dynamic-variable allocation with
+`#pragma D option dynvarsize=16777216`, supported by Apple's
+[`dt_options.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/lib/libdtrace/common/dt_options.c).
+This producer allocation changes no output, row, argument, numeric or deadline
+bound; fresh hosted macOS capture must establish that it is sufficient and
+loss-free. Rows are validated and hashed incrementally; no full raw-row copy or
+digest concatenation is retained. Argument operation and scalar facts survive the
+copy-fault window; thread-local text, operation, pointer, namespace and code are
+cleared after normal row emission and after the target/thread-bound ERROR row.
+The copy flag ends with the copy attempt or ERROR row. DTrace stderr, including
+dynamic-variable drops, still refuses complete capture. Arguments stay diagnostic; public causes expose
 only a finite argument status, never their text or numeric selector/code values.
 That optional status cannot displace existing failure or cleanup facts.
 These source contracts and Oracle language guidance establish no Apple compilation,

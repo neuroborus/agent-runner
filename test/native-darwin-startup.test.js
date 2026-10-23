@@ -2808,6 +2808,7 @@ function traceFixture({
   const retired = new Set();
   let tracerReads = 0,
     bindingExec,
+    program,
     delivered = "";
   const trace = openDarwinStartupTrace(
     { identity: binding.identity },
@@ -2819,7 +2820,7 @@ function traceFixture({
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
         assert.equal(file, "/usr/bin/sudo");
-        const program = args[coldCommand ? 6 : 5];
+        program = args[coldCommand ? 6 : 5];
         assert.deepEqual(args, [
           "--non-interactive",
           "--",
@@ -2842,6 +2843,12 @@ function traceFixture({
             `#pragma D option strsize=${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes + 1 : 129}\n`,
           ),
         );
+        if (coldCommand)
+          assert.deepEqual(
+            program.match(/^#pragma D option dynvarsize=.*$/gmu),
+            ["#pragma D option dynvarsize=16777216"],
+          );
+        else assert.doesNotMatch(program, /\bdynvarsize\b/u);
         assert.equal(
           program.split(
             `copyinstr(self->pointer, ${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes : 128})`,
@@ -2970,6 +2977,9 @@ function traceFixture({
     trace,
     child,
     calls,
+    get program() {
+      return program;
+    },
     acknowledge: () => child.stdout.write(`armed ${tracerPid} 100\n`),
     close: async (code = 0) => {
       await bindingExec;
@@ -2984,6 +2994,162 @@ function traceFixture({
     },
   };
 }
+
+test("startup trace argument actions release scratch after normal and copy-fault rows", async () => {
+  for (const coldCommand of [false, true]) {
+    const f = traceFixture({ coldCommand });
+    assert.equal((await f.trace.arm()).status, "armed");
+    try {
+      const entry = /syscall:::entry [^\n]+\{\n([\s\S]*?)\n\}/u.exec(
+          f.program,
+        )?.[1],
+        error = /dtrace:::ERROR [^\n]+\{ (.*) \}/u.exec(f.program)?.[1];
+      assert.ok(entry && error);
+      const translate = (body) =>
+          body
+            .replaceAll("self->", "scratch.")
+            .replaceAll(/\((?:uint32_t|uint64_t)\)/gu, ""),
+        entryAction = new Script(translate(entry)),
+        errorAction = new Script(translate(error));
+      for (const [name, pointer, text, fault] of [
+        ["open", 101, "/fixture/direct", false],
+        ["openat", 102, "/fixture/relative", false],
+        ["abort_with_payload", 103, "fixture reason", false],
+        ["abort_with_payload", 104, null, true],
+        ["open", 0, "", false],
+      ]) {
+        const scratch = {
+            operation: 0,
+            namespace: 0,
+            code: 0,
+            pointer: 0,
+            copying: 0,
+            text: 0,
+          },
+          cleared = { ...scratch },
+          rows = [],
+          copyFault = new Error("Injected copy fault"),
+          namespace = name === "abort_with_payload" ? 0xffffffff : 0,
+          code = name === "abort_with_payload" ? 0xffffffffffffffffn : 0;
+        let copies = 0;
+        const scope = {
+          scratch,
+          probefunc: name,
+          pid: 42,
+          timestamp: 101,
+          tid: 7,
+          arg0:
+            name === "abort_with_payload"
+              ? namespace
+              : name === "openat"
+                ? -2
+                : pointer,
+          arg1:
+            name === "abort_with_payload"
+              ? code
+              : name === "openat"
+                ? pointer
+                : -3,
+          arg4: name === "abort_with_payload" ? pointer : -4,
+          strlen: (value) => value.length,
+          copyinstr(value, bytes) {
+            copies++;
+            assert.equal(value, pointer);
+            assert.equal(bytes, coldCommand ? 1024 : 128);
+            assert.deepEqual(scratch, {
+              ...cleared,
+              operation: name,
+              namespace,
+              code,
+              pointer,
+              copying: true,
+            });
+            if (fault) {
+              errorAction.runInNewContext(scope);
+              throw copyFault;
+            }
+            return text;
+          },
+          printf(format, ...values) {
+            assert.equal(scratch.operation, name);
+            assert.equal(scratch.namespace, namespace);
+            assert.equal(scratch.code, code);
+            assert.equal(scratch.pointer, pointer);
+            assert.equal(Boolean(scratch.copying), fault);
+            rows.push({ format, values });
+          },
+        };
+        if (fault)
+          assert.throws(
+            () => entryAction.runInNewContext(scope),
+            (error) => error === copyFault,
+          );
+        else entryAction.runInNewContext(scope);
+        assert.equal(copies, pointer ? 1 : 0);
+        assert.deepEqual(scratch, cleared);
+        assert.equal(rows.length, 1);
+        assert.deepEqual(
+          rows[0].values,
+          fault
+            ? [42, 101, name, 7, namespace, code]
+            : [
+                42,
+                101,
+                name,
+                7,
+                pointer ? "complete" : "missing",
+                namespace,
+                code,
+                text,
+              ],
+        );
+        assert.equal(
+          rows[0].format,
+          fault
+            ? "argument-entry %d %llu %s %llu copy-failed %u %llu \n"
+            : "argument-entry %d %llu %s %llu %s %u %llu %S\n",
+        );
+      }
+    } finally {
+      f.child.stdout.write([...TRACE_START, "exit 42 103"].join("\n") + "\n");
+      await f.close();
+      assert.equal((await f.trace.finish()).status, "observed");
+    }
+  }
+});
+
+test("cold tracing refuses dynamic-variable drops despite otherwise valid complete rows", async () => {
+  const f = traceFixture({
+    coldCommand: true,
+    bindReplacement: false,
+    live: true,
+  });
+  await f.trace.arm();
+  f.child.stdout.write("exec 42 100\n");
+  await f.trace.bindExec({ ...IDENTITY, pidVersion: IDENTITY.pidVersion + 1 });
+  f.child.stdout.write(
+    [...TRACE_START.slice(1), "exit 42 103"].join("\n") + "\n",
+  );
+  f.child.stderr.write(
+    "dtrace: 41 dynamic variable drops with non-empty dirty list\n",
+  );
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "refused");
+  assert.equal(result.captureComplete, false);
+  assert.equal(result.failure.reason, "attach");
+  assert.equal(result.cleanup, "RETIRED");
+  assert.equal(result.events, null);
+  assert.equal(result.sha256, null);
+  assert.equal(result.arguments, null);
+  assert.equal(result.numericStatus, "unavailable");
+  assert.ok(Object.values(result.runtime).every((value) => value === null));
+  assert.throws(() => assertDarwinColdStartupTrace(result));
+  assert.deepEqual(
+    f.calls.filter(([kind]) => kind === "retire").map(([, pid]) => pid),
+    [900, 901],
+  );
+});
 
 test("cold tracing joins the replacement epoch and drains final delivery before observer retirement", async () => {
   const f = traceFixture({
@@ -3153,6 +3319,7 @@ test("cold schema capture crosses former byte and record caps without losing pai
     { status: "partial" },
     { captureComplete: false },
     { cleanup: "UNCERTAIN" },
+    { programSha256: DARWIN_STARTUP_TRACE_INTENT.programSha256 },
     { argumentStatus: "malformed" },
     { argumentStatus: "unavailable" },
     { numericStatus: "unavailable" },

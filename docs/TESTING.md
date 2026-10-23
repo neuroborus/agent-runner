@@ -866,6 +866,15 @@ foreign PID rejection. Cold trace attachment retains explicit process tracking
 across exec; its probes gate syscall/argument/numeric rows on actual exec-success,
 and its consumer rejects helper observations as target coverage. Missing exec
 or exit still refuses complete capture while independent tracer retirement runs.
+Generated-program fixtures bind both exact emitted programs to their intent
+hashes and require only the cold program's finite 16-MiB `dynvarsize` allocation.
+The actual argument action bodies retain operation/scalar facts through copy
+faults and clear thread-local scratch after normal and ERROR rows, preserving
+path positions, escaped formatting and unsigned abort values. Injecting the
+reproduced dynamic-variable-drop diagnostic through the real trace owner refuses
+cold admission despite otherwise complete valid rows and independently retires
+both observers. Portable fixtures cannot prove the producer budget sufficient;
+fresh hosted macOS capture must be complete and loss-free.
 These regressions compile/run no Darwin binaries and
 establish no hosted values, Rust crash causality or installed-build equivalence.
 Existing hosted cold version/schema probes, model-free commands, positive
