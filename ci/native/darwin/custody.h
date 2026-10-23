@@ -122,6 +122,21 @@ static bool is_bootstrap_parent(const char *name, const struct stat *st) {
   return S_ISDIR(st->st_mode) &&
     (experiment_installed_path(name) || (st->st_uid == 0 && !(st->st_mode & 022)));
 }
+/* Only fixed ordinary case inputs cross the observed hosted run directory.
+ * Every generated descendant retains the generic private ancestry guard. */
+static bool experiment_case_parent(const char *name, const char *parent, const struct stat *st) {
+#ifdef NATIVE_CI_EXPERIMENT
+  const char *root = "/private/var/run/native-poc/cases/";
+  size_t length = strlen(root);
+  if (strncmp(name, root, length)) return false;
+  const char *context = name + length;
+  if (strspn(context, "0123456789abcdef") != 64 || (context[64] && context[64] != '/')) return false;
+  return !strcmp(parent, "/private/var/run") && S_ISDIR(st->st_mode) &&
+    st->st_uid == 0 && !(st->st_mode & 06002);
+#else
+  (void)name; (void)parent; (void)st; return false;
+#endif
+}
 /* A pin or custody kind never makes a generated input an installed input. */
 static int installed_path(const char *name, const struct stat *st) {
   const char *tools[] = {"/usr/bin/clang", "/usr/bin/xcrun", "/usr/bin/codesign", "/usr/bin/env",

@@ -1902,10 +1902,22 @@ guards with injected filesystem calls. Its private user-owned report parent
 reproduces the generic ancestry refusal before the bound join succeeds. Root/file
 replacement, birth changes, ACLs, wrong pins/bindings and unrelated ancestry still
 refuse, and consuming reads cannot chown or reseal the root.
+
+That same fixture executes the actual ordinary case-parent predicate and ancestry,
+admission, open/read and held-file stability bodies against the observed root-owned
+GID 1 mode-0775 run directory. It admits only fixed, canonical case roots with a
+64-character lowercase hexadecimal context, and rejects writable arbitrary
+parents, unsafe generated descendants, malformed/near-miss roots and host-parent
+owner/kind/mode changes. Reviewed reads retain refusal, while canonical aliases,
+no-follow symlinks and post-open substitution remain unsuccessful. The original
+build/root birth, ACL, pin and binding matrices remain intact. These portable
+observations establish no native admission or retirement result.
+
 The same small filesystem projection follows the actual experiment lease
 publication and case declaration into native plan admission, descriptor-relative
-open, stability and PF reservation guards. A successful `lstat` of the observed
-root-owned gid-1 mode-0775 run directory still refuses through generic ancestry;
+open, stability and PF reservation guards. For the lease path, a successful
+`lstat` of the observed root-owned gid-1 mode-0775 run directory still refuses
+through generic ancestry;
 only the exact experiment lease joins its strict producer-created private base.
 The producer models Darwin directory-GID inheritance and normalizes only after
 exclusive creation. Read-only consumers retain root:wheel ownership, exact

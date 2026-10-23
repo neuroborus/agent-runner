@@ -189,6 +189,7 @@ test("Darwin ancestry refusals retain the original input, sampled parent and API
         predicates++;
         return false;
       },
+      experiment_case_parent: () => false,
       hex(bytes, size, out) {
         out.write(Buffer.from(bytes).subarray(0, size).toString("hex"));
         context.errno = 97;

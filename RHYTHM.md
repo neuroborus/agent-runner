@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Confine hosted case ancestry to the observed parent
+
+Ordinary Darwin case custody can cross the root-owned group-writable run
+directory only for the fixed context-hashed case root. Every other ancestor
+and generated descendant retains its strict metadata admission. This expresses
+the accepted disposable-host boundary without granting a writable-parent
+exception to unrelated or reviewed inputs. Canonical no-follow reads and held
+identity/stability checks remain mandatory; portable fixtures do not establish
+native admission or independent retirement.
+
 ## 2026-10-22 — Retry trusted polishing failures only by explicit resume
 
 Polishing can repeat complete finalization from an unchanged environment-blocked

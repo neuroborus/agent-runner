@@ -168,7 +168,8 @@ static void ancestors(const char *path) {
   char *slash = strrchr(name, '/'); need(slash && slash != name); *slash = 0;
   for (;;) {
     errno = 0; int result = lstat(name, &st), error = errno;
-    bool sampled = result == 0, ok = sampled && is_bootstrap_parent(path, &st);
+    bool sampled = result == 0, ok = sampled &&
+      (is_bootstrap_parent(path, &st) || experiment_case_parent(path, name, &st));
     if (!ok) {
       /* A successful sample supplies metadata, never an API-error explanation. */
       int primary_error = sampled ? 0 : error; errno = primary_error;

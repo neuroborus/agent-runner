@@ -1173,6 +1173,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
     ["installed_input_path", "name"],
     ["experiment_installed_path", "name"],
     ["is_bootstrap_parent", "name, st"],
+    ["experiment_case_parent", "name, parent, st"],
     ["same_stat", "a, b"],
     ["lease_entry", "value"],
     ["lease_guard", "value"],
@@ -1236,6 +1237,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       )
       .replace(/struct entry \*(\w+) = /gu, "const $1 = ")
       .replace(/(?:const )?char \*(\w+)/gu, "let $1")
+      .replace("name + length", "name.slice(length)")
       .replaceAll("->", ".")
       .replace(/&(entries\[index\]|value\.stat|\w+)/gu, "$1")
       .replace(/\*(leaf|slash|parent) = 0/gu, "$1.truncate()")
@@ -1263,7 +1265,8 @@ async function boundCustodyFixture({ experiment = true } = {}) {
     ).exec(
       name.startsWith("installed_") ||
         name === "experiment_installed_path" ||
-        name === "is_bootstrap_parent"
+        name === "is_bootstrap_parent" ||
+        name === "experiment_case_parent"
         ? header
         : name.startsWith("reservation_") || name === "reserve"
           ? effective
@@ -1310,7 +1313,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       st_mtimespec: { tv_sec: 1, tv_nsec: 0 },
       st_ctimespec: { tv_sec: 1, tv_nsec: 0 },
     });
-  const fixture = ({ lease = false } = {}) => {
+  const fixture = ({ unbuilt = false } = {}) => {
     const events = [],
       nodes = new Map(),
       held = new Map();
@@ -1517,7 +1520,7 @@ async function boundCustodyFixture({ experiment = true } = {}) {
       input_refusal() {},
     };
     const native = script.runInNewContext(env);
-    if (lease) return { env, native, nodes, held, events, metadata };
+    if (unbuilt) return { env, native, nodes, held, events, metadata };
     native.build_directory(output);
     assert.deepEqual(
       events.filter((name) => name !== "acl"),
@@ -1696,6 +1699,114 @@ test("Darwin generated custody joins the real build producer and consuming guard
       fault,
     );
   }
+
+  const caseRoot = "/private/var/run/native-poc/cases/" + "a".repeat(64),
+    launcher = caseRoot + "/custody/launcher",
+    run = "/private/var/run",
+    reviewed = await boundCustodyFixture({ experiment: false }),
+    refused = /Native bound custody refused/u;
+  const hosted = (make = fixture, target = launcher) => {
+    const f = make({ unbuilt: true });
+    let parent = "";
+    for (const component of target.split("/").slice(1, -1)) {
+      parent += "/" + component;
+      const mode =
+        parent === run ? 0o775 : parent.length < run.length ? 0o755 : 0o700;
+      f.nodes.set(parent, {
+        stat: f.metadata(
+          f.nodes.size + 10,
+          0,
+          parent === run ? 1 : 0,
+          0o40000 | mode,
+        ),
+      });
+    }
+    f.image = {
+      stat: f.metadata(100, 0, 0, 0o100555, bytes.length),
+      bytes,
+    };
+    f.nodes.set(target, f.image);
+    f.env.entries = [
+      { kind: "image", path: target, pin: digest(bytes), fd: -1, stat: {} },
+    ];
+    f.env.count = 1;
+    f.env.encoded = target;
+    return f;
+  };
+  const ordinary = hosted();
+  ordinary.native.ancestors(caseRoot);
+  ordinary.native.ancestors(caseRoot + "/custody");
+  ordinary.native.ancestors(launcher);
+  ordinary.native.admitPlan();
+  ordinary.native.openEntry();
+  ordinary.env.n = 5;
+  ordinary.env.tokens = ["read", "2", "0", "0", String(bytes.length)];
+  ordinary.native.readEntry();
+  assert.equal(ordinary.env.lastRead, bytes.toString("hex"));
+  assert.deepEqual(
+    ordinary.events.filter((name) => name !== "acl"),
+    [],
+  );
+
+  const privateRead = hosted(reviewed.fixture);
+  assert.throws(() => privateRead.native.ancestors(launcher), refused);
+  privateRead.nodes.get(run).stat.st_mode = 0o40755;
+  privateRead.native.ancestors(launcher);
+  for (const parent of [
+    "/private",
+    "/private/var",
+    run + "/native-poc",
+    run + "/native-poc/cases",
+    caseRoot,
+    caseRoot + "/custody",
+  ]) {
+    const f = hosted();
+    f.nodes.get(parent).stat.st_mode = 0o40775;
+    assert.throws(() => f.native.ancestors(launcher), refused, parent);
+  }
+  for (const [key, value] of [
+    ["st_uid", 501],
+    ["st_mode", 0o40777],
+    ["st_mode", 0o42775],
+    ["st_mode", 0o120775],
+  ]) {
+    const f = hosted();
+    f.nodes.get(run).stat[key] = value;
+    assert.throws(
+      () => f.native.ancestors(launcher),
+      refused,
+      `${key}/${value}`,
+    );
+  }
+  for (const target of [
+    run + "/native-poc/cases-other/" + "a".repeat(64) + "/custody/launcher",
+    caseRoot + "b/custody/launcher",
+    caseRoot + "g/custody/launcher",
+    caseRoot.slice(0, -1) + "/custody/launcher",
+    caseRoot.slice(0, -64) + "A".repeat(64) + "/custody/launcher",
+    run + "/unrelated/launcher",
+  ]) {
+    const f = hosted(fixture, target);
+    assert.throws(() => f.native.ancestors(target), refused, target);
+  }
+  for (const fault of ["alias", "symlink", "replacement"]) {
+    const f = hosted();
+    if (fault === "alias") f.image.canonical = caseRoot + "/other";
+    else if (fault === "symlink") f.image.symlink = true;
+    else {
+      f.native.openEntry();
+      f.nodes.set(launcher, {
+        ...f.image,
+        stat: { ...f.image.stat, st_ino: 101 },
+      });
+    }
+    assert.throws(
+      () =>
+        fault === "replacement" ? f.native.slot("0") : f.native.openEntry(),
+      refused,
+      fault,
+    );
+  }
 });
 
 test("Darwin fixed PF lease joins its exclusive producer through admission, open, stability and reservation", async () => {
@@ -1730,7 +1841,7 @@ test("Darwin fixed PF lease joins its exclusive producer through admission, open
     contents = Buffer.from("native-poc-pf-lease-v1\n"),
     refused = /Native bound custody refused/u;
   const fixture = async ({ experiment = true, recovery = false } = {}) => {
-    const f = (experiment ? ordinary : reviewed).fixture({ lease: true }),
+    const f = (experiment ? ordinary : reviewed).fixture({ unbuilt: true }),
       { env, nodes, metadata, events } = f,
       staged = new Map(),
       parent = { stat: metadata(10, 0, 1, 0o40775), children: new Map() };

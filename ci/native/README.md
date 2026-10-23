@@ -7286,6 +7286,18 @@ ordinary plan ancestors remain root-owned. Asset hashes must match the concrete
 request; access profiles and rendered policy bytes must match the fixed native
 policy.
 
+For ordinary experiments, generated-case ancestry accepts the root-owned hosted
+`/private/var/run` directory with group write permission, including the observed
+GID 1 mode `0775`, only for canonical inputs under the fixed
+`/private/var/run/native-poc/cases/<context-sha256>` root. The context component
+must be exactly 64 lowercase hexadecimal characters. The group-writable host
+exception rejects world write access and set-ID permission bits. Every
+other ancestor, including the producer-created case base and all generated
+descendants, retains its strict metadata guard. Canonical/no-follow reads,
+held identities, stability and private-case ACL checks remain mandatory.
+The exception supplies no installed-input classification, resealing authority
+or reviewed/private admission change; matching hosted CI still owns native proof.
+
 For reviewed admission, external protected bootstrap supplies the root-owned
 mode-0711 `cases` parent
 and independently reserved non-login account and empty dedicated group. Native
