@@ -2243,6 +2243,8 @@ test("Windows reader failure rejects queued commands while the dependent journal
     fault = Promise.withResolvers(),
     entered = Promise.withResolvers(),
     release = Promise.withResolvers(),
+    waiting = Promise.withResolvers(),
+    exited = Promise.withResolvers(),
     primary = new Error("original reader EOF");
   fault.promise.catch(() => {});
   f.owner.wait = (value) => Promise.race([value, fault.promise]);
@@ -2267,7 +2269,29 @@ test("Windows reader failure rejects queued commands while the dependent journal
   await rejected;
   assert.ok(!f.events.some((event) => /^open [0-9]/u.test(event)));
   release.resolve();
-  const result = await reader.close();
+  assert.equal(reader.transportFailed, true);
+  assert.equal(reader.failure, primary);
+  Object.defineProperty(f.owner, "exited", {
+    get() {
+      waiting.resolve();
+      return exited.promise;
+    },
+  });
+  let closed = false;
+  const closing = reader
+    .close({ signal: new AbortController().signal })
+    .then((result) => {
+      closed = true;
+      return result;
+    });
+  await waiting.promise;
+  assert.equal(
+    closed,
+    false,
+    "A rejected command is not actual transport closure",
+  );
+  exited.resolve({ code: 126, signal: null });
+  const result = await closing;
   assert.equal(result.status, "RETAINED");
   assert.equal(result.primaryCause, primary);
   assert.ok(!f.events.some((event) => /^open [0-9]/u.test(event)));
@@ -8051,6 +8075,8 @@ test("Windows experiment cold custody proves disappeared originals without retai
 test("Windows experiment case recovery selects acknowledged cold owners before retention and keeps every cleanup obligation", async () => {
   for (const fault of [
     null,
+    "retained-original",
+    "retained-foreign",
     "observer-only",
     "lost-completion",
     "lost-completion-live",
@@ -8160,6 +8186,16 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
           nativeEventSha256: hash,
         },
       ];
+    if (fault?.startsWith("retained-")) {
+      const held = fault === "retained-original" ? f.helper : identity(99);
+      if (fault === "retained-foreign")
+        k.states.set(held.pid, {
+          ...structuredClone(f.process),
+          identity: held,
+        });
+      await k.verifier.retainObservers(f.input, [held]);
+    }
+    const recoveryStart = k.events.length;
     for (const actor of k.states.values()) actor.retired = true;
     if (fault !== "observer-only") k.states.clear();
     else {
@@ -8234,7 +8270,10 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
       return Buffer.from(JSON.stringify(frame) + "\n");
     };
     const recover = () => k.verifier.recoverCase(f.input, records, observers);
-    if (fault && !["observer-only", "lost-completion"].includes(fault)) {
+    if (
+      fault &&
+      !["observer-only", "lost-completion", "retained-original"].includes(fault)
+    ) {
       let original;
       await assert.rejects(
         recover,
@@ -8271,10 +8310,10 @@ test("Windows experiment case recovery selects acknowledged cold owners before r
           .every(({ args }) => args.at(-1) === "1"),
       );
     }
-    const retains = k.events.filter(
-      ({ operation }) => operation === "verify-retain",
-    );
-    if (!fault || fault === "lost-completion") {
+    const retains = k.events
+      .slice(recoveryStart)
+      .filter(({ operation }) => operation === "verify-retain");
+    if (!fault || ["lost-completion", "retained-original"].includes(fault)) {
       assert.equal(retains.length, 0);
       assert.equal(
         k.events.filter(({ operation }) => operation === "verify-cold-process")

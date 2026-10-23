@@ -1244,11 +1244,13 @@ export function createWindowsSystemEffects(
         );
         try {
           result = current
-            ? current.repositoryProvisioning && !current.caseEffectsPossible
+            ? current.repositoryProvisioning &&
+              (!current.caseEffectsPossible || current.reader?.transportFailed)
               ? await provisioning.retire(current, { signal })
               : await finish(current, { signal })
             : retained();
         } catch (diagnosticError) {
+          if (current) current.retirementFailure ??= diagnosticError;
           nativeException("win32/effects", diagnosticError);
           result = retained();
         }

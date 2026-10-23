@@ -7790,6 +7790,40 @@ retained owner, while unresolved observer, restoration or identity failures rema
 separate cleanup failures. Cancellation, helper/owner loss, final handle close,
 literal argv and storage guarantees retain their original owners and bounds.
 
+Failed case transport is distinct from a rejected parked admission: the latter
+still owns its independently bound X/D abort. Once transport has failed, cleanup
+fences admission and waits for the original bridge's actual exit event, rather
+than asking that reader to enter cleanup. Command rejection or completion-promise
+failure supplies no exit evidence. The original error remains the case cause;
+closing its transport returns retained custody and cannot attest retirement.
+This also applies when the setup reply or a provisioning read was lost before
+the case returned complete admission.
+
+Settlement then rejoins the protected original case ledger through the admitted
+independent observer. That observer keeps its original process/token handles
+and transferred creator custody; a vanished or reused PID cannot substitute for
+them. A protected closed owner is selected before any new live retain. An
+existing observer may use that closed lane alongside its already held original
+births only when every held subject joins the recovered inventory. Missing
+acknowledgements still require live original custody, and a failed live retain
+cannot switch lanes. No record, baseline or admission is manufactured for a
+lost response.
+
+Every acquired case and preparation-file owner receives a settlement attempt.
+An independent case-proof refusal does not suppress the separate file-observer
+settlement attempt; its registration remains until original-reader proof permits
+release. Repeated close requests share their original attempt. Case proof and
+file-observer retirement must both succeed, and both enter the settlement digest.
+An original reader that already completed retirement receives no new cleanup or
+finish request: a fresh verifier must rejoin its protected closure and the old
+file observer's original records, selecting closed owners before live retention.
+Independent helper/Job/task/account retirement, possible policy/SACL restoration
+and original outside sentinels retain their existing native checks. Not-started
+effects require the original protected pre-effect ledger and fresh absence
+verification; missing records alone establish nothing. Each unresolved proof or
+cleanup cause remains separate from the original native error. Portable fixtures
+do not establish hosted retirement or native acceptance.
+
 Preparation persists case intent before provisioning, validates approved concrete
 parameters before dependent custody, and supplies the existing launch, policy,
 ownership, access, file, fixed Git, release and retirement owners. Native held

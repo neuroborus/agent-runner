@@ -736,7 +736,11 @@ export function createWindowsPreparationFiles(input, options = {}) {
       for (const [reader, retained] of readers)
         if (retained.signal !== signal) {
           try {
-            await (retained.cleanup ??= reader.beginCleanup({ signal }));
+            // Failed transport closure orders independent recovery; it cannot
+            // accept cleanup or attest retirement. Keep its registration/held
+            // process and token custody until original-owner proof releases it.
+            if (reader.transportFailed) await reader.waitForExit(signal);
+            else await (retained.cleanup ??= reader.beginCleanup({ signal }));
             retained.signal = signal;
           } catch (cause) {
             failures.push(cause);

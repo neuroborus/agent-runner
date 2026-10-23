@@ -2717,6 +2717,17 @@ function rawPreparation({ experiment = false, environment } = {}) {
     if (operation === "verify-case-recover") {
       const account = f.accounts.get(selected[Number(args[0])].path);
       const domain = f.ownershipScopes?.get(args[1]);
+      assert.ok(
+        args[3] === "0" || account,
+        "Possible acquisition requires the protected original account record",
+      );
+      if (account && !account.retired && !domain) {
+        // The protected acquisition record and empty pre-launch Job belong to
+        // the original case, independently of a lost case-read reply.
+        assert.equal(args[3], "1");
+        assert.equal(actors.get(account.creator.pid).retired, true);
+        account.retired = true;
+      }
       if (account && !account.retired && domain) {
         assert.equal(
           domain.policy,
@@ -3307,6 +3318,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
         recoveryJobs: new Set(),
       },
       queue = [],
+      exited = Promise.withResolvers(),
       bridge = actor(false),
       helper = actor(),
       processSlots = [];
@@ -3347,17 +3359,11 @@ function rawPreparation({ experiment = false, environment } = {}) {
         return JSON.parse(JSON.stringify(queue.shift()));
       },
       completion: Promise.resolve({ code: 0, signal: null }),
+      exited: exited.promise,
       close: () => {
-        if (
-          ![
-            "start-reply",
-            "setup-refusal",
-            "ready-refusal",
-            "policy-reply",
-          ].includes(f.ownershipDamage) ||
-          observer
-        )
-          return;
+        // Interrupted observer tests own their later exit event independently;
+        // rejecting IPC must not prematurely retire their held original births.
+        if (observer) return;
         // Model the sealed reader/control EOF and independent guardian path;
         // account and policy retirement remain separate native operations.
         for (const held of [
@@ -3367,8 +3373,9 @@ function rawPreparation({ experiment = false, environment } = {}) {
           scope.ownership?.owner,
           ...(scope.ownership?.members ?? []),
         ].filter(Boolean))
-          actors.get(held.pid).retired = true;
+          if (actors.has(held.pid)) actors.get(held.pid).retired = true;
         if (scope.ownership) scope.ownership.jobAbsent = true;
+        exited.resolve({ code: 126, signal: null });
       },
       settle: () => {},
       async send(frame) {
@@ -3441,6 +3448,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
               ? { helper, observations: f.survivingObserver ? 1 : 2 }
               : {}),
           });
+          exited.resolve({ code: 0, signal: null });
         } else if (frame === "P\n")
           queue.push({
             candidateSha,
@@ -3530,6 +3538,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
             if (f.caseDamage === "malformed-token-type") token.primary = 1;
             f.accounts.set(custody, {
               ...value,
+              creator: helper,
               token,
               endpoints: [],
               retired: false,
@@ -4056,6 +4065,8 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
     "cleanup",
     "cancel",
     "original-and-recovery",
+    "acquired-subset",
+    "closed-original",
   ]) {
     const f = experimentBootstrapFixture();
     Object.assign(f.bootstrapOptions.binding, {
@@ -4171,6 +4182,7 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
       cleanup = new AbortController(),
       cleanupCause = new Error("Independent case observer finish failed"),
       originalCause = new Error("Original ownership refusal"),
+      acquiredCause = new Error("Other acquired owner settlement refused"),
       cancellation = new Error("Case census canceled"),
       entered = Promise.withResolvers(),
       blocked = Promise.withResolvers();
@@ -4221,25 +4233,52 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
       }
       if (["cleanup", "original-and-recovery"].includes(fault))
         f.coldDamage = "rights";
+      const attempts = [],
+        acquired = state.plan.cases
+          .filter(({ id }) => id !== recipe.id)
+          .slice(0, 2),
+        active =
+          fault === "acquired-subset"
+            ? new Map(acquired.map(({ id }) => [id, { retired: false }]))
+            : fault === "original-and-recovery"
+              ? new Map([[recipe.id, { retired: false }]])
+              : new Map();
+      if (fault === "closed-original")
+        active.set(recipe.id, {
+          retired: false,
+          retirementFailure: originalCause,
+          reader: {
+            retired: true,
+            recoverCase() {
+              assert.fail("Closed originals require fresh protected recovery");
+            },
+          },
+        });
       const recover = () =>
         recoverWindowsCases(
           state,
           options,
           records,
-          fault === "original-and-recovery"
-            ? new Map([[recipe.id, { retired: false }]])
-            : new Map(),
-          () => {
+          active,
+          (current) => {
+            if (fault === "acquired-subset") {
+              attempts.push(current);
+              throw attempts.length === 1 ? originalCause : acquiredCause;
+            }
             if (fault === "original-and-recovery") throw originalCause;
             assert.fail("No live case is available for replay");
           },
           {},
           cleanup.signal,
         );
-      if (!fault) {
+      if (!fault || fault === "closed-original") {
         const result = await recover();
         assert.equal(result.status, "RETIRED");
         assert.equal(result.independent, true);
+        if (fault === "closed-original") {
+          assert.equal(active.get(recipe.id).retired, true);
+          assert.equal(active.get(recipe.id).retirementFailure, originalCause);
+        }
       } else if (["source", "object"].includes(fault)) {
         await assert.rejects(recover);
       } else {
@@ -4257,11 +4296,26 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
             assert.equal(cause.cause, originalCause);
             assert.equal(cause.errors[1].errors[1], cleanupCause);
           }
+          if (fault === "acquired-subset") {
+            assert.equal(cause.cause, originalCause);
+            assert.ok(cause.errors.includes(acquiredCause));
+            assert.equal(attempts.length, 2);
+            assert.ok(
+              [...active.values()].every((current) => !current.retired),
+            );
+          }
           return true;
         });
         if (fault === "cancel") assert.ok(closed > 0);
       }
       const events = f.rawEvents.slice(before);
+      if (fault === "acquired-subset")
+        assert.equal(
+          events.filter((frame) => frame.startsWith("verify-case-recover "))
+            .length,
+          2,
+          "Missing owner receipts cannot suppress another case's independent settlement",
+        );
       assert.equal(
         events.some((frame) => frame.startsWith("verify-cold-process ")),
         fault !== "source",
@@ -4287,7 +4341,7 @@ test("Windows experiment case recovery rejoins closed original receipts and sepa
 });
 
 test("Windows experiment partial preparation settles only its matching owner and keeps observer failure separate", async () => {
-  for (const stage of ["pre-setup", "account"])
+  for (const stage of ["pre-setup", "account", "reader-loss", "setup-loss"])
     for (const observerFailure of [false, true]) {
       const f = experimentBootstrapFixture();
       Object.assign(f.bootstrapOptions.binding, {
@@ -4340,7 +4394,9 @@ test("Windows experiment partial preparation settles only its matching owner and
           ({ id }) => id === recipe.id,
         ),
         primary = new Error("Case preparation did not return"),
-        secondary = new Error("Independent case observer did not retire");
+        secondary = new Error("Independent case observer did not retire"),
+        waiting = Promise.withResolvers(),
+        exited = Promise.withResolvers();
       f.manifest.windowsPreparation.cases =
         input.manifest.windowsPreparation.cases;
       f.preSetupRejected = stage === "pre-setup";
@@ -4348,6 +4404,56 @@ test("Windows experiment partial preparation settles only its matching owner and
         options.bindResources = async () => {
           throw primary;
         };
+      const readerLoss = ["reader-loss", "setup-loss"].includes(stage);
+      if (stage === "reader-loss")
+        primary.custodyReaderFailure = {
+          phase: "reader-failure",
+          command: "case-read",
+          sequence: 26,
+          source: "custody-reader.c",
+          line: 1,
+          lastError: 5,
+          baseline: {
+            operation: "ReOpenFile",
+            index: 0,
+            apiFailure: true,
+            cleanupFailed: false,
+            cleanupError: 0,
+          },
+        };
+      if (readerLoss) {
+        const open = options.readerOptions.open;
+        options.readerOptions = {
+          ...options.readerOptions,
+          async open(declaration) {
+            const channel = await open(declaration);
+            if (declaration.context.executionId !== recipe.id) return channel;
+            return {
+              ...channel,
+              get exited() {
+                waiting.resolve();
+                return exited.promise;
+              },
+              async send(frame) {
+                if (
+                  (stage === "reader-loss" && frame.startsWith("case-read ")) ||
+                  (stage === "setup-loss" && frame === "P\n")
+                )
+                  throw primary;
+                return channel.send(frame);
+              },
+              close() {
+                // Control EOF fences the native helper; account and task
+                // settlement still require the independent original records.
+                f.actors.get(channel.pid).retired = true;
+                f.actors.get(f.rawTasks.get(declaration.nonce).pid).retired =
+                  true;
+                channel.close();
+              },
+            };
+          },
+        };
+      }
       const open = options.openPreparation;
       options.openPreparation = async (file, args, settings) => {
         const channel = await open(file, args, settings);
@@ -4401,7 +4507,7 @@ test("Windows experiment partial preparation settles only its matching owner and
         }),
         (cause) => {
           original = cause;
-          if (stage === "account") assert.equal(cause, primary);
+          if (stage !== "pre-setup") assert.equal(cause, primary);
           else assert.equal(cause.admission.predicates.unique, false);
           return true;
         },
@@ -4427,11 +4533,25 @@ test("Windows experiment partial preparation settles only its matching owner and
         before,
         "A foreign case cannot reach the retained owner",
       );
-      const diagnostics = [],
-        settlements = await withNativeDiagnostics(
-          () => system.settle(recipe, null, settings),
-          (_, value) => diagnostics.push(value),
+      const diagnostics = [];
+      let completed = false;
+      const pending = withNativeDiagnostics(
+        () => system.settle(recipe, null, settings),
+        (_, value) => diagnostics.push(value),
+      ).then((result) => {
+        completed = true;
+        return result;
+      });
+      if (readerLoss) {
+        await waiting.promise;
+        assert.equal(
+          completed,
+          false,
+          "Recovery must await actual transport closure",
         );
+        exited.resolve({ code: 126, signal: null });
+      }
+      const settlements = await pending;
       assert.ok(
         Object.values(settlements).every(
           (entry) =>
@@ -4444,13 +4564,18 @@ test("Windows experiment partial preparation settles only its matching owner and
         original,
         "Settlement cannot replace preparation failure",
       );
-      if (observerFailure)
-        assert.ok(
-          diagnostics.some((value) =>
-            value.exception?.errors?.includes(secondary),
-          ),
+      if (stage === "reader-loss")
+        assert.equal(
+          system.cause.custodyReaderFailure.baseline.operation,
+          "ReOpenFile",
         );
-      else {
+      if (observerFailure) {
+        const contains = (cause) =>
+          cause === secondary ||
+          cause?.errors?.some(contains) ||
+          (cause?.cause && contains(cause.cause));
+        assert.ok(diagnostics.some((value) => contains(value.exception)));
+      } else {
         assert.equal(f.rawTasks.size, 0);
         assert.ok([...f.actors.values()].every((actor) => actor.retired));
       }
@@ -4461,13 +4586,38 @@ test("Windows experiment partial preparation settles only its matching owner and
         .map(([, bytes]) => JSON.parse(bytes))
         .filter((record) => record.phase === "custody")
         .map(({ record }) => record);
-      assert.ok(
+      assert.equal(
         records.some(
           (record) =>
             record.phase === "retired" &&
             (stage !== "pre-setup" || record.preSetup === true),
         ),
+        !readerLoss,
+        "A dead original cannot attest its own retirement",
       );
+      if (readerLoss) {
+        assert.ok(records.some(({ phase }) => phase === "retained"));
+        assert.ok(
+          !records.some(({ phase }) =>
+            ["cleanup", "case-retire", "case-partial-retire"].includes(phase),
+          ),
+        );
+        assert.ok(
+          f.rawEvents
+            .slice(before)
+            .some((frame) => frame.startsWith("verify-case-recover ")),
+        );
+        if (stage === "setup-loss") {
+          assert.equal(f.accounts.size, 0);
+          assert.ok(records.some(({ phase }) => phase === "admitted"));
+          assert.ok(!records.some(({ phase }) => phase === "case-account"));
+          assert.ok(
+            f.rawCommands
+              .filter(({ operation }) => operation === "verify-case-recover")
+              .every(({ values }) => values.at(-1) === "0"),
+          );
+        }
+      }
       if (stage === "pre-setup") {
         assert.ok(
           records.some((record) => record.phase === "pre-setup-helper-retired"),
@@ -9072,7 +9222,9 @@ test("Windows partial launch recovery restores possible policy before account re
     if (stage === "restoration-refusal") {
       assert.ok(policy >= 0);
       assert.equal(account, -1);
-      assert.equal(system.cause.cause.cause, f.launcherRefusal);
+      let first = system.cause;
+      while (first?.cause) first = first.cause;
+      assert.equal(first, f.launcherRefusal);
       continue;
     }
     if (

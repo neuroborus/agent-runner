@@ -516,6 +516,20 @@ export function createWindowsCustodyReader(value, options = {}) {
     return actual;
   };
   return {
+    get retired() {
+      return retiredOwner;
+    },
+    get transportFailed() {
+      // A rejected parked admission still owns its bound X/D abort lane.
+      return failed && !(parked && !setupAuthorized);
+    },
+    get failure() {
+      return firstCause ?? null;
+    },
+    waitForExit(finish) {
+      requireWindows(owner?.exited);
+      return waitForWindowsCustodyExit(owner, finish);
+    },
     get retirementBinding() {
       // A failure must not erase the original birth while the ordinary command
       // guard stays closed. This snapshot admits no further reader operation.
@@ -2479,7 +2493,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         operation === "remove",
       );
     },
-    async close() {
+    async close({ signal: finish } = {}) {
       try {
         await serial;
         if (failed && parked && !setupAuthorized) {
@@ -2650,7 +2664,7 @@ export function createWindowsCustodyReader(value, options = {}) {
         owner?.close();
         let cleanupCause;
         try {
-          await waitForWindowsCustodyExit(owner, cleanupSignal);
+          await waitForWindowsCustodyExit(owner, finish ?? cleanupSignal);
         } catch (error) {
           cleanupCause = error;
         }

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Recover acquired cases through independent original custody
+
+Windows failed-reader settlement waits for actual transport closure and uses the
+protected original ledger and independent process/token custody instead of
+requesting cleanup from the dead reader. Closed-owner acknowledgements select
+their existing recovery lane before live retention; interrupted originals retain
+their strict held-handle authority. Every acquired case and file observer receives
+a settlement attempt, with proof and cleanup failures preserved separately from
+the original error. Neither bridge exit nor missing records supplies retirement
+or a fresh baseline, and hosted verification remains required.
+
 ## 2026-10-23 — Read ownership baselines from their held handles
 
 Windows ownership baselines join each retained handle to its saved file identity

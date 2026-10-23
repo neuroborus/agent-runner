@@ -42,6 +42,7 @@ import {
   validateWindowsAccessExpectation,
 } from "./access-coverage.js";
 import { windowsOperationPreparation } from "./case-operations.js";
+import { recoverWindowsCases } from "./case-recovery.js";
 
 const same = (a, b) => observationDigest(a) === observationDigest(b);
 const rootFor = (state, context) =>
@@ -1023,36 +1024,54 @@ export function createWindowsCaseProvisioning(state, options) {
       state.guard(signal);
       requireObservation(
         current.repositoryProvisioning &&
-          !current.prepared &&
-          !current.caseEffectsPossible &&
+          ((!current.prepared && !current.caseEffectsPossible) ||
+            current.reader?.transportFailed) &&
           current.reader,
       );
       options.fenceAdmission?.();
       const failures = [];
       let account, custody, files;
-      try {
-        await current.reader.beginCleanup({ signal });
-        // No account command is possible before the setup acknowledgement.
-        // close() owns the distinct bound X/helper-retirement/D lifecycle.
-        if (current.admission)
-          account = current.account
-            ? await current.reader.retireCase(current.custodySlot)
-            : await current.reader.retirePartialCase();
-        else requireObservation(!current.account);
-      } catch (error) {
-        failures.push(error);
-      }
-      try {
-        custody = await this.closeReader(current, { signal });
-        requireObservation(
-          custody.status === "RETIRED" &&
-            custody.independent &&
-            custody.closed &&
-            custody.taskRemoved &&
-            (current.admission || custody.preSetup === true),
-        );
-      } catch (error) {
-        failures.push(error);
+      if (current.reader.transportFailed) {
+        // Original command errors stay on the failed case. Its protected
+        // producer ledger and independently held births own settlement now.
+        try {
+          custody = await recoverWindowsCases(
+            state,
+            options,
+            [],
+            new Map([[current.recipe.id, current]]),
+            () => requireObservation(false),
+            this,
+            signal,
+          );
+        } catch (cause) {
+          failures.push(cause);
+        }
+      } else {
+        try {
+          await current.reader.beginCleanup({ signal });
+          // No account command is possible before the setup acknowledgement.
+          // close() owns the distinct bound X/helper-retirement/D lifecycle.
+          if (current.admission)
+            account = current.account
+              ? await current.reader.retireCase(current.custodySlot)
+              : await current.reader.retirePartialCase();
+          else requireObservation(!current.account);
+        } catch (error) {
+          failures.push(error);
+        }
+        try {
+          custody = await this.closeReader(current, { signal });
+          requireObservation(
+            custody.status === "RETIRED" &&
+              custody.independent &&
+              custody.closed &&
+              custody.taskRemoved &&
+              (current.admission || custody.preSetup === true),
+          );
+        } catch (error) {
+          failures.push(error);
+        }
       }
       if (closeFiles) {
         try {
@@ -1067,14 +1086,18 @@ export function createWindowsCaseProvisioning(state, options) {
           failures.push(error);
         }
       }
-      if (failures.length)
-        throw new AggregateError(
+      if (failures.length) {
+        current.retired = false;
+        const cause = new AggregateError(
           failures,
           "Windows partial case settlement failed",
           {
             cause: failures[0],
           },
         );
+        current.retirementFailure ??= cause;
+        throw cause;
+      }
       current.retired = true;
       return {
         status: "RETIRED",

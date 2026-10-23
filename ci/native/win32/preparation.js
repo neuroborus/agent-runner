@@ -808,6 +808,7 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
         ...settings,
         admissionClosed: () => files.admissionClosed,
       });
+      let closing;
       const start = reader.start.bind(reader),
         close = reader.close.bind(reader),
         beginCleanup = reader.beginCleanup.bind(reader);
@@ -828,49 +829,61 @@ export function windowsPreparationOptions(input, options, preparationOwners) {
             observationDigest(group.declared.custody) ===
               observationDigest(declaration),
         );
+        const failures = [];
+        let proof, settlement;
         try {
           await custodyFiles.beginCleanup(signal);
-        } catch {
-          // A failed reader cannot accept D. Its admitted observer keeps the
-          // original process/token custody until case recovery has completed.
+          proof = await custodyFiles.verify(
+            "recoverCase",
+            declaration,
+            group.custody,
+            group.observers,
+            group.records.find(
+              ({ record }) => record.phase === "provisioning-observed",
+            )?.record.actual?.objects ?? [],
+            group.records.map(({ record }) => record),
+          );
+          requireObservation(
+            windowsRetired(proof) && proof.noLiveMembers && proof.taskRemoved,
+          );
+          custodyFiles.releaseReader(reader);
+        } catch (cause) {
+          failures.push(cause);
         }
-        const proof = await custodyFiles.verify(
-          "recoverCase",
-          declaration,
-          group.custody,
-          group.observers,
-          group.records.find(
-            ({ record }) => record.phase === "provisioning-observed",
-          )?.record.actual?.objects ?? [],
-          group.records.map(({ record }) => record),
-        );
-        requireObservation(
-          windowsRetired(proof) && proof.noLiveMembers && proof.taskRemoved,
-        );
-        custodyFiles.releaseReader(reader);
-        const settlement = await custodyFiles.settleFiles();
-        requireObservation(windowsRetired(settlement));
+        try {
+          settlement = await custodyFiles.settleFiles();
+          requireObservation(windowsRetired(settlement));
+        } catch (cause) {
+          failures.push(cause);
+        }
+        if (failures.length)
+          throw new AggregateError(
+            failures,
+            "Windows case and file observer recovery failed",
+            { cause: failures[0] },
+          );
         return {
           ...proof,
           observerSettlement: settlement,
           nativeEventSha256: observationDigest({ proof, settlement }),
         };
       };
-      reader.close = async () => {
-        const result = await close();
-        if (windowsRetired(result)) {
-          custodyFiles.releaseReader(reader);
-          if (isCase) {
-            const settlement = await custodyFiles.settleFiles();
-            requireObservation(windowsRetired(settlement));
-            result.nativeEventSha256 = observationDigest({
-              custody: result.nativeEventSha256,
-              settlement,
-            });
+      reader.close = (settings) =>
+        (closing ??= (async () => {
+          const result = await close(settings);
+          if (windowsRetired(result)) {
+            custodyFiles.releaseReader(reader);
+            if (isCase) {
+              const settlement = await custodyFiles.settleFiles();
+              requireObservation(windowsRetired(settlement));
+              result.nativeEventSha256 = observationDigest({
+                custody: result.nativeEventSha256,
+                settlement,
+              });
+            }
           }
-        }
-        return result;
-      };
+          return result;
+        })());
       return reader;
     },
     async verifyCommands(commands, _reader, { signal }) {

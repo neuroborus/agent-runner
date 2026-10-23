@@ -379,8 +379,15 @@ export function createWindowsCustodyVerifier(
   // Protected original acknowledgements select this lane before live retention.
   // It reuses the same native census, complete Job slots and task observations
   // for build readers and closed case owners; missing PIDs supply no proof.
-  const coldOwners = async (owners) => {
-    requireWindows(input.purpose === "experiment" && subjects.size === 0);
+  const coldOwners = async (owners, retainedOriginals = []) => {
+    requireWindows(
+      input.purpose === "experiment" &&
+        [...subjects.values()].every((held) =>
+          retainedOriginals.some((identity) =>
+            sameWindowsIdentity(held.identity, identity),
+          ),
+        ),
+    );
     requireWindows(
       dense(owners, 64).length > 0 &&
         new Set(owners.map(({ nonce }) => nonce)).size === owners.length,
@@ -1173,7 +1180,10 @@ export function createWindowsCustodyVerifier(
       // call remains terminal and can never retry through the cold lane.
       const closedIdentities = new Set();
       if (closedOwners.length) {
-        observations.push(await coldOwners(closedOwners));
+        // An existing observer may already hold interrupted originals. Join
+        // those exact births; do not reopen them or discard transferred handles
+        // merely because another owner has protected close acknowledgements.
+        observations.push(await coldOwners(closedOwners, unique));
         for (const owner of closedOwners)
           for (const identity of owner.identities)
             closedIdentities.add(

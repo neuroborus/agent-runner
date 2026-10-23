@@ -2326,6 +2326,19 @@ failures retain the first cause and separate uncertainty. These portable suites
 add no slow-tier assignment; both fresh original hosted workflows on the final
 candidate, all three platforms, all 69 records and exact provenance remain the
 supervisor's external acceptance requirement.
+The same custody fixture proves that a rejected reader command does not replace
+the bridge's actual exit event. The existing raw preparation fixture loses the
+setup acknowledgement and a provisioning read separately, requires the failed
+reader's cleanup/retirement commands to remain unused, and rejoins its protected
+intent and held original process/token custody through independent recovery.
+Account/Job/task proof and preparation-file retirement remain separate, including
+observer-close failure. Missing authority for two acquired owners retains both
+causes without suppressing an independently recoverable case. Existing transferred
+creator-handle, PID-reuse, missing receipt, policy/SACL and outside-sentinel
+refusals remain active. Closed-owner fixtures also cover an observer that already
+holds matching originals and reject unrelated retained subjects. These cases use
+the existing explicit native harness, add no check or version, and prove no
+Windows API behavior or native acceptance.
 The existing raw experiment preparation fixture also reaches the actual
 `experiment-runtime.js` consumer through the normal system factory and independent
 admission verifier. Repeated observations retain the same owner slots while

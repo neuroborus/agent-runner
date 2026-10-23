@@ -338,6 +338,17 @@ export async function recoverWindowsCases(
   for (const [id, current] of active) {
     try {
       if (!current.retired) {
+        if (current.reader?.retired) {
+          unfinished.set(
+            id,
+            current.retirementFailure ? [current.retirementFailure] : [],
+          );
+          continue;
+        }
+        if (current.reader?.transportFailed)
+          throw (
+            current.reader.failure ?? new Error("Windows case reader failed")
+          );
         const result =
           current.repositoryProvisioning && !current.caseEffectsPossible
             ? await provisioning.retire(current, { signal, closeFiles: false })
@@ -405,7 +416,9 @@ export async function recoverWindowsCases(
       // absent task or a fixture exit code alone is never settlement evidence.
       const current = active.get(id);
       results.push(
-        unfinished.has(id) && typeof current?.reader?.recoverCase === "function"
+        unfinished.has(id) &&
+          !current?.reader?.retired &&
+          typeof current?.reader?.recoverCase === "function"
           ? await current.reader.recoverCase(group, { signal })
           : await observeCase(state, options, group, signal),
       );
