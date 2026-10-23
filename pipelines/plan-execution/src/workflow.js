@@ -5274,31 +5274,34 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
           return productDecision(result.decision, "IMPLEMENT");
         }
         if (result.status === "BLOCKED") {
-          if (correction !== null) {
-            await transition({
-              ...state(),
-              availabilityCorrectionCharged: false,
-              pendingLazyCorrection: null,
-            });
-          }
-          if (changed) {
-            await transition({
-              ...state(),
-              availabilityCorrectionCharged: false,
-              ...clearedCandidateAndTerminalGate(),
-              previousFindings:
-                current.findings.length === 0
-                  ? current.previousFindings
-                  : current.findings,
-              findings: [],
-              pendingCorrection: true,
-            });
-          }
-          await pause("environment_blocked", {
-            explanation: result.reason,
-            evidence: result.evidence,
-            resumeState: "CHECK_AND_FIX",
-          });
+          await pause(
+            "environment_blocked",
+            {
+              explanation: result.reason,
+              evidence: result.evidence,
+              resumeState: "CHECK_AND_FIX",
+            },
+            {
+              ...(correction !== null
+                ? {
+                    availabilityCorrectionCharged: false,
+                    pendingLazyCorrection: null,
+                  }
+                : {}),
+              ...(changed
+                ? {
+                    availabilityCorrectionCharged: false,
+                    ...clearedCandidateAndTerminalGate(),
+                    previousFindings:
+                      current.findings.length === 0
+                        ? current.previousFindings
+                        : current.findings,
+                    findings: [],
+                    pendingCorrection: true,
+                  }
+                : {}),
+            },
+          );
           return false;
         }
         if (changed) {

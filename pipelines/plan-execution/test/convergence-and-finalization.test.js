@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import test from "node:test";
+import { isDeepStrictEqual } from "node:util";
 
 import { planExecutionPipeline } from "../src/index.js";
 import {
@@ -2219,6 +2220,142 @@ test("runs lazy execution with one Worker source fork and no review roles", asyn
 });
 
 for (const mode of ["lazy", "combined"]) {
+  for (const corrected of [false, true]) {
+    test(`preserves a ${mode} BLOCKED check/fix pause after ${corrected ? "corrected" : "ordinary"} repair`, async (t) => {
+      const findings = cleanConfirmationFindings("R1").findings;
+      const blocked = {
+        ...checkAndFix("BLOCKED"),
+        summary: "",
+        reason: "The local analysis service is unavailable.",
+        evidence: ["The service did not answer the local request."],
+      };
+      let checkRound = 0;
+      let beforeRepair;
+      let beforeBlocked;
+      const fixture = await createFixture(t, {
+        mode,
+        worker: [
+          clarificationReady(),
+          bootstrapReady("Worker"),
+          ...(mode === "combined" ? [reconciliationResolved()] : []),
+        ],
+        workWorker: [
+          implementationCompleted(),
+          checkAndFix(),
+          {
+            status: "FINDINGS",
+            findings,
+            question: "",
+            options: [],
+            whyBlocked: "",
+            evidence: [],
+          },
+          ...(corrected
+            ? [{ ...checkAndFix("CHANGED"), unexpected: "rejected" }]
+            : []),
+          blocked,
+        ],
+        async onRoleRun(role, request) {
+          if (role !== "worker" || request.schema !== CHECK_AND_FIX_SCHEMA)
+            return;
+          checkRound += 1;
+          if (checkRound === 2) beforeRepair = fixture.currentRun.pipelineState;
+          if (checkRound > 1) {
+            beforeBlocked = fixture.currentRun;
+            await writeFile(
+              join(request.cwd, "repair.txt"),
+              checkRound === 2 && corrected ? "partial\n" : "repaired\n",
+            );
+          }
+        },
+      });
+      const transition = fixture.runtime.transition;
+      fixture.runtime.transition = async (patch, options) => {
+        if (
+          options?.activity == null &&
+          Object.entries(patch).every(([field, value]) =>
+            isDeepStrictEqual(fixture.currentRun[field], value),
+          )
+        ) {
+          throw Object.assign(
+            new Error("Transition has no change or activity."),
+            { code: "ERR_EMPTY_RUN_TRANSITION" },
+          );
+        }
+        return transition(patch, options);
+      };
+
+      const paused = await fixture.run();
+      const state = paused.pipelineState;
+
+      assert.deepEqual(
+        mode === "combined"
+          ? beforeRepair.primaryFindings
+          : beforeRepair.findings,
+        findings,
+      );
+      if (mode === "lazy")
+        assert.equal(beforeRepair.candidateReviewResult.status, "FINDINGS");
+      if (corrected) {
+        assert.equal(
+          beforeBlocked.pipelineState.pendingLazyCorrection.fixRoundCharged,
+          true,
+        );
+        assert.equal(beforeBlocked.counters.fixRounds, 2);
+      }
+      assert.equal(state.workflowState, "WAITING_FOR_USER");
+      assert.deepEqual(paused.pause, {
+        reason: "environment_blocked",
+        explanation: blocked.reason,
+        evidence: blocked.evidence,
+        resumeState: "CHECK_AND_FIX",
+      });
+      assert.equal(paused.activeTurn, null);
+      assert.equal(
+        await readFile(join(fixture.projectPath, "repair.txt"), "utf8"),
+        "repaired\n",
+      );
+      assert.deepEqual(
+        state.repositoryBaseline,
+        await fixture.runtime.git.snapshot({
+          projectPath: fixture.projectPath,
+          allowedPaths: state.repositoryBaseline.allowedPaths,
+        }),
+      );
+      assert.notEqual(
+        state.repositoryBaseline.contentFingerprint,
+        beforeBlocked.pipelineState.repositoryBaseline.contentFingerprint,
+      );
+      for (const field of [
+        "candidateReviewResult",
+        "candidateReviewedFingerprint",
+        "candidateConfirmationFingerprint",
+        "finalizationResult",
+        "finalizedFingerprint",
+        "reviewResult",
+        "reviewedFingerprint",
+        "cleanConfirmationFingerprint",
+      ]) {
+        assert.equal(state[field], null, field);
+      }
+      assert.deepEqual(state.findings, []);
+      assert.deepEqual(state.primaryFindings, []);
+      assert.deepEqual(state.previousFindings, mode === "lazy" ? findings : []);
+      assert.equal(state.pendingCorrection, true);
+      assert.equal(state.pendingLazyCorrection, null);
+      assert.equal(state.availabilityCorrectionCharged, false);
+      assert.equal(paused.counters.fixRounds, 2);
+      assert.deepEqual(state.completedCommits, []);
+      planExecutionPipeline.validateResumeAction(paused, null);
+      assert.equal(
+        fixture.transitions.some(
+          ({ patch }) => patch?.pause?.reason === "internal_failure",
+        ),
+        false,
+      );
+    });
+  }
+
   test(`automatically corrects invalid ${mode} check output in a fresh session`, async (t) => {
     const fixture = await createFixture(t, {
       mode,

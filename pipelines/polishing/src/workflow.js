@@ -4716,18 +4716,20 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
           return productDecision(result.decision, "BOOTSTRAP");
         }
         if (result.status === "BLOCKED") {
-          if (correction !== null) {
-            await transition({
-              ...state(),
-              availabilityCorrectionCharged: false,
-              pendingLazyCorrection: null,
-            });
-          }
-          await pause("environment_blocked", {
-            explanation: result.reason,
-            evidence: result.evidence,
-            resumeState: "CHECK_AND_FIX",
-          });
+          await pause(
+            "environment_blocked",
+            {
+              explanation: result.reason,
+              evidence: result.evidence,
+              resumeState: "CHECK_AND_FIX",
+            },
+            correction !== null
+              ? {
+                  availabilityCorrectionCharged: false,
+                  pendingLazyCorrection: null,
+                }
+              : {},
+          );
           return false;
         }
         if (changed) {
