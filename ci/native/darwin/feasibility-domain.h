@@ -7,7 +7,6 @@
 #include <security/audit/audit_ioctl.h>
 #include <mach/mach_vm.h>
 #include <mach/mig.h>
-#include <mach-o/dyld-interposing.h>
 
 static void domain_check(bool ok, const char *operation, const char *kind, int value) {
   if (!ok) { remember(operation, kind, value); failure(126); }
@@ -87,7 +86,18 @@ static mach_port_t domain_runtime_reply_allocate(void) {
 /* dyld applies this only to callers outside this image; the callback calls the
  * original allocator. A missed producer grants no authority: its right remains
  * unknown and fences exec. No hidden runtime global or TSD offset is read. */
-DYLD_INTERPOSE(domain_runtime_reply_allocate, mach_reply_port);
+/* Owned x64 two-pointer layout following Apple dyld
+ * fd8d0c4d52320ebf64db34f3cb280310d905c5ae, include/mach-o/dyld-interposing.h.
+ * The helper's x64 guard excludes authenticated-pointer targets. Keep the entry
+ * emitted even though C code never reads it; dyld consumes the named section. */
+static const struct {
+  mach_port_t (*replacement)(void);
+  mach_port_t (*replacee)(void);
+} domain_runtime_reply_interpose __attribute__((used, section("__DATA,__interpose"))) = {
+  domain_runtime_reply_allocate, mach_reply_port
+};
+_Static_assert(sizeof(domain_runtime_reply_interpose) == 2 * sizeof(void *),
+  "The x64 dyld interposition entry requires exactly two pointers.");
 /* XNU xnu-11417.140.69's libsyscall/mach/mach/mach_sync_ipc.h declares
  * mach_port_t mig_get_special_reply_port(void); mach_port.c implements its
  * cached acquisition. That private header is absent from the hosted 15.5 SDK.

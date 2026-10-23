@@ -4735,10 +4735,22 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       start > 0 &&
       end > start,
   );
+  const interpose =
+    /static const struct \{([^}]+)\}\s+domain_runtime_reply_interpose\s+__attribute__\(\(([^;]+)\)\)\s*=\s*\{\s*(\w+)\s*,\s*(\w+)\s*\};/u.exec(
+      source,
+    );
+  assert.ok(interpose, "The helper must emit its own dyld interposition entry");
   assert.match(
-    source,
-    /DYLD_INTERPOSE\(domain_runtime_reply_allocate, mach_reply_port\)/u,
+    interpose[1],
+    /^\s*mach_port_t \(\*replacement\)\(void\);\s*mach_port_t \(\*replacee\)\(void\);\s*$/u,
   );
+  assert.match(interpose[2], /(?:^|,\s*)used(?:,|$)/u);
+  assert.match(interpose[2], /section\("__DATA,__interpose"\)/u);
+  assert.deepEqual(interpose.slice(3), [
+    "domain_runtime_reply_allocate",
+    "mach_reply_port",
+  ]);
+  assert.doesNotMatch(source, /#include <mach-o\/dyld-interposing\.h>/u);
   assert.match(
     source,
     /typedef mach_port_t \(\*domain_special_reply_fn\)\(void\);/u,
@@ -4793,6 +4805,9 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     function domain_access_observe(phase) {${translate(observation)}}
     function domain_access_release(self, access, type) {${translate(releaseBody)}}
     function domain_sanitize() {${translate(sanitation)}}
+    var domain_runtime_reply_interpose = {
+      replacement: ${interpose[3]}, replacee: ${interpose[4]},
+    };
     () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
   `);
   const SEND = 0x10000,
@@ -5419,6 +5434,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       cleanup = [],
       releaseFailures = [],
       referenceReleases = [],
+      allocatorReturns = [],
       notifyCopies = [],
       executed = {},
       originalBirth = { pid: 42 },
@@ -5769,13 +5785,16 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       thread_get_special_reply_port: () =>
         assert.fail("The allocating trap cannot query a cached reply"),
-      mach_reply_port: () => allocationReply,
+      mach_reply_port() {
+        allocatorReturns.push(allocationReply);
+        return allocationReply;
+      },
       atomic_compare_exchange_strong(target, expected, value) {
         if (options.concurrentInitialization && !racedInitialization) {
           racedInitialization = true;
           const pending = allocationReply;
           allocationReply = 119;
-          context.domain_runtime_reply_allocate();
+          runtimeAllocate();
           allocationReply = pending;
         }
         if (target.value !== expected.value) {
@@ -5792,7 +5811,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           nestedProducer = true;
           const pending = allocationReply;
           allocationReply = 119;
-          context.domain_runtime_reply_allocate();
+          runtimeAllocate();
           allocationReply = pending;
         }
         return previous;
@@ -5857,7 +5876,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         if (options.replaceSpecial === "census") specialReply = 109;
         if (options.replaceRuntime === "census") {
           allocationReply = 119;
-          context.domain_runtime_reply_allocate();
+          runtimeAllocate();
         }
         return options.census ?? 0;
       },
@@ -5876,7 +5895,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         if (options.replaceSpecial === "release") specialReply = 109;
         if (options.replaceRuntime === "release") {
           allocationReply = 119;
-          context.domain_runtime_reply_allocate();
+          runtimeAllocate();
         }
         if (options.censusRelease)
           releaseFailures.push({
@@ -5898,6 +5917,24 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       fflush() {},
     };
     const launch = script.runInNewContext(context);
+    let allocatorCalls = 0;
+    // Model outside-image dispatch from the actual emitted pair. The callback's
+    // own mach_reply_port call still reaches the original trap, never this path.
+    // This checks wiring and ownership only; no native dyld execution occurs.
+    const runtimeAllocate = () => {
+      const entry = context.domain_runtime_reply_interpose;
+      assert.equal(entry.replacee, context.mach_reply_port, label);
+      assert.equal(
+        entry.replacement,
+        context.domain_runtime_reply_allocate,
+        label,
+      );
+      const expected = allocationReply;
+      allocatorCalls++;
+      const actual = entry.replacement();
+      assert.equal(actual, expected, label);
+      return actual;
+    };
     if (!options.unobservedRuntime)
       for (const name of options.concurrentProducer
         ? options.runtimeReplies.slice(0, 1)
@@ -5905,7 +5942,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           ? [117]
           : (options.runtimeReplies ?? [117])) {
         allocationReply = name;
-        assert.equal(context.domain_runtime_reply_allocate(), name, label);
+        assert.equal(runtimeAllocate(), name, label);
       }
     assert.throws(launch, (error) => {
       if (!operation) return error === executed;
@@ -5934,6 +5971,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       );
       return true;
     });
+    assert.equal(
+      allocatorReturns.length,
+      allocatorCalls,
+      "Each interposed call returns one original allocation without recursion",
+    );
     assert.equal(
       calls.some(([op]) => op === "exec"),
       !operation || !!options.execFailure,

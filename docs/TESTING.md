@@ -385,6 +385,19 @@ their distinct original and cleanup outcomes. These deterministic cases add no
 native execution, validation command or slow-tier assignment. They identify no
 historical unknown right and establish no native dyld interception or closure.
 
+That existing fixture also reads the owned interposition declaration, requires
+the retained `__DATA,__interpose` entry and its ordered, typed replacement/replacee
+pair, and rejects the unavailable `mach-o/dyld-interposing.h` include. It models
+outside-image allocation dispatch through the actual declared pair. The original
+allocator stub remains distinct from that dispatch, and each intercepted call
+must return exactly one original allocation without recursion. The existing
+PID/fork, concurrency, cache, overflow, missed-producer, census and cleanup cases
+all retain their original assertions through this entry. These portable
+observations protect declaration and ownership wiring only; they do not execute
+dyld, compile an SDK shim or prove installed header/export availability. Both
+ordinary and command-enabled helper builds remain matching hosted CI obligations.
+No validation command or slow-tier assignment is added.
+
 The same fixture executes the cached special-reply loader body with injected
 `dlsym` and `dlerror`. It protects the pinned zero-argument `mach_port_t` call
 type without the unavailable private SDK header, clears a stale loader error,

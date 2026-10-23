@@ -3963,6 +3963,45 @@ Child entry preserves already recorded allocations from its own process; reexec
 starts with new image bookkeeping. Neither a hidden runtime global nor a private
 TSD offset is inspected. No name from a census can enter the ledger.
 
+The hosted Xcode 16.4 macOS 15.5 SDK also omits `mach-o/dyld-interposing.h`.
+The helper owns a single typed replacement/replacee pair following the raw x64
+interposition contract in Apple's
+[`dyld-interposing.h` at `fd8d0c4d52320ebf64db34f3cb280310d905c5ae`](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/include/mach-o/dyld-interposing.h).
+The ordered function pointers identify `domain_runtime_reply_allocate` and the
+original `mach_reply_port`. The compiler's `used` attribute retains the entry in
+`__DATA,__interpose` even without a C reader; a compile-time size check requires
+exactly two pointer widths. Both functions retain the SDK's zero-argument
+`mach_port_t` call type. The existing Apple/x86-64 guard confines this raw-pointer
+layout to its declared target; authenticated-pointer targets require their own
+contract. The declaration implements that ABI directly with attribution to the
+primary source, without importing the upstream macro or header.
+
+The complete feasibility helper has two build variants: the ordinary helper and
+the same translation unit with `NATIVE_FEASIBILITY_COMMAND` defined. Both use
+C11 atomics, `-arch x86_64`, the selected `-isysroot`, and the existing sandbox and
+BSM linkage. Their source/header identities remain bound by the existing build
+owner. The SDK surface audit covers these transitive owners together:
+
+| Owner                            | SDK declarations and constants retained                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `feasibility-helper.c`           | Its C/POSIX headers cover fixed file, socket, credential, signal and wait operations; `CommonCrypto/CommonDigest.h` supplies SHA-256; `libproc.h`, `sys/proc.h` and `sys/proc_info.h` supply process identities and census records; `sys/acl.h`, `sys/attr.h` and `sys/mount.h` supply held ACL and volume inspection; `bsm/audit.h` and `mach/mach.h` supply audit tokens, task identities, Mach traps and rights; `sandbox.h` supplies policy application. |
+| `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `stdatomic.h` covers the fixed producer ledger; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor. The interposition entry requires no additional SDK header.                                                           |
+| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes its general custody declarations; `NATIVE_AUDIT_DOMAIN` includes only the shared identity, audit-session and bounded census operations, using the helper/domain declarations above.                                                                                                                                                                                                                                      |
+| `feasibility-sandbox.h`          | Its public C/POSIX types and `dlfcn.h` support the pinned variadic sandbox-check ABI and separately checked function/data lookups.                                                                                                                                                                                                                                                                                                                           |
+| Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                                   |
+
+The Mach special-port selectors, exact right types, audit constants and spawn
+flags remain supplied by those SDK interfaces; no substitute numeric definitions
+are introduced. The separately resolved exports remain `sandbox_check`, the
+`SANDBOX_CHECK_NO_REPORT` data object, `proc_signal_with_audittoken` and the cached
+special-reply accessor described below. Their existing checks still gate use.
+Cycle 117 observed the absent private cached-reply header; completed cycle 118
+then observed the absent interposition header in both build variants. Those
+compiler refusals do not establish availability of declarations or exports after
+the failed include. This source audit and portable fixtures supply no installed
+SDK, complete compilation, native interposition or retirement proof. Both native
+build variants and the original controls still require fresh matching hosted CI.
+
 Before the child's first identity/audit RPC, it separately borrows the exact
 ordinary cache from `mig_get_reply_port` and the special cache from
 `mig_get_special_reply_port`. Pinned
