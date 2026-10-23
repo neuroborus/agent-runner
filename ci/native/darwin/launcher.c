@@ -48,6 +48,114 @@ static void descriptors(void) {
 }
 static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child);
 static void mach_rights(void) {
+#ifdef NATIVE_CI_EXPERIMENT
+  task_t self = mach_task_self(); thread_t thread = mach_thread_self();
+  mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL, reply = MACH_PORT_NULL;
+  mach_port_t held_host = MACH_PORT_NULL, held_access = MACH_PORT_NULL;
+  mach_port_t held_thread = MACH_PORT_VALID(thread) ? thread : MACH_PORT_NULL;
+  mach_port_type_t access_type = MACH_PORT_TYPE_NONE, reply_type = MACH_PORT_TYPE_NONE;
+  natural_t type = 0; mach_vm_address_t address = 0;
+  mach_port_name_array_t names = NULL; mach_port_type_array_t types = NULL;
+  mach_msg_type_number_t n = 0, nt = 0; bool service = false, seen = false;
+  const char *operation; long result = 0; int error = 0;
+  operation = "mach_thread_self"; result = thread; error = errno;
+  if (!MACH_PORT_VALID(thread) || thread == self) goto mach_cleanup;
+  operation = "task_get_special_port/TASK_HOST_PORT";
+  result = task_get_special_port(self, TASK_HOST_PORT, &host); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  held_host = MACH_PORT_VALID(host) ? host : MACH_PORT_NULL;
+  operation = "mach_port_kobject"; result = mach_port_kobject(self, host, &type, &address); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "mach_port_kobject/type"; result = type;
+  if (type != 3) goto mach_cleanup;
+  held_host = MACH_PORT_NULL;
+  operation = "mach_port_deallocate/host"; result = mach_port_deallocate(self, host); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "task_get_special_port/TASK_ACCESS_PORT";
+  result = task_get_special_port(self, TASK_ACCESS_PORT, &access); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  if (MACH_PORT_VALID(access)) {
+    /* The getter owns a copy before the fallible query. Unsupported types with
+     * no deallocatable reference grant no authority over an unowned receive. */
+    held_access = access;
+    operation = "mach_port_type/access"; result = mach_port_type(self, access, &access_type); error = errno;
+    if (result == KERN_SUCCESS && !(access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
+      held_access = MACH_PORT_NULL;
+    if (result != KERN_SUCCESS) goto mach_cleanup;
+    if (access_type == MACH_PORT_TYPE_SEND) {
+      type = ~0U;
+      operation = "mach_port_kobject/access"; result = mach_port_kobject(self, access, &type, &address); error = errno;
+      if (result != KERN_SUCCESS) goto mach_cleanup;
+      operation = "mach_port_kobject/access/type"; result = type;
+      if (type != 0) goto mach_cleanup; /* IKOT_NONE, never task/thread authority. */
+      operation = "TASK_ACCESS_PORT/identity"; result = access;
+      if (access == self || access == thread) goto mach_cleanup;
+      service = true;
+    } else {
+      operation = "TASK_ACCESS_PORT/authority"; result = access_type;
+      if (access_type != MACH_PORT_TYPE_DEAD_NAME) goto mach_cleanup;
+      held_access = MACH_PORT_NULL;
+      operation = "mach_port_deallocate/access"; result = mach_port_deallocate(self, access); error = errno;
+      if (result != KERN_SUCCESS) goto mach_cleanup;
+    }
+  }
+  operation = "task_set_special_port/TASK_BOOTSTRAP_PORT"; result = task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "task_set_special_port/TASK_DEBUG_CONTROL_PORT"; result = task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "mach_ports_register"; result = mach_ports_register(self, NULL, 0); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "task_set_exception_ports"; result = task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "thread_set_exception_ports"; result = thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  bootstrap_port = MACH_PORT_NULL;
+  mig_dealloc_reply_port(mig_get_reply_port()); reply = mig_get_reply_port();
+  operation = "mig_get_reply_port/identity"; result = reply; error = errno;
+  if (!MACH_PORT_VALID(reply) || reply == self || reply == thread || (service && reply == access)) goto mach_cleanup;
+  operation = "mach_port_type/reply"; result = mach_port_type(self, reply, &reply_type); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "mach_port_type/reply/type"; result = reply_type;
+  if (reply_type != MACH_PORT_TYPE_RECEIVE) goto mach_cleanup;
+  operation = "mach_port_names"; result = mach_port_names(self, &names, &n, &types, &nt); error = errno;
+  if (result != KERN_SUCCESS) goto mach_cleanup;
+  operation = "mach_port_names/count"; result = n;
+  if (n != nt || n > 4096 || !names || !types) goto mach_cleanup;
+  for (mach_msg_type_number_t i = 0; i < n; i++) {
+    if (service && names[i] == access) {
+      operation = "TASK_ACCESS_PORT/census"; result = types[i];
+      if (seen || types[i] != MACH_PORT_TYPE_SEND) goto mach_cleanup;
+      seen = true;
+    } else if (names[i] != self && names[i] != thread && names[i] != reply) {
+      operation = "mach_port_destroy"; result = mach_port_destroy(self, names[i]); error = errno;
+      if (result != KERN_SUCCESS) goto mach_cleanup;
+    }
+  }
+  operation = "TASK_ACCESS_PORT/census"; result = MACH_PORT_TYPE_NONE;
+  if (service && !seen) goto mach_cleanup;
+  operation = NULL;
+mach_cleanup: {
+    /* One entry per acquisition, even when local names alias. Never retry a
+     * failed release or let it replace the original refusal. */
+    const char *cleanup_operations[] = {"mach_vm_deallocate/names", "mach_vm_deallocate/types", "mach_port_deallocate/access", "mach_port_deallocate/host", "mach_port_deallocate/thread"};
+    kern_return_t releases[5] = {KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS};
+    int errors[5] = {0};
+    if (names) { releases[0] = mach_vm_deallocate(self, (mach_vm_address_t)names, (mach_vm_size_t)n * sizeof(*names)); errors[0] = errno; }
+    if (types) { releases[1] = mach_vm_deallocate(self, (mach_vm_address_t)types, (mach_vm_size_t)nt * sizeof(*types)); errors[1] = errno; }
+    if (MACH_PORT_VALID(held_access)) { releases[2] = mach_port_deallocate(self, held_access); errors[2] = errno; }
+    if (MACH_PORT_VALID(held_host)) { releases[3] = mach_port_deallocate(self, held_host); errors[3] = errno; }
+    if (MACH_PORT_VALID(held_thread)) { releases[4] = mach_port_deallocate(self, held_thread); errors[4] = errno; }
+    for (unsigned i = 0; i < 5; i++) if (releases[i] != KERN_SUCCESS) {
+      (void)signal(SIGPIPE, SIG_IGN);
+      fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s result=%d errno=%d\n", cleanup_operations[i], releases[i], errors[i]);
+      fflush(stderr);
+      if (!operation) { operation = cleanup_operations[i]; result = releases[i]; error = errors[i]; }
+    }
+    if (operation) launch_failure(operation, result, error, 0, -1, 0);
+  }
+#else
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host, access; natural_t type; mach_vm_address_t address;
   /* SIP forbids clearing itk_host. Require the ordinary IKOT_HOST (XNU value 3),
@@ -84,6 +192,7 @@ static void mach_rights(void) {
   need(mach_vm_deallocate(self, (mach_vm_address_t)names, n * sizeof(*names)) == KERN_SUCCESS &&
        mach_vm_deallocate(self, (mach_vm_address_t)types, nt * sizeof(*types)) == KERN_SUCCESS &&
        mach_port_deallocate(self, thread) == KERN_SUCCESS);
+#endif
 }
 static pid_t launcher_pid, launch_child;
 static struct identity launcher_identity;

@@ -355,13 +355,17 @@ successful exec closes the diagnostic copy. Injected descriptor mappings keep
 ordinary setup stderr separate until exec and preserve provider/payload stdio.
 Diagnostic-write and identity/status inspection failures cannot replace the first
 cause or consume protocol data; stderr diagnostics survive transport failure.
-The same actual launch-body fixture exercises all six initial Mach refusals and
-the successful ordered path, requiring single evaluation and suppression of
-later operations after refusal. Direct kernel results, including signed errors,
-and full-width observed type/port values survive failed diagnostic writes and
-flushes; the Mach diagnostic also survives the existing transport-loss fixture.
-These checks preserve the exact predicates and subsequent sanitation and prove
-no functional Mach remedy or successful native launch.
+The same actual launch-body fixture retains protected/provider null-only refusals
+and executes the complete experiment Mach body through census and cleanup.
+It covers absent/dead/service values, kernel/type/query refusals, missing/changed
+census entries, partial arrays and reference/array release failures. Owned arrays
+and deallocatable acquired references, including aliases, require one release attempt;
+unsupported access types grant no receive-right destruction authority. Independent
+cleanup diagnostics preserve the primary failure. Direct kernel results, including
+signed errors and full-width type/port values, survive failed diagnostic writes
+and flushes; the Mach diagnostic also survives the existing transport-loss fixture.
+Successful sanitation, provider stdio and parked-handshake regressions remain
+covered. These portable checks establish no successful native launch or cleanup.
 Retirement rejects changed admission bindings, trailing custody output and a close
 reply without bounded custodian exit.
 These deterministic fast regressions run no macOS helper; the existing native
@@ -370,8 +374,9 @@ Fault transition regressions execute the original writable-journal handoff and
 audit-session creation bodies with injected native calls, covering descriptor
 substitution, read-only access, exact errors and preserved reexec effects.
 
-Task-access regressions execute the actual sanitation, checked-release and
-original child launch bodies using injected Mach and process calls. They accept
+Separate feasibility task-access regressions execute the actual sanitation,
+checked-release and original child launch bodies using injected Mach and process
+calls. They accept
 absent/dead values and the specific task-access slot's exact SEND service with
 `IKOT_NONE`, including different local names across lifecycle observations.
 Task/thread/kernel substitutions, mixed/unknown types and failed type or kobject

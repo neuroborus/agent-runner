@@ -4001,6 +4001,8 @@ and Mach rights, bounded process count and native credential/session/delegation
 negative controls. Image, birth, parent, credentials and Seatbelt observations
 join candidate, case and exact policy bytes before protected intent and release.
 
+<a id="ordinary-darwin-task-access"></a>
+
 At this feasibility-only ordinary launch boundary, task-access sanitation accepts
 `MACH_PORT_NULL`, `MACH_PORT_DEAD`, an exactly typed allocated dead name, or the
 host-inherited authorization service returned by this task's `TASK_ACCESS_PORT`
@@ -8744,11 +8746,16 @@ creates a fresh session. Clear supplemental groups, then privileged
 `setgid`/`setuid`, verifying real/effective/saved IDs and the sole reserved group.
 Install the independently reviewed profile
 while only trusted helper code runs, then clear bootstrap, registered, debug,
-resource-notify and task/thread exception rights and destroy all foreign Mach
+resource-notify and task/thread exception rights and sanitize the remaining Mach
 names. Replace the cached MIG reply port and retain only the fresh local
 receive-only reply port needed by the sanitation RPCs, together with self task/
-thread rights. The inherited task-access port must already be null. Only a
-classified ordinary host port is permitted; a privileged or unknown one fails. Remaining
+thread rights. Reviewed/protected and provider builds require the inherited
+task-access port to be null. `NATIVE_CI_EXPERIMENT` adopts the getter/type/kernel-object
+checks of the [ordinary inherited-service policy](#ordinary-darwin-task-access).
+Its checked local service copy stays held through the bounded census, where that
+exact name must occur once with its exact type; arbitrary SEND names gain no
+exception. Only a classified ordinary host port is permitted; a privileged or
+unknown one fails. Remaining
 descriptors are private stdio and close-on-exec admission pipes. After fork, only
 the separate root helper obtains `audit_session_port` for custody; the payload
 never inherits that send right or any foreign audit-session capability.
@@ -8772,17 +8779,20 @@ saved errno, poll revents and read count/EOF. Bounded secondary observations ret
 the original launcher's PID/birth and available child status with non-reaping
 `waitid(WNOWAIT)`; reporting failures cannot replace the primary cause. Diagnostics
 consume no protocol frames and establish neither admission nor retirement.
-The launcher's first Mach guard retains its exact order: host-port acquisition,
-host kobject query, ordinary host type 3, host-copy deallocation, access-port
-acquisition and null access port. Each native call runs once; a refusal reports
-its operation and immediate `kern_return_t` or observed type/port name in `result`,
-with the saved errno. Successful checks remain silent, and failed diagnostic
-writes/flushes cannot change the original cause or exit 126. Subsequent sanitation
-is unchanged. The recorded compound refusal identifies no failed operand or
-functional Mach remedy; fresh matching macOS launch evidence remains required.
-Windows partial-acquisition retirement/error87 remains unattributed and open,
-alongside Windows TCP/WFP and audit-delivery and Darwin Mach/startup obligations;
-these diagnostics supply no native acceptance claim.
+The initial Mach guard preserves host acquisition, kobject query, ordinary host
+type 3 and host-copy deallocation before the access getter. The experiment's
+owned getter/thread copies enter cleanup before fallible queries, with one release
+per acquisition even for aliased names. Census arrays and owned copies settle on
+success and refusal. A successful query exposing no deallocatable reference grants
+no authority to destroy an unowned receive right. Each native call runs once;
+refusals retain the direct result and saved errno. Separate bounded
+`native-darwin-launch-cleanup` records preserve release failures without replacing
+the primary refusal. Failed diagnostic writes/flushes cannot change that cause
+or exit 126. Descriptor/credential/session checks, native negative controls and
+parked-release barriers remain required. Fresh matching macOS CI must establish
+actual launch and independent cleanup. Windows recovery error 87/watchdog,
+TCP/audit, Darwin fault/allowed-command audit and both non-Linux independent
+cleanup obligations remain open; portable fixtures supply no native acceptance.
 
 Held regular-file reads bind canonical root ownership, immutable modes, single
 links, native identities and expected SHA-256, with one-MiB profile/128-MiB image
