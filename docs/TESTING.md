@@ -536,12 +536,21 @@ checks repeated cold loading and subsequent build verification without
 compilation, and verifies effect-free indexed factory construction.
 Default installed-file build regressions also revalidate unchanged canonical tools
 through cold loading, without a `readInstalled` override. They preserve existing
-tool, SDK and private bounds, exact byte and identity refusal, bounded
+512 MiB tool, one MiB SDK and 128 MiB private-helper bounds, exact byte and
+identity refusal, bounded
 ordinary-sink predicate/error diagnostics, recorded expected-hash labeling, and
 separate primary/descriptor-close failures despite sink exceptions. They retain
 captured stability snapshots and distinguish held and named recheck API failures.
 Refused reads permit descriptor closure but no subsequent file reads or native
-effects. These remain in the existing explicit native harness and add no durable
+effects. The same fixture injects the former-bound-plus-one, observed Clang size
+and exact native-budget boundary without allocating large tool images; it checks
+the installed-reader ceiling and unchanged private/source ceilings. Tiny buffer
+cases cover the shared acquisition/observation guard's exact ceiling and refusal
+of oversized, empty or non-buffer results. The default held reader still rejects
+native-budget-plus-one metadata before reading and retains independent SDK-limit,
+substitution, unsafe-metadata, stability and closure-failure coverage. These
+portable checks establish neither a complete large native read nor hosted
+acceptance. They remain in the existing explicit native harness and add no durable
 slow-tier requirement.
 Installed audit mapping coverage retains Git open variants within the original
 class mask. Missing case selectors keep recovery retained despite retired build

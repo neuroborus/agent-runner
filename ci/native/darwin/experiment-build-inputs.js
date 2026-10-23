@@ -18,6 +18,8 @@ import { encodeDarwinCustodyPlan } from "./custody.js";
 import { digest, inspectDarwinMachO } from "./protocol.js";
 
 const ROOT = fileURLToPath(new URL("../../../", import.meta.url));
+// Match the native installed-input readers; private helper ceilings stay separate.
+export const DARWIN_HOSTED_INPUT_BYTES = 536870912;
 export const DARWIN_HOSTED_OUTPUT_BYTES = 256 * 1024;
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
   ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
@@ -39,6 +41,14 @@ const absolute = (value) =>
   path.isAbsolute(value) &&
   path.normalize(value) === value &&
   !/[\0\r\n]/u.test(value);
+
+export async function readDarwinHostedInput(file, maximum, read) {
+  const bytes = await read(file, maximum);
+  requireObservation(
+    Buffer.isBuffer(bytes) && bytes.length > 0 && bytes.length <= maximum,
+  );
+  return bytes;
+}
 
 // The trusted compiler still owns a bounded process group. Abort/deadline kills
 // the group, awaits the reaped leader and never publishes uncertain completion.
@@ -205,7 +215,9 @@ export async function acquireDarwinExperimentBuild(
   options = {},
 ) {
   const env = darwinExperimentWorker(job, binding, options),
-    fs = options.fs ?? filesystem;
+    fs = options.fs ?? filesystem,
+    readInstalled = (file, maximum) =>
+      readDarwinHostedInput(file, maximum, (file) => fs.readFile(file));
   requireObservation(
     job.preparationEffects.admission === "possible" &&
       absolute(directory) &&
@@ -315,7 +327,11 @@ export async function acquireDarwinExperimentBuild(
     ["sdk", "/usr/bin/xcrun"],
     ["signer", "/usr/bin/codesign"],
   ])
-    tools.push({ name, path: file, sha256: digest(await fs.readFile(file)) });
+    tools.push({
+      name,
+      path: file,
+      sha256: digest(await readInstalled(file, DARWIN_HOSTED_INPUT_BYTES)),
+    });
   const version = await run(compiler, ["--version"], environment),
     sdkVersion = await run(
       "/usr/bin/xcrun",
@@ -367,7 +383,7 @@ export async function acquireDarwinExperimentBuild(
     path: SDKROOT,
     build: sdkVersion.stdout.trim(),
     settingsSha256: digest(
-      await fs.readFile(path.join(SDKROOT, "SDKSettings.json")),
+      await readInstalled(path.join(SDKROOT, "SDKSettings.json"), 1048576),
     ),
   };
   const context = {
@@ -507,7 +523,10 @@ export async function acquireDarwinExperimentBuild(
       digest(await fs.readFile(path.join(staging, name))) === sha256,
     );
   for (const tool of tools)
-    requireObservation(digest(await fs.readFile(tool.path)) === tool.sha256);
+    requireObservation(
+      digest(await readInstalled(tool.path, DARWIN_HOSTED_INPUT_BYTES)) ===
+        tool.sha256,
+    );
   return {
     purpose: "experiment",
     schemaVersion: 3,

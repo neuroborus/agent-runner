@@ -502,9 +502,17 @@ It returns current `revalidation: { source: "file", readSha256 }` separately fro
 or `nativeEventSha256` claim. Incompatible, mixed, incomplete, changed and unsettled
 records refuse admission; no cached PASS replaces current byte checks.
 
-Cold revalidation of ordinary installed build tools retains its 128 MiB bound;
-SDK settings retain their one MiB bound. Complete byte hashes remain bound to the
-recorded canonical targets. The held file reader diagnoses failed metadata,
+Ordinary installed build tools share the existing 512 MiB native input budget
+across acquisition, post-build byte checks and cold revalidation. The completed
+hosted diagnostic identified a 264942528-byte Clang image rejected by the former
+134217728-byte cold limit. The cold reader now passes the shared tool budget to
+its existing held-file reader; private/reviewed helper limits remain 128 MiB and
+SDK settings remain limited to one MiB. Acquisition and post-build checks also
+require complete nonempty buffers within their applicable ceiling before hashing.
+Complete byte hashes remain bound to the recorded canonical targets. Canonical
+no-follow opens, exact identities, installed ancestry, stable held/named rechecks
+and checked closure retain their existing contracts. The held file reader
+diagnoses failed metadata,
 installed-path/ancestry, stability, size or byte predicates using bounded paths and
 already captured scalar metadata, including available ancestor and stability
 snapshots. Held and named recheck API failures have distinct predicates.

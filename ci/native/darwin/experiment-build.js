@@ -16,7 +16,9 @@ import {
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
   DARWIN_HOSTED_OUTPUT_BYTES,
+  DARWIN_HOSTED_INPUT_BYTES,
   darwinHostedCompilerArguments,
+  readDarwinHostedInput,
 } from "./experiment-build-inputs.js";
 import { DARWIN_HELPER_NAMES, darwinDeveloperDirectory } from "./build.js";
 import {
@@ -411,16 +413,24 @@ export async function observeDarwinExperimentImages(
 async function observe(prepared, reader, options) {
   const reads = [],
     helpers = [],
-    fs = options.fs ?? filesystem;
+    fs = options.fs ?? filesystem,
+    readInstalled = options.readInstalled ?? ((file) => fs.readFile(file));
   for (const tool of prepared.tools)
     requireObservation(
-      digest(await (options.readInstalled ?? fs.readFile)(tool.path)) ===
-        tool.sha256,
+      digest(
+        await readDarwinHostedInput(
+          tool.path,
+          DARWIN_HOSTED_INPUT_BYTES,
+          readInstalled,
+        ),
+      ) === tool.sha256,
     );
   requireObservation(
     digest(
-      await (options.readInstalled ?? fs.readFile)(
+      await readDarwinHostedInput(
         path.join(prepared.sdk.path, "SDKSettings.json"),
+        1048576,
+        readInstalled,
       ),
     ) === prepared.sdk.settingsSha256,
   );
@@ -657,7 +667,7 @@ export async function loadDarwinExperimentBuild(
       // source/output reads below keep their protected metadata requirements.
       requireObservation(isDarwinInstalledPath(file));
       bytes = options.readInstalled
-        ? await options.readInstalled(file)
+        ? await options.readInstalled(file, maximum)
         : await protectedBytes(
             { path: file, sha256: pin },
             0,
@@ -678,7 +688,7 @@ export async function loadDarwinExperimentBuild(
     return bytes;
   };
   for (const tool of prepared.tools)
-    await read(tool.path, tool.sha256, 134217728, true);
+    await read(tool.path, tool.sha256, DARWIN_HOSTED_INPUT_BYTES, true);
   await read(
     path.join(prepared.sdk.path, "SDKSettings.json"),
     prepared.sdk.settingsSha256,

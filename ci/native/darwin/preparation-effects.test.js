@@ -85,8 +85,10 @@ import {
   acquireDarwinExperimentBuild,
   DARWIN_EXPERIMENT_SOURCES,
   DARWIN_PF_ABI_REFERENCE,
+  DARWIN_HOSTED_INPUT_BYTES,
   DARWIN_HOSTED_OUTPUT_BYTES,
   darwinHostedCompilerArguments,
+  readDarwinHostedInput,
   runDarwinHostedCommand,
 } from "./experiment-build-inputs.js";
 
@@ -885,6 +887,63 @@ test("Darwin cold default installed reader reuses unchanged canonical tools with
   );
 });
 
+test("Darwin ordinary build reads share the native installed budget without increasing private or SDK limits", async () => {
+  const f = await defaultInstalledBuildFixture(),
+    compiler = f.prepared.tools[0].path,
+    sdk = path.join(f.prepared.sdk.path, "SDKSettings.json"),
+    originalRead = f.options.read,
+    privateReads = [];
+  assert.equal(DARWIN_HOSTED_INPUT_BYTES, 536870912);
+  f.options.read = async (file, pin, maximum) => {
+    privateReads.push({ file, maximum });
+    return originalRead(file, pin, maximum);
+  };
+  // Model the installed file's size at the existing injected read boundary;
+  // the complete default held-reader checks retain their tiny real buffers.
+  for (const size of [134217729, 264942528, DARWIN_HOSTED_INPUT_BYTES]) {
+    const requested = [];
+    f.options.readInstalled = async (file, maximum) => {
+      requested.push({ file, maximum });
+      assert.ok(f.installed.has(file));
+      assert.equal(maximum, file === sdk ? 1048576 : 536870912);
+      assert.ok((file === compiler ? size : bytes.length) <= maximum);
+      return f.installed.get(file);
+    };
+    const loaded = await loadDarwinExperimentBuild(
+      f.built.job,
+      directory,
+      f.options,
+    );
+    assert.deepEqual(loaded.build, f.built.build);
+    assert.deepEqual(
+      requested.map(({ file }) => file),
+      [...f.installed.keys()],
+    );
+  }
+  assert.ok(privateReads.length > 0);
+  for (const { file, maximum } of privateReads)
+    assert.equal(
+      maximum,
+      path.dirname(file) === f.prepared.output ? 134217728 : 1048576,
+    );
+  // Exercise the acquisition/observation byte guard at a tiny injected ceiling,
+  // including exact equality, without allocating an installed-size image.
+  const read = async (file, maximum) => {
+    assert.equal(file, compiler);
+    assert.ok([bytes.length - 1, bytes.length].includes(maximum));
+    return bytes;
+  };
+  assert.equal(
+    await readDarwinHostedInput(compiler, bytes.length, read),
+    bytes,
+  );
+  await assert.rejects(readDarwinHostedInput(compiler, bytes.length - 1, read));
+  for (const value of [Buffer.alloc(0), bytes.toString()])
+    await assert.rejects(
+      readDarwinHostedInput(compiler, bytes.length, async () => value),
+    );
+});
+
 test("Darwin cold default installed reads reject substitutions, unsafe metadata and failed closure without replacing the first cause", async () => {
   const f = await defaultInstalledBuildFixture(),
     compiler = f.prepared.tools[0].path,
@@ -896,7 +955,7 @@ test("Darwin cold default installed reads reject substitutions, unsafe metadata 
     [compiler, { dev: -1n }, "identity"],
     [compiler, { isFile: () => false }, "regular"],
     [compiler, { nlink: 0n }, "installed", "links"],
-    [compiler, { size: 134217729n }, "maximum-size"],
+    [compiler, { size: 536870913n }, "maximum-size"],
     [sdk, { size: 1048577n }, "maximum-size"],
     [
       path.dirname(compiler),
@@ -933,7 +992,7 @@ test("Darwin cold default installed reads reject substitutions, unsafe metadata 
           ? f.prepared.sdk.settingsSha256
           : f.prepared.tools[0].sha256,
     });
-    assert.equal(failure.maximum, file === sdk ? 1048576 : 134217728);
+    assert.equal(failure.maximum, file === sdk ? 1048576 : 536870912);
     assert.equal(failure.stat.size, change.size ?? BigInt(bytes.length));
     assert.equal(failure.installed.predicate, installedPredicate);
     if (installedPredicate) {
