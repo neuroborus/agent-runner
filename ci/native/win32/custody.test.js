@@ -2297,6 +2297,233 @@ test("Windows reader failure rejects queued commands while the dependent journal
   assert.ok(!f.events.some((event) => /^open [0-9]/u.test(event)));
 });
 
+test("actual witness completion preserves original child and parent refusals before fencing", async () => {
+  const [source, header] = await Promise.all(
+    ["custody-reader.c", "custody.h"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const start = source.indexOf(
+      "  char result[65536];",
+      source.indexOf("static void ownership_fresh("),
+    ),
+    end = source.indexOf("\n}\nstatic void ownership_send", start),
+    guard = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(header)[1];
+  assert.ok(start > 0 && end > start);
+  const translate = (body) =>
+    body
+      .replace(/#ifdef NATIVE_CUSTODY_FAILURE\n([\s\S]*?)#endif/gu, "$1")
+      .replaceAll("NATIVE_CUSTODY_FAILURE", "reader_failure")
+      .replace("char result[65536]", "const result = {}")
+      .replace(
+        "JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0}",
+        "const accounting = {}",
+      )
+      .replace("const char *operation", "let operation")
+      .replace("BYTE extra", "const extra = {}")
+      .replaceAll("sizeof(result)", "65536")
+      .replaceAll("sizeof(accounting)", "1")
+      .replaceAll(/&(accounting|extra)\b/gu, "$1")
+      .replace(
+        /&(exit|used|belongs)\b/gu,
+        (_, name) => `{set value(value){${name}=value}}`,
+      )
+      .replace(/\((?:unsigned long long|unsigned|int)\)/gu, "")
+      .replace(/\b(?:DWORD|BOOL|size_t|unsigned) /gu, "let ");
+  const program = new Script(`
+    function need_at(ok,file,line){${translate(guard)}}
+    function need(ok){need_at(ok,"custody-reader.c",1);}
+    ${translate(source.slice(start, end))}
+  `);
+  for (const [fault, operation, actual, error] of [
+    [null],
+    ["wait-failed", "WaitForSingleObject", 0xffffffff, 5],
+    ["wait-timeout", "WaitForSingleObject", 258, 0],
+    ["exit-query", "GetExitCodeProcess", 0, 5],
+    ["child-exit", "child-exit", 126, 0],
+    ["accounting-query", "QueryInformationJobObject", 0, 87],
+    ["active", "ActiveProcesses", 2, 0],
+    ["diagnostic", "child-exit", 126, 0],
+    ["truncated", "child-exit", 126, 0],
+  ])
+    for (const outsideControl of fault ? [false] : [false, true]) {
+      const calls = [],
+        diagnostics = [],
+        refused = new Error("exit 126"),
+        exitCode = ["child-exit", "diagnostic", "truncated"].includes(fault)
+          ? 126
+          : 0,
+        childLine =
+          fault === "truncated"
+            ? "x".repeat(2048)
+            : exitCode
+              ? "native-windows-guard: file=witness.c line=7 last-error=5"
+              : '{"held":true}',
+        waited =
+          fault === "wait-failed"
+            ? 0xffffffff
+            : fault === "wait-timeout"
+              ? 258
+              : 0,
+        exitAvailable = waited === 0 && fault !== "exit-query",
+        accountingAvailable =
+          exitAvailable && !exitCode && fault !== "accounting-query";
+      let lastError = 122,
+        output = "";
+      const api = {
+        outsideControl,
+        child: { hProcess: "process", hThread: "thread" },
+        job: "job",
+        parentOut: "pipe",
+        case_job: "domain",
+        ownership_count: 1,
+        ownership_released: false,
+        ownership_creation_verified: false,
+        TRUE: true,
+        FALSE: false,
+        NULL: null,
+        ERROR_SUCCESS: 0,
+        ERROR_BROKEN_PIPE: 109,
+        WAIT_OBJECT_0: 0,
+        WAIT_FAILED: 0xffffffff,
+        JobObjectBasicAccountingInformation: 1,
+        stderr: "stderr",
+        GetLastError: () => lastError,
+        SetLastError: (value) => {
+          lastError = value;
+        },
+        strlen: (value) => value.text.length,
+        line: (pipe, value, maximum) => {
+          assert.equal(pipe, "pipe");
+          assert.equal(maximum, 65536);
+          calls.push("line");
+          value.text = childLine;
+        },
+        WaitForSingleObject: (process, deadline) => {
+          assert.equal(process, "process");
+          assert.equal(deadline, 30000);
+          calls.push("wait");
+          lastError = 5;
+          return waited;
+        },
+        GetExitCodeProcess: (process, out) => {
+          assert.equal(process, "process");
+          calls.push("exit");
+          out.value = fault === "exit-query" ? 999 : exitCode;
+          lastError = fault === "exit-query" ? 5 : 122;
+          return fault !== "exit-query";
+        },
+        QueryInformationJobObject: (job, kind, accounting, size, returned) => {
+          assert.deepEqual([job, kind, size, returned], ["job", 1, 1, null]);
+          calls.push("accounting");
+          accounting.ActiveProcesses = fault === "active" ? 2 : 999;
+          if (fault !== "active" && fault !== "accounting-query")
+            accounting.ActiveProcesses = 0;
+          lastError = fault === "accounting-query" ? 87 : 122;
+          return fault !== "accounting-query";
+        },
+        ReadFile: (pipe, _extra, size, used, overlapped) => {
+          assert.deepEqual([pipe, size, overlapped], ["pipe", 1, null]);
+          calls.push("eof");
+          used.value = 0;
+          lastError = 109;
+          return false;
+        },
+        IsProcessInJob: (process, job, belongs) => {
+          assert.deepEqual([process, job], ["process", "domain"]);
+          calls.push("outside");
+          belongs.value = false;
+          return true;
+        },
+        CloseHandle: (handle) => {
+          calls.push("close-" + handle);
+          return true;
+        },
+        fprintf: (stream, format, ...values) => {
+          assert.equal(stream, "stderr");
+          let index = 0;
+          diagnostics.push(
+            format.replace(/%(\.\*s|llu|lu|[us])/gu, (_, kind) => {
+              const value = values[index++];
+              if (kind === ".*s") return values[index++].text.slice(0, value);
+              return kind === "s" ? String(value) : String(Number(value));
+            }),
+          );
+          lastError = 99;
+          return fault === "diagnostic" ? -1 : 1;
+        },
+        fflush: () => {
+          lastError = 88;
+          return -1;
+        },
+        reader_failure: () => {
+          assert.equal(diagnostics.length, 2);
+          calls.push("fence");
+          lastError = 6;
+        },
+        ExitProcess: (code) => {
+          assert.equal(code, 126);
+          throw refused;
+        },
+        printf: (format, value) => {
+          output += format.replace("%s", value?.text);
+        },
+      };
+      const expectedCalls = ["line", "wait"];
+      if (!waited) expectedCalls.push("exit");
+      if (exitAvailable && !exitCode) expectedCalls.push("accounting");
+      if (fault) {
+        assert.throws(
+          () => program.runInNewContext(api),
+          (cause) => cause === refused,
+        );
+        assert.deepEqual(calls, [...expectedCalls, "fence"]);
+        assert.deepEqual(
+          [...diagnostics[0].matchAll(/=([^\s]+)/gu)].map((match) => match[1]),
+          [
+            operation,
+            actual,
+            Number(
+              ["wait-failed", "exit-query", "accounting-query"].includes(fault),
+            ),
+            error,
+            waited,
+            Number(exitAvailable),
+            exitAvailable ? exitCode : 0,
+            Number(accountingAvailable),
+            accountingAvailable ? 2 : 0,
+          ].map(String),
+        );
+        assert.equal(
+          diagnostics[1],
+          `native-windows-ownership-witness-child: bytes=${childLine.length} shown=${Math.min(1024, childLine.length)} truncated=${Number(childLine.length > 1024)} ${childLine.slice(0, 1024)}\n`,
+        );
+        assert.equal(
+          diagnostics[2],
+          `native-windows-guard: file=custody-reader.c line=1 last-error=${error}\n`,
+        );
+        assert.equal(output, "");
+        assert.equal(api.ownership_creation_verified, false);
+      } else {
+        program.runInNewContext(api);
+        assert.deepEqual(calls, [
+          ...expectedCalls,
+          "eof",
+          ...(outsideControl ? ["outside"] : []),
+          ...["pipe", "process", "thread", "job"].map(
+            (handle) => "close-" + handle,
+          ),
+        ]);
+        assert.deepEqual(diagnostics, []);
+        assert.equal(
+          output,
+          outsideControl ? '{"ready":true,"reachable":true}' : childLine,
+        );
+        assert.equal(api.ownership_creation_verified, true);
+      }
+    }
+});
+
 test("Windows custody EOF refuses a lost response while reader diagnostics remain failures, never receipts", async () => {
   const source = await readFile(
       new URL("./custody-reader.c", import.meta.url),

@@ -7803,6 +7803,12 @@ suspended with a System-only creator default DACL, explicit two-handle list and
 creation-time Job admission;
 fresh System witnesses inspect token assignments, objects, cwd/image, Job
 membership, creator denial and complete account-principal census before release.
+Witness completion reports the original captured child line on stderr before
+creator fencing, capped at 1024 bytes with its full length and truncation flag.
+Separate wait, exit-query, child-exit and accounting refusals retain actual results,
+saved API errors and explicit output availability despite diagnostic failures.
+Success framing, held process/Job closure and independent retirement stay required;
+these diagnostics establish neither the native cause nor successful ownership.
 
 Private acknowledgements gate attempts, child retention, reparenting and faults.
 Outside service/WMI/COM/parent/breakaway controls must be available separately;

@@ -1723,8 +1723,31 @@ static void ownership_fresh(BOOL outsideControl) {
   PROCESS_INFORMATION child; need(CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (outsideControl ? CREATE_BREAKAWAY_FROM_JOB : 0), NULL, NULL, &start.StartupInfo, &child));
   for (unsigned i = 0; i < n; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
   DWORD written; need(system_process(child.hProcess) && ResumeThread(child.hThread) == 1 && WriteFile(parentIn, &view, sizeof(view), &written, NULL) && written == sizeof(view) && CloseHandle(parentIn));
-  char result[65536]; line(parentOut, result, sizeof(result)); need(WaitForSingleObject(child.hProcess, 30000) == WAIT_OBJECT_0); DWORD exit; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
-  need(GetExitCodeProcess(child.hProcess, &exit) && !exit && QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL) && !accounting.ActiveProcesses);
+  char result[65536]; line(parentOut, result, sizeof(result));
+  DWORD waited = WaitForSingleObject(child.hProcess, 30000), error = waited == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
+  DWORD exit = 0, actual = waited; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
+  BOOL exitRead = FALSE, accountingRead = FALSE, apiFailure = waited == WAIT_FAILED;
+  const char *operation = waited == WAIT_OBJECT_0 ? NULL : "WaitForSingleObject";
+  if (!operation) {
+    exitRead = GetExitCodeProcess(child.hProcess, &exit); error = exitRead ? ERROR_SUCCESS : GetLastError();
+    if (!exitRead) { operation = "GetExitCodeProcess"; actual = exitRead; apiFailure = TRUE; }
+    else if (exit) { operation = "child-exit"; actual = exit; }
+    else {
+      accountingRead = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL); error = accountingRead ? ERROR_SUCCESS : GetLastError();
+      if (!accountingRead) { operation = "QueryInformationJobObject"; actual = accountingRead; apiFailure = TRUE; }
+      else if (accounting.ActiveProcesses) { operation = "ActiveProcesses"; actual = accounting.ActiveProcesses; }
+    }
+  }
+  if (operation) {
+    /* Report the consumed child line before the guard can fence creators. */
+    size_t captured = strlen(result); unsigned shown = captured < 1024 ? (unsigned)captured : 1024;
+    fprintf(stderr, "native-windows-ownership-witness: operation=%s result=%lu api-error=%u error=%lu wait=%lu exit-available=%u exit-code=%lu accounting-available=%u active-processes=%lu\n",
+      operation, actual, (unsigned)apiFailure, error, waited, (unsigned)exitRead, exitRead ? exit : 0,
+      (unsigned)accountingRead, accountingRead ? accounting.ActiveProcesses : 0);
+    fprintf(stderr, "native-windows-ownership-witness-child: bytes=%llu shown=%u truncated=%u %.*s\n",
+      (unsigned long long)captured, shown, (unsigned)(captured > shown), (int)shown, result);
+    fflush(stderr); SetLastError(error); need(FALSE);
+  }
   BYTE extra; DWORD used; need(!ReadFile(parentOut, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
   if (outsideControl) { BOOL belongs; need(case_job && IsProcessInJob(child.hProcess, case_job, &belongs) && !belongs); }
   need(CloseHandle(parentOut) && CloseHandle(child.hProcess) && CloseHandle(child.hThread) && CloseHandle(job));
