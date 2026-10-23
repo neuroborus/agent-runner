@@ -2464,9 +2464,17 @@ protected provider cases remain external and must never enter local FINALIZE.
 Its existing Windows actual-body baseline fixture executes private-directory
 creation through the shared held-handle acquisition, then the original baseline
 and `file_sd`/security-failure bodies together. It reproduces the former missing
-SACL-query grant and requires the corrected acquisition to retain it without
-broadening volume or ancestor opens. It requires saved held identity before a
-complete owner/group/DACL/label/SACL read, direct success when reopening
+SACL-query grant and requires acquisition to retain it alongside `WRITE_DAC` and
+`WRITE_OWNER` without broadening volume or ancestor opens. An actual copied-file
+acquisition and the complete `ownership_acl` body protect retained grants and
+borrowed-handle survival through install, inspection and restoration of all six
+objects. Identity, baseline and installed owner/DACL/label substitutions refuse;
+journal failure precedes any mutation, and partial setter failures retain saved
+recovery descriptors. The effective-reader fixture distinguishes DACL, SACL,
+label and combined restoration masks, requiring `WRITE_OWNER` only for label
+writes while retaining temporary-writer identity refusal and cleanup. Coverage
+requires saved held identity before a complete owner/group/DACL/label/SACL read,
+direct success when reopening
 would fail, strict denied-query fallback and refusal of unexpected query errors
 or substituted fallback identities. Borrowed originals remain open; primary
 errors survive independent temporary-handle and descriptor cleanup failures

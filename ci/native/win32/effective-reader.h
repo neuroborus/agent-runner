@@ -102,7 +102,8 @@ static void set_file_security(HANDLE file, SECURITY_INFORMATION info, PACL dacl,
   FILE_ID_INFO before, after;
   BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &before, sizeof(before)); DWORD error = GetLastError();
   if (!read) file_security_failure("security-write-original-id", TRUE, error, INVALID_HANDLE_VALUE, NULL, __LINE__);
-  HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES,
+  HANDLE writer = ReOpenFile(file, READ_CONTROL | WRITE_DAC | ACCESS_SYSTEM_SECURITY | FILE_READ_ATTRIBUTES |
+    (info & LABEL_SECURITY_INFORMATION ? WRITE_OWNER : 0),
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS); error = GetLastError();
   if (writer == INVALID_HANDLE_VALUE) file_security_failure("security-write-reopen", TRUE, error, writer, NULL, __LINE__);
   read = GetFileInformationByHandleEx(writer, FileIdInfo, &after, sizeof(after)); error = GetLastError();

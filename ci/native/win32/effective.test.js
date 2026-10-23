@@ -19,6 +19,7 @@ import { observationDigest } from "../index.js";
 
 async function securityNative({
   writer = false,
+  information = 8,
   fault,
   closeFailure,
   freeFailure,
@@ -82,6 +83,7 @@ async function securityNative({
     ERROR_INVALID_SECURITY_DESCR: 1338,
     READ_CONTROL: 0x20000,
     WRITE_DAC: 0x40000,
+    WRITE_OWNER: 0x80000,
     DELETE: 0x10000,
     ACCESS_SYSTEM_SECURITY: 0x1000000,
     FILE_READ_ATTRIBUTES: 0x80,
@@ -126,7 +128,10 @@ async function securityNative({
         api.READ_CONTROL |
           api.ACCESS_SYSTEM_SECURITY |
           api.FILE_READ_ATTRIBUTES |
-          (writer ? api.WRITE_DAC : 0),
+          (writer ? api.WRITE_DAC : 0) |
+          (writer && information & api.LABEL_SECURITY_INFORMATION
+            ? api.WRITE_OWNER
+            : 0),
       );
       assert.equal(
         flags,
@@ -192,10 +197,26 @@ async function securityNative({
     SetSecurityInfo(handle, kind, info, owner, group, dacl, sacl) {
       assert.deepEqual(
         [handle, kind, info, owner, group, dacl, sacl],
-        [2, 1, 8, null, null, null, "owned-sacl"],
+        [
+          2,
+          1,
+          information,
+          null,
+          null,
+          information & api.DACL_SECURITY_INFORMATION ? "owned-dacl" : null,
+          information &
+          (api.SACL_SECURITY_INFORMATION | api.LABEL_SECURITY_INFORMATION)
+            ? "owned-sacl"
+            : null,
+        ],
       );
       calls.push("descriptor");
       lastError = 999;
+      const required =
+        (info & api.DACL_SECURITY_INFORMATION ? api.WRITE_DAC : 0) |
+        (info & api.LABEL_SECURITY_INFORMATION ? api.WRITE_OWNER : 0) |
+        (info & api.SACL_SECURITY_INFORMATION ? api.ACCESS_SYSTEM_SECURITY : 0);
+      if ((opens.get(handle).access & required) !== required) return 5;
       return fault === "descriptor" ? 87 : 0;
     },
     CloseHandle(handle) {
@@ -264,10 +285,51 @@ async function securityNative({
     sd,
     run: () =>
       writer
-        ? native.set_file_security(1, 8, null, "owned-sacl")
+        ? native.set_file_security(
+            1,
+            information,
+            information & api.DACL_SECURITY_INFORMATION ? "owned-dacl" : null,
+            information &
+              (api.SACL_SECURITY_INFORMATION | api.LABEL_SECURITY_INFORMATION)
+              ? "owned-sacl"
+              : null,
+          )
         : native.file_sd(1, registry ? 4 : 1),
   };
 }
+
+test("Windows native restoration writers acquire label access only when requested and retain temporary ownership", async () => {
+  for (const information of [4, 8, 16, 4 | 8 | 16]) {
+    for (const fault of [null, "file-id", "descriptor"]) {
+      const f = await securityNative({
+        writer: true,
+        information,
+        fault,
+        deleteOpen: true,
+      });
+      if (fault) {
+        assert.throws(
+          f.run,
+          (cause) => cause.guard.error === (fault === "file-id" ? 13 : 87),
+        );
+        assert.equal(f.calls.includes("descriptor"), fault !== "file-id");
+      } else {
+        f.run();
+        assert.deepEqual(f.calls, [
+          "original-id",
+          "reopen",
+          "reopened-id",
+          "descriptor",
+          "close",
+        ]);
+        assert.deepEqual(f.diagnostics, []);
+      }
+      assert.deepEqual([...f.opens.keys()], [1, 3]);
+      assert.equal(f.opens.get(1).access, 0x20000 | 0x80);
+      assert.equal(f.descriptors.size, 0);
+    }
+  }
+});
 
 test("Windows native security observers use granted originals and strict compatible reopens", async () => {
   const direct = await securityNative({

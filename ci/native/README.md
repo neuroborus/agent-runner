@@ -10926,32 +10926,39 @@ file query returning `ERROR_ACCESS_DENIED` may use the retained strict
 reopen-and-query fallback, after releasing any partial descriptor. Failed
 partial-descriptor cleanup stops without retrying or reopening and preserves
 the query status with a separate cleanup diagnostic. Other direct-query errors
-stop immediately; registry reads remain direct and the setter is unchanged.
+stop immediately; registry reads remain direct.
 This supported equivalent read operation does not identify the kernel condition
 behind the observed Windows system `ReOpenFile` error5.
 
-Ownership baselines use this complete read after comparing the held `FileIdInfo`
-with its saved identity. The shared handle producer adds `READ_CONTROL` and
-`FILE_READ_ATTRIBUTES`; private case-directory acquisition explicitly requests
-`ACCESS_SYSTEM_SECURITY` as well. Its previous `FILE_LIST_DIRECTORY` request
-omitted the original SACL-query grant, independently of the still-unexplained
-native fallback refusal. Other open masks and payload grants are unchanged.
+Ownership baselines and policy operations compare the held `FileIdInfo` with its
+saved identity before the complete read. Policy install, inspection and restore
+borrow that same retained handle without reopening or closing it. The shared
+producer adds `READ_CONTROL` and `FILE_READ_ATTRIBUTES`; original private
+directory acquisition requests `FILE_LIST_DIRECTORY | WRITE_DAC | WRITE_OWNER |
+ACCESS_SYSTEM_SECURITY`, and copied private files request `GENERIC_READ |
+WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY`. `WRITE_DAC` permits DACL and
+protected-DACL writes; `WRITE_OWNER` permits the existing label write. Recovery
+descriptors remain durably recorded before either policy effect, and inspection
+and restoration retain the exact installed-policy comparisons.
 The reader runs as System with its existing `SE_DEBUG`/`SE_SECURITY` authority
 enabled before opening entries; successful impersonated operations revert
 before returning to dispatch. `GetSecurityInfo`
 requires `READ_CONTROL` for owner/group/DACL reads and `ACCESS_SYSTEM_SECURITY`
 for the SACL, with security privilege enabled for that access request. Existing
 denied-query fallback remains responsible for insufficient grants. Baseline
-reads borrow the retained handle and release only their returned descriptor;
-payload grants, handle ownership and privilege policy retain their owners.
+reads release only their returned descriptor; the policy caller retains saved
+before/installed descriptors until restoration completes. Payload grants,
+no-follow and private-security checks, sharing and privilege policy are unchanged.
 
 Both the read fallback and setter reopen masks include `FILE_READ_ATTRIBUTES`
 for their `FileIdInfo` queries. These rights belong to temporary trusted observer
-handles; payload grants remain unchanged. Both temporary reopens share read,
+handles; the setter also requests `WRITE_OWNER` only when its information mask
+includes `LABEL_SECURITY_INFORMATION`. Its temporary writer retains original and
+reopened identity checks and owns its cleanup. Both temporary reopens share read,
 write and delete access so they can coexist with a live DELETE-granted control
 open on the same object. `FILE_SHARE_DELETE` accommodates existing access; it does not grant
 `DELETE` to either observer. Original protective handles retain their existing
-access and sharing restrictions, and control-handle access and sharing remain
+sharing restrictions, and control-handle access and sharing remain
 unchanged. Original identity, reopening, reopened identity, same-object
 comparison, descriptor read/write and close failures have separate
 call sites and finite diagnostics. Win32 errors are saved immediately;
@@ -10962,10 +10969,12 @@ custody failure owner, retaining the first cause and separate cleanup diagnostic
 No-follow flags, original protective no-delete sharing and complete
 owner/group/DACL/label/SACL reads remain required. The existing injected fixture
 models live grants and descriptor lifetimes for the original read, strict
-fallback and unchanged setter while a DELETE-granted open remains live on the
-same object, refusing incompatible temporary sharing. A granted original read
-must succeed even when a fresh reopen would fail. The historical compound error
-does not identify its failed subcall; the retained sharing correction
+fallback and conditional label writer while a DELETE-granted open remains live
+on the same object, refusing incompatible temporary sharing. A granted original read
+must succeed even when a fresh reopen would fail. Actual-body policy fixtures
+exercise acquisition grants, borrowed-handle survival through install/inspect/restore,
+identity and installed-policy refusal, and journaling failure before mutation.
+The historical compound error does not identify its failed subcall; the retained sharing correction
 does not attribute that failure or claim an observed native error32. Portable
 regressions establish no matching Windows native acceptance; fresh original
 Windows CI remains necessary.

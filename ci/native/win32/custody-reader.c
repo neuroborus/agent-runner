@@ -1168,7 +1168,7 @@ static void case_directory_create(unsigned index, unsigned parent,BOOL report) {
   wchar_t name[4096]; wcscpy_s(name, 4096, entries[index].path); wchar_t *leaf = wcsrchr(name, '\\'); need(leaf); *leaf = 0;
   need(!wcscmp(name, entries[parent].path)); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
   need(CreateDirectoryW(entries[index].path, &sa)); LocalFree(sd);
-  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY | ACCESS_SYSTEM_SECURITY); if(report) inspect(&entries[index]);
+  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY); if(report) inspect(&entries[index]);
 }
 static void case_directory(unsigned index,unsigned parent) { case_directory_create(index,parent,TRUE); }
 static void case_copy(unsigned target, unsigned source, unsigned parent) {
@@ -1180,7 +1180,7 @@ static void case_copy(unsigned target, unsigned source, unsigned parent) {
   PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
   HANDLE file = CreateFileW(entries[target].path, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH, NULL); LocalFree(sd); DWORD written;
   need(file != INVALID_HANDLE_VALUE && WriteFile(file, bytes, size, &written, NULL) && written == size && FlushFileBuffers(file) && CloseHandle(file)); free(bytes);
-  entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | ACCESS_SYSTEM_SECURITY); pin(&entries[target].file, entries[target].pin);
+  entries[target].file = hold(entries[target].path, FALSE, TRUE, GENERIC_READ | WRITE_DAC | WRITE_OWNER | ACCESS_SYSTEM_SECURITY); pin(&entries[target].file, entries[target].pin);
   if (strcmp(entries[target].signature, "-")) { char hash[65]; signature(&entries[target].file, entries[target].signature, hash); } inspect(&entries[target]);
 }
 /* Fixed private data files. Bytes and the mutable owned-file exception are
@@ -1504,9 +1504,10 @@ refused:
 }
 static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
   struct entry *entry = &entries[i+1]; need(entry->file.handle);
-  HANDLE file = ReOpenFile(entry->file.handle, READ_CONTROL | FILE_READ_ATTRIBUTES | WRITE_DAC | ACCESS_SYSTEM_SECURITY,
-    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-  FILE_ID_INFO id; need(file != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entry->file.id, sizeof(id)));
+  /* Borrow the original private capability through install, inspection and
+   * restoration. A fresh open would recheck the policy this handle changes. */
+  HANDLE file = entry->file.handle;
+  FILE_ID_INFO id; need(GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &entry->file.id, sizeof(id)));
   wchar_t text[2048]; DWORD mask = ownership_masks[i];
   if (!mask) wcscpy_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)");
   else need(swprintf_s(text, 2048, L"O:SYG:SYD:P(A;;FA;;;SY)(A;;0x%lx;;;%ls)(A;;0x%lx;;;%ls)%ls", mask, case_record.accountSid, mask, case_record.restrictingSid,
@@ -1531,7 +1532,7 @@ static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
     if (i == 3) { PACL label; need(GetSecurityDescriptorSacl(target, &present, &label, &defaulted));
       need(SetSecurityInfo(file, SE_FILE_OBJECT, LABEL_SECURITY_INFORMATION, NULL, NULL, NULL, present ? label : NULL) == ERROR_SUCCESS); }
   }
-  if (actual) LocalFree(actual); if (wanted) LocalFree(wanted); need(CloseHandle(file));
+  if (actual) LocalFree(actual); if (wanted) LocalFree(wanted);
 }
 static void ownership_retain(DWORD pid, ULONGLONG birth) {
   for (unsigned i = 0; i < ownership_count; i++) if (GetProcessId(ownership_processes[i]) == pid) {

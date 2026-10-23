@@ -2457,7 +2457,7 @@ test("held baseline guards acquire complete original grants and retain strict fa
         `static (?:HANDLE|struct held_file) ${name}\\([^\\n]*?\\) \\{ ([^\\n]+) \\}`,
         "u",
       ).exec(header)[1];
-    // Replay the former request only for insufficient-grant cases. All other
+    // Remove only the SACL-query grant for insufficient-grant cases. All other
     // acquisition, identity and complete-security-read decisions stay native.
     const creating = body("case_directory_create");
     return new Script(`
@@ -2587,6 +2587,8 @@ test("held baseline guards acquire complete original grants and retain strict fa
       FILE_READ_ATTRIBUTES: 2,
       ACCESS_SYSTEM_SECURITY: 4,
       FILE_LIST_DIRECTORY: 256,
+      WRITE_DAC: 512,
+      WRITE_OWNER: 2048,
       FILE_SHARE_READ: 8,
       FILE_SHARE_WRITE: 16,
       FILE_SHARE_DELETE: 32,
@@ -2655,6 +2657,8 @@ test("held baseline guards acquire complete original grants and retain strict fa
             api.FILE_READ_ATTRIBUTES |
             (handle === 7
               ? api.FILE_LIST_DIRECTORY |
+                api.WRITE_DAC |
+                api.WRITE_OWNER |
                 (isFallback ? 0 : api.ACCESS_SYSTEM_SECURITY)
               : 0),
         );
@@ -2909,6 +2913,473 @@ test("held baseline guards acquire complete original grants and retain strict fa
     await assert.rejects(f.channel.completion);
     f.child.emit("close", 126, null);
     assert.throws(() => f.channel.settle());
+  }
+});
+
+test("Windows owned policy borrows acquired handles across install, inspection and restoration with recovery before effects", async () => {
+  const [reader, effective] = await Promise.all(
+    ["custody-reader.c", "effective-reader.h"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const project = (source, name, args) => {
+    const body = new RegExp(
+      `static [^\\n]+ ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+    // Project C storage and output pointers only; native policy decisions run
+    // unchanged against live grants, opaque descriptors and journal failures.
+    return `function ${name}(${args}) {${body
+      .replaceAll("->", ".")
+      .replace(
+        "struct entry *entry = &entries[i+1];",
+        "const entry = entries[i+1];",
+      )
+      .replace("FILE_ID_INFO id;", "const id = Buffer.alloc(24);")
+      .replace(
+        "FILE_ID_INFO before, after;",
+        "const before=Buffer.alloc(24),after=Buffer.alloc(24);",
+      )
+      .replace(/wchar_t (name|text)\[\d+\];/gu, 'const $1 = {value:""};')
+      .replace("wchar_t *leaf", "let leaf")
+      .replace("*leaf = 0", "name.value = name.value.slice(0,leaf)")
+      .replace(/char hash\[\d+\];/gu, "const hash = {};")
+      .replace("BYTE *bytes", "let bytes")
+      .replaceAll("&entries[source].file", "entries[source].file")
+      .replaceAll("&entries[target].file", "entries[target].file")
+      .replaceAll("&entries[target]", "entries[target]")
+      .replaceAll("&entry.file.id", "entry.file.id")
+      .replace(/&(id|before|after|sa)\b/gu, "$1")
+      .replace(
+        /&(size|written|sd|present|defaulted|acl|expected|owner|system|flags|revision|label|expectedLabel)\b/gu,
+        (_, name) =>
+          `{get value(){return ${name}},set value(value){${name}=value}}`,
+      )
+      .replace(/sizeof\((?:id|before|after)\)/gu, "24")
+      .replaceAll("(BYTE *)actual", "actual")
+      .replaceAll('L"', '"')
+      .replaceAll("__LINE__", "1")
+      .replace(
+        /\b(?:HANDLE|DWORD|PSECURITY_DESCRIPTOR|SECURITY_ATTRIBUTES|PACL|BOOL|PSID|SECURITY_DESCRIPTOR_CONTROL|SECURITY_INFORMATION) /gu,
+        "let ",
+      )}}`;
+  };
+  const program = new Script(
+    [
+      project(reader, "case_copy", "target,source,parent"),
+      project(effective, "file_sd", "file,kind"),
+      project(reader, "ownership_acl", "i,restore,inspectOnly"),
+      "({case_copy,ownership_acl})",
+    ].join("\n"),
+  );
+  const acl = (value) =>
+    Object.assign(Buffer.from(value), { AclSize: Buffer.byteLength(value) });
+  const copy = (sd) => ({
+    ...sd,
+    dacl: acl(sd.dacl),
+    sacl: sd.sacl && acl(sd.sacl),
+  });
+  const fingerprint = (sd) => digest(JSON.stringify(sd));
+  const fixture = (fault) => {
+    const paths = [
+      "C:\\fixture",
+      "C:\\fixture\\case",
+      "C:\\fixture\\case\\custody",
+      "C:\\fixture\\case\\application",
+      "C:\\fixture\\case\\application\\workspace",
+      "C:\\fixture\\case\\custody\\image.exe",
+      "C:\\fixture\\case\\application\\helper.exe",
+      "C:\\source.exe",
+    ];
+    const entries = paths.map((path, index) => ({
+      path,
+      kind: index < 5 ? "directory" : index === 6 ? "helper" : "image",
+      pin: "pin",
+      signature: "-",
+      file: { handle: 10 + index, id: Buffer.alloc(24, index + 1) },
+    }));
+    const calls = [],
+      allocations = new Set(),
+      handles = new Map();
+    const current = entries.map((_, index) => ({
+      owner: "system",
+      group: "system",
+      flags: 1,
+      dacl: acl(`baseline-${index}`),
+      sacl: index === 4 ? acl("baseline-label") : null,
+    }));
+    const baseline = current.map(copy);
+    const masks = [0, 0, 0x120020, 0x12019f, 0, 0x1200a9];
+    const own = (value) => {
+      allocations.add(value);
+      return value;
+    };
+    const text = (value) => (typeof value === "string" ? value : value.value);
+    const api = {
+      Buffer,
+      entries,
+      count: entries.length,
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      INVALID_HANDLE_VALUE: -1,
+      FileIdInfo: 18,
+      SE_FILE_OBJECT: 1,
+      READ_CONTROL: 0x20000,
+      WRITE_DAC: 0x40000,
+      WRITE_OWNER: 0x80000,
+      ACCESS_SYSTEM_SECURITY: 0x1000000,
+      GENERIC_READ: 0x80000000,
+      GENERIC_WRITE: 0x40000000,
+      FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      FILE_FLAG_WRITE_THROUGH: 0x80000000,
+      CREATE_NEW: 1,
+      OWNER_SECURITY_INFORMATION: 1,
+      GROUP_SECURITY_INFORMATION: 2,
+      DACL_SECURITY_INFORMATION: 4,
+      SACL_SECURITY_INFORMATION: 8,
+      LABEL_SECURITY_INFORMATION: 16,
+      PROTECTED_DACL_SECURITY_INFORMATION: 0x80000000,
+      SE_DACL_PROTECTED: 1,
+      ERROR_SUCCESS: 0,
+      ERROR_ACCESS_DENIED: 5,
+      ownership_masks: masks,
+      ownership_before: Array(6).fill(null),
+      ownership_installed: Array(6).fill(null),
+      ownership_baseline: baseline.slice(1, 7).map(fingerprint),
+      case_record: { accountSid: "account", restrictingSid: "restricting" },
+      need(value) {
+        if (!value) throw new Error("policy refused");
+      },
+      GetLastError: () => 5,
+      strcmp: (a, b) => text(a).localeCompare(text(b)),
+      wcscmp: (a, b) => text(a).localeCompare(text(b)),
+      wcscpy_s(out, bound, value) {
+        out.value = text(value);
+        assert.ok(out.value.length < bound);
+      },
+      wcsrchr: (value, separator) => text(value).lastIndexOf(separator),
+      swprintf_s(out, bound, format, ...values) {
+        out.value = format.replace(/%(?:lx|ls)/gu, (token) => {
+          const value = values.shift();
+          return token === "%lx" ? value.toString(16) : value;
+        });
+        assert.ok(out.value.length < bound);
+        return out.value.length;
+      },
+      descriptor(value) {
+        const sddl = text(value),
+          [dacl, label] = sddl.split("S:");
+        return own({
+          owner: "system",
+          group: "system",
+          flags: 1,
+          dacl: acl(dacl),
+          sacl: label ? acl(label) : null,
+        });
+      },
+      attributes: (sd, inherit) => {
+        assert.equal(inherit, false);
+        return { sd };
+      },
+      pin(file, value) {
+        assert.ok(handles.has(file.handle));
+        assert.equal(value, "pin");
+      },
+      read_file(file, bound, out) {
+        assert.equal(file.handle, 17);
+        assert.equal(bound, 134217728);
+        out.value = 1;
+        return Buffer.from("x");
+      },
+      CreateFileW(path, access, sharing, sa, disposition, flags, template) {
+        assert.deepEqual(
+          [path, access, sharing, disposition, flags, template],
+          [
+            paths[5],
+            api.GENERIC_WRITE,
+            0,
+            1,
+            api.FILE_FLAG_OPEN_REPARSE_POINT | api.FILE_FLAG_WRITE_THROUGH,
+            null,
+          ],
+        );
+        assert.ok(allocations.has(sa.sd));
+        handles.set(100, { access });
+        return 100;
+      },
+      WriteFile(handle, bytes, size, out, overlapped) {
+        assert.equal(handle, 100);
+        assert.deepEqual(bytes, Buffer.from("x"));
+        assert.equal(overlapped, null);
+        out.value = size;
+        return true;
+      },
+      FlushFileBuffers: (handle) => {
+        assert.equal(handle, 100);
+        return true;
+      },
+      CloseHandle(handle) {
+        assert.equal(
+          handle,
+          100,
+          "Policy operations must not close borrowed handles",
+        );
+        assert.ok(handles.delete(handle));
+        return true;
+      },
+      free: () => {},
+      hold(path, directory, isPrivate, access) {
+        assert.equal(path, paths[5]);
+        assert.equal(directory, false);
+        assert.equal(isPrivate, true);
+        assert.equal(
+          access,
+          api.GENERIC_READ |
+            api.WRITE_DAC |
+            api.WRITE_OWNER |
+            api.ACCESS_SYSTEM_SECURITY,
+        );
+        assert.ok(
+          !handles.has(100),
+          "Finish the creation writer before protective acquisition",
+        );
+        const file = { handle: 15, id: Buffer.alloc(24, 6) };
+        handles.set(15, {
+          access: access | api.READ_CONTROL,
+          id: file.id,
+          index: 5,
+        });
+        return file;
+      },
+      inspect: (entry) => {
+        assert.equal(entry.file.handle, 15);
+      },
+      ReOpenFile: () =>
+        assert.fail("Granted original policy handles need no reopen"),
+      GetFileInformationByHandleEx(handle, kind, out, size) {
+        assert.deepEqual([kind, size], [18, 24]);
+        assert.ok(handles.has(handle));
+        calls.push("id");
+        handles.get(handle).id.copy(out);
+        if (fault === "identity") out[23]++;
+        return fault !== "id";
+      },
+      memcmp: (a, b, size) =>
+        Buffer.compare(a.subarray(0, size), b.subarray(0, size)),
+      GetSecurityInfo(handle, kind, info, owner, group, dacl, sacl, out) {
+        assert.equal(kind, 1);
+        assert.equal(info, 31);
+        assert.deepEqual([owner, group, dacl, sacl], [null, null, null, null]);
+        assert.equal(out.value, null);
+        const held = handles.get(handle);
+        assert.ok(held);
+        assert.equal(
+          held.access & (api.READ_CONTROL | api.ACCESS_SYSTEM_SECURITY),
+          api.READ_CONTROL | api.ACCESS_SYSTEM_SECURITY,
+        );
+        calls.push("read");
+        out.value = own(copy(current[held.index]));
+        return 0;
+      },
+      IsValidSecurityDescriptor: (sd) => allocations.has(sd),
+      GetSecurityDescriptorLength: (sd) => {
+        assert.ok(allocations.has(sd));
+        return 64;
+      },
+      GetSecurityDescriptorDacl(sd, present, out, defaulted) {
+        present.value = true;
+        out.value = sd.dacl;
+        defaulted.value = false;
+        return true;
+      },
+      GetSecurityDescriptorSacl(sd, present, out, defaulted) {
+        present.value = sd.sacl !== null;
+        out.value = sd.sacl;
+        defaulted.value = false;
+        return true;
+      },
+      GetSecurityDescriptorOwner(sd, out, defaulted) {
+        out.value = sd.owner;
+        defaulted.value = false;
+        return true;
+      },
+      GetSecurityDescriptorControl(sd, out, revision) {
+        out.value = sd.flags;
+        revision.value = 1;
+        return true;
+      },
+      ConvertStringSidToSidW(value, out) {
+        assert.equal(value, "S-1-5-18");
+        out.value = own({ sid: "system" });
+        return true;
+      },
+      EqualSid: (owner, system) => owner === system.sid,
+      LocalFree(value) {
+        assert.ok(
+          allocations.delete(value),
+          "Free only owned live allocations",
+        );
+        return null;
+      },
+      security(handle, kind, isPrivate) {
+        assert.ok(handles.has(handle));
+        assert.equal(kind, 1);
+        assert.equal(isPrivate, true);
+        calls.push("private");
+      },
+      sum(sd, size, out) {
+        assert.equal(size, 64);
+        out.value = fingerprint(sd);
+      },
+      file_security_failure: () =>
+        assert.fail("Complete granted reads must succeed"),
+      policy_recovery_save(index, before, wanted) {
+        assert.ok(allocations.has(before) && allocations.has(wanted));
+        assert.deepEqual(before, baseline[index]);
+        calls.push("journal");
+        if (fault === "journal") throw new Error("journal refused");
+      },
+      SetSecurityInfo(handle, kind, info, owner, group, dacl, sacl) {
+        const held = handles.get(handle);
+        assert.ok(held);
+        assert.equal(kind, 1);
+        assert.deepEqual([owner, group], [null, null]);
+        const label = info === api.LABEL_SECURITY_INFORMATION,
+          required = label ? api.WRITE_OWNER : api.WRITE_DAC;
+        assert.equal(held.access & required, required);
+        assert.equal(
+          info,
+          label ? 16 : 4 | api.PROTECTED_DACL_SECURITY_INFORMATION,
+        );
+        assert.ok(
+          calls.includes("journal"),
+          "Persist recovery before either policy effect",
+        );
+        calls.push(label ? "label" : "dacl");
+        if (fault === (label ? "set-label" : "set-dacl")) return 5;
+        if (label) {
+          assert.equal(dacl, null);
+          current[held.index].sacl = acl(sacl);
+        } else {
+          assert.equal(sacl, null);
+          current[held.index].dacl = acl(dacl);
+        }
+        return 0;
+      },
+    };
+    for (let index = 0; index < entries.length; index++)
+      handles.set(10 + index, {
+        access:
+          api.READ_CONTROL |
+          api.WRITE_DAC |
+          api.WRITE_OWNER |
+          api.ACCESS_SYSTEM_SECURITY,
+        id: entries[index].file.id,
+        index,
+      });
+    entries[5].file = {};
+    handles.delete(15);
+    const native = program.runInNewContext(api);
+    native.case_copy(5, 7, 2);
+    assert.equal(allocations.size, 0);
+    const retained = [...handles.keys()],
+      borrowed = entries.slice(1, 7).map((entry) => entry.file);
+    if (fault === "baseline") api.ownership_baseline[3] = "changed";
+    return {
+      api,
+      native,
+      calls,
+      current,
+      baseline,
+      allocations,
+      handles,
+      retained,
+      borrowed,
+    };
+  };
+  for (let i = 0; i < 6; i++) {
+    const f = fixture();
+    f.native.ownership_acl(i, false, false);
+    assert.ok(f.calls.indexOf("journal") < f.calls.indexOf("dacl"));
+    const mask = f.api.ownership_masks[i];
+    assert.equal(
+      f.current[i + 1].dacl.toString(),
+      mask
+        ? `O:SYG:SYD:P(A;;FA;;;SY)(A;;0x${mask.toString(16)};;;account)(A;;0x${mask.toString(16)};;;restricting)`
+        : "O:SYG:SYD:P(A;;FA;;;SY)",
+    );
+    const effects = f.calls.filter(
+      (call) => call === "dacl" || call === "label",
+    );
+    assert.deepEqual(effects, i === 3 ? ["dacl", "label"] : ["dacl"]);
+    f.native.ownership_acl(i, false, true);
+    assert.deepEqual(
+      f.calls.filter((call) => call === "dacl" || call === "label"),
+      effects,
+    );
+    f.native.ownership_acl(i, true, false);
+    assert.deepEqual(f.current[i + 1], f.baseline[i + 1]);
+    assert.deepEqual([...f.handles.keys()], f.retained);
+    assert.equal(f.api.entries[i + 1].file, f.borrowed[i]);
+    assert.equal(
+      f.allocations.size,
+      2,
+      "Saved descriptors stay live until their caller releases them",
+    );
+    f.api.LocalFree(f.api.ownership_before[i]);
+    f.api.LocalFree(f.api.ownership_installed[i]);
+    assert.equal(f.allocations.size, 0);
+  }
+  for (const fault of [
+    "id",
+    "identity",
+    "baseline",
+    "journal",
+    "set-dacl",
+    "set-label",
+  ]) {
+    const f = fixture(fault);
+    assert.throws(
+      () => f.native.ownership_acl(3, false, false),
+      /(?:policy|journal) refused/u,
+    );
+    assert.deepEqual([...f.handles.keys()], f.retained);
+    if (["id", "identity"].includes(fault)) assert.deepEqual(f.calls, ["id"]);
+    if (["id", "identity", "baseline", "journal"].includes(fault)) {
+      assert.ok(!f.calls.includes("dacl") && !f.calls.includes("label"));
+      assert.deepEqual(f.current, f.baseline);
+    } else {
+      assert.deepEqual(f.api.ownership_before[3], f.baseline[4]);
+      assert.ok(f.allocations.has(f.api.ownership_before[3]));
+      assert.ok(f.allocations.has(f.api.ownership_installed[3]));
+      assert.deepEqual(
+        f.calls.filter((call) => ["journal", "dacl", "label"].includes(call)),
+        fault === "set-label"
+          ? ["journal", "dacl", "label"]
+          : ["journal", "dacl"],
+      );
+    }
+  }
+  for (const field of ["owner", "dacl", "sacl"]) {
+    const f = fixture();
+    f.native.ownership_acl(3, false, false);
+    if (field === "owner") f.current[4].owner = "foreign";
+    else f.current[4][field][0] ^= 1;
+    for (const restore of [false, true]) {
+      const effects = f.calls.filter(
+        (call) => call === "dacl" || call === "label",
+      );
+      assert.throws(
+        () => f.native.ownership_acl(3, restore, !restore),
+        /policy refused/u,
+      );
+      assert.deepEqual(
+        f.calls.filter((call) => call === "dacl" || call === "label"),
+        effects,
+      );
+      assert.deepEqual([...f.handles.keys()], f.retained);
+    }
   }
 });
 
