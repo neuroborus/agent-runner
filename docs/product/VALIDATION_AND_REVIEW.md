@@ -297,10 +297,26 @@ fix sandbox incompatibility or restore discarded stdout/stderr. A check may
 pass on the host yet fail closed in isolation with only a generic exit code;
 the timeout must not be presented as a diagnostics remedy.
 
+A producer-only test-location protocol is available to the repository harness
+through existing scratch requests; runtime allocation and consumption remain
+inactive. Its entire report is bounded to 4,096 UTF-8 bytes and four locations
+across the original command's batches. Locations contain only canonical
+repository-relative test-source paths of at most 256 UTF-8 bytes, nullable
+integer coordinates from 1 through 1,000,000, and the metadata-derived classes
+`test-failure`, `subtests`, `timeout`, `cancelled`, or `uncaught`. No native output,
+titles, messages, assertion values, stacks, external paths or provider data are
+retained. An exclusive claim prevents nested harness overwrites. Reporting never
+replaces the original outcome with a diagnostic rerun, and unavailable metadata
+cannot change acceptance, grant a retry or explain a historical opaque failure.
+
 Execution and polishing validation infrastructure consists of files that own
 commands, discovery, runners, configuration, or mandatory finalization guidance. Ordinary
 source, individual tests, fixtures, and generated output merely consumed by
 checks are excluded; ownership is semantic rather than inferred from filenames.
+The actual test harness (`scripts/test.js`), structured reporter
+(`scripts/test-reporter.js`) and producer/codec
+(`src/trusted-validation/test-attribution.js`, through its public index) own
+validation execution and reporting and therefore belong to infrastructure.
 Both pipelines permit 256 entries per role field and 512 per merged, persisted,
 or finalization field. Inventories are complete and never truncated; `requiredChecks` overflow has priority over infrastructure overflow.
 Existing byte limits still apply. Legacy evidence in both pipelines migrates

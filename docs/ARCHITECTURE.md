@@ -3215,6 +3215,29 @@ boundary. Consequently, a full repository check may pass on the host yet fail
 closed in trusted isolation with only a generic nonzero exit code; increasing
 `trustedCommandTimeoutMs` neither explains nor fixes that difference.
 
+The private `trusted-validation/test-attribution.js` producer/codec and
+`scripts/test-reporter.js` cooperate with `scripts/test.js` through an optional
+canonical request in `.agent-runner-test-attribution` under the existing
+`AGENT_RUNNER_SCRATCH` binding. The request carries a fresh nonce and exact
+command identity. An exclusive claim binds the original harness PID before test
+launch; only its direct reporter children can update the preallocated report.
+Both fast batches share that report, and selected slow files use the same
+structured event stream. Reporting mode discards native output and performs no
+diagnostic reruns; ordinary developer diagnostics retain their existing behavior.
+Discovery, batching, order, concurrency, temporary storage, and original
+exit/signal handling remain unchanged.
+
+The complete canonical UTF-8 report is at most 4,096 bytes and retains at most
+four locations independently of event count. Each location contains only a
+canonical repository-relative test-source path of at most 256 UTF-8 bytes,
+nullable integer line/column coordinates from 1 through 1,000,000, and a
+metadata-derived class: `test-failure`, `subtests`, `timeout`, `cancelled`, or
+`uncaught`. Titles, messages, assertion values, stacks, stdout/stderr, external
+paths, and provider data are excluded. Invalid requests/reports and unavailable
+storage cannot change test outcomes. This is producer-only infrastructure:
+the trusted service neither allocates requests nor consumes reports yet, and
+pipeline evidence and retry authority remain unchanged.
+
 Plan execution can retry these opaque failures through an explicit resume from
 an `environment_blocked` finding-resolution pause. Pipeline policy recognizes
 only a complete persisted match between failed runner checks and their generated

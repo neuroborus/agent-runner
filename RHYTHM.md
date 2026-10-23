@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23
+
+- **Original test invocations can produce bounded locations without native output.**
+  A scratch-request producer and structured reporter share one exclusively
+  claimed report across the existing fast batches or selected slow files.
+  Only four canonical locations within 4 KiB survive; metadata classes and
+  bounded nullable coordinates replace arbitrary diagnostic text. Nested
+  harnesses cannot overwrite the original report, and reporting does no
+  diagnostic reruns. Ordinary developer diagnostics keep the original failure
+  even when a later diagnostic passes. Runtime request allocation and report
+  consumption remain inactive pending provenance guards; this infrastructure
+  grants neither acceptance nor retry authority and explains no historical
+  validation or process-owner loss.
+
 ## 2026-10-22
 
 - **Verified tail repair returns the value its callers consume.** Journal
