@@ -735,10 +735,15 @@ The same actual-body fixture also executes the one-page interval-only comparison
 under that shared deadline and scan budget. Same/foreign AppIds, full pages,
 query failures, expired socket binding, separate enum-close failure and principal-specific rejections
 remain diagnostic; none contributes a match. The existing TCP body fixture
-reads original socket restriction/provider options, preserves the immediate
-connect error through optional inspection, and keeps failed/short reads
-unavailable. Pending connect plus select timeout still refuses a receipt.
-These injected reads add no validation tier and establish no native remedy.
+reports restriction information as unavailable without defining an unsupported
+socket option or inventing a restriction status or API error. It exercises only
+the documented protocol query on the original socket, retaining provider, catalog,
+chain and creator availability, failed/short protocol reads, the immediate
+connect result and restored Winsock error. Successful, denied and pending connect
+results remain distinct from saved Winsock error state. Existing connect and
+cleanup coverage still refuses a receipt for pending connect plus select timeout.
+These portable injected reads add no validation tier and establish neither
+matching Windows SDK compilation/linking/runtime success nor a native remedy.
 Receipt consumers join both actual `WSAENOTCONN` and exact requested-peer reads;
 missing, mismatched or fabricated peers refuse success. The real operation-loop
 fixture carries both peer forms through `O/D/T/U`, completion and independent

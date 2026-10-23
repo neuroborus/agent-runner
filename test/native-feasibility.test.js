@@ -5870,30 +5870,27 @@ test("TCP setup, completion and observer failures retain native causes and close
     /static void tcp_socket_observe\([^\n]+\) \{([\s\S]*?)\n\}/u
       .exec(source)[1]
       .replace(
-        "int saved = WSAGetLastError(); BOOL restricted = FALSE; int restrictedSize = sizeof(restricted);",
-        "const saved = WSAGetLastError(), restricted = {value:false}, restrictedSize = {value:4};",
-      )
-      .replace(
         "WSAPROTOCOL_INFOW protocol = {0}; int protocolSize = sizeof(protocol);",
         "const protocol = {}, protocolSize = {value:628};",
       )
-      .replaceAll("sizeof(restricted)", "4")
       .replaceAll("sizeof(protocol)", "628")
-      .replaceAll("restrictedSize ==", "restrictedSize.value ==")
       .replaceAll("protocolSize ==", "protocolSize.value ==")
-      .replaceAll("!!restricted", "!!restricted.value")
+      .replace(
+        "protocolStatus, protocolSize)",
+        "protocolStatus, protocolSize.value)",
+      )
       .replaceAll("(char *)", "")
       .replace(/&(?=[a-zA-Z_])/gu, "")
       .replace(/\b(?:int|DWORD)\b/gu, "let");
-  for (const fault of [
-    null,
-    "restricted-query",
-    "restricted-short",
-    "protocol-query",
-    "protocol-short",
-    "creator-unavailable",
+  for (const [fault, connectError, savedError] of [
+    [null, 0, 10022],
+    [null, 10013, 10013],
+    [null, 10035, 10035],
+    ["protocol-query", 10035, 10035],
+    ["protocol-short", 10035, 10035],
+    ["creator-unavailable", 10035, 10035],
   ]) {
-    let lastError = 10035;
+    let lastError = savedError;
     const calls = [],
       writes = [],
       creator = {
@@ -5905,7 +5902,6 @@ test("TCP setup, completion and observer failures retain native causes and close
     new Script(`(socket,connected)=>{${socketBody}}`).runInNewContext({
       SOCKET_ERROR: -1,
       SOL_SOCKET: 1,
-      SO_IS_RESTRICTED: 2,
       SO_PROTOCOL_INFOW: 3,
       diagnosticOutputLock: {},
       stderr: {},
@@ -5918,48 +5914,50 @@ test("TCP setup, completion and observer failures retain native causes and close
       getsockopt(socket, level, option, value, size) {
         calls.push([socket, level, option]);
         lastError = 10022;
-        if (option === 2) {
-          value.value = true;
-          if (fault === "restricted-short") size.value = 1;
-        } else {
-          Object.assign(value, {
-            ProviderId: "provider",
-            dwCatalogEntryId: 7,
-            dwServiceFlags1: 8,
-            ProtocolChain: { ChainLen: 1 },
-          });
-          if (fault === "protocol-short") size.value = 1;
-        }
-        return fault === (option === 2 ? "restricted-query" : "protocol-query")
-          ? -1
-          : 0;
+        Object.assign(value, {
+          ProviderId: "provider",
+          dwCatalogEntryId: 7,
+          dwServiceFlags1: 8,
+          ProtocolChain: { ChainLen: 1 },
+        });
+        if (fault === "protocol-short") size.value = 1;
+        return fault === "protocol-query" ? -1 : 0;
       },
       AcquireSRWLockExclusive: () => {},
       ReleaseSRWLockExclusive: () => {},
       socket_protocol: () => true,
       socket_target_write(_stream, actual) {
         assert.equal(actual, creator);
+        writes.push("creator");
       },
       wfp_key(_stream, key) {
         assert.equal(key, "provider");
         writes.push("provider");
       },
-      fprintf: (_stream, format, ...args) => writes.push([format, ...args]),
+      fprintf(_stream, format, ...args) {
+        let index = 0;
+        writes.push(
+          format.replace(/%(?:lu|[du])/gu, () => String(args[index++])),
+        );
+        assert.equal(index, args.length);
+      },
       fputs: (value) => writes.push(value),
       fflush: () => {},
-    })(17, 10035);
-    assert.deepEqual(calls, [
-      [17, 1, 2],
-      [17, 1, 3],
-    ]);
-    assert.equal(lastError, 10035);
+    })(17, connectError);
+    assert.deepEqual(calls, [[17, 1, 3]]);
+    assert.equal(lastError, savedError);
     assert.equal(
-      writes.filter((value) => value === "unavailable").length,
-      fault ? 1 : 0,
+      writes.join(""),
+      [
+        `native-windows-socket-input: caller=tcp_connection connect=${connectError} restricted=unavailable`,
+        ` protocol-status=${fault === "protocol-query" ? 10022 : 0}`,
+        ` protocol-size=${fault === "protocol-short" ? 1 : 628} provider=`,
+        fault?.startsWith("protocol-")
+          ? "unavailable"
+          : "provider catalog=7 flags=8 chain=1",
+        ` creator=${fault === "creator-unavailable" ? "unavailable" : "creator"} consumer=43\n`,
+      ].join(""),
     );
-    assert.equal(writes.includes("provider"), !fault?.startsWith("protocol-"));
-    assert.equal(writes[0][1], 10035);
-    assert.equal(writes[0][2], fault === "restricted-query" ? 10022 : 0);
   }
   const tcp = source.slice(
     source.indexOf("static int tcp_connection("),

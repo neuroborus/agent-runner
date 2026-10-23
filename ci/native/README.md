@@ -1490,12 +1490,17 @@ collection and later settlement errors. Allowed TCP and pipe listeners remain
 live through each restricted attempt, attribution, independent retirement and the
 subsequent positive transactions.
 
-Pending restricted TCP diagnostics read `SO_IS_RESTRICTED` and the public
-`SO_PROTOCOL_INFOW` provider/catalog/chain state from the original socket at
-the immediate connect result. The saved result, original creator birth/token
-and actual consumer PID remain joined; failed or short option reads stay
-unavailable. These reads restore the original Winsock error and change no
-socket option, transfer, policy, collection keyword or protocol acknowledgement.
+Pending restricted TCP diagnostics report `restricted=unavailable`: the
+unsupported `SO_IS_RESTRICTED` query is omitted without substituting a socket
+state, option number or API error. The public `SO_PROTOCOL_INFOW`
+provider/catalog/chain state is still read from the original socket at the
+immediate connect result. The saved result, original creator birth/token and
+actual consumer PID remain joined; failed or short protocol reads and unavailable
+creator facts stay unavailable. These reads restore the original Winsock error
+and change no socket option, transfer, policy, collection keyword or protocol
+acknowledgement. The portable actual-body fixture defines no unsupported option;
+it verifies diagnostic logic and error preservation, not matching Windows SDK
+compilation, linking or runtime success. Both native build variants remain required.
 After the first complete unmatched AppId snapshot, one read-only comparison
 removes only that query's AppId selection. It keeps the same interval and engine,
 shares the five-second deadline and total 256-event budget, and reads at most

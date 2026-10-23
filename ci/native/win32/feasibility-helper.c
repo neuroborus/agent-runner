@@ -2064,18 +2064,16 @@ closed:
   }
   ReleaseSRWLockExclusive(&diagnosticOutputLock);
 }
-/* Read the original socket at the immediate connect result, not a control or
- * imported copy. Failed/short reads stay unavailable and change no predicate. */
+/* Read documented provider facts from the original socket at the immediate
+ * connect result. Restriction information has no supported query here.
+ * Failed/short reads stay unavailable and change no predicate. */
 static void tcp_socket_observe(SOCKET socket, DWORD connected) {
-  int saved = WSAGetLastError(); BOOL restricted = FALSE; int restrictedSize = sizeof(restricted);
-  int result = getsockopt(socket, SOL_SOCKET, SO_IS_RESTRICTED, (char *)&restricted, &restrictedSize);
-  DWORD restrictedStatus = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  int saved = WSAGetLastError();
   WSAPROTOCOL_INFOW protocol = {0}; int protocolSize = sizeof(protocol);
-  result = getsockopt(socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&protocol, &protocolSize);
+  int result = getsockopt(socket, SOL_SOCKET, SO_PROTOCOL_INFOW, (char *)&protocol, &protocolSize);
   DWORD protocolStatus = result == SOCKET_ERROR ? WSAGetLastError() : 0;
   AcquireSRWLockExclusive(&diagnosticOutputLock);
-  fprintf(stderr, "native-windows-socket-input: caller=tcp_connection connect=%lu restricted-status=%lu restricted-size=%d restricted=", connected, restrictedStatus, restrictedSize);
-  if (!restrictedStatus && restrictedSize == sizeof(restricted)) fprintf(stderr, "%u", !!restricted); else fputs("unavailable", stderr);
+  fprintf(stderr, "native-windows-socket-input: caller=tcp_connection connect=%lu restricted=unavailable", connected);
   fprintf(stderr, " protocol-status=%lu protocol-size=%d provider=", protocolStatus, protocolSize);
   if (!protocolStatus && protocolSize == sizeof(protocol) && socket_protocol(&protocol)) {
     wfp_key(stderr, &protocol.ProviderId);
