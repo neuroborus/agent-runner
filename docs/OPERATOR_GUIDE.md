@@ -321,6 +321,15 @@ client timeout nor disconnect cancels the durable continuation or its receipt.
 Unrelated revision movement and retained lease reservations are not launch proof.
 Inspection-budget exhaustion preserves exclusion just like incomplete evidence.
 
+For detached failures, inspect `dispatchFailure` (known exit code/signal) and
+the separate nullable `recoveryCause` (safe stage, Runner code and explanation).
+CLI resume uses the same fixed explanations. Missing causes are explicitly
+unavailable; an exit or signal never establishes why the owner disappeared.
+Restart can retain a correlated cause without known exit facts. Address the
+reported blocker, then retry the identical key and arguments. Retry alone
+does not repair it, complete the intent or release uncertain ownership. Never
+collect raw child streams, provider output or transcripts to fill this gap.
+
 Shared-host recovery requires frozen pre-launch boot/PID/start evidence and
 stable complete ancestry. Observed ownership takes precedence. Inaccessible
 candidates need positive control-group, fully exited, or separate live-custody

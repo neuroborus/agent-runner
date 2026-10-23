@@ -309,10 +309,13 @@ export async function reconcileOperatorStop({
   configurationFailure = null,
   cleanupResources = async (run) => run,
   inspectSessionProcesses,
+  onRecoveryStage = () => {},
 }) {
+  onRecoveryStage("state-recovery");
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
   if (current.executionProcess !== null) {
+    onRecoveryStage("process-recovery");
     const owner = await runStore.inspectExecutionProcess(current.runId);
     await terminateOwnedProcess(
       owner.pid,
@@ -321,7 +324,9 @@ export async function reconcileOperatorStop({
     );
     current = await runStore.recordExecutionProcess(lease, null);
   }
+  onRecoveryStage("resource-recovery");
   current = await cleanupResources(current);
+  onRecoveryStage("state-recovery");
   if (current.observations?.attempts.at(-1).status === "active")
     current = await runStore.recoverRun(lease);
   const activity = {
@@ -333,6 +338,7 @@ export async function reconcileOperatorStop({
   current = await runStore.recordStopActivity(lease, activity);
   await publish(activity, current);
 
+  onRecoveryStage("checkpoint-continuation");
   const simulated = reconciliationRuntime(runtime, current);
   let reconciled = await pipeline.workflow.run({
     action: null,

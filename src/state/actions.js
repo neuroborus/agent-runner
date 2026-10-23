@@ -65,7 +65,7 @@ function actionError(message, code = "ERR_INVALID_MCP_ACTION") {
   return new RunStoreError(message, { code });
 }
 
-function actionIdentity(key, tool, actionArguments) {
+function actionKeyHash(key, tool) {
   if (
     typeof key !== "string" ||
     key.trim().length === 0 ||
@@ -75,6 +75,11 @@ function actionIdentity(key, tool, actionArguments) {
   ) {
     throw actionError("MCP action input is invalid.");
   }
+  return hash(key);
+}
+
+function actionIdentity(key, tool, actionArguments) {
+  const keyHash = actionKeyHash(key, tool);
   let legacyArgumentsHash = null;
   if (["run_pause", "run_cancel"].includes(tool)) {
     if (
@@ -102,7 +107,7 @@ function actionIdentity(key, tool, actionArguments) {
     actionArguments = { ...actionArguments, timing };
   }
   return Object.freeze({
-    keyHash: hash(key),
+    keyHash,
     argumentsHash: hash(canonicalJson(actionArguments)),
     legacyArgumentsHash,
   });
@@ -380,11 +385,11 @@ export function createActionStore({
   }
 
   async function read({ key, tool, arguments: actionArguments }) {
-    const { keyHash, argumentsHash, legacyArgumentsHash } = actionIdentity(
-      key,
-      tool,
-      actionArguments,
-    );
+    const identity =
+      typeof actionArguments === "function"
+        ? { keyHash: actionKeyHash(key, tool) }
+        : actionIdentity(key, tool, actionArguments);
+    const { keyHash } = identity;
     let canonicalRoot;
     try {
       canonicalRoot = await realpath(stateRoot);
@@ -416,6 +421,16 @@ export function createActionStore({
       return null;
     }
     const record = parseRecord(source, keyHash);
+    // Recovery may need saved context before it can inspect the run journal.
+    // Resolve its arguments read-only, retaining the exact identity check.
+    const { argumentsHash, legacyArgumentsHash } =
+      typeof actionArguments === "function"
+        ? actionIdentity(
+            key,
+            tool,
+            actionArguments(deepFreeze(structuredClone(record.context))),
+          )
+        : identity;
     if (
       record.tool !== tool ||
       (record.argumentsHash !== argumentsHash &&

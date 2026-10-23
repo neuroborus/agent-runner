@@ -63,6 +63,16 @@ const FIELDS = [
   "explanation",
 ];
 
+export function recoveryFailureDetails(stage, error) {
+  if (!STAGES.has(stage)) invalid();
+  const code = EXPLANATIONS.has(error?.code) ? error.code : null;
+  return Object.freeze({
+    stage,
+    code,
+    explanation: EXPLANATIONS.get(code) ?? UNAVAILABLE,
+  });
+}
+
 function invalid() {
   throw new RunStoreError("Detached recovery failure is invalid.", {
     code: "ERR_INVALID_RECOVERY_FAILURE",
@@ -139,17 +149,12 @@ export function createRecoveryFailureStore({
       hostname: hostName,
       processIdentity: await processIdentity(processId),
     });
-    const code = EXPLANATIONS.has(failure.error?.code)
-      ? failure.error.code
-      : null;
     const diagnostic = {
       schemaVersion: 1,
       runId,
       dispatch,
       owner,
-      stage: failure.stage,
-      code,
-      explanation: EXPLANATIONS.get(code) ?? UNAVAILABLE,
+      ...recoveryFailureDetails(failure.stage, failure.error),
     };
     const source = `${JSON.stringify(diagnostic)}\n`;
     parseFailure(source);

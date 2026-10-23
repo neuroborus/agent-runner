@@ -23,6 +23,7 @@ export {
 } from "./validation.js";
 
 export { normalizeRecoveryDispatch } from "./dispatch.js";
+export { recoveryFailureDetails } from "./recovery-failures.js";
 
 export {
   DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,

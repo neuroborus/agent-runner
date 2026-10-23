@@ -185,8 +185,8 @@ export function createDetachedLauncher({
       };
       if (dispatch !== null) child.on("message", onMessage);
       child.once("error", finish);
-      child.once("exit", (code) => {
-        onExit?.(code);
+      child.once("exit", (code, signal) => {
+        onExit?.(code, signal);
         if (dispatch !== null && !sent)
           finish(
             new RunStoreError("Detached child exited before admission.", {

@@ -1,11 +1,18 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { DETACHED_RUNTIME_COMPATIBILITY_TOKEN } from "../../src/index.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+
+import {
+  DETACHED_RUNTIME_COMPATIBILITY_TOKEN,
+  RUNTIME_VERSION_SKEW_EXIT_CODE,
+} from "../../src/index.js";
 import {
   createDetachedLauncher,
   createMcpControlPlane,
+  createMcpServer,
   DETACHED_RUNTIME_COMPATIBILITY_ENV,
   DETACHED_STOP_CHECKPOINT_ENV,
   MCP_INSTRUCTIONS,
@@ -215,17 +222,17 @@ test("launches continuation independently from the MCP process streams", async (
     },
   });
 
-  let exited = false;
+  let exit;
   assert.equal(
     await launch(RUN_ID, null, {
-      onExit() {
-        exited = true;
+      onExit(code, signal) {
+        exit = { code, signal };
       },
     }),
     42,
   );
-  exitCallbacks[0]();
-  assert.equal(exited, true);
+  exitCallbacks[0](null, "SIGTERM");
+  assert.deepEqual(exit, { code: null, signal: "SIGTERM" });
   await launch(RUN_ID, { type: "extra-fix-rounds", amount: 2 });
   await launch(RUN_ID, { type: "override-finding", findingId: "finding-1" });
   await launch(RUN_ID, null, { stopCheckpointRevision: 7 });
@@ -271,4 +278,378 @@ test("launches continuation independently from the MCP process streams", async (
     launch(RUN_ID, null, { expectedRuntimeCompatibility: "other" }),
     (error) => error.code === "ERR_RUNTIME_VERSION_SKEW",
   );
+});
+
+test("MCP separates dispatch exit facts from safe correlated causes and leaves failures incomplete", async (t) => {
+  const cause = {
+    stage: "process-recovery",
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    explanation: "Execution process ownership could not be verified.",
+  };
+  const journalCause = {
+    stage: "state-recovery",
+    code: "ERR_INVALID_EVENT_LOG",
+    explanation: "The saved run journal is invalid.",
+  };
+  for (const [
+    exitCode,
+    signal,
+    diagnostic,
+    admissionFailure = false,
+    inspection,
+  ] of [
+    [1, null, cause],
+    [0, null, null],
+    [null, "SIGTERM", null],
+    [RUNTIME_VERSION_SKEW_EXIT_CODE, null, null, true],
+    [1, null, journalCause, false, "status"],
+    [null, "SIGTERM", journalCause, false, "proof"],
+  ]) {
+    let completed = false;
+    let released = false;
+    let launched = false;
+    function inspect(boundary) {
+      if (launched && inspection === boundary)
+        throw Object.assign(new Error("private journal error"), {
+          code: "ERR_INVALID_EVENT_LOG",
+        });
+    }
+    const intent = {
+      created: true,
+      record: { status: "intent", context: {} },
+      async updateContext(context) {
+        this.record.context = context;
+      },
+      async complete() {
+        completed = true;
+      },
+      async release() {
+        released = true;
+      },
+    };
+    const control = createMcpControlPlane({
+      runner: {
+        async status() {
+          inspect("status");
+          return {
+            run: {
+              runId: RUN_ID,
+              revision: 1,
+              pause: null,
+              pipelineId: "plan-authoring",
+              pipelineState: { workflowState: "CLARIFY" },
+            },
+          };
+        },
+      },
+      runStore: {
+        async readAction() {
+          return null;
+        },
+        async beginAction() {
+          return intent;
+        },
+        async runLeaseOwnerIsLive() {
+          return false;
+        },
+        async inspectDispatchOwner() {
+          return "live";
+        },
+        async inspectRecoveryDispatch() {
+          inspect("proof");
+          return { ready: false, started: false };
+        },
+        async readRecoveryFailure(id, dispatch) {
+          assert.equal(id, RUN_ID);
+          assert.deepEqual(dispatch, intent.record.context.dispatch);
+          assert.equal(dispatch.owner.pid, 42);
+          return diagnostic === null
+            ? null
+            : { ...diagnostic, transcript: "private transcript" };
+        },
+      },
+      async launchRun(_id, _action, options) {
+        await options.onSpawn({ pid: 42 });
+        launched = true;
+        options.onExit(exitCode, signal);
+        if (admissionFailure) throw new Error("private admission error");
+      },
+    });
+    const [clientTransport, serverTransport] =
+      InMemoryTransport.createLinkedPair();
+    const server = createMcpServer({ control, issueReportingEnabled: false });
+    const client = new Client({ name: "dispatch-test", version: "1.0.0" });
+    t.after(async () => {
+      await client.close();
+      await server.close();
+    });
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    const response = await client.callTool({
+      name: "run_resume",
+      arguments: {
+        runId: RUN_ID,
+        expectedRevision: 1,
+        action: null,
+        idempotencyKey: "dispatch-failure",
+      },
+    });
+    assert.equal(response.isError, true);
+    assert.equal(
+      response.structuredContent.code,
+      exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE
+        ? "ERR_RUNTIME_VERSION_SKEW"
+        : "ERR_DETACHED_START_FAILED",
+    );
+    if (exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE)
+      assert.match(
+        response.structuredContent.message,
+        /restart the Agent Runner MCP server/u,
+      );
+    assert.deepEqual(response.structuredContent.dispatchFailure, {
+      exitCode,
+      signal,
+    });
+    assert.deepEqual(response.structuredContent.recoveryCause, diagnostic);
+    assert.ok(
+      response.structuredContent.message.includes(
+        diagnostic?.explanation ?? "The recovery cause is unavailable.",
+      ),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(response),
+      /private|transcript|processIdentity/u,
+    );
+    assert.equal(completed, false);
+    assert.equal(released, true);
+  }
+});
+
+test("recorded dispatch inspection failures retain safe causes on identical-key retries after restart", async () => {
+  const dispatch = { id: RUN_ID, expectedRevision: 1, owner: { pid: 42 } };
+  const recoveryCause = {
+    stage: "state-recovery",
+    code: "ERR_INVALID_EVENT_LOG",
+    explanation: "The saved run journal is invalid.",
+  };
+  for (const tool of ["runResume", "runRespond", "runStart"]) {
+    for (const boundary of ["status", "proof"]) {
+      let released = false;
+      const record = { status: "intent", context: { runId: RUN_ID, dispatch } };
+      function inspect(name) {
+        if (name === boundary)
+          throw Object.assign(new Error("private journal error"), {
+            code: "ERR_INVALID_EVENT_LOG",
+          });
+      }
+      const options = {
+        runner: {
+          async status() {
+            inspect("status");
+            return { run: {} };
+          },
+          async validateBoundary() {
+            return {};
+          },
+        },
+        runStore: {
+          async readAction() {
+            return record;
+          },
+          async beginAction() {
+            return {
+              record,
+              async complete() {
+                assert.fail("Inspection failure must not complete the intent.");
+              },
+              async release() {
+                released = true;
+              },
+            };
+          },
+          async inspectRecoveryDispatch() {
+            inspect("proof");
+            return { ready: false };
+          },
+          async readRecoveryFailure(runId, saved) {
+            assert.equal(runId, RUN_ID);
+            assert.deepEqual(saved, dispatch);
+            return recoveryCause;
+          },
+        },
+        launchRun() {
+          assert.fail("Unreadable evidence excludes a replacement child.");
+        },
+      };
+      for (let attempt = 0; attempt < 2; attempt++) {
+        await assert.rejects(
+          createMcpControlPlane(options)[tool]({
+            runId: RUN_ID,
+            expectedRevision: 1,
+            action: null,
+            idempotencyKey: "same-request",
+          }),
+          (error) => {
+            assert.equal(error.code, "ERR_DETACHED_START_FAILED");
+            assert.deepEqual(error.dispatchFailure, {
+              exitCode: null,
+              signal: null,
+            });
+            assert.deepEqual(error.recoveryCause, recoveryCause);
+            assert.doesNotMatch(error.message, /private/u);
+            return true;
+          },
+        );
+        assert.equal(record.status, "intent");
+        assert.equal(
+          released,
+          boundary === "proof" ? tool !== "runStart" : tool === "runStart",
+        );
+      }
+    }
+  }
+});
+
+test("retry-time lease and stop inspections retain correlated causes without completing recovery", async () => {
+  const dispatch = { id: RUN_ID, expectedRevision: 3, owner: { pid: 42 } };
+  const recoveryCause = {
+    stage: "execution-lease",
+    code: "ERR_INVALID_RUN_LEASE",
+    explanation: "Execution lease evidence is invalid.",
+  };
+  for (const [tool, boundary, applicableStop = false] of [
+    ["runResume", "lease"],
+    ["runResume", "lease", true],
+    ["runPause", "status"],
+    ["runPause", "lease"],
+    ["runCancel", "status"],
+    ["runCancel", "lease"],
+  ]) {
+    const stopTool = tool !== "runResume";
+    // A superseding cancellation can retain an earlier stop checkpoint.
+    const receipt = {
+      runId: RUN_ID,
+      requestId: "a".repeat(64),
+      expectedRevision: 2,
+      revision: 3,
+    };
+    const record = {
+      status: "intent",
+      result: null,
+      context: {
+        runId: RUN_ID,
+        expectedRevision: 3,
+        dispatch,
+        ...(stopTool ? { stopCheckpointRevision: 1 } : {}),
+      },
+    };
+    let releases = 0;
+    let diagnostics = 0;
+    function inspect(name) {
+      if (name === boundary)
+        throw Object.assign(new Error("private inspection error"), {
+          code: "ERR_INVALID_RUN_LEASE",
+        });
+    }
+    const options = {
+      runner: {
+        async requestOperatorStop() {
+          return receipt;
+        },
+        async status() {
+          inspect("status");
+          return {
+            run: {
+              runId: RUN_ID,
+              revision: 3,
+              pause: null,
+              pipelineState: { workflowState: "CLARIFY" },
+              stopRequest:
+                stopTool || applicableStop
+                  ? {
+                      requestId: receipt.requestId,
+                      reconciledRevision: null,
+                      checkpoint: { revision: 1 },
+                    }
+                  : null,
+            },
+          };
+        },
+      },
+      runStore: {
+        async readAction(identity) {
+          if (stopTool) {
+            assert.equal(
+              identity.key,
+              `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
+            );
+            assert.equal(identity.tool, "run_resume");
+            assert.deepEqual(identity.arguments(record.context), {
+              runId: RUN_ID,
+              stopCheckpointRevision: 1,
+            });
+          }
+          return record;
+        },
+        async beginAction() {
+          assert.equal(
+            stopTool,
+            false,
+            "Failed stop inspection must not acquire an intent.",
+          );
+          return {
+            record,
+            async complete() {
+              assert.fail("Inspection failure must not complete recovery.");
+            },
+            async release() {
+              releases++;
+            },
+          };
+        },
+        async inspectRecoveryDispatch() {
+          return { ready: false };
+        },
+        async runLeaseOwnerIsLive() {
+          inspect("lease");
+          return false;
+        },
+        async readRecoveryFailure(runId, saved) {
+          assert.equal(runId, RUN_ID);
+          assert.deepEqual(saved, dispatch);
+          diagnostics++;
+          return { ...recoveryCause, transcript: "private transcript" };
+        },
+      },
+      launchRun() {
+        assert.fail("Failed inspection must exclude a replacement child.");
+      },
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await assert.rejects(
+        createMcpControlPlane(options)[tool]({
+          runId: RUN_ID,
+          expectedRevision: 3,
+          ...(stopTool ? {} : { action: null }),
+          idempotencyKey: "same-request",
+        }),
+        (error) => {
+          assert.equal(error.code, "ERR_DETACHED_START_FAILED");
+          assert.deepEqual(error.dispatchFailure, {
+            exitCode: null,
+            signal: null,
+          });
+          assert.deepEqual(error.recoveryCause, recoveryCause);
+          assert.ok(error.message.includes(recoveryCause.explanation));
+          assert.doesNotMatch(error.message, /private/u);
+          assert.doesNotMatch(JSON.stringify(error), /private|transcript/u);
+          return true;
+        },
+      );
+      assert.equal(record.status, "intent");
+      assert.equal(record.result, null);
+      assert.equal(diagnostics, attempt + 1);
+      assert.equal(releases, stopTool ? 0 : attempt + 1);
+    }
+  }
 });

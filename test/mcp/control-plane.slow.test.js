@@ -75,6 +75,129 @@ await writeFile(${JSON.stringify(receipt)}, JSON.stringify({ dispatch, connected
   });
 });
 
+test("real detached resume retains safe CLI/MCP causes across restart and identical-key recovery", async (t) => {
+  const paths = await workspace(t, "agent-runner-detached-cause-");
+  const store = createRunStore({ stateRoot: paths.stateRoot });
+  const initial = await createStoredRun(store, paths);
+  const script = join(paths.taskPath, "child.mjs");
+  const diagnosticPath = join(paths.taskPath, "cli-diagnostic.json");
+  await writeFile(
+    script,
+    `import { writeFile } from "node:fs/promises";
+import { main, createRunner, createRunStore, RunStoreError } from ${JSON.stringify(new URL("../../src/index.js", import.meta.url).href)};
+const store = createRunStore({ stateRoot: ${JSON.stringify(paths.stateRoot)} });
+const runner = createRunner({ runStore: {
+  async acquireRunLease() {
+    process.stdout.write("private provider output");
+    process.stderr.write("private native stderr");
+    throw new RunStoreError("private transcript", { code: "ERR_RUN_LEASED", cause: new Error("private cause") });
+  },
+} });
+let diagnostic = "";
+process.exitCode = await main(process.argv.slice(2), {
+  runner, createCommandRunStore: () => store,
+  stderr: { write(chunk) { diagnostic += chunk; } },
+});
+await writeFile(${JSON.stringify(diagnosticPath)}, JSON.stringify({ diagnostic, exitCode: process.exitCode }));
+`,
+  );
+  const exited = Promise.withResolvers();
+  const launcher = createDetachedLauncher({ executablePath: script });
+  const input = {
+    runId: RUN_ID,
+    expectedRevision: initial.revision,
+    action: null,
+    idempotencyKey: "same-recovery-request",
+  };
+  const identity = {
+    key: input.idempotencyKey,
+    tool: "run_resume",
+    arguments: {
+      runId: RUN_ID,
+      expectedRevision: initial.revision,
+      action: null,
+    },
+  };
+  const expectedCause = {
+    stage: "execution-lease",
+    code: "ERR_RUN_LEASED",
+    explanation: "Execution ownership could not be acquired.",
+  };
+  const control = createMcpControlPlane({
+    runner: storedRunner(store, paths),
+    runStore: store,
+    launchRun(id, action, options) {
+      return launcher(id, action, {
+        ...options,
+        onExit(code, signal) {
+          options.onExit(code, signal);
+          exited.resolve({ exitCode: code, signal });
+        },
+      });
+    },
+  });
+  await assert.rejects(control.runResume(input), (error) => {
+    assert.equal(error.code, "ERR_DETACHED_START_FAILED");
+    assert.deepEqual(error.dispatchFailure, { exitCode: 1, signal: null });
+    assert.deepEqual(error.recoveryCause, expectedCause);
+    assert.doesNotMatch(
+      JSON.stringify(error),
+      /private|transcript|processIdentity/u,
+    );
+    return true;
+  });
+  assert.deepEqual(await exited.promise, { exitCode: 1, signal: null });
+  const cli = JSON.parse(await readFile(diagnosticPath, "utf8"));
+  assert.equal(cli.exitCode, 1);
+  assert.match(cli.diagnostic, /execution-lease \(ERR_RUN_LEASED\)/u);
+  assert.ok(cli.diagnostic.includes(expectedCause.explanation));
+  assert.doesNotMatch(cli.diagnostic, /private|transcript|stderr/u);
+  const pending = await store.readAction(identity);
+  assert.equal(pending.status, "intent");
+  assert.equal(pending.result, null);
+  assert.deepEqual(await store.loadRun(RUN_ID), initial);
+
+  // A replacement control plane has the durable cause, but no observed exit.
+  // Unverifiable ownership continues to exclude a replacement child.
+  const restarted = createRunStore({ stateRoot: paths.stateRoot });
+  const uncertain = createMcpControlPlane({
+    runner: storedRunner(restarted, paths),
+    runStore: {
+      ...restarted,
+      async inspectDispatchOwner() {
+        return "unverifiable";
+      },
+    },
+    launchRun() {
+      assert.fail("Uncertain ownership must exclude a second child.");
+    },
+  });
+  await assert.rejects(uncertain.runResume(input), (error) => {
+    assert.equal(error.code, "ERR_DETACHED_OWNERSHIP_PENDING");
+    assert.deepEqual(error.dispatchFailure, { exitCode: null, signal: null });
+    assert.deepEqual(error.recoveryCause, expectedCause);
+    return true;
+  });
+  assert.deepEqual(
+    (await restarted.readAction(identity)).context.dispatch,
+    pending.context.dispatch,
+  );
+  let continuations = 0;
+  const recovered = createMcpControlPlane({
+    runner: storedRunner(restarted, paths),
+    runStore: restarted,
+    async launchRun(id, _action, options) {
+      continuations++;
+      assert.notEqual(options.dispatch.id, pending.context.dispatch.id);
+      await advanceMutatingStoredRun(restarted, id, options.dispatch);
+    },
+  });
+  assert.deepEqual(await recovered.runResume(input), { runId: RUN_ID });
+  assert.deepEqual(await recovered.runResume(input), { runId: RUN_ID });
+  assert.equal(continuations, 1);
+  assert.equal((await restarted.readAction(identity)).status, "completed");
+});
+
 async function childNodeStdoutIsAvailable() {
   const marker = "agent-runner-child-stdio-probe";
   try {
@@ -1617,7 +1740,9 @@ test("restart recovery bounds noisy observations and preserves recorded child id
   };
   await assert.rejects(
     createMcpControlPlane(options).runResume(input),
-    /server interrupted/u,
+    (error) =>
+      error.code === "ERR_DETACHED_START_FAILED" &&
+      !error.message.includes("server interrupted"),
   );
   await assert.rejects(createMcpControlPlane(options).runResume(input), {
     code: "ERR_DETACHED_OWNERSHIP_PENDING",
@@ -1713,7 +1838,9 @@ test("an admitted dispatch cannot replay after another admission or CLI turn", a
       };
       await assert.rejects(
         createMcpControlPlane(options).runStart(input),
-        /Interrupted after admission/u,
+        (error) =>
+          error.code === "ERR_DETACHED_START_FAILED" &&
+          !error.message.includes("Interrupted after admission"),
       );
       const lease = await store.acquireRunLease(RUN_ID);
       try {

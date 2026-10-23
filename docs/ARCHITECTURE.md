@@ -961,8 +961,33 @@ code and an unavailable explanation. Error messages, causes, stacks, provider
 output and transcripts are discarded. Exit codes and signals are separate
 observations and are never inferred from a diagnostic. A diagnostic cannot
 acknowledge dispatch, complete an action receipt, change acceptance or workflow
-state, or release uncertain ownership. The state API alone does not wire CLI/MCP
-publication or projection; detached launch and receipt behavior remain unchanged.
+state, or release uncertain ownership.
+
+The CLI resume boundary publishes this diagnostic after a failed admitted
+dispatch, using the actual recovery stage reported by the runner. Runtime
+compatibility and execution-lease failures can therefore be retained before
+admission is journaled. Diagnostic publication failure preserves the original
+failure and its exit status. CLI recovery explanations use the same allowlist;
+native messages, causes and stacks never supply detached diagnostics.
+
+The launcher forwards both child exit arguments. MCP dispatch errors expose
+`dispatchFailure: { exitCode, signal }` separately from the nullable
+`recoveryCause: { stage, code, explanation }`. Tool errors return `isError: true`
+with these fields, the dispatch error `code` and safe `message` in both text JSON
+and `structuredContent`. Only exact state-owned correlation admits a cause;
+missing, invalid or mismatched diagnostics explicitly leave it unavailable.
+Failed journal, status or ownership inspection for a recorded dispatch uses
+the same safe projection, including identical-key retries after restart.
+Stop recovery loads its saved action context before status or lease inspection,
+including the original checkpoint retained by a superseding cancellation.
+Inspection failure grants neither receipt completion nor replacement authority.
+An unobserved exit has null facts, including after control-plane replacement;
+neither a signal nor an exit code establishes a recovery cause. Version-skew
+exit handling retains its distinct restart instruction. Admission errors also
+discard arbitrary native error text. Bounded event-driven inspection, runtime
+compatibility, readiness, stop settlement and exact-key retry rules are unchanged.
+Failed dispatches retain incomplete intents and ownership exclusion. Retrying
+does not repair the reported blocker or acknowledge workflow success.
 
 Action-free provider process-proof failures leave the active turn and exact
 pipeline checkpoint durable, including a finalization failure after command
@@ -1088,7 +1113,9 @@ other.
 MCP action intents and receipts live under `actions/<hashed-key>/` in the same
 external root. The opaque key itself is not persisted. Action records are
 atomically replaced and protected by a same-host process lease; they never live
-inside the target or task directory.
+inside the target or task directory. Read-only `readAction` accepts exact
+arguments or a synchronous resolver over frozen saved context; both forms
+require the same tool and canonical argument hash before returning the record.
 
 An unexpected-issue action persists its intent and reserved report path before
 publication. It records a published phase while the temporary hard link still

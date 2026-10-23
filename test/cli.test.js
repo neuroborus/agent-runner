@@ -1274,7 +1274,47 @@ test("detached resume rejects runtime skew with a distinct exit code", async () 
     request.expectedRuntimeCompatibility,
     `${DETACHED_RUNTIME_COMPATIBILITY_TOKEN}-old`,
   );
-  assert.match(stderr.read(), /Runtime mismatch/u);
+  assert.match(stderr.read(), /The recovery runtime is incompatible/u);
+  assert.doesNotMatch(stderr.read(), /Runtime mismatch/u);
+});
+
+test("resume reports the failed recovery boundary without native error content", async () => {
+  for (const stage of ["execution-lease", "state-recovery"]) {
+    const stdout = createSink();
+    const stderr = createSink();
+    const failure = Object.assign(new Error("private stderr and transcript"), {
+      code:
+        stage === "execution-lease"
+          ? "ERR_RUN_LEASED"
+          : "ERR_INVALID_EVENT_LOG",
+    });
+    const runner = createRunner({
+      runStore: {
+        async acquireRunLease() {
+          if (stage === "execution-lease") throw failure;
+          return { async release() {} };
+        },
+        async loadRun() {
+          throw failure;
+        },
+      },
+    });
+    assert.equal(
+      await main(["resume", "--run", RUN_ID], {
+        runner,
+        stdout: stdout.stream,
+        stderr: stderr.stream,
+        createCommandRunStore() {
+          assert.fail("Foreground failure has no dispatch to publish.");
+        },
+      }),
+      1,
+    );
+    assert.match(stderr.read(), new RegExp(`Recovery failed at ${stage}`));
+    assert.match(stderr.read(), new RegExp(failure.code));
+    assert.doesNotMatch(stderr.read(), /private|stderr|transcript/u);
+    assert.equal(stdout.read(), "");
+  }
 });
 
 test("detached version-18 dispatch rejects before accessing run state", async () => {

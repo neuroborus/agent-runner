@@ -473,6 +473,14 @@ output. They cannot approve work, mark dispatch ready, complete a request, fail
 resumable work terminally, or clear ownership; missing or mismatched records
 provide no cause.
 
+CLI resume diagnostics and MCP dispatch errors project only those safe cause
+fields. Exit code and signal remain separate observations, with nulls for
+unknown facts after restart; they cannot establish a recovery cause. Failed
+diagnostic publication preserves the original error outcome. Detached native
+streams remain ignored, and structured tool errors expose no child identity,
+raw error text, provider output or transcripts. Identical-key retries retain
+the existing readiness, settlement and ownership checks.
+
 Claude sandbox scaffolding is adapter-owned content outside project and task
 trees, including tool HOME/config projections and provider temporary storage.
 Absent optional project masks cannot become host-visible mount-point files.

@@ -34,6 +34,7 @@ import {
   RUNTIME_VERSION_SKEW_EXIT_CODE,
   RunStoreError,
   normalizeRecoveryDispatch,
+  recoveryFailureDetails,
 } from "../state/index.js";
 import { createUnexpectedIssueReporter } from "./reporting.js";
 import { launchDetachedRun } from "./detached.js";
@@ -254,6 +255,24 @@ function result(value) {
     content: [{ type: "text", text: JSON.stringify(value) }],
     structuredContent: value,
   };
+}
+
+async function detachedResult(operation) {
+  try {
+    return result(await operation());
+  } catch (error) {
+    if (!(error instanceof RunStoreError) || !error.dispatchFailure)
+      throw error;
+    return {
+      ...result({
+        code: error.code,
+        message: error.message,
+        dispatchFailure: error.dispatchFailure,
+        recoveryCause: error.recoveryCause,
+      }),
+      isError: true,
+    };
+  }
 }
 
 function actionArguments(input) {
@@ -478,14 +497,71 @@ export function createMcpControlPlane(options = {}) {
     return statusProjection(current, leaseOwner);
   }
 
+  async function detachedFailure(
+    runId,
+    dispatch,
+    code,
+    message,
+    exitFacts = () => null,
+  ) {
+    let recoveryCause = null;
+    if (dispatch !== undefined) {
+      try {
+        const diagnostic = await runStore.readRecoveryFailure(runId, dispatch);
+        if (diagnostic !== null)
+          recoveryCause = recoveryFailureDetails(diagnostic.stage, diagnostic);
+      } catch {
+        // Unavailable diagnostics cannot replace dispatch or ownership facts.
+      }
+    }
+    return Object.assign(
+      new RunStoreError(
+        `${message} ${recoveryCause?.explanation ?? "The recovery cause is unavailable."}`,
+        { code },
+      ),
+      {
+        dispatchFailure: exitFacts() ?? { exitCode: null, signal: null },
+        recoveryCause,
+      },
+    );
+  }
+
+  async function inspectDetached(
+    runId,
+    context,
+    inspect,
+    exitFacts = () => null,
+  ) {
+    try {
+      return await inspect();
+    } catch (cause) {
+      if (context?.dispatch === undefined) throw cause;
+      const childExit = exitFacts();
+      const skew =
+        childExit?.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE ||
+        cause?.code === "ERR_RUNTIME_VERSION_SKEW";
+      throw await detachedFailure(
+        runId,
+        context.dispatch,
+        skew ? "ERR_RUNTIME_VERSION_SKEW" : "ERR_DETACHED_START_FAILED",
+        skew
+          ? "Detached runtime is incompatible; restart the Agent Runner MCP server and retry the same idempotency key."
+          : "Detached recovery inspection failed; retry the same idempotency key.",
+        exitFacts,
+      );
+    }
+  }
+
   async function dispatchIsReady(context, runId) {
     const { dispatch, stopCheckpointRevision } = context;
     if (dispatch === undefined || stopCheckpointRevision !== undefined)
       return false;
-    const proof = await runStore.inspectRecoveryDispatch(runId, {
-      id: dispatch.id,
-      expectedRevision: dispatch.expectedRevision,
-    });
+    const proof = await inspectDetached(runId, context, () =>
+      runStore.inspectRecoveryDispatch(runId, {
+        id: dispatch.id,
+        expectedRevision: dispatch.expectedRevision,
+      }),
+    );
     return proof.ready;
   }
 
@@ -511,9 +587,13 @@ export function createMcpControlPlane(options = {}) {
   ) {
     const deadline = dispatchClock() + DISPATCH_TIMEOUT_MS;
     const exited = Promise.withResolvers();
-    let exitCode;
+    let childExit;
     let launched = false;
     let dispatch = intent.record.context.dispatch;
+    const failure = (code, message) =>
+      detachedFailure(runIdValue, dispatch, code, message, () => childExit);
+    const inspect = (operation) =>
+      inspectDetached(runIdValue, { dispatch }, operation, () => childExit);
     if (dispatch !== undefined) {
       normalizeRecoveryDispatch({
         id: dispatch.id,
@@ -530,8 +610,8 @@ export function createMcpControlPlane(options = {}) {
     for (let inspected = 0; inspected < MAX_DISPATCH_INSPECTIONS; inspected++) {
       const remaining = Math.ceil(deadline - dispatchClock());
       if (!Number.isFinite(remaining) || remaining <= 0) break;
-      const exitedBeforeInspection = exitCode !== undefined;
-      const run = (await runner.status(runIdValue)).run;
+      const exitedBeforeInspection = childExit !== undefined;
+      const run = (await inspect(() => runner.status(runIdValue))).run;
       if (
         stopCheckpointRevision !== null &&
         (run.stopRequest === null ||
@@ -541,19 +621,24 @@ export function createMcpControlPlane(options = {}) {
         return;
       let proof = { started: false, ready: false };
       if (dispatch !== undefined)
-        proof = await runStore.inspectRecoveryDispatch(runIdValue, {
-          id: dispatch.id,
-          expectedRevision: dispatch.expectedRevision,
-        });
+        proof = await inspect(() =>
+          runStore.inspectRecoveryDispatch(runIdValue, {
+            id: dispatch.id,
+            expectedRevision: dispatch.expectedRevision,
+          }),
+        );
       if (proof.ready && stopCheckpointRevision === null) return;
-      if (exitCode !== undefined) {
+      if (childExit !== undefined) {
         if (!exitedBeforeInspection) continue;
-        const skew = exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
+        const skew = childExit.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
         const owner =
           !skew && pipelineRequiresWorktreeLease(run.pipelineId)
-            ? await runStore.worktreeLeaseOwner(run.projectPath, runIdValue)
+            ? await inspect(() =>
+                runStore.worktreeLeaseOwner(run.projectPath, runIdValue),
+              )
             : null;
-        throw new RunStoreError(
+        throw await failure(
+          skew ? "ERR_RUNTIME_VERSION_SKEW" : "ERR_DETACHED_START_FAILED",
           `Detached ${stopCheckpointRevision === null ? "continuation" : "stop reconciliation"} for run ${runIdValue} exited before durable ${stopCheckpointRevision === null ? "acknowledgement" : "stop settlement"}; retry the same idempotency key.` +
             (skew
               ? " The runtime is incompatible; restart the Agent Runner MCP server."
@@ -561,14 +646,11 @@ export function createMcpControlPlane(options = {}) {
             (owner !== null && owner !== runIdValue
               ? ` The conflicting canonical worktree lease belongs to run ${owner}.`
               : ""),
-          {
-            code: skew
-              ? "ERR_RUNTIME_VERSION_SKEW"
-              : "ERR_DETACHED_START_FAILED",
-          },
         );
       }
-      const live = await runStore.runLeaseOwnerIsLive(runIdValue);
+      const live = await inspect(() =>
+        runStore.runLeaseOwnerIsLive(runIdValue),
+      );
       if (dispatch === undefined) {
         if (rejectLiveOwner && live)
           throw new RunStoreError(
@@ -591,20 +673,19 @@ export function createMcpControlPlane(options = {}) {
         pipelineRequiresWorktreeLease(run.pipelineId) &&
         stopCheckpointRevision === null
       ) {
-        const owner = await runStore.worktreeLeaseOwner(
-          run.projectPath,
-          runIdValue,
+        const owner = await inspect(() =>
+          runStore.worktreeLeaseOwner(run.projectPath, runIdValue),
         );
         if (owner !== null && owner !== runIdValue)
-          throw new RunStoreError(
+          throw await failure(
+            "ERR_WORKTREE_LEASED",
             `Run ${runIdValue} remains durable; retry the same idempotency key after worktree owner ${owner} releases ownership.`,
-            { code: "ERR_WORKTREE_LEASED" },
           );
       }
       const ownerStatus =
         dispatch?.owner == null
           ? null
-          : await runStore.inspectDispatchOwner(dispatch.owner);
+          : await inspect(() => runStore.inspectDispatchOwner(dispatch.owner));
       if (ownerStatus === "unverifiable") break;
       if (!launched && !live && ownerStatus !== "live") {
         // No started event means the child never passed exact-revision admission.
@@ -624,23 +705,50 @@ export function createMcpControlPlane(options = {}) {
           owner: null,
         };
         await intent.updateContext({ ...intent.record.context, dispatch });
-        await launchRun(runIdValue, action, {
-          expectedRuntimeCompatibility: detachedCompatibilityToken,
-          stopCheckpointRevision,
-          dispatch: {
-            id: dispatch.id,
-            expectedRevision: dispatch.expectedRevision,
-          },
-          async onSpawn(owner) {
-            await runStore.inspectDispatchOwner(owner);
-            dispatch = { ...dispatch, owner };
-            await intent.updateContext({ ...intent.record.context, dispatch });
-          },
-          onExit(code) {
-            exitCode = code ?? 1;
-            exited.resolve();
-          },
-        });
+        try {
+          await launchRun(runIdValue, action, {
+            expectedRuntimeCompatibility: detachedCompatibilityToken,
+            stopCheckpointRevision,
+            dispatch: {
+              id: dispatch.id,
+              expectedRevision: dispatch.expectedRevision,
+            },
+            async onSpawn(owner) {
+              await runStore.inspectDispatchOwner(owner);
+              dispatch = { ...dispatch, owner };
+              await intent.updateContext({
+                ...intent.record.context,
+                dispatch,
+              });
+            },
+            onExit(code, signal) {
+              childExit = {
+                exitCode: Number.isSafeInteger(code) ? code : null,
+                signal:
+                  typeof signal === "string" &&
+                  /^SIG[A-Z0-9]{1,29}$/u.test(signal)
+                    ? signal
+                    : null,
+              };
+              exited.resolve();
+            },
+          });
+        } catch (cause) {
+          const skew =
+            childExit?.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE ||
+            cause?.code === "ERR_RUNTIME_VERSION_SKEW";
+          const code = skew
+            ? "ERR_RUNTIME_VERSION_SKEW"
+            : cause?.code === "ERR_DETACHED_OWNERSHIP_PENDING"
+              ? cause.code
+              : "ERR_DETACHED_START_FAILED";
+          throw await failure(
+            code,
+            code === "ERR_RUNTIME_VERSION_SKEW"
+              ? "Detached runtime is incompatible; restart the Agent Runner MCP server and retry the same idempotency key."
+              : "Detached admission failed; retry the same idempotency key.",
+          );
+        }
         launched = true;
         continue;
       }
@@ -653,15 +761,15 @@ export function createMcpControlPlane(options = {}) {
         includeOwnership: true,
       });
       try {
-        await Promise.race([changed, exited.promise]);
+        await inspect(() => Promise.race([changed, exited.promise]));
       } finally {
         wait.abort();
         await changed.catch(() => {});
       }
     }
-    throw new RunStoreError(
+    throw await failure(
+      "ERR_DETACHED_OWNERSHIP_PENDING",
       "Detached ownership recovery remains pending; retry the same idempotency key.",
-      { code: "ERR_DETACHED_OWNERSHIP_PENDING" },
     );
   }
 
@@ -716,7 +824,11 @@ export function createMcpControlPlane(options = {}) {
       });
       let run;
       try {
-        ({ run } = await runner.status(reservedRunId));
+        ({ run } = await inspectDetached(
+          reservedRunId,
+          action.record.context,
+          () => runner.status(reservedRunId),
+        ));
       } catch (cause) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
           throw cause;
@@ -828,7 +940,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    await runner.status(input.runId);
+    await inspectDetached(input.runId, existing?.context, () =>
+      runner.status(input.runId),
+    );
     const action = await runStore.beginAction({
       ...identity,
       context: {
@@ -859,7 +973,11 @@ export function createMcpControlPlane(options = {}) {
         await action.updateContext(context);
       }
 
-      let run = (await runner.status(input.runId)).run;
+      let run = (
+        await inspectDetached(input.runId, context, () =>
+          runner.status(input.runId),
+        )
+      ).run;
       let submittedRevision = context.submittedRevision;
       if (
         run.pause?.inputResponse?.requestId === input.requestId &&
@@ -910,7 +1028,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    await runner.status(input.runId);
+    await inspectDetached(input.runId, existing?.context, () =>
+      runner.status(input.runId),
+    );
     const action = await runStore.beginAction({
       ...identity,
       context: {
@@ -925,7 +1045,11 @@ export function createMcpControlPlane(options = {}) {
       const completedReceipt = { runId: input.runId };
       if (await completeReadyDispatch(action, completedReceipt))
         return completedReceipt;
-      const run = (await runner.status(input.runId)).run;
+      const run = (
+        await inspectDetached(input.runId, action.record.context, () =>
+          runner.status(input.runId),
+        )
+      ).run;
       let stopCheckpointRevision = action.record.context.stopCheckpointRevision;
       if (
         stopCheckpointRevision !== undefined &&
@@ -945,7 +1069,11 @@ export function createMcpControlPlane(options = {}) {
         if (input.action !== null) {
           throw new Error("A pending stop accepts only an action-free resume.");
         }
-        if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+        if (
+          await inspectDetached(run.runId, action.record.context, () =>
+            runStore.runLeaseOwnerIsLive(run.runId),
+          )
+        ) {
           throw new RunStoreError(
             `Run ${run.runId} already has a live execution owner.`,
             { code: "ERR_RUN_LEASED" },
@@ -968,7 +1096,11 @@ export function createMcpControlPlane(options = {}) {
               "An interrupted run accepts only an action-free resume.",
             );
           }
-          if (await runStore.runLeaseOwnerIsLive(run.runId)) {
+          if (
+            await inspectDetached(run.runId, action.record.context, () =>
+              runStore.runLeaseOwnerIsLive(run.runId),
+            )
+          ) {
             throw new RunStoreError(
               `Run ${run.runId} already has a live execution owner.`,
               { code: "ERR_RUN_LEASED" },
@@ -1000,7 +1132,22 @@ export function createMcpControlPlane(options = {}) {
   }
 
   async function reconcileDetachedStop(receipt) {
-    const run = (await runner.status(receipt.runId)).run;
+    const identity = {
+      key: `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
+      tool: "run_resume",
+    };
+    const existing = await runStore.readAction({
+      ...identity,
+      arguments: (context) => ({
+        runId: receipt.runId,
+        stopCheckpointRevision: context.stopCheckpointRevision,
+      }),
+    });
+    const run = (
+      await inspectDetached(receipt.runId, existing?.context, () =>
+        runner.status(receipt.runId),
+      )
+    ).run;
     const stop = run.stopRequest;
     if (
       stop === null ||
@@ -1008,10 +1155,14 @@ export function createMcpControlPlane(options = {}) {
       stop.requestId !== receipt.requestId
     )
       return;
-    if (await runStore.runLeaseOwnerIsLive(receipt.runId)) return;
-    const identity = {
-      key: `stop-recovery-${createHash("sha256").update(receipt.requestId).digest("hex")}`,
-      tool: "run_resume",
+    if (
+      await inspectDetached(receipt.runId, existing?.context, () =>
+        runStore.runLeaseOwnerIsLive(receipt.runId),
+      )
+    )
+      return;
+    const intent = await runStore.beginAction({
+      ...identity,
       arguments: {
         runId: receipt.runId,
         stopCheckpointRevision: stop.checkpoint.revision,
@@ -1021,8 +1172,7 @@ export function createMcpControlPlane(options = {}) {
         expectedRevision: run.revision,
         stopCheckpointRevision: stop.checkpoint.revision,
       },
-    };
-    const intent = await runStore.beginAction(identity);
+    });
     try {
       if (intent.record.status === "completed") return;
       await launchIfNeeded(
@@ -1221,7 +1371,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runStart(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runStart(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_status",
@@ -1241,7 +1393,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runPause(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runPause(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_cancel",
@@ -1252,7 +1406,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runCancel(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runCancel(input, { signal: context.mcpReq.signal }),
+      ),
   );
   server.registerTool(
     "run_activity",
@@ -1308,8 +1464,8 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(
-        await control.runRespond(input, { signal: context.mcpReq.signal }),
+      detachedResult(() =>
+        control.runRespond(input, { signal: context.mcpReq.signal }),
       ),
   );
   server.registerTool(
@@ -1321,7 +1477,9 @@ export function createMcpServer(options = {}) {
       annotations: mutating,
     },
     async (input, context) =>
-      result(await control.runResume(input, { signal: context.mcpReq.signal })),
+      detachedResult(() =>
+        control.runResume(input, { signal: context.mcpReq.signal }),
+      ),
   );
   if (issueReportingEnabled) {
     server.registerTool(

@@ -140,6 +140,17 @@ The fast state `recovery-failures.test.js` suite owns the public state boundary
 for pre-lease and pre-readiness diagnostic publication, interrupted publication,
 exact dispatch/child correlation, immutable retries, absent historical causes and
 redaction. It does not establish detached launcher or CLI/MCP projection behavior.
+The fast MCP control-plane suite owns exit/signal forwarding and structured,
+redacted tool-error projection, including unavailable causes and failed journal
+inspection after child exit or control-plane replacement. Retry regressions cover
+both resume lease checks and stop status/ownership checks before dispatch,
+retaining correlated causes without receipt completion or a replacement child.
+The fast state safety suite covers exact context-derived action reads without
+mutation or weakened tool/argument matching. The CLI suite
+owns safe explanations at execution-lease and state-recovery failures. The slow
+MCP control-plane suite composes the real launcher, IPC admission, CLI diagnostic
+publication, restart with unknown exit facts, ownership exclusion and identical-key
+receipt recovery. It retains the existing STDIO protocol-cleanliness coverage.
 
 Claude restricted-host launcher changes use deterministic public-adapter tests
 with controlled bubblewrap processes for the commit gate. That coverage must

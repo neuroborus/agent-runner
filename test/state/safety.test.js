@@ -278,6 +278,43 @@ test("guidance action intents preserve metadata and replay bounded receipts", as
   );
 });
 
+test("action inspection resolves exact arguments from immutable saved context", async (t) => {
+  const { store, created } = await createFixture(t);
+  const runId = created.state.runId;
+  const identity = {
+    key: "stop-recovery-context",
+    tool: "run_resume",
+    arguments: { runId, stopCheckpointRevision: 1 },
+    context: { runId, stopCheckpointRevision: 1 },
+  };
+  const inspection = {
+    ...identity,
+    arguments(context) {
+      assert.equal(Object.isFrozen(context), true);
+      return { runId, stopCheckpointRevision: context.stopCheckpointRevision };
+    },
+  };
+  assert.equal(await store.readAction(inspection), null);
+  const action = await store.beginAction(identity);
+  try {
+    assert.deepEqual(await store.readAction(inspection), action.record);
+    await assert.rejects(
+      store.readAction({
+        ...inspection,
+        arguments: () => ({ runId, stopCheckpointRevision: 2 }),
+      }),
+      { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+    );
+    await assert.rejects(
+      store.readAction({ ...inspection, tool: "run_respond" }),
+      { code: "ERR_MCP_IDEMPOTENCY_CONFLICT" },
+    );
+    assert.equal((await store.readAction(identity)).status, "intent");
+  } finally {
+    await action.release();
+  }
+});
+
 test("writes only confined run artifacts with atomic replacement", async (t) => {
   const { created, store, workspace } = await createFixture(t);
   const artifactPath = await store.writeRunArtifact(

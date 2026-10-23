@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-24
+
+- **Detached errors separate observed exits from correlated recovery causes.**
+  CLI resume publishes fixed, state-owned diagnostics at the runner's actual
+  failed recovery stage, including pre-lease failures. The launcher retains
+  both exit arguments; MCP returns safe structured dispatch facts and a separate
+  nullable cause. Restart cannot invent missing exit facts or historical causes.
+  Native streams and arbitrary error text stay excluded. Diagnostic failure
+  changes no readiness, receipt, retry or ownership authority, and identical-key
+  retries do not promise to repair the blocker.
+
 ## 2026-10-23
 
 - **Detached recovery causes have separate state-owned evidence.** Immutable

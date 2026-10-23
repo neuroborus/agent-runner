@@ -343,9 +343,15 @@ state and action receipts, even before a child acquires its execution lease.
 Only exact correlation with the recorded dispatch and child identity makes that
 cause available. Missing historical causes remain unavailable; an exit or signal
 does not establish why recovery failed. Stored causes contain only recognized
-Runner codes, finite stages and fixed explanations. This state-level support
-does not yet change CLI/MCP dispatch reporting or establish that a retry repairs
-the blocker.
+Runner codes, finite stages and fixed explanations. The CLI publishes failed
+detached resume causes and uses those same safe explanations. MCP tool errors
+carry separate `dispatchFailure` exit-code/signal facts and nullable
+`recoveryCause` stage/code/explanation fields in text JSON and structured content.
+After restart, a retained correlated cause can remain available while both exit
+facts are unknown. Missing, invalid or mismatched causes are explicitly
+unavailable. Errors keep the intent incomplete, and live or unverifiable
+ownership still excludes another child. Retry the identical key and arguments
+after addressing the reported blocker; a retry itself is no repair guarantee.
 
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and

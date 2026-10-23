@@ -1264,6 +1264,15 @@ An exit before settlement leaves recovery retryable and preserves the applicable
 stop. Losing a concurrent ownership race keeps the durable idempotency intent
 available for an exact retry, including when the competing lease is released
 before the next MCP observation because child exit is acknowledged directly.
+Detached tool errors expose `dispatchFailure: { exitCode, signal }` and a
+separate nullable `recoveryCause: { stage, code, explanation }`, together with
+the dispatch error `code` and safe `message` in text JSON and structured content.
+CLI resume uses the same fixed recovery explanations. Causes require exact
+dispatch/child correlation; absent causes are explicitly unavailable. Unknown
+exit facts stay null, including after restart, and a signal or exit does not
+explain why recovery failed. These diagnostics contain no native output or
+transcripts. Failed requests remain incomplete: address the reported blocker
+and retry the identical key and arguments; retry alone promises no repair.
 The MCP process freezes a detached-compatibility token over the root
 detached protocol version, run-envelope tuple, and every sorted loaded pipeline
 ID/state version. The child

@@ -12,12 +12,14 @@ import {
 import { getPipeline, listPipelines } from "./pipeline-registry.js";
 import { createRunner, parseSourceSession } from "./runner/index.js";
 import {
+  createRunStore,
   projectAvailabilityRetry,
   projectInactivityRecovery,
   projectLaunchRecovery,
   projectOperatorStop,
   projectObservations,
   RUNTIME_VERSION_SKEW_EXIT_CODE,
+  recoveryFailureDetails,
 } from "./state/index.js";
 
 const COMMAND_OPTIONS = Object.freeze({
@@ -471,6 +473,7 @@ export async function main(
     stderr = process.stderr,
     runner,
     createCommandRunner = createRunner,
+    createCommandRunStore = createRunStore,
     guidance,
     createCommandGuidance = createGuidanceService,
     startMcp = serveMcp,
@@ -624,6 +627,9 @@ export async function main(
     }
   }
 
+  let recoveryDispatch;
+  let recoveryStarted = false;
+  let recoveryStage = "runtime-compatibility";
   try {
     if (command === "guidance") {
       const service = guidance ?? createCommandGuidance({ env: environment });
@@ -692,11 +698,12 @@ export async function main(
     }
     if (command === "resume") {
       const dispatch = await awaitDetachedDispatch(environment);
+      recoveryDispatch = dispatch;
       const expectedRevision =
         values["expected-revision"] === undefined
           ? undefined
           : parseExpectedRevision(values["expected-revision"]);
-      const result = await commandRunner.resume({
+      const resumeInput = {
         runId: values.run,
         action: resumeAction(values),
         ...(dispatch === undefined ? {} : { dispatch }),
@@ -712,6 +719,12 @@ export async function main(
               expectedRuntimeCompatibility:
                 environment[DETACHED_RUNTIME_COMPATIBILITY_ENV],
             }),
+      };
+      recoveryStarted = true;
+      const result = await commandRunner.resume(resumeInput, {
+        onRecoveryStage(stage) {
+          recoveryStage = stage;
+        },
       });
       stdout.write(runSummary(result));
       return workflowExitCode(result.run);
@@ -749,7 +762,38 @@ export async function main(
     stdout.write(runSummary(result));
     return 0;
   } catch (error) {
-    stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+    const details = recoveryStarted
+      ? recoveryFailureDetails(recoveryStage, error)
+      : null;
+    if (
+      details !== null &&
+      (details.code !== null ||
+        recoveryDispatch !== undefined ||
+        environment[DETACHED_RUNTIME_COMPATIBILITY_ENV] !== undefined)
+    ) {
+      if (recoveryDispatch !== undefined) {
+        try {
+          await createCommandRunStore().recordRecoveryFailure(
+            values.run,
+            recoveryDispatch,
+            { stage: recoveryStage, error },
+          );
+        } catch {
+          // Diagnostics cannot replace the original failure or grant recovery.
+        }
+      }
+      stderr.write(
+        `Recovery failed at ${details.stage} (${details.code ?? "unavailable"}): ${details.explanation}\n`,
+      );
+      if (error?.code === "ERR_RUNTIME_VERSION_SKEW")
+        stderr.write(
+          "Restart the Agent Runner MCP server and retry the same idempotency key.\n",
+        );
+    } else {
+      stderr.write(
+        `${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
     return error?.code === "ERR_RUNTIME_VERSION_SKEW"
       ? RUNTIME_VERSION_SKEW_EXIT_CODE
       : 1;

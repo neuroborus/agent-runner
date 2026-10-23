@@ -714,6 +714,7 @@ export function createRunner(options = {}) {
     action = null,
     verifyProviderPolicies = false,
     dispatch = null,
+    onRecoveryStage = () => {},
   ) {
     if (run.pipelineState.workflowState === "CANCELED") return run;
     if (
@@ -770,6 +771,7 @@ export function createRunner(options = {}) {
     const baseRuntime = runtimeFor(pipeline, lease, run, selected);
     if (stopPending(run))
       return reconcileOperatorStop({
+        onRecoveryStage,
         inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run,
@@ -782,6 +784,7 @@ export function createRunner(options = {}) {
       });
     // Recover an orphaned supervised process before examining or replaying work.
     if (run.executionProcess !== null) {
+      onRecoveryStage("process-recovery");
       const owner = await runStore.inspectExecutionProcess(run.runId);
       await terminateOwnedProcess(
         owner.pid,
@@ -796,7 +799,9 @@ export function createRunner(options = {}) {
         configurationFailure = cause;
       }
     }
+    onRecoveryStage("resource-recovery");
     run = await cleanupExecutionResource(run, lease);
+    onRecoveryStage("state-recovery");
     if (run.observations?.attempts.at(-1).status === "active")
       run = await runStore.recoverRun(lease);
     if (
@@ -806,6 +811,7 @@ export function createRunner(options = {}) {
     ) {
       return pauseForProjectConfiguration(run, lease);
     }
+    onRecoveryStage("checkpoint-continuation");
     if (verifyProviderPolicies && run.pause?.reason !== "environment_blocked") {
       const migrationRequired = Object.entries(run.providerPolicies).some(
         ([role, receipt]) => role !== "arbiter" && receipt === null,
@@ -868,6 +874,7 @@ export function createRunner(options = {}) {
     const latest = await runStore.loadRun(run.runId);
     if (stopPending(latest)) {
       return reconcileOperatorStop({
+        onRecoveryStage,
         inspectSessionProcesses,
         cleanupResources: (current) => cleanupExecutionResource(current, lease),
         run: latest,
@@ -1378,7 +1385,8 @@ export function createRunner(options = {}) {
     return result(await runStore.loadRun(created.state.runId));
   }
 
-  async function resumeLeased(normalized, lease) {
+  async function resumeLeased(normalized, lease, onRecoveryStage) {
+    onRecoveryStage("state-recovery");
     if (normalized.stopCheckpointRevision !== null) {
       const current = await runStore.loadRun(normalized.runId);
       if (
@@ -1414,16 +1422,40 @@ export function createRunner(options = {}) {
       return recovered;
     }
     if (stopPending(recovered)) {
+      onRecoveryStage("worktree-lease");
       return withStopReconciliationLease(
         recovered,
-        (current) => execute(pipeline, current, lease, null, true),
+        (current) => {
+          onRecoveryStage("checkpoint-continuation");
+          return execute(
+            pipeline,
+            current,
+            lease,
+            null,
+            true,
+            null,
+            onRecoveryStage,
+          );
+        },
         lease,
       );
     }
     if (configurationChanged) {
+      onRecoveryStage("worktree-lease");
       return withWorktreeLease(
         recovered,
-        () => execute(pipeline, recovered, lease, null, true),
+        () => {
+          onRecoveryStage("checkpoint-continuation");
+          return execute(
+            pipeline,
+            recovered,
+            lease,
+            null,
+            true,
+            null,
+            onRecoveryStage,
+          );
+        },
         lease,
       );
     }
@@ -1466,9 +1498,11 @@ export function createRunner(options = {}) {
         });
       }
     }
+    onRecoveryStage("worktree-lease");
     return withWorktreeLease(
       recovered,
       async () => {
+        onRecoveryStage("checkpoint-continuation");
         if (operatorRestore !== null) {
           recovered = await runStore.transitionRun(
             lease,
@@ -1495,19 +1529,22 @@ export function createRunner(options = {}) {
           normalized.action,
           true,
           normalized.dispatch,
+          onRecoveryStage,
         );
       },
       lease,
     );
   }
 
-  async function resume(input) {
+  async function resume(input, { onRecoveryStage = () => {} } = {}) {
+    onRecoveryStage("runtime-compatibility");
     const normalized = normalizeResumeInput(input);
     const retained = retainedRunLeases.get(normalized.runId);
     // Taking the private handle synchronously excludes concurrent resumes; all
     // other callers still encounter the live durable lease and are rejected.
     retainedRunLeases.delete(normalized.runId);
     let lease;
+    onRecoveryStage("execution-lease");
     try {
       lease = await runStore.acquireRunLease(normalized.runId, retained);
     } catch (cause) {
@@ -1519,6 +1556,7 @@ export function createRunner(options = {}) {
     }
     let executionFailure = null;
     try {
+      onRecoveryStage("state-recovery");
       const inspected = await runStore.loadRun(normalized.runId);
       if (
         normalized.expectedRevision !== null &&
@@ -1530,7 +1568,7 @@ export function createRunner(options = {}) {
       }
       if (normalized.dispatch !== null)
         await runStore.recordRecoveryDispatch(lease, normalized.dispatch);
-      await resumeLeased(normalized, lease);
+      await resumeLeased(normalized, lease, onRecoveryStage);
       if (
         normalized.dispatch !== null &&
         normalized.stopCheckpointRevision === null &&
