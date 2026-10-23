@@ -7,6 +7,13 @@ remain in the owning documentation.
 
 ## 2026-10-23
 
+- **The common guide keeps editing headroom through owning-contract links.**
+  Consolidated validation, mode, provider-isolation, and recovery procedures
+  replace duplicated detail with links to existing product/specification owners.
+  Required safety wording, anchors, mode tables, historical measurements and
+  accounting caveats remain; the 64 KiB loader limit and public guidance-read
+  contract are unchanged.
+
 - **Original test invocations can produce bounded locations without native output.**
   A scratch-request producer and structured reporter share one exclusively
   claimed report across the existing fast batches or selected slow files.
