@@ -10777,13 +10777,19 @@ and digest failures; bounded refusal facts contain only the predicate, byte coun
 offset and operation errno. The original combined guard's errno 0 identifies none
 of those predicates. The digest covers the returned bytes after zeroing documented
 usage counters and remains in read evidence and original journals. Route hashes are excluded
-only from experiment authority/root equality across setup, effective case reads,
-counter windows and restoration/recovery. The fixed experiment recipe rejects
+only from experiment authority/root equality across input acquisition, setup,
+effective case reads, counter windows and restoration/recovery. Input acquisition
+normalizes both complete experiment PF observations and uses the existing PF
+window assertion: authority and kernel/rule generations must remain equal even
+when route hashes differ. Both original observations and route hashes remain in
+the existing custody evidence, and the first complete observation remains the
+acquired baseline. The fixed experiment recipe rejects
 scoped routes, dynamic addresses and routing pools; PF rule identities/semantics,
 generations, interfaces, states, actual network controls and independent retirement
 still gate acceptance. Reviewed route inventory pins and exact comparisons remain
 strict. Ordinary cleanup restores owned PF effects without requiring unrelated
-host routing to rewind.
+host routing to rewind. Portable acquisition fixtures exercise route-only drift
+and material PF/generation refusals; they establish no matching Darwin acceptance.
 
 Matching macOS must still prove the original access/file/Git recipes,
 positive/negative controls, counters and independent policy restoration.

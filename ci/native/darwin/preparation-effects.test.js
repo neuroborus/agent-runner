@@ -11250,8 +11250,20 @@ async function experimentPfAcquisitionFixture() {
 }
 
 test("Darwin acquired PF requests cold-load through their original custody journal", async (t) => {
-  const f = await experimentPfAcquisitionFixture();
+  const f = await experimentPfAcquisitionFixture(),
+    observations = [],
+    originals = [];
   t.after(() => f.acquisition.custody.reader.close());
+  f.native.operationFrames((name, args, { pfRead }) => {
+    if (name !== "pf-read") return;
+    const value = {
+      ...stockPfFixture(pfRead()),
+      routesSha256: digest(`acquisition-route-${observations.length + 1}`),
+    };
+    observations.push(value);
+    originals.push(structuredClone(value));
+    return value;
+  });
   const acquired = await f.acquire(),
     closed = await f.state.releaseBootstrap(),
     records = f.custodyRecords(),
@@ -11261,6 +11273,16 @@ test("Darwin acquired PF requests cold-load through their original custody journ
   assert.equal(closed.emergencyCleanup, false);
   assert.equal(f.native.processes.size, 0);
   assert.equal(acquired.inputs.pf.active, false);
+  assert.deepEqual(observations, originals);
+  assert.deepEqual(acquired.inputs.pf, originals[0]);
+  assert.deepEqual(
+    observations.map((read) => read.routesSha256),
+    [digest("acquisition-route-1"), digest("acquisition-route-2")],
+  );
+  assert.deepEqual(originals[1], {
+    ...originals[0],
+    routesSha256: digest("acquisition-route-2"),
+  });
   assert.deepEqual(
     reads.map(([, record]) => record.request),
     [
@@ -11300,6 +11322,70 @@ test("Darwin acquired PF requests cold-load through their original custody journ
     f.native.events.filter((event) => event === "pf-read").length,
     2,
   );
+});
+
+test("Darwin experiment input acquisition refuses material PF authority and generation drift", async (t) => {
+  for (const [label, change] of [
+    [
+      "foreign rule",
+      (read) => {
+        read.graph.find(
+          (node) => node.anchor === "com.apple/stock",
+        ).rules[0].raw = "b1";
+      },
+    ],
+    [
+      "interface",
+      (read) => {
+        read.interfaces[0].skip = true;
+        read.interfaces[0].flags = 0x100;
+      },
+    ],
+    [
+      "states",
+      (read) => {
+        read.states = 1;
+      },
+    ],
+    [
+      "active policy",
+      (read) => {
+        read.active = true;
+      },
+    ],
+    [
+      "kernel generation",
+      (read) => {
+        read.kernel.anchors[0].sets[0].ticket++;
+      },
+    ],
+    [
+      "rule generation",
+      (read) => {
+        read.graph[0].rules[0].ticket = "99";
+      },
+    ],
+  ]) {
+    const f = await installedCaseAcquisitionFixture("thin"),
+      before = await f.reader.pf(),
+      after = structuredClone(before);
+    t.after(() => f.custody.reader.close());
+    change(after);
+    let reads = 0;
+    await assert.rejects(
+      acquireDarwinExperimentInputs(
+        f.built.prepared,
+        f.built.build,
+        { ...f.reader, pf: async () => (++reads === 1 ? before : after) },
+        f.persist,
+        f.options,
+      ),
+      /Unverified/u,
+      label,
+    );
+    assert.equal(reads, 2, label);
+    assert.deepEqual(before, await f.reader.pf(), label);
+  }
 });
 
 test("Darwin build recovery rejects malformed PF requests and unrelated phases", async (t) => {

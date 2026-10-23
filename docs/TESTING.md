@@ -300,7 +300,14 @@ oversized dumps, truncated headers, invalid message extents/version/type and has
 failure. Only documented usage counters are normalized; other observed bytes
 remain in the digest. Ordinary route variation is accepted across preparation,
 case snapshots, counter windows, normal restoration and interrupted recovery;
-reviewed route pins remain strict. The native journal retains its bounded original
+reviewed route pins remain strict. The existing installed-input acquisition
+fixtures additionally accept route-only drift through the actual two-read
+acquisition boundary and refuse foreign-rule, interface, state, active-policy,
+kernel-generation and rule-ticket changes. Both complete original observations
+and route hashes remain retained through the existing custody evidence; the
+original independent retirement, cold-loading and interrupted recovery assertions
+remain required. These portable fixtures run no native tools and establish no
+Darwin native acceptance. The native journal retains its bounded original
 route hash without requiring host routing to rewind. These tests infer no failed
 predicate from the original combined guard's errno 0 and run no native API.
 Return-response regressions reject altered ICMP codes and unsupported queue

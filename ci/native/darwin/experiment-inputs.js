@@ -9,6 +9,7 @@ import { diagnosticCommand, nativeException } from "../diagnostics.js";
 import { observationDigest, requireObservation } from "../index.js";
 import { digest } from "./protocol.js";
 import { darwinExperimentWorker } from "./experiment-build-inputs.js";
+import { assertDarwinPfWindow } from "./pf-kernel.js";
 import { normalizeDarwinPfRead } from "./pf-preparation.js";
 import { protectedInstalledInput } from "./private-files.js";
 
@@ -571,11 +572,9 @@ export async function acquireDarwinExperimentInputs(
     volumePath,
   ]);
   await reader.readBuildInput(volumePath, digest(volumeBytes));
-  const pf = normalizeDarwinPfRead(await reader.pf(), "experiment");
-  requireObservation(
-    observationDigest(pf) ===
-      observationDigest(normalizeDarwinPfRead(await reader.pf(), "experiment")),
-  );
+  const pf = normalizeDarwinPfRead(await reader.pf(), "experiment"),
+    pfAfter = normalizeDarwinPfRead(await reader.pf(), "experiment");
+  assertDarwinPfWindow(pf, pfAfter);
   return {
     inputs: {
       git,
