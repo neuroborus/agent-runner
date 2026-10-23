@@ -355,6 +355,15 @@ successful exec closes the diagnostic copy. Injected descriptor mappings keep
 ordinary setup stderr separate until exec and preserve provider/payload stdio.
 Diagnostic-write and identity/status inspection failures cannot replace the first
 cause or consume protocol data; stderr diagnostics survive transport failure.
+The same launch-body fixture injects fatal termination before reply replacement,
+census destruction and cleanup return. The preceding bounded entered-stage record
+retains the original child and launcher birth, plus any earlier cleanup-entry cause;
+the parent's separate matching SIGKILL status survives secondary parked EOF.
+Failed/empty/mismatched status inspection, unrelated-child refusal, failed stage
+writes and unavailable signal protection remain advisory. Existing errno, signal
+disposition, framing, acquired-reference cleanup and protected/provider checks stay
+required. Richer kernel reasons remain explicitly unavailable without a verified
+selected-SDK declaration; these portable tests establish no native success.
 The same actual launch-body fixture retains protected/provider null-only refusals
 and executes the complete experiment Mach body through census and cleanup.
 It covers absent/dead/service values, kernel/type/query refusals, missing/changed

@@ -3099,6 +3099,7 @@ test("Darwin launcher numeric credentials retain primary-only groups and every s
       audit: { ai_asid: 17 },
       observed: {},
       RLIMIT_NPROC: 7,
+      launch_stage() {},
       setgroups(count, groups) {
         assert.equal(count, 0);
         assert.equal(groups, null);
@@ -3741,6 +3742,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         "const $1={fd:$2,events:POLLIN,revents:0};",
       )
       .replace("struct identity parked;", "const parked={token:{val:[]}};")
+      .replace("char bytes[512];", "const bytes={};")
+      .replace(
+        "struct sigaction ignored = {0}, previous;",
+        "const ignored={sa_mask:{}},previous={};",
+      )
+      .replaceAll(/&(ignored(?:\.sa_mask)?|previous)\b/gu, "$1")
       .replace(
         "char bytes[8192]; unsigned length = 0;",
         "const bytes=[]; let length=0;",
@@ -3764,6 +3771,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replaceAll("goto mach_cleanup;", "break mach_body;")
       .replace("mach_cleanup:", "}")
       .replace("const char *operation", "let operation")
+      .replace("const char *prior", "let prior")
       .replace(
         /const char \*cleanup_operations\[\] = \{([^;]+)\};/u,
         "const cleanup_operations=[$1];",
@@ -3784,13 +3792,16 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           `{get value(){return ${name}},set value(value){${name}=value}}`,
       )
       .replaceAll(
-        /\((?:unsigned long long|unsigned|int|long|id_t|void|void \*|mach_vm_address_t|mach_vm_size_t)\)/gu,
+        /\((?:unsigned long long|unsigned|int|long|id_t|size_t|void|void \*|mach_vm_address_t|mach_vm_size_t)\)/gu,
         "",
       )
       .replaceAll("sizeof(identity)", "48")
       .replaceAll("sizeof(status)", "64")
       .replaceAll("sizeof(parked)", "96")
-      .replaceAll("sizeof(bytes)", "8192")
+      .replaceAll(
+        "sizeof(bytes)",
+        text.includes("char bytes[512];") ? "512" : "8192",
+      )
       .replaceAll("sizeof(*names)", "4")
       .replaceAll("sizeof(*types)", "4")
       .replaceAll("&argv[12]", "argv.slice(12)")
@@ -3810,6 +3821,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [reader, "case_launch_failure", "operation,result,error,revents,used"],
       [reader, "case_launch_check", "operation,result"],
       [reader, "case_line", "fd,encoded"],
+      [launcher, "launch_stage", "stage,operation,result,error"],
       [launcher, "launch_failure", "operation,result,error,revents,used,child"],
       [launcher, "command", "fd,milliseconds"],
       [launcher, "child_stdio", "workspace,provider"],
@@ -3843,6 +3855,15 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ONCE = 0x40000,
     DEAD = 0x100000;
   const machCases = [
+    ...["reply", "destroy", "cleanup"].map((fatal) => [
+      { fatal, ...(fatal === "cleanup" ? { destroy: 24 } : {}) },
+      "parked-read",
+      0,
+      0,
+    ]),
+    [{ fatal: "cleanup", notify: 300, release: "notify" }, "parked-read", 0, 0],
+    [{ stageWriteFailure: true }],
+    [{ stageSignalFailure: true }],
     ...[0, 0xffffffff, 200, 201].map((access) => [{ access }]),
     [{ type: DEAD }],
     [{ access: 7 }], // A new getter copy can reuse the released host's local name.
@@ -3958,6 +3979,16 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ["parked-eof", "parked_identity(8,42)", "parked-read", 0, 0, 16, 0],
     ["parked-timeout", "parked_identity(8,42)", "parked-poll", 0, 0, 0, -1],
     ["parked-read-error", "parked_identity(8,42)", "parked-read", -1, 5, 1, -1],
+    ...["error", "mismatch", "empty"].map((status) => [
+      `parked-status-${status}`,
+      "parked_identity(8,42)",
+      "parked-read",
+      0,
+      0,
+      1,
+      0,
+    ]),
+    ["parked-unrelated", "parked_identity(8,43)", "parked-read", 0, 0, 1, 0],
     [
       "parked-identity",
       "parked_identity(8,42)",
@@ -4057,8 +4088,20 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       ]),
       actions = [],
       machCalls = [],
+      stageAttempts = [],
       cloexec = new Set(),
-      replaced = {};
+      replaced = {},
+      killed = {};
+    const record = (format, values) => {
+      let index = 0;
+      const line = format.replace(/%(?:\.48s|llu|ld|d|s)/gu, (specifier) => {
+        const raw = values[index++],
+          value = String(specifier.endsWith("s") ? raw : Number(raw));
+        return specifier === "%.48s" ? value.slice(0, 48) : value;
+      });
+      assert.ok(Buffer.byteLength(line) < 1024);
+      return { format, values, line };
+    };
     let reads = 0,
       reporter = 41,
       pipeIgnored = false;
@@ -4132,6 +4175,33 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         pipeIgnored = true;
         return 0;
       },
+      sigemptyset(mask) {
+        mask.value = "empty";
+        api.errno = 98;
+        return 0;
+      },
+      sigaction(number, action, previous) {
+        assert.equal(number, 13);
+        api.errno = 98;
+        if (machCase?.stageSignalFailure) return -1;
+        if (previous) {
+          assert.equal(action.sa_handler, 1);
+          assert.equal(action.sa_mask.value, "empty");
+          Object.assign(previous, {
+            sa_handler: 0,
+            sa_flags: 64,
+            sa_mask: "original-mask",
+          });
+          pipeIgnored = true;
+        } else {
+          assert.deepEqual(
+            [action.sa_handler, action.sa_flags, action.sa_mask],
+            [0, 64, "original-mask"],
+          );
+          pipeIgnored = false;
+        }
+        return 0;
+      },
       PROC_PIDTBSDINFO: 3,
       POSIX_SPAWN_CLOEXEC_DEFAULT: 16,
       control: [10, 11],
@@ -4156,11 +4226,26 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(kind, 1);
         assert.ok([41, 42].includes(pid));
         assert.equal(flags, 7);
-        Object.assign(out, { si_pid: pid, si_code: 1, si_status: 126 });
+        Object.assign(out, {
+          si_pid:
+            fault === "parked-status-mismatch"
+              ? 43
+              : fault === "parked-status-empty"
+                ? 0
+                : pid,
+          si_code: 1,
+          si_status: 126,
+        });
         api.errno = 71;
-        return fault === "read-error" ? -1 : 0;
+        return fault === "read-error" || fault === "parked-status-error"
+          ? -1
+          : 0;
       },
       getpid: () => reporter,
+      stage_preserved(error) {
+        assert.equal(api.errno, error);
+        assert.equal(pipeIgnored, false);
+      },
       inspect(pid) {
         assert.equal(pid, 41);
         return {
@@ -4180,13 +4265,25 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
             pipeIgnored,
             "Cleanup reporting must survive a closed diagnostic pipe",
           );
-        let index = 0;
-        const line = format.replace(/%(?:llu|ld|d|s)/gu, () =>
-          String(values[index++]),
-        );
-        assert.ok(Buffer.byteLength(line) < 1024);
-        diagnostics.push({ format, values, line });
+        diagnostics.push(record(format, values));
         return -1;
+      },
+      snprintf(bytes, maximum, format, ...values) {
+        assert.equal(maximum, 512);
+        bytes.record = record(format, values);
+        api.errno = 97;
+        return Buffer.byteLength(bytes.record.line);
+      },
+      write(fd, bytes, size) {
+        assert.equal(fd, 2);
+        assert.equal(descriptors.get(fd), "diagnostic");
+        assert.ok(pipeIgnored);
+        assert.equal(size, Buffer.byteLength(bytes.record.line));
+        stageAttempts.push(bytes.record);
+        api.errno = 99;
+        if (machCase?.stageWriteFailure) return -1;
+        diagnostics.push(bytes.record);
+        return size;
       },
       fflush() {
         api.errno = 99;
@@ -4244,7 +4341,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       read(fd, out, size) {
         reads++;
         api.errno = 5;
-        if (fault.endsWith("eof")) return 0;
+        if (
+          fault.endsWith("eof") ||
+          fault.startsWith("parked-status-") ||
+          fault === "parked-unrelated"
+        )
+          return 0;
         if (fault.endsWith("read-error")) return -1;
         if (fd === 8) {
           assert.equal(size, 96);
@@ -4385,6 +4487,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         mach_port_deallocate(self, name) {
           assert.equal(self, 1);
+          if (
+            machCase.fatal === "cleanup" &&
+            stageAttempts.at(-1)?.values[0] === "mach-cleanup"
+          )
+            throw killed;
           machCalls.push(["release", name]);
           const resource = resourceCopies.find(
             (copy) =>
@@ -4427,6 +4534,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         mig_dealloc_reply_port(name) {
           assert.equal(name, 8);
+          if (machCase.fatal === "reply") throw killed;
         },
         mach_port_names(self, names, n, types, nt) {
           assert.equal(self, 1);
@@ -4461,12 +4569,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         mach_port_destroy(self, name) {
           assert.deepEqual([self, name], [1, 9]);
+          if (machCase.fatal === "destroy") throw killed;
           destroyed.push(name);
           api.errno = 13;
           return machCase.destroy ?? 0;
         },
         mach_vm_deallocate(self, buffer, size) {
           assert.equal(self, 1);
+          if (machCase.fatal === "cleanup") throw killed;
           const allocation = arrays.find((entry) => entry.buffer === buffer);
           assert.ok(allocation);
           assert.equal(size, allocation.size);
@@ -4476,12 +4586,71 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     }
     const program = new Script(
         functions +
-          `\nfunction setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,setup,capture});`,
+          `\nconst entered=launch_stage;
+          launch_stage=(...args)=>{const saved=errno;entered(...args);stage_preserved(saved);};
+          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
     if (machCase) {
       reporter = 42;
+      if (machCase.fatal) {
+        assert.throws(
+          native.experiment_mach_rights,
+          (cause) => cause === killed,
+        );
+        const last = stageAttempts.at(-1);
+        assert.deepEqual(last.values.slice(0, 5), [
+          {
+            reply: "mach-reply-replace",
+            destroy: "mach-census-destroy",
+            cleanup: "mach-cleanup",
+          }[machCase.fatal],
+          41,
+          42,
+          100,
+          200,
+        ]);
+        assert.deepEqual(
+          last.values.slice(5),
+          machCase.release === "notify"
+            ? ["mach_port_deallocate/notify", 15, 41]
+            : machCase.fatal === "cleanup"
+              ? ["mach_port_destroy", 24, 13]
+              : ["none", 0, 0],
+        );
+        assert.ok(last.line.includes("entered=1"));
+        assert.ok(
+          !diagnostics.some(({ line }) =>
+            line.startsWith("native-darwin-launch:"),
+          ),
+        );
+        reporter = 41;
+        api.read = (fd) => {
+          assert.equal(fd, 8);
+          return 0;
+        };
+        api.waitid = (kind, pid, status, flags) => {
+          assert.deepEqual([kind, pid, flags], [1, 42, 7]);
+          Object.assign(status, { si_pid: 42, si_code: 2, si_status: 9 });
+          api.errno = 71;
+          return 0;
+        };
+        assert.throws(() => native.parked_identity(8, 42), /launch refused/u);
+        const termination = diagnostics.at(-1);
+        assert.match(
+          termination.line,
+          /available=1 pid=42 code=2 status=9 kernel-reason=unavailable/u,
+        );
+        assert.ok(
+          diagnostics
+            .at(-2)
+            .line.includes("operation=parked-read result=0 errno=0"),
+        );
+        assert.equal(api.errno, 0);
+        assert.deepEqual(output, []);
+        continue;
+      }
       if (operation)
         assert.throws(native.experiment_mach_rights, /launch refused/u);
       else native.experiment_mach_rights();
@@ -4565,6 +4734,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           [3, 4, 5],
         );
       }
+      assert.ok(stageAttempts.length <= 10);
+      assert.ok(
+        Buffer.byteLength(diagnostics.map(({ line }) => line).join("")) < 8192,
+      );
+      if (machCase.stageWriteFailure || machCase.stageSignalFailure)
+        assert.deepEqual(diagnostics, []);
       if (
         api.MACH_PORT_VALID(machCase.access ?? 200) &&
         accessType === SEND &&
@@ -4595,7 +4770,29 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         () => new Script(invocation).runInNewContext({ ...api, ...native }),
         /launch refused/u,
       );
-      assert.equal(diagnostics.length, 1, fault);
+      const termination = diagnostics.filter(({ line }) =>
+        line.startsWith("native-darwin-launch-termination:"),
+      );
+      assert.equal(diagnostics.length, 1 + termination.length, fault);
+      if (
+        (fault.startsWith("parked-") && fault !== "parked-unrelated") ||
+        fault.startsWith("command-")
+      ) {
+        assert.equal(termination.length, 1);
+        assert.match(termination[0].line, /kernel-reason=unavailable/u);
+        if (fault.startsWith("parked-status-")) {
+          assert.match(
+            termination[0].line,
+            /available=0 pid=0 code=0 status=0/u,
+          );
+          assert.match(
+            termination[0].line,
+            new RegExp(
+              `wait-result=${fault === "parked-status-error" ? -1 : 0}`,
+            ),
+          );
+        }
+      } else assert.deepEqual(termination, []);
       assert.deepEqual(diagnostics[0].values.slice(0, 5), [
         operation,
         result,

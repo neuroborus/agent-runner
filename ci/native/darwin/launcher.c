@@ -46,9 +46,31 @@ static void descriptors(void) {
   need(mask == 31);
   need(!fcntl(3, F_SETFD, FD_CLOEXEC) && !fcntl(4, F_SETFD, FD_CLOEXEC));
 }
+static pid_t launcher_pid, launch_child;
+static struct identity launcher_identity;
+#ifdef NATIVE_CI_EXPERIMENT
+/* Fixed child-only call sites, never one record per censused Mach right. */
+static void launch_stage(const char *stage, const char *operation, long result, int error) {
+  int saved = errno;
+  char bytes[512];
+  int size = snprintf(bytes, sizeof(bytes), "native-darwin-launch-stage: entered=1 stage=%.48s launcher=%d reporter=%d start-seconds=%llu start-micros=%llu prior-operation=%s prior-result=%ld prior-errno=%d\n",
+    stage, launcher_pid, getpid(), (unsigned long long)launcher_identity.bsd.pbi_start_tvsec,
+    (unsigned long long)launcher_identity.bsd.pbi_start_tvusec, operation ? operation : "none", operation ? result : 0, operation ? error : 0);
+  if (size > 0 && size < (int)sizeof(bytes)) {
+    struct sigaction ignored = {0}, previous; ignored.sa_handler = SIG_IGN;
+    if (!sigemptyset(&ignored.sa_mask) && !sigaction(SIGPIPE, &ignored, &previous)) {
+      (void)write(2, bytes, (size_t)size); (void)sigaction(SIGPIPE, &previous, NULL);
+    }
+  }
+  errno = saved;
+}
+#else
+#define launch_stage(stage, operation, result, error) ((void)0)
+#endif
 static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child);
 static void mach_rights(void) {
 #ifdef NATIVE_CI_EXPERIMENT
+  launch_stage("mach-acquire", NULL, 0, 0);
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL, reply = MACH_PORT_NULL;
   mach_port_t held_host = MACH_PORT_NULL, held_access = MACH_PORT_NULL;
@@ -62,6 +84,7 @@ static void mach_rights(void) {
   const char *operation; long result = 0; int error = 0;
   operation = "mach_thread_self"; result = thread; error = errno;
   if (!MACH_PORT_VALID(thread) || thread == self) goto mach_cleanup;
+  launch_stage("mach-host", NULL, 0, 0);
   operation = "task_get_special_port/TASK_HOST_PORT";
   result = task_get_special_port(self, TASK_HOST_PORT, &host); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
@@ -73,6 +96,7 @@ static void mach_rights(void) {
   held_host = MACH_PORT_NULL;
   operation = "mach_port_deallocate/host"; result = mach_port_deallocate(self, host); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
+  launch_stage("mach-access", NULL, 0, 0);
   operation = "task_get_special_port/TASK_ACCESS_PORT";
   result = task_get_special_port(self, TASK_ACCESS_PORT, &access); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
@@ -101,6 +125,7 @@ static void mach_rights(void) {
       if (result != KERN_SUCCESS) goto mach_cleanup;
     }
   }
+  launch_stage("mach-special-ports", NULL, 0, 0);
   operation = "task_set_special_port/TASK_BOOTSTRAP_PORT"; result = task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "task_set_special_port/TASK_DEBUG_CONTROL_PORT"; result = task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL); error = errno;
@@ -127,6 +152,7 @@ static void mach_rights(void) {
         }
       }
     }
+    launch_stage("resource-notify-cleanup", operation, result, error);
     if (notify_get == KERN_SUCCESS && MACH_PORT_VALID(notify)) {
       notify_release = mach_port_deallocate(self, notify); notify_error = errno;
     }
@@ -135,6 +161,7 @@ static void mach_rights(void) {
     }
     if (operation || notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) goto mach_cleanup;
   }
+  launch_stage("mach-exceptions", NULL, 0, 0);
   operation = "mach_ports_register"; result = mach_ports_register(self, NULL, 0); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "task_set_exception_ports"; result = task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
@@ -142,6 +169,7 @@ static void mach_rights(void) {
   operation = "thread_set_exception_ports"; result = thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
   bootstrap_port = MACH_PORT_NULL;
+  launch_stage("mach-reply-replace", NULL, 0, 0);
   mig_dealloc_reply_port(mig_get_reply_port()); reply = mig_get_reply_port();
   operation = "mig_get_reply_port/identity"; result = reply; error = errno;
   if (!MACH_PORT_VALID(reply) || reply == self || reply == thread || (service && reply == access)) goto mach_cleanup;
@@ -149,10 +177,12 @@ static void mach_rights(void) {
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "mach_port_type/reply/type"; result = reply_type;
   if (reply_type != MACH_PORT_TYPE_RECEIVE) goto mach_cleanup;
+  launch_stage("mach-census", NULL, 0, 0);
   operation = "mach_port_names"; result = mach_port_names(self, &names, &n, &types, &nt); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "mach_port_names/count"; result = n;
   if (n != nt || n > 4096 || !names || !types) goto mach_cleanup;
+  launch_stage("mach-census-destroy", NULL, 0, 0);
   for (mach_msg_type_number_t i = 0; i < n; i++) {
     if (service && names[i] == access) {
       operation = "TASK_ACCESS_PORT/census"; result = types[i];
@@ -167,6 +197,10 @@ static void mach_rights(void) {
   if (service && !seen) goto mach_cleanup;
   operation = NULL;
 mach_cleanup: {
+    const char *prior = operation; long prior_result = result; int prior_error = error;
+    if (!prior && notify_release != KERN_SUCCESS) { prior = "mach_port_deallocate/notify"; prior_result = notify_release; prior_error = notify_error; }
+    if (!prior && readback_release != KERN_SUCCESS) { prior = "mach_port_deallocate/readback"; prior_result = readback_release; prior_error = readback_error; }
+    launch_stage("mach-cleanup", prior, prior_result, prior_error);
     /* One entry per acquisition, even when local names alias. Never retry a
      * failed release or let it replace the original refusal. */
     const char *cleanup_operations[] = {"mach_port_deallocate/notify", "mach_port_deallocate/readback", "mach_vm_deallocate/names", "mach_vm_deallocate/types", "mach_port_deallocate/access", "mach_port_deallocate/host", "mach_port_deallocate/thread"};
@@ -224,8 +258,6 @@ mach_cleanup: {
        mach_port_deallocate(self, thread) == KERN_SUCCESS);
 #endif
 }
-static pid_t launcher_pid, launch_child;
-static struct identity launcher_identity;
 /* Status inspection is diagnostic only: never reap or replace the original
  * child, consume a protocol frame, or use it as retirement/admission proof. */
 static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child) {
@@ -238,15 +270,21 @@ static void launch_failure(const char *operation, long result, int error, int re
   } else if (launcher_identity.token.val[5] == (unsigned)launcher_pid) {
     identity = launcher_identity.bsd; identityResult = (int)sizeof(identity);
   }
+  bool original = getpid() == launcher_pid && child > 0 && child == launch_child;
   errno = 0;
-  int waitResult = child > 0 ? waitid(P_PID, (id_t)child, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
+  int waitResult = original ? waitid(P_PID, (id_t)child, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
   int waitError = errno;
-  if (waitResult || status.si_pid != child) memset(&status, 0, sizeof(status));
+  bool matched = original && !waitResult && status.si_pid == child;
+  if (!matched) memset(&status, 0, sizeof(status));
   fprintf(stderr, "native-darwin-launch: owner=launcher operation=%s result=%ld errno=%d revents=%d read=%ld launcher=%d reporter=%d child=%d identity-result=%d identity-errno=%d start-seconds=%llu start-micros=%llu wait-result=%d wait-errno=%d status-pid=%d status-code=%d status=%d\n",
     operation, result, error, revents, used, launcher_pid, getpid(), child, identityResult, identityError,
     identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvsec : 0,
     identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvusec : 0,
     waitResult, waitError, status.si_pid, status.si_code, status.si_status);
+  /* sys/wait.h already owns this compiled contract. No SDK-verified richer
+   * exit-reason interface is established; never guess a proc_pidinfo flavor. */
+  if (original) fprintf(stderr, "native-darwin-launch-termination: launcher=%d child=%d wait-result=%d wait-errno=%d available=%d pid=%d code=%d status=%d kernel-reason=unavailable\n",
+    launcher_pid, child, waitResult, waitError, (int)matched, status.si_pid, status.si_code, status.si_status);
   fflush(stderr); errno = error; need(false);
 }
 static char command(int fd, int milliseconds) {
@@ -539,25 +577,34 @@ int main(int argc, char **argv) {
   pid_t child = fork(); if (child < 0) launch_failure("fork", child, errno, 0, -1, 0);
   if (child > 0) launch_child = child;
   if (!child) {
+    launch_stage("child-entry", NULL, 0, 0);
     close(ready[0]); close(release[1]);
+    launch_stage("child-stdio", NULL, 0, 0);
     child_stdio(workspace, provider);
+    launch_stage("child-descriptors", NULL, 0, 0);
     need(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4); descriptors();
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
     struct rlimit limit = { .rlim_cur = 32, .rlim_max = 32 }, observed;
+    launch_stage("limits-audit-session", NULL, 0, 0);
     need(!setrlimit(RLIMIT_NPROC, &limit));
     need(!setaudit_addr(&audit, sizeof(audit)) && !getaudit_addr(&audit, sizeof(audit)) &&
          audit.ai_asid != AU_DEFAUDITSID && audit.ai_asid != AU_ASSIGN_ASID);
+    launch_stage("credentials", NULL, 0, 0);
     need(!setgroups(0, NULL));
     need(!setgid(gid));
     need(!setuid(uid));
     gid_t only; need(getgroups(1, &only) == 1 && only == gid);
     need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
+    launch_stage("sandbox", NULL, 0, 0);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
-    mach_rights(); descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
+    mach_rights();
+    launch_stage("domain-controls", NULL, 0, 0);
+    descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
          identity.bsd.pbi_gid == gid && identity.bsd.pbi_rgid == gid && identity.bsd.pbi_svgid == gid &&
          identity.token.val[0] == uid && identity.token.val[6] == (unsigned)audit.ai_asid);
+    launch_stage("parked-publication", NULL, 0, 0);
     need(write(3, &identity, sizeof(identity)) == sizeof(identity) && !close(3));
     need(command(4, 30000) == 'R' && !close(4));
     struct stat named; need(!lstat(argv[6], &named) && named.st_dev == image.st_dev &&

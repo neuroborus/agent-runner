@@ -8807,6 +8807,24 @@ saved errno, poll revents and read count/EOF. Bounded secondary observations ret
 the original launcher's PID/birth and available child status with non-reaping
 `waitid(WNOWAIT)`; reporting failures cannot replace the primary cause. Diagnostics
 consume no protocol frames and establish neither admission nor retirement.
+Ordinary experiment children add at most 18 fixed `entered=1` stage attempts,
+each smaller than 512 bytes, through the original stderr. They identify the saved
+launcher birth and child reporter before setup, reply-port replacement, census
+destruction and cleanup; cleanup entry retains any preceding refusal separately.
+Each bounded write restores errno and the prior SIGPIPE disposition. Stages mark
+entry only, including when the following syscall never returns. Protected/provider
+setup keeps its existing path. A separate parent termination record reports only
+the original unreaped child's matching PID, code and status, or explicit
+unavailability after failed, empty or mismatched `waitid` inspection.
+The selected Xcode 16.4 SDK already compiles this launcher's `<sys/wait.h>`
+`waitid`/`siginfo_t` contract with `WEXITED | WNOHANG | WNOWAIT`; stage reporting
+uses the public `<signal.h>` `sigaction`/`sigemptyset` contracts already used by
+the [Darwin command owner](darwin/feasibility-command.h), restoring the complete
+saved signal action. A richer callable
+kernel-reason contract has not been verified against that selected SDK, so the
+record states `kernel-reason=unavailable`; no selector, ABI or compatibility loader
+is inferred from XNU source headers. Original errno/status, strict Mach sanitation
+and independent cleanup remain authoritative; these records provide attribution only.
 The initial Mach guard preserves host acquisition, kobject query, ordinary host
 type 3 and host-copy deallocation before the access getter. The experiment's
 owned getter/thread copies enter cleanup before fallible queries, with one release
