@@ -10915,11 +10915,14 @@ This supported equivalent read operation does not identify the kernel condition
 behind the observed Windows system `ReOpenFile` error5.
 
 Ownership baselines use this complete read after comparing the held `FileIdInfo`
-with its saved identity. The case handle producer adds `READ_CONTROL` and
-`FILE_READ_ATTRIBUTES`, and generated private entries request
-`ACCESS_SYSTEM_SECURITY`. The reader runs as System with its existing
-`SE_DEBUG`/`SE_SECURITY` authority enabled before opening entries; successful
-impersonated operations revert before returning to dispatch. `GetSecurityInfo`
+with its saved identity. The shared handle producer adds `READ_CONTROL` and
+`FILE_READ_ATTRIBUTES`; private case-directory acquisition explicitly requests
+`ACCESS_SYSTEM_SECURITY` as well. Its previous `FILE_LIST_DIRECTORY` request
+omitted the original SACL-query grant, independently of the still-unexplained
+native fallback refusal. Other open masks and payload grants are unchanged.
+The reader runs as System with its existing `SE_DEBUG`/`SE_SECURITY` authority
+enabled before opening entries; successful impersonated operations revert
+before returning to dispatch. `GetSecurityInfo`
 requires `READ_CONTROL` for owner/group/DACL reads and `ACCESS_SYSTEM_SECURITY`
 for the SACL, with security privilege enabled for that access request. Existing
 denied-query fallback remains responsible for insufficient grants. Baseline

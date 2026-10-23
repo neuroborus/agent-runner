@@ -2404,9 +2404,9 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
   await assert.rejects(f.channel.completion);
 });
 
-test("held baseline guards read complete originals and retain strict fallback and independent cleanup refusals", async () => {
-  const [source, effective] = await Promise.all(
-    ["custody-reader.c", "effective-reader.h"].map((name) =>
+test("held baseline guards acquire complete original grants and retain strict fallback and independent cleanup refusals", async () => {
+  const [source, effective, header] = await Promise.all(
+    ["custody-reader.c", "effective-reader.h", "custody.h"].map((name) =>
       readFile(new URL(name, import.meta.url), "utf8"),
     ),
   );
@@ -2415,6 +2415,62 @@ test("held baseline guards read complete originals and retain strict fallback an
       `static (?:void|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
+  const opening = (name) =>
+    new RegExp(
+      `static (?:HANDLE|struct held_file) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(header)[1];
+  const acquisition = (priorGrant) => {
+    const translate = (text) =>
+      text
+        .replace(
+          /#ifdef NATIVE_CI_EXPERIMENT\n[\s\S]*?#else\n([\s\S]*?)#endif/gu,
+          "$1",
+        )
+        .replace(
+          "struct held_file value = {0};",
+          'const value = {parents:[],count:0,path:{text:""},volumeName:{},filesystem:{},id:{}};',
+        )
+        .replace("FILE_ATTRIBUTE_TAG_INFO tag;", "const tag = {};")
+        .replace("BY_HANDLE_FILE_INFORMATION info;", "const info = {};")
+        .replace("FILE_ID_INFO volumeId;", "const volumeId = {};")
+        .replace("char hash[65];", "const hash = {};")
+        .replace(/wchar_t (\w+)\[\d+\];/gu, 'const $1 = {text:""};')
+        .replace(/wchar_t \*(leaf|slash)/gu, "let $1")
+        .replace(
+          /\*(leaf|slash) = 0/gu,
+          "$1.buffer.text = $1.buffer.text.slice(0,$1.index)",
+        )
+        .replaceAll(
+          /\b(?:DWORD|HANDLE|PSECURITY_DESCRIPTOR|SECURITY_ATTRIBUTES) /gu,
+          "let ",
+        )
+        .replace(/sizeof\((?:value.id|volumeId)\)/gu, "24")
+        .replaceAll("sizeof(tag)", "8")
+        .replace(/&(value.id|volumeId|info|tag|sa|entries\[index\])/gu, "$1")
+        .replace(/&(?:serial|maximum|flags)/gu, "{}")
+        .replaceAll("canonical + 4", "canonical.text.slice(4)")
+        .replaceAll('L"', '"')
+        .replaceAll("private", "isPrivate");
+    const inline = (name) =>
+      new RegExp(
+        `static (?:HANDLE|struct held_file) ${name}\\([^\\n]*?\\) \\{ ([^\\n]+) \\}`,
+        "u",
+      ).exec(header)[1];
+    // Replay the former request only for insufficient-grant cases. All other
+    // acquisition, identity and complete-security-read decisions stay native.
+    const creating = body("case_directory_create");
+    return new Script(`
+      function open_file_shared(name,directory,access,mutable) {${translate(opening("open_file_shared"))}}
+      function open_file(name,directory,access) {${translate(inline("open_file"))}}
+      function hold_shared(name,directory,isPrivate,access,mutable) {${translate(opening("hold_shared"))}}
+      function hold(name,directory,isPrivate,access) {${translate(inline("hold"))}}
+      function case_directory_create(index,parent,report) {${translate(priorGrant ? creating.replace(" | ACCESS_SYSTEM_SECURITY", "") : creating)}}
+      case_directory_create;
+    `);
+  };
+  const acquisitions = [acquisition(false), acquisition(true)],
+    text = (value) => (typeof value === "string" ? value : value.text);
   const native = body("ownership_baseline_read")
     .replaceAll("->", ".")
     .replace(
@@ -2489,7 +2545,8 @@ test("held baseline guards read complete originals and retain strict fallback an
       record = {},
       frames = [],
       diagnostics = [],
-      opens = new Set([7]),
+      opens = new Set([3]),
+      grants = new Map(),
       descriptors = new Set(),
       isFallback = fault?.startsWith("fallback") ?? false;
     let lastError = 91,
@@ -2498,7 +2555,11 @@ test("held baseline guards read complete originals and retain strict fallback an
       error: 0,
       operation: null,
       apiFailure: false,
-      entries: [{}, { file: { handle: 7, id: "original" } }],
+      entries: [
+        { path: "C:\\fixture", file: { handle: 3 } },
+        { path: "C:\\fixture\\case", kind: "directory", file: {} },
+      ],
+      count: 2,
       reader_baseline: record,
       refused: {},
       TRUE: true,
@@ -2525,11 +2586,19 @@ test("held baseline guards read complete originals and retain strict fallback an
       READ_CONTROL: 1,
       FILE_READ_ATTRIBUTES: 2,
       ACCESS_SYSTEM_SECURITY: 4,
+      FILE_LIST_DIRECTORY: 256,
       FILE_SHARE_READ: 8,
       FILE_SHARE_WRITE: 16,
       FILE_SHARE_DELETE: 32,
       FILE_FLAG_OPEN_REPARSE_POINT: 64,
       FILE_FLAG_BACKUP_SEMANTICS: 128,
+      OPEN_EXISTING: 3,
+      FILE_ATTRIBUTE_DIRECTORY: 16,
+      FILE_ATTRIBUTE_REPARSE_POINT: 1024,
+      FILE_NAME_NORMALIZED: 0,
+      VOLUME_NAME_DOS: 0,
+      HANDLE_FLAG_INHERIT: 1,
+      FileAttributeTagInfo: 9,
       FileIdInfo: 18,
       SE_FILE_OBJECT: 1,
       ERROR_SUCCESS: 0,
@@ -2541,6 +2610,86 @@ test("held baseline guards read complete originals and retain strict fallback an
       DACL_SECURITY_INFORMATION: 4,
       SACL_SECURITY_INFORMATION: 8,
       LABEL_SECURITY_INFORMATION: 16,
+      wcslen: (value) => text(value).length,
+      wcscmp: (left, right) => text(left).localeCompare(text(right)),
+      strcmp: (left, right) => left.localeCompare(right),
+      wcsncmp: (left, right, size) =>
+        text(left).slice(0, size).localeCompare(text(right)),
+      wcscpy_s(out, maximum, value) {
+        out.text = text(value);
+        assert.ok(out.text.length < maximum);
+      },
+      wcsrchr(buffer, separator) {
+        const index = buffer.text.lastIndexOf(separator);
+        return index < 0 ? null : { buffer, index };
+      },
+      descriptor(value) {
+        assert.equal(value, "O:SYG:SYD:P(A;;GA;;;SY)");
+        descriptors.add("directory-sd");
+        return "directory-sd";
+      },
+      attributes: (sd, inherit) => {
+        assert.equal(sd, "directory-sd");
+        assert.equal(inherit, false);
+        return { sd };
+      },
+      CreateDirectoryW(name, sa) {
+        assert.equal(name, "C:\\fixture\\case");
+        assert.equal(sa.sd, "directory-sd");
+        return true;
+      },
+      inspect(entry) {
+        assert.equal(entry.file.handle, 7);
+      },
+      CreateFileW(name, access, sharing, sa, disposition, flags, template) {
+        const path = text(name),
+          handle = path === "C:\\fixture\\case" ? 7 : path === "C:\\" ? 11 : 12;
+        assert.ok(!opens.has(handle));
+        assert.deepEqual(
+          [sharing, sa, disposition, flags, template],
+          [24, null, 3, 192, null],
+        );
+        assert.equal(
+          access,
+          api.READ_CONTROL |
+            api.FILE_READ_ATTRIBUTES |
+            (handle === 7
+              ? api.FILE_LIST_DIRECTORY |
+                (isFallback ? 0 : api.ACCESS_SYSTEM_SECURITY)
+              : 0),
+        );
+        grants.set(handle, { path, access });
+        opens.add(handle);
+        return handle;
+      },
+      GetFinalPathNameByHandleW(handle, out, bound, flags) {
+        assert.deepEqual([bound, flags], [4100, 0]);
+        out.text = "\\\\?\\" + grants.get(handle).path;
+        return out.text.length;
+      },
+      SetHandleInformation: (handle, flag, value) => {
+        assert.ok(opens.has(handle));
+        assert.deepEqual([flag, value], [1, 0]);
+        return true;
+      },
+      GetFileInformationByHandle(handle, out) {
+        assert.equal(handle, 7);
+        out.nNumberOfLinks = 1;
+        return true;
+      },
+      GetVolumePathNameW(name, out) {
+        assert.equal(text(name), "C:\\fixture\\case");
+        out.text = "C:\\";
+        return true;
+      },
+      GetVolumeNameForVolumeMountPointW: () => true,
+      GetVolumeInformationByHandleW: (handle) => {
+        assert.equal(handle, 11);
+        return true;
+      },
+      security(handle, kind, isPrivate) {
+        assert.deepEqual([handle, kind, isPrivate], [7, 1, true]);
+      },
       ReOpenFile(handle, access, sharing, flags) {
         assert.deepEqual([handle, access, sharing, flags], [7, 7, 56, 192]);
         calls.push("reopen");
@@ -2548,11 +2697,23 @@ test("held baseline guards read complete originals and retain strict fallback an
         // The direct baseline must work even if a fresh open would be denied.
         if (!isFallback || fault === "fallback-reopen") return -1;
         opens.add(9);
+        grants.set(9, { access });
         return 9;
       },
       GetFileInformationByHandleEx(handle, kind, out, size) {
         assert.ok(opens.has(handle));
+        if (kind === 9) {
+          assert.equal(size, 8);
+          out.FileAttributes = 16;
+          return true;
+        }
         assert.deepEqual([kind, size], [18, 24]);
+        out.VolumeSerialNumber = 1;
+        // Acquisition saves the original identity before fault injection.
+        if (!api.entries[1].file.handle) {
+          out.value = "original";
+          return true;
+        }
         calls.push(handle === 7 ? "original-id" : "reopened-id");
         lastError = 50;
         out.value =
@@ -2574,7 +2735,8 @@ test("held baseline guards read complete originals and retain strict fallback an
         assert.equal(out.value, null);
         calls.push(handle === 7 ? "original-security" : "reopened-security");
         lastError = 99;
-        if (handle === 7 && isFallback) return 5;
+        const queryAccess = api.READ_CONTROL | api.ACCESS_SYSTEM_SECURITY;
+        if ((grants.get(handle).access & queryAccess) !== queryAccess) return 5;
         descriptors.add("full-sd");
         out.value = "full-sd";
         return fault === "direct-error-free" ? 87 : 0;
@@ -2590,7 +2752,7 @@ test("held baseline guards read complete originals and retain strict fallback an
         assert.ok(descriptors.has(sd));
         calls.push("free");
         lastError = 8;
-        if (fault === "direct-error-free") return sd;
+        if (sd === "full-sd" && fault === "direct-error-free") return sd;
         descriptors.delete(sd);
         return null;
       },
@@ -2614,7 +2776,7 @@ test("held baseline guards read complete originals and retain strict fallback an
         lastError = error;
       },
       need(ok) {
-        assert.equal(ok, false);
+        if (ok) return;
         record.error = lastError;
         guardError = lastError;
         sending.runInNewContext(api)("custody-reader.c", 1, lastError);
@@ -2630,11 +2792,21 @@ test("held baseline guards read complete originals and retain strict fallback an
         throw new Error("guard refused");
       },
     };
+    acquisitions[isFallback ? 1 : 0].runInNewContext(api)(1, 0, true);
+    const held = api.entries[1].file,
+      retained = [...opens];
+    assert.equal(held.handle, 7);
+    assert.equal(held.id.value, "original");
+    assert.equal(held.volume, 11);
+    assert.deepEqual(Array.from(held.parents), [12]);
+    assert.equal(held.count, 1);
+    assert.equal(descriptors.size, 0);
+    calls.length = 0;
     const hash = {};
     if (!operation) {
       program.runInNewContext(api)(0, hash);
       assert.equal(hash.value, "unchanged");
-      assert.deepEqual([...opens], [7]);
+      assert.deepEqual([...opens], retained);
       assert.equal(descriptors.size, 0);
       assert.deepEqual(diagnostics, []);
     } else {
@@ -2675,6 +2847,8 @@ test("held baseline guards read complete originals and retain strict fallback an
       }
     }
     assert.ok(opens.has(7));
+    assert.ok(retained.every((handle) => opens.has(handle)));
+    assert.equal(api.entries[1].file, held);
     assert.equal(
       calls.filter((call) => call === "reopen").length,
       isFallback ? 1 : 0,

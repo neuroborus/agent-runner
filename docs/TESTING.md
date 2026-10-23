@@ -2454,9 +2454,12 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
-Its existing Windows actual-body baseline fixture executes the original baseline
-and `file_sd`/security-failure bodies together. It requires saved held identity
-before a complete owner/group/DACL/label/SACL read, direct success when reopening
+Its existing Windows actual-body baseline fixture executes private-directory
+creation through the shared held-handle acquisition, then the original baseline
+and `file_sd`/security-failure bodies together. It reproduces the former missing
+SACL-query grant and requires the corrected acquisition to retain it without
+broadening volume or ancestor opens. It requires saved held identity before a
+complete owner/group/DACL/label/SACL read, direct success when reopening
 would fail, strict denied-query fallback and refusal of unexpected query errors
 or substituted fallback identities. Borrowed originals remain open; primary
 errors survive independent temporary-handle and descriptor cleanup failures

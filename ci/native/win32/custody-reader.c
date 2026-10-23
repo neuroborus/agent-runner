@@ -1168,7 +1168,7 @@ static void case_directory_create(unsigned index, unsigned parent,BOOL report) {
   wchar_t name[4096]; wcscpy_s(name, 4096, entries[index].path); wchar_t *leaf = wcsrchr(name, '\\'); need(leaf); *leaf = 0;
   need(!wcscmp(name, entries[parent].path)); PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, FALSE);
   need(CreateDirectoryW(entries[index].path, &sa)); LocalFree(sd);
-  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY); if(report) inspect(&entries[index]);
+  entries[index].file = hold(entries[index].path, TRUE, TRUE, FILE_LIST_DIRECTORY | ACCESS_SYSTEM_SECURITY); if(report) inspect(&entries[index]);
 }
 static void case_directory(unsigned index,unsigned parent) { case_directory_create(index,parent,TRUE); }
 static void case_copy(unsigned target, unsigned source, unsigned parent) {
