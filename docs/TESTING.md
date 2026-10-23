@@ -348,6 +348,13 @@ binds the shared custody and fixed feasibility-domain header bytes, including th
 helper's required libbsm linkage without enabling model-free command observation.
 Native predicates reject changed zombie credentials and sealed-file metadata;
 channel failures retain bounded native diagnostics independently of payload errors.
+Actual custody/launcher bodies inject setup-status and pre-park child failures,
+EOF/HUP, timeout, poll/read errors and substituted parked identities while
+retaining successful control/data framing. Failed exec retains its saved cause;
+successful exec closes the diagnostic copy. Injected descriptor mappings keep
+ordinary setup stderr separate until exec and preserve provider/payload stdio.
+Diagnostic-write and identity/status inspection failures cannot replace the first
+cause or consume protocol data; stderr diagnostics survive transport failure.
 Retirement rejects changed admission bindings, trailing custody output and a close
 reply without bounded custodian exit.
 These deterministic fast regressions run no macOS helper; the existing native

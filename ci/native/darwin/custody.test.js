@@ -3719,13 +3719,396 @@ test("Darwin custody completion rejects an unconsumed trailing frame", async () 
     child.stdout.destroy();
   }
 });
+test("Darwin ownership launch bodies preserve setup and handshake causes on the original diagnostic channel", async () => {
+  const [reader, launcher] = await Promise.all(
+    ["custody-reader.c", "launcher.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const body = (source, name) =>
+    new RegExp(
+      `static (?:void|char|struct identity) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const translate = (text) =>
+    text
+      .replace(
+        "struct proc_bsdinfo identity = {0}; siginfo_t status = {0};",
+        "let identity={};const status={si_pid:0,si_code:0,si_status:0};",
+      )
+      .replace(
+        /struct pollfd (\w+) = \{\s*\.fd = ([^,]+), \.events = POLLIN\s*\};/gu,
+        "const $1={fd:$2,events:POLLIN,revents:0};",
+      )
+      .replace("struct identity parked;", "const parked={token:{val:[]}};")
+      .replace(
+        "char bytes[8192]; unsigned length = 0;",
+        "const bytes=[]; let length=0;",
+      )
+      .replace("char out[16385];", "const out={};")
+      .replace(/char (byte|value);/gu, "const $1={value:0};")
+      .replace(
+        "bytes[length++] = byte; if (byte == '\\n') break;",
+        "bytes[length++]=byte.value; if(byte.value===10)break;",
+      )
+      .replace("if (!byte ||", "if (!byte.value ||")
+      .replace(
+        'case_launch_failure("case-frame", byte,',
+        'case_launch_failure("case-frame", byte.value,',
+      )
+      .replace("return value;", "return value.value;")
+      .replaceAll(
+        /&(identity|status|waitReady|wait|p|parked|byte|value)\b/gu,
+        "$1",
+      )
+      .replaceAll(
+        /\((?:unsigned long long|unsigned|int|long|id_t|void|void \*)\)/gu,
+        "",
+      )
+      .replaceAll("sizeof(identity)", "48")
+      .replaceAll("sizeof(status)", "64")
+      .replaceAll("sizeof(parked)", "96")
+      .replaceAll("sizeof(bytes)", "8192")
+      .replaceAll("&argv[12]", "argv.slice(12)")
+      .replaceAll(/\b(?:int|long|ssize_t) /gu, "let ");
+  const functions = [
+    [reader, "case_launch_failure", "operation,result,error,revents,used"],
+    [reader, "case_launch_check", "operation,result"],
+    [reader, "case_line", "fd,encoded"],
+    [launcher, "launch_failure", "operation,result,error,revents,used,child"],
+    [launcher, "command", "fd,milliseconds"],
+    [launcher, "child_stdio", "workspace,provider"],
+    [launcher, "child_exec", "argv,environment,provider"],
+    [launcher, "parked_identity", "fd,child"],
+  ]
+    .map(
+      ([source, name, args]) =>
+        `function ${name}(${args}) {${translate(body(source, name))}}`,
+    )
+    .join("\n");
+  const start = reader.indexOf("static void case_start("),
+    setup = reader
+      .slice(
+        reader.indexOf("  posix_spawn_file_actions_t actions;", start),
+        reader.indexOf("  char uid[24]", start),
+      )
+      .replace(
+        "posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;",
+        "const actions={},attributes={};",
+      )
+      .replaceAll(/&(actions|attributes)/gu, "$1"),
+    capture = /  launcher_identity = inspect\(getpid\(\)\);/u.exec(
+      launcher,
+    )?.[0];
+  assert.ok(start > 0 && setup && capture);
+  for (const [fault, invocation, operation, result, error, revents, used] of [
+    ["setup", "setup()", "spawn-stderr", 22, 0, 0, -1],
+    ["child", "child_stdio(10,false)", "fchdir", -1, 13, 0, -1],
+    ["exec", "child_exec(argv,env,false)", "execve", -1, 2, 0, -1],
+    ["timeout", "case_line(7,false)", "case-poll", 0, 0, 0, -1],
+    ["poll-error", "case_line(7,false)", "case-poll", -1, 4, 0, -1],
+    ["hup", "case_line(7,false)", "case-poll-events", 1, 0, 16, -1],
+    ["eof", "case_line(7,false)", "case-read", 0, 0, 1, 0],
+    ["read-error", "case_line(7,false)", "case-read", -1, 5, 1, -1],
+    ["parked-eof", "parked_identity(8,42)", "parked-read", 0, 0, 16, 0],
+    ["parked-timeout", "parked_identity(8,42)", "parked-poll", 0, 0, 0, -1],
+    ["parked-read-error", "parked_identity(8,42)", "parked-read", -1, 5, 1, -1],
+    [
+      "parked-identity",
+      "parked_identity(8,42)",
+      "parked-identity",
+      43,
+      0,
+      1,
+      96,
+    ],
+    ["command-eof", "command(0,30000)", "command-read", 0, 0, 1, 0],
+    ["command-timeout", "command(0,30000)", "command-poll", 0, 0, 0, -1],
+    ["success"],
+  ]) {
+    const diagnostics = [],
+      output = [],
+      frames = [...Buffer.from('{"payload":null}\n')],
+      descriptors = new Map([
+        [0, "control"],
+        [1, "control"],
+        [2, "diagnostic"],
+        [3, "data"],
+        [4, "provider-input"],
+        [5, "provider-error"],
+      ]),
+      actions = [],
+      cloexec = new Set(),
+      replaced = {};
+    let reads = 0,
+      reporter = 41;
+    const api = {
+      errno: 91,
+      case_pid: fault === "setup" ? 0 : 41,
+      case_mode: true,
+      launcher_pid: 41,
+      launcher_identity: {},
+      launch_child: 42,
+      argv: Array.from({ length: 14 }, (_, i) => String(i)),
+      env: ["LANG=en_US.UTF-8"],
+      F_DUPFD_CLOEXEC: 64,
+      POLLIN: 1,
+      P_PID: 1,
+      WEXITED: 1,
+      WNOHANG: 2,
+      WNOWAIT: 4,
+      SIGPIPE: 13,
+      SIG_IGN: 1,
+      signal(number, disposition) {
+        assert.deepEqual([number, disposition], [13, 1]);
+        return 0;
+      },
+      PROC_PIDTBSDINFO: 3,
+      POSIX_SPAWN_CLOEXEC_DEFAULT: 16,
+      control: [10, 11],
+      output: [12, 13],
+      data: [14, 15],
+      stderr: {},
+      stdout: {},
+      provider: false,
+      proc_pidinfo(pid, kind, arg, out, size) {
+        assert.equal(
+          reporter,
+          41,
+          "Child diagnostics must use the saved launcher birth",
+        );
+        assert.deepEqual([pid, kind, arg, size], [41, 3, 1, 48]);
+        api.errno = 70;
+        out.pbi_start_tvsec = 100;
+        out.pbi_start_tvusec = 200;
+        return fault === "read-error" ? -1 : 48;
+      },
+      waitid(kind, pid, out, flags) {
+        assert.equal(kind, 1);
+        assert.ok([41, 42].includes(pid));
+        assert.equal(flags, 7);
+        Object.assign(out, { si_pid: pid, si_code: 1, si_status: 126 });
+        api.errno = 71;
+        return fault === "read-error" ? -1 : 0;
+      },
+      getpid: () => reporter,
+      inspect(pid) {
+        assert.equal(pid, 41);
+        return {
+          token: { val: [0, 0, 0, 0, 0, 41] },
+          bsd: { pbi_start_tvsec: 100, pbi_start_tvusec: 200 },
+        };
+      },
+      memset(out, value, size) {
+        assert.deepEqual([value, size], [0, 64]);
+        for (const key of Object.keys(out)) out[key] = 0;
+        return out;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, api.stderr);
+        let index = 0;
+        const line = format.replace(/%(?:llu|ld|d|s)/gu, () =>
+          String(values[index++]),
+        );
+        assert.ok(Buffer.byteLength(line) < 1024);
+        diagnostics.push({ format, values, line });
+        return -1;
+      },
+      fflush() {
+        api.errno = 99;
+        return -1;
+      },
+      dprintf(fd, format, ...values) {
+        assert.equal(descriptors.get(fd), "diagnostic");
+        const result = api.fprintf(api.stderr, format, ...values);
+        api.errno = 99;
+        return result;
+      },
+      fcntl(fd, operation, minimum) {
+        assert.deepEqual([fd, operation, minimum], [2, 64, 3]);
+        let copy = minimum;
+        while (descriptors.has(copy)) copy++;
+        descriptors.set(copy, descriptors.get(fd));
+        cloexec.add(copy);
+        return copy;
+      },
+      execve(path, args, environment) {
+        assert.equal(path, api.argv[6]);
+        assert.deepEqual(Array.from(args), api.argv.slice(12));
+        assert.equal(environment, api.env);
+        if (fault === "exec") {
+          api.errno = 2;
+          return -1;
+        }
+        for (const fd of cloexec) descriptors.delete(fd);
+        cloexec.clear();
+        throw replaced;
+      },
+      _exit(code) {
+        assert.equal(code, 126);
+        assert.equal(api.errno, error);
+        throw new Error("launch refused");
+      },
+      need(ok) {
+        if (!ok) {
+          assert.equal(api.errno, error);
+          throw new Error("launch refused");
+        }
+      },
+      poll(wait, count, milliseconds) {
+        assert.equal(count, 1);
+        assert.equal(milliseconds, wait.fd === 8 ? 10000 : 30000);
+        wait.revents =
+          fault.includes("timeout") || fault === "poll-error"
+            ? 0
+            : fault === "hup" || fault === "parked-eof"
+              ? 16
+              : 1;
+        api.errno = 4;
+        return fault.includes("timeout") ? 0 : fault === "poll-error" ? -1 : 1;
+      },
+      read(fd, out, size) {
+        reads++;
+        api.errno = 5;
+        if (fault.endsWith("eof")) return 0;
+        if (fault.endsWith("read-error")) return -1;
+        if (fd === 8) {
+          assert.equal(size, 96);
+          out.token.val[5] = fault === "parked-identity" ? 43 : 42;
+          return 96;
+        }
+        assert.equal(size, 1);
+        out.value = fd === 0 ? 80 : frames.shift();
+        return 1;
+      },
+      close(fd) {
+        assert.equal(fd, 8);
+        return 0;
+      },
+      fputs(bytes) {
+        output.push(Buffer.from(bytes.slice(0, bytes.indexOf(0))).toString());
+      },
+      hex(bytes, length, out) {
+        out.value = Buffer.from(bytes.slice(0, length)).toString("hex");
+      },
+      printf(format, out) {
+        output.push(format.replace("%s", out.value));
+      },
+      fchdir(workspace) {
+        assert.equal(workspace, 10);
+        api.errno = 13;
+        return fault === "child" ? -1 : 0;
+      },
+      dup2(from, to) {
+        descriptors.set(to, descriptors.get(from));
+        return to;
+      },
+      posix_spawn_file_actions_init: () => 0,
+      posix_spawnattr_init: () => 0,
+      posix_spawnattr_setflags: (_attributes, flags) => {
+        assert.equal(flags, 16);
+        return 0;
+      },
+      posix_spawn_file_actions_adddup2(_actions, from, to) {
+        actions.push([from, to]);
+        api.errno = 88;
+        return fault === "setup" && to === 2 ? 22 : 0;
+      },
+    };
+    const program = new Script(
+        functions +
+          `\nfunction setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,setup,capture});`,
+      ),
+      native = program.runInNewContext(api);
+    native.capture();
+    if (fault === "child" || fault === "exec") reporter = 42;
+    if (fault === "exec") {
+      native.child_stdio(10, false);
+      for (const fd of [3, 4, 5]) descriptors.delete(fd);
+    }
+    if (operation) {
+      assert.throws(
+        () => new Script(invocation).runInNewContext({ ...api, ...native }),
+        /launch refused/u,
+      );
+      assert.deepEqual(diagnostics[0].values.slice(0, 5), [
+        operation,
+        result,
+        error,
+        revents,
+        used,
+      ]);
+      assert.ok(
+        diagnostics[0].line.includes(
+          fault === "setup" ? "launcher=0" : "launcher=41",
+        ),
+      );
+      if (fault === "child" || fault === "exec")
+        assert.match(
+          diagnostics[0].line,
+          /start-seconds=100 start-micros=200/u,
+        );
+      if (fault === "read-error")
+        assert.match(diagnostics[0].line, /wait-result=-1 .*status-pid=0/u);
+      assert.deepEqual(output, []);
+      if (
+        [
+          "setup",
+          "child",
+          "exec",
+          "timeout",
+          "poll-error",
+          "hup",
+          "parked-timeout",
+        ].includes(fault)
+      )
+        assert.equal(reads, 0);
+    } else {
+      native.setup();
+      assert.deepEqual(actions, [
+        [10, 0],
+        [13, 1],
+        [2, 2],
+        [15, 3],
+      ]);
+      native.child_stdio(10, false);
+      assert.equal(descriptors.get(2), "diagnostic");
+      native.case_line(7, false);
+      assert.deepEqual(output, ['{"payload":null}']);
+      frames.push(...Buffer.from("fixture\n"));
+      native.case_line(7, true);
+      assert.equal(output[1], '{"hex":"666978747572650a"}');
+      assert.equal(native.command(0, 30000), 80);
+      assert.equal(native.parked_identity(8, 42).token.val[5], 42);
+      for (const fd of [3, 4, 5]) descriptors.delete(fd);
+      assert.throws(
+        () => native.child_exec(api.argv, api.env, false),
+        (cause) => cause === replaced,
+      );
+      assert.equal(cloexec.size, 0);
+      assert.deepEqual([...descriptors.keys()], [0, 1, 2]);
+      assert.deepEqual(
+        [descriptors.get(0), descriptors.get(1), descriptors.get(2)],
+        ["data", "data", "data"],
+      );
+      descriptors.set(3, "data");
+      descriptors.set(4, "provider-input");
+      descriptors.set(5, "provider-error");
+      native.child_stdio(10, true);
+      assert.equal(descriptors.get(2), "provider-error");
+      assert.deepEqual(diagnostics, []);
+    }
+  }
+});
+
 test("Darwin guard locations and errno remain diagnostics through failed custody", async () => {
   const chunks = [],
     guard = Buffer.from(
       "native-darwin-sdk: realpath=1 realpath-errno=0 equal=1 lstat=0 lstat-errno=0 kind=1 owner=1 writable=1\n" +
         "native-darwin-sdk-metadata: uid=0 gid=0 mode=040775 dev=1 inode=42\n" +
         "native-darwin-sdk: malformed untrusted=value\n" +
-        "native-darwin-guard: file=fixture.c line=19 errno=13\n",
+        "native-darwin-guard: file=fixture.c line=19 errno=13\n" +
+        "native-darwin-launch: owner=launcher operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126\n",
     );
   await withNativeDiagnostics(
     async () => {
@@ -3738,10 +4121,17 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
         cancel() {},
       });
       try {
+        const hello = { helper: { pid: 41 }, payload: null };
+        child.stdout.write(JSON.stringify(hello) + "\n");
+        assert.deepEqual(await channel.receive(), hello);
         const pending = assert.rejects(channel.receive()),
           completion = assert.rejects(channel.completion);
         const at = guard.indexOf("file=");
         child.stderr.write(guard.subarray(0, at));
+        child.stdout.emit(
+          "error",
+          new Error("Injected custody transport failure"),
+        );
         child.stderr.write(guard.subarray(at));
         child.emit("close", 126, null);
         await Promise.all([pending, completion]);
@@ -3759,4 +4149,9 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
   assert.ok(output.includes("file=fixture.c line=19 errno=13"));
   assert.ok(output.includes("kind=1 owner=1 writable=1"));
   assert.ok(output.includes("uid=0 gid=0 mode=040775 dev=1 inode=42"));
+  assert.ok(
+    output.includes(
+      "operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126",
+    ),
+  );
 });

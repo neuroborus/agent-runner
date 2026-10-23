@@ -78,10 +78,70 @@ static void mach_rights(void) {
        mach_vm_deallocate(self, (mach_vm_address_t)types, nt * sizeof(*types)) == KERN_SUCCESS &&
        mach_port_deallocate(self, thread) == KERN_SUCCESS);
 }
+static pid_t launcher_pid, launch_child;
+static struct identity launcher_identity;
+/* Status inspection is diagnostic only: never reap or replace the original
+ * child, consume a protocol frame, or use it as retirement/admission proof. */
+static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child) {
+  /* Failure-only disposition: no successful payload inherits this change. */
+  (void)signal(SIGPIPE, SIG_IGN);
+  struct proc_bsdinfo identity = {0}; siginfo_t status = {0};
+  int identityResult = -1, identityError = 0;
+  if (getpid() == launcher_pid) {
+    errno = 0; identityResult = proc_pidinfo(launcher_pid, PROC_PIDTBSDINFO, 1, &identity, sizeof(identity)); identityError = errno;
+  } else if (launcher_identity.token.val[5] == (unsigned)launcher_pid) {
+    identity = launcher_identity.bsd; identityResult = (int)sizeof(identity);
+  }
+  errno = 0;
+  int waitResult = child > 0 ? waitid(P_PID, (id_t)child, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
+  int waitError = errno;
+  if (waitResult || status.si_pid != child) memset(&status, 0, sizeof(status));
+  fprintf(stderr, "native-darwin-launch: owner=launcher operation=%s result=%ld errno=%d revents=%d read=%ld launcher=%d reporter=%d child=%d identity-result=%d identity-errno=%d start-seconds=%llu start-micros=%llu wait-result=%d wait-errno=%d status-pid=%d status-code=%d status=%d\n",
+    operation, result, error, revents, used, launcher_pid, getpid(), child, identityResult, identityError,
+    identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvsec : 0,
+    identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvusec : 0,
+    waitResult, waitError, status.si_pid, status.si_code, status.si_status);
+  fflush(stderr); errno = error; need(false);
+}
 static char command(int fd, int milliseconds) {
   struct pollfd p = { .fd = fd, .events = POLLIN }; char value;
-  need(poll(&p, 1, milliseconds) == 1 && (p.revents & POLLIN) && read(fd, &value, 1) == 1);
+  int result = poll(&p, 1, milliseconds), error = result < 0 ? errno : 0;
+  if (result != 1) launch_failure("command-poll", result, error, p.revents, -1, launch_child);
+  if (!(p.revents & POLLIN)) launch_failure("command-poll-events", result, 0, p.revents, -1, launch_child);
+  ssize_t used = read(fd, &value, 1); error = used < 0 ? errno : 0;
+  if (used != 1) launch_failure("command-read", used, error, p.revents, used, launch_child);
   return value;
+}
+static void child_stdio(int workspace, bool provider) {
+  int result = fchdir(workspace); if (result) launch_failure("fchdir", result, errno, 0, -1, 0);
+  result = dup2(3, 1); if (result != 1) launch_failure("dup2-output", result, errno, 0, -1, 0);
+  /* Keep ordinary setup errors on the original stderr until the exec handoff.
+   * Provider descriptor 5 must still be duplicated before sanitation closes it. */
+  if (provider) { result = dup2(5, 2); if (result != 2) launch_failure("dup2-stderr", result, errno, 0, -1, 0); }
+  result = dup2(provider ? 4 : 3, 0); if (result != 0) launch_failure("dup2-input", result, errno, 0, -1, 0);
+}
+static void child_exec(char **argv, char **environment, bool provider) {
+  if (provider) { execve(argv[6], &argv[12], environment); _exit(126); }
+  /* This copy cannot survive successful exec. Only a failed exec uses it. */
+  int diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 3);
+  if (diagnostic < 0) launch_failure("fcntl-stderr", diagnostic, errno, 0, -1, 0);
+  int result = dup2(1, 2); if (result != 2) launch_failure("dup2-stderr", result, errno, 0, -1, 0);
+  result = execve(argv[6], &argv[12], environment); int error = errno;
+  (void)signal(SIGPIPE, SIG_IGN);
+  dprintf(diagnostic, "native-darwin-launch: owner=child operation=%s result=%ld errno=%d revents=%d read=%ld launcher=%d reporter=%d start-seconds=%llu start-micros=%llu\n",
+    "execve", (long)result, error, 0, (long)-1, launcher_pid, getpid(),
+    (unsigned long long)launcher_identity.bsd.pbi_start_tvsec, (unsigned long long)launcher_identity.bsd.pbi_start_tvusec);
+  errno = error; _exit(126);
+}
+static struct identity parked_identity(int fd, pid_t child) {
+  struct pollfd waitReady = { .fd = fd, .events = POLLIN }; struct identity parked;
+  int result = poll(&waitReady, 1, 10000), error = result < 0 ? errno : 0;
+  if (result != 1) launch_failure("parked-poll", result, error, waitReady.revents, -1, child);
+  ssize_t used = read(fd, &parked, sizeof(parked)); error = used < 0 ? errno : 0;
+  if (used != sizeof(parked)) launch_failure("parked-read", used, error, waitReady.revents, used, child);
+  if (parked.token.val[5] != (unsigned)child) launch_failure("parked-identity", parked.token.val[5], 0, waitReady.revents, used, child);
+  result = close(fd); if (result) launch_failure("parked-close", result, errno, waitReady.revents, used, child);
+  return parked;
 }
 static uint64_t bounded_number(const char *s, uint64_t maximum) {
   char *end; errno = 0; unsigned long long n = strtoull(s, &end, 10);
@@ -201,6 +261,7 @@ static char **provider_environment(const char *nonce) {
 }
 
 int main(int argc, char **argv) {
+  launcher_pid = getpid();
   need(getuid() == 0 && geteuid() == 0 && getgid() == 0 && getegid() == 0 && getenv("CI") && !strcmp(getenv("CI"), "true") &&
        getenv("GITHUB_ACTIONS") && !strcmp(getenv("GITHUB_ACTIONS"), "true"));
   if (argc == 14 && !strcmp(argv[1], "--audit-holder")) {
@@ -310,7 +371,8 @@ int main(int argc, char **argv) {
   /* Privileged setup itself waits for a protected, independently verified
    * helper receipt. No UID/GID claim or fork precedes this acknowledgement. */
   au_asid_t parent_asid = audit_fresh(0);
-  printf("{\"helper\":"); emit(inspect(getpid())); puts(",\"payload\":null}"); fflush(stdout);
+  launcher_identity = inspect(getpid());
+  printf("{\"helper\":"); emit(launcher_identity); puts(",\"payload\":null}"); fflush(stdout);
   need(command(0, 30000) == 'P');
   uid_t uid = number(argv[1]); gid_t gid = number(argv[2]); need(uid > 500 && gid > 500);
   int custody = directory(argv[3], 0, 0, 0700), storage = directory(argv[4], 0, gid, 0710);
@@ -328,11 +390,11 @@ int main(int argc, char **argv) {
    * Reject an unexpected multithreaded launcher instead of forking it. */
   struct proc_taskinfo task;
   need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == (int)sizeof(task) && task.pti_threadnum == 1);
-  pid_t child = fork(); need(child >= 0);
+  pid_t child = fork(); if (child < 0) launch_failure("fork", child, errno, 0, -1, 0);
+  if (child > 0) launch_child = child;
   if (!child) {
     close(ready[0]); close(release[1]);
-    need(!fchdir(workspace) && dup2(3, 1) == 1 && dup2(provider ? 5 : 3, 2) == 2);
-    need(dup2(provider ? 4 : 3, 0) == 0);
+    child_stdio(workspace, provider);
     need(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4); descriptors();
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
@@ -361,13 +423,11 @@ int main(int argc, char **argv) {
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
       "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
-    argv[12] = argv[6]; execve(argv[6], &argv[12], provider ? providerEnv : env); _exit(126);
+    argv[12] = argv[6]; child_exec(argv, provider ? providerEnv : env, provider);
   }
   if (provider) { close(4); close(5); }
   free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
-  struct pollfd waitReady = { .fd = ready[0], .events = POLLIN }; struct identity parked;
-  need(poll(&waitReady, 1, 10000) == 1 && read(ready[0], &parked, sizeof(parked)) == sizeof(parked) &&
-       parked.token.val[5] == (unsigned)child && !close(ready[0]));
+  struct identity parked = parked_identity(ready[0], child);
   /* Acquire after fork: only root custody gets the session reference. This
    * original launcher remains a recoverable holder if reader IPC is lost. */
   (void)audit_hold(parked.token.val[6]);

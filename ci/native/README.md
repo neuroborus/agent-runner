@@ -8753,6 +8753,22 @@ framework path before fork. A bounded native thread-count read rejects a
 multithreaded launcher; the reviewed helper/SDK closure must exclude asynchronous
 parent thread creation.
 
+Case launchers explicitly retain the custody reader's stderr instead of discarding
+setup errors. Ordinary children keep that channel through trusted setup and the
+P/R barriers, then join stderr to their original data socket at the exec handoff.
+A close-on-exec diagnostic copy preserves failed-exec errors and cannot reach
+the payload. Child diagnostics use the launcher's saved verified birth.
+Successful frames and payload descriptors are unchanged. Setup and
+handshake refusals report the first native operation, direct result, applicable
+saved errno, poll revents and read count/EOF. Bounded secondary observations retain
+the original launcher's PID/birth and available child status with non-reaping
+`waitid(WNOWAIT)`; reporting failures cannot replace the primary cause. Diagnostics
+consume no protocol frames and establish neither admission nor retirement.
+The original post-P refusal still supplies no supported platform cause.
+Windows partial-acquisition retirement/error87 remains unattributed and open,
+alongside Windows TCP/WFP and audit-delivery and Darwin Mach/startup obligations;
+these diagnostics justify no third repair or native acceptance claim.
+
 Held regular-file reads bind canonical root ownership, immutable modes, single
 links, native identities and expected SHA-256, with one-MiB profile/128-MiB image
 bounds. Thin x64 Mach-O requires a bounded code-signature command and rejects

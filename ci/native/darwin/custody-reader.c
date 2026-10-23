@@ -1086,6 +1086,25 @@ static void case_read(void) {
 }
 /* Finite ownership operations. Privilege is checked here, at the executing
  * owner. No caller path, environment, executable or arbitrary command is used. */
+static void case_launch_failure(const char *operation, long result, int error, int revents, long used) {
+  /* This turn is already fatal; a broken diagnostic pipe must not replace it. */
+  (void)signal(SIGPIPE, SIG_IGN);
+  struct proc_bsdinfo identity = {0}; siginfo_t status = {0};
+  errno = 0; int identityResult = case_pid > 0 ? proc_pidinfo(case_pid, PROC_PIDTBSDINFO, 1, &identity, sizeof(identity)) : -1;
+  int identityError = errno; errno = 0;
+  int waitResult = case_pid > 0 ? waitid(P_PID, (id_t)case_pid, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
+  int waitError = errno;
+  if (waitResult || status.si_pid != case_pid) memset(&status, 0, sizeof(status));
+  fprintf(stderr, "native-darwin-launch: owner=reader operation=%s result=%ld errno=%d revents=%d read=%ld launcher=%d identity-result=%d identity-errno=%d start-seconds=%llu start-micros=%llu wait-result=%d wait-errno=%d status-pid=%d status-code=%d status=%d\n",
+    operation, result, error, revents, used, case_pid, identityResult, identityError,
+    identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvsec : 0,
+    identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvusec : 0,
+    waitResult, waitError, status.si_pid, status.si_code, status.si_status);
+  fflush(stderr); errno = error; need(false);
+}
+static void case_launch_check(const char *operation, int result) {
+  if (result) case_launch_failure(operation, result, result < 0 ? errno : 0, 0, -1);
+}
 static void case_start(const char *mode, const char *cdhash) {
   need(!case_fenced);
   need(case_mode && case_started && !case_pid && !case_recovery && (count == 12 || !strcmp(mode, "access")));
@@ -1100,14 +1119,18 @@ static void case_start(const char *mode, const char *cdhash) {
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)launcher->path, strlen(launcher->path), false);
   SecStaticCodeRef code = NULL; need(url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess &&
     SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess); CFRelease(code); CFRelease(url);
-  int control[2], output[2], data[2]; need(!pipe(control) && !pipe(output) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data));
+  int control[2], output[2], data[2];
+  case_launch_check("pipe-control", pipe(control)); case_launch_check("pipe-output", pipe(output));
+  case_launch_check("socketpair-data", socketpair(AF_UNIX, SOCK_STREAM, 0, data));
   posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
-  need(!posix_spawn_file_actions_init(&actions) && !posix_spawnattr_init(&attributes) &&
-    !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
-    !posix_spawn_file_actions_adddup2(&actions, control[0], 0) &&
-    !posix_spawn_file_actions_adddup2(&actions, output[1], 1) &&
-    !posix_spawn_file_actions_addopen(&actions, 2, "/dev/null", O_WRONLY, 0) &&
-    !posix_spawn_file_actions_adddup2(&actions, data[1], 3));
+  case_launch_check("posix_spawn_file_actions_init", posix_spawn_file_actions_init(&actions));
+  case_launch_check("posix_spawnattr_init", posix_spawnattr_init(&attributes));
+  case_launch_check("posix_spawnattr_setflags", posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT));
+  case_launch_check("spawn-control", posix_spawn_file_actions_adddup2(&actions, control[0], 0));
+  case_launch_check("spawn-output", posix_spawn_file_actions_adddup2(&actions, output[1], 1));
+  /* Explicitly retain the existing diagnostic channel under CLOEXEC_DEFAULT. */
+  case_launch_check("spawn-stderr", posix_spawn_file_actions_adddup2(&actions, 2, 2));
+  case_launch_check("spawn-data", posix_spawn_file_actions_adddup2(&actions, data[1], 3));
   char uid[24], gid[24], nonce[33]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(gid, sizeof(gid), "%u", subject_gid);
   memcpy(nonce, case_context, 32); nonce[32] = 0;
   char *argv[20] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
@@ -1116,9 +1139,11 @@ static void case_start(const char *mode, const char *cdhash) {
     argv[13] = ""; argv[14] = "space value"; argv[15] = "λ雪"; argv[16] = "'\""; argv[17] = "$(false); & | < > *";
   } else { argv[13] = nonce; argv[14] = (char *)mode; }
   char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", !strcmp(mode, "access") ? "NATIVE_ACCESS_CUSTODY=true" : "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
-  need(!posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment) &&
-    !posix_spawn_file_actions_destroy(&actions) && !posix_spawnattr_destroy(&attributes));
-  need(!close(control[0]) && !close(output[1]) && !close(data[1]));
+  case_launch_check("posix_spawn", posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment));
+  case_launch_check("posix_spawn_file_actions_destroy", posix_spawn_file_actions_destroy(&actions));
+  case_launch_check("posix_spawnattr_destroy", posix_spawnattr_destroy(&attributes));
+  case_launch_check("close-control", close(control[0])); case_launch_check("close-output", close(output[1]));
+  case_launch_check("close-data", close(data[1]));
   case_in = control[1]; case_out = output[0]; case_data = data[0];
   /* The hello is consumed separately. No P acknowledgement has been sent. */
   printf("{\"pid\":%d}", case_pid);
@@ -1127,7 +1152,12 @@ static void case_line(int fd, bool encoded) {
   need(case_mode && case_pid && fd >= 0); char bytes[8192]; unsigned length = 0;
   for (;;) {
     struct pollfd wait = {.fd = fd, .events = POLLIN}; char byte;
-    need(poll(&wait, 1, 30000) == 1 && (wait.revents & POLLIN) && read(fd, &byte, 1) == 1 && byte && length + 1 < sizeof(bytes));
+    int result = poll(&wait, 1, 30000), error = result < 0 ? errno : 0;
+    if (result != 1) case_launch_failure("case-poll", result, error, wait.revents, -1);
+    if (!(wait.revents & POLLIN)) case_launch_failure("case-poll-events", result, 0, wait.revents, -1);
+    ssize_t used = read(fd, &byte, 1); error = used < 0 ? errno : 0;
+    if (used != 1) case_launch_failure("case-read", used, error, wait.revents, used);
+    if (!byte || length + 1 >= sizeof(bytes)) case_launch_failure("case-frame", byte, 0, wait.revents, used);
     bytes[length++] = byte; if (byte == '\n') break;
   }
   if (encoded) { char out[16385]; hex((void *)bytes, length, out); printf("{\"hex\":\"%s\"}", out); }
