@@ -7353,6 +7353,20 @@ and fixed compiler/link inventories remain unchanged; the matched SDK review
 must include the reader's credential/descriptor, directory-service and socket
 operations. Local injected regressions provide no native GO or SDK compilation.
 
+When an original `probe-intent` cannot join the immediately following custody
+`probe-created` record with the same PID and next sequence, the existing recovery
+exception publication includes a bounded `probeJoin` projection. It reports the
+zero-based case-record and custody positions, original/expected/observed phases,
+sequence/PID values and each join predicate. Missing or invalid numeric facts
+are null. `protectedIdentities` counts the admitted helper/verifier and created
+probe identity slots that contain PIDs, and reports whether the following probe
+identity is available; these are availability observations, not distinct-owner or
+retirement counts. The projection omits full requests and records. The original
+exception and separate cleanup causes remain intact. An interrupted intent can
+still own a verifier without a saved birth: missing records prove no absence and
+cannot authorize a fresh baseline or substitute identity. These diagnostics
+provide attribution only and do not repair recovery or establish native acceptance.
+
 Normal file, Git and release setup additionally carries
 `operations.approval: {path, sha256}`. Its separately approved canonical JSON is a
 closed version-1 record with `{schemaVersion, contextSha256, id, inputSha256,

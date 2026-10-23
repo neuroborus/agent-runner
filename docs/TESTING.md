@@ -2374,6 +2374,16 @@ restoration and independent retirement cases remain required. This coverage
 uses the existing fast/native harness assignments and establishes no native
 acceptance.
 
+The same Darwin preparation fixture interrupts the actual custody producer both
+before `probe-created` and after creation but before completion. Fresh recovery
+keeps a missing birth refused, while an acquired subset with recorded identities
+retains independent observation of each original owner. Altered phase/PID joins
+publish precise bounded `probeJoin` diagnostics through the original exception
+owner, preserving the separate acquisition cause and original ledger bytes.
+Recovery performs no setup or compilation, and diagnostics expose no full
+requests. This portable coverage adds no command or slow-tier assignment and
+does not attribute or repair the hosted recovery failure by itself.
+
 Experiment case recovery regressions reuse the original protected ledger and
 closed-custody observations. They cover acknowledged disappeared readers and
 children, mixed closed observers and live custody, damaged births/task bindings,

@@ -6872,6 +6872,177 @@ test("Darwin partial case recovery rejoins protected births and objects without 
   }
 });
 
+test("Darwin partial probe recovery attributes original receipt joins without inventing missing births", async () => {
+  for (const fault of ["interrupted", "phase", "pid", "acquired-subset"]) {
+    const f = buildTranscripts(true),
+      binding = experimentCase(f, "ownership.literal"),
+      effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.literal",
+      ),
+      build = darwinSystemRecipes().find(({ id }) => id === "build");
+    await effects.bootstrap();
+    await effects.settle(build, null, {
+      signal: new AbortController().signal,
+      execution: execution(build),
+    });
+    const original = new Error("Original probe acknowledgement lost"),
+      diagnostics = [],
+      publish = (owner, value) => diagnostics.push({ owner, value }),
+      transport = f.options.readerOptions.transport;
+    let probes = 0;
+    f.options.readerOptions.transport = async (input, args) => {
+      const observer = await transport(input, args);
+      if (
+        input.context.executionId !== recipe.id ||
+        args[0] !== "--probe" ||
+        ++probes !== 2
+      )
+        return observer;
+      return {
+        ...observer,
+        receive:
+          fault === "interrupted"
+            ? async () => {
+                throw original;
+              }
+            : observer.receive,
+        get completion() {
+          return Promise.reject(original);
+        },
+      };
+    };
+    await withNativeDiagnostics(
+      () =>
+        assert.rejects(
+          effects.provision(recipe, {
+            policyBinding: binding,
+            recordPolicy: async () => {},
+          }),
+        ),
+      publish,
+    );
+    assert.ok(diagnostics.some(({ value }) => value.exception === original));
+    const prefix = `darwin-case-${recipe.id}-`,
+      entries = [...f.files.entries()]
+        .filter(([file]) => path.basename(file).startsWith(prefix))
+        .map(([file, value]) => ({ file, record: JSON.parse(value.bytes) }))
+        .sort(
+          (a, b) =>
+            Number(path.basename(a.file).slice(prefix.length, -5)) -
+            Number(path.basename(b.file).slice(prefix.length, -5)),
+        ),
+      custody = entries
+        .filter(({ record }) => record.phase === "custody")
+        .map(({ record }) => record.record),
+      intent = custody.findLast(({ phase }) => phase === "probe-intent"),
+      index = custody.indexOf(intent),
+      born = custody[index + 1];
+    if (fault === "phase" || fault === "pid") {
+      if (fault === "phase") born.phase = "probe-retired";
+      else born.request.pid++;
+      born.requestSha256 = digest(JSON.stringify(born.request));
+      const { file, record } = entries.find(
+        ({ record }) => record.record === born,
+      );
+      f.files.get(file).bytes = Buffer.from(JSON.stringify(record) + "\n");
+    }
+    const originals = entries.map(({ file }) => [
+        file,
+        Buffer.from(f.files.get(file).bytes),
+      ]),
+      before = f.events.length,
+      preparation = f.input.preparation,
+      recovered = await withNativeDiagnostics(
+        () =>
+          createDarwinSystemEffects(f.input, f.options).recover({
+            request: {
+              candidateSha,
+              platform: "darwin",
+              jobSha256: observationDigest(f.input.job),
+              preparationSha256: observationDigest(preparation),
+            },
+            job: f.input.job,
+            preparation,
+          }),
+        publish,
+      ),
+      refusal = diagnostics.find(({ value }) => value.exception?.probeJoin)
+        ?.value.exception,
+      recovery = f.events.slice(before);
+    assert.equal(
+      recovered.status,
+      fault === "acquired-subset" ? "RETIRED" : "RETAINED",
+      fault,
+    );
+    assert.equal(recovered.independent, fault === "acquired-subset");
+    assert.equal(recovered.emergencyCleanup, false);
+    if (fault === "acquired-subset") {
+      assert.equal(refusal, undefined);
+      const admitted = custody.find(({ phase }) => phase === "admitted"),
+        identities = [
+          ...Object.values(admitted.subjects),
+          ...custody
+            .filter(({ phase }) => phase === "probe-created")
+            .map(({ request }) => request.verifier),
+        ];
+      for (const identity of identities)
+        assert.ok(recovery.includes(`probe:${identity.pid}`));
+    } else {
+      assert.ok(!recovery.some((event) => event.startsWith(prefix)));
+      assert.notEqual(refusal, original);
+      assert.equal(refusal.message, "Unverified native tool observation");
+      assert.match(refusal.stack, /recoverDarwinCases/u);
+      assert.deepEqual(refusal.probeJoin, {
+        recordPosition: entries.findIndex(
+          ({ record }) => record.record === intent,
+        ),
+        custodyPosition: index,
+        phase: "probe-intent",
+        expected: {
+          phase: "probe-created",
+          sequence: intent.sequence + 1,
+          pid: intent.request.pid,
+        },
+        observed: {
+          recordPosition: born
+            ? entries.findIndex(({ record }) => record.record === born)
+            : null,
+          phase: born?.phase ?? null,
+          sequence: born?.sequence ?? null,
+          pid: born?.request.pid ?? null,
+        },
+        predicates: {
+          phase: fault === "pid",
+          pid: fault === "phase",
+          sequence: fault !== "interrupted",
+        },
+        protectedIdentities: {
+          helpers: 1,
+          verifiers: 1,
+          probes: fault === "pid" ? 2 : 1,
+          followingProbe: fault === "pid",
+        },
+      });
+      const output = [];
+      createNativeDiagnosticWriter((bytes) => output.push(bytes))(
+        "darwin-preparation",
+        { exception: refusal },
+      );
+      assert.ok(Buffer.concat(output).toString().includes("probeJoin"));
+      assert.ok(!Buffer.concat(output).toString().includes("requestSha256"));
+    }
+    for (const [file, bytes] of originals)
+      assert.deepEqual(f.files.get(file).bytes, bytes);
+    assert.ok(
+      !recovery.some((event) =>
+        ["case-directory", "case-copy"].includes(event),
+      ),
+    );
+    assert.ok(!f.events.some((event) => event.startsWith("tool:")));
+  }
+});
+
 test("fixed Darwin entry executes each ownership owner through raw custody and held observations", async () => {
   for (const mode of ["literal", "storage", ...DARWIN_OWNERSHIP_CASES]) {
     const f = buildTranscripts(),

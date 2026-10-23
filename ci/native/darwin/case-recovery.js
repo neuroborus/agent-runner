@@ -336,11 +336,66 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         if (custody[i].phase === "probe-intent") {
           const intent = custody[i],
             born = custody[i + 1];
-          requireObservation(
-            born?.phase === "probe-created" &&
-              born.request.pid === intent.request.pid &&
-              born.sequence === intent.sequence + 1,
-          );
+          try {
+            requireObservation(
+              born?.phase === "probe-created" &&
+                born.request.pid === intent.request.pid &&
+                born.sequence === intent.sequence + 1,
+            );
+          } catch (cause) {
+            // Publish only bounded facts from the sealed original ledger via
+            // the existing exception owner. Missing births remain refusals.
+            const number = (value) =>
+                Number.isSafeInteger(value) && value >= 0 ? value : null,
+              position = (record) =>
+                record
+                  ? entries.findIndex(
+                      (entry) =>
+                        entry.record.phase === "custody" &&
+                        entry.record.record === record,
+                    )
+                  : null,
+              hasIdentity = (value) =>
+                Number.isSafeInteger(value?.pid) && value.pid > 1;
+            cause.probeJoin = {
+              recordPosition: position(intent),
+              custodyPosition: i,
+              phase: intent.phase,
+              expected: {
+                phase: "probe-created",
+                sequence: number(intent.sequence + 1),
+                pid: number(intent.request?.pid),
+              },
+              observed: {
+                recordPosition: position(born),
+                phase: born?.phase ?? null,
+                sequence: number(born?.sequence),
+                pid: number(born?.request?.pid),
+              },
+              predicates: {
+                phase: born?.phase === "probe-created",
+                pid: born?.request?.pid === intent.request?.pid,
+                sequence: born?.sequence === intent.sequence + 1,
+              },
+              protectedIdentities: {
+                helpers: admitted.filter(({ subjects }) =>
+                  hasIdentity(subjects.helper),
+                ).length,
+                verifiers: admitted.filter(({ subjects }) =>
+                  hasIdentity(subjects.verifier),
+                ).length,
+                probes: custody.filter(
+                  (record) =>
+                    record.phase === "probe-created" &&
+                    hasIdentity(record.request?.verifier),
+                ).length,
+                followingProbe:
+                  born?.phase === "probe-created" &&
+                  hasIdentity(born.request?.verifier),
+              },
+            };
+            throw cause;
+          }
           subjects.push(born.request.verifier);
         }
       const objects = custody.filter(

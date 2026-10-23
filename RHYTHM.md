@@ -5,6 +5,14 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Attribute original probe joins without changing recovery
+
+Darwin partial-custody refusals retain their original exception and publish only
+bounded record positions, join predicates, sequence/PID facts and availability
+of recorded owner identities. A lost response differs from a recorded creation
+whose completion was lost. Neither diagnostic observations nor missing records
+can supply a fresh baseline, prove absence or replace independent retirement.
+
 ## 2026-10-23 — Repeat held trees without changing retained cursors
 
 Darwin outside snapshots open a fresh directory description relative to the
