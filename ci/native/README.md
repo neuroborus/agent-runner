@@ -3617,6 +3617,33 @@ target/marker observations and reset; the JavaScript effects owner independently
 assesses that evidence before allowing R or RPC input. Readiness, verified setup
 or an RPC success cannot replace this proof.
 
+Command audit diagnostics join each original target/marker open, read/write,
+truncate, flush and close result to the command PID/birth, completion-time sample
+and fixed object slot. Open diagnostics query only that held handle's file ID;
+unavailable identity/birth reads stay explicit. Failed I/O retains its immediate
+native error and unknown byte count. Optional inspection restores last-error,
+and marker read/nonce failures remain primary across separate close failures.
+The native owner caches the actual dynamically queried subject SID and its
+availability alongside the operating logon, effective policy and held SACLs.
+These facts describe attempted generation; successful I/O and policy bits do not
+establish an emitted or delivered event.
+
+Post-refusal inspection labels the original subscription's open notification/
+bookmark state, subscribe status, notifications, drain calls, returned records,
+resets and successful bookmarks. Its two existing finite event selections stay
+unchanged. Separate read-only calls open Security channel configuration, the
+fixed Security-Auditing publisher metadata and the Security log; fixed-size typed
+reads report channel enabled state, record count and oldest record availability.
+Native statuses, returned types/sizes and every independent metadata-handle close
+remain distinct. There is no retry, channel/publisher setter or live-subscription
+drain in this inspection. Unknown values remain unknown, and a query ending in
+259 with zero records supplies neither absence nor delivery proof.
+The original target event, later loss-free marker, exact subject/logon/PID/birth/
+object/access/time/sequence joins and independent capture/helper/Job retirement
+with owned policy/SACL restoration remain required. This diagnostic follow-up
+does not repair missing audit delivery; hosted attribution and a reviewed revised
+remaining plan must precede any dependent remedy.
+
 Independent baseline and installed reads retain the administrative broker's exact
 primary token, SID/logon, birth and held gate, its exclusion from the empty payload
 Job, unchanged global system policy, exact per-user inclusion and the SACL on each

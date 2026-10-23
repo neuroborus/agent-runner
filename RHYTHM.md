@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Distinguish command I/O from audit delivery
+
+Windows command diagnostics retain original target/marker I/O, held IDs and
+operating-subject observations, then distinguish subscription progress from
+read-only Security channel, publisher and log availability. Fixed finite reads
+preserve native statuses, unknown values and separate closure failures. None
+replaces the real control, matching target event, later loss-free marker or
+independent retirement/restoration. Missing delivery remains open pending hosted
+attribution and a reviewed follow-up plan.
+
 ## 2026-10-23 — Attribute pending TCP without changing denial evidence
 
 Windows feasibility observes the original socket's restriction/provider state

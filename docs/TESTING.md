@@ -2459,6 +2459,15 @@ and exercise bounded post-refusal query selection, empty/error/saturated batches
 typed and textual PID/logon/time projection, case-insensitive held-name joins,
 foreign/stale event exclusion and independent event/query/context closure.
 Inspection never drains the live subscription or supplies native acceptance.
+The same command-case fixture retains actual target/marker open, I/O and close
+facts, held file IDs and completion-time samples while preserving original API
+failures and independent marker-close errors. Its permitted control still uses
+the canonical outside action. The post-refusal fixture additionally covers typed
+Security channel/log properties, publisher availability and every metadata close,
+including unavailable interfaces and wrong types. Dynamic subject diagnostics
+retain the actual queried SID even when the original admission guard rejects it.
+No diagnostic count, successful I/O or readable interface replaces missing events
+or independent retirement; these injected cases add no tier or Windows API proof.
 Existing notification/drain ordering, missing-event
 and uncertain-retirement refusals remain required. These tiny injected cases add
 no validation tier and execute no Windows tool on a foreign host.

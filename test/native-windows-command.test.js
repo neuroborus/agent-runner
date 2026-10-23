@@ -1543,6 +1543,7 @@ test("native command auditing queries the dynamic operating context, reverts and
     "impersonate",
     "open",
     "subject",
+    "subject-diagnostic",
     "type",
     "level",
     "logon",
@@ -1583,6 +1584,7 @@ test("native command auditing queries the dynamic operating context, reverts and
       userText: identity.userSid,
       command_category: "file-system",
       command_delivery: {
+        subject: [],
         operating: false,
         sacls: [{}, {}],
         rejected: Array(4).fill(0),
@@ -1615,6 +1617,11 @@ test("native command auditing queries the dynamic operating context, reverts and
               ImpersonationLevel: fault === "level" ? 1 : 2,
               AuthenticationId: { HighPart: 0, LowPart: 1 },
             };
+      },
+      command_gate_sid: (sid) => {
+        context.command_delivery.subject =
+          fault === "subject-diagnostic" ? "" : sid;
+        return fault === "subject-diagnostic" ? 5 : 0;
       },
       EqualSid: (a, b) => a === b,
       free: () => {},
@@ -1735,6 +1742,20 @@ test("native command auditing queries the dynamic operating context, reverts and
         "id:14",
         "sacl:14",
       ]);
+    }
+    if (!["impersonate", "open"].includes(fault)) {
+      assert.equal(
+        context.command_delivery.subjectError,
+        fault === "subject-diagnostic" ? 5 : 0,
+      );
+      assert.equal(
+        context.command_delivery.subject,
+        fault === "subject"
+          ? "other"
+          : fault === "subject-diagnostic"
+            ? ""
+            : identity.userSid,
+      );
     }
     assert.equal(
       freed.length,
@@ -4962,14 +4983,25 @@ test("actual command-case guards attribute native calls and control invariants w
       .replace("const char *operation=", "const operation=")
       .replaceAll("&count", "{set value(v){count=v}}")
       .replaceAll("&ackValue", "{set value(v){ackValue=v}}")
-      .replaceAll("(DWORD)", "")
+      .replace(/\((?:DWORD|LONGLONG|ULONGLONG)\)/gu, "")
+      .replace(
+        "FILETIME born={0},exited,kernel,user;FILE_ID_INFO id={0};",
+        "const born={dwHighDateTime:0,dwLowDateTime:0},exited={},kernel={},user={},id={FileId:{Identifier:Array(16).fill(0)}};",
+      )
+      .replace(
+        "FILETIME sampled={0};",
+        "const sampled={dwHighDateTime:0,dwLowDateTime:0};",
+      )
+      .replaceAll("sizeof(id)", "24")
+      .replace(/&(born|exited|kernel|user|id|sampled)\b/gu, "$1")
       .replace(/\bL(?=")/gu, "")
-      .replace(/\b(?:HANDLE|BOOL|DWORD|int|unsigned) /gu, "let ");
+      .replace(/\b(?:HANDLE|BOOL|DWORD|LONGLONG|int|unsigned) /gu, "let ");
   const program = new Script(`
     function invariant_value(ok,operation,value){${project(body(helper, "invariant_value"))}}
     function invariant(ok,operation){${body(helper, "invariant")}}
     function win32_check(ok,operation){${project(body(helper, "win32_check"))}}
     function close_handle(handle,operation){${project(body(helper, "close_handle"))}}
+    function command_case_io(ok,operation,object,count,file){${project(body(source, "command_case_io"))}}
     (function(argc,argv){${project(body(source, "command_case"))}})`);
   const cases = [
     ["arguments", "edit", "invariant"],
@@ -5015,10 +5047,20 @@ test("actual command-case guards attribute native calls and control invariants w
     ["target-open", "inspect", "win32"],
     ["target-read", "inspect", "win32"],
   ];
-  for (const [fault, mode, domain, markerCloseFails] of [
+  for (const [
+    fault,
+    mode,
+    domain,
+    markerCloseFails,
+    diagnosticFault,
+    permitted,
+  ] of [
     [null, "inspect"],
     [null, "edit"],
     [null, "outside"],
+    [null, "outside", null, false, null, true],
+    [null, "outside", null, false, "birth", true],
+    [null, "outside", null, false, "file-id", true],
     ...cases,
     ["marker-read", "edit", "win32", true],
     ["marker-size", "edit", "invariant", true],
@@ -5031,6 +5073,7 @@ test("actual command-case guards attribute native calls and control invariants w
     const calls = [],
       cleanup = [],
       output = [],
+      io = [],
       brokerRights = [],
       nonce = "a".repeat(32);
     const call = (operation, value = true) => {
@@ -5059,6 +5102,34 @@ test("actual command-case guards attribute native calls and control invariants w
       PROCESS_TERMINATE: 1,
       ERROR_ACCESS_DENIED: 5,
       ERROR_SUCCESS: 0,
+      FileIdInfo: 18,
+      stderr: {},
+      GetCurrentProcess: () => "self",
+      GetCurrentProcessId: () => 43,
+      GetSystemTimePreciseAsFileTime: (time) => {
+        time.dwLowDateTime = 200 + io.length;
+      },
+      GetProcessTimes(process, born) {
+        assert.equal(process, "self");
+        lastError = 50;
+        if (diagnosticFault === "birth") return false;
+        born.dwLowDateTime = 100;
+        return true;
+      },
+      GetFileInformationByHandleEx(file, kind, id, size) {
+        assert.ok(["target", "marker"].includes(file));
+        assert.deepEqual([kind, size], [18, 24]);
+        lastError = 50;
+        id.VolumeSerialNumber = 7;
+        id.FileId.Identifier.fill(1);
+        return diagnosticFault !== "file-id";
+      },
+      fprintf(_stream, format, ...args) {
+        if (format.startsWith("native-windows-command: io")) io.push(args);
+        lastError = 92;
+      },
+      fputs: () => {},
+      fputc: () => {},
       CP_UTF8: 65001,
       WC_ERR_INVALID_CHARS: 128,
       wcslen: (value) => value.length,
@@ -5086,7 +5157,7 @@ test("actual command-case guards attribute native calls and control invariants w
         if (name === "marker") assert.equal(flags, 0x200000);
         if (name === "pipe") assert.equal(flags, 0x160000);
         if (!call(operation)) return -1;
-        if (name === "target" && mode === "outside") {
+        if (name === "target" && mode === "outside" && !permitted) {
           lastError = fault === "target-denial" ? 87 : 5;
           return -1;
         }
@@ -5187,13 +5258,44 @@ test("actual command-case guards attribute native calls and control invariants w
       assert.deepEqual(output, [
         mode === "inspect"
           ? nonce
-          : mode === "outside"
+          : mode === "outside" && !permitted
             ? "attempt:denied"
             : "attempt:written",
       ]);
+      assert.equal(io[0][0], 43);
+      assert.equal(io[0][1], diagnosticFault === "birth" ? 0 : 100);
+      assert.equal(io[0][2], diagnosticFault === "birth" ? 50 : 0);
+      assert.equal(io[0][9], 200);
+      assert.equal(
+        io[0][8],
+        mode === "outside" && !permitted
+          ? -1
+          : diagnosticFault === "file-id"
+            ? 50
+            : 0,
+      );
+      if (permitted)
+        assert.deepEqual(
+          io.map((row) => [row[3], row[4], row[5], row[6], row[7]]),
+          [
+            [0, "open", true, 0, 0],
+            [0, "write", true, 0, 32],
+            [0, "edit", true, 0, 7],
+            [0, "truncate", true, 0, 0],
+            [0, "flush", true, 0, 0],
+            [0, "close", true, 0, 0],
+            [1, "open", true, 0, 0],
+            [1, "read", true, 0, 32],
+            [1, "close", true, 0, 0],
+          ],
+        );
       continue;
     }
     assert.throws(run, { code: 126 });
+    for (const row of io.filter((row) => !row[5])) {
+      assert.equal(row[6], fault === "target-denial" ? 87 : 5);
+      assert.equal(row[7], -1);
+    }
     const broker = fault.startsWith("broker-");
     const operation = `command-case-${fault === "target-denial" ? "target-open" : fault.replace(/-(error|close)$/u, (match) => (fault.startsWith("broker-") ? "" : match))}`;
     assert.deepEqual(first, [
@@ -8457,6 +8559,25 @@ test("post-refusal audit inspection joins the original case without draining the
     .replace(/&(values\[[02]\])/gu, "$1")
     .replace(/,&(pid|logon|used|count)/gu, ",value=>$1=value")
     .replace(/\b(?:DWORD|BOOL)\b/gu, "let");
+  const availability = body("command_delivery_interface")
+    .replace("EVT_HANDLE handles[3]={0};", "const handles=Array(3).fill(null);")
+    .replace(
+      "LONGLONG status[6]={-1,-1,-1,-1,-1,-1},values[3]={-1,-1,-1},closed[3]={-1,-1,-1};",
+      "const status=Array(6).fill(-1),values=Array(3).fill(-1),closed=Array(3).fill(-1);",
+    )
+    .replace(
+      "LONGLONG types[3]={-1,-1,-1},sizes[3]={-1,-1,-1};",
+      "const types=Array(3).fill(-1),sizes=Array(3).fill(-1);",
+    )
+    .replace("EVT_VARIANT value={0};", "let value={};")
+    .replaceAll("memset(&value,0,sizeof(value))", "value={}")
+    .replaceAll("sizeof(value)", "16")
+    .replaceAll("value.UInt64Val>>63", "value.UInt64Val/2**63>=1")
+    .replace(/(?<!&)&value\b/gu, "value")
+    .replace(/(?<!&)&used\b/gu, "v=>used=v")
+    .replace(/\((?:DWORD|LONGLONG)\)/gu, "")
+    .replaceAll(/\bL(?=")/gu, "")
+    .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let");
   const inspection = body("command_delivery_observe")
     .replace(
       "WCHAR query[2048]; EVT_HANDLE events[16]={0};",
@@ -8472,6 +8593,7 @@ test("post-refusal audit inspection joins the original case without draining the
   const program =
     new Script(`function command_delivery_number(value,number){${number}}
     function command_delivery_match(context,event,operation,error){${match}}
+    function command_delivery_interface(){${availability}}
     ()=>{${inspection}}`);
   for (const fault of [
     null,
@@ -8490,6 +8612,13 @@ test("post-refusal audit inspection joins the original case without draining the
     "other-logon",
     "stale",
     "object-case",
+    "channel",
+    "channel-enabled",
+    "channel-type",
+    "publisher",
+    "log",
+    "log-info",
+    "interface-close",
   ]) {
     const calls = [],
       closed = [],
@@ -8510,6 +8639,51 @@ test("post-refusal audit inspection joins the original case without draining the
       EvtRenderContextValues: 0,
       EvtRenderEventValues: 0,
       EvtVarTypeUInt32: 8,
+      EvtVarTypeBoolean: 13,
+      EvtChannelConfigEnabled: 0,
+      EvtOpenChannelPath: 1,
+      EvtLogNumberOfLogRecords: 2,
+      EvtLogOldestRecordNumber: 3,
+      command_subscription: "subscription",
+      command_event: "notification",
+      command_bookmark: "bookmark",
+      command_observed: { audit: [5, 0, 1, 2, 3, 4, 5, 0, 0] },
+      EvtOpenChannelConfig(session, channel, flags) {
+        assert.deepEqual([session, channel, flags], [null, "Security", 0]);
+        lastError = 5;
+        return fault === "channel" ? null : "channel";
+      },
+      EvtOpenPublisherMetadata(session, publisher, file, locale, flags) {
+        assert.deepEqual(
+          [session, publisher, file, locale, flags],
+          [null, "Microsoft-Windows-Security-Auditing", null, 0, 0],
+        );
+        lastError = 5;
+        return fault === "publisher" ? null : "publisher";
+      },
+      EvtOpenLog(session, channel, flags) {
+        assert.deepEqual([session, channel, flags], [null, "Security", 1]);
+        lastError = 5;
+        return fault === "log" ? null : "log";
+      },
+      EvtGetChannelConfigProperty(handle, kind, flags, size, value, used) {
+        assert.deepEqual([handle, kind, flags, size], ["channel", 0, 0, 16]);
+        lastError = 5;
+        Object.assign(value, {
+          Type: fault === "channel-type" ? 8 : 13,
+          BooleanVal: true,
+        });
+        used(16);
+        return fault !== "channel-enabled";
+      },
+      EvtGetLogInfo(handle, kind, size, value, used) {
+        assert.deepEqual([handle, size], ["log", 16]);
+        assert.ok([2, 3].includes(kind));
+        lastError = 5;
+        Object.assign(value, { Type: 10, UInt64Val: kind === 2 ? 2 : 10 });
+        used(16);
+        return fault !== "log-info";
+      },
       EvtVarTypeUInt64: 10,
       EvtVarTypeHexInt64: 21,
       EvtVarTypeString: 1,
@@ -8523,6 +8697,8 @@ test("post-refusal audit inspection joins the original case without draining the
       command_paths: ["inspect", "edit", "outside", "marker"],
       userText: identity.userSid,
       command_delivery: {
+        subject: identity.userSid,
+        subjectError: 0,
         level: 2,
         policy: 3,
         policyError: 0,
@@ -8626,7 +8802,11 @@ test("post-refusal audit inspection joins the original case without draining the
             handle.startsWith("event:")
           ) &&
           !(fault === "query-close" && handle.startsWith("query:")) &&
-          !(fault === "context-close" && handle === "context")
+          !(fault === "context-close" && handle === "context") &&
+          !(
+            fault === "interface-close" &&
+            ["channel", "publisher", "log"].includes(handle)
+          )
         );
       },
       cleanup_error: (...cause) => cleanup.push(cause),
@@ -8645,7 +8825,42 @@ test("post-refusal audit inspection joins the original case without draining the
       calls.filter((call) => call === "next").length,
       fault === "query" ? 0 : 2,
     );
-    assert.equal(frames.length, 4);
+    assert.equal(frames.length, 6);
+    assert.deepEqual(frames[4], [true, true, true, 0, 1, 2, 3, 4, 5]);
+    assert.equal(frames[5][0], fault === "channel" ? 5 : 0);
+    assert.equal(frames[5][1], fault === "publisher" ? 5 : 0);
+    assert.equal(frames[5][2], fault === "log" ? 5 : 0);
+    assert.equal(frames[0][4], identity.userSid);
+    assert.equal(frames[0][5], 0);
+    assert.equal(
+      frames[5][12],
+      ["channel", "channel-enabled"].includes(fault)
+        ? -1
+        : fault === "channel-type"
+          ? 8
+          : 13,
+    );
+    assert.equal(
+      frames[5][15],
+      ["channel", "channel-enabled"].includes(fault) ? -1 : 16,
+    );
+    assert.equal(
+      frames[5][6],
+      ["channel", "channel-enabled", "channel-type"].includes(fault)
+        ? -1
+        : true,
+    );
+    assert.equal(frames[5][7], ["log", "log-info"].includes(fault) ? -1 : 2);
+    assert.equal(frames[5][8], ["log", "log-info"].includes(fault) ? -1 : 10);
+    for (const handle of ["channel", "publisher", "log"])
+      assert.equal(
+        closed.filter((value) => value === handle).length,
+        fault === handle ? 0 : 1,
+      );
+    if (fault === "interface-close") {
+      assert.deepEqual(frames[5].slice(9, 12), [6, 6, 6]);
+      assert.equal(cleanup.length, 3);
+    }
     assert.equal(frames[1][0], 0);
     assert.equal(frames[2][0], 1);
     assert.equal(frames[1][1], fault === "query" ? "EvtQuery" : "EvtNext");
@@ -8675,7 +8890,12 @@ test("post-refusal audit inspection joins the original case without draining the
     );
     assert.equal(
       cleanup.length > 0,
-      ["event-close", "query-close", "context-close"].includes(fault),
+      [
+        "event-close",
+        "query-close",
+        "context-close",
+        "interface-close",
+      ].includes(fault),
     );
     assert.equal(
       frames[1][10],
