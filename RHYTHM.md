@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Repeat held trees without changing retained cursors
+
+Darwin outside snapshots open a fresh directory description relative to the
+retained root and rejoin its identity before traversal. A duplicated descriptor
+shares its cursor and cannot provide an independent repeated snapshot. Exact
+outside equality, per-read stability and checked closure remain required;
+cursor exhaustion establishes no file deletion. Partial-custody recovery keeps
+its separate original-record and independent retirement obligations.
+
 ## 2026-10-23 — Confine hosted case ancestry to the observed parent
 
 Ordinary Darwin case custody can cross the root-owned group-writable run

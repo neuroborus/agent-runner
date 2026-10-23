@@ -152,8 +152,13 @@ static void file_barrier(struct entry *root, const char *relative) {
 }
 static unsigned tree_count, tree_files;
 static void tree_at(int root, const char *prefix, unsigned depth) {
-  need(depth < 16); int fd = *prefix ? relative_file(root, prefix) : dup(root); need(fd >= 0);
-  struct stat before, after; need(!fstat(fd, &before)); DIR *directory = fdopendir(fd); need(directory);
+  /* dup would share the retained root's cursor with fdopendir/readdir. Open
+   * a fresh description relative to that held object and rejoin its identity. */
+  need(depth < 16); int fd = *prefix ? relative_file(root, prefix) :
+    openat(root, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
+  struct stat before, after; need(!fstat(fd, &before));
+  if (!*prefix) { need(!fstat(root, &after)); same_stat(before, after); }
+  DIR *directory = fdopendir(fd); need(directory);
   struct dirent *entry;
   for (;;) {
     errno = 0; entry = readdir(directory); if (!entry) { need(!errno); break; }

@@ -91,16 +91,22 @@ test("Darwin file authority rejects foreign volume, hardlink aliases and path/na
 // Execute the original native decisions with injected APIs. Only C data and
 // pointer representations are projected; no Darwin executable is invoked.
 async function nativeFileFunctions(experiment = true) {
-  const [identity, effective, helper] = await Promise.all(
-    ["file-identity.h", "effective-reader.h", "file-helper.c"].map((name) =>
-      readFile(new URL(name, import.meta.url), "utf8"),
-    ),
+  const [identity, effective, helper, reader] = await Promise.all(
+    [
+      "file-identity.h",
+      "effective-reader.h",
+      "file-helper.c",
+      "custody-reader.c",
+    ].map((name) => readFile(new URL(name, import.meta.url), "utf8")),
   );
   const declarations = [
     [identity, "file_identity_capabilities", "fd, publication"],
     [identity, "file_name_at", "parent, name, fd"],
     [effective, "file_capabilities", "fd"],
     [helper, "named", "at, name, fd, expected, directory, links"],
+    [reader, "same_stat", "a, b"],
+    [effective, "tree_at", "root, prefix, depth"],
+    [effective, "file_tree", "root"],
   ].map(([source, name, args]) => {
     const body = new RegExp(
       `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
@@ -129,17 +135,25 @@ async function nativeFileFunctions(experiment = true) {
       .replaceAll("struct file_identity ", "let ")
       .replaceAll("struct dirent *", "let ")
       .replaceAll("DIR *", "let ")
+      .replace(
+        "char name[PATH_MAX], encoded[PATH_MAX * 2];",
+        'const name = {value: ""}, encoded = {value: ""};',
+      )
       .replaceAll("->", ".")
       .replaceAll("sizeof(caps)", "4096")
+      .replaceAll("sizeof(name)", "4096")
       .replace(/\*name\b/gu, "name.length")
-      .replace(/(?<!&)&(attrs|caps|before|after|named|held|s|fs)\b/gu, "$1")
-      .replace(/\((?:void|uint32_t)\)/gu, "")
+      .replace(/\*prefix\b/gu, "strlen(prefix)")
+      .replace(/(?<!&)&(attrs|caps|before|after|named|held|st|s|fs)\b/gu, "$1")
+      .replaceAll("(unsigned char *)", "")
+      .replace(/\((?:void|uint32_t|size_t)\)/gu, "")
       .replace(/\b(?:unsigned|uint32_t|int) /gu, "let ");
     return `function ${name}(${args}) {${projected}}`;
   });
   return (context) =>
     new Script(
-      `${declarations.join("\n")} ({file_identity_capabilities, file_capabilities, file_name_at, named})`,
+      `${declarations.join("\n")} let tree_count = 0, tree_files = 0;
+      ({file_identity_capabilities, file_capabilities, file_name_at, named, tree_at, file_tree})`,
     ).runInNewContext(context);
 }
 
@@ -335,6 +349,164 @@ test("Darwin native held-name checks exclude aliases and substitutions while ret
       read();
       assert.deepEqual(calls, ["close", "held-close"]);
     }
+  }
+});
+
+test("Darwin held tree snapshots repeat completely with independent directory offsets and checked stability", async () => {
+  const load = await nativeFileFunctions();
+  for (const fault of [
+    null,
+    "offset",
+    "substitute",
+    "change",
+    "read",
+    "close",
+  ]) {
+    const metadata = (inode, directory) => ({
+      st_dev: 1,
+      st_ino: inode,
+      st_mode: directory ? 0o40700 : 0o100600,
+      st_uid: 0,
+      st_gid: 0,
+      st_nlink: directory ? 2 : 1,
+      st_size: 64,
+      st_mtimespec: { tv_sec: 100, tv_nsec: 0 },
+      st_ctimespec: { tv_sec: 100, tv_nsec: 0 },
+    });
+    const nodes = new Map([
+      ["", { stat: metadata(1, true), names: ["storage", "custody"] }],
+      ["storage", { stat: metadata(2, true), names: ["payload"] }],
+      ["custody", { stat: metadata(3, true), names: ["launcher", "policy"] }],
+      ...["storage/payload", "custody/launcher", "custody/policy"].map(
+        (name, index) => [name, { stat: metadata(index + 4, false) }],
+      ),
+    ]);
+    const retained = {
+        path: "",
+        node: nodes.get(""),
+        cursor: fault === "offset" ? 1 : 0,
+      },
+      held = new Map([[1, retained]]),
+      root = { fd: 1, stat: structuredClone(retained.node.stat) },
+      closed = [],
+      text = (value) => (typeof value === "string" ? value : value.value);
+    let nextFd = 2,
+      output = "",
+      stable = 0,
+      reads = 0;
+    const opened = (description) => {
+      const fd = nextFd++;
+      held.set(fd, description);
+      return fd;
+    };
+    const env = {
+      errno: 0,
+      O_RDONLY: 1,
+      O_DIRECTORY: 2,
+      O_NOFOLLOW: 4,
+      O_CLOEXEC: 8,
+      AT_SYMLINK_NOFOLLOW: 16,
+      case_mode: false,
+      need: (ok) => assert.ok(ok, "Native tree refused"),
+      S_ISDIR: (mode) => mode === 0o40700,
+      S_ISREG: (mode) => mode === 0o100600,
+      strcmp: (a, b) => Number(text(a) !== text(b)),
+      strlen: (value) => text(value).length,
+      // dup aliases the original open description, including its cursor.
+      dup: (fd) => opened(held.get(fd)),
+      openat(fd, name, flags) {
+        assert.equal(fd, 1);
+        assert.equal(name, ".");
+        assert.equal(flags, 15);
+        const node =
+          fault === "substitute"
+            ? { ...retained.node, stat: metadata(99, true) }
+            : retained.node;
+        return opened({ path: "", node, cursor: 0 });
+      },
+      relative_file(fd, name) {
+        assert.equal(fd, 1);
+        const path = text(name);
+        return opened({ path, node: nodes.get(path), cursor: 0 });
+      },
+      fstat(fd, out) {
+        Object.assign(out, structuredClone(held.get(fd).node.stat));
+        return 0;
+      },
+      fdopendir: (fd) => fd,
+      readdir(fd) {
+        reads++;
+        const scan = held.get(fd);
+        if (scan.cursor === scan.node.names.length) {
+          env.errno = fault === "read" ? 5 : 0;
+          return null;
+        }
+        return { d_name: scan.node.names[scan.cursor++] };
+      },
+      fstatat(fd, name, out, flags) {
+        assert.equal(flags, 16);
+        const parent = held.get(fd).path;
+        Object.assign(
+          out,
+          structuredClone(nodes.get((parent ? parent + "/" : "") + name).stat),
+        );
+        return 0;
+      },
+      closedir(fd) {
+        closed.push(fd);
+        held.delete(fd);
+        return fault === "close" ? -1 : 0;
+      },
+      snprintf(out, _size, _format, prefix, separator, name) {
+        out.value = text(prefix) + separator + name;
+        return out.value.length;
+      },
+      hex(value, size, out) {
+        out.value = Buffer.from(text(value)).subarray(0, size).toString("hex");
+      },
+      printf(format, ...args) {
+        let index = 0;
+        output += format.replace(/%s/gu, () => text(args[index++]));
+      },
+      putchar: (value) => {
+        output += value;
+      },
+      // Record observations at the existing file barrier boundary to isolate
+      // directory-description ownership and traversal in this fixture.
+      barrier_at(fd, name, contents) {
+        assert.equal(fd, 1);
+        assert.equal(contents, false);
+        output += JSON.stringify({ sha256: digest(text(name)) });
+        if (fault === "change") retained.node.stat.st_ctimespec.tv_nsec++;
+      },
+      stable(entry) {
+        assert.deepEqual(retained.node.stat, entry.stat);
+        stable++;
+      },
+    };
+    const native = load(env);
+    const snapshot = () => {
+      output = "";
+      native.file_tree(root);
+      return JSON.parse(output);
+    };
+    if (fault && fault !== "offset") {
+      assert.throws(snapshot, /Native tree refused/u, fault);
+      if (fault === "substitute") assert.equal(reads, 0);
+    } else {
+      const first = snapshot(),
+        second = snapshot();
+      assert.deepEqual(
+        first.map(({ name }) => Buffer.from(name, "hex").toString()),
+        ["storage/payload", "custody/launcher", "custody/policy"],
+      );
+      assert.deepEqual(second, first);
+      assert.equal(stable, 2);
+      assert.equal(held.size, 1);
+      assert.equal(closed.length, 6);
+    }
+    assert.equal(held.get(1), retained);
+    assert.equal(retained.cursor, fault === "offset" ? 1 : 0);
   }
 });
 

@@ -7319,6 +7319,17 @@ rereads: launcher is root:wheel mode-0550, executable root:reserved-group
 mode-0550, and policy root:wheel mode-0400. Native file identities survive through
 subsequent readers; these setup observations do not claim installed Seatbelt/PF.
 
+Outside snapshots enumerate the complete tree relative to the retained case
+root. Each snapshot opens a fresh no-follow directory description for `.`
+relative to that held root and rejoins its identity before reading entries.
+The retained root's cursor remains untouched across repeated and recursive scans;
+duplicating its descriptor would share an offset and could return an empty
+later traversal without any file deletion. Per-read metadata stability, bounded
+depth/entry/name counts, held-relative file barriers and checked directory
+closure remain mandatory. `case-effects.js` still requires exact outside-snapshot
+equality. Independent partial-custody recovery retains its own original-record
+and retirement requirements; repeatable traversal supplies no recovery proof.
+
 Access setup holds exactly the approved eight IPv4/IPv6 TCP/UDP loopback ports,
 with no reuse options. Native socket reads precede any port binding receipt.
 Fresh UID/GID/nonce/port bindings must stay inside the template's declared rules;

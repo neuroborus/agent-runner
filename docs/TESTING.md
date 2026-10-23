@@ -1937,6 +1937,17 @@ validation command or durable slow-tier requirement. Its focused invocation is
 installation or system/provider probe. Darwin SDK compilation and actual native
 custody remain dedicated external CI evidence.
 
+The existing native file-body fixture in `ci/native/darwin/files.test.js` also
+executes the actual held-tree traversal and stat-comparison bodies. Its injected
+directory descriptions model shared `dup` offsets and independent `openat`
+offsets. It reproduces three files followed by an empty traversal before the
+repair, then protects repeated complete snapshots, a retained nonzero cursor,
+fresh-root identity refusal, changes during traversal, read errors and checked
+closure. File-barrier observations are injected at their existing boundary;
+the fixture supplies no native filesystem or independent recovery proof.
+The selected native harness retains this coverage without a new command or
+slow-tier assignment; matching macOS verification remains required.
+
 `test/native-windows-experiment.test.js` belongs to ordinary fast discovery.
 Pure/injected cases protect the complete helper/header/case inventory, disjoint
 experiment custody, exact checkout/Git-blob bytes, one hosted compilation per
