@@ -14,6 +14,7 @@ import { createActionStore } from "./actions.js";
 import {
   dispatchActivity,
   isRecoveryPreparation,
+  normalizeDispatchOwner,
   normalizeRecoveryDispatch,
 } from "./dispatch.js";
 import {
@@ -37,6 +38,7 @@ import {
   observationActivity,
 } from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
+import { createRecoveryFailureStore } from "./recovery-failures.js";
 import { createStopService } from "./stops.js";
 import {
   assertRunCanAdvance,
@@ -249,6 +251,7 @@ export function createRunStore({
   processIsAlive = defaultProcessIsAlive,
   processIdentity = readProcessIdentity,
   onLeasePublicationBoundary = async () => {},
+  onRecoveryFailurePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
   resolveStopBoundary = null,
 } = {}) {
@@ -266,6 +269,7 @@ export function createRunStore({
     typeof processIsAlive !== "function" ||
     typeof processIdentity !== "function" ||
     typeof onLeasePublicationBoundary !== "function" ||
+    typeof onRecoveryFailurePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
@@ -390,6 +394,13 @@ export function createRunStore({
     onPublicationBoundary: onLeasePublicationBoundary,
     stateRoot: requestedStateRoot,
     tokenFactory: leaseTokenFactory,
+  });
+  const recoveryFailures = createRecoveryFailureStore({
+    getRunDirectory,
+    hostName,
+    processId,
+    processIdentity,
+    onPublicationBoundary: onRecoveryFailurePublicationBoundary,
   });
 
   async function inspectRoot() {
@@ -1083,21 +1094,7 @@ export function createRunStore({
   }
 
   async function inspectDispatchOwner(record) {
-    if (
-      !isRecord(record) ||
-      Object.keys(record).length !== 3 ||
-      !Number.isSafeInteger(record.pid) ||
-      record.pid < 1 ||
-      typeof record.hostname !== "string" ||
-      record.hostname.length < 1 ||
-      record.hostname.length > 255 ||
-      validateProcessIdentity(record.processIdentity) === null
-    ) {
-      throw new RunStoreError("Detached owner identity is invalid.", {
-        code: "ERR_INVALID_MCP_ACTION",
-      });
-    }
-    return inspectProcessOwner(record, {
+    return inspectProcessOwner(normalizeDispatchOwner(record), {
       hostName,
       processIsAlive,
       processIdentity,
@@ -1839,6 +1836,8 @@ export function createRunStore({
     recoverRun,
     inspectRecoveryDispatch,
     recordRecoveryDispatch,
+    recordRecoveryFailure: recoveryFailures.record,
+    readRecoveryFailure: recoveryFailures.read,
     inspectDispatchOwner,
     runIsLeased,
     runLeaseOwnerIsLive,

@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-23
 
+- **Detached recovery causes have separate state-owned evidence.** Immutable
+  per-dispatch diagnostic sidecars bind the run, dispatch, expected revision and
+  publishing child's exact process identity. They remain publishable without an
+  execution lease, retaining recognized Runner codes, finite stages and fixed
+  explanations while discarding native error text. Readers require the child
+  identity already recorded in the action intent; absent or mismatched evidence
+  explains nothing. Diagnostics grant no readiness, receipt, workflow or
+  ownership authority. CLI/MCP wiring remains a separate change.
+
 - **The common guide keeps editing headroom through owning-contract links.**
   Consolidated validation, mode, provider-isolation, and recovery procedures
   replace duplicated detail with links to existing product/specification owners.

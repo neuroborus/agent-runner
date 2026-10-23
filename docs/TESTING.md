@@ -136,6 +136,11 @@ validation cannot replace the original publication certificate. The state
 slow suite's bounded-heap journal case also covers overflowed projections,
 complete progress, old cursors and repeated transitions across segments.
 
+The fast state `recovery-failures.test.js` suite owns the public state boundary
+for pre-lease and pre-readiness diagnostic publication, interrupted publication,
+exact dispatch/child correlation, immutable retries, absent historical causes and
+redaction. It does not establish detached launcher or CLI/MCP projection behavior.
+
 Claude restricted-host launcher changes use deterministic public-adapter tests
 with controlled bubblewrap processes for the commit gate. That coverage must
 compare every x64 and arm64 BPF instruction, reject unsupported architectures

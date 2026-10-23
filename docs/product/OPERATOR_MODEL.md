@@ -338,6 +338,15 @@ ownerless pending run from the different run recorded as lease owner. Operators
 must use supported recovery and reclamation rather than manually deleting or
 bypassing lease records.
 
+The state boundary can retain a bounded recovery cause separately from workflow
+state and action receipts, even before a child acquires its execution lease.
+Only exact correlation with the recorded dispatch and child identity makes that
+cause available. Missing historical causes remain unavailable; an exit or signal
+does not establish why recovery failed. Stored causes contain only recognized
+Runner codes, finite stages and fixed explanations. This state-level support
+does not yet change CLI/MCP dispatch reporting or establish that a retry repairs
+the blocker.
+
 Legacy opaque plan-execution failures during terminal confirmation can expose
 an action-free retry in either mode when durable history proves acceptance and
 finalization. CLI and MCP share that eligibility; status remains lock-free and

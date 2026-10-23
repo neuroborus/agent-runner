@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { assertRunId, RunStoreError } from "./validation.js";
+import {
+  assertRunId,
+  RunStoreError,
+  validateProcessIdentity,
+} from "./validation.js";
 import { interruptObservations } from "./observations.js";
 
 const PREPARATION_FIELDS = new Map([
@@ -73,6 +77,32 @@ export function normalizeRecoveryDispatch(value) {
   return Object.freeze({
     id: value.id,
     expectedRevision: value.expectedRevision,
+  });
+}
+
+export function normalizeDispatchOwner(value) {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value)) ||
+    Reflect.ownKeys(value).length !== 3 ||
+    !Number.isSafeInteger(value.pid) ||
+    value.pid < 1 ||
+    typeof value.hostname !== "string" ||
+    value.hostname.length < 1 ||
+    value.hostname.length > 255 ||
+    /[\p{Cc}\p{Zl}\p{Zp}]/u.test(value.hostname) ||
+    validateProcessIdentity(value.processIdentity) === null
+  )
+    throw new RunStoreError("Detached owner identity is invalid.", {
+      code: "ERR_INVALID_MCP_ACTION",
+    });
+  return Object.freeze({
+    pid: value.pid,
+    hostname: value.hostname,
+    processIdentity: Object.freeze(
+      validateProcessIdentity(value.processIdentity),
+    ),
   });
 }
 

@@ -465,6 +465,14 @@ lease's mere existence or unrelated state advancement, permits receipt completio
 Public activity omits dispatch identities; persisted PIDs never grant signalling
 authority. Caller disconnect cannot release another execution's ownership.
 
+State-owned recovery-failure sidecars are diagnostic evidence only. Publication
+does not require the execution lease whose acquisition may have failed, and
+reading requires the exact run/dispatch/revision and recorded child identity.
+Their immutable, bounded, closed records discard arbitrary error text and native
+output. They cannot approve work, mark dispatch ready, complete a request, fail
+resumable work terminally, or clear ownership; missing or mismatched records
+provide no cause.
+
 Claude sandbox scaffolding is adapter-owned content outside project and task
 trees, including tool HOME/config projections and provider temporary storage.
 Absent optional project masks cannot become host-visible mount-point files.

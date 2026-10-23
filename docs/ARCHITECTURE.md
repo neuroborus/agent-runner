@@ -941,6 +941,29 @@ later pauses or input changes. Stop receipts additionally require settlement of
 the specific saved stop checkpoint. A different worktree owner remains identified
 in the retryable diagnostic.
 
+The state capability exposes `recordRecoveryFailure(runId, dispatch, { stage,
+error })` and `readRecoveryFailure(runId, { id, expectedRevision, owner })` for
+detached recovery diagnostics. Each dispatch has an immutable, exclusively and
+atomically published `.recovery-failure-<uuid>.json` beside the run state, bounded
+to 4 KiB on publication and reads, and reserved from ordinary run-artifact writes.
+Publication derives hostname/PID/boot/start identity from the publishing child.
+Reading requires the exact run UUID, dispatch UUID, expected revision and child
+identity already recorded in the action intent; mismatches and missing historical
+records return no cause. A late child cannot replace a later dispatch's record.
+Identical writes are idempotent; conflicting records are rejected.
+
+These sidecars use the existing durable exclusive-file publication protocol,
+without acquiring the execution or action lease or reading the workflow journal.
+They can therefore retain failures before execution-lease acquisition or durable
+readiness. The closed record stores a finite recovery stage, recognized Runner
+error code and fixed allowlisted explanation; unrecognized errors retain a null
+code and an unavailable explanation. Error messages, causes, stacks, provider
+output and transcripts are discarded. Exit codes and signals are separate
+observations and are never inferred from a diagnostic. A diagnostic cannot
+acknowledge dispatch, complete an action receipt, change acceptance or workflow
+state, or release uncertain ownership. The state API alone does not wire CLI/MCP
+publication or projection; detached launch and receipt behavior remain unchanged.
+
 Action-free provider process-proof failures leave the active turn and exact
 pipeline checkpoint durable, including a finalization failure after command
 execution. They do not become terminal `internal_failure` or accept output,

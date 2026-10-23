@@ -296,11 +296,30 @@ export async function publishExclusiveFile(
   }
 }
 
-export async function readOptionalText(filePath) {
+export async function readOptionalText(filePath, { maxBytes = null } = {}) {
   let handle;
   try {
     handle = await openRegularFile(filePath, constants.O_RDONLY);
-    return await handle.readFile("utf8");
+    if (maxBytes === null) return await handle.readFile("utf8");
+    const tooLarge = () =>
+      new RunStoreError("Managed state file exceeds its size limit.", {
+        code: "ERR_STATE_FILE_TOO_LARGE",
+      });
+    if ((await handle.stat()).size > maxBytes) throw tooLarge();
+    const buffer = Buffer.alloc(maxBytes + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        length,
+        buffer.length - length,
+        length,
+      );
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > maxBytes) throw tooLarge();
+    return buffer.toString("utf8", 0, length);
   } catch (cause) {
     if (cause?.code === "ENOENT") {
       return null;
@@ -311,11 +330,11 @@ export async function readOptionalText(filePath) {
   }
 }
 
-export async function readOptionalPublishedText(filePath) {
+export async function readOptionalPublishedText(filePath, options) {
   for (let attempt = 0; ; attempt += 1) {
     await settleExclusivePublication(filePath);
     try {
-      return await readOptionalText(filePath);
+      return await readOptionalText(filePath, options);
     } catch (cause) {
       // A replacement can publish its temporary link after the settlement read.
       // Retry settlement; every attempt still requires an isolated regular file.
@@ -400,6 +419,7 @@ export async function resolveRunArtifactPath(runDirectory, relativePath) {
     normalizedPath.startsWith(`..${sep}`) ||
     RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase()) ||
     /^events-[0-9]+\.jsonl$/iu.test(topLevelPath) ||
+    topLevelPath.toLowerCase().startsWith(".recovery-failure-") ||
     topLevelPath.toLowerCase().startsWith(".mutation-")
   ) {
     throw new RunStoreError("Run artifact path escapes its declared area.", {
