@@ -6006,7 +6006,8 @@ test("TCP setup, completion and observer failures retain native causes and close
       sent = [];
     let actualError = bindError,
       received = 0;
-    const observations = [];
+    const observations = [],
+      details = [];
     const api = {
       socket: 17,
       started: 1,
@@ -6039,6 +6040,7 @@ test("TCP setup, completion and observer failures retain native causes and close
         expireAfterTransfer && api.transferred ? 5000 : now,
       WSAGetLastError: () => actualError,
       wfp_now: () => 1100,
+      tcp_detail: (api, value) => details.push([api, value]),
       tcp_observe: (name, phase, value) => {
         observations.push([name, phase, value]);
         events.push(`${name}:${phase}`);
@@ -6180,6 +6182,21 @@ test("TCP setup, completion and observer failures retain native causes and close
             api === "select" &&
             phase === (selectResult === -1 ? "failed" : "complete") &&
             value === (selectResult === -1 ? selectError : selectResult),
+        ),
+      );
+    if (!unattempted && connectError === 10035 && selectResult > 0)
+      assert.ok(
+        details.some(
+          ([api, value]) =>
+            api === "select-readiness" &&
+            value ===
+              (readiness === "both"
+                ? 3
+                : readiness === "ready"
+                  ? 1
+                  : readiness === "exception"
+                    ? 2
+                    : 0),
         ),
       );
     if (completedError)
@@ -6779,6 +6796,7 @@ test("socket creation and observer admission bind the actual child primary token
       GetTickCount64: () => (fault === "deadline" ? 5000 : 10),
       GetLastError: () => lastError,
       wcscmp: (a, b) => (a === b ? 0 : 1),
+      tcp_detail: () => {},
       tcp_observe: () => {},
       WSASocketW() {
         assert.deepEqual(structuredClone(context.socketCreation), child);
@@ -7309,6 +7327,7 @@ test("child-owned TCP keeps its original socket through self-import controls and
         }
         return true;
       },
+      tcp_detail: () => {},
       tcp_observe: (api, phase) => events.push(`observe:${api}:${phase}`),
       wfp_tuple: () => events.push("tuple"),
       closesocket(socket) {
@@ -7928,6 +7947,8 @@ test("native WFP filter lookup binds block and terminating-callout providers and
     .replaceAll("*providerKey =", "providerKey.value =")
     .replaceAll("*calloutKey =", "calloutKey.value =")
     .replaceAll("*calloutProviderKey =", "calloutProviderKey.value =")
+    .replaceAll("*operation =", "operation.value =")
+    .replaceAll("*predicate =", "predicate.value =")
     .replaceAll("goto closed;", "break;")
     .replace("closed:", "} while (false);");
   const script = new Script(`result = (function() {${body}})();`);
@@ -7975,6 +7996,8 @@ test("native WFP filter lookup binds block and terminating-callout providers and
         providerKey: { value: null },
         calloutKey: { value: null },
         calloutProviderKey: { value: null },
+        operation: { value: null },
+        predicate: { value: null },
         NULL: null,
         ERROR_INVALID_DATA: 13,
         FWP_ACTION_BLOCK: 0x1001,
@@ -8027,6 +8050,18 @@ test("native WFP filter lookup binds block and terminating-callout providers and
       };
       script.runInNewContext(context);
       assert.equal(context.result === 0, !fault, `${action}:${fault}`);
+      if (fault === "provider-error") {
+        assert.equal(context.operation.value, "FwpmProviderGetByKey0");
+        assert.equal(context.predicate.value, "filter-provider");
+      }
+      if (fault === "callout-error") {
+        assert.equal(context.operation.value, "FwpmCalloutGetByKey0");
+        assert.equal(context.predicate.value, "callout");
+      }
+      if (fault === "callout-provider-error") {
+        assert.equal(context.operation.value, "FwpmProviderGetByKey0");
+        assert.equal(context.predicate.value, "callout-provider");
+      }
       assert.equal(freed.length, acquired.length);
       for (const allocation of acquired)
         assert.equal(freed.filter((value) => value === allocation).length, 1);
@@ -8059,7 +8094,7 @@ test("native WFP filter lookup binds block and terminating-callout providers and
     const context = {
       socketBound: true,
       engine: 17,
-      filter: {},
+      filter: { action: { type: 0x1001 } },
       layer: {},
       status: 0,
       reason: "none",
@@ -8160,6 +8195,10 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     "scan-bound",
     "appid",
     "appid-fields",
+    "drop-loopback",
+    "drop-direction",
+    "drop-vswitch",
+    "header-flags",
   ]) {
     const order = [],
       failures = [],
@@ -8225,6 +8264,9 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       appSid: "package",
       wfpToken: 19,
       wfpCleanupFailed: false,
+      rejected: Array(5).fill(0),
+      refreshed: 0,
+      predicate: "binding",
       INADDR_LOOPBACK: 0x7f000001,
       FWP_IP_VERSION_V4: 0,
       IPPROTO_TCP: 6,
@@ -8296,6 +8338,14 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         if (fault === "scan-bound") {
           rows.length = 0;
           rows.push(...Array(Math.min(63, limit)).fill({ type: 1 }));
+        }
+        if (snapshots > 1) {
+          if (fault === "drop-loopback")
+            rows[0].classifyDrop.isLoopback = false;
+          if (fault === "drop-direction")
+            rows[0].classifyDrop.msFwpDirection = 3;
+          if (fault === "drop-vswitch") rows[0].classifyDrop.vSwitchId.size = 1;
+          if (fault === "header-flags") rows[0].header.flags = 0;
         }
         context[slot] = rows;
         count.value = rows.length;
@@ -8384,6 +8434,25 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       assert.deepEqual(failures[0], [operation, "win32", 6]);
       assert.deepEqual(cleanup, [[operation, "win32", 6]]);
     }
+    if (
+      [
+        "drop-loopback",
+        "drop-direction",
+        "drop-vswitch",
+        "header-flags",
+      ].includes(fault)
+    ) {
+      assert.equal(context.predicate, fault);
+      assert.equal(context.reason, "fields");
+      assert.equal(
+        context.status,
+        0,
+        "An invariant must not invent an API error",
+      );
+    }
+    if (fault === "layer") assert.equal(context.api, "FwpmLayerGetById0");
+    if (fault === "provider") assert.equal(context.api, "wfp_filter");
+    if (fault === "unrelated") assert.equal(context.rejected[1], 1);
     if (fault === "empty") {
       assert.equal(snapshots, 1);
       assert.equal(context.matched, 0);
@@ -8394,6 +8463,83 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       assert.equal(snapshots, 5);
       assert.equal(context.reason, "exhausted");
     }
+  }
+});
+
+test("WFP collection inspection preserves option statuses, typed values and original last-error", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void wfp_collection_observe\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "DWORD saved = GetLastError(); FWP_VALUE0 *keywords = NULL;",
+      "const saved = GetLastError(); let keywords = NULL;",
+    )
+    .replace("DWORD queried =", "const queried =")
+    .replace("FwpmFreeMemory0((void **)&keywords)", "release(keywords)")
+    .replace("&keywords", "value=>keywords=value")
+    .replaceAll("&diagnosticOutputLock", "diagnosticOutputLock")
+    .replaceAll("*keywords->uint64", "keywords->uint64.value")
+    .replaceAll("->", ".")
+    .replace(/\((?:int|LONGLONG|ULONGLONG)\)/gu, "")
+    .replaceAll("0ULL", "0");
+  const program = new Script(`(status,collection)=>{${body}}`);
+  for (const fault of [null, "query", "type", "value", "uint32"]) {
+    let lastError = 91,
+      observed,
+      freed = 0;
+    program.runInNewContext({
+      NULL: null,
+      FWP_UINT32: 4,
+      FWP_UINT64: 5,
+      wfpEngine: 7,
+      FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS: 2,
+      stderr: {},
+      diagnosticOutputLock: {},
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      FwpmEngineGetOption0(engine, option, out) {
+        assert.deepEqual([engine, option], [7, 2]);
+        lastError = 5;
+        out({
+          type: fault === "type" ? 3 : fault === "uint32" ? 4 : 5,
+          uint32: 17,
+          uint64: fault === "value" ? null : { value: 9 },
+        });
+        return fault === "query" ? 5 : 0;
+      },
+      fprintf: (_stream, _format, ...args) => {
+        observed = args;
+        lastError = 92;
+      },
+      release: () => {
+        freed++;
+        lastError = 93;
+      },
+      fflush: () => {},
+    })(0, { type: 4, uint32: 1 });
+    assert.deepEqual(observed, [
+      0,
+      4,
+      1,
+      fault === "query" ? 5 : 0,
+      fault === "query"
+        ? -1
+        : fault === "type"
+          ? 3
+          : fault === "uint32"
+            ? 4
+            : 5,
+      fault === "uint32" ? 17 : fault ? 0 : 9,
+    ]);
+    assert.equal(freed, 1);
+    assert.equal(lastError, 91);
   }
 });
 
@@ -8494,9 +8640,10 @@ test("native socket and WFP predicates reject fabricated peers, stale windows an
     predicate.runInNewContext(altered);
     assert.equal(altered.socketBound, false, change.toString());
   }
-  const tupleGuard = /if \(h->ipVersion ([\s\S]*?)\) continue;/u.exec(
-    source,
-  )[1];
+  const tupleGuard =
+    /if \(h->ipVersion ([\s\S]*?)\) \{ rejected\[1\]\+\+; continue; \}/u.exec(
+      source,
+    )[1];
   const eventPredicate = new Script(
     "rejected = (h.ipVersion " + tupleGuard.replaceAll("h->", "h.") + ");",
   );
@@ -9595,6 +9742,7 @@ test("socket export refusals retain distinct self/destination evidence and bound
         emit(f.transfer);
       },
       observerReady: () => emit(f.prepared),
+      tcp_detail: () => {},
       tcp_observe: (api, phase, value) =>
         write(
           context.stderr,
@@ -10586,7 +10734,11 @@ test("WFP observations join exact held birth, image, package, endpoints and even
   ]) {
     const valid = wfpFixture();
     valid.observation.matches[0].actionType = action;
-    const text = (valid.tuple() + valid.snapshot()).replaceAll("\n", ending);
+    const text = (
+      valid.tuple() +
+      "native-windows-socket-input: caller=wfp_snapshot predicate=drop-loopback\n" +
+      valid.snapshot()
+    ).replaceAll("\n", ending);
     for (const chunk of [
       text.slice(0, 30),
       text.slice(30, 171),

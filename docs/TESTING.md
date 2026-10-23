@@ -2377,6 +2377,19 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
+Its existing Windows actual-body fixtures also cover original held-baseline API
+errors versus identity mismatches and independent close failures, strict finite
+diagnostic frames and compiler-trust failure attribution. The ordinary fast
+fixtures in `test/native-feasibility.test.js` cover 32/64-bit WFP keyword values
+and exact DROP rejection predicates. Those in `test/native-windows-command.test.js`
+preserve successful operating-token/policy/SACL observations
+and exercise bounded post-refusal query selection, empty/error/saturated batches,
+typed and textual PID/logon/time projection, case-insensitive held-name joins,
+foreign/stale event exclusion and independent event/query/context closure.
+Inspection never drains the live subscription or supplies native acceptance.
+Existing notification/drain ordering, missing-event
+and uncertain-retirement refusals remain required. These tiny injected cases add
+no validation tier and execute no Windows tool on a foreign host.
 Its Linux preparation suite injects one hosted GCC compilation and verifies actual
 host paths, fixed static options, command diagnostics and cold loading without
 execution. Legacy/mixed or incomplete records and changed candidate/source/tool/

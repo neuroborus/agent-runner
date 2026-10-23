@@ -283,6 +283,42 @@ export function windowsCustodyChannel(
                 ? 9216
                 : 2048),
         );
+        if (Object.hasOwn(value, "baseline")) {
+          fields.push("baseline");
+          const baseline = value.baseline;
+          closed(baseline, [
+            "operation",
+            "index",
+            "apiFailure",
+            "cleanupFailed",
+            "cleanupError",
+          ]);
+          requireWindows(
+            value.source === "custody-reader.c" &&
+              Object.hasOwn(value, "lastError") &&
+              ![
+                "open",
+                "trust",
+                "transfer",
+                "loader",
+                "retain",
+                "scheduler",
+                "cold",
+                "launcher",
+              ].some((field) => Object.hasOwn(value, field)) &&
+              ["ReOpenFile", "FileIdInfo", "identity", "CloseHandle"].includes(
+                baseline.operation,
+              ) &&
+              Number.isInteger(baseline.index) &&
+              baseline.index >= 0 &&
+              baseline.index < 6 &&
+              baseline.apiFailure === (baseline.operation !== "identity") &&
+              (baseline.apiFailure || value.lastError === 0) &&
+              typeof baseline.cleanupFailed === "boolean" &&
+              uint32(baseline.cleanupError) &&
+              (baseline.cleanupFailed || baseline.cleanupError === 0),
+          );
+        }
         if (Object.hasOwn(value, "open")) {
           fields.push("open");
           const open = value.open;

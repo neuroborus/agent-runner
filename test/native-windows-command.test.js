@@ -1530,6 +1530,10 @@ test("native command auditing queries the dynamic operating context, reverts and
     .replace(/\b(?:unsigned|BOOL|ULONGLONG)\b/gu, "let")
     .replace("(let)SecurityImpersonation", "SecurityImpersonation")
     .replace("strcmp(id,", "strcmp(id.value,")
+    .replace(
+      "memcpy(command_delivery.sacls[i],hash,65)",
+      "command_delivery.sacls[i]=hash.value",
+    )
     .replace('i?",":"",id,hash', 'i?",":"",id.value,hash.value');
   const program = new Script(
     `function command_effective(token) {${effective}} ${auditing}`,
@@ -1578,6 +1582,11 @@ test("native command auditing queries the dynamic operating context, reverts and
       userSid: identity.userSid,
       userText: identity.userSid,
       command_category: "file-system",
+      command_delivery: {
+        operating: false,
+        sacls: [{}, {}],
+        rejected: Array(4).fill(0),
+      },
       command_action: 2,
       command_files: [11, 12, 13, 14],
       command_ids: ["inspect", "edit", "outside", "marker"],
@@ -1694,6 +1703,12 @@ test("native command auditing queries the dynamic operating context, reverts and
     else {
       program.runInNewContext(context);
       const row = JSON.parse(output);
+      assert.equal(
+        context.command_delivery.policyError,
+        fault === "query" ? 5 : 0,
+      );
+      assert.equal(context.command_delivery.operating, false);
+      assert.deepEqual(context.command_delivery.sacls, [sha("13"), sha("14")]);
       assert.deepEqual(row.effective, {
         available: fault !== "query",
         success: fault !== "query",
@@ -6153,6 +6168,8 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       command_prerequisite_cleanup_failed: false,
       command_category: "file-system",
       command_gate_observed: { observed: false },
+      command_delivery_observe: () => {},
+      command_delivery: { rejected: Array(4).fill(0) },
       command_observed: {
         active: true,
         pid: 43,
@@ -6669,6 +6686,8 @@ test("actual admission releases the checked child before a complete Job census w
     const api = {
       command_observed: observed,
       command_gate_observed: { observed: false },
+      command_delivery_observe: () => {},
+      command_delivery: { rejected: Array(4).fill(0) },
       command_gate_audit_write: () => {},
       admission: { hProcess: 41, hThread: 42, dwProcessId: 43, dwThreadId: 44 },
       command_processes: [41],
@@ -7294,6 +7313,8 @@ function commandCaptureFixture(
       audit: [5, 0, 0, 0, 0, 0, 0, 0, 1],
     },
     command_gate_observed: { observed: false },
+    command_delivery_observe: () => {},
+    command_delivery: { rejected: Array(4).fill(0) },
     command_subscription_query: { text: "" },
     command_subscription_flags: 0,
     EvtSubscribeToFutureEvents: 1,
@@ -8407,6 +8428,284 @@ test("native audit installation records intent first and preserves exact setter 
   }
 });
 
+test("post-refusal audit inspection joins the original case without draining the subscription", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|BOOL|int) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const number = body("command_delivery_number")
+    .replaceAll("->", ".")
+    .replace(/\*number=([^;]+);/gu, "number($1);");
+  const match = body("command_delivery_match")
+    .replace(
+      "union { EVT_VARIANT alignment; BYTE bytes[32768]; } buffer;",
+      "const buffer={bytes:[]};",
+    )
+    .replace(
+      "const EVT_VARIANT *values=(const EVT_VARIANT *)buffer.bytes;",
+      "const values=buffer.bytes;",
+    )
+    .replace("ULONGLONG pid,logon,time=", "let pid,logon;let time=")
+    .replaceAll("sizeof(buffer.bytes)", "32768")
+    .replaceAll("sizeof(EVT_VARIANT)", "16")
+    .replace(/\*(operation|error)=([^;]+);/gu, "$1($2);")
+    .replace(/&(values\[[02]\])/gu, "$1")
+    .replace(/,&(pid|logon|used|count)/gu, ",value=>$1=value")
+    .replace(/\b(?:DWORD|BOOL)\b/gu, "let");
+  const inspection = body("command_delivery_observe")
+    .replace(
+      "WCHAR query[2048]; EVT_HANDLE events[16]={0};",
+      "const query={};const events=Array(16).fill(null);",
+    )
+    .replace(/const WCHAR \*paths\[\]=\{([^}]+)\};/u, "const paths=[$1];")
+    .replace("const WCHAR *keywords", "const keywords")
+    .replaceAll("const char *", "let ")
+    .replaceAll(", *", ", ")
+    .replaceAll(/\bL(?=")/gu, "")
+    .replace(/\b(?:DWORD|EVT_HANDLE|BOOL|LONGLONG|int|unsigned)\b/gu, "let")
+    .replace(/,&(count|readOperation|readError)/gu, ",value=>$1=value");
+  const program =
+    new Script(`function command_delivery_number(value,number){${number}}
+    function command_delivery_match(context,event,operation,error){${match}}
+    ()=>{${inspection}}`);
+  for (const fault of [
+    null,
+    "query",
+    "empty",
+    "next",
+    "event-close",
+    "query-close",
+    "context-close",
+    "saturated",
+    "context",
+    "render",
+    "event-fields",
+    "text",
+    "other-pid",
+    "other-logon",
+    "stale",
+    "object-case",
+  ]) {
+    const calls = [],
+      closed = [],
+      cleanup = [],
+      queries = [],
+      frames = [];
+    let lastError = 91,
+      selected = 0;
+    const api = {
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      ERROR_INSUFFICIENT_BUFFER: 122,
+      ERROR_INVALID_DATA: 13,
+      EvtQueryChannelPath: 1,
+      EvtQueryReverseDirection: 0x200,
+      EvtRenderContextValues: 0,
+      EvtRenderEventValues: 0,
+      EvtVarTypeUInt32: 8,
+      EvtVarTypeUInt64: 10,
+      EvtVarTypeHexInt64: 21,
+      EvtVarTypeString: 1,
+      EvtVarTypeFileTime: 17,
+      stderr: {},
+      command_case_pid: 43,
+      command_case_birth: 50,
+      command_case_logon: 7,
+      command_case_from: 90,
+      command_action: 2,
+      command_paths: ["inspect", "edit", "outside", "marker"],
+      userText: identity.userSid,
+      command_delivery: {
+        level: 2,
+        policy: 3,
+        policyError: 0,
+        sacls: [sha("target"), sha("marker")],
+        rejected: [1, 2, 3, 4],
+      },
+      command_event_time: (text) => Number(text),
+      command_event_number(text, out) {
+        if (!text || !/^(?:0x[0-9a-f]+|[0-9]+)$/u.test(text)) return false;
+        out(Number(text));
+        return true;
+      },
+      _wcsicmp: (a, b) => (a.toLowerCase() === b.toLowerCase() ? 0 : 1),
+      wcsnlen_s: (text, maximum) => Math.min(text.length, maximum),
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      EvtCreateRenderContext(count, paths, flags) {
+        assert.equal(count, 4);
+        assert.equal(paths.length, 4);
+        assert.equal(flags, 0);
+        assert.ok(paths[0].includes("ProcessId"));
+        assert.ok(paths[2].includes("SubjectLogonId"));
+        lastError = 5;
+        return fault === "context" ? null : "context";
+      },
+      swprintf_s(query, maximum, format, ...args) {
+        assert.equal(maximum, 2048);
+        let i = 0;
+        query.text = format.replace(/%ls/gu, () => args[i++]);
+        queries.push(query.text);
+        return query.text.length;
+      },
+      EvtQuery(session, channel, query, flags) {
+        assert.deepEqual([session, channel, flags], [null, "Security", 0x201]);
+        selected = queries.length - 1;
+        calls.push("query");
+        lastError = 5;
+        assert.equal(
+          query.text.includes("ObjectName"),
+          false,
+          "Case-insensitive held names are joined after projection",
+        );
+        assert.ok(
+          query.text.includes("TimeCreated[timediff(@SystemTime)<=150000]"),
+        );
+        return fault === "query" ? null : `query:${selected}`;
+      },
+      EvtNext(query, maximum, events, timeout, flags, count) {
+        assert.deepEqual(
+          [query, maximum, timeout, flags],
+          [`query:${selected}`, 16, 0, 0],
+        );
+        calls.push("next");
+        lastError = fault === "empty" ? 259 : 50;
+        const size =
+          fault === "saturated"
+            ? 16
+            : fault === "empty" || fault === "next"
+              ? 0
+              : selected
+                ? 1
+                : 2;
+        count(size);
+        for (let i = 0; i < size; i++) events[i] = `event:${selected}:${i}`;
+        return !["empty", "next"].includes(fault);
+      },
+      EvtRender(context, event, flags, maximum, bytes, used, count) {
+        assert.deepEqual([context, flags, maximum], ["context", 0, 32768]);
+        calls.push("render");
+        lastError = 50;
+        if (fault === "render") return false;
+        const object = event.endsWith(":0") ? "outside" : "marker";
+        bytes.push(
+          fault === "text"
+            ? { Type: 1, StringVal: "0x2b" }
+            : { Type: 8, UInt32Val: fault === "other-pid" ? 44 : 43 },
+          {
+            Type: fault === "event-fields" ? 8 : 1,
+            StringVal: fault === "object-case" ? object.toUpperCase() : object,
+          },
+          fault === "text"
+            ? { Type: 1, StringVal: "0x7" }
+            : { Type: 21, UInt64Val: fault === "other-logon" ? 8 : 7 },
+          fault === "text"
+            ? { Type: 1, StringVal: "100" }
+            : { Type: 17, FileTimeVal: fault === "stale" ? 89 : 100 },
+        );
+        used(128);
+        count(4);
+        return true;
+      },
+      EvtClose(handle) {
+        closed.push(handle);
+        lastError = 6;
+        return (
+          !(
+            fault === "event-close" &&
+            handle.endsWith(":0") &&
+            handle.startsWith("event:")
+          ) &&
+          !(fault === "query-close" && handle.startsWith("query:")) &&
+          !(fault === "context-close" && handle === "context")
+        );
+      },
+      cleanup_error: (...cause) => cleanup.push(cause),
+      fprintf: (_stream, _format, ...args) => {
+        frames.push(args);
+        lastError = 92;
+      },
+      fflush: () => {},
+    };
+    program.runInNewContext(api)();
+    assert.equal(queries.length, 2);
+    assert.equal(queries[0].includes("band(Keywords"), false);
+    assert.equal(queries[1].includes("band(Keywords"), true);
+    assert.equal(lastError, 91);
+    assert.equal(
+      calls.filter((call) => call === "next").length,
+      fault === "query" ? 0 : 2,
+    );
+    assert.equal(frames.length, 4);
+    assert.equal(frames[1][0], 0);
+    assert.equal(frames[2][0], 1);
+    assert.equal(frames[1][1], fault === "query" ? "EvtQuery" : "EvtNext");
+    assert.equal(
+      frames[1][2],
+      fault === "query"
+        ? 5
+        : fault === "empty"
+          ? 259
+          : fault === "next"
+            ? 50
+            : 0,
+    );
+    assert.equal(frames[1][4], fault === "saturated");
+    assert.equal(
+      frames[1][5],
+      ["event-close", "query-close"].includes(fault) ? 6 : 0,
+    );
+    assert.equal(frames[3][0], fault === "context-close" ? 6 : 0);
+    assert.equal(
+      closed.filter((handle) => handle.startsWith("query:")).length,
+      fault === "query" ? 0 : 2,
+    );
+    assert.equal(
+      closed.filter((handle) => handle === "context").length,
+      fault === "context" ? 0 : 1,
+    );
+    assert.equal(
+      cleanup.length > 0,
+      ["event-close", "query-close", "context-close"].includes(fault),
+    );
+    assert.equal(
+      frames[1][10],
+      fault === "context"
+        ? 5
+        : fault === "render"
+          ? 50
+          : fault === "event-fields"
+            ? 13
+            : 0,
+    );
+    const matches = ![
+      "query",
+      "empty",
+      "next",
+      "render",
+      "event-fields",
+      "other-pid",
+      "other-logon",
+      "stale",
+    ].includes(fault);
+    assert.equal(frames[1][7], fault === "context" ? -1 : matches ? 1 : 0);
+    assert.equal(
+      frames[1][8],
+      fault === "context" ? -1 : matches ? (fault === "saturated" ? 15 : 1) : 0,
+    );
+    assert.deepEqual(api.command_delivery.rejected, [1, 2, 3, 4]);
+  }
+});
+
 test("effective audit reads retain both outcomes and the immediate native query status", async () => {
   const source = await readFile(
       new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
@@ -8443,6 +8742,11 @@ test("effective audit reads retain both outcomes and the immediate native query 
       FALSE: false,
       ERROR_SUCCESS: 0,
       command_category: "file-system",
+      command_delivery: {
+        operating: false,
+        sacls: [{}, {}],
+        rejected: Array(4).fill(0),
+      },
       POLICY_AUDIT_EVENT_SUCCESS: 1,
       POLICY_AUDIT_EVENT_FAILURE: 2,
       AuditComputeEffectivePolicyByToken: (token, category, count, result) => {

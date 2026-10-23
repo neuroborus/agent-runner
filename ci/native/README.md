@@ -85,6 +85,38 @@ fails. Successful opens are silent. Reviewed/protected helpers retain their
 original guard; receipt schemas, held identity/hash reads, canonical-path and
 private/protected permission checks remain unchanged.
 
+The ordinary Windows diagnostic checkpoint retains the existing TCP, WFP and
+Security acceptance protocols. Bounded `native-windows-socket-input:` text adds
+select readiness, `SO_ERROR` result size, installed event-collection options and
+keyword type/value, query interval/AppId size, rejection counts and the last WFP
+API/predicate. These lines stay outside the strict tuple/snapshot carriers.
+WFP collection remains read-only; no event option is enabled or filter installed.
+The rejection counters distinguish non-DROP/unbound events, endpoint, interval,
+principal and layer/direction mismatches; malformed DROP fields name their exact
+predicate. Provider/callout lookups name their exact failed API and join;
+lookup status and resource closure remain independent.
+
+Command failure output joins the operating PID/birth/logon/window to cached
+effective-policy status, impersonation level and held target/marker SACL hashes
+from the existing N/F observations. Case admission resets this diagnostic cache;
+unread values remain unavailable. Readiness, drain and projection counters retain
+their existing meanings; `audit[0]=5` is a control phase, not a delivery cause.
+The four projection counters record state/subject refusal, numeric or lifetime
+binding refusal, a target predicate miss, and a marker/order predicate miss.
+One post-refusal inspection issues two read-only Security queries over the same
+subject and recent interval, with and without the existing keyword selection.
+Each uses one zero-timeout batch of at most 16 events. A four-field projection
+with a fixed 32 KiB buffer joins the original PID, operating logon and birth/release
+window before comparing the held target/marker names case-insensitively outside
+XPath. Earlier broker reads and other processes cannot count as case events.
+Unavailable or malformed projection remains distinct from zero matches. Every
+acquired event/query/render-context handle is closed, with the original error
+preserved separately from closure errors. Counts, saturation, empty queries and
+I/O completion establish neither event absence nor delivery. The live subscription,
+bookmark, deadlines, policy, SACLs and acceptance predicates are unchanged. The hosted diagnostic
+checkpoint must establish actual attribution before dependent repairs; unresolved
+attribution requires a reviewed diagnostic follow-up.
+
 SDK `Windows.h`, the private access-payload dependency graph and installed Git
 selected by `windowsExperimentGitRuntime` remain distinct inputs. Initial and
 cold reads reuse `preparation-files.js` and native held custody. An earlier
@@ -9503,6 +9535,14 @@ HRESULT, collection index and census attempt independently of incidental
 BSTRs and engine handles before refusal; handle-close uncertainty is retained
 separately from the original HRESULT. This metadata supplies no completion or
 retirement authority. Successful queries clear the refusal context.
+Held ownership baselines also distinguish the original `ReOpenFile`, `FileIdInfo`
+and identity predicates, each evaluated once. Their finite `baseline` context
+names the object index and separates API failure from invariant failure; an
+identity mismatch reports error zero. The first API error is captured before
+closing the temporary observer handle, and any independent close failure has
+its own fields. A failed final close is reported without retrying it. Full
+security-descriptor/SACL reads and exact original held identity remain required;
+these diagnostics confer no restoration or retirement authority.
 Rejected admission retains protected original receipts and fences work. A fresh
 verifier under the original deadline rechecks ownership before `X` exits the
 parked helper without plan loading or setup authorization. Independent process/Job

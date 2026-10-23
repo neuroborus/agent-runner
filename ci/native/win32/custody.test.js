@@ -2315,6 +2315,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
         ownership_failure_write: () => false,
         ownership_failure_fence: () => {},
         reader_cold_failure: () => false,
+        reader_baseline_failure: () => false,
         reader_scheduler_failure: () => false,
         reader_context_failure: () => false,
         reader_open_failure: () => false,
@@ -2377,6 +2378,238 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
   assert.throws(() => f.channel.settle());
   await assert.rejects(f.channel.receive());
   await assert.rejects(f.channel.completion);
+});
+
+test("held baseline guards identify the first API or identity refusal and independent closure", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const native = body("ownership_baseline_read")
+    .replaceAll("->", ".")
+    .replace(
+      "struct held_file *held = &entries[i+1].file;",
+      "const held = entries[i+1].file;",
+    )
+    .replace("HANDLE file =", "file =")
+    .replace("DWORD error =", "error =")
+    .replace("const char *operation =", "operation =")
+    .replace("BOOL apiFailure =", "apiFailure =")
+    .replace("FILE_ID_INFO id;", "const id = {};")
+    .replaceAll("&id", "id")
+    .replace("&held.id", "held.id")
+    .replaceAll("sizeof(id)", "24")
+    .replace("PSECURITY_DESCRIPTOR sd =", "const sd =")
+    .replace("BOOL read =", "const read =")
+    .replace("(BYTE *)sd", "sd")
+    .replaceAll("goto refused;", "throw refused;");
+  const [reading, cleanup] = native.split("refused:");
+  const program = new Script(
+    `(i,hash)=>{try{${reading}}catch(cause){if(cause!==refused)throw cause;}${cleanup}}`,
+  );
+  const sending = new Script(
+    `(source,line,error)=>{${body("reader_baseline_failure")
+      .replace(
+        "char bytes[1024]; DWORD written;",
+        "const bytes={};let written;",
+      )
+      .replace("int size", "const size")
+      .replace("sizeof(bytes)", "1024")
+      .replace("(DWORD)size", "size")
+      .replace("&written", "value=>written=value")
+      .replaceAll("\\036", "\\x1e")}}`,
+  );
+  for (const fault of [
+    null,
+    "reopen",
+    "id",
+    "identity",
+    "close",
+    "id-close",
+    "identity-close",
+  ]) {
+    const calls = [],
+      record = {},
+      frames = [];
+    let lastError = 91;
+    const api = {
+      file: null,
+      error: 0,
+      operation: null,
+      apiFailure: false,
+      entries: [{}, { file: { handle: 7, id: "original" } }],
+      reader_baseline: record,
+      refused: {},
+      TRUE: true,
+      FALSE: false,
+      INVALID_HANDLE_VALUE: -1,
+      sequence: 26,
+      reader_command: "ownership-outside",
+      control: "authenticated",
+      NULL: null,
+      sprintf_s(bytes, maximum, format, ...args) {
+        assert.equal(maximum, 1024);
+        let i = 0;
+        bytes.text = format.replace(/%(?:lu|u|s)/gu, () => String(args[i++]));
+        return bytes.text.length;
+      },
+      WriteFile(handle, bytes, size, written) {
+        assert.equal(handle, "authenticated");
+        assert.equal(size, bytes.text.length);
+        frames.push(JSON.parse(bytes.text.slice(1)));
+        written(size);
+        lastError = 92;
+        return true;
+      },
+      READ_CONTROL: 1,
+      FILE_READ_ATTRIBUTES: 2,
+      ACCESS_SYSTEM_SECURITY: 4,
+      FILE_SHARE_READ: 8,
+      FILE_SHARE_WRITE: 16,
+      FILE_SHARE_DELETE: 32,
+      FILE_FLAG_OPEN_REPARSE_POINT: 64,
+      FILE_FLAG_BACKUP_SEMANTICS: 128,
+      FileIdInfo: 18,
+      SE_FILE_OBJECT: 1,
+      ERROR_SUCCESS: 0,
+      ReOpenFile(handle, access, sharing, flags) {
+        assert.deepEqual([handle, access, sharing, flags], [7, 7, 56, 192]);
+        calls.push("reopen");
+        lastError = 5;
+        return fault === "reopen" ? -1 : 9;
+      },
+      GetFileInformationByHandleEx(handle, kind, out, size) {
+        assert.deepEqual([handle, kind, size], [9, 18, 24]);
+        calls.push("id");
+        lastError = 50;
+        out.value = fault?.startsWith("identity") ? "other" : "original";
+        return !fault?.startsWith("id-") && fault !== "id";
+      },
+      memcmp: (id, expected) => (id.value === expected ? 0 : 1),
+      file_sd(handle, kind) {
+        assert.deepEqual([handle, kind], [9, 1]);
+        calls.push("security");
+        return "full-sd";
+      },
+      GetSecurityDescriptorLength: () => 32,
+      sum(sd, length, hash) {
+        assert.deepEqual([sd, length], ["full-sd", 32]);
+        calls.push("hash");
+        hash.value = "unchanged";
+      },
+      LocalFree: () => {
+        calls.push("free");
+        lastError = 92;
+      },
+      CloseHandle(handle) {
+        assert.equal(handle, 9);
+        calls.push("close");
+        lastError = 6;
+        return !fault?.endsWith("close");
+      },
+      GetLastError: () => lastError,
+      SetLastError: (error) => {
+        lastError = error;
+      },
+      need(ok) {
+        assert.equal(ok, false);
+        record.error = lastError;
+        sending.runInNewContext(api)("custody-reader.c", 1, lastError);
+        throw new Error("guard refused");
+      },
+    };
+    const hash = {};
+    if (!fault) {
+      program.runInNewContext(api)(0, hash);
+      assert.equal(hash.value, "unchanged");
+    } else {
+      assert.throws(
+        () => program.runInNewContext(api)(0, hash),
+        /guard refused/u,
+      );
+      const operation =
+        fault === "reopen"
+          ? "ReOpenFile"
+          : fault.startsWith("identity")
+            ? "identity"
+            : fault === "close"
+              ? "CloseHandle"
+              : "FileIdInfo";
+      assert.equal(record.operation, operation);
+      assert.equal(
+        record.error,
+        operation === "identity"
+          ? 0
+          : operation === "ReOpenFile"
+            ? 5
+            : operation === "CloseHandle"
+              ? 6
+              : 50,
+      );
+      assert.equal(record.apiFailure, operation !== "identity");
+      assert.equal(record.cleanupFailed, fault.endsWith("-close"));
+      assert.equal(record.cleanupError, fault.endsWith("-close") ? 6 : 0);
+      assert.equal(frames[0].lastError, record.error);
+      assert.equal(frames[0].baseline.operation, operation);
+      assert.equal(frames[0].baseline.cleanupError, record.cleanupError);
+    }
+    assert.equal(calls.filter((call) => call === "reopen").length, 1);
+    assert.equal(
+      calls.filter((call) => call === "id").length,
+      fault === "reopen" ? 0 : 1,
+    );
+    assert.equal(
+      calls.filter((call) => call === "close").length,
+      fault === "reopen" ? 0 : 1,
+    );
+    if (fault && fault !== "close")
+      assert.equal(calls.includes("security"), false);
+  }
+  const baseline = {
+    operation: "FileIdInfo",
+    index: 0,
+    apiFailure: true,
+    cleanupFailed: true,
+    cleanupError: 6,
+  };
+  for (const change of [
+    null,
+    { operation: "retry" },
+    { index: 6 },
+    { apiFailure: false },
+    { cleanupError: -1 },
+    { cleanupFailed: false },
+    { extra: 1 },
+  ]) {
+    const f = transport(),
+      response = f.channel.receive();
+    f.child.stdout.write(
+      "\x1e" +
+        JSON.stringify({
+          phase: "reader-failure",
+          sequence: 26,
+          command: "ownership-outside",
+          source: "custody-reader.c",
+          line: 1,
+          lastError: 50,
+          baseline: { ...baseline, ...change },
+        }) +
+        "\n",
+    );
+    await assert.rejects(response, (error) =>
+      change
+        ? !error.custodyReaderFailure
+        : error.custodyReaderFailure?.baseline.operation === "FileIdInfo",
+    );
+    await assert.rejects(f.channel.completion);
+    f.child.emit("close", 126, null);
+    assert.throws(() => f.channel.settle());
+  }
 });
 
 test("original creator-census calls retain guard errors, clear successful context and never retry a refusal", async () => {
@@ -2473,6 +2706,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           ownership_failure_write: () => false,
           ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
+          reader_baseline_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure: () => false,
           reader_open_failure: () => false,
@@ -4415,6 +4649,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           ownership_failure_write: () => false,
           ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
+          reader_baseline_failure: () => false,
           reader_scheduler_failure: () => false,
           reader_context_failure() {
             assert.fail("Loader context masked the sampled open refusal");
@@ -4491,6 +4726,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
     ownership_failure_write: () => false,
     ownership_failure_fence: () => {},
     reader_cold_failure: () => false,
+    reader_baseline_failure: () => false,
     reader_scheduler_failure: () => false,
     reader_context_failure(source, line, error) {
       fallback.push([source, line, error]);

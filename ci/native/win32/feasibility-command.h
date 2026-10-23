@@ -74,7 +74,12 @@ static struct command_gate_observation {
   struct { LONGLONG status,type,flags,mask;char sid[184]; } entries[8];
   unsigned count;char sid[184];TOKEN_STATISTICS stats;DWORD policyBits,error;const char *api;
 } command_gate_observed;
+static struct {
+  BOOL operating; LONGLONG policy, policyError, level;
+  char sacls[2][65]; unsigned rejected[4];
+} command_delivery = {FALSE, -1, -1, -1, {{0}}, {0}};
 static void command_gate_audit_write(FILE *output);
+static void command_delivery_observe(void);
 static void command_pump(HANDLE *pipe,const char *event);
 static void command_observe_failure(void) {
   if (!command_observed.active) return;
@@ -96,6 +101,7 @@ static void command_observe_failure(void) {
     fflush(stderr);
   }
   if(command_gate_observed.observed){fputs("native-windows-command: gate-audit=",stderr);command_gate_audit_write(stderr);fputc('\n',stderr);fflush(stderr);}
+  if(command_observed.audit[0]>=5)command_delivery_observe();
   ReleaseSRWLockExclusive(&diagnosticOutputLock); SetLastError(saved);
 }
 static void command_available(BOOL ok, const char *operation) {
@@ -454,6 +460,7 @@ static void command_effective(HANDLE token) {
   AUDIT_POLICY_INFORMATION *policy=NULL;BOOL available=AuditComputeEffectivePolicyByToken(token,&command_category,1,&policy),success=FALSE;
   DWORD error=available?ERROR_SUCCESS:GetLastError();BOOL failed=FALSE;
   if(available){invariant(policy&&IsEqualGUID(&policy->AuditSubCategoryGuid,&command_category),"command-effective-policy");success=(policy->AuditingInformation&POLICY_AUDIT_EVENT_SUCCESS)!=0;failed=(policy->AuditingInformation&POLICY_AUDIT_EVENT_FAILURE)!=0;}
+  if(command_delivery.operating){command_delivery.policyError=error;command_delivery.policy=-1;if(available)command_delivery.policy=policy->AuditingInformation;}
   if(policy)AuditFree(policy);
   printf("{\"available\":%s,\"success\":%s,\"failure\":%s,\"error\":%lu}",available?"true":"false",success?"true":"false",failed?"true":"false",error);
 }
@@ -512,6 +519,65 @@ static BOOL command_event_number(const WCHAR *text, ULONGLONG *value) {
   WCHAR *end;errno=0;ULONGLONG number=_wcstoui64(text,&end,0);
   if(errno||*end)return FALSE;*value=number;return TRUE;
 }
+/* Diagnostic projection returns no acceptance evidence and never calls the
+ * fatal parser/guards while an original failure is already being reported. */
+static BOOL command_delivery_number(const EVT_VARIANT *value, ULONGLONG *number) {
+  if(value->Type==EvtVarTypeUInt32){*number=value->UInt32Val;return TRUE;}
+  if(value->Type==EvtVarTypeUInt64||value->Type==EvtVarTypeHexInt64){*number=value->UInt64Val;return TRUE;}
+  return value->Type==EvtVarTypeString&&command_event_number(value->StringVal,number);
+}
+static int command_delivery_match(EVT_HANDLE context, EVT_HANDLE event, const char **operation, DWORD *error) {
+  union { EVT_VARIANT alignment; BYTE bytes[32768]; } buffer;
+  DWORD used=0,count=0;*operation="EvtRender";*error=ERROR_SUCCESS;
+  BOOL rendered=EvtRender(context,event,EvtRenderEventValues,sizeof(buffer.bytes),buffer.bytes,&used,&count);
+  if(!rendered){*error=GetLastError();return -1;}
+  *operation="event-fields";
+  if(count!=4||used<4*sizeof(EVT_VARIANT)||used>sizeof(buffer.bytes)){*error=ERROR_INVALID_DATA;return -1;}
+  const EVT_VARIANT *values=(const EVT_VARIANT *)buffer.bytes;
+  ULONGLONG pid,logon,time=values[3].Type==EvtVarTypeFileTime?values[3].FileTimeVal:
+    values[3].Type==EvtVarTypeString?command_event_time(values[3].StringVal):0;
+  if(!command_delivery_number(&values[0],&pid)||!command_delivery_number(&values[2],&logon)||!time||
+      values[1].Type!=EvtVarTypeString||!values[1].StringVal||wcsnlen_s(values[1].StringVal,4096)>=4096){*error=ERROR_INVALID_DATA;return -1;}
+  if(!command_case_pid||!command_case_from||!command_case_logon||pid!=command_case_pid||logon!=command_case_logon||
+      time<command_case_from||time<command_case_birth)return 0;
+  return (!_wcsicmp(values[1].StringVal,command_paths[command_action])?1:0)|(!_wcsicmp(values[1].StringVal,command_paths[3])?2:0);
+}
+/* One finite post-refusal inspection, without draining or updating the live
+ * subscription. Query counts are diagnostics, never delivery or loss proof. */
+static void command_delivery_observe(void) {
+  DWORD saved=GetLastError();
+  fprintf(stderr,"native-windows-command: delivery operating-context pid=%lu birth=%llu logon=%llu from=%llu level=%lld policy=%lld policy-error=%lld target-sacl=%s marker-sacl=%s rejected=%u,%u,%u,%u\n",
+    command_case_pid,command_case_birth,command_case_logon,command_case_from,command_delivery.level,command_delivery.policy,command_delivery.policyError,
+    command_delivery.sacls[0],command_delivery.sacls[1],command_delivery.rejected[0],command_delivery.rejected[1],command_delivery.rejected[2],command_delivery.rejected[3]);
+  const WCHAR *paths[]={L"Event/EventData/Data[@Name='ProcessId']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/System/TimeCreated/@SystemTime"};
+  EVT_HANDLE context=EvtCreateRenderContext(4,paths,EvtRenderContextValues);DWORD contextError=context?ERROR_SUCCESS:GetLastError();
+  for(unsigned selected=0;selected<2;selected++){
+    WCHAR query[2048]; EVT_HANDLE events[16]={0}; DWORD count=0,error=ERROR_SUCCESS,closeError=0,projectionError=contextError;
+    const char *api="EvtQuery", *closeKind="none", *projection=context?"none":"EvtCreateRenderContext";
+    LONGLONG targets=context?0:-1,markers=context?0:-1;
+    const WCHAR *keywords=selected?L" and ((EventID=4663 and band(Keywords,9007199254740992)) or (EventID=4656 and band(Keywords,4503599627370496)))":L"";
+    int length=swprintf_s(query,2048,L"*[System[Provider[@Name=\"Microsoft-Windows-Security-Auditing\"] and (EventID=4656 or EventID=4663)%ls and TimeCreated[timediff(@SystemTime)<=150000]] and EventData[Data[@Name=\"SubjectUserSid\"]=\"%ls\" and Data[@Name=\"ObjectType\"]=\"File\"]]",keywords,userText);
+    if(length<=0)api="query-format";
+    EVT_HANDLE inspection=length>0?EvtQuery(NULL,L"Security",query,EvtQueryChannelPath|EvtQueryReverseDirection):NULL;
+    if(!inspection)error=length>0?GetLastError():ERROR_INSUFFICIENT_BUFFER;
+    else {
+      api="EvtNext";
+      BOOL next=EvtNext(inspection,16,events,0,0,&count);error=next?ERROR_SUCCESS:GetLastError();
+      if(count>16){count=16;if(!error)error=ERROR_INVALID_DATA;}
+      if(next&&context)for(unsigned i=0;i<count;i++){
+        DWORD readError=0;const char *readOperation="none";int match=command_delivery_match(context,events[i],&readOperation,&readError);
+        if(match<0){if(!projectionError){projectionError=readError;projection=readOperation;}}
+        else{if(match&1)targets++;if(match&2)markers++;}
+      }
+      for(unsigned i=0;i<16;i++)if(events[i]&&!EvtClose(events[i])){DWORD closed=GetLastError();if(!closeError){closeError=closed;closeKind="event";}cleanup_error("command-metadata-close","win32",closed);}
+      if(!EvtClose(inspection)){DWORD closed=GetLastError();if(!closeError){closeError=closed;closeKind="query";}cleanup_error("command-metadata-close","win32",closed);}
+    }
+    fprintf(stderr,"native-windows-command: delivery inspection selection=%u api=%s error=%lu count=%lu saturated=%u close-error=%lu close-kind=%s targets=%lld markers=%lld projection=%s projection-error=%lu\n",selected,api,error,count,count==16,closeError,closeKind,targets,markers,projection,projectionError);
+  }
+  DWORD contextClose=ERROR_SUCCESS;if(context&&!EvtClose(context)){contextClose=GetLastError();cleanup_error("command-metadata-close","win32",contextClose);}
+  fprintf(stderr,"native-windows-command: delivery projection-close-error=%lu\n",contextClose);
+  fflush(stderr);SetLastError(saved);
+}
 /* Only a signaled control process permits draining to pipe EOF. A prefix of
  * stderr cannot become the child's complete original-failure carrier. */
 static void command_control_output(void) {
@@ -539,11 +605,11 @@ static void command_case_live(void) {
  * held birth, actual operating logon, outcome and post-release access window. */
 static void command_case_event(const WCHAR *process, const WCHAR *object, const WCHAR *eventId, const WCHAR *mask, const WCHAR *stamp,
     const WCHAR *subject, const WCHAR *logon, const WCHAR *keywords, const WCHAR *record) {
-  if(!command_case_pid||!command_case_from||!command_client||command_closing||!object||!subject||wcscmp(subject,userText))return;
+  if(!command_case_pid||!command_case_from||!command_client||command_closing||!object||!subject||wcscmp(subject,userText)){command_delivery.rejected[0]++;return;}
   ULONGLONG pid,rights,id,authentication,bits,sequence,time=command_event_time(stamp);
   if(!command_event_number(process,&pid)||pid!=command_case_pid||!command_event_number(mask,&rights)||rights>MAXDWORD||
       !command_event_number(eventId,&id)||!command_event_number(logon,&authentication)||authentication!=command_case_logon||
-      !command_event_number(keywords,&bits)||!command_event_number(record,&sequence)||!sequence||time<command_case_from||time<command_case_birth)return;
+      !command_event_number(keywords,&bits)||!command_event_number(record,&sequence)||!sequence||time<command_case_from||time<command_case_birth){command_delivery.rejected[1]++;return;}
   command_case_live();
   BOOL failureExpected=!command_case_permit;
   BOOL failed=(bits&0x0030000000000000ULL)==0x0010000000000000ULL;
@@ -551,9 +617,10 @@ static void command_case_event(const WCHAR *process, const WCHAR *object, const 
   if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2))&&
       (failureExpected?(id==4656&&failed):(id==4663&&succeeded))){
     command_target_seen=TRUE;command_target_record=sequence;command_target_time=time;command_marker_seen=FALSE;
-  }
+  }else command_delivery.rejected[2]++;
   if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&id==4663&&succeeded&&(rights&1)&&
       sequence>command_target_record&&time>=command_target_time)command_marker_seen=TRUE;
+  else command_delivery.rejected[3]++;
 }
 static BOOL command_audit_project(BYTE *bytes, DWORD length) {
   char *encoded=malloc((size_t)length*2+1);invariant(encoded!=NULL,"command-capture-allocation");for(DWORD j=0;j<length;j++)snprintf(encoded+2*j,3,"%02x",bytes[j]);struct xml_result parsed=xml_parse(encoded);const WCHAR *process=NULL,*object=NULL,*eventId=NULL,*mask=NULL,*stamp=NULL,*subject=NULL,*logon=NULL,*keywords=NULL,*record=NULL;
@@ -838,18 +905,20 @@ static void command_case_auditing(void) {
   BOOL matched=EqualSid(subject->User.Sid,userSid)&&stats->TokenType==TokenImpersonation&&stats->ImpersonationLevel==SecurityImpersonation;
   ULONGLONG logon=((ULONGLONG)(DWORD)stats->AuthenticationId.HighPart<<32)|stats->AuthenticationId.LowPart;
   matched=matched&&logon&&(!command_case_logon||command_case_logon==logon);command_case_logon=logon;
+  command_delivery.level=stats->ImpersonationLevel;
   free(subject);free(stats);invariant(matched,"command-client-context");
   if(!command_revert())failure(126);
-  fputs("{\"effective\":",stdout);command_effective(command_preflight_owned.token);
+  fputs("{\"effective\":",stdout);command_delivery.operating=TRUE;command_effective(command_preflight_owned.token);command_delivery.operating=FALSE;
   printf(",\"operating\":{\"userSid\":\"%ls\",\"level\":%u,\"token\":",userText,(unsigned)SecurityImpersonation);command_token_read(command_preflight_owned.token);putchar('}');
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
   fputs(",\"files\":[",stdout);
   unsigned indices[2]={command_action,3};
-  for(unsigned i=0;i<2;i++){char id[50],hash[65];unsigned index=indices[i];fileid(command_files[index],id);invariant(!strcmp(id,command_ids[index]),"command-file-identity");command_sacl_read(command_files[index],hash);printf("%s{\"identity\":\"%s\",\"saclSha256\":\"%s\"}",i?",":"",id,hash);}
+  for(unsigned i=0;i<2;i++){char id[50],hash[65];unsigned index=indices[i];fileid(command_files[index],id);invariant(!strcmp(id,command_ids[index]),"command-file-identity");command_sacl_read(command_files[index],hash);memcpy(command_delivery.sacls[i],hash,65);printf("%s{\"identity\":\"%s\",\"saclSha256\":\"%s\"}",i?",":"",id,hash);}
   fputs("]}",stdout);
 }
 static void command_case_observe(BOOL after) {
   invariant(after?(command_client&&command_case_from&&!command_case_finished):!command_client,"command-coverage-state");
+  if(!after){memset(&command_delivery,0,sizeof(command_delivery));command_delivery.policy=command_delivery.policyError=command_delivery.level=-1;}
   char bytes[32],expected[33];if(!command_gate_wait(!after,bytes))return;need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL)==33&&!memcmp(bytes,expected,32));
   if(!after){DWORD pid;need(GetNamedPipeClientProcessId(command_gate,&pid));command_case_pid=pid;command_case_from=command_case_logon=command_target_record=command_target_time=0;command_target_seen=command_marker_seen=command_case_finished=FALSE;command_client=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);need(command_client);command_case_birth=creation(command_client);BOOL member;need(IsProcessInJob(command_client,ownedJob,&member)&&member);command_image_read(command_client,command_helper_hash,FALSE);}
   printf("{\"event\":\"%s\",\"ioCompleted\":%s,\"identity\":",after?"F":"N",after?"true":"false");identity(command_client);printf(",\"token\":");command_token(command_client);printf(",\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_snapshot(command_action);printf(",\"gate\":");command_snapshot(3);fputs(",\"auditing\":",stdout);command_case_auditing();puts("}");

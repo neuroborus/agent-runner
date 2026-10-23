@@ -127,6 +127,19 @@ static unsigned helper_lane;
 static HANDLE control; static char nonce[33], candidate[41];
 static BOOL reader_diagnostics_ready;
 static char reader_command[64] = "setup";
+static __declspec(thread) struct {
+  BOOL active, apiFailure, cleanupFailed; const char *operation;
+  unsigned index; DWORD cleanupError;
+} reader_baseline;
+static BOOL reader_baseline_failure(const char *source, unsigned line, DWORD error) {
+  if (!reader_baseline.active) return FALSE;
+  char bytes[1024]; DWORD written;
+  int size = sprintf_s(bytes, sizeof(bytes), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"baseline\":{\"operation\":\"%s\",\"index\":%u,\"apiFailure\":%s,\"cleanupFailed\":%s,\"cleanupError\":%lu}}\n",
+    sequence, reader_command, source, line, error, reader_baseline.operation, reader_baseline.index,
+    reader_baseline.apiFailure ? "true" : "false", reader_baseline.cleanupFailed ? "true" : "false", reader_baseline.cleanupError);
+  if (size > 0) WriteFile(control, bytes, (DWORD)size, &written, NULL);
+  return TRUE;
+}
 /* Control worker guards must never inherit the census thread's context. */
 static __declspec(thread) struct {
   BOOL active; ULONG_PTR ordinal, count; USHORT type;
@@ -276,6 +289,7 @@ static void reader_failure(const char *file, unsigned line, DWORD error) {
   if(ownership_failure_write(source,line,error)) { ownership_failure_fence(error); return; }
   ownership_failure_fence(error);
   if(reader_cold_failure(source,line,error))return;
+  if(reader_baseline_failure(source,line,error))return;
   if(reader_scheduler_failure(source,line,error))return;
   if (signature_trust.active) { reader_trust_failure(source, line); return; }
   /* Import resolution can fail while holding the resolved file or its parents. */
@@ -1475,9 +1489,26 @@ static void ownership_baseline_read(unsigned i, char hash[65]) {
   struct held_file *held = &entries[i+1].file;
   HANDLE file = ReOpenFile(held->handle, READ_CONTROL | FILE_READ_ATTRIBUTES | ACCESS_SYSTEM_SECURITY,
     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-  FILE_ID_INFO id; need(file != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id)) && !memcmp(&id, &held->id, sizeof(id)));
+  DWORD error = file == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
+  const char *operation = "ReOpenFile"; BOOL apiFailure = TRUE;
+  if (file == INVALID_HANDLE_VALUE) goto refused;
+  FILE_ID_INFO id;
+  BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id));
+  error = read ? ERROR_SUCCESS : GetLastError(); operation = "FileIdInfo";
+  if (!read) goto refused;
+  operation = "identity"; apiFailure = FALSE;
+  if (memcmp(&id, &held->id, sizeof(id))) goto refused;
   PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT);
-  sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); LocalFree(sd); need(CloseHandle(file));
+  sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); LocalFree(sd);
+  if (CloseHandle(file)) return;
+  error = GetLastError(); file = INVALID_HANDLE_VALUE; operation = "CloseHandle"; apiFailure = TRUE;
+refused:
+  reader_baseline.active = TRUE; reader_baseline.index = i; reader_baseline.operation = operation;
+  reader_baseline.apiFailure = apiFailure; reader_baseline.cleanupFailed = FALSE; reader_baseline.cleanupError = 0;
+  if (file != INVALID_HANDLE_VALUE && !CloseHandle(file)) {
+    reader_baseline.cleanupError = GetLastError(); reader_baseline.cleanupFailed = TRUE;
+  }
+  SetLastError(error); need(FALSE);
 }
 static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {
   struct entry *entry = &entries[i+1]; need(entry->file.handle);
