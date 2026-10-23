@@ -2421,11 +2421,18 @@ The CI-private native harness has its own explicit local invocation:
 `node --test ci/native/harness.test.js`. It uses synthetic evidence and injected
 effects only, outside the ordinary test discovery roots. Native system and
 protected provider cases remain external and must never enter local FINALIZE.
-Its existing Windows actual-body fixtures also cover original held-baseline API
-errors versus identity mismatches and independent close failures, strict finite
-diagnostic frames and compiler-trust failure attribution. The ordinary fast
-fixtures in `test/native-feasibility.test.js` cover 32/64-bit WFP keyword values
-and exact DROP rejection predicates. Those in `test/native-windows-command.test.js`
+Its existing Windows actual-body baseline fixture executes the original baseline
+and `file_sd`/security-failure bodies together. It requires saved held identity
+before a complete owner/group/DACL/label/SACL read, direct success when reopening
+would fail, strict denied-query fallback and refusal of unexpected query errors
+or substituted fallback identities. Borrowed originals remain open; primary
+errors survive independent temporary-handle and descriptor cleanup failures
+without retrying failed cleanup. Existing finite diagnostic-frame and
+compiler-trust attribution coverage remains required. The fixture supplies no
+Windows SDK/runtime evidence or kernel explanation for the observed error5.
+The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
+WFP keyword values and exact DROP rejection predicates. Those in
+`test/native-windows-command.test.js`
 preserve successful operating-token/policy/SACL observations
 and exercise bounded post-refusal query selection, empty/error/saturated batches,
 typed and textual PID/logon/time projection, case-insensitive held-name joins,

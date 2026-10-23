@@ -1486,28 +1486,20 @@ static void ownership_birth_save(const wchar_t *leaf, HANDLE process, HANDLE *to
 static HKEY policy_registry_owned(unsigned custody,const char *context);
 static void policy_registry_remove(HKEY key);
 static void ownership_baseline_read(unsigned i, char hash[65]) {
-  struct held_file *held = &entries[i+1].file;
-  HANDLE file = ReOpenFile(held->handle, READ_CONTROL | FILE_READ_ATTRIBUTES | ACCESS_SYSTEM_SECURITY,
-    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-  DWORD error = file == INVALID_HANDLE_VALUE ? GetLastError() : ERROR_SUCCESS;
-  const char *operation = "ReOpenFile"; BOOL apiFailure = TRUE;
-  if (file == INVALID_HANDLE_VALUE) goto refused;
-  FILE_ID_INFO id;
-  BOOL read = GetFileInformationByHandleEx(file, FileIdInfo, &id, sizeof(id));
-  error = read ? ERROR_SUCCESS : GetLastError(); operation = "FileIdInfo";
+  struct held_file *held = &entries[i+1].file; FILE_ID_INFO id;
+  BOOL read = GetFileInformationByHandleEx(held->handle, FileIdInfo, &id, sizeof(id));
+  DWORD error = read ? ERROR_SUCCESS : GetLastError();
+  const char *operation = "FileIdInfo"; BOOL apiFailure = TRUE;
   if (!read) goto refused;
   operation = "identity"; apiFailure = FALSE;
   if (memcmp(&id, &held->id, sizeof(id))) goto refused;
-  PSECURITY_DESCRIPTOR sd = file_sd(file, SE_FILE_OBJECT);
-  sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); LocalFree(sd);
-  if (CloseHandle(file)) return;
-  error = GetLastError(); file = INVALID_HANDLE_VALUE; operation = "CloseHandle"; apiFailure = TRUE;
+  /* Reuse granted query rights. file_sd owns any strict denied-query fallback;
+   * this caller keeps the original handle. */
+  PSECURITY_DESCRIPTOR sd = file_sd(held->handle, SE_FILE_OBJECT);
+  sum((BYTE *)sd, GetSecurityDescriptorLength(sd), hash); LocalFree(sd); return;
 refused:
   reader_baseline.active = TRUE; reader_baseline.index = i; reader_baseline.operation = operation;
   reader_baseline.apiFailure = apiFailure; reader_baseline.cleanupFailed = FALSE; reader_baseline.cleanupError = 0;
-  if (file != INVALID_HANDLE_VALUE && !CloseHandle(file)) {
-    reader_baseline.cleanupError = GetLastError(); reader_baseline.cleanupFailed = TRUE;
-  }
   SetLastError(error); need(FALSE);
 }
 static void ownership_acl(unsigned i, BOOL restore, BOOL inspectOnly) {

@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Read ownership baselines from their held handles
+
+Windows ownership baselines join each retained handle to its saved file identity
+and reuse the complete security-descriptor reader. Granted query rights avoid an
+unconditional reopen; denied queries retain the existing strict same-object
+fallback. Original handle ownership, complete SACL coverage and separate cleanup
+causes remain required. This equivalent read does not explain the native reopen
+error and still requires hosted Windows verification.
+
 ## 2026-10-23 — Attribute original probe joins without changing recovery
 
 Darwin partial-custody refusals retain their original exception and publish only

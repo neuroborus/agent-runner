@@ -2380,10 +2380,11 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
   await assert.rejects(f.channel.completion);
 });
 
-test("held baseline guards identify the first API or identity refusal and independent closure", async () => {
-  const source = await readFile(
-    new URL("custody-reader.c", import.meta.url),
-    "utf8",
+test("held baseline guards read complete originals and retain strict fallback and independent cleanup refusals", async () => {
+  const [source, effective] = await Promise.all(
+    ["custody-reader.c", "effective-reader.h"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
   );
   const body = (name) =>
     new RegExp(
@@ -2396,7 +2397,6 @@ test("held baseline guards identify the first API or identity refusal and indepe
       "struct held_file *held = &entries[i+1].file;",
       "const held = entries[i+1].file;",
     )
-    .replace("HANDLE file =", "file =")
     .replace("DWORD error =", "error =")
     .replace("const char *operation =", "operation =")
     .replace("BOOL apiFailure =", "apiFailure =")
@@ -2409,8 +2409,34 @@ test("held baseline guards identify the first API or identity refusal and indepe
     .replace("(BYTE *)sd", "sd")
     .replaceAll("goto refused;", "throw refused;");
   const [reading, cleanup] = native.split("refused:");
+  const security = (name, args) => {
+    const body = new RegExp(
+      `static [^\\n]+ ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(effective)[1];
+    // Only C storage/pointer representations change; execute the existing
+    // complete-query and cleanup decisions with the baseline body below.
+    return `function ${name}(${args}) {${body
+      .replace("FILE_ID_INFO before, after;", "const before={},after={};")
+      .replace(/sizeof\((?:before|after)\)/gu, "24")
+      .replace(/&(before|after)\b/gu, "$1")
+      .replaceAll("&sd", "{get value(){return sd},set value(value){sd=value}}")
+      .replaceAll("__LINE__", "1")
+      .replaceAll("__FILE__", '"effective-reader.h"')
+      .replace(
+        /\b(?:HANDLE|DWORD|BOOL|PSECURITY_DESCRIPTOR|SECURITY_INFORMATION) /gu,
+        "let ",
+      )}}`;
+  };
   const program = new Script(
-    `(i,hash)=>{try{${reading}}catch(cause){if(cause!==refused)throw cause;}${cleanup}}`,
+    [
+      security(
+        "file_security_failure",
+        "operation,api_failure,error,temporary,sd,line",
+      ),
+      security("file_sd", "file,kind"),
+      `(i,hash)=>{try{${reading}}catch(cause){if(cause!==refused)throw cause;}${cleanup}}`,
+    ].join("\n"),
   );
   const sending = new Script(
     `(source,line,error)=>{${body("reader_baseline_failure")
@@ -2424,21 +2450,27 @@ test("held baseline guards identify the first API or identity refusal and indepe
       .replace("&written", "value=>written=value")
       .replaceAll("\\036", "\\x1e")}}`,
   );
-  for (const fault of [
-    null,
-    "reopen",
-    "id",
-    "identity",
-    "close",
-    "id-close",
-    "identity-close",
+  for (const [fault, operation, error, cleanupOperation] of [
+    [null],
+    ["held-id", "FileIdInfo", 50],
+    ["held-identity", "identity", 0],
+    ["direct-error-free", "security-read-descriptor", 87, "LocalFree"],
+    ["fallback"],
+    ["fallback-reopen", "security-read-reopen", 5],
+    ["fallback-identity", "security-read-same-object", 13],
+    ["fallback-id-close", "security-read-reopened-id", 50, "CloseHandle"],
+    ["fallback-close", "security-read-close", 6],
   ]) {
     const calls = [],
       record = {},
-      frames = [];
-    let lastError = 91;
+      frames = [],
+      diagnostics = [],
+      opens = new Set([7]),
+      descriptors = new Set(),
+      isFallback = fault?.startsWith("fallback") ?? false;
+    let lastError = 91,
+      guardError;
     const api = {
-      file: null,
       error: 0,
       operation: null,
       apiFailure: false,
@@ -2477,40 +2509,81 @@ test("held baseline guards identify the first API or identity refusal and indepe
       FileIdInfo: 18,
       SE_FILE_OBJECT: 1,
       ERROR_SUCCESS: 0,
+      ERROR_ACCESS_DENIED: 5,
+      ERROR_INVALID_DATA: 13,
+      ERROR_INVALID_SECURITY_DESCR: 1338,
+      OWNER_SECURITY_INFORMATION: 1,
+      GROUP_SECURITY_INFORMATION: 2,
+      DACL_SECURITY_INFORMATION: 4,
+      SACL_SECURITY_INFORMATION: 8,
+      LABEL_SECURITY_INFORMATION: 16,
       ReOpenFile(handle, access, sharing, flags) {
         assert.deepEqual([handle, access, sharing, flags], [7, 7, 56, 192]);
         calls.push("reopen");
         lastError = 5;
-        return fault === "reopen" ? -1 : 9;
+        // The direct baseline must work even if a fresh open would be denied.
+        if (!isFallback || fault === "fallback-reopen") return -1;
+        opens.add(9);
+        return 9;
       },
       GetFileInformationByHandleEx(handle, kind, out, size) {
-        assert.deepEqual([handle, kind, size], [9, 18, 24]);
-        calls.push("id");
+        assert.ok(opens.has(handle));
+        assert.deepEqual([kind, size], [18, 24]);
+        calls.push(handle === 7 ? "original-id" : "reopened-id");
         lastError = 50;
-        out.value = fault?.startsWith("identity") ? "other" : "original";
-        return !fault?.startsWith("id-") && fault !== "id";
+        out.value =
+          fault === "held-identity" ||
+          (handle === 9 && fault === "fallback-identity")
+            ? "other"
+            : "original";
+        return (
+          fault !== "held-id" &&
+          !(handle === 9 && fault === "fallback-id-close")
+        );
       },
-      memcmp: (id, expected) => (id.value === expected ? 0 : 1),
-      file_sd(handle, kind) {
-        assert.deepEqual([handle, kind], [9, 1]);
-        calls.push("security");
-        return "full-sd";
+      memcmp: (left, right) => (left.value === (right.value ?? right) ? 0 : 1),
+      GetSecurityInfo(handle, kind, mask, owner, group, dacl, sacl, out) {
+        assert.ok(opens.has(handle));
+        assert.equal(kind, 1);
+        assert.equal(mask, 31);
+        assert.deepEqual([owner, group, dacl, sacl], [null, null, null, null]);
+        assert.equal(out.value, null);
+        calls.push(handle === 7 ? "original-security" : "reopened-security");
+        lastError = 99;
+        if (handle === 7 && isFallback) return 5;
+        descriptors.add("full-sd");
+        out.value = "full-sd";
+        return fault === "direct-error-free" ? 87 : 0;
       },
+      IsValidSecurityDescriptor: (sd) => sd === "full-sd",
       GetSecurityDescriptorLength: () => 32,
       sum(sd, length, hash) {
         assert.deepEqual([sd, length], ["full-sd", 32]);
         calls.push("hash");
         hash.value = "unchanged";
       },
-      LocalFree: () => {
+      LocalFree: (sd) => {
+        assert.ok(descriptors.has(sd));
         calls.push("free");
-        lastError = 92;
+        lastError = 8;
+        if (fault === "direct-error-free") return sd;
+        descriptors.delete(sd);
+        return null;
       },
       CloseHandle(handle) {
-        assert.equal(handle, 9);
+        assert.equal(handle, 9, "Never close the borrowed original handle");
+        assert.ok(opens.has(handle));
         calls.push("close");
         lastError = 6;
-        return !fault?.endsWith("close");
+        if (fault?.endsWith("close")) return false;
+        opens.delete(handle);
+        return true;
+      },
+      stderr: {},
+      fprintf: (_stream, format, ...values) =>
+        diagnostics.push({ format, values }),
+      fflush() {
+        lastError = 93;
       },
       GetLastError: () => lastError,
       SetLastError: (error) => {
@@ -2519,56 +2592,85 @@ test("held baseline guards identify the first API or identity refusal and indepe
       need(ok) {
         assert.equal(ok, false);
         record.error = lastError;
+        guardError = lastError;
         sending.runInNewContext(api)("custody-reader.c", 1, lastError);
+        throw new Error("guard refused");
+      },
+      need_at(ok, source, line) {
+        assert.equal(ok, false);
+        guardError = lastError;
+        assert.equal(
+          sending.runInNewContext(api)(source, line, lastError),
+          false,
+        );
         throw new Error("guard refused");
       },
     };
     const hash = {};
-    if (!fault) {
+    if (!operation) {
       program.runInNewContext(api)(0, hash);
       assert.equal(hash.value, "unchanged");
+      assert.deepEqual([...opens], [7]);
+      assert.equal(descriptors.size, 0);
+      assert.deepEqual(diagnostics, []);
     } else {
       assert.throws(
         () => program.runInNewContext(api)(0, hash),
         /guard refused/u,
       );
-      const operation =
-        fault === "reopen"
-          ? "ReOpenFile"
-          : fault.startsWith("identity")
-            ? "identity"
-            : fault === "close"
-              ? "CloseHandle"
-              : "FileIdInfo";
-      assert.equal(record.operation, operation);
-      assert.equal(
-        record.error,
-        operation === "identity"
-          ? 0
-          : operation === "ReOpenFile"
-            ? 5
-            : operation === "CloseHandle"
-              ? 6
-              : 50,
-      );
-      assert.equal(record.apiFailure, operation !== "identity");
-      assert.equal(record.cleanupFailed, fault.endsWith("-close"));
-      assert.equal(record.cleanupError, fault.endsWith("-close") ? 6 : 0);
-      assert.equal(frames[0].lastError, record.error);
-      assert.equal(frames[0].baseline.operation, operation);
-      assert.equal(frames[0].baseline.cleanupError, record.cleanupError);
+      assert.equal(guardError, error);
+      assert.equal(hash.value, undefined);
+      if (fault.startsWith("held-")) {
+        assert.equal(record.operation, operation);
+        assert.equal(record.apiFailure, operation !== "identity");
+        assert.equal(record.cleanupFailed, false);
+        assert.equal(record.cleanupError, 0);
+        assert.equal(frames[0].lastError, error);
+        assert.equal(frames[0].baseline.operation, operation);
+      } else {
+        const primary = diagnostics.find(({ format }) =>
+          format.startsWith("native-windows-security:"),
+        );
+        assert.deepEqual(primary.values, [
+          operation,
+          fault === "fallback-identity" ? "invariant" : "win32",
+          error,
+        ]);
+        const cleanup = diagnostics.filter(({ format }) =>
+          format.startsWith("native-windows-security-cleanup:"),
+        );
+        assert.deepEqual(
+          cleanup.map(({ format, values }) => [
+            format.includes(cleanupOperation),
+            values[0],
+          ]),
+          cleanupOperation
+            ? [[true, cleanupOperation === "CloseHandle" ? 6 : 8]]
+            : [],
+        );
+      }
     }
-    assert.equal(calls.filter((call) => call === "reopen").length, 1);
+    assert.ok(opens.has(7));
     assert.equal(
-      calls.filter((call) => call === "id").length,
-      fault === "reopen" ? 0 : 1,
+      calls.filter((call) => call === "reopen").length,
+      isFallback ? 1 : 0,
+    );
+    assert.equal(
+      calls.filter((call) => call === "original-id").length,
+      fault?.startsWith("held-") ? 1 : 2,
     );
     assert.equal(
       calls.filter((call) => call === "close").length,
-      fault === "reopen" ? 0 : 1,
+      isFallback && fault !== "fallback-reopen" ? 1 : 0,
     );
-    if (fault && fault !== "close")
-      assert.equal(calls.includes("security"), false);
+    assert.equal(
+      calls.filter((call) => call === "free").length,
+      !operation || fault === "direct-error-free" || fault === "fallback-close"
+        ? 1
+        : 0,
+    );
+    if (fault?.startsWith("held-"))
+      assert.ok(!calls.includes("original-security"));
   }
   const baseline = {
     operation: "FileIdInfo",

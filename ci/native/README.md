@@ -9586,12 +9586,13 @@ HRESULT, collection index and census attempt independently of incidental
 BSTRs and engine handles before refusal; handle-close uncertainty is retained
 separately from the original HRESULT. This metadata supplies no completion or
 retirement authority. Successful queries clear the refusal context.
-Held ownership baselines also distinguish the original `ReOpenFile`, `FileIdInfo`
-and identity predicates, each evaluated once. Their finite `baseline` context
-names the object index and separates API failure from invariant failure; an
-identity mismatch reports error zero. The first API error is captured before
-closing the temporary observer handle, and any independent close failure has
-its own fields. A failed final close is reported without retrying it. Full
+Held ownership baselines compare the original handle's `FileIdInfo` with its
+saved identity before querying the descriptor. Their finite `baseline` refusal
+context names the object index and separates the identity-query API error from
+an invariant mismatch, which reports error zero. Descriptor reads use the
+existing `file_sd` failure owner, preserving its primary error and independent
+temporary-handle or descriptor cleanup diagnostics without closing the borrowed
+original. Historical reopen/close refusal frames remain readable. Full
 security-descriptor/SACL reads and exact original held identity remain required;
 these diagnostics confer no restoration or retirement authority.
 Rejected admission retains protected original receipts and fences work. A fresh
@@ -10817,6 +10818,18 @@ the query status with a separate cleanup diagnostic. Other direct-query errors
 stop immediately; registry reads remain direct and the setter is unchanged.
 This supported equivalent read operation does not identify the kernel condition
 behind the observed Windows system `ReOpenFile` error5.
+
+Ownership baselines use this complete read after comparing the held `FileIdInfo`
+with its saved identity. The case handle producer adds `READ_CONTROL` and
+`FILE_READ_ATTRIBUTES`, and generated private entries request
+`ACCESS_SYSTEM_SECURITY`. The reader runs as System with its existing
+`SE_DEBUG`/`SE_SECURITY` authority enabled before opening entries; successful
+impersonated operations revert before returning to dispatch. `GetSecurityInfo`
+requires `READ_CONTROL` for owner/group/DACL reads and `ACCESS_SYSTEM_SECURITY`
+for the SACL, with security privilege enabled for that access request. Existing
+denied-query fallback remains responsible for insufficient grants. Baseline
+reads borrow the retained handle and release only their returned descriptor;
+payload grants, handle ownership and privilege policy retain their owners.
 
 Both the read fallback and setter reopen masks include `FILE_READ_ATTRIBUTES`
 for their `FileIdInfo` queries. These rights belong to temporary trusted observer
