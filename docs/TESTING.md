@@ -366,6 +366,13 @@ signed errors and full-width type/port values, survive failed diagnostic writes
 and flushes; the Mach diagnostic also survives the existing transport-loss fixture.
 Successful sanitation, provider stdio and parked-handshake regressions remain
 covered. These portable checks establish no successful native launch or cleanup.
+Resource-notify cases cover paired selector unavailability, supported clearing
+and null readback, mixed selector results, other errors and uncertain failed-getter
+output. Nonnull readback and aliased-copy release failures retain independent
+release attempts, separate cleanup diagnostics and the original refusal/errno.
+Acquired resource copies must settle before later sanitation and its census;
+failed getter output supplies no ownership. These portable cases establish no
+hosted Darwin success and add no harness or validation command.
 Retirement rejects changed admission bindings, trailing custody output and a close
 reply without bounded custodian exit.
 These deterministic fast regressions run no macOS helper; the existing native

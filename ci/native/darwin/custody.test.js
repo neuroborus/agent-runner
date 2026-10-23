@@ -3769,17 +3769,17 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         "const cleanup_operations=[$1];",
       )
       .replace(
-        /kern_return_t releases\[5\] = \{[^;]+\};/u,
-        "const releases=Array(5).fill(KERN_SUCCESS);",
+        /kern_return_t releases\[7\] = \{([^;]+)\};/u,
+        "const releases=[$1];",
       )
-      .replace("int errors[5] = {0};", "const errors=Array(5).fill(0);")
+      .replace(/int errors\[7\] = \{([^;]+)\};/u, "const errors=[$1];")
       .replaceAll("~0U", "0xffffffff")
       .replaceAll(
         /&(identity|status|waitReady|wait|p|parked|byte|value)\b/gu,
         "$1",
       )
       .replace(
-        /&(host|access|type|address|access_type|reply_type|names|types|n|nt)\b/gu,
+        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt)\b/gu,
         (_, name) =>
           `{get value(){return ${name}},set value(value){${name}=value}}`,
       )
@@ -3885,6 +3885,57 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     [{ type: DEAD, release: "access" }, "mach_port_deallocate/access", 15, 22],
     [{ kind: 1, release: "access" }, "mach_port_kobject/access/type", 1],
     [{ changed: true, release: "all" }, "TASK_ACCESS_PORT/census", ONCE],
+    [{ notifyGet: 4, notifySet: 4, notify: 300 }],
+    ...[0, 0xffffffff, 300, 200, 2, 7].map((notify) => [{ notify }]),
+    ...[
+      [4, 0],
+      [4, 5],
+      [5, 0],
+      [5, 4],
+      [5, 5],
+    ].map(([notifyGet, notifySet]) => [
+      { notifyGet, notifySet, notify: 300 },
+      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT",
+      notifyGet,
+      31,
+    ]),
+    ...[4, 5].map((notifySet) => [
+      { notifySet, notify: 300 },
+      "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT",
+      notifySet,
+      32,
+    ]),
+    ...[4, 5].map((readbackGet) => [
+      { notify: 300, readback: 301, readbackGet },
+      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback",
+      readbackGet,
+      33,
+    ]),
+    ...[0xffffffff, 301, 300, 200, 2, 7].map((readback) => [
+      { notify: 300, readback },
+      "TASK_RESOURCE_NOTIFY_PORT/null",
+      readback,
+      33,
+    ]),
+    [{ notify: 300, release: "notify" }, "mach_port_deallocate/notify", 15, 41],
+    [
+      { notify: 200, readback: 200, readbackGet: 5, release: "all" },
+      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback",
+      5,
+      33,
+    ],
+    [
+      { notify: 300, notifySet: 4, release: "all" },
+      "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT",
+      4,
+      32,
+    ],
+    ...["notify", "readback", ["notify", "readback"], "all"].map((release) => [
+      { notify: 200, readback: 200, release },
+      "TASK_RESOURCE_NOTIFY_PORT/null",
+      200,
+      33,
+    ]),
   ];
   for (const [
     fault,
@@ -4246,19 +4297,34 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       const access = machCase.access ?? 200,
         accessType = machCase.type ?? SEND;
       let accessRead = false,
-        replyReads = 0;
+        replyReads = 0,
+        notifyReads = 0;
+      const resourceCopies = [];
+      const resourcesSettled = () => {
+        for (const copy of resourceCopies)
+          assert.deepEqual(
+            released
+              .filter((entry) => entry.kind === copy.kind)
+              .map(({ kind, name, status }) => ({ kind, name, status })),
+            [{ ...copy, status: 0 }],
+          );
+      };
       const portRelease = (kind, name) => {
         const status =
           machCase.release === kind ||
+          (Array.isArray(machCase.release) &&
+            machCase.release.includes(kind)) ||
           (machCase.release === "all" && kind !== "host")
             ? 15
             : 0;
-        released.push({ kind, name, status });
-        api.errno = 22;
+        api.errno = kind === "notify" ? 41 : kind === "readback" ? 42 : 22;
+        released.push({ kind, name, status, error: api.errno });
         return status;
       };
       Object.assign(api, {
         NULL: null,
+        KERN_INVALID_ARGUMENT: 4,
+        KERN_FAILURE: 5,
         MACH_PORT_DEAD: 0xffffffff,
         MACH_PORT_TYPE_NONE: 0,
         MACH_PORT_TYPE_SEND: SEND,
@@ -4279,15 +4345,26 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         task_get_special_port(self, which, out) {
           assert.equal(self, 1);
-          assert.ok(which === 1 || which === 2);
-          const kind = which === 1 ? "host" : "access";
+          assert.ok([1, 2, 5].includes(which));
+          const kind =
+            which === 1
+              ? "host"
+              : which === 2
+                ? "access"
+                : notifyReads++ === 0
+                  ? "notify"
+                  : "readback";
           machCalls.push(kind);
           if (which === 2) accessRead = true;
           const status = machCase[`${kind}Get`] ?? 0;
-          out.value = which === 1 ? 7 : access;
-          if (!status && api.MACH_PORT_VALID(out.value))
-            acquired.push({ kind, name: out.value });
-          api.errno = 13;
+          out.value =
+            which === 1 ? 7 : which === 2 ? access : (machCase[kind] ?? 0);
+          if (!status && api.MACH_PORT_VALID(out.value)) {
+            const copy = { kind, name: out.value };
+            acquired.push(copy);
+            if (which === 5) resourceCopies.push(copy);
+          }
+          api.errno = kind === "notify" ? 31 : kind === "readback" ? 33 : 13;
           return status;
         },
         mach_port_kobject(self, name, type, address) {
@@ -4309,12 +4386,19 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         mach_port_deallocate(self, name) {
           assert.equal(self, 1);
           machCalls.push(["release", name]);
+          const resource = resourceCopies.find(
+            (copy) =>
+              copy.name === name &&
+              !released.some((entry) => entry.kind === copy.kind),
+          );
           return portRelease(
-            accessRead && name === access
-              ? "access"
-              : name === 2
-                ? "thread"
-                : "host",
+            resource
+              ? resource.kind
+              : accessRead && name === access
+                ? "access"
+                : name === 2
+                  ? "thread"
+                  : "host",
             name,
           );
         },
@@ -4322,11 +4406,16 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           assert.deepEqual([self, name], [1, 0]);
           assert.ok([3, 4, 5].includes(slot));
           machCalls.push(["set", slot]);
-          api.errno = 13;
-          return slot === 4 ? (machCase.sanitation ?? 0) : 0;
+          api.errno = slot === 5 ? 32 : 13;
+          return slot === 5
+            ? (machCase.notifySet ?? 0)
+            : slot === 4
+              ? (machCase.sanitation ?? 0)
+              : 0;
         },
         mach_ports_register(self, ports, count) {
           assert.deepEqual([self, ports, count], [1, null, 0]);
+          resourcesSettled();
           machCalls.push("register");
           return 0;
         },
@@ -4341,6 +4430,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         mach_port_names(self, names, n, types, nt) {
           assert.equal(self, 1);
+          resourcesSettled();
           machCalls.push("census");
           api.errno = 13;
           const live = api.MACH_PORT_VALID(access) && accessType === SEND;
@@ -4438,12 +4528,31 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         cleanup.map((entry) => entry.values),
         failed
           .slice(Number(early))
-          .map(({ kind, status }) => [
+          .map(({ kind, status, error }) => [
             `${kind === "names" || kind === "types" ? "mach_vm" : "mach_port"}_deallocate/${kind}`,
             status,
-            22,
+            error,
           ]),
       );
+      if (machCalls.includes("notify")) {
+        assert.equal(machCalls.filter((call) => call === "notify").length, 1);
+        const shouldReadBack =
+          !(machCase.notifyGet ?? 0) && !(machCase.notifySet ?? 0);
+        assert.equal(
+          machCalls.filter((call) => call === "readback").length,
+          Number(shouldReadBack),
+        );
+        if (
+          operation?.includes("RESOURCE_NOTIFY_PORT") ||
+          [
+            "mach_port_deallocate/notify",
+            "mach_port_deallocate/readback",
+          ].includes(operation)
+        ) {
+          assert.equal(machCalls.includes("register"), false);
+          assert.equal(machCalls.includes("census"), false);
+        }
+      }
       if (!operation) {
         assert.equal(pipeIgnored, false);
         assert.deepEqual(destroyed, [9]);

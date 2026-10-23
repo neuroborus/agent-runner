@@ -4183,17 +4183,22 @@ Explicit bootstrap/debug/resource-notify clearing, registered-port removal and
 task/thread exception sanitation remain required, alongside descriptor closure,
 credential separation and the real task/process/IPC negative controls.
 
-Resource-notify availability is tested only on `mach_task_self()`. XNU's
+The feasibility domain and ordinary `NATIVE_CI_EXPERIMENT` launcher test
+resource-notify availability only on `mach_task_self()`. XNU's
 [`ipc_tt.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/kern/ipc_tt.c)
 places both selectors behind `CONFIG_PROC_RESOURCE_LIMITS`; only a getter and
 null setter both returning `KERN_INVALID_ARGUMENT` admit an unavailable facility.
 Every other combination requires a successful getter, clearing and null readback.
-Mixed results, other failures and nonnull readback refuse exec. Every acquired
-getter copy is released once, including nonnull readback, before refusal; both
-release attempts run even when one fails. Release failures preserve a separate
-cleanup cause and cannot replace the earlier selector/readback refusal. No
-resource-notify right is added to the strict live-port census. These source and
-portable-fixture contracts supply no exact hosted-kernel availability or native
+Mixed results, other failures and nonnull readback refuse exec. Failed getter
+output grants no release authority. Every successfully acquired valid getter
+copy is released once, including nonnull readback and aliased names, before
+later sanitation or its census, or before refusal. Both release attempts run
+even when one fails, without retrying a failed release. Release failures preserve
+a separate cleanup cause and cannot replace the earlier selector/readback refusal
+or its saved errno. No resource-notify right is added to the strict live-port
+census. Protected/provider launcher behavior remains unchanged. These source and
+portable-fixture contracts establish no hosted Darwin success, exact hosted-kernel
+availability or native
 cancellation, owner-loss, sentinel or independent-retirement proof.
 
 Bounded lifecycle observations separate `custodian-entry` before sealed reexec,
@@ -8754,7 +8759,13 @@ task-access port to be null. `NATIVE_CI_EXPERIMENT` adopts the getter/type/kerne
 checks of the [ordinary inherited-service policy](#ordinary-darwin-task-access).
 Its checked local service copy stays held through the bounded census, where that
 exact name must occur once with its exact type; arbitrary SEND names gain no
-exception. Only a classified ordinary host port is permitted; a privileged or
+exception. The experiment also applies the paired optional resource-notify
+selector policy above: supported slots must clear and read back null, and every
+acquired getter copy must settle before registered-port, exception and census
+sanitation. Resource copies gain no census exemption; their release failures
+retain separate cleanup diagnostics and preserve the first refusal. Portable
+fixtures establish no hosted Darwin launch or cleanup success.
+Only a classified ordinary host port is permitted; a privileged or
 unknown one fails. Remaining
 descriptors are private stdio and close-on-exec admission pipes. After fork, only
 the separate root helper obtains `audit_session_port` for custody; the payload

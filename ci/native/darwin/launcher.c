@@ -57,6 +57,8 @@ static void mach_rights(void) {
   natural_t type = 0; mach_vm_address_t address = 0;
   mach_port_name_array_t names = NULL; mach_port_type_array_t types = NULL;
   mach_msg_type_number_t n = 0, nt = 0; bool service = false, seen = false;
+  kern_return_t notify_release = KERN_SUCCESS, readback_release = KERN_SUCCESS;
+  int notify_error = 0, readback_error = 0;
   const char *operation; long result = 0; int error = 0;
   operation = "mach_thread_self"; result = thread; error = errno;
   if (!MACH_PORT_VALID(thread) || thread == self) goto mach_cleanup;
@@ -103,8 +105,36 @@ static void mach_rights(void) {
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "task_set_special_port/TASK_DEBUG_CONTROL_PORT"; result = task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
+  {
+    /* XNU may omit both resource-notify selectors. Failed getter output owns
+     * nothing; successful getter copies must settle before later sanitation. */
+    mach_port_t notify = MACH_PORT_NULL, readback = MACH_PORT_NULL;
+    kern_return_t notify_get = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &notify); int get_error = errno;
+    kern_return_t notify_set = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL); int set_error = errno;
+    kern_return_t notify_read = KERN_FAILURE;
+    operation = NULL;
+    if (!(notify_get == KERN_INVALID_ARGUMENT && notify_set == KERN_INVALID_ARGUMENT)) {
+      if (notify_get != KERN_SUCCESS) {
+        operation = "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = notify_get; error = get_error;
+      } else if (notify_set != KERN_SUCCESS) {
+        operation = "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = notify_set; error = set_error;
+      } else {
+        notify_read = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &readback); error = errno;
+        if (notify_read != KERN_SUCCESS) {
+          operation = "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback"; result = notify_read;
+        } else if (readback != MACH_PORT_NULL) {
+          operation = "TASK_RESOURCE_NOTIFY_PORT/null"; result = readback;
+        }
+      }
+    }
+    if (notify_get == KERN_SUCCESS && MACH_PORT_VALID(notify)) {
+      notify_release = mach_port_deallocate(self, notify); notify_error = errno;
+    }
+    if (notify_read == KERN_SUCCESS && MACH_PORT_VALID(readback)) {
+      readback_release = mach_port_deallocate(self, readback); readback_error = errno;
+    }
+    if (operation || notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) goto mach_cleanup;
+  }
   operation = "mach_ports_register"; result = mach_ports_register(self, NULL, 0); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
   operation = "task_set_exception_ports"; result = task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
@@ -139,15 +169,15 @@ static void mach_rights(void) {
 mach_cleanup: {
     /* One entry per acquisition, even when local names alias. Never retry a
      * failed release or let it replace the original refusal. */
-    const char *cleanup_operations[] = {"mach_vm_deallocate/names", "mach_vm_deallocate/types", "mach_port_deallocate/access", "mach_port_deallocate/host", "mach_port_deallocate/thread"};
-    kern_return_t releases[5] = {KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS};
-    int errors[5] = {0};
-    if (names) { releases[0] = mach_vm_deallocate(self, (mach_vm_address_t)names, (mach_vm_size_t)n * sizeof(*names)); errors[0] = errno; }
-    if (types) { releases[1] = mach_vm_deallocate(self, (mach_vm_address_t)types, (mach_vm_size_t)nt * sizeof(*types)); errors[1] = errno; }
-    if (MACH_PORT_VALID(held_access)) { releases[2] = mach_port_deallocate(self, held_access); errors[2] = errno; }
-    if (MACH_PORT_VALID(held_host)) { releases[3] = mach_port_deallocate(self, held_host); errors[3] = errno; }
-    if (MACH_PORT_VALID(held_thread)) { releases[4] = mach_port_deallocate(self, held_thread); errors[4] = errno; }
-    for (unsigned i = 0; i < 5; i++) if (releases[i] != KERN_SUCCESS) {
+    const char *cleanup_operations[] = {"mach_port_deallocate/notify", "mach_port_deallocate/readback", "mach_vm_deallocate/names", "mach_vm_deallocate/types", "mach_port_deallocate/access", "mach_port_deallocate/host", "mach_port_deallocate/thread"};
+    kern_return_t releases[7] = {notify_release,readback_release,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS};
+    int errors[7] = {notify_error,readback_error,0,0,0,0,0};
+    if (names) { releases[2] = mach_vm_deallocate(self, (mach_vm_address_t)names, (mach_vm_size_t)n * sizeof(*names)); errors[2] = errno; }
+    if (types) { releases[3] = mach_vm_deallocate(self, (mach_vm_address_t)types, (mach_vm_size_t)nt * sizeof(*types)); errors[3] = errno; }
+    if (MACH_PORT_VALID(held_access)) { releases[4] = mach_port_deallocate(self, held_access); errors[4] = errno; }
+    if (MACH_PORT_VALID(held_host)) { releases[5] = mach_port_deallocate(self, held_host); errors[5] = errno; }
+    if (MACH_PORT_VALID(held_thread)) { releases[6] = mach_port_deallocate(self, held_thread); errors[6] = errno; }
+    for (unsigned i = 0; i < 7; i++) if (releases[i] != KERN_SUCCESS) {
       (void)signal(SIGPIPE, SIG_IGN);
       fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s result=%d errno=%d\n", cleanup_operations[i], releases[i], errors[i]);
       fflush(stderr);
