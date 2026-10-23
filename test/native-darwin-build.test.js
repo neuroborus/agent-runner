@@ -4689,14 +4689,20 @@ test("Darwin custodian lifecycle observations balance their own public getter re
 });
 
 test("Darwin fault sanitation preserves the inherited authorization service and refuses unexpected control rights", async () => {
-  const source = await readFile(
-      new URL("feasibility-domain.h", SOURCE),
-      "utf8",
-    ),
-    sanitation = /static void domain_sanitize\(void\) \{([\s\S]*?)\n\}/u.exec(
-      source,
-    )?.[1],
-    start = source.indexOf(
+  const [source, helper, custody, sandbox, command, builder] =
+    await Promise.all(
+      [
+        "feasibility-domain.h",
+        "feasibility-helper.c",
+        "custody.h",
+        "feasibility-sandbox.h",
+        "feasibility-command.h",
+        "feasibility.js",
+      ].map((name) => readFile(new URL(name, SOURCE), "utf8")),
+    );
+  const sanitation =
+    /static void domain_sanitize\(void\) \{([\s\S]*?)\n\}/u.exec(source)?.[1];
+  const start = source.indexOf(
       "  if (!child) {",
       source.indexOf("static void domain_start("),
     ),
@@ -4740,6 +4746,30 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       source,
     );
   assert.ok(interpose, "The helper must emit its own dyld interposition entry");
+  // The pinned user-space trap declaration is PRIVATE in XNU. Its owned
+  // prototype must precede both references without widening SDK visibility.
+  const allocator = /^extern mach_port_name_t mach_reply_port\(void\);$/mu.exec(
+    source,
+  );
+  assert.ok(
+    allocator,
+    "The original allocator needs its exact owned prototype",
+  );
+  assert.ok(
+    allocator.index <
+      source.indexOf("static mach_port_t domain_runtime_reply_allocate("),
+  );
+  assert.ok(allocator.index < interpose.index);
+  for (const owner of [source, helper, custody, sandbox, command, builder])
+    assert.doesNotMatch(owner, /#\s*define\s+PRIVATE\b|-DPRIVATE\b/u);
+  assert.match(
+    helper,
+    /#include "feasibility-domain\.h"\s+static void fault\(void\)/u,
+  );
+  assert.match(
+    helper,
+    /#ifdef NATIVE_FEASIBILITY_COMMAND\s+#include "feasibility-command\.h"\s+#endif/u,
+  );
   assert.match(
     interpose[1],
     /^\s*mach_port_t \(\*replacement\)\(void\);\s*mach_port_t \(\*replacee\)\(void\);\s*$/u,

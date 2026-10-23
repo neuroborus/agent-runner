@@ -4016,6 +4016,19 @@ layout to its declared target; authenticated-pointer targets require their own
 contract. The declaration implements that ABI directly with attribution to the
 primary source, without importing the upstream macro or header.
 
+The allocator itself needs an owned declaration as well. Pinned XNU
+[`mach_traps.h:82-85` at `43a90889846e00bfb5cf1d255cdc0a701a1e05a4`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/mach_traps.h#L82-L85)
+declares `extern mach_port_name_t mach_reply_port(void)` under
+`!KERNEL && PRIVATE`. That placement establishes the user-space prototype,
+not public SDK visibility. The helper declares only that exact zero-argument
+prototype in `feasibility-domain.h`, before its allocator callback and retained
+interposition entry. The common include makes it available to both build
+variants without enabling `PRIVATE` in the source or compiler arguments.
+The original direct allocator reference and retained pair remain unchanged;
+the declaration does not establish installed export availability, successful
+native linking or dyld interception. Those remain hosted observations, separately
+from the cached special-reply export lookup below.
+
 The complete feasibility helper has two build variants: the ordinary helper and
 the same translation unit with `NATIVE_FEASIBILITY_COMMAND` defined. Both use
 C11 atomics, `-arch x86_64`, the selected `-isysroot`, and the existing sandbox and
@@ -4036,11 +4049,12 @@ are introduced. The separately resolved exports remain `sandbox_check`, the
 `SANDBOX_CHECK_NO_REPORT` data object, `proc_signal_with_audittoken` and the cached
 special-reply accessor described below. Their existing checks still gate use.
 Cycle 117 observed the absent private cached-reply header; completed cycle 118
-then observed the absent interposition header in both build variants. Those
-compiler refusals do not establish availability of declarations or exports after
-the failed include. This source audit and portable fixtures supply no installed
-SDK, complete compilation, native interposition or retirement proof. Both native
-build variants and the original controls still require fresh matching hosted CI.
+then observed the absent interposition header in both build variants. Cycle 119
+reached the undeclared ordinary reply allocator in both variants. A compiler
+refusal does not establish availability of later declarations or exports.
+This source audit and portable fixtures supply no installed SDK, complete
+compilation, native interposition or retirement proof. Both native build variants
+and the original controls still require fresh matching hosted CI.
 
 Before the child's first identity/audit RPC, it separately borrows the exact
 ordinary cache from `mig_get_reply_port` and the special cache from

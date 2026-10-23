@@ -398,6 +398,17 @@ dyld, compile an SDK shim or prove installed header/export availability. Both
 ordinary and command-enabled helper builds remain matching hosted CI obligations.
 No validation command or slow-tier assignment is added.
 
+That fixture also requires the exact owned `mach_port_name_t mach_reply_port(void)`
+prototype before both the allocator callback and interposition entry. It checks
+the common domain include alongside the optional command include and rejects
+broad `PRIVATE` enablement across the complete helper's transitive source owners
+and build arguments. The same actual allocator and interposition bodies still
+exercise the original ownership matrix; no replacement fixture or SDK shim is
+introduced. The existing ordinary/command build fixtures retain their source
+pins and link flags. These source guards do not compile either variant or prove
+the installed allocator export; matching hosted compilation, linking and runtime
+verification remain required.
+
 The same fixture executes the cached special-reply loader body with injected
 `dlsym` and `dlerror`. It protects the pinned zero-argument `mach_port_t` call
 type without the unavailable private SDK header, clears a stale loader error,

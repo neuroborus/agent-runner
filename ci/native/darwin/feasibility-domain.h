@@ -8,6 +8,12 @@
 #include <mach/mach_vm.h>
 #include <mach/mig.h>
 
+/* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4,
+ * osfmk/mach/mach_traps.h:82-85 declares this user-space trap under PRIVATE.
+ * Keep its exact prototype without enabling unrelated private SDK interfaces.
+ * The direct reference still requires the original installed allocator export. */
+extern mach_port_name_t mach_reply_port(void);
+
 static void domain_check(bool ok, const char *operation, const char *kind, int value) {
   if (!ok) { remember(operation, kind, value); failure(126); }
 }
