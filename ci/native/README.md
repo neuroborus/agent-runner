@@ -3037,9 +3037,20 @@ Each command audit pipe explicitly enables driver nonblocking mode with checked
 `FIONBIO` immediately after opening. The matched
 [XNU audit driver](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/security/audit/audit_pipe.c)
 ignores the open flags for that state. Empty drains return to command input;
-they supply no capture-completion or retirement evidence. The drain checks its
-existing deadline before reads, EINTR retries and each complete record. A bounded
-64-KiB buffer retains partial headers and records across drains and separates
+they supply no capture-completion or retirement evidence.
+Command waits that include the audit descriptor use `select(2)`: the driver
+supplies select readiness but may refuse poll registration. The small command-local
+wait rebuilds its fixed descriptor sets and timeout each time, bounds active
+descriptors before `FD_SET` and excludes inactive output channels. Audit-only waits retain 10 ms;
+cold acknowledgement, exec receipt and broker waits retain 1000 ms. Controller-only
+poll checks still fence hangup/errors before consuming input or releasing children,
+including unread input with EOF after a wait, and remain usable during cleanup.
+Checked reads retain controller EOF refusal, exec-receipt EOF and unexpected-byte
+refusal, and output closure. Wait errors retain their saved errno through the
+existing failure/cleanup owner; alarm interruption cannot extend its bounds.
+The drain checks its existing deadline before reads, EINTR retries and each
+complete record. A bounded 64-KiB buffer retains partial headers and records across
+drains and separates
 coalesced records before the unchanged libbsm token decoder. The existing
 eight-MiB byte and 4096-record limits remain. Barriers wait for complete framing;
 terminal capture refuses any unfinished tail before closing its pipe and emitting
@@ -4106,7 +4117,7 @@ owner. The SDK surface audit covers these transitive owners together:
 | `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `stdatomic.h` covers the fixed producer ledger; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor. The interposition entry requires no additional SDK header.                                                           |
 | `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes its general custody declarations; `NATIVE_AUDIT_DOMAIN` includes only the shared identity, audit-session and bounded census operations, using the helper/domain declarations above.                                                                                                                                                                                                                                      |
 | `feasibility-sandbox.h`          | Its public C/POSIX types and `dlfcn.h` support the pinned variadic sandbox-check ABI and separately checked function/data lookups.                                                                                                                                                                                                                                                                                                                           |
-| Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                                   |
+| Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/select.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                   |
 
 The Mach special-port selectors, exact right types, audit constants and spawn
 flags remain supplied by those SDK interfaces; no substitute numeric definitions

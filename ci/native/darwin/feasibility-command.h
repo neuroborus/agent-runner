@@ -4,6 +4,7 @@
 #include <security/audit/audit_ioctl.h>
 #include <sys/ioctl.h>
 #include <sys/poll.h>
+#include <sys/select.h>
 #include <sys/time.h>
 #include <spawn.h>
 #include <grp.h>
@@ -354,7 +355,26 @@ static void command_drain(void) {
   }
   command_health();
 }
-static void command_poll(void) {struct pollfd fd={command_audit,POLLIN,0};need(!command_expired);command_native(poll(&fd,1,10), >= 0);command_drain();}
+/* auditpipe supplies select readiness, but need not support poll registration.
+ * These are only the command owner's fixed audit/control/receipt/output sets. */
+static void command_wait(fd_set *ready, bool controller, bool receipt, bool output, int milliseconds) {
+  need(!command_expired && command_audit>=0 && (!receipt || command_exec_receipt>=0));
+  int fds[]={command_audit,controller?0:-1,receipt?command_exec_receipt:-1,output?command_out:-1,output?command_err:-1};
+  int maximum=-1;FD_ZERO(ready);
+  for(unsigned i=0;i<5;i++)if(fds[i]>=0){
+    need(fds[i]<FD_SETSIZE);FD_SET(fds[i],ready);if(fds[i]>maximum)maximum=fds[i];}
+  struct timeval timeout={milliseconds/1000,(milliseconds%1000)*1000};
+  command_native(select(maximum+1,ready,NULL,NULL,&timeout), >= 0);
+  need(!command_expired);
+}
+static void command_controller_ready(void) {
+  struct pollfd controller={0,POLLIN,0};command_native(poll(&controller,1,0), >= 0);
+  need(!(controller.revents&(POLLHUP|POLLERR|POLLNVAL)));
+}
+static void command_poll(void) {
+  command_controller_ready();fd_set ready;command_wait(&ready,false,false,false,10);
+  command_drain();command_controller_ready();
+}
 static uint64_t command_clock(struct timeval *time) {
   command_native(gettimeofday(time,NULL), == 0);need(time->tv_sec>0&&(uint64_t)time->tv_sec<=UINT32_MAX&&time->tv_usec>=0&&time->tv_usec<1000000);
   return (uint64_t)time->tv_sec*1000+(unsigned)time->tv_usec/1000;
@@ -442,13 +462,12 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
 }
 static void command_release_ready(void) {
   need(!command_expired && !command_admissions_closed);
-  struct pollfd controller={0,POLLIN,0};command_native(poll(&controller,1,0), >= 0);
-  need(!(controller.revents&(POLLHUP|POLLERR|POLLNVAL)));
+  command_controller_ready();
 }
 static void command_cold_ack(const char *expected) {
-  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};
-  for(;;){command_release_ready();command_native(poll(waiting,2,1000), >= 0);command_drain();
-    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(waiting[0].revents&POLLIN)break;}
+  fd_set ready;
+  for(;;){command_release_ready();command_wait(&ready,true,false,false,1000);command_drain();
+    command_release_ready();if(FD_ISSET(0,&ready))break;}
   char acknowledgement[3];need(fgets(acknowledgement,sizeof(acknowledgement),stdin));need(!strcmp(acknowledgement,expected));
 }
 /* SETEXEC keeps the parked PID/birth/session, but advances its audit pidversion.
@@ -459,10 +478,9 @@ static struct identity command_exec(struct identity parked, const char *operatio
   command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)parked.token.val[5]), == 1);
   command_release_ready();need(live(command_launch_owner) && live(parked));
   command_native(write(command_exec_gate,"X",1), == 1);command_native(close(command_exec_gate), == 0);command_exec_gate=-1;
-  struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0},{command_exec_receipt,POLLIN,0}};
-  for(;;){command_release_ready();command_native(poll(waiting,3,1000), >= 0);command_drain();
-    need(!(waiting[0].revents&(POLLHUP|POLLERR|POLLNVAL)) && !(waiting[2].revents&(POLLERR|POLLNVAL)));
-    if(waiting[2].revents&(POLLIN|POLLHUP))break;}
+  fd_set ready;
+  for(;;){command_release_ready();command_wait(&ready,true,true,false,1000);command_drain();
+    command_release_ready();if(FD_ISSET(command_exec_receipt,&ready))break;}
   char byte;command_native(read(command_exec_receipt,&byte,1), == 0);
   struct proc_bsdinfo state;
   for(;;){command_release_ready();command_native(proc_pidinfo((pid_t)parked.token.val[5],PROC_PIDTBSDINFO,0,&state,sizeof(state)), == sizeof(state));
@@ -615,9 +633,9 @@ static int command_entry(int argc,char **argv) {
   struct identity observer;need(inspect(getpid(),&observer));command_image_identity(observer,command_helper,command_helper_hash);
   printf("{\"event\":\"ready\",\"imageSha256\":\"%s\",\"identity\":",command_helper_hash);emit_identity(observer);puts("}");
   struct identity server={0};char line[131080];bool stopping=false;setvbuf(stdin,NULL,_IONBF,0);
-  while(!stopping){need(!command_expired);struct pollfd fds[]={{0,POLLIN,0},{command_audit,POLLIN,0},{command_out,POLLIN,0},{command_err,POLLIN,0}};command_native(poll(fds,4,1000), >= 0);command_drain();
-    for(unsigned i=2;i<4;i++)if(fds[i].revents&(POLLIN|POLLHUP)){unsigned char bytes[8192];ssize_t n=read(fds[i].fd,bytes,sizeof(bytes));int read_error=errno;command_observed(n>=0, n, read_error);if(n){printf("{\"event\":\"%s\",\"hex\":\"",i==2?"rpc":"stderr");command_hex(bytes,(size_t)n);puts("\"}");}else{close(fds[i].fd);if(i==2)command_out=-1;else command_err=-1;printf("{\"event\":\"%s-end\"}\n",i==2?"rpc":"stderr");}}
-    need(!(fds[0].revents&(POLLHUP|POLLERR|POLLNVAL)));if(!(fds[0].revents&POLLIN))continue;need(fgets(line,sizeof(line),stdin)&&strchr(line,'\n'));line[strlen(line)-1]=0;
+  while(!stopping){need(!command_expired);command_controller_ready();int fds[]={0,command_audit,command_out,command_err};fd_set ready;command_wait(&ready,true,false,true,1000);command_drain();
+    for(unsigned i=2;i<4;i++)if(fds[i]>=0 && FD_ISSET(fds[i],&ready)){unsigned char bytes[8192];ssize_t n=read(fds[i],bytes,sizeof(bytes));int read_error=errno;command_observed(n>=0, n, read_error);if(n){printf("{\"event\":\"%s\",\"hex\":\"",i==2?"rpc":"stderr");command_hex(bytes,(size_t)n);puts("\"}");}else{close(fds[i]);if(i==2)command_out=-1;else command_err=-1;printf("{\"event\":\"%s-end\"}\n",i==2?"rpc":"stderr");}}
+    command_controller_ready();if(!FD_ISSET(0,&ready))continue;need(fgets(line,sizeof(line),stdin)&&strchr(line,'\n'));line[strlen(line)-1]=0;
     need((!command_expired && !command_admissions_closed) || !strcmp(line,"D") || !strcmp(line,"S"));
     if(!strcmp(line,"V")||!strcmp(line,"G")){char directory[4096];command_path(directory,"schema");char *v[]={(char*)command_image,"--version",NULL},*g[]={(char*)command_image,"app-server","generate-json-schema","--out",directory,NULL};struct identity child=command_spawn(line[0]=='V'?v:g,"schema-home");command_cold_start(child,line);command_capture(line);}
     else if(!strcmp(line,"A")){char *args[]={(char*)command_image,"-c","web_search=\"disabled\"","-c","mcp_servers={}","app-server","--listen","stdio://",NULL};server=command_spawn(args,"home");command_server_wrapper=command_wrappers[command_count-1];command_case_asid=server.token.val[6];printf("{\"event\":\"A\",\"identity\":");emit_identity(server);printf(",\"phase\":\"pre-exec\",\"sessionHeld\":true,\"imageSha256\":\"%s\",\"policyFileSha256\":\"%s\"}\n",command_image_hash,command_policy_hash);}

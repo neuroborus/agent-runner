@@ -1422,6 +1422,13 @@ independent session check, failed native server exit, first-cause retention and
 observed emergency reporting.
 Cleanup requests require original file/parent identities and unchanged outside
 bytes; replacement fixtures cannot become newly admitted cleanup targets.
+Actual command wait and consumer bodies model an audit descriptor that refuses
+poll registration while select delivers delayed/split records. They retain empty
+timeout refusal, descriptor bounds, rebuilt sets/timeouts, saved wait errors and
+alarm expiry with separate cleanup causes. Cold/exec and broker projections
+cover controller EOF with and without pending input, receipt EOF/unexpected bytes,
+output closure and inactive descriptors, and cleanup command admission. These
+portable cases use no native OS tool and establish no hosted Darwin success.
 The actual finite-operation header digest and opt-in libbsm build vector are
 protected by injected compiler/filesystem coverage in the existing Darwin build
 test. Source guards require the SDK's `AUDIT_HEADER_VERSION_OPENBSM` declaration,

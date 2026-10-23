@@ -85,16 +85,19 @@ function commandGuards(header, helper, body, caller, options = {}) {
         .replace("struct proc_bsdinfo bsd;", "const bsd={};")
         .replace(
           "struct pollfd controller={0,POLLIN,0};",
-          "const controller={revents:0};",
+          "const controller={fd:0,events:POLLIN,revents:0};",
         )
         .replaceAll(/(?<!&)&controller\b/gu, "controller")
         .replace("char byte;", "let byte;")
         .replace("char acknowledgement[3];", "const acknowledgement={};")
         .replaceAll("sizeof(acknowledgement)", "3")
+        .replaceAll("fd_set ready;", "const ready=new Set();")
+        .replace(/int fds\[\]=\{([^;]+)\};/gu, "const fds=[$1];")
         .replace(
-          "struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0}};",
-          "const waiting=[{revents:0},{revents:0}];",
+          "struct timeval timeout={milliseconds/1000,(milliseconds%1000)*1000};",
+          "const timeout={tv_sec:Math.trunc(milliseconds/1000),tv_usec:(milliseconds%1000)*1000};",
         )
+        .replaceAll(/(?<!&)&(ready|timeout)\b/gu, "$1")
         .replace("struct timeval time;", "const time={};")
         .replace(
           "auditinfo_addr_t audit={0};",
@@ -195,6 +198,8 @@ function commandGuards(header, helper, body, caller, options = {}) {
       command_cleanup_started: false,
       command_expired: 0,
       command_in: -1,
+      command_out: -1,
+      command_err: -1,
       command_release: -1,
       command_exec_gate: -1,
       command_exec_receipt: -1,
@@ -207,6 +212,13 @@ function commandGuards(header, helper, body, caller, options = {}) {
       command_rights: [],
       MACH_PORT_NULL: 0,
       KERN_SUCCESS: 0,
+      FD_SETSIZE: 1024,
+      FD_ZERO: (set) => set.clear(),
+      FD_SET: (fd, set) => set.add(fd),
+      FD_ISSET: (fd, set) => {
+        assert.ok(fd >= 0 && fd < 1024);
+        return Number(set.has(fd));
+      },
       strcmp: (a, b) => Number(a !== b),
       getpid: () => 42,
       getuid: () => 0,
@@ -253,14 +265,23 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [helper, "failure", "code"],
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
-    ...(options.audit ? [[header, "command_drain", ""]] : []),
-    ...(options.coldAck ? [[header, "command_cold_ack", "expected"]] : []),
-    ...(options.exec
+    ...(options.wait || options.coldAck || options.exec
       ? [
-          [header, "command_release_ready", ""],
-          [header, "command_continue", "identity"],
+          [
+            header,
+            "command_wait",
+            "ready,controller,receipt,output,milliseconds",
+          ],
+          [header, "command_controller_ready", ""],
         ]
       : []),
+    ...(options.wait ? [[header, "command_poll", ""]] : []),
+    ...(options.audit ? [[header, "command_drain", ""]] : []),
+    ...(options.coldAck ? [[header, "command_cold_ack", "expected"]] : []),
+    ...(options.coldAck || options.exec
+      ? [[header, "command_release_ready", ""]]
+      : []),
+    ...(options.exec ? [[header, "command_continue", "identity"]] : []),
     ...(options.membership ? [[header, "command_absent", "pid"]] : []),
     ...(options.lifecycle
       ? [
@@ -948,9 +969,11 @@ function commandDrainFixture(
   helper,
   chunks = [],
   body = "command_drain();stdin();",
+  nativeWait = false,
 ) {
   const f = commandGuards(header, helper, body, "command_drain", {
     audit: true,
+    wait: nativeWait,
     cleanup: true,
     context: { command_prerequisite: false, command_owner: 0 },
   });
@@ -1170,6 +1193,282 @@ test("Darwin command drain retains split and coalesced BSM records, bounds and i
       f.run();
       assert.equal(f.context.command_barriers, 1);
       assert.equal(f.calls.includes("barrier"), true);
+    }
+  }
+});
+
+test("Darwin command select waits retain delayed audit records, bounds and original failures", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const record = Buffer.alloc(68);
+  record[0] = 0x14;
+  record.writeUInt32BE(68, 1);
+  const deliveries = [null, record.subarray(0, 3), record.subarray(3)];
+  const f = commandDrainFixture(header, helper, [], "command_poll();", true);
+  let waits = 0;
+  Object.assign(f.context, {
+    POLLIN: 1,
+    POLLHUP: 16,
+    POLLERR: 8,
+    POLLNVAL: 32,
+    poll(fd, count, timeout) {
+      assert.equal(count, 1);
+      // The audit device refuses poll registration; only select can deliver it.
+      if (fd.fd === 7) {
+        assert.equal(timeout, 10);
+        fd.revents = 32;
+        return 1;
+      }
+      assert.deepEqual([fd.fd, timeout], [0, 0]);
+      fd.revents = 0;
+      return 0;
+    },
+    select(maximum, ready, write, errors, timeout) {
+      assert.deepEqual([maximum, write, errors], [8, null, null]);
+      assert.deepEqual([...ready], [7]);
+      assert.deepEqual({ ...timeout }, { tv_sec: 0, tv_usec: 10000 });
+      const bytes = deliveries[waits++];
+      ready.clear();
+      timeout.tv_usec = 0;
+      if (bytes) {
+        f.chunks.push(bytes);
+        ready.add(7);
+        return 1;
+      }
+      return 0;
+    },
+  });
+  f.run();
+  assert.equal(f.records.length, 0);
+  f.run();
+  assert.equal(f.context.command_pending, 3);
+  assert.equal(f.records.length, 0);
+  f.run();
+  assert.deepEqual(f.records, [record]);
+  assert.equal(waits, 3);
+  const finish =
+    /static void command_case_finish\(void\) \{([\s\S]*?)\n\}/u.exec(header)[1];
+  const empty = commandDrainFixture(header, helper, [], finish, true);
+  let emptyWaits = 0;
+  Object.assign(empty.context, {
+    POLLIN: 1,
+    POLLHUP: 16,
+    POLLERR: 8,
+    POLLNVAL: 32,
+    command_attempt_seen: false,
+    command_marker_seen: false,
+    select(_maximum, ready) {
+      emptyWaits++;
+      ready.clear();
+      return 0;
+    },
+  });
+  assert.throws(empty.run, { code: 126, kind: "invariant" });
+  assert.equal(emptyWaits, 1000);
+  assert.equal(empty.records.length, 0);
+  for (const fault of [
+    "wait-error",
+    "alarm-interrupted",
+    "alarm-returned",
+    "expired",
+    "audit-negative",
+    "audit-bound",
+    "receipt-negative",
+    "receipt-bound",
+    "output-bound",
+    "controller-error",
+    "controller-hup",
+    "controller-hup-input",
+    "controller-after-wait",
+    "controller-input-after-wait",
+  ]) {
+    const g = commandDrainFixture(
+      header,
+      helper,
+      [],
+      "command_controller_ready();fd_set ready;command_wait(&ready,true,true,true,1000);command_controller_ready();",
+      true,
+    );
+    let selected = false;
+    Object.assign(g.context, {
+      POLLIN: 1,
+      POLLHUP: 16,
+      POLLERR: 8,
+      POLLNVAL: 32,
+      command_exec_receipt: 8,
+      command_err: 9,
+      FD_SET(fd, set) {
+        assert.ok(fd >= 0 && fd < 1024);
+        set.add(fd);
+      },
+      poll(fd) {
+        assert.equal(fd.fd, 0);
+        fd.revents =
+          fault.startsWith("controller-hup") ||
+          (selected && fault.startsWith("controller-"))
+            ? 16 | (fault.includes("input") ? 1 : 0)
+            : 0;
+        g.context.errno = 9;
+        return fault === "controller-error" ? -1 : 0;
+      },
+      select(maximum, ready, write, errors, timeout) {
+        assert.deepEqual([maximum, write, errors], [10, null, null]);
+        assert.deepEqual([...ready], [7, 0, 8, 9]);
+        assert.deepEqual({ ...timeout }, { tv_sec: 1, tv_usec: 0 });
+        selected = true;
+        ready.clear();
+        if (fault.startsWith("alarm")) g.context.command_expired = 1;
+        g.context.errno = fault === "alarm-interrupted" ? 4 : 5;
+        return fault === "wait-error" || fault === "alarm-interrupted" ? -1 : 0;
+      },
+    });
+    if (fault === "expired") g.context.command_expired = 1;
+    if (fault === "audit-negative") g.context.command_audit = -1;
+    if (fault === "audit-bound") g.context.command_audit = 1024;
+    if (fault === "receipt-negative") g.context.command_exec_receipt = -1;
+    if (fault === "receipt-bound") g.context.command_exec_receipt = 1024;
+    if (fault === "output-bound") g.context.command_err = 1024;
+    const error =
+      fault === "wait-error"
+        ? 5
+        : fault === "alarm-interrupted"
+          ? 4
+          : fault === "controller-error"
+            ? 9
+            : 0;
+    assert.throws(g.run, (failure) => {
+      assert.equal(failure.kind, error ? "errno" : "invariant", fault);
+      assert.equal(failure.value, error, fault);
+      assert.deepEqual(failure.cleanup, ["fixture-close", "errno", 16]);
+      return true;
+    });
+  }
+  const highest = commandDrainFixture(
+    header,
+    helper,
+    [],
+    "fd_set ready;command_wait(&ready,false,false,false,10);",
+    true,
+  );
+  Object.assign(highest.context, {
+    command_audit: 1023,
+    select(maximum, ready) {
+      assert.equal(maximum, 1024);
+      assert.deepEqual([...ready], [1023]);
+      return 0;
+    },
+  });
+  highest.run();
+});
+
+test("Darwin broker select readiness retains output closure, controller refusal and cleanup input", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const start = header.indexOf("  while(!stopping){"),
+    end = header.indexOf('    if(!strcmp(line,"V")', start);
+  assert.ok(start > 0 && end > start);
+  const body =
+    "const line={};let stopping=false;" +
+    header
+      .slice(start, end)
+      .replace("unsigned char bytes[8192];", "const bytes=Buffer.alloc(8192);")
+      .replaceAll("sizeof(bytes)", "8192")
+      .replaceAll("sizeof(line)", "131080")
+      .replace(
+        "line[strlen(line)-1]=0;",
+        "line.value=line.value.slice(0,-1);",
+      ) +
+    "stopping=true;}";
+  for (const fault of [
+    null,
+    "D",
+    "S",
+    "output-read",
+    "controller-eof",
+    "controller-eof-input",
+    "input-eof",
+    "unterminated",
+  ]) {
+    const f = commandDrainFixture(header, helper, [], body, true),
+      reads = [],
+      closed = [];
+    const auditRead = f.context.read;
+    let waits = 0;
+    Object.assign(f.context, {
+      Buffer,
+      POLLIN: 1,
+      POLLHUP: 16,
+      POLLERR: 8,
+      POLLNVAL: 32,
+      stdin: {},
+      command_out: 8,
+      command_admissions_closed: fault === "D" || fault === "S",
+      poll(fd) {
+        assert.equal(fd.fd, 0);
+        fd.revents =
+          waits && fault?.startsWith("controller-eof")
+            ? 16 | (fault.endsWith("input") ? 1 : 0)
+            : 0;
+        return 0;
+      },
+      select(maximum, ready) {
+        assert.equal(maximum, waits ? 8 : 9);
+        assert.deepEqual([...ready], waits ? [7, 0] : [7, 0, 8]);
+        ready.clear();
+        ready.add(waits++ ? 0 : 8);
+        if (fault === "controller-eof-input") ready.add(0);
+        return 1;
+      },
+      read(fd, bytes, size) {
+        if (fd === 7) return auditRead(fd, bytes, size);
+        assert.equal(fd, 8);
+        f.context.errno = 5;
+        return fault === "output-read" ? -1 : 0;
+      },
+      close(fd) {
+        closed.push(fd);
+        return 0;
+      },
+      command_hex() {
+        assert.fail("Closed output supplies no bytes");
+      },
+      fgets(line) {
+        reads.push("input");
+        line.value =
+          fault === "unterminated"
+            ? "B"
+            : fault === "S"
+              ? "S\n"
+              : fault === "D"
+                ? "D\n"
+                : "B\n";
+        return fault === "input-eof" ? null : line;
+      },
+      strchr: (line, value) => line.value.includes(value),
+      strcmp: (line, value) => Number(line.value !== value),
+      strlen: (line) => line.value.length,
+      printf() {},
+      puts() {},
+    });
+    if (fault && !["D", "S"].includes(fault)) {
+      assert.throws(f.run, (error) => {
+        assert.deepEqual(error.cleanup, ["fixture-close", "errno", 16]);
+        return true;
+      });
+      if (fault.startsWith("controller-eof") || fault === "output-read")
+        assert.deepEqual(reads, []);
+    } else {
+      f.run();
+      assert.deepEqual(reads, ["input"]);
+      assert.deepEqual(closed, [8]);
+      assert.equal(f.context.command_out, -1);
+      assert.equal(waits, 2);
     }
   }
 });
@@ -2093,17 +2392,18 @@ test("Darwin cold child exec gate follows trace acknowledgement while capture re
     "wrong-ack",
     "expired",
     "owner-loss",
+    "owner-loss-input",
+    "wait-error",
+    "alarm",
     "capture",
     "exec",
   ]) {
+    let waits = 0;
     const calls = [],
       child = { token: { val: [501, 501, 20, 20, 501, 123, 17, 2] } },
       f = commandGuards(header, helper, body, "command_cold_start", {
         coldAck: true,
         context: {
-          command_release_ready() {
-            if (refusal === "expired") throw new Error("Expired release");
-          },
           child,
           operation: "V",
           command_image: "/fixture/codex",
@@ -2122,15 +2422,28 @@ test("Darwin cold child exec gate follows trace acknowledgement while capture re
             calls.push("identity");
           },
           puts() {},
-          poll(waiting, size, timeout) {
-            assert.equal(size, 2);
-            assert.equal(timeout, 1000);
-            waiting[0].revents = calls.includes("poll")
-              ? refusal === "owner-loss"
-                ? 16
-                : 1
-              : 0;
-            calls.push("poll");
+          poll(controller, size, timeout) {
+            assert.deepEqual([size, timeout], [1, 0]);
+            controller.revents =
+              waits >= 2 && refusal?.startsWith("owner-loss")
+                ? 16 | (refusal === "owner-loss-input" ? 1 : 0)
+                : 0;
+            return 0;
+          },
+          select(maximum, ready, write, errors, timeout) {
+            assert.deepEqual([maximum, write, errors], [7, null, null]);
+            assert.deepEqual([...ready], [6, 0]);
+            assert.deepEqual({ ...timeout }, { tv_sec: 1, tv_usec: 0 });
+            waits++;
+            calls.push("wait");
+            ready.clear();
+            ready.add(waits === 1 ? 6 : 0);
+            timeout.tv_sec = 0;
+            if (refusal === "wait-error" || refusal === "alarm") {
+              if (refusal === "alarm") f.context.command_expired = 1;
+              f.context.errno = refusal === "alarm" ? 4 : 5;
+              return -1;
+            }
             return 1;
           },
           command_drain() {
@@ -2161,9 +2474,9 @@ test("Darwin cold child exec gate follows trace acknowledgement while capture re
       f.run();
       assert.deepEqual(calls, [
         "identity",
-        "poll",
+        "wait",
         "drain",
-        "poll",
+        "wait",
         "drain",
         "ack",
         "exec",
@@ -2323,6 +2636,8 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
   for (const fault of [
     null,
     "controller",
+    "controller-after-wait",
+    "controller-input-after-wait",
     "owner-loss",
     "owner-loss-late",
     "expired",
@@ -2332,6 +2647,9 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
     "policy",
     "write",
     "receipt",
+    "receipt-error",
+    "wait-error",
+    "wait-alarm",
     "birth",
     "version",
     "credentials",
@@ -2374,10 +2692,6 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
         "struct identity target;",
         "const target={token:{val:[]},bsd:{}};",
       )
-      .replace(
-        "struct pollfd waiting[]={{0,POLLIN,0},{command_audit,POLLIN,0},{command_exec_receipt,POLLIN,0}};",
-        "const waiting=[{revents:0},{revents:0},{revents:0}];",
-      )
       .replaceAll(/(?<!&)&(state|target)\b/gu, "$1")
       .replaceAll("sizeof(state)", "1");
     const f = commandGuards(header, helper, projected, "command_exec", {
@@ -2406,13 +2720,27 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
         SZOMB: 5,
         command_expired: fault === "expired" ? 1 : 0,
         command_admissions_closed: fault === "closed",
-        poll(waiting, size) {
-          if (size === 1) {
-            waiting.revents = fault === "controller" ? 16 : 0;
-            return 0;
-          }
+        poll(controller, size, timeout) {
+          assert.deepEqual([size, timeout], [1, 0]);
+          controller.revents =
+            fault === "controller" ||
+            (calls.includes("wait-exec") && fault?.startsWith("controller-"))
+              ? 16 | (fault === "controller-input-after-wait" ? 1 : 0)
+              : 0;
+          return 0;
+        },
+        select(maximum, ready, write, errors, timeout) {
+          assert.deepEqual([maximum, write, errors], [45, null, null]);
+          assert.deepEqual([...ready], [44, 0, 42]);
+          assert.deepEqual({ ...timeout }, { tv_sec: 1, tv_usec: 0 });
           calls.push("wait-exec");
-          waiting[2].revents = 16;
+          ready.clear();
+          ready.add(42);
+          if (fault === "wait-error" || fault === "wait-alarm") {
+            if (fault === "wait-alarm") f.context.command_expired = 1;
+            f.context.errno = fault === "wait-alarm" ? 4 : 5;
+            return -1;
+          }
           return 1;
         },
         command_drain: () => calls.push("drain"),
@@ -2479,6 +2807,10 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
         read(fd) {
           assert.equal(fd, 42);
           calls.push("receipt");
+          if (fault === "receipt-error") {
+            f.context.errno = 5;
+            return -1;
+          }
           return fault === "receipt" ? 1 : 0;
         },
         proc_pidinfo(pid, _kind, _arg, value) {
