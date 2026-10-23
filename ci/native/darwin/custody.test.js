@@ -3761,6 +3761,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         /&(identity|status|waitReady|wait|p|parked|byte|value)\b/gu,
         "$1",
       )
+      .replace(
+        /&(host|access|type|address)\b/gu,
+        (_, name) =>
+          `{get value(){return ${name}},set value(value){${name}=value}}`,
+      )
       .replaceAll(
         /\((?:unsigned long long|unsigned|int|long|id_t|void|void \*)\)/gu,
         "",
@@ -3770,22 +3775,30 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replaceAll("sizeof(parked)", "96")
       .replaceAll("sizeof(bytes)", "8192")
       .replaceAll("&argv[12]", "argv.slice(12)")
-      .replaceAll(/\b(?:int|long|ssize_t) /gu, "let ");
-  const functions = [
-    [reader, "case_launch_failure", "operation,result,error,revents,used"],
-    [reader, "case_launch_check", "operation,result"],
-    [reader, "case_line", "fd,encoded"],
-    [launcher, "launch_failure", "operation,result,error,revents,used,child"],
-    [launcher, "command", "fd,milliseconds"],
-    [launcher, "child_stdio", "workspace,provider"],
-    [launcher, "child_exec", "argv,environment,provider"],
-    [launcher, "parked_identity", "fd,child"],
-  ]
-    .map(
-      ([source, name, args]) =>
-        `function ${name}(${args}) {${translate(body(source, name))}}`,
-    )
-    .join("\n");
+      .replaceAll(
+        /\b(?:int|long|ssize_t|task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|kern_return_t) /gu,
+        "let ",
+      );
+  const mach = body(launcher, "mach_rights"),
+    sanitation = mach.indexOf("  need(task_set_special_port");
+  assert.ok(sanitation > 0);
+  const functions =
+    [
+      [reader, "case_launch_failure", "operation,result,error,revents,used"],
+      [reader, "case_launch_check", "operation,result"],
+      [reader, "case_line", "fd,encoded"],
+      [launcher, "launch_failure", "operation,result,error,revents,used,child"],
+      [launcher, "command", "fd,milliseconds"],
+      [launcher, "child_stdio", "workspace,provider"],
+      [launcher, "child_exec", "argv,environment,provider"],
+      [launcher, "parked_identity", "fd,child"],
+    ]
+      .map(
+        ([source, name, args]) =>
+          `function ${name}(${args}) {${translate(body(source, name))}}`,
+      )
+      .join("\n") +
+    `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}`;
   const start = reader.indexOf("static void case_start("),
     setup = reader
       .slice(
@@ -3824,6 +3837,60 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ],
     ["command-eof", "command(0,30000)", "command-read", 0, 0, 1, 0],
     ["command-timeout", "command(0,30000)", "command-poll", 0, 0, 0, -1],
+    [
+      "mach-host",
+      "initial_mach_rights()",
+      "task_get_special_port/TASK_HOST_PORT",
+      -37,
+      0,
+      0,
+      -1,
+    ],
+    [
+      "mach-kobject",
+      "initial_mach_rights()",
+      "mach_port_kobject",
+      17,
+      11,
+      0,
+      -1,
+    ],
+    [
+      "mach-type",
+      "initial_mach_rights()",
+      "mach_port_kobject/type",
+      0xffffffff,
+      11,
+      0,
+      -1,
+    ],
+    [
+      "mach-deallocate",
+      "initial_mach_rights()",
+      "mach_port_deallocate/host",
+      15,
+      12,
+      0,
+      -1,
+    ],
+    [
+      "mach-access",
+      "initial_mach_rights()",
+      "task_get_special_port/TASK_ACCESS_PORT",
+      19,
+      13,
+      0,
+      -1,
+    ],
+    [
+      "mach-access-value",
+      "initial_mach_rights()",
+      "TASK_ACCESS_PORT/null",
+      0xffffffff,
+      13,
+      0,
+      -1,
+    ],
     ["success"],
   ]) {
     const diagnostics = [],
@@ -3838,6 +3905,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         [5, "provider-error"],
       ]),
       actions = [],
+      machCalls = [],
       cloexec = new Set(),
       replaced = {};
     let reads = 0,
@@ -3849,6 +3917,48 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       launcher_pid: 41,
       launcher_identity: {},
       launch_child: 42,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      TASK_HOST_PORT: 1,
+      TASK_ACCESS_PORT: 2,
+      mach_task_self() {
+        machCalls.push("task");
+        return 1;
+      },
+      mach_thread_self() {
+        machCalls.push("thread");
+        return 2;
+      },
+      task_get_special_port(self, which, out) {
+        assert.equal(self, 1);
+        assert.ok(which === 1 || which === 2);
+        machCalls.push(which === 1 ? "host" : "access");
+        api.errno = which === 1 ? 0 : 13;
+        out.value =
+          which === 1 ? 7 : fault === "mach-access-value" ? 0xffffffff : 0;
+        return fault === (which === 1 ? "mach-host" : "mach-access")
+          ? which === 1
+            ? -37
+            : 19
+          : 0;
+      },
+      mach_port_kobject(self, host, type, address) {
+        assert.deepEqual([self, host], [1, 7]);
+        machCalls.push("kobject");
+        api.errno = 11;
+        type.value = fault === "mach-type" ? 0xffffffff : 3;
+        address.value = 4096;
+        return fault === "mach-kobject" ? 17 : 0;
+      },
+      mach_port_deallocate(self, host) {
+        assert.deepEqual([self, host], [1, 7]);
+        machCalls.push("deallocate");
+        api.errno = 12;
+        return fault === "mach-deallocate" ? 15 : 0;
+      },
+      mach_sanitation() {
+        machCalls.push("sanitation");
+      },
       argv: Array.from({ length: 14 }, (_, i) => String(i)),
       env: ["LANG=en_US.UTF-8"],
       F_DUPFD_CLOEXEC: 64,
@@ -4017,11 +4127,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     };
     const program = new Script(
         functions +
-          `\nfunction setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,setup,capture});`,
+          `\nfunction setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
-    if (fault === "child" || fault === "exec") reporter = 42;
+    if (fault === "child" || fault === "exec" || fault.startsWith("mach-"))
+      reporter = 42;
     if (fault === "exec") {
       native.child_stdio(10, false);
       for (const fd of [3, 4, 5]) descriptors.delete(fd);
@@ -4031,6 +4142,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         () => new Script(invocation).runInNewContext({ ...api, ...native }),
         /launch refused/u,
       );
+      assert.equal(diagnostics.length, 1, fault);
       assert.deepEqual(diagnostics[0].values.slice(0, 5), [
         operation,
         result,
@@ -4043,7 +4155,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           fault === "setup" ? "launcher=0" : "launcher=41",
         ),
       );
-      if (fault === "child" || fault === "exec")
+      if (fault === "child" || fault === "exec" || fault.startsWith("mach-"))
         assert.match(
           diagnostics[0].line,
           /start-seconds=100 start-micros=200/u,
@@ -4051,6 +4163,30 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       if (fault === "read-error")
         assert.match(diagnostics[0].line, /wait-result=-1 .*status-pid=0/u);
       assert.deepEqual(output, []);
+      if (fault.startsWith("mach-")) {
+        const stopped = {
+          "mach-host": 3,
+          "mach-kobject": 4,
+          "mach-type": 4,
+          "mach-deallocate": 5,
+          "mach-access": 6,
+          "mach-access-value": 6,
+        }[fault];
+        assert.deepEqual(
+          machCalls,
+          [
+            "task",
+            "thread",
+            "host",
+            "kobject",
+            "deallocate",
+            "access",
+            "sanitation",
+          ].slice(0, stopped),
+        );
+        assert.equal(reads, 0);
+        assert.equal(descriptors.get(2), "diagnostic");
+      }
       if (
         [
           "setup",
@@ -4096,6 +4232,16 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       descriptors.set(5, "provider-error");
       native.child_stdio(10, true);
       assert.equal(descriptors.get(2), "provider-error");
+      native.initial_mach_rights();
+      assert.deepEqual(machCalls, [
+        "task",
+        "thread",
+        "host",
+        "kobject",
+        "deallocate",
+        "access",
+        "sanitation",
+      ]);
       assert.deepEqual(diagnostics, []);
     }
   }
@@ -4108,6 +4254,7 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
         "native-darwin-sdk-metadata: uid=0 gid=0 mode=040775 dev=1 inode=42\n" +
         "native-darwin-sdk: malformed untrusted=value\n" +
         "native-darwin-guard: file=fixture.c line=19 errno=13\n" +
+        "native-darwin-launch: owner=launcher operation=task_get_special_port/TASK_ACCESS_PORT result=19 errno=13 revents=0 read=-1 launcher=41 reporter=42 child=0\n" +
         "native-darwin-launch: owner=launcher operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126\n",
     );
   await withNativeDiagnostics(
@@ -4149,6 +4296,11 @@ test("Darwin guard locations and errno remain diagnostics through failed custody
   assert.ok(output.includes("file=fixture.c line=19 errno=13"));
   assert.ok(output.includes("kind=1 owner=1 writable=1"));
   assert.ok(output.includes("uid=0 gid=0 mode=040775 dev=1 inode=42"));
+  assert.ok(
+    output.includes(
+      "operation=task_get_special_port/TASK_ACCESS_PORT result=19 errno=13",
+    ),
+  );
   assert.ok(
     output.includes(
       "operation=parked-read result=0 errno=0 revents=16 read=0 launcher=41 child=42 status=126",

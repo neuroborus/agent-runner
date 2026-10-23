@@ -8764,10 +8764,17 @@ saved errno, poll revents and read count/EOF. Bounded secondary observations ret
 the original launcher's PID/birth and available child status with non-reaping
 `waitid(WNOWAIT)`; reporting failures cannot replace the primary cause. Diagnostics
 consume no protocol frames and establish neither admission nor retirement.
-The original post-P refusal still supplies no supported platform cause.
+The launcher's first Mach guard retains its exact order: host-port acquisition,
+host kobject query, ordinary host type 3, host-copy deallocation, access-port
+acquisition and null access port. Each native call runs once; a refusal reports
+its operation and immediate `kern_return_t` or observed type/port name in `result`,
+with the saved errno. Successful checks remain silent, and failed diagnostic
+writes/flushes cannot change the original cause or exit 126. Subsequent sanitation
+is unchanged. The recorded compound refusal identifies no failed operand or
+functional Mach remedy; fresh matching macOS launch evidence remains required.
 Windows partial-acquisition retirement/error87 remains unattributed and open,
 alongside Windows TCP/WFP and audit-delivery and Darwin Mach/startup obligations;
-these diagnostics justify no third repair or native acceptance claim.
+these diagnostics supply no native acceptance claim.
 
 Held regular-file reads bind canonical root ownership, immutable modes, single
 links, native identities and expected SHA-256, with one-MiB profile/128-MiB image

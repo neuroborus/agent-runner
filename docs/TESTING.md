@@ -355,6 +355,13 @@ successful exec closes the diagnostic copy. Injected descriptor mappings keep
 ordinary setup stderr separate until exec and preserve provider/payload stdio.
 Diagnostic-write and identity/status inspection failures cannot replace the first
 cause or consume protocol data; stderr diagnostics survive transport failure.
+The same actual launch-body fixture exercises all six initial Mach refusals and
+the successful ordered path, requiring single evaluation and suppression of
+later operations after refusal. Direct kernel results, including signed errors,
+and full-width observed type/port values survive failed diagnostic writes and
+flushes; the Mach diagnostic also survives the existing transport-loss fixture.
+These checks preserve the exact predicates and subsequent sanitation and prove
+no functional Mach remedy or successful native launch.
 Retirement rejects changed admission bindings, trailing custody output and a close
 reply without bounded custodian exit.
 These deterministic fast regressions run no macOS helper; the existing native

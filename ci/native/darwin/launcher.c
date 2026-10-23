@@ -46,15 +46,22 @@ static void descriptors(void) {
   need(mask == 31);
   need(!fcntl(3, F_SETFD, FD_CLOEXEC) && !fcntl(4, F_SETFD, FD_CLOEXEC));
 }
+static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child);
 static void mach_rights(void) {
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host, access; natural_t type; mach_vm_address_t address;
   /* SIP forbids clearing itk_host. Require the ordinary IKOT_HOST (XNU value 3),
    * never a privileged host port; bind this private type/export to the actual SDK. */
-  need(task_get_special_port(self, TASK_HOST_PORT, &host) == KERN_SUCCESS &&
-       mach_port_kobject(self, host, &type, &address) == KERN_SUCCESS && type == 3 &&
-       mach_port_deallocate(self, host) == KERN_SUCCESS &&
-       task_get_special_port(self, TASK_ACCESS_PORT, &access) == KERN_SUCCESS && access == MACH_PORT_NULL);
+  kern_return_t status = task_get_special_port(self, TASK_HOST_PORT, &host); int error = errno;
+  if (status != KERN_SUCCESS) launch_failure("task_get_special_port/TASK_HOST_PORT", status, error, 0, -1, 0);
+  status = mach_port_kobject(self, host, &type, &address); error = errno;
+  if (status != KERN_SUCCESS) launch_failure("mach_port_kobject", status, error, 0, -1, 0);
+  if (type != 3) launch_failure("mach_port_kobject/type", type, error, 0, -1, 0);
+  status = mach_port_deallocate(self, host); error = errno;
+  if (status != KERN_SUCCESS) launch_failure("mach_port_deallocate/host", status, error, 0, -1, 0);
+  status = task_get_special_port(self, TASK_ACCESS_PORT, &access); error = errno;
+  if (status != KERN_SUCCESS) launch_failure("task_get_special_port/TASK_ACCESS_PORT", status, error, 0, -1, 0);
+  if (access != MACH_PORT_NULL) launch_failure("TASK_ACCESS_PORT/null", access, error, 0, -1, 0);
   need(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
        task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
        task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
