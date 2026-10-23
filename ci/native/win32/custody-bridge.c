@@ -265,12 +265,41 @@ static DWORD relay_retire(HANDLE process, HANDLE input) {
   relay_check("input-settlement", inputOk, 0, ERROR_SUCCESS); return exit;
 }
 static LONG task_active(ITaskService *service, BSTR name) {
-  IRunningTaskCollection *all;LONG count,found=0;wchar_t path[132];need(swprintf_s(path,132,L"\\%ls",name)>0);
-  need_hr(ITaskService_GetRunningTasks,service,TASK_ENUM_HIDDEN,&all);need_hr(IRunningTaskCollection_get_Count,all,&count);need(count>=0&&count<=4096);
-  for(LONG i=1;i<=count;i++){VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;IRunningTask *running;BSTR actual;
-    need_hr(IRunningTaskCollection_get_Item,all,index,&running);need_hr(IRunningTask_get_Path,running,&actual);
-    if(!_wcsicmp(path,actual))found++;SysFreeString(actual);IRunningTask_Release(running);
-  }IRunningTaskCollection_Release(all);return found;
+  wchar_t path[132];need(swprintf_s(path,132,L"\\%ls",name)>0);
+  for(unsigned attempt=1;attempt<=3;attempt++){
+    IRunningTaskCollection *all=NULL;IRunningTask *running=NULL;BSTR actual=NULL;
+    LONG count=-1,found=0;BOOL retry=FALSE;
+    const char *operation="ITaskService_GetRunningTasks";unsigned line=__LINE__;
+    HRESULT result=ITaskService_GetRunningTasks(service,TASK_ENUM_HIDDEN,&all);DWORD error=GetLastError();
+    BOOL valid=SUCCEEDED(result)&&all;
+    if(valid){
+      operation="IRunningTaskCollection_get_Count";line=__LINE__;
+      result=IRunningTaskCollection_get_Count(all,&count);error=GetLastError();
+      valid=SUCCEEDED(result)&&count>=0&&count<=4096;
+    }
+    for(LONG i=1;valid&&i<=count;i++){
+      VARIANT index;VariantInit(&index);index.vt=VT_I4;index.lVal=i;
+      operation="IRunningTaskCollection_get_Item";line=__LINE__;
+      result=IRunningTaskCollection_get_Item(all,index,&running);error=GetLastError();
+      valid=SUCCEEDED(result)&&running;
+      if(!valid){retry=result==SCHED_E_TASK_NOT_RUNNING;break;}
+      operation="IRunningTask_get_Path";line=__LINE__;
+      result=IRunningTask_get_Path(running,&actual);error=GetLastError();
+      valid=SUCCEEDED(result)&&actual&&actual[0]==L'\\'&&SysStringLen(actual)>0&&SysStringLen(actual)<4096&&SysStringLen(actual)==wcslen(actual);
+      if(!valid){retry=result==SCHED_E_TASK_NOT_RUNNING;break;}
+      if(!_wcsicmp(path,actual))found++;
+      SysFreeString(actual);actual=NULL;IRunningTask_Release(running);running=NULL;
+    }
+    if(actual)SysFreeString(actual);
+    if(running)IRunningTask_Release(running);
+    if(all)IRunningTaskCollection_Release(all);
+    /* A disappeared item invalidates every count from this snapshot. Only a
+     * complete fresh census can return zero; held retirement is still separate. */
+    if(retry&&attempt<3)continue;
+    SetLastError(error);need_hresult_at(result,SUCCEEDED(result),operation,__FILE__,line);need(valid);
+    return found;
+  }
+  need(FALSE);return 0;
 }
 int wmain(int argc, wchar_t **argv) {
 #ifdef NATIVE_CI_EXPERIMENT

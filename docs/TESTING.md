@@ -2048,12 +2048,21 @@ It also covers hidden-task GUID/state/engine and birth joins, matching-digest
 zero-instance rejection, durable pre-setup abort receipts and fresh verification
 without clearing admission failure. Lost replies, live Jobs and exit 124 retain
 separate causes; independent task settlement precedes outer observer release.
+The existing scheduler actual-body fixture executes both reader and bridge
+censuses. It injects disappearance after partial progress, fresh complete
+empty/nonempty snapshots, persistent instability, unrelated HRESULTs, failed
+collection/count reads and invalid or unwritten outputs. Assertions require
+one-based hidden enumeration, exact case-insensitive paths, discarded partial
+counts, bounded whole-census restarts and exactly-once collection/item/BSTR release,
+with the original failure preserved through cleanup.
 Ordinary experiment cold recovery distinguishes the ordered normal finish chain
 from the bound pre-setup abort/helper-retirement chain. Injected records reject
 missing, duplicated or reordered acknowledgements, mixed setup/abort lifecycles,
 substituted helper/bridge births, task hashes, instances and verifiers. Fresh
-process/Job censuses and task removal remain required after either chain; error
-87 and a failed live retention call cannot authorize a different recovery lane.
+process/Job censuses and task removal remain required after either chain. Original-owner
+recovery error 87/watchdog and actual independent cleanup remain unresolved native
+CI obligations; neither an empty scheduler census nor failed live retention proves
+retirement or authorizes a different recovery lane.
 The same suite now executes the repository verifier and prerequisite recovery
 using raw framed native replies and filesystem bytes, without supplying verifier
 verdict callbacks. It covers original process/token and transferred-object joins,

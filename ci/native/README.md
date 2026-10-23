@@ -9683,11 +9683,15 @@ Independent admission verifies the registered path and enumerates
 that complete path, refreshes each owned entry and retains the separate
 `GetInstances(0)` count after the hidden census; this count cannot introduce an
 instance missing from that census. Partial reads cannot contribute counts.
-Only `SCHED_E_TASK_NOT_RUNNING` permits discarding an incomplete snapshot and
-acquiring a fresh complete census, at most three times within the existing
-request/owner bounds. All references and strings from the discarded snapshot
-are released first. Other errors and exhaustion refuse immediately; no index is
-skipped and no stopped entry is converted into an absent-instance receipt.
+Both the admission reader and bridge release census discard the entire incomplete
+snapshot only for `SCHED_E_TASK_NOT_RUNNING` from item/path reads (or the reader's
+owned-entry refresh). Each makes at most three attempts within existing lifetime
+bounds, resetting counts before each fresh hidden-task census. Counts remain
+bounded and paths must be valid, with exact case-insensitive owned-path matching.
+Before retry or refusal, every acquired collection, item and BSTR is released,
+including partial failure outputs, preserving the original HRESULT and immediate
+error through cleanup. Other errors, invalid results and exhaustion refuse; no
+index is skipped and no failed census becomes an absence receipt.
 
 An ended owned instance can be reconciled only when a fresh complete census has
 no owned entries and independent original-process/whole-Job lifetime observations
@@ -9699,6 +9703,8 @@ creation, and a same-PID engine must have that exact held helper identity.
 Fresh helper observations surround the scheduler read, with unchanged image,
 DACL, token and task digest. Zero, multiple, changed or unjoined instances fail
 with bounded predicate facts; a matching digest alone supplies no launch authority.
+Original-owner recovery error 87/watchdog and independent cleanup remain unresolved
+obligations for fresh Windows CI; bridge census retries cannot establish them.
 
 The existing private refusal frame carries the precise scheduler API, immediate
 HRESULT, collection index and census attempt independently of incidental

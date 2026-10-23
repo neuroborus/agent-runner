@@ -6924,15 +6924,16 @@ test("scheduler refusals retain the exact API/HRESULT independently of last-erro
 });
 
 async function schedulerProgram() {
-  const source = await readFile(
-    new URL("./custody-reader.c", import.meta.url),
-    "utf8",
+  const [source, bridge] = await Promise.all(
+    ["custody-reader.c", "custody-bridge.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
   );
-  const body = (name) =>
+  const body = (name, text = source) =>
     new RegExp(
       `static (?:LONG|void|DWORD|BOOL) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
-    ).exec(source)[1];
+    ).exec(text)[1];
   const translate = (text) =>
     text
       .replace("struct task_scope *s=reader_task", "const s=reader_task")
@@ -6955,7 +6956,10 @@ async function schedulerProgram() {
       )
       .replace(/->/gu, ".")
       .replace(/\bL(?=['"])/gu, "")
-      .replace(/(?<!&)&count\b/gu, "value=>count=value")
+      .replace(/(?<!&)&(count|all|running|actual)\b/gu, "value=>$1=value")
+      .replace(/\b(?:IRunningTaskCollection|IRunningTask) \*/gu, "let ")
+      .replace("const char *operation", "let operation")
+      .replace(/\bBSTR\b/gu, "let")
       .replace(/\b(?:LONG|BOOL|DWORD|HANDLE|HRESULT|unsigned)\b/gu, "let");
   return new Script(`
     function task_result(result,operation,line){${translate(body("task_result"))}}
@@ -6963,16 +6967,28 @@ async function schedulerProgram() {
     function task_engine_close(){${translate(body("task_engine_close"))}}
     function task_close(){${translate(body("task_close"))}}
     function task_instances(service,name,owned){${translate(body("task_instances"))}}
+    function task_active(service,name){${translate(body("task_active", bridge))}}
   `);
 }
 
 function schedulerFixture(program, snapshots, fault) {
   const closed = [],
     calls = [],
+    collections = [],
+    releasedCollections = [],
+    strings = [],
+    releasedStrings = [],
     scheduler = { cleanupError: 0, cleanupFailed: false },
     owned = Array(32).fill(null);
   let lastError = 0,
-    reads = 0;
+    reads = 0,
+    currentIndex = 0;
+  const reply = (stage, index, value, out) => {
+    const result = fault?.(stage, reads, index) ?? 0;
+    if (typeof result === "number") out(value);
+    else if (Object.hasOwn(result, "output")) out(result.output);
+    return typeof result === "number" ? result : (result.result ?? 0);
+  };
   const api = {
     NULL: null,
     TRUE: true,
@@ -6996,7 +7012,7 @@ function schedulerFixture(program, snapshots, fault) {
     },
     VariantInit: () => {},
     SysStringLen: (value) => value.length,
-    wcslen: (value) => value.length,
+    wcslen: (value) => value.split("\0")[0].length,
     _wcsicmp: (a, b) => Number(a.toLowerCase() !== b.toLowerCase()),
     need(ok) {
       if (!ok) {
@@ -7027,30 +7043,40 @@ function schedulerFixture(program, snapshots, fault) {
     ITaskService_GetRunningTasks(service, flags, out) {
       assert.equal(flags, 1);
       calls.push(["census", ++reads]);
-      out({ rows: snapshots[Math.min(reads - 1, snapshots.length - 1)] });
+      currentIndex = 0;
+      const all = {
+        rows: snapshots[Math.min(reads - 1, snapshots.length - 1)],
+      };
       lastError = 0;
-      return fault?.("all", reads, 0) ?? 0;
+      return reply("all", 0, all, (value) => {
+        if (value) collections.push(value);
+        out(value);
+      });
     },
     IRunningTaskCollection_get_Count(all, out) {
-      out(all.rows.censusCount ?? all.rows.length);
       lastError = 0;
-      return fault?.("count", reads, 0) ?? 0;
+      return reply("count", 0, all.rows.censusCount ?? all.rows.length, out);
     },
     IRunningTaskCollection_get_Item(all, index, out) {
       assert.equal(index.vt, 3);
       assert.ok(index.lVal > 0);
+      currentIndex = index.lVal;
       calls.push(["item", reads, index.lVal]);
       const row = all.rows[index.lVal - 1];
       assert.ok(row);
-      out(row);
       lastError = 0;
-      return fault?.("item", reads, index.lVal) ?? 0;
+      return reply("item", index.lVal, row, out);
     },
     IRunningTask_get_Path(row, out) {
       calls.push(["path", row.id]);
-      out(row.path);
       lastError = 0;
-      return fault?.("path", reads, scheduler.index) ?? 0;
+      return reply("path", currentIndex, row.path, (value) => {
+        if (value == null) return out(value);
+        // Distinct allocations stay owned even for identical or empty text.
+        const actual = new String(value);
+        strings.push(actual);
+        out(actual);
+      });
     },
     IRunningTask_Refresh(row) {
       calls.push(["refresh", row.id]);
@@ -7062,6 +7088,7 @@ function schedulerFixture(program, snapshots, fault) {
       lastError = 91;
     },
     IRunningTaskCollection_Release: (all) => {
+      releasedCollections.push(all);
       closed.push(all.rows ? "census" : "instances");
       lastError = 92;
     },
@@ -7078,6 +7105,7 @@ function schedulerFixture(program, snapshots, fault) {
       lastError = 95;
     },
     SysFreeString: (text) => {
+      releasedStrings.push(text);
       closed.push(`string:${text}`);
       lastError = 96;
     },
@@ -7093,9 +7121,156 @@ function schedulerFixture(program, snapshots, fault) {
     owned,
     closed,
     calls,
+    collections,
+    releasedCollections,
+    strings,
+    releasedStrings,
     read: () => api.task_instances({}, "owned", owned),
+    active: () => api.task_active({}, "owned"),
   };
 }
+
+function assertSchedulerReleases(f) {
+  for (const [acquired, released] of [
+    [f.collections, f.releasedCollections],
+    [f.strings, f.releasedStrings],
+  ]) {
+    assert.equal(released.length, acquired.length);
+    for (const reference of acquired)
+      assert.equal(released.filter((value) => value === reference).length, 1);
+  }
+}
+
+test("bridge task census restarts completely after a disappearing item and discards partial counts", async () => {
+  const program = await schedulerProgram();
+  const first = { id: "first", path: "\\owned" },
+    ended = { id: "ended", path: "\\OWNED" },
+    live = { id: "live", path: "\\owned" },
+    hidden = { id: "hidden", path: "\\OWNED" },
+    other = { id: "other", path: "\\owned-extra" };
+  for (const stage of ["item", "path"]) {
+    for (const fresh of [[], [other], [other, live, hidden]]) {
+      const snapshots = [[first, ended], fresh];
+      let f;
+      f = schedulerFixture(program, snapshots, (at, pass, index) => {
+        if (at === "all" && pass === 2) {
+          assertSchedulerReleases(f);
+          for (const row of [first, ended])
+            assert.equal(f.closed.filter((id) => id === row.id).length, 1);
+          assert.equal(
+            f.closed.filter((id) => id.startsWith("string:")).length,
+            stage === "path" ? 2 : 1,
+          );
+        }
+        return at === stage && pass === 1 && index === 2 ? 0x8004130b | 0 : 0;
+      });
+      assert.equal(f.active(), fresh.filter((row) => row !== other).length);
+      assert.deepEqual(
+        f.calls
+          .filter(([at]) => at === "item")
+          .map(([, pass, index]) => [pass, index]),
+        [[1, 1], [1, 2], ...fresh.map((_, i) => [2, i + 1])],
+      );
+      assert.equal(f.collections.length, 2);
+      assertSchedulerReleases(f);
+      for (const row of [first, ended, ...fresh])
+        assert.equal(f.closed.filter((id) => id === row.id).length, 1);
+      assert.deepEqual(
+        f.closed.filter((id) => id.startsWith("string:")).sort(),
+        [first, ...(stage === "path" ? [ended] : []), ...fresh]
+          .map((row) => `string:${row.path}`)
+          .sort(),
+      );
+    }
+  }
+});
+
+test("bridge task census bounds instability and preserves other HRESULTs through cleanup", async () => {
+  const program = await schedulerProgram();
+  const first = { id: "first", path: "\\owned" },
+    ended = { id: "ended", path: "\\OWNED" };
+  const operations = {
+    all: "ITaskService_GetRunningTasks",
+    count: "IRunningTaskCollection_get_Count",
+    item: "IRunningTaskCollection_get_Item",
+    path: "IRunningTask_get_Path",
+  };
+  for (const stage of Object.keys(operations)) {
+    for (const result of [0x8004130b | 0, 0x80070005 | 0]) {
+      let f;
+      f = schedulerFixture(program, [[first, ended]], (at, pass, index) => {
+        if (at !== stage || (["item", "path"].includes(at) && index !== 2))
+          return 0;
+        f.api.SetLastError(37);
+        return result;
+      });
+      assert.throws(f.active, (error) => {
+        assert.equal(error.scheduler.result, result);
+        assert.equal(error.scheduler.operation, operations[stage]);
+        assert.equal(error.scheduler.lastError, 37);
+        return true;
+      });
+      const attempts =
+        ["item", "path"].includes(stage) && result === (0x8004130b | 0) ? 3 : 1;
+      assert.equal(f.calls.filter(([at]) => at === "census").length, attempts);
+      assertSchedulerReleases(f);
+      for (const row of [first, ended])
+        assert.equal(
+          f.closed.filter((id) => id === row.id).length,
+          ["item", "path"].includes(stage) ? attempts : 0,
+        );
+      assert.equal(
+        f.closed.filter((id) => id.startsWith("string:")).length,
+        stage === "path" ? attempts * 2 : stage === "item" ? attempts : 0,
+      );
+    }
+  }
+});
+
+test("bridge task census refuses invalid and unwritten outputs without leaking partial acquisitions", async () => {
+  const program = await schedulerProgram();
+  const first = { id: "first", path: "\\owned" },
+    ended = { id: "ended", path: "\\OWNED" };
+  const cases = [
+    ...["all", "count", "item", "path"].flatMap((stage) =>
+      [0, 0x80070057 | 0].map((result) => [stage, { result }]),
+    ),
+    ...["all", "item", "path"].map((stage) => [stage, { output: null }]),
+    ...[-1, 4097].map((output) => ["count", { output }]),
+    ...["", "relative", "\\owned\0suffix", "\\" + "x".repeat(4095)].map(
+      (output) => ["path", { output }],
+    ),
+  ];
+  for (const [stage, response] of cases) {
+    const f = schedulerFixture(program, [[first, ended]], (at, pass, index) =>
+      at === stage && (!["item", "path"].includes(at) || index === 2)
+        ? response
+        : 0,
+    );
+    assert.throws(f.active, (error) => {
+      if (response.result)
+        assert.equal(error.scheduler.result, response.result);
+      return true;
+    });
+    assert.equal(f.calls.filter(([at]) => at === "census").length, 1);
+    assertSchedulerReleases(f);
+    assert.equal(
+      f.closed.filter((id) => id === "first").length,
+      ["item", "path"].includes(stage) ? 1 : 0,
+    );
+    assert.equal(
+      f.closed.filter((id) => id === "ended").length,
+      stage === "path" ? 1 : 0,
+    );
+    const strings = ["item", "path"].includes(stage) ? ["string:\\owned"] : [];
+    if (stage === "path" && response.output != null)
+      strings.push(`string:${response.output}`);
+    assert.deepEqual(
+      f.closed.filter((id) => id.startsWith("string:")).sort(),
+      strings.sort(),
+    );
+  }
+});
 
 test("actual scheduler census retains one-based hidden reads, exact paths and every partial reference", async () => {
   const program = await schedulerProgram();
