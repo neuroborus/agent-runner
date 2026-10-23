@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-23 — Attribute pending TCP without changing denial evidence
+
+Windows feasibility observes the original socket's restriction/provider state
+at its immediate connect result and compares bounded event availability with
+AppId selection over the same WFP interval. The comparison shares existing
+time/count limits and cleanup ownership; its rows never supply denial matches.
+Collection settings, policy and the O/D/T/U protocol remain unchanged. Actual
+`10013`, exact kernel DROP joins and independent retirement remain mandatory.
+The defect stays open pending hosted attribution and a reviewed follow-up plan.
+
 ## 2026-10-23 — Recover acquired cases through independent original custody
 
 Windows failed-reader settlement waits for actual transport closure and uses the

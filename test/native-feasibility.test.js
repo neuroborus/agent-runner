@@ -5866,6 +5866,101 @@ test("TCP setup, completion and observer failures retain native causes and close
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
   );
+  const socketBody =
+    /static void tcp_socket_observe\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "int saved = WSAGetLastError(); BOOL restricted = FALSE; int restrictedSize = sizeof(restricted);",
+        "const saved = WSAGetLastError(), restricted = {value:false}, restrictedSize = {value:4};",
+      )
+      .replace(
+        "WSAPROTOCOL_INFOW protocol = {0}; int protocolSize = sizeof(protocol);",
+        "const protocol = {}, protocolSize = {value:628};",
+      )
+      .replaceAll("sizeof(restricted)", "4")
+      .replaceAll("sizeof(protocol)", "628")
+      .replaceAll("restrictedSize ==", "restrictedSize.value ==")
+      .replaceAll("protocolSize ==", "protocolSize.value ==")
+      .replaceAll("!!restricted", "!!restricted.value")
+      .replaceAll("(char *)", "")
+      .replace(/&(?=[a-zA-Z_])/gu, "")
+      .replace(/\b(?:int|DWORD)\b/gu, "let");
+  for (const fault of [
+    null,
+    "restricted-query",
+    "restricted-short",
+    "protocol-query",
+    "protocol-short",
+    "creator-unavailable",
+  ]) {
+    let lastError = 10035;
+    const calls = [],
+      writes = [],
+      creator = {
+        version: fault === "creator-unavailable" ? 0 : 1,
+        pid: 43,
+        birth: 100,
+        token: 7,
+      };
+    new Script(`(socket,connected)=>{${socketBody}}`).runInNewContext({
+      SOCKET_ERROR: -1,
+      SOL_SOCKET: 1,
+      SO_IS_RESTRICTED: 2,
+      SO_PROTOCOL_INFOW: 3,
+      diagnosticOutputLock: {},
+      stderr: {},
+      socketCreation: creator,
+      WSAGetLastError: () => lastError,
+      WSASetLastError: (value) => {
+        lastError = value;
+      },
+      GetCurrentProcessId: () => 43,
+      getsockopt(socket, level, option, value, size) {
+        calls.push([socket, level, option]);
+        lastError = 10022;
+        if (option === 2) {
+          value.value = true;
+          if (fault === "restricted-short") size.value = 1;
+        } else {
+          Object.assign(value, {
+            ProviderId: "provider",
+            dwCatalogEntryId: 7,
+            dwServiceFlags1: 8,
+            ProtocolChain: { ChainLen: 1 },
+          });
+          if (fault === "protocol-short") size.value = 1;
+        }
+        return fault === (option === 2 ? "restricted-query" : "protocol-query")
+          ? -1
+          : 0;
+      },
+      AcquireSRWLockExclusive: () => {},
+      ReleaseSRWLockExclusive: () => {},
+      socket_protocol: () => true,
+      socket_target_write(_stream, actual) {
+        assert.equal(actual, creator);
+      },
+      wfp_key(_stream, key) {
+        assert.equal(key, "provider");
+        writes.push("provider");
+      },
+      fprintf: (_stream, format, ...args) => writes.push([format, ...args]),
+      fputs: (value) => writes.push(value),
+      fflush: () => {},
+    })(17, 10035);
+    assert.deepEqual(calls, [
+      [17, 1, 2],
+      [17, 1, 3],
+    ]);
+    assert.equal(lastError, 10035);
+    assert.equal(
+      writes.filter((value) => value === "unavailable").length,
+      fault ? 1 : 0,
+    );
+    assert.equal(writes.includes("provider"), !fault?.startsWith("protocol-"));
+    assert.equal(writes[0][1], 10035);
+    assert.equal(writes[0][2], fault === "restricted-query" ? 10022 : 0);
+  }
   const tcp = source.slice(
     source.indexOf("static int tcp_connection("),
     source.indexOf("static int connection("),
@@ -6040,6 +6135,12 @@ test("TCP setup, completion and observer failures retain native causes and close
         expireAfterTransfer && api.transferred ? 5000 : now,
       WSAGetLastError: () => actualError,
       wfp_now: () => 1100,
+      tcp_socket_observe: (socket, error) => {
+        assert.equal(socket, 17);
+        assert.equal(error, connectError);
+        events.push("socket-observed");
+        actualError = 10022; // Optional inspection cannot replace connect.
+      },
       tcp_detail: (api, value) => details.push([api, value]),
       tcp_observe: (name, phase, value) => {
         observations.push([name, phase, value]);
@@ -6175,6 +6276,10 @@ test("TCP setup, completion and observer failures retain native causes and close
       unattempted ? 0 : 1,
     );
     assert.equal(events.filter((event) => event === "close").length, 1);
+    assert.equal(
+      events.filter((event) => event === "socket-observed").length,
+      unattempted ? 0 : 1,
+    );
     if (!unattempted && connectError === 10035)
       assert.ok(
         observations.some(
@@ -8175,12 +8280,55 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
           .join(",") +
         "})",
     );
+  const availabilityBody =
+    /static UINT32 wfp_availability\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "DWORD saved = GetLastError(); HANDLE enumeration = NULL; FWPM_NET_EVENT2 **events = NULL; UINT32 scanned = 0;",
+        "const saved = GetLastError(); enumeration = null; events = null; let scanned = 0;",
+      )
+      .replace(
+        "FWPM_NET_EVENT_ENUM_TEMPLATE0 query = *selected;",
+        "const query = {...selected};",
+      )
+      .replace(
+        "UINT32 limit = remaining > 64 ? 64 : remaining, count = 0;",
+        "const limit = remaining > 64 ? 64 : remaining, count = {value:0};",
+      )
+      .replace(/\bcount\b/gu, "count.value")
+      .replace("count.value = {value:0}", "count = {value:0}")
+      .replace("&count.value", "count")
+      .replaceAll("value->count.value", "value->count")
+      .replace(/\(void \*\*\)&(events)/gu, '\"$1\"')
+      .replace(/&(enumeration|events)\b/gu, '\"$1\"')
+      .replace("const FWPM_NET_EVENT2 *event", "const event")
+      .replace("const FWPM_NET_EVENT_HEADER2 *h", "const h")
+      .replaceAll("(unsigned)", "")
+      .replaceAll("->", ".")
+      .replace(/&(?=[a-zA-Z_])/gu, "")
+      .replace(/\b(?:UINT32|ULONGLONG)\b/gu, "let");
   const split = body.indexOf("  if (filter)");
-  const script = new Script(`function collect(){${body.slice(0, split)}}
+  const script =
+    new Script(`function wfp_availability(engine,selected,appId,deadline,remaining,value){${availabilityBody}}
+    function collect(){${body.slice(0, split)}}
     collect(); ${body.slice(split)}`);
   for (const fault of [
     null,
     "empty",
+    "available-other-app",
+    "available-same-app",
+    "socket-unbound",
+    "availability-create",
+    "availability-read",
+    "availability-close",
+    "availability-full",
+    "availability-fields",
+    "availability-appid-fields",
+    "availability-count",
+    "availability-late",
+    "principal-app",
+    "principal-user",
+    "principal-package",
     "unrelated",
     "create",
     "enumerate",
@@ -8250,7 +8398,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       complete: false,
       matched: 0,
       matches: [],
-      socketBound: true,
+      socketBound: fault !== "socket-unbound",
       tupleBound: false,
       tuple: {
         localAddress: 0x7f000001,
@@ -8258,7 +8406,29 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         started: 1100,
         ended: 2000,
       },
-      query: { appId: "app", started: 1100, ended: 2000 },
+      query: {
+        numFilterConditions: 1,
+        filterCondition: { appId: "app" },
+        startTime: 1100,
+        endTime: 2000,
+      },
+      availability: {
+        attempted: false,
+        read: false,
+        complete: false,
+        createStatus: 0,
+        readStatus: 0,
+        closeStatus: 0,
+        count: 0,
+        interval: 0,
+        appIdSet: 0,
+        appId: 0,
+        drop: 0,
+      },
+      scanned: 0,
+      principalRejected: [0, 0, 0],
+      GetLastError: () => 91,
+      SetLastError: (value) => assert.equal(value, 91),
       wfpRemotePort: 32100,
       userSid: "user",
       appSid: "package",
@@ -8309,14 +8479,29 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         assert.equal(duration, 1);
         assert.equal(context.wfpToken, 19);
         order.push("delivery");
-        tick += fault === "empty" ? 5000 : 1;
+        tick += [
+          "empty",
+          "available-other-app",
+          "available-same-app",
+          "availability-full",
+        ].includes(fault)
+          ? 5000
+          : 1;
       },
       FwpmNetEventCreateEnumHandle0(engine, query, slot) {
         assert.equal(engine, 11);
+        assert.deepEqual([query.startTime, query.endTime], [1100, 2000]);
+        if (query.numFilterConditions === 0) {
+          assert.equal(query.filterCondition, null);
+          context[slot] = -1;
+          order.push("availability");
+          return fault === "availability-create" ? 5 : 0;
+        }
         assert.deepEqual(structuredClone(query), {
-          appId: "app",
-          started: 1100,
-          ended: 2000,
+          numFilterConditions: 1,
+          filterCondition: { appId: "app" },
+          startTime: 1100,
+          endTime: 2000,
         });
         assert.equal(context.wfpToken, 19);
         context[slot] = ++snapshots;
@@ -8324,8 +8509,32 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         return fault === "create" ? 5 : 0;
       },
       FwpmNetEventEnum2(engine, handle, limit, slot, count) {
-        assert.deepEqual([engine, handle], [11, snapshots]);
+        assert.equal(engine, 11);
         assert.ok(limit > 0 && limit <= 64);
+        if (handle === -1) {
+          const row = structuredClone(event);
+          if (fault === "available-other-app") row.header.appId.data = "other";
+          context[slot] =
+            fault === "availability-full"
+              ? Array(limit).fill(row)
+              : [
+                    "available-other-app",
+                    "available-same-app",
+                    "socket-unbound",
+                  ].includes(fault)
+                ? [row]
+                : [];
+          if (fault === "availability-fields") context[slot] = [null];
+          if (fault === "availability-appid-fields") {
+            row.header.appId.size = 0;
+            context[slot] = [row];
+          }
+          if (fault === "availability-late") tick = 5000;
+          count.value =
+            fault === "availability-count" ? limit + 1 : context[slot].length;
+          return fault === "availability-read" ? 5 : 0;
+        }
+        assert.equal(handle, snapshots);
         const rows = snapshots === 1 ? [] : [structuredClone(event)];
         if (fault === "unrelated" && snapshots === 1) {
           rows.push(structuredClone(event));
@@ -8340,6 +8549,10 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
           rows.push(...Array(Math.min(63, limit)).fill({ type: 1 }));
         }
         if (snapshots > 1) {
+          if (fault === "principal-app") rows[0].header.appId.data = "other";
+          if (fault === "principal-user") rows[0].header.userId = "other";
+          if (fault === "principal-package")
+            rows[0].header.packageSid = "other";
           if (fault === "drop-loopback")
             rows[0].classifyDrop.isLoopback = false;
           if (fault === "drop-direction")
@@ -8376,7 +8589,8 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       FwpmNetEventDestroyEnumHandle0(engine, handle) {
         assert.equal(engine, 11);
         order.push(`enum-close:${handle}`);
-        return (fault === "refresh-close" && handle === 1) ||
+        return (fault === "availability-close" && handle === -1) ||
+          (fault === "refresh-close" && handle === 1) ||
           (fault === "enum-close" && handle === 2)
           ? 6
           : 0;
@@ -8395,7 +8609,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       },
       remember: (...v) => failures.push(v),
       cleanup_error: (...v) => cleanup.push(v),
-      wfp_blob: () => fault !== "appid-fields",
+      wfp_blob: (value) => fault !== "appid-fields" && value?.size === 2,
       IsValidSid: () => true,
       GetLengthSid: () => 16,
       EqualSid: (a, b) => a === b,
@@ -8405,7 +8619,15 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     script.runInNewContext(context);
     assert.equal(
       Boolean(context.observed),
-      fault === null || fault === "unrelated",
+      [
+        null,
+        "unrelated",
+        "availability-create",
+        "availability-read",
+        "availability-fields",
+        "availability-appid-fields",
+        "availability-count",
+      ].includes(fault),
       fault,
     );
     assert.equal(order.filter((v) => v === "token-close").length, 1, fault);
@@ -8463,6 +8685,54 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       assert.equal(snapshots, 5);
       assert.equal(context.reason, "exhausted");
     }
+    if (context.availability.attempted)
+      assert.equal(order.filter((v) => v === "enum-close:-1").length, 1, fault);
+    assert.ok(context.scanned <= 256);
+    if (fault?.startsWith("available-") || fault === "socket-unbound") {
+      assert.equal(context.availability.interval, 1);
+      assert.equal(context.availability.drop, 1);
+      assert.equal(context.availability.appIdSet, 1);
+      assert.equal(
+        context.availability.appId,
+        fault !== "available-other-app" ? 1 : 0,
+      );
+      assert.equal(
+        context.matched,
+        0,
+        "Unfiltered rows supply no denial authority",
+      );
+    }
+    if (
+      [
+        "availability-full",
+        "availability-fields",
+        "availability-appid-fields",
+        "availability-count",
+        "availability-late",
+      ].includes(fault)
+    )
+      assert.equal(context.availability.complete, false);
+    if (fault === "availability-count")
+      assert.equal(context.availability.count, 65);
+    if (fault === "availability-appid-fields")
+      assert.equal(context.availability.appIdSet, 0);
+    if (fault === "availability-create")
+      assert.equal(context.availability.createStatus, 5);
+    if (fault === "availability-read")
+      assert.equal(context.availability.readStatus, 5);
+    if (fault === "availability-close") {
+      assert.equal(context.wfpCleanupFailed, true);
+      assert.deepEqual(cleanup, [["observer-enum-close", "win32", 6]]);
+    }
+    if (fault?.startsWith("principal-"))
+      assert.equal(
+        context.principalRejected[
+          ["principal-app", "principal-user", "principal-package"].indexOf(
+            fault,
+          )
+        ] > 0,
+        true,
+      );
   }
 });
 

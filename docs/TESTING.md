@@ -731,6 +731,14 @@ shared 256-record scan limit, API/lookup/deadline failures and intermediate/fina
 snapshot, engine and token closure failures. Injected clocks drive delivery
 without real sleeps. Snapshot refresh preserves the exact query and existing
 five-second bound while the original socket and token remain held.
+The same actual-body fixture also executes the one-page interval-only comparison
+under that shared deadline and scan budget. Same/foreign AppIds, full pages,
+query failures, expired socket binding, separate enum-close failure and principal-specific rejections
+remain diagnostic; none contributes a match. The existing TCP body fixture
+reads original socket restriction/provider options, preserves the immediate
+connect error through optional inspection, and keeps failed/short reads
+unavailable. Pending connect plus select timeout still refuses a receipt.
+These injected reads add no validation tier and establish no native remedy.
 Receipt consumers join both actual `WSAENOTCONN` and exact requested-peer reads;
 missing, mismatched or fabricated peers refuse success. The real operation-loop
 fixture carries both peer forms through `O/D/T/U`, completion and independent

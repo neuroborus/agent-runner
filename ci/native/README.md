@@ -1490,6 +1490,29 @@ collection and later settlement errors. Allowed TCP and pipe listeners remain
 live through each restricted attempt, attribution, independent retirement and the
 subsequent positive transactions.
 
+Pending restricted TCP diagnostics read `SO_IS_RESTRICTED` and the public
+`SO_PROTOCOL_INFOW` provider/catalog/chain state from the original socket at
+the immediate connect result. The saved result, original creator birth/token
+and actual consumer PID remain joined; failed or short option reads stay
+unavailable. These reads restore the original Winsock error and change no
+socket option, transfer, policy, collection keyword or protocol acknowledgement.
+After the first complete unmatched AppId snapshot, one read-only comparison
+removes only that query's AppId selection. It keeps the same interval and engine,
+shares the five-second deadline and total 256-event budget, and reads at most
+one 64-event page. Bounded counts distinguish available interval events, DROP
+types, valid AppId fields and matching AppIds without publishing event bodies.
+The comparison also runs when the elapsed socket binding already refuses
+acceptance, without authorizing another acceptance-query refresh.
+A full, malformed or late page is incomplete; unavailable or empty enumeration
+establishes no remedy or delivery guarantee. Separate AppId/user/package
+rejection counts supplement the existing tuple, interval, filter/layer/direction
+and provider/callout refusal diagnostics. Comparison-query API statuses and
+independent enum closure remain separate from the original acceptance query.
+Only that original query's fully joined DROP can accompany actual `10013`;
+comparison rows never enter matches. This diagnostic follow-up leaves the
+restricted TCP defect open for hosted attribution and a reviewed revised
+remaining plan before any dependent repair.
+
 The acceptance record is separate from the 4 KiB WFP diagnostic snapshot. Both
 retain actual enum/engine closure statuses. The diagnostic reader preserves
 both literal-block and terminating-callout action types emitted by the native
