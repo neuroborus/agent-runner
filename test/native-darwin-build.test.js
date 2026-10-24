@@ -4718,16 +4718,17 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     )?.[1];
   const portBody = (name) =>
     new RegExp(
-      `static (?:void|kern_return_t|mach_port_t) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|kern_return_t|mach_port_t|domain_special_reply_fn) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
-    ).exec(source)?.[1];
+    ).exec(source + custody)?.[1];
   const portRelease = portBody("domain_port_release"),
     portsBegin = portBody("domain_ports_begin"),
     portCleanup = portBody("domain_port_cleanup"),
     portDiagnostic = portBody("domain_port_diagnostic"),
     repliesBegin = portBody("domain_runtime_replies_begin"),
     replyAllocate = portBody("domain_runtime_reply_allocate"),
-    specialReplyLoad = portBody("domain_special_reply_load");
+    specialReplyLoad = portBody("domain_special_reply_load"),
+    specialReplyLookup = portBody("domain_special_reply_lookup");
   assert.ok(
     sanitation &&
       observation &&
@@ -4739,18 +4740,19 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       repliesBegin &&
       replyAllocate &&
       specialReplyLoad &&
+      specialReplyLookup &&
       start > 0 &&
       end > start,
   );
   const interpose =
     /static const struct \{([^}]+)\}\s+domain_runtime_reply_interpose\s+__attribute__\(\(([^;]+)\)\)\s*=\s*\{\s*(\w+)\s*,\s*(\w+)\s*\};/u.exec(
-      source,
+      custody,
     );
   assert.ok(interpose, "The helper must emit its own dyld interposition entry");
   // The pinned user-space trap declaration is PRIVATE in XNU. Its owned
   // prototype must precede both references without widening SDK visibility.
   const allocator = /^extern mach_port_name_t mach_reply_port\(void\);$/mu.exec(
-    source,
+    custody,
   );
   assert.ok(
     allocator,
@@ -4758,7 +4760,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
   );
   assert.ok(
     allocator.index <
-      source.indexOf("static mach_port_t domain_runtime_reply_allocate("),
+      custody.indexOf("static mach_port_t domain_runtime_reply_allocate("),
   );
   assert.ok(allocator.index < interpose.index);
   for (const owner of [source, helper, custody, sandbox, command, builder])
@@ -4781,18 +4783,30 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     "domain_runtime_reply_allocate",
     "mach_reply_port",
   ]);
-  assert.doesNotMatch(source, /#include <mach-o\/dyld-interposing\.h>/u);
+  assert.doesNotMatch(
+    source + custody,
+    /#include <mach-o\/dyld-interposing\.h>/u,
+  );
   assert.match(
-    source,
+    custody,
     /typedef mach_port_t \(\*domain_special_reply_fn\)\(void\);/u,
   );
-  assert.doesNotMatch(source, /#include <mach\/mach_sync_ipc\.h>/u);
+  assert.match(
+    source,
+    /#define NATIVE_RUNTIME_REPLIES 1\s+#include "custody.h"\s+#undef NATIVE_RUNTIME_REPLIES/u,
+  );
+  assert.match(
+    custody,
+    /#ifdef NATIVE_RUNTIME_REPLIES\s+#include <stdatomic.h>\s+#include <dlfcn.h>/u,
+  );
+  assert.doesNotMatch(source + custody, /#include <mach\/mach_sync_ipc\.h>/u);
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
   const translate = (body) =>
     body
       .replace("extern mach_port_t bootstrap_port;", "")
       .replaceAll("(domain_special_reply_fn)", "")
+      .replace(/\bdomain_special_reply_fn /gu, "let ")
       .replace(
         "struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32};",
         "const limit = {rlim_cur:32, rlim_max:32};",
@@ -4828,6 +4842,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
   const script = new Script(`
     function domain_runtime_replies_begin(owner) {${translate(repliesBegin)}}
     function domain_runtime_reply_allocate() {${translate(replyAllocate)}}
+    function domain_special_reply_lookup() {${translate(specialReplyLookup)}}
     function domain_special_reply_load() {${translate(specialReplyLoad)}}
     function domain_ports_begin() {${translate(portsBegin)}}
     function domain_port_release(held, operation) {${translate(portRelease)}}

@@ -4105,9 +4105,12 @@ The allocator itself needs an owned declaration as well. Pinned XNU
 declares `extern mach_port_name_t mach_reply_port(void)` under
 `!KERNEL && PRIVATE`. That placement establishes the user-space prototype,
 not public SDK visibility. The helper declares only that exact zero-argument
-prototype in `feasibility-domain.h`, before its allocator callback and retained
-interposition entry. The common include makes it available to both build
-variants without enabling `PRIVATE` in the source or compiler arguments.
+prototype in the scoped reply section of `custody.h`, before its allocator callback
+and retained interposition entry. Only `feasibility-domain.h` and the experimental
+launcher enable that section with `NATIVE_RUNTIME_REPLIES`; both feasibility build
+variants retain it without enabling `PRIVATE` in the source or compiler arguments.
+The bounded producer ledger and checked special-reply lookup are shared primitives;
+sanitation, reference ownership and refusal policy stay in their existing owners.
 The original direct allocator reference and retained pair remain unchanged;
 the declaration does not establish installed export availability, successful
 native linking or dyld interception. Those remain hosted observations, separately
@@ -4122,8 +4125,8 @@ owner. The SDK surface audit covers these transitive owners together:
 | Owner                            | SDK declarations and constants retained                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `feasibility-helper.c`           | Its C/POSIX headers cover fixed file, socket, credential, signal and wait operations; `CommonCrypto/CommonDigest.h` supplies SHA-256; `libproc.h`, `sys/proc.h` and `sys/proc_info.h` supply process identities and census records; `sys/acl.h`, `sys/attr.h` and `sys/mount.h` supply held ACL and volume inspection; `bsm/audit.h` and `mach/mach.h` supply audit tokens, task identities, Mach traps and rights; `sandbox.h` supplies policy application. |
-| `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `stdatomic.h` covers the fixed producer ledger; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor. The interposition entry requires no additional SDK header.                                                           |
-| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes its general custody declarations; `NATIVE_AUDIT_DOMAIN` includes only the shared identity, audit-session and bounded census operations, using the helper/domain declarations above.                                                                                                                                                                                                                                      |
+| `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor.                                                                                                                                                                      |
+| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes general custody declarations; `NATIVE_AUDIT_DOMAIN` includes shared identity, audit-session and bounded census operations. The separate `NATIVE_RUNTIME_REPLIES` section uses `stdatomic.h`, `dlfcn.h` and `mach/mig.h` for the producer ledger and checked cached accessor, with the existing pinned allocator declaration and x64 interposition contract. No private SDK header is added.                              |
 | `feasibility-sandbox.h`          | Its public C/POSIX types and `dlfcn.h` support the pinned variadic sandbox-check ABI and separately checked function/data lookups.                                                                                                                                                                                                                                                                                                                           |
 | Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/select.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                   |
 
@@ -4156,11 +4159,12 @@ The pinned
 [`mach_sync_ipc.h`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach/mach_sync_ipc.h)
 declares the cached accessor as `mach_port_t mig_get_special_reply_port(void)`.
 The hosted Xcode 16.4 macOS 15.5 SDK does not install that private header. The
-helper therefore uses the declared function-pointer type with the SDK's public
+shared lookup therefore uses the declared function-pointer type with the SDK's public
 `dlfcn.h` interface to resolve the installed `mig_get_special_reply_port` export.
 Each child clears the loader error, performs one lookup and checks its own error
-before borrowing either cache; a null result or lookup error refuses admission
-as `fault-special-reply-binding`. A copied parent binding cannot bypass this
+before borrowing either cache; a null result or lookup error refuses feasibility
+admission as `fault-special-reply-binding` and experimental launch as
+`mig_get_special_reply_port/binding`. A copied parent binding cannot bypass this
 lookup. The checked pointer supplies all subsequent special-cache reads.
 The source declaration establishes the call ABI, not installed availability:
 the native lookup must succeed on the declared hosted runtime. No speculative
@@ -8785,19 +8789,40 @@ creates a fresh session. Clear supplemental groups, then privileged
 Install the independently reviewed profile
 while only trusted helper code runs, then clear bootstrap, registered, debug,
 resource-notify and task/thread exception rights and sanitize the remaining Mach
-names. Replace the cached MIG reply port and retain only the fresh local
-receive-only reply port needed by the sanitation RPCs, together with self task/
-thread rights. Reviewed/protected and provider builds require the inherited
+names. Reviewed/protected and provider builds replace the cached MIG reply port
+and retain the fresh local receive-only reply needed by sanitation RPCs, together
+with self task/thread rights. Those builds require the inherited
 task-access port to be null. `NATIVE_CI_EXPERIMENT` adopts the getter/type/kernel-object
 checks of the [ordinary inherited-service policy](#ordinary-darwin-task-access).
 Its checked local service copy stays held through the bounded census, where that
 exact name must occur once with its exact type; arbitrary SEND names gain no
-exception. The experiment also applies the paired optional resource-notify
+exception. Before any child observation the experiment binds its PID and shared
+producer bookkeeping, takes responsibility for the separate local bootstrap
+reference, and performs its own checked cached-special-reply lookup. It borrows
+ordinary and special caches without replacing or destroying either. The bounded
+census requires exact task/thread/host/service SEND names, the ordinary RECEIVE
+cache, the special SEND/RECEIVE cache and every producer-proven RECEIVE name.
+Cache/producer aliases share a census entry; owned local/getter aliases still
+require one release per acquisition. A launcher-local guard releases a captured
+bootstrap local if child setup refuses before Mach sanitation; release failures
+remain secondary to the saved guard error, and parent bookkeeping grants no authority.
+Cache, PID, producer count and recorded names
+must remain stable through independent array and reference cleanup. Missing,
+duplicate, changed or unknown live names refuse without destruction; a type or
+`IKOT_NONE` query cannot supply missing provenance. Unowned dead names remain untouched.
+The experiment also applies the paired optional resource-notify
 selector policy above: supported slots must clear and read back null, and every
 acquired getter copy must settle before registered-port, exception and census
 sanitation. Resource copies gain no census exemption; their release failures
-retain separate cleanup diagnostics and preserve the first refusal. Portable
-fixtures establish no hosted Darwin launch or cleanup success.
+retain separate cleanup diagnostics and preserve the first refusal. A census
+refusal reports only its affected name/type and observed binding before cleanup
+RPCs. The earlier original child's affected census name/type and its cache/API or
+producer binding remain unproved; this repair cannot identify that right by
+exclusion. Missing installed callable/export evidence remains a binding refusal,
+not a trap fallback. Matching hosted compilation, export lookup, interception,
+original workflows and independent retirement are still required; portable
+fixtures establish none of those native successes. Other TCP/audit/fault-port
+causes and complete native acceptance remain open.
 Only a classified ordinary host port is permitted; a privileged or
 unknown one fails. Remaining
 descriptors are private stdio and close-on-exec admission pipes. After fork, only

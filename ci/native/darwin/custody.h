@@ -1,6 +1,89 @@
 /* Shared protected bytes, signatures and audit-token identity reads. */
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
+/* Only the feasibility helper and experimental launcher opt into reply
+ * provenance. Sanitation, reference ownership and failure policy stay local. */
+#ifdef NATIVE_RUNTIME_REPLIES
+#include <stdatomic.h>
+#include <dlfcn.h>
+#include <mach/mig.h>
+#if !defined(__APPLE__) || !defined(__x86_64__)
+#error Runtime reply interposition requires the matching macOS x64 SDK.
+#endif
+/* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4,
+ * osfmk/mach/mach_traps.h:82-85 declares this user-space trap under PRIVATE.
+ * Keep its exact prototype without enabling unrelated private SDK interfaces.
+ * The direct reference still requires the original installed allocator export. */
+extern mach_port_name_t mach_reply_port(void);
+
+/* The runtime owns these receive references. mach_init's task fallback is not
+ * the MIG thread cache, and neither is the cached special reply. Observe the
+ * ordinary allocator's return at its producer, including initialization/fork,
+ * rather than guessing an unnamed receive right from a later census. Only a
+ * PID read and fixed bookkeeping surround the original allocation trap; no
+ * auxiliary allocation, RPC, diagnostics or failure cleanup may reenter it. */
+static _Atomic(pid_t) domain_runtime_reply_owner;
+static _Atomic(mach_port_t) domain_runtime_replies[8];
+static _Atomic(unsigned) domain_runtime_reply_count;
+static _Atomic(bool) domain_runtime_reply_overflow;
+static void domain_runtime_replies_begin(pid_t owner) {
+  for (;;) {
+    pid_t observed = domain_runtime_reply_owner;
+    if (observed == owner) return;
+    /* A negative current PID owns initialization. A fork inherits a different
+     * PID, including an unfinished parent's marker, and must never wait on it. */
+    if (observed == -owner) continue;
+    if (!atomic_compare_exchange_strong(&domain_runtime_reply_owner, &observed, -owner)) continue;
+    domain_runtime_reply_count = 0; domain_runtime_reply_overflow = false;
+    for (unsigned i = 0; i < 8; i++) domain_runtime_replies[i] = MACH_PORT_NULL;
+    domain_runtime_reply_owner = owner;
+    return;
+  }
+}
+static mach_port_t domain_runtime_reply_allocate(void) {
+  pid_t owner = getpid();
+  domain_runtime_replies_begin(owner);
+  mach_port_t reply = mach_reply_port();
+  if (MACH_PORT_VALID(reply)) {
+    /* Reserve before publishing: concurrent runtime callers must never share
+     * an array slot or write past its bound. An unpublished slot still refuses
+     * admission. */
+    unsigned slot = atomic_fetch_add(&domain_runtime_reply_count, 1);
+    if (slot < 8)
+      domain_runtime_replies[slot] = reply;
+    else domain_runtime_reply_overflow = true;
+  }
+  return reply;
+}
+/* dyld applies this only to callers outside this image; the callback calls the
+ * original allocator. A missed producer grants no authority: its right remains
+ * unknown and fences exec. No hidden runtime global or TSD offset is read. */
+/* Owned x64 two-pointer layout following Apple dyld
+ * fd8d0c4d52320ebf64db34f3cb280310d905c5ae, include/mach-o/dyld-interposing.h.
+ * The x64 guard excludes authenticated-pointer targets. Keep the entry
+ * emitted even though C code never reads it; dyld consumes the named section. */
+static const struct {
+  mach_port_t (*replacement)(void);
+  mach_port_t (*replacee)(void);
+} domain_runtime_reply_interpose __attribute__((used, section("__DATA,__interpose"))) = {
+  domain_runtime_reply_allocate, mach_reply_port
+};
+_Static_assert(sizeof(domain_runtime_reply_interpose) == 2 * sizeof(void *),
+  "The x64 dyld interposition entry requires exactly two pointers.");
+/* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4's
+ * libsyscall/mach/mach/mach_sync_ipc.h declares
+ * mach_port_t mig_get_special_reply_port(void); mach_port.c implements its
+ * cached acquisition. That private header is absent from the hosted 15.5 SDK.
+ * The declaration establishes the type, not installed libSystem availability:
+ * require its actual export without a guessed extern or allocating-trap fallback. */
+typedef mach_port_t (*domain_special_reply_fn)(void);
+static domain_special_reply_fn domain_special_reply_lookup(void) {
+  dlerror();
+  domain_special_reply_fn callable = (domain_special_reply_fn)dlsym(RTLD_DEFAULT, "mig_get_special_reply_port");
+  if (dlerror()) callable = NULL;
+  return callable;
+}
+#endif
 #ifndef NATIVE_AUDIT_DOMAIN_ONLY
 #include <mach-o/loader.h>
 #include <stdbool.h>

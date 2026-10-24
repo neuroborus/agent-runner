@@ -3,16 +3,9 @@
 #include <grp.h>
 #include <sys/poll.h>
 #include <sys/resource.h>
-#include <stdatomic.h>
 #include <security/audit/audit_ioctl.h>
 #include <mach/mach_vm.h>
 #include <mach/mig.h>
-
-/* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4,
- * osfmk/mach/mach_traps.h:82-85 declares this user-space trap under PRIVATE.
- * Keep its exact prototype without enabling unrelated private SDK interfaces.
- * The direct reference still requires the original installed allocator export. */
-extern mach_port_name_t mach_reply_port(void);
 
 static void domain_check(bool ok, const char *operation, const char *kind, int value) {
   if (!ok) { remember(operation, kind, value); failure(126); }
@@ -32,7 +25,9 @@ static struct identity fault_inspect(pid_t pid) {
 #define AUDIT_DOMAIN_INSPECT(pid) fault_inspect(pid)
 #define AUDIT_DOMAIN_DIAG(ok, operation, kind, value) domain_check(ok, operation, kind, value)
 #define emit(value) emit_identity(value)
+#define NATIVE_RUNTIME_REPLIES 1
 #include "custody.h"
+#undef NATIVE_RUNTIME_REPLIES
 #undef emit
 
 struct fault_record {
@@ -50,71 +45,9 @@ static bool domain_fenced;
  * slots and uninspected census names never enter this cleanup inventory. */
 static pid_t domain_port_owner;
 static mach_port_t domain_bootstrap_local, domain_host_copy, domain_access_copy, domain_thread_copy;
-/* The runtime owns these receive references. mach_init's task fallback is not
- * the MIG thread cache, and neither is the cached special reply. Observe the
- * ordinary allocator's return at its producer, including initialization/fork,
- * rather than guessing an unnamed receive right from a later census. Only a
- * PID read and fixed bookkeeping surround the original allocation trap; no
- * auxiliary allocation, RPC, diagnostics or failure cleanup may reenter it. */
-static _Atomic(pid_t) domain_runtime_reply_owner;
-static _Atomic(mach_port_t) domain_runtime_replies[8];
-static _Atomic(unsigned) domain_runtime_reply_count;
-static _Atomic(bool) domain_runtime_reply_overflow;
-static void domain_runtime_replies_begin(pid_t owner) {
-  for (;;) {
-    pid_t observed = domain_runtime_reply_owner;
-    if (observed == owner) return;
-    /* A negative current PID owns initialization. A fork inherits a different
-     * PID, including an unfinished parent's marker, and must never wait on it. */
-    if (observed == -owner) continue;
-    if (!atomic_compare_exchange_strong(&domain_runtime_reply_owner, &observed, -owner)) continue;
-    domain_runtime_reply_count = 0; domain_runtime_reply_overflow = false;
-    for (unsigned i = 0; i < 8; i++) domain_runtime_replies[i] = MACH_PORT_NULL;
-    domain_runtime_reply_owner = owner;
-    return;
-  }
-}
-static mach_port_t domain_runtime_reply_allocate(void) {
-  pid_t owner = getpid();
-  domain_runtime_replies_begin(owner);
-  mach_port_t reply = mach_reply_port();
-  if (MACH_PORT_VALID(reply)) {
-    /* Reserve before publishing: concurrent runtime callers must never share
-     * an array slot or write past its bound. An unpublished slot still refuses
-     * admission. */
-    unsigned slot = atomic_fetch_add(&domain_runtime_reply_count, 1);
-    if (slot < 8)
-      domain_runtime_replies[slot] = reply;
-    else domain_runtime_reply_overflow = true;
-  }
-  return reply;
-}
-/* dyld applies this only to callers outside this image; the callback calls the
- * original allocator. A missed producer grants no authority: its right remains
- * unknown and fences exec. No hidden runtime global or TSD offset is read. */
-/* Owned x64 two-pointer layout following Apple dyld
- * fd8d0c4d52320ebf64db34f3cb280310d905c5ae, include/mach-o/dyld-interposing.h.
- * The helper's x64 guard excludes authenticated-pointer targets. Keep the entry
- * emitted even though C code never reads it; dyld consumes the named section. */
-static const struct {
-  mach_port_t (*replacement)(void);
-  mach_port_t (*replacee)(void);
-} domain_runtime_reply_interpose __attribute__((used, section("__DATA,__interpose"))) = {
-  domain_runtime_reply_allocate, mach_reply_port
-};
-_Static_assert(sizeof(domain_runtime_reply_interpose) == 2 * sizeof(void *),
-  "The x64 dyld interposition entry requires exactly two pointers.");
-/* XNU xnu-11417.140.69's libsyscall/mach/mach/mach_sync_ipc.h declares
- * mach_port_t mig_get_special_reply_port(void); mach_port.c implements its
- * cached acquisition. That private header is absent from the hosted 15.5 SDK.
- * The declaration establishes the type, not installed libSystem availability:
- * require its actual export without a guessed extern or allocating-trap fallback. */
-typedef mach_port_t (*domain_special_reply_fn)(void);
 static domain_special_reply_fn domain_special_reply;
 static void domain_special_reply_load(void) {
-  dlerror();
-  domain_special_reply = (domain_special_reply_fn)dlsym(RTLD_DEFAULT, "mig_get_special_reply_port");
-  if (dlerror()) domain_special_reply = NULL;
+  domain_special_reply = domain_special_reply_lookup();
   invariant(domain_special_reply != NULL, "fault-special-reply-binding");
 }
 static mach_port_t domain_reply_borrowed, domain_special_reply_borrowed;

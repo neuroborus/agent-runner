@@ -355,8 +355,8 @@ successful exec closes the diagnostic copy. Injected descriptor mappings keep
 ordinary setup stderr separate until exec and preserve provider/payload stdio.
 Diagnostic-write and identity/status inspection failures cannot replace the first
 cause or consume protocol data; stderr diagnostics survive transport failure.
-The same launch-body fixture injects fatal termination before reply replacement,
-census destruction and cleanup return. The preceding bounded entered-stage record
+The same launch-body fixture injects fatal termination during reply binding,
+census observation and cleanup return. The preceding bounded entered-stage record
 retains the original child and launcher birth, plus any earlier cleanup-entry cause;
 the parent's separate matching SIGKILL status survives secondary parked EOF.
 Failed/empty/mismatched status inspection, unrelated-child refusal, failed stage
@@ -375,6 +375,20 @@ signed errors and full-width type/port values, survive failed diagnostic writes
 and flushes; the Mach diagnostic also survives the existing transport-loss fixture.
 Successful sanitation, provider stdio and parked-handshake regressions remain
 covered. These portable checks establish no successful native launch or cleanup.
+The experiment binds child bookkeeping before observations and executes the shared
+producer/checked-lookup bodies from the scoped `custody.h` section. Borrowed ordinary
+and special caches survive while owned bootstrap/getter aliases release once each.
+An early setup refusal also releases the captured bootstrap local exactly once;
+an aliased release failure cannot replace the guard's original error.
+Producer/cache aliases, missing exports, stale/failed loader lookups, copied parent
+state, invalid or duplicate producer names and overflow all retain refusal coverage.
+Missing, duplicate or changed census entries and unknown RECEIVE/SEND/`IKOT_NONE`
+names refuse without destruction. Cache/PID/producer changes before or during the
+census and through cleanup also refuse. A failure-only name/type/binding fact
+precedes independent array/reference release; combined release failures preserve
+the first cause. No fixture identifies the earlier child's unknown right or proves
+installed callable availability, SDK compilation or native interception. Those
+precise hosted observations remain required; the check inventory stays unchanged.
 Resource-notify cases cover paired selector unavailability, supported clearing
 and null readback, mixed selector results, other errors and uncertain failed-getter
 output. Nonnull readback and aliased-copy release failures retain independent
@@ -441,7 +455,7 @@ ordinary and command-enabled helper builds remain matching hosted CI obligations
 No validation command or slow-tier assignment is added.
 
 That fixture also requires the exact owned `mach_port_name_t mach_reply_port(void)`
-prototype before both the allocator callback and interposition entry. It checks
+prototype in the scoped shared header before both the allocator callback and interposition entry. It checks
 the common domain include alongside the optional command include and rejects
 broad `PRIVATE` enablement across the complete helper's transitive source owners
 and build arguments. The same actual allocator and interposition bodies still

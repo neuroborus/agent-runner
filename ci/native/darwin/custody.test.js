@@ -3721,14 +3721,14 @@ test("Darwin custody completion rejects an unconsumed trailing frame", async () 
   }
 });
 test("Darwin ownership launch bodies preserve setup and handshake causes on the original diagnostic channel", async () => {
-  const [reader, launcher] = await Promise.all(
-    ["custody-reader.c", "launcher.c"].map((name) =>
+  const [reader, launcher, custody] = await Promise.all(
+    ["custody-reader.c", "launcher.c", "custody.h"].map((name) =>
       readFile(new URL(name, import.meta.url), "utf8"),
     ),
   );
   const body = (source, name) =>
     new RegExp(
-      `static (?:void|char|struct identity) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|char|struct identity|mach_port_t|domain_special_reply_fn|const char \\*)\\s*${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const translate = (text) =>
@@ -3765,29 +3765,39 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .replace("return value;", "return value.value;")
       .replace(
-        'operation = "mach_thread_self";',
-        'mach_body: { operation = "mach_thread_self";',
+        'operation = "runtime-reply-owner";',
+        'mach_body: { operation = "runtime-reply-owner";',
       )
       .replaceAll("goto mach_cleanup;", "break mach_body;")
       .replace("mach_cleanup:", "}")
+      .replace(
+        "launch_reply_owner = getpid();",
+        "reply_body: { launch_reply_owner = getpid();",
+      )
+      .replaceAll("goto reply_failure;", "break reply_body;")
+      .replace("reply_failure:", "}")
+      .replace("runtime[8] = {0}", "runtime = Array(8).fill(0)")
+      .replaceAll("(domain_special_reply_fn)", "")
       .replace("const char *operation", "let operation")
       .replace("const char *prior", "let prior")
+      .replace("const char *binding", "let binding")
       .replace(
         /const char \*cleanup_operations\[\] = \{([^;]+)\};/u,
         "const cleanup_operations=[$1];",
       )
       .replace(
-        /kern_return_t releases\[7\] = \{([^;]+)\};/u,
+        /kern_return_t releases\[8\] = \{([^;]+)\};/u,
         "const releases=[$1];",
       )
-      .replace(/int errors\[7\] = \{([^;]+)\};/u, "const errors=[$1];")
+      .replace(/int errors\[8\] = \{([^;]+)\};/u, "const errors=[$1];")
+      .replace(/\b(\d+)u\b/gu, "$1")
       .replaceAll("~0U", "0xffffffff")
       .replaceAll(
         /&(identity|status|waitReady|wait|p|parked|byte|value)\b/gu,
         "$1",
       )
       .replace(
-        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt)\b/gu,
+        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt|observed|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
         (_, name) =>
           `{get value(){return ${name}},set value(value){${name}=value}}`,
       )
@@ -3806,7 +3816,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replaceAll("sizeof(*types)", "4")
       .replaceAll("&argv[12]", "argv.slice(12)")
       .replaceAll(
-        /\b(?:int|long|unsigned|bool|ssize_t|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
+        /\b(?:int|long|unsigned|bool|ssize_t|pid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
         "let ",
       );
   const [ordinary, protectedBody] = body(launcher, "mach_rights").split(
@@ -3816,6 +3826,19 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     mach = protectedBody.replace("#endif", ""),
     sanitation = mach.indexOf("  need(task_set_special_port");
   assert.ok(sanitation > 0);
+  assert.match(
+    launcher,
+    /#ifdef NATIVE_CI_EXPERIMENT\s+#define NATIVE_RUNTIME_REPLIES 1\s+#endif\s+#include "custody.h"\s+#undef NATIVE_RUNTIME_REPLIES/u,
+  );
+  assert.match(
+    launcher,
+    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static void descriptors/u,
+  );
+  assert.match(
+    launcher,
+    /if \(!child\) \{\s+#ifdef NATIVE_CI_EXPERIMENT\s+launch_replies_begin\(\);\s+#endif\s+launch_stage\("child-entry"/u,
+  );
+  assert.doesNotMatch(experiment, /mig_dealloc_reply_port|mach_port_destroy/u);
   const functions =
     [
       [reader, "case_launch_failure", "operation,result,error,revents,used"],
@@ -3827,6 +3850,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [launcher, "child_stdio", "workspace,provider"],
       [launcher, "child_exec", "argv,environment,provider"],
       [launcher, "parked_identity", "fd,child"],
+      [launcher, "launch_replies_begin", ""],
+      [launcher, "launch_need_at", "ok,file,line"],
+      [launcher, "launch_replies_changed", "count,runtime"],
+      [custody, "domain_runtime_replies_begin", "owner"],
+      [custody, "domain_runtime_reply_allocate", ""],
+      [custody, "domain_special_reply_lookup", ""],
     ]
       .map(
         ([source, name, args]) =>
@@ -3834,7 +3863,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .join("\n") +
     `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}` +
-    `\nfunction experiment_mach_rights(){${translate(experiment)}}`;
+    `\nfunction experiment_mach_rights(){launch_replies_begin();after_reply_binding();${translate(experiment)}}`;
   const start = reader.indexOf("static void case_start("),
     setup = reader
       .slice(
@@ -3855,8 +3884,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ONCE = 0x40000,
     DEAD = 0x100000;
   const machCases = [
-    ...["reply", "destroy", "cleanup"].map((fatal) => [
-      { fatal, ...(fatal === "cleanup" ? { destroy: 24 } : {}) },
+    ...["reply", "census", "cleanup"].map((fatal) => [
+      { fatal },
       "parked-read",
       0,
       0,
@@ -3866,7 +3895,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     [{ stageSignalFailure: true }],
     ...[0, 0xffffffff, 200, 201].map((access) => [{ access }]),
     [{ type: DEAD }],
-    [{ access: 7 }], // A new getter copy can reuse the released host's local name.
+    [{ access: 7 }, "TASK_ACCESS_PORT/identity", 7], // The host copy now remains held.
     ...[1, 2, 3, 99].map((kind) => [
       { kind },
       "mach_port_kobject/access/type",
@@ -3886,26 +3915,115 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       "TASK_ACCESS_PORT/identity",
       access,
     ]),
-    [{ reply: 200 }, "mig_get_reply_port/identity", 200],
-    [{ missing: true }, "TASK_ACCESS_PORT/census", 0],
-    [{ changed: true }, "TASK_ACCESS_PORT/census", ONCE],
-    [{ duplicate: true }, "TASK_ACCESS_PORT/census", SEND],
+    [{ reply: 200 }, "mig_get_reply_port/identity", 200, 33],
+    [{ missing: true }, "mach_port_names/authority", 0],
+    [{ changed: true }, "mach_port_names/authority", ONCE],
+    [{ duplicate: true }, "mach_port_names/authority", SEND],
     [{ list: 25 }, "mach_port_names", 25],
-    [{ mismatch: true }, "mach_port_names/count", 5],
+    [{ mismatch: true }, "mach_port_names/count", 7],
     [{ overflow: true }, "mach_port_names/count", 4097],
     [{ partial: true, list: 25 }, "mach_port_names", 25],
-    [{ partial: true }, "mach_port_names/count", 5],
+    [{ partial: true }, "mach_port_names/count", 7],
     [{ sanitation: 23 }, "task_set_special_port/TASK_DEBUG_CONTROL_PORT", 23],
-    [{ destroy: 24 }, "mach_port_destroy", 24],
-    ...["names", "types", "access", "thread", "host"].map((release) => [
-      { release },
-      `${release === "names" || release === "types" ? "mach_vm" : "mach_port"}_deallocate/${release}`,
-      15,
-      22,
+    ...[RECEIVE, SEND, SEND | RECEIVE, 0].map((unknownType) => [
+      { unknownType },
+      "mach_port_names/authority",
+      unknownType,
     ]),
+    ...[0, 0xffffffff, 3, 6, 7].map((bootstrap) => [{ bootstrap }]),
+    ...[3, 6].map((notify) => [{ notify }]),
+    [{ notify: 6, readback: 6 }, "TASK_RESOURCE_NOTIFY_PORT/null", 6, 33],
+    [{ producer: [11, 3] }],
+    [{ producer: [0, 0xffffffff] }],
+    [{ producer: [11, 11] }, "runtime-reply-producer", 11, 33],
+    [{ producer: [6] }, "runtime-reply-producer", 6, 33],
+    [
+      { producer: Array.from({ length: 9 }, (_, i) => 11 + i) },
+      "runtime-reply-producer",
+      9,
+      33,
+    ],
+    [{ producer: [11], omit: 11 }, "mach_port_names/authority", 0],
+    [{ producer: [11], producerType: SEND }, "mach_port_names/authority", SEND],
+    ...[1, 2, 7, 3, 6].map((omit) => [
+      { omit },
+      "mach_port_names/authority",
+      0,
+    ]),
+    [{ duplicateName: 3 }, "mach_port_names/authority", RECEIVE],
+    [{ duplicateName: 6 }, "mach_port_names/authority", SEND | RECEIVE],
+    [{ specialType: RECEIVE }, "mach_port_names/authority", RECEIVE],
+    [
+      { replyType: SEND | RECEIVE },
+      "mach_port_type/reply/type",
+      SEND | RECEIVE,
+    ],
+    ...[0, 0xffffffff].map((reply) => [
+      { reply },
+      "mig_get_reply_port/identity",
+      reply,
+    ]),
+    ...[0, 0xffffffff, 3].map((special) => [
+      { special },
+      "mig_get_special_reply_port/identity",
+      special,
+    ]),
+    [{ bindingMissing: true }, "mig_get_special_reply_port/binding", 0, 0],
+    [{ bindingError: true }, "mig_get_special_reply_port/binding", 0, 0],
+    [
+      { bindingMissing: true, release: "bootstrap" },
+      "mig_get_special_reply_port/binding",
+      0,
+      0,
+    ],
+    [{ preMach: true }, "fchdir", -1],
+    [{ preMach: true, bootstrap: 3, release: "bootstrap" }, "fchdir", -1],
+    [{ wrongOwner: true }, "runtime-reply-owner", 99],
+    ...["before", "census", "release"].flatMap((at) => [
+      [
+        { changeCache: at },
+        "mig_get_reply_port/identity",
+        0,
+        at === "release" ? 0 : at === "before" ? 33 : 13,
+      ],
+      [
+        { changeSpecial: at },
+        "mig_get_special_reply_port/identity",
+        0,
+        at === "release" ? 0 : at === "before" ? 33 : 13,
+      ],
+    ]),
+    ...["census", "release"].map((producerAt) => [
+      { producerAt },
+      "runtime-reply-producer",
+      0,
+      producerAt === "release" ? 0 : 13,
+    ]),
+    ...["census", "release"].flatMap((at) => [
+      [
+        { producer: [11], mutateProducer: at },
+        "runtime-reply-producer",
+        0,
+        at === "release" ? 0 : 13,
+      ],
+      [
+        { changeOwner: at },
+        "runtime-reply-owner",
+        0,
+        at === "release" ? 0 : 13,
+      ],
+    ]),
+    ...["names", "types", "access", "thread", "host", "bootstrap"].map(
+      (release) => [
+        { release },
+        `${release === "names" || release === "types" ? "mach_vm" : "mach_port"}_deallocate/${release}`,
+        15,
+        22,
+      ],
+    ),
     [{ type: DEAD, release: "access" }, "mach_port_deallocate/access", 15, 22],
     [{ kind: 1, release: "access" }, "mach_port_kobject/access/type", 1],
-    [{ changed: true, release: "all" }, "TASK_ACCESS_PORT/census", ONCE],
+    [{ changed: true, release: "all" }, "mach_port_names/authority", ONCE],
     [{ notifyGet: 4, notifySet: 4, notify: 300 }],
     ...[0, 0xffffffff, 300, 200, 2, 7].map((notify) => [{ notify }]),
     ...[
@@ -4094,17 +4212,26 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       killed = {};
     const record = (format, values) => {
       let index = 0;
-      const line = format.replace(/%(?:\.48s|llu|ld|d|s)/gu, (specifier) => {
-        const raw = values[index++],
-          value = String(specifier.endsWith("s") ? raw : Number(raw));
-        return specifier === "%.48s" ? value.slice(0, 48) : value;
-      });
+      const line = format.replace(
+        /%(?:\.48s|llu|ld|#x|[dus])/gu,
+        (specifier) => {
+          const raw = values[index++],
+            value = String(specifier.endsWith("s") ? raw : Number(raw));
+          return specifier === "%.48s"
+            ? value.slice(0, 48)
+            : specifier === "%#x" && Number(raw)
+              ? "0x" + Number(raw).toString(16)
+              : value;
+        },
+      );
       assert.ok(Buffer.byteLength(line) < 1024);
       return { format, values, line };
     };
     let reads = 0,
       reporter = 41,
-      pipeIgnored = false;
+      pipeIgnored = false,
+      lookupReads = 0,
+      guardPidRead = false;
     const api = {
       errno: 91,
       case_pid: fault === "setup" ? 0 : 41,
@@ -4112,6 +4239,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       launcher_pid: 41,
       launcher_identity: {},
       launch_child: 42,
+      launch_reply_owner: 0,
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
       TASK_HOST_PORT: 1,
@@ -4241,7 +4369,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           ? -1
           : 0;
       },
-      getpid: () => reporter,
+      getpid() {
+        if (guardPidRead) api.errno = 77;
+        return reporter;
+      },
       stage_preserved(error) {
         assert.equal(api.errno, error);
         assert.equal(pipeIgnored, false);
@@ -4260,6 +4391,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       },
       fprintf(stream, format, ...values) {
         assert.equal(stream, api.stderr);
+        if (format.startsWith("native-darwin-launch-port:"))
+          machCalls.push(["refusal", ...values]);
         if (machCase && format.startsWith("native-darwin-launch-cleanup:"))
           assert.ok(
             pipeIgnored,
@@ -4320,10 +4453,20 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(api.errno, error);
         throw new Error("launch refused");
       },
-      need(ok) {
+      need_at(ok, file, line) {
+        assert.equal(file, "launcher.c");
+        assert.equal(line, 1);
         if (!ok) {
-          assert.equal(api.errno, error);
+          assert.equal(api.errno, error, JSON.stringify(machCase));
           throw new Error("launch refused");
+        }
+      },
+      need(ok) {
+        guardPidRead = !ok;
+        try {
+          return native.launch_need_at(ok, "launcher.c", 1);
+        } finally {
+          guardPidRead = false;
         }
       },
       poll(wait, count, milliseconds) {
@@ -4373,7 +4516,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       fchdir(workspace) {
         assert.equal(workspace, 10);
         api.errno = 13;
-        return fault === "child" ? -1 : 0;
+        return fault === "child" || machCase?.preMach ? -1 : 0;
       },
       dup2(from, to) {
         descriptors.set(to, descriptors.get(from));
@@ -4399,9 +4542,21 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       const access = machCase.access ?? 200,
         accessType = machCase.type ?? SEND;
       let accessRead = false,
-        replyReads = 0,
+        cachedReply = machCase.reply ?? 3,
+        cachedSpecial = machCase.special ?? 6,
+        allocation = 0,
         notifyReads = 0;
       const resourceCopies = [];
+      const bootstrap = machCase.bootstrap ?? 10;
+      if (bootstrap !== 0 && bootstrap !== 0xffffffff)
+        acquired.push({ kind: "bootstrap", name: bootstrap });
+      const change = (at) => {
+        if (machCase.changeCache === at) cachedReply = 13;
+        if (machCase.changeSpecial === at) cachedSpecial = 14;
+        if (machCase.producerAt === at) native.domain_runtime_reply_allocate();
+        if (machCase.mutateProducer === at) api.domain_runtime_replies[0] = 12;
+        if (machCase.changeOwner === at) api.launch_reply_owner = 99;
+      };
       const resourcesSettled = () => {
         for (const copy of resourceCopies)
           assert.deepEqual(
@@ -4416,7 +4571,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           machCase.release === kind ||
           (Array.isArray(machCase.release) &&
             machCase.release.includes(kind)) ||
-          (machCase.release === "all" && kind !== "host")
+          (machCase.release === "all" && !["host", "bootstrap"].includes(kind))
             ? 15
             : 0;
         api.errno = kind === "notify" ? 41 : kind === "readback" ? 42 : 22;
@@ -4425,6 +4580,54 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       };
       Object.assign(api, {
         NULL: null,
+        bootstrap_port: bootstrap,
+        launch_reply_owner: 41,
+        launch_bootstrap_local: 999,
+        launch_reply_borrowed: 998,
+        launch_special_borrowed: 997,
+        launch_special_reply: () => assert.fail("Inherited callable used"),
+        domain_runtime_reply_owner: 41,
+        domain_runtime_reply_count: 1,
+        domain_runtime_reply_overflow: false,
+        domain_runtime_replies: Array(8).fill(996),
+        RTLD_DEFAULT: -2,
+        atomic_compare_exchange_strong(target, expected, value) {
+          assert.equal(expected.value, target.value);
+          target.value = value;
+          return true;
+        },
+        atomic_fetch_add(target, count) {
+          const prior = target.value;
+          target.value += count;
+          return prior;
+        },
+        dlerror() {
+          return ++lookupReads === 1
+            ? "stale"
+            : machCase.bindingError
+              ? "lookup failed"
+              : null;
+        },
+        dlsym(handle, symbol) {
+          assert.equal(handle, -2);
+          assert.equal(symbol, "mig_get_special_reply_port");
+          return machCase.bindingMissing
+            ? null
+            : () => {
+                api.errno = 13;
+                return cachedSpecial;
+              };
+        },
+        mach_reply_port() {
+          const name = machCase.producer?.[allocation++] ?? 11;
+          machCalls.push(["producer", name]);
+          return name;
+        },
+        after_reply_binding() {
+          change("before");
+          if (machCase.wrongOwner) api.launch_reply_owner = 99;
+          if (machCase.preMach) native.child_stdio(10, false);
+        },
         KERN_INVALID_ARGUMENT: 4,
         KERN_FAILURE: 5,
         MACH_PORT_DEAD: 0xffffffff,
@@ -4471,6 +4674,13 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         },
         mach_port_kobject(self, name, type, address) {
           assert.equal(self, 1);
+          // Even an unknown IKOT_NONE right has no cache/API/producer binding.
+          if (name === 50) {
+            machCalls.push(["kobject", name]);
+            type.value = 0;
+            address.value = 4096;
+            return 0;
+          }
           assert.equal(name, accessRead ? access : 7);
           machCalls.push(["kobject", name]);
           type.value = accessRead ? (machCase.kind ?? 0) : 3;
@@ -4482,7 +4692,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           assert.equal(self, 1);
           machCalls.push(["type", name]);
           api.errno = 13;
-          out.value = name === access ? accessType : RECEIVE;
+          out.value =
+            name === access ? accessType : (machCase.replyType ?? RECEIVE);
           return name === access ? (machCase.typeQuery ?? 0) : 0;
         },
         mach_port_deallocate(self, name) {
@@ -4498,16 +4709,17 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
               copy.name === name &&
               !released.some((entry) => entry.kind === copy.kind),
           );
-          return portRelease(
-            resource
-              ? resource.kind
-              : accessRead && name === access
-                ? "access"
-                : name === 2
-                  ? "thread"
-                  : "host",
-            name,
-          );
+          const cleanup = stageAttempts.at(-1)?.values[0] === "mach-cleanup";
+          const unmatched = (kind) =>
+            acquired.some((copy) => copy.kind === kind && copy.name === name) &&
+            !released.some((entry) => entry.kind === kind);
+          const kind =
+            resource?.kind ??
+            (!cleanup && unmatched("bootstrap")
+              ? "bootstrap"
+              : ["access", "host", "thread", "bootstrap"].find(unmatched));
+          assert.ok(kind, "Only an owned acquisition can be released");
+          return portRelease(kind, name);
         },
         task_set_special_port(self, slot, name) {
           assert.deepEqual([self, name], [1, 0]);
@@ -4530,11 +4742,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         thread_set_exception_ports: () => 0,
         mig_get_reply_port() {
           api.errno = 13;
-          return ++replyReads === 1 ? 8 : (machCase.reply ?? 3);
+          if (machCase.fatal === "reply") throw killed;
+          return cachedReply;
         },
         mig_dealloc_reply_port(name) {
-          assert.equal(name, 8);
-          if (machCase.fatal === "reply") throw killed;
+          assert.fail("Borrowed caches cannot be replaced");
         },
         mach_port_names(self, names, n, types, nt) {
           assert.equal(self, 1);
@@ -4542,21 +4754,40 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           machCalls.push("census");
           api.errno = 13;
           const live = api.MACH_PORT_VALID(access) && accessType === SEND;
+          if (machCase.fatal === "census") throw killed;
           const rows = [
             1,
             2,
-            3,
+            7,
+            cachedReply,
+            cachedSpecial,
             9,
             ...(live && !machCase.missing ? [access] : []),
-          ];
+            ...new Set(
+              (machCase.producer ?? []).filter(
+                (name) => api.MACH_PORT_VALID(name) && name !== cachedReply,
+              ),
+            ),
+          ].filter((name) => name !== machCase.omit);
           if (machCase.duplicate) rows.push(access);
+          if (machCase.duplicateName) rows.push(machCase.duplicateName);
+          if (machCase.unknownType !== undefined) rows.push(50);
           const kinds = rows.map((name) =>
-            name === 3
-              ? RECEIVE
-              : name === access && machCase.changed
-                ? ONCE
-                : SEND,
+            name === cachedReply
+              ? (machCase.replyType ?? RECEIVE)
+              : name === cachedSpecial
+                ? (machCase.specialType ?? SEND | RECEIVE)
+                : name === access && machCase.changed
+                  ? ONCE
+                  : name === 9
+                    ? DEAD
+                    : name === 50
+                      ? machCase.unknownType
+                      : (machCase.producer ?? []).includes(name)
+                        ? (machCase.producerType ?? RECEIVE)
+                        : SEND,
           );
+          change("census");
           n.value = machCase.overflow ? 4097 : rows.length;
           nt.value = rows.length + Number(Boolean(machCase.mismatch));
           names.value = rows;
@@ -4568,11 +4799,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           return machCase.list ?? 0;
         },
         mach_port_destroy(self, name) {
-          assert.deepEqual([self, name], [1, 9]);
-          if (machCase.fatal === "destroy") throw killed;
           destroyed.push(name);
-          api.errno = 13;
-          return machCase.destroy ?? 0;
+          assert.fail("Unknown census names cannot be destroyed");
         },
         mach_vm_deallocate(self, buffer, size) {
           assert.equal(self, 1);
@@ -4580,6 +4808,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           const allocation = arrays.find((entry) => entry.buffer === buffer);
           assert.ok(allocation);
           assert.equal(size, allocation.size);
+          machCalls.push(["array-release", allocation.kind]);
+          change("release");
           return portRelease(allocation.kind, buffer);
         },
       });
@@ -4588,12 +4818,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         functions +
           `\nconst entered=launch_stage;
           launch_stage=(...args)=>{const saved=errno;entered(...args);stage_preserved(saved);};
-          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,setup,capture});`,
+          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,domain_runtime_reply_allocate,launch_need_at,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
     if (machCase) {
       reporter = 42;
+      for (const name of machCase.producer ?? [])
+        assert.equal(native.domain_runtime_reply_allocate(), name);
       if (machCase.fatal) {
         assert.throws(
           native.experiment_mach_rights,
@@ -4602,8 +4834,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         const last = stageAttempts.at(-1);
         assert.deepEqual(last.values.slice(0, 5), [
           {
-            reply: "mach-reply-replace",
-            destroy: "mach-census-destroy",
+            reply: "mach-reply-bind",
+            census: "mach-census",
             cleanup: "mach-cleanup",
           }[machCase.fatal],
           41,
@@ -4615,9 +4847,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           last.values.slice(5),
           machCase.release === "notify"
             ? ["mach_port_deallocate/notify", 15, 41]
-            : machCase.fatal === "cleanup"
-              ? ["mach_port_destroy", 24, 13]
-              : ["none", 0, 0],
+            : ["none", 0, 0],
         );
         assert.ok(last.line.includes("entered=1"));
         assert.ok(
@@ -4652,7 +4882,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         continue;
       }
       if (operation)
-        assert.throws(native.experiment_mach_rights, /launch refused/u);
+        assert.throws(
+          native.experiment_mach_rights,
+          (cause) => {
+            if (!/launch refused/u.test(cause.message)) throw cause;
+            return true;
+          },
+          JSON.stringify(machCase),
+        );
       else native.experiment_mach_rights();
       const primary = diagnostics.filter(({ line }) =>
         line.startsWith("native-darwin-launch:"),
@@ -4666,11 +4903,60 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           0,
           -1,
         ]);
+      const portFacts = machCalls.filter(
+        (entry) => Array.isArray(entry) && entry[0] === "refusal",
+      );
+      assert.ok(
+        !machCalls.some(
+          (entry) =>
+            Array.isArray(entry) && entry[0] === "kobject" && entry[1] === 50,
+        ),
+      );
+      if (
+        operation === "mach_port_names/authority" ||
+        operation === "mach_port_type/reply/type"
+      ) {
+        const missing = machCase.missing || machCase.omit !== undefined;
+        const name = missing
+          ? (machCase.omit ?? 200)
+          : machCase.unknownType !== undefined
+            ? 50
+            : (machCase.duplicateName ??
+              (machCase.specialType !== undefined
+                ? 6
+                : machCase.producerType !== undefined
+                  ? 11
+                  : machCase.replyType !== undefined
+                    ? 3
+                    : 200));
+        const binding = missing
+          ? "missing"
+          : name === 3
+            ? "ordinary-cache"
+            : name === 6
+              ? "special-cache"
+              : name === 11
+                ? "producer"
+                : name === 200
+                  ? "task-access"
+                  : "unproved";
+        assert.deepEqual(portFacts, [["refusal", 42, name, result, binding]]);
+        if (arrays.length)
+          assert.ok(
+            machCalls.indexOf(portFacts[0]) <
+              machCalls.findIndex(
+                (entry) => Array.isArray(entry) && entry[0] === "array-release",
+              ),
+          );
+      } else assert.deepEqual(portFacts, []);
+      assert.equal(lookupReads, 2);
       const accessType = machCase.type ?? SEND;
       const unowned =
         !(machCase.typeQuery ?? 0) && !(accessType & (SEND | ONCE | DEAD));
       const owned = acquired.filter(
-        (entry) => !(unowned && entry.kind === "access"),
+        (entry) =>
+          !(unowned && entry.kind === "access") &&
+          !(machCase.wrongOwner && entry.kind === "bootstrap"),
       );
       for (const name of new Set(owned.map((entry) => entry.name)))
         assert.equal(
@@ -4688,7 +4974,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         );
       const failed = released.filter((entry) => entry.status);
       const early =
-        operation === "mach_port_deallocate/host" ||
+        operation === "mach_port_deallocate/bootstrap" ||
         (accessType === DEAD && operation === "mach_port_deallocate/access");
       const cleanup = diagnostics.filter(({ line }) =>
         line.startsWith("native-darwin-launch-cleanup:"),
@@ -4724,7 +5010,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       }
       if (!operation) {
         assert.equal(pipeIgnored, false);
-        assert.deepEqual(destroyed, [9]);
+        assert.deepEqual(destroyed, []);
         assert.equal(machCalls.filter((value) => value === "census").length, 1);
         assert.deepEqual(
           machCalls
@@ -4734,7 +5020,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           [3, 4, 5],
         );
       }
-      assert.ok(stageAttempts.length <= 10);
+      assert.ok(stageAttempts.length <= 11);
       assert.ok(
         Buffer.byteLength(diagnostics.map(({ line }) => line).join("")) < 8192,
       );
