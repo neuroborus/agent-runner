@@ -2577,7 +2577,15 @@ shadowing. Empty, binary, truncated and maximum-length child data remain hex dat
 malformed, oversized, mixed or misplaced contexts refuse without receipt or
 retirement authority. The fixtures retain short-circuit ordering, exact handle
 ownership and ordinary/outside-control success framing without Windows tools or
-timing waits. This coverage remains in the same harness and proves attribution only.
+timing waits. Injected clocks, accounting and completion queues cover private-port
+setup and once-only cleanup, immediate zero without notification waits, delayed
+settlement, lost-notification timeout with final zero, and notification-only
+refusal with final nonzero accounting. Exact keys and message payloads, packet
+and deadline bounds, incomplete accounting and original API errors remain strict.
+Successful original child exit plus fresh complete zero accounting establishes
+settlement; best-effort notifications only wake reinspection. The concrete
+active-count-one refusal retains an opaque synthetic 1024-of-2391-byte prefix.
+This coverage remains in the same harness and supplies no native PASS.
 The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
 WFP keyword values and exact DROP rejection predicates. Those in
 `test/native-windows-command.test.js`

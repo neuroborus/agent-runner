@@ -7826,6 +7826,15 @@ API errors and explicit output availability. The channel validates their finite
 operations, bounds and consistency under the existing 9216-byte diagnostic ceiling;
 malformed, oversized, mixed or misplaced contexts refuse transport. Diagnostic
 writes and creator-fencing failures cannot replace the original guard error.
+The private witness Job has its own non-inherited completion port associated
+before creation-time child admission. Successful original child exit and fresh
+complete zero accounting establish settlement; best-effort notifications only
+wake reinspection. Immediate zero needs no notification wait. Nonzero accounting
+uses exact-Job/key and retained-child payload checks within one 30-second budget
+and a finite packet cap. Timeout or exhaustion gets one final accounting read;
+missing notifications cannot override fresh zero, and notifications cannot
+override nonzero or unavailable accounting. Private resources close independently
+on setup, launch and refusal paths without replacing the original error.
 Success framing, held process/Job closure and independent retirement stay required;
 child bytes remain data, never receipts or retirement authority. These diagnostics
 establish neither the native cause nor successful ownership.

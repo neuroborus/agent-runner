@@ -132,7 +132,48 @@ static __declspec(thread) struct {
   const char *operation; DWORD result, error, waited, exitCode, activeProcesses;
   size_t childBytes; unsigned childShown; BYTE child[1024];
 } reader_witness;
+/* Only owned duplicates and private resources enter this scope. The existing
+ * failure sender releases them independently while retaining the primary error. */
+static __declspec(thread) struct {
+  HANDLE inherited[208], input, output, job, port;
+  PROCESS_INFORMATION child;
+  LPPROC_THREAD_ATTRIBUTE_LIST attributes;
+  BOOL attributesReady, cleanupFailed;
+  DWORD cleanupError;
+  PSECURITY_DESCRIPTOR descriptor;
+} reader_witness_resources;
+static void ownership_witness_cleanup_error(const char *operation, DWORD error) {
+  if (!reader_witness_resources.cleanupFailed) reader_witness_resources.cleanupError = error;
+  reader_witness_resources.cleanupFailed = TRUE;
+  fprintf(stderr, "native-windows-witness-cleanup: operation=%s error=%lu\n", operation, error);
+  SetLastError(error);
+}
+static BOOL ownership_witness_handle_close(HANDLE *owned) {
+  HANDLE handle = *owned; *owned = NULL;
+  if (!handle || CloseHandle(handle)) return TRUE;
+  ownership_witness_cleanup_error("CloseHandle", GetLastError()); return FALSE;
+}
+static BOOL ownership_witness_close(void) {
+  DWORD error = GetLastError();
+  for (unsigned i = 0; i < 208; i++) ownership_witness_handle_close(&reader_witness_resources.inherited[i]);
+  ownership_witness_handle_close(&reader_witness_resources.input);
+  ownership_witness_handle_close(&reader_witness_resources.output);
+  ownership_witness_handle_close(&reader_witness_resources.child.hThread);
+  ownership_witness_handle_close(&reader_witness_resources.child.hProcess);
+  ownership_witness_handle_close(&reader_witness_resources.port);
+  ownership_witness_handle_close(&reader_witness_resources.job);
+  if (reader_witness_resources.attributesReady) {
+    reader_witness_resources.attributesReady = FALSE;
+    DeleteProcThreadAttributeList(reader_witness_resources.attributes);
+  }
+  free(reader_witness_resources.attributes); reader_witness_resources.attributes = NULL;
+  PSECURITY_DESCRIPTOR descriptor = reader_witness_resources.descriptor; reader_witness_resources.descriptor = NULL;
+  if (descriptor && LocalFree(descriptor)) ownership_witness_cleanup_error("LocalFree", GetLastError());
+  SetLastError(reader_witness_resources.cleanupFailed ? reader_witness_resources.cleanupError : error);
+  return !reader_witness_resources.cleanupFailed;
+}
 static BOOL reader_witness_failure(const char *source, unsigned line, DWORD error) {
+  ownership_witness_close(); SetLastError(error);
   if (!reader_witness.active) return FALSE;
   char frame[9216], encoded[2049] = {0}; DWORD written;
   for (unsigned i = 0; i < reader_witness.childShown; i++)
@@ -330,7 +371,12 @@ static HANDLE recovery_job(SECURITY_ATTRIBUTES *attributes) {
   wchar_t name[128]; need(recovery_job_count < 128 && strlen(nonce) == 32 &&
     swprintf_s(name, 128, L"Local\\NativeProof-Recovery-%hs-%lu-%llu-%u", nonce, GetCurrentProcessId(), creation, recovery_job_count++) > 0);
   SetLastError(0); HANDLE job = CreateJobObjectW(attributes, name);
-  need(job && GetLastError() != ERROR_ALREADY_EXISTS); return job;
+  DWORD error = GetLastError();
+  if (job && error == ERROR_ALREADY_EXISTS) {
+    if (!CloseHandle(job)) fprintf(stderr, "native-windows-job-cleanup: operation=CloseHandle error=%lu\n", GetLastError());
+    SetLastError(error); need(FALSE);
+  }
+  SetLastError(error); need(job); return job;
 }
 static BOOL preparation_only;
 static wchar_t preparation_directory[4096], preparation_output[4096], preparation_plan[4096];
@@ -1770,26 +1816,47 @@ static void ownership_fresh(BOOL outsideControl) {
   for (unsigned i = 0; i < count; i++) if (!wcscmp(entries[i].path, self) && !strcmp(entries[i].kind, "helper")) image = i;
   need(image < count); if (!entries[image].file.handle) entries[image].file = hold(entries[image].path, FALSE, TRUE, GENERIC_READ);
   pin(&entries[image].file, entries[image].pin); char sig[65]; signature(&entries[image].file, entries[image].signature, sig); strcpy_s(view.imagePin, 65, entries[image].pin);
-  HANDLE inherited[208], parentIn, parentOut; unsigned n = 0;
-  PSECURITY_DESCRIPTOR sd = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)"); SECURITY_ATTRIBUTES sa = attributes(sd, TRUE), private = attributes(sd, FALSE);
-  need(CreatePipe(&inherited[n++], &parentIn, &sa, 0) && CreatePipe(&parentOut, &inherited[n++], &sa, 0) && SetHandleInformation(parentIn, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(parentOut, HANDLE_FLAG_INHERIT, 0));
+  memset(&reader_witness_resources, 0, sizeof(reader_witness_resources));
+  HANDLE *inherited = reader_witness_resources.inherited; unsigned n = 0;
+  reader_witness_resources.descriptor = descriptor(L"O:SYG:SYD:P(A;;GA;;;SY)");
+  SECURITY_ATTRIBUTES sa = attributes(reader_witness_resources.descriptor, TRUE), private = attributes(reader_witness_resources.descriptor, FALSE);
+  HANDLE input = NULL, output = NULL;
+  need(CreatePipe(&input, &output, &sa, 0)); inherited[n++] = input; reader_witness_resources.input = output;
+  need(CreatePipe(&input, &output, &sa, 0)); reader_witness_resources.output = input; inherited[n++] = output;
+  need(SetHandleInformation(reader_witness_resources.input, HANDLE_FLAG_INHERIT, 0) && SetHandleInformation(reader_witness_resources.output, HANDLE_FLAG_INHERIT, 0));
   HANDLE *handles[] = {&view.files[0], &view.files[1], &view.files[2], &view.files[3], &view.files[4], &view.files[5], &view.token, &view.job, &view.launcher, &view.owner, &view.launcherToken, &view.ownerToken, &view.ownerJob};
-  for (unsigned i = 0; i < sizeof(handles)/sizeof(handles[0]); i++) if (*handles[i]) { need(DuplicateHandle(GetCurrentProcess(), *handles[i], GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); *handles[i] = inherited[n++]; }
+  for (unsigned i = 0; i < sizeof(handles)/sizeof(handles[0]); i++) if (*handles[i]) { HANDLE duplicate = NULL;
+    need(DuplicateHandle(GetCurrentProcess(), *handles[i], GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; *handles[i] = inherited[n++]; }
   for (unsigned i = 0; i < view.count; i++) for (unsigned j = 0; j < 2; j++) { HANDLE *value = j ? &view.tokens[i] : &view.processes[i];
-    need(DuplicateHandle(GetCurrentProcess(), *value, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); *value = inherited[n++]; }
-  for (unsigned i = 0; i < view.sources; i++) { need(n < 208 && DuplicateHandle(GetCurrentProcess(), view.pins[i].file, GetCurrentProcess(), &inherited[n], 0, TRUE, DUPLICATE_SAME_ACCESS)); view.pins[i].file = inherited[n++]; }
-  HANDLE job = recovery_job(&private); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
+    HANDLE duplicate = NULL; need(DuplicateHandle(GetCurrentProcess(), *value, GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; *value = inherited[n++]; }
+  for (unsigned i = 0; i < view.sources; i++) { HANDLE duplicate = NULL; need(n < 208);
+    need(DuplicateHandle(GetCurrentProcess(), view.pins[i].file, GetCurrentProcess(), &duplicate, 0, TRUE, DUPLICATE_SAME_ACCESS)); inherited[n] = duplicate; view.pins[i].file = inherited[n++]; }
+  reader_witness_resources.job = recovery_job(&private); HANDLE job = reader_witness_resources.job;
+  reader_witness_resources.port = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, 0, 1);
+  need(reader_witness_resources.port && SetHandleInformation(reader_witness_resources.port, HANDLE_FLAG_INHERIT, 0));
+  JOBOBJECT_ASSOCIATE_COMPLETION_PORT association = {0}; association.CompletionKey = (PVOID)(ULONG_PTR)job; association.CompletionPort = reader_witness_resources.port;
+  need(SetInformationJobObject(job, JobObjectAssociateCompletionPortInformation, &association, sizeof(association)));
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}; limits.BasicLimitInformation.LimitFlags = 0x2008; limits.BasicLimitInformation.ActiveProcessLimit = 1;
   need(SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits)));
-  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start); start.lpAttributeList = calloc(1, bytes);
-  need(start.lpAttributeList && InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &bytes) &&
-    UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, n*sizeof(HANDLE), NULL, NULL) &&
+  SIZE_T bytes = 0; InitializeProcThreadAttributeList(NULL, 2, 0, &bytes); STARTUPINFOEXW start = {0}; start.StartupInfo.cb = sizeof(start);
+  reader_witness_resources.attributes = calloc(1, bytes); start.lpAttributeList = reader_witness_resources.attributes;
+  need(start.lpAttributeList);
+  reader_witness_resources.attributesReady = InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &bytes);
+  need(reader_witness_resources.attributesReady && UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherited, n*sizeof(HANDLE), NULL, NULL) &&
     UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST, &job, sizeof(job), NULL, NULL));
   start.StartupInfo.dwFlags = STARTF_USESTDHANDLES; start.StartupInfo.hStdInput = inherited[0]; start.StartupInfo.hStdOutput = start.StartupInfo.hStdError = inherited[1];
   wchar_t command[8192]; need(swprintf_s(command, 8192, L"\"%ls\" --ownership-witness %llu", self, (ULONGLONG)(ULONG_PTR)inherited[0]) > 0);
-  PROCESS_INFORMATION child; need(CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (outsideControl ? CREATE_BREAKAWAY_FROM_JOB : 0), NULL, NULL, &start.StartupInfo, &child));
-  for (unsigned i = 0; i < n; i++) need(CloseHandle(inherited[i])); DeleteProcThreadAttributeList(start.lpAttributeList); free(start.lpAttributeList); LocalFree(sd);
-  DWORD written; need(system_process(child.hProcess) && ResumeThread(child.hThread) == 1 && WriteFile(parentIn, &view, sizeof(view), &written, NULL) && written == sizeof(view) && CloseHandle(parentIn));
-  char result[65536]; line(parentOut, result, sizeof(result));
+  PROCESS_INFORMATION child = {0};
+  BOOL created = CreateProcessW(self, command, &private, &private, TRUE, CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | (outsideControl ? CREATE_BREAKAWAY_FROM_JOB : 0), NULL, NULL, &start.StartupInfo, &child);
+  if (created) reader_witness_resources.child = child;
+  need(created);
+  BOOL closed = TRUE;
+  for (unsigned i = 0; i < n; i++) if (!ownership_witness_handle_close(&inherited[i])) closed = FALSE;
+  if (!closed) { SetLastError(reader_witness_resources.cleanupError); need(FALSE); }
+  DWORD written; need(system_process(child.hProcess) && ResumeThread(child.hThread) == 1 && WriteFile(reader_witness_resources.input, &view, sizeof(view), &written, NULL) && written == sizeof(view));
+  need(ownership_witness_handle_close(&reader_witness_resources.input));
+  char result[65536]; line(reader_witness_resources.output, result, sizeof(result));
+  ULONGLONG started = GetTickCount64();
   DWORD waited = WaitForSingleObject(child.hProcess, 30000), error = waited == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
   DWORD exit = 0, actual = waited; JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0};
   BOOL exitRead = FALSE, accountingRead = FALSE, apiFailure = waited == WAIT_FAILED;
@@ -1799,9 +1866,33 @@ static void ownership_fresh(BOOL outsideControl) {
     if (!exitRead) { operation = "GetExitCodeProcess"; actual = exitRead; apiFailure = TRUE; }
     else if (exit) { operation = "child-exit"; actual = exit; }
     else {
-      accountingRead = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), NULL); error = accountingRead ? ERROR_SUCCESS : GetLastError();
-      if (!accountingRead) { operation = "QueryInformationJobObject"; actual = accountingRead; apiFailure = TRUE; }
-      else if (accounting.ActiveProcesses) { operation = "ActiveProcesses"; actual = accounting.ActiveProcesses; }
+      BOOL finalRead = FALSE; unsigned packets = 0;
+      for (;;) {
+        DWORD returned = 0;
+        BOOL sampled = QueryInformationJobObject(job, JobObjectBasicAccountingInformation, &accounting, sizeof(accounting), &returned);
+        error = sampled ? ERROR_SUCCESS : GetLastError(); accountingRead = sampled && returned == sizeof(accounting);
+        if (!sampled) { operation = "QueryInformationJobObject"; actual = 0; apiFailure = TRUE; break; }
+        if (!accountingRead) { operation = "accounting-size"; actual = returned; break; }
+        if (!accounting.ActiveProcesses) break;
+        if (finalRead) { operation = "ActiveProcesses"; actual = accounting.ActiveProcesses; break; }
+        ULONGLONG elapsed = GetTickCount64() - started;
+        /* Bounds end notification waits, not the final authoritative read.
+         * Job messages are best-effort wakeups and never prove settlement. */
+        if (elapsed >= 30000 || packets >= 16) { finalRead = TRUE; continue; }
+        DWORD message = 0; ULONG_PTR key = 0; LPOVERLAPPED payload = NULL;
+        BOOL received = GetQueuedCompletionStatus(reader_witness_resources.port, &message, &key, &payload, 30000 - (DWORD)elapsed);
+        error = received ? ERROR_SUCCESS : GetLastError();
+        if (!received) {
+          if (error == WAIT_TIMEOUT && !payload) { finalRead = TRUE; continue; }
+          operation = "GetQueuedCompletionStatus"; actual = 0; apiFailure = TRUE; break;
+        }
+        if (key != (ULONG_PTR)job || !((message == JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO && !payload) ||
+          ((message == JOB_OBJECT_MSG_NEW_PROCESS || message == JOB_OBJECT_MSG_EXIT_PROCESS || message == JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS) &&
+            (ULONG_PTR)payload == child.dwProcessId))) {
+          operation = "job-notification"; actual = message; break;
+        }
+        packets++;
+      }
     }
   }
   if (operation) {
@@ -1815,9 +1906,9 @@ static void ownership_fresh(BOOL outsideControl) {
     memcpy(reader_witness.child, result, reader_witness.childShown);
     SetLastError(error); need(FALSE);
   }
-  BYTE extra; DWORD used; need(!ReadFile(parentOut, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
+  BYTE extra; DWORD used; need(!ReadFile(reader_witness_resources.output, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
   if (outsideControl) { BOOL belongs; need(case_job && IsProcessInJob(child.hProcess, case_job, &belongs) && !belongs); }
-  need(CloseHandle(parentOut) && CloseHandle(child.hProcess) && CloseHandle(child.hThread) && CloseHandle(job));
+  need(ownership_witness_close());
   if (ownership_count && !ownership_released) ownership_creation_verified = TRUE;
   if (outsideControl) printf("{\"ready\":true,\"reachable\":true}"); else printf("%s", result);
 }

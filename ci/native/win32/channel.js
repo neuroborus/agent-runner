@@ -313,7 +313,11 @@ export function windowsCustodyChannel(
             exitQuery = witness.operation === "GetExitCodeProcess",
             childExit = witness.operation === "child-exit",
             accountingQuery = witness.operation === "QueryInformationJobObject",
-            active = witness.operation === "ActiveProcesses";
+            accountingSize = witness.operation === "accounting-size",
+            completionQuery = witness.operation === "GetQueuedCompletionStatus",
+            notification = witness.operation === "job-notification",
+            active = witness.operation === "ActiveProcesses",
+            accounted = active || completionQuery || notification;
           requireWindows(
             value.source === "custody-reader.c" &&
               ["ownership-witness", "ownership-outside-control"].includes(
@@ -323,6 +327,9 @@ export function windowsCustodyChannel(
                 exitQuery ||
                 childExit ||
                 accountingQuery ||
+                accountingSize ||
+                completionQuery ||
+                notification ||
                 active) &&
               [
                 witness.result,
@@ -333,10 +340,10 @@ export function windowsCustodyChannel(
               witness.apiFailure ===
                 (waiting
                   ? witness.wait === 0xffffffff
-                  : exitQuery || accountingQuery) &&
+                  : exitQuery || accountingQuery || completionQuery) &&
               (witness.apiFailure || value.lastError === 0) &&
               witness.exitAvailable === !(waiting || exitQuery) &&
-              witness.accountingAvailable === active &&
+              witness.accountingAvailable === accounted &&
               (waiting
                 ? witness.wait !== 0 && witness.result === witness.wait
                 : witness.wait === 0) &&
@@ -346,8 +353,11 @@ export function windowsCustodyChannel(
               (active
                 ? witness.activeProcesses > 0 &&
                   witness.result === witness.activeProcesses
-                : witness.activeProcesses === 0) &&
-              (!(exitQuery || accountingQuery) || witness.result === 0) &&
+                : accounted
+                  ? witness.activeProcesses > 0
+                  : witness.activeProcesses === 0) &&
+              (!(exitQuery || accountingQuery || completionQuery) ||
+                witness.result === 0) &&
               Number.isInteger(witness.childBytes) &&
               witness.childBytes >= 0 &&
               witness.childBytes < 65536 &&

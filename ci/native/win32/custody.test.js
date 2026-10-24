@@ -2304,7 +2304,7 @@ test("actual witness completion preserves original child and parent refusals bef
     ),
   );
   const start = source.indexOf(
-      "  char result[65536];",
+      "  HANDLE *inherited = reader_witness_resources.inherited;",
       source.indexOf("static void ownership_fresh("),
     ),
     end = source.indexOf("\n}\nstatic void ownership_send", start),
@@ -2312,7 +2312,7 @@ test("actual witness completion preserves original child and parent refusals bef
   assert.ok(start > 0 && end > start);
   const body = (name) =>
     new RegExp(
-      `static (?:void|BOOL) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|BOOL|HANDLE) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const translate = (body) =>
@@ -2324,86 +2324,226 @@ test("actual witness completion preserves original child and parent refusals bef
         "char frame[9216], encoded[2049] = {0}; DWORD written;",
         'const frame={text:""},encoded={text:""}; let written;',
       )
+      .replace(
+        'char bytes[1024], transfer[256] = ""; DWORD written;',
+        'const bytes={text:""},transfer={text:""}; let written;',
+      )
       .replace("const char *source", "let source")
       .replace("source+1", "source.slice(1)")
+      .replace("const char *operation", "let operation")
       .replace(
         "HANDLE creators[] = {ownership_launcher.hProcess, ownership_owner.hProcess};",
         "const creators = [ownership_launcher.hProcess, ownership_owner.hProcess];",
       )
       .replaceAll("sizeof(creators)/sizeof(creators[0])", "creators.length")
+      .replaceAll("sizeof(handles)/sizeof(handles[0])", "handles.length")
+      .replace(/HANDLE \*(inherited|value)\b/gu, "let $1")
+      .replace(/HANDLE \*handles\[\] = \{([^}]+)\}/u, "const handles = [$1]")
+      .replace(/\*handles\[i\]/gu, "handles[i].value")
+      .replace(/\*value\b/gu, "value.value")
       .replaceAll("sizeof(frame)", "9216")
       .replaceAll("sizeof(encoded)", "2049")
+      .replaceAll("sizeof(transfer)", "256")
+      .replaceAll("sizeof(bytes)", "1024")
       .replaceAll("encoded+i*2", "{target:encoded,offset:i*2}")
-      .replaceAll("&written", "value=>written=value")
       .replaceAll("\\036", "\\x1e")
       .replace(
         "JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0}",
         "const accounting = {}",
       )
-      .replace("const char *operation", "let operation")
+      .replace(
+        "JOBOBJECT_ASSOCIATE_COMPLETION_PORT association = {0}",
+        "const association = {}",
+      )
+      .replace(
+        "JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0}",
+        "const limits = {BasicLimitInformation:{}}",
+      )
+      .replace("STARTUPINFOEXW start = {0}", "const start = {StartupInfo:{}}")
+      .replace(
+        "FILETIME birth, exit, kernel, user",
+        "const birth={},exit={},kernel={},user={}",
+      )
+      .replace(
+        "((ULONGLONG)birth.dwHighDateTime << 32) | birth.dwLowDateTime",
+        "birth.dwHighDateTime * 2 ** 32 + birth.dwLowDateTime",
+      )
+      .replace(/wchar_t (name|command)\[(128|8192)\]/gu, "const $1 = {text:''}")
+      .replace(
+        "PROCESS_INFORMATION child = {0}",
+        "const child = {hProcess:null,hThread:null}",
+      )
       .replace("BYTE extra", "const extra = {}")
       .replaceAll("sizeof(result)", "65536")
-      .replaceAll("sizeof(accounting)", "1")
-      .replaceAll(/&(accounting|extra)\b/gu, "$1")
-      .replace(
-        /&(exit|used|belongs)\b/gu,
-        (_, name) => `{set value(value){${name}=value}}`,
+      .replaceAll(
+        /sizeof\((?:accounting|association|limits|start|view|job|HANDLE)\)/gu,
+        "1",
       )
-      .replace(/\((?:DWORD|unsigned long long|unsigned|int)\)/gu, "")
-      .replace(/\b(?:DWORD|BOOL|size_t|unsigned|int) /gu, "let ");
-  const dispatch = body("reader_failure");
+      .replaceAll(
+        "&reader_witness_resources.inherited[i]",
+        "ref(reader_witness_resources.inherited,i)",
+      )
+      .replaceAll("&inherited[i]", "ref(inherited,i)")
+      .replace(
+        /&view\.(files|tokens|processes)\[([^\]]+)\]/gu,
+        "ref(view.$1,$2)",
+      )
+      .replace(/&view\.([a-zA-Z]+)\b/gu, 'ref(view,"$1")')
+      .replace(
+        /&reader_witness_resources\.child\.(hThread|hProcess)/gu,
+        'ref(reader_witness_resources.child,"$1")',
+      )
+      .replace(
+        /&reader_witness_resources\.(input|output|port|job)\b/gu,
+        'ref(reader_witness_resources,"$1")',
+      )
+      .replaceAll(
+        "&reader_witness_resources.child",
+        "reader_witness_resources.child",
+      )
+      .replaceAll(
+        /&(accounting|association|limits|start\.StartupInfo|view|private|sa|birth|kernel|user|extra|child)\b/gu,
+        "$1",
+      )
+      .replace("&exit, &kernel", "exit, kernel")
+      .replace(
+        /&(exit|used|belongs|returned|message|key|payload|bytes|written|job|input|output|duplicate)\b/gu,
+        (_, name) =>
+          `({get value(){return ${name}},set value(value){${name}=value}})`,
+      )
+      .replaceAll("*owned", "owned.value")
+      .replace(
+        /\((?:DWORD|ULONG_PTR|PVOID|ULONGLONG|unsigned long long|unsigned|int)\)/gu,
+        "",
+      )
+      .replace(
+        /\b(?:DWORD|BOOL|HANDLE|ULONGLONG|ULONG_PTR|LPOVERLAPPED|PSECURITY_DESCRIPTOR|SECURITY_ATTRIBUTES|SIZE_T|size_t|unsigned|int) /gu,
+        "let ",
+      )
+      .replace(/\bL"/gu, '"')
+      .replace(/\bprivate\b/gu, "privateAttributes");
   const program = new Script(`
     function need_at(ok,file,line){${translate(guard)}}
     function need(ok){need_at(ok,"custody-reader.c",1);}
+    function recovery_job(attributes){${translate(body("recovery_job"))}}
+    function ownership_witness_cleanup_error(operation,error){${translate(body("ownership_witness_cleanup_error"))}}
+    function ownership_witness_handle_close(owned){${translate(body("ownership_witness_handle_close"))}}
+    function ownership_witness_close(){${translate(body("ownership_witness_close"))}}
     function reader_witness_failure(source,line,error){${translate(body("reader_witness_failure"))}}
     function ownership_failure_fence(error){${translate(body("ownership_failure_fence"))}}
-    function reader_failure(file,line,error){${translate(dispatch.slice(0, dispatch.indexOf("  if(reader_cold_failure")))}}
+    function reader_failure(file,line,error){${translate(body("reader_failure"))}}
     ${translate(source.slice(start, end))}
   `);
-  let sample;
-  for (const [fault, operation, actual, error] of [
+  const pid = 41,
+    zero = 4,
+    born = 6,
+    exited = 7,
+    abnormal = 8;
+  let sample, completionSample, notificationSample, sizeSample;
+  for (const [fault, operation, actual, error = 0, outsideControl = false] of [
     [null],
+    [null, undefined, undefined, 0, true],
+    ["delayed"],
+    ["lifecycle"],
+    ["lost-zero"],
+    ["deadline-zero"],
+    ["active", "ActiveProcesses", 1],
+    ["notification-only", "ActiveProcesses", 1],
+    ["packet-cap", "ActiveProcesses", 1],
+    ["wrong-key", "job-notification", zero],
+    ["zero-payload", "job-notification", zero],
+    ["wrong-pid", "job-notification", born],
+    ["unknown", "job-notification", 999],
+    ["unexpected", "job-notification", 3],
+    ["completion-api", "GetQueuedCompletionStatus", 0, 5],
+    ["failed-packet", "GetQueuedCompletionStatus", 0, 258],
+    ["accounting-size", "accounting-size", 0],
+    ["accounting-after-wakeup", "QueryInformationJobObject", 0, 87],
     ["wait-failed", "WaitForSingleObject", 0xffffffff, 5],
-    ["wait-timeout", "WaitForSingleObject", 258, 0],
+    ["wait-timeout", "WaitForSingleObject", 258],
     ["exit-query", "GetExitCodeProcess", 0, 5],
-    ["child-exit", "child-exit", 126, 0],
+    ["child-exit", "child-exit", 126],
+    ["child-exit", "child-exit", 126, 0, true],
     ["accounting-query", "QueryInformationJobObject", 0, 87],
-    ["active", "ActiveProcesses", 2, 0],
-    ["diagnostic", "child-exit", 126, 0],
-    ["format", "child-exit", 126, 0],
-    ["cleanup", "child-exit", 126, 0],
-    ["truncated", "child-exit", 126, 0],
-    ["maximum", "child-exit", 126, 0],
-    ["binary", "child-exit", 126, 0],
-    ["empty", "child-exit", 126, 0],
-  ])
-    for (const outsideControl of !fault || fault === "child-exit"
-      ? [false, true]
-      : [false]) {
-      const calls = [],
-        diagnostics = [],
-        frames = [],
-        f = transport(),
-        pending = f.channel.receive().catch((cause) => cause),
-        completion = f.channel.completion.catch((cause) => cause),
-        refused = new Error("exit 126"),
-        exitCode = [
-          "child-exit",
-          "diagnostic",
-          "format",
-          "cleanup",
-          "truncated",
-          "maximum",
-          "binary",
-          "empty",
-        ].includes(fault)
-          ? 126
-          : 0,
-        childLine =
-          fault === "binary"
-            ? Buffer.from([0x1e, 34, 92, 0x7f])
-            : Buffer.from(
-                fault === "truncated"
+    ["diagnostic", "child-exit", 126],
+    ["format", "child-exit", 126],
+    ["cleanup", "child-exit", 126],
+    ["truncated", "child-exit", 126],
+    ["maximum", "child-exit", 126],
+    ["binary", "child-exit", 126],
+    ["empty", "child-exit", 126],
+    ["input-pipe", null, 0, 5],
+    ["output-pipe", null, 0, 5],
+    ["parent-inherit", null, 0, 5],
+    ["duplicate-file", null, 0, 5],
+    ["duplicate-process", null, 0, 5],
+    ["duplicate-pin", null, 0, 5],
+    ["job-create", null, 0, 5],
+    ["job-collision", null, 0, 183],
+    ["port-create", null, 0, 5],
+    ["port-inherit", null, 0, 5],
+    ["association", null, 0, 5],
+    ["association-cleanup", null, 0, 5],
+    ["limits", null, 0, 5],
+    ["allocation", null, 0, 8],
+    ["attributes", null, 0, 5],
+    ["handle-list", null, 0, 5],
+    ["job-list", null, 0, 5],
+    ["command", null, 0, 5],
+    ["launch", null, 0, 5],
+    ["inherit-close", null, 0, 5],
+    ["system-process", null, 0, 5],
+    ["resume", null, 0, 5],
+    ["input-write", null, 0, 5],
+    ["input-close", null, 0, 5],
+    ["eof", null, 0, 5],
+    ["outside", null, 0, 5, true],
+    ["final-close", null, 0, 5],
+  ]) {
+    const refuses = operation !== undefined,
+      calls = [],
+      diagnostics = [],
+      frames = [],
+      waits = [],
+      f = transport(),
+      pending = f.channel.receive().catch((cause) => cause),
+      completion = f.channel.completion.catch((cause) => cause),
+      refused = new Error("exit 126"),
+      inherited = Array(208).fill(null),
+      owned = new Set(),
+      released = new Set(),
+      resources = {
+        inherited,
+        input: null,
+        output: null,
+        job: null,
+        port: null,
+        child: { hProcess: null, hThread: null },
+        attributes: null,
+        attributesReady: false,
+        cleanupFailed: false,
+        cleanupError: 0,
+        descriptor: null,
+      },
+      exitCode = [
+        "child-exit",
+        "diagnostic",
+        "format",
+        "cleanup",
+        "truncated",
+        "maximum",
+        "binary",
+        "empty",
+      ].includes(fault)
+        ? 126
+        : 0,
+      childLine =
+        fault === "binary"
+          ? Buffer.from([0x1e, 34, 92, 0x7f])
+          : Buffer.from(
+              fault === "active"
+                ? "opaque".repeat(399).slice(0, 2391)
+                : fault === "truncated"
                   ? "x".repeat(2048)
                   : fault === "maximum"
                     ? "x".repeat(65534)
@@ -2412,218 +2552,633 @@ test("actual witness completion preserves original child and parent refusals bef
                       : exitCode
                         ? "native-windows-guard: file=witness.c line=7 last-error=5"
                         : '{"held":true}',
-              ),
-        waited =
-          fault === "wait-failed"
-            ? 0xffffffff
-            : fault === "wait-timeout"
-              ? 258
-              : 0,
-        exitAvailable = waited === 0 && fault !== "exit-query",
-        accountingAvailable =
-          exitAvailable && !exitCode && fault !== "accounting-query";
-      const text = (value) =>
-        Buffer.isBuffer(value)
-          ? value
-              .subarray(
-                0,
-                value.indexOf(0) < 0 ? value.length : value.indexOf(0),
-              )
-              .toString()
-          : (value?.text ?? value);
-      const format = (pattern, values) => {
-        let index = 0;
-        return pattern.replace(/%(02x|zu|lu|[us])/gu, (_, kind) => {
-          const value = values[index++];
-          return kind === "s"
-            ? String(text(value))
-            : kind === "02x"
-              ? Number(value).toString(16).padStart(2, "0")
-              : String(Number(value));
-        });
-      };
-      let lastError = 122,
-        output = "";
-      const api = {
-        Buffer,
-        outsideControl,
-        child: { hProcess: "process", hThread: "thread" },
-        job: "job",
-        parentOut: "pipe",
-        case_job: "domain",
-        ownership_count: 1,
-        ownership_released: false,
-        ownership_creation_verified: false,
-        ownership_launcher: { hProcess: "launcher" },
-        ownership_owner: { hProcess: "owner" },
-        reader_witness: { active: false, child: Buffer.alloc(1024) },
-        reader_diagnostics_ready: true,
-        reader_command: outsideControl
-          ? "ownership-outside-control"
-          : "ownership-witness",
-        sequence: 2,
-        control: "authenticated",
-        ownership_failure_write: () =>
-          assert.fail("Launcher diagnostic shadowed the witness"),
-        strrchr: (value, separator) =>
-          value.includes(separator)
-            ? value.slice(value.lastIndexOf(separator))
-            : null,
-        TRUE: true,
-        FALSE: false,
-        NULL: null,
-        ERROR_SUCCESS: 0,
-        ERROR_BROKEN_PIPE: 109,
-        WAIT_OBJECT_0: 0,
-        WAIT_TIMEOUT: 258,
-        WAIT_FAILED: 0xffffffff,
-        JobObjectBasicAccountingInformation: 1,
-        stderr: "stderr",
-        GetLastError: () => lastError,
-        SetLastError: (value) => {
-          lastError = value;
-        },
-        strlen: (value) => value.indexOf(0),
-        memcpy: (target, value, size) => value.copy(target, 0, 0, size),
-        line: (pipe, value, maximum) => {
-          assert.equal(pipe, "pipe");
-          assert.equal(maximum, 65536);
-          assert.ok(childLine.length + 1 < maximum);
-          assert.ok(
-            childLine.every((byte) => byte > 0 && byte < 128 && byte !== 10),
-          );
-          calls.push("line");
-          childLine.copy(value);
-        },
-        WaitForSingleObject: (process, deadline) => {
-          if (process !== "process") {
-            assert.ok(["launcher", "owner"].includes(process));
-            assert.equal(deadline, 0);
-            calls.push("fence-wait-" + process);
-            lastError = 77;
-            return fault === "cleanup" && process === "launcher"
-              ? 0xffffffff
-              : 258;
-          }
-          assert.equal(process, "process");
-          assert.equal(deadline, 30000);
-          calls.push("wait");
-          lastError = 5;
-          return waited;
-        },
-        TerminateJobObject: (job, code) => {
-          assert.deepEqual([job, code], ["domain", 126]);
-          calls.push("fence-job");
-          lastError = 78;
-          return fault !== "cleanup";
-        },
-        TerminateProcess: (process, code) => {
-          assert.ok(["launcher", "owner"].includes(process));
-          assert.equal(code, 126);
-          calls.push("fence-" + process);
-          lastError = 79;
-          return fault !== "cleanup";
-        },
-        GetExitCodeProcess: (process, out) => {
-          assert.equal(process, "process");
-          calls.push("exit");
-          out.value = fault === "exit-query" ? 999 : exitCode;
-          lastError = fault === "exit-query" ? 5 : 122;
-          return fault !== "exit-query";
-        },
-        QueryInformationJobObject: (job, kind, accounting, size, returned) => {
-          assert.deepEqual([job, kind, size, returned], ["job", 1, 1, null]);
-          calls.push("accounting");
-          accounting.ActiveProcesses = fault === "active" ? 2 : 999;
-          if (fault !== "active" && fault !== "accounting-query")
-            accounting.ActiveProcesses = 0;
-          lastError = fault === "accounting-query" ? 87 : 122;
-          return fault !== "accounting-query";
-        },
-        ReadFile: (pipe, _extra, size, used, overlapped) => {
-          assert.deepEqual([pipe, size, overlapped], ["pipe", 1, null]);
-          calls.push("eof");
-          used.value = 0;
-          lastError = 109;
-          return false;
-        },
-        IsProcessInJob: (process, job, belongs) => {
-          assert.deepEqual([process, job], ["process", "domain"]);
-          calls.push("outside");
-          belongs.value = false;
-          return true;
-        },
-        CloseHandle: (handle) => {
-          calls.push("close-" + handle);
-          return true;
-        },
-        fprintf: (stream, pattern, ...values) => {
-          assert.equal(stream, "stderr");
-          // Scheduled-reader stderr is disconnected from the bridge channel.
-          diagnostics.push(format(pattern, values));
-          lastError = 99;
-          return fault === "diagnostic" ? -1 : 1;
-        },
-        fflush: () => {
-          lastError = 88;
-          return -1;
-        },
-        sprintf_s: (out, maximum, pattern, ...values) => {
-          if (fault === "format" && pattern.startsWith("\x1e")) return -1;
-          const value = format(pattern, values);
-          assert.ok(Buffer.byteLength(value) < maximum);
-          if (out.target)
-            out.target.text = out.target.text.slice(0, out.offset) + value;
-          else out.text = value;
-          lastError = 80;
-          return value.length;
-        },
-        WriteFile: (handle, value, size, used) => {
-          assert.equal(handle, "authenticated");
-          calls.push("diagnostic-write");
-          lastError = 81;
-          if (fault === "diagnostic") return false;
-          used(size);
-          frames.push(value.text);
-          f.child.stdout.write('{"sequence":2,"value":');
-          for (let offset = 0; offset < size; offset += 37)
-            f.child.stdout.write(value.text.slice(offset, offset + 37));
-          return true;
-        },
-        ExitProcess: (code) => {
-          assert.equal(code, 126);
-          throw refused;
-        },
-        printf: (format, value) => {
-          output += format.replace("%s", text(value));
-        },
-      };
-      const expectedCalls = ["line", "wait"];
-      if (!waited) expectedCalls.push("exit");
-      if (exitAvailable && !exitCode) expectedCalls.push("accounting");
-      if (fault) {
-        assert.throws(
-          () => program.runInNewContext(api),
-          (cause) => cause === refused,
-        );
-        assert.deepEqual(calls, [
-          ...expectedCalls,
-          ...(fault === "format" ? [] : ["diagnostic-write"]),
-          "fence-job",
-          "fence-wait-launcher",
-          ...(fault === "cleanup" ? [] : ["fence-launcher"]),
-          "fence-wait-owner",
-          "fence-owner",
-        ]);
+            ),
+      waited =
+        fault === "wait-failed"
+          ? 0xffffffff
+          : fault === "wait-timeout"
+            ? 258
+            : 0,
+      exitAvailable = waited === 0 && fault !== "exit-query",
+      accountingAvailable =
+        exitAvailable &&
+        !exitCode &&
+        ![
+          "accounting-query",
+          "accounting-size",
+          "accounting-after-wakeup",
+        ].includes(fault),
+      accountValues =
+        fault === "packet-cap"
+          ? Array(18).fill(1)
+          : ["active", "notification-only"].includes(fault)
+            ? [1, 1, 1]
+            : [
+                  "delayed",
+                  "lifecycle",
+                  "lost-zero",
+                  "deadline-zero",
+                  "accounting-after-wakeup",
+                ].includes(fault)
+              ? fault === "lifecycle"
+                ? [1, 1, 1, 0]
+                : [1, 0]
+              : [
+                    "wrong-key",
+                    "zero-payload",
+                    "wrong-pid",
+                    "unknown",
+                    "unexpected",
+                    "completion-api",
+                    "failed-packet",
+                  ].includes(fault)
+                ? [1]
+                : [0],
+      packets =
+        fault === "lifecycle"
+          ? [born, abnormal, exited]
+          : fault === "packet-cap"
+            ? Array(16).fill(born)
+            : [
+                  "delayed",
+                  "notification-only",
+                  "accounting-after-wakeup",
+                  "wrong-key",
+                  "zero-payload",
+                ].includes(fault)
+              ? [zero]
+              : fault === "wrong-pid"
+                ? [born]
+                : fault === "unknown"
+                  ? [999]
+                  : fault === "unexpected"
+                    ? [3]
+                    : [];
+    const text = (value) =>
+      Buffer.isBuffer(value)
+        ? value
+            .subarray(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0))
+            .toString()
+        : (value?.text ?? value);
+    const format = (pattern, values) => {
+      let index = 0;
+      return pattern.replace(/%(02x|llu|zu|lu|hs|ls|[us])/gu, (_, kind) => {
+        const value = values[index++];
+        return ["s", "hs", "ls"].includes(kind)
+          ? String(text(value))
+          : kind === "02x"
+            ? Number(value).toString(16).padStart(2, "0")
+            : String(Number(value));
+      });
+    };
+    let lastError = 122,
+      output = "",
+      accountReads = 0,
+      packetReads = 0,
+      ticks = 0,
+      descriptorClosed = false,
+      attributesFreed = false,
+      attributesDeleted = false,
+      pipeCreates = 0;
+    const failApi = (name, value = true, code = 5) => {
+      const failed =
+        fault === name ||
+        (fault === "association-cleanup" && name === "association");
+      calls.push(name);
+      lastError = failed ? code : 122;
+      return failed ? false : value;
+    };
+    const api = {
+      Buffer,
+      outsideControl,
+      self: "reader.exe",
+      view: {
+        files: ["source-file", null, null, null, null, null],
+        count: 1,
+        processes: ["source-process"],
+        tokens: ["source-token"],
+        sources: 1,
+        pins: [{ file: "source-pin" }],
+      },
+      nonce: "a".repeat(32),
+      recovery_job_count: 0,
+      reader_witness_resources: resources,
+      case_job: "domain",
+      ownership_count: 1,
+      ownership_released: false,
+      ownership_creation_verified: false,
+      ownership_launcher: { hProcess: "launcher" },
+      ownership_owner: { hProcess: "owner" },
+      reader_witness: { active: false, child: Buffer.alloc(1024) },
+      reader_diagnostics_ready: true,
+      reader_command: outsideControl
+        ? "ownership-outside-control"
+        : "ownership-witness",
+      sequence: 2,
+      control: "authenticated",
+      stderr: "stderr",
+      reader_transfer: { active: false },
+      signature_trust: { active: false },
+      ownership_failure_write: () => {
         assert.equal(
-          diagnostics.at(-1),
-          `native-windows-guard: file=custody-reader.c line=1 last-error=${error}\n`,
+          api.reader_witness.active,
+          false,
+          "Launcher diagnostic shadowed the witness",
         );
+        return false;
+      },
+      reader_cold_failure: () => false,
+      reader_baseline_failure: () => false,
+      reader_scheduler_failure: () => false,
+      reader_open_failure: () => false,
+      reader_context_failure: () => false,
+      strrchr: (value, separator) =>
+        value.includes(separator)
+          ? value.slice(value.lastIndexOf(separator))
+          : null,
+      ref: (target, key) => ({
+        get value() {
+          return target[key];
+        },
+        set value(value) {
+          target[key] = value;
+        },
+      }),
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      ERROR_BROKEN_PIPE: 109,
+      ERROR_ALREADY_EXISTS: 183,
+      WAIT_OBJECT_0: 0,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
+      INVALID_HANDLE_VALUE: -1,
+      HANDLE_FLAG_INHERIT: 1,
+      DUPLICATE_SAME_ACCESS: 2,
+      JobObjectBasicAccountingInformation: 1,
+      JobObjectAssociateCompletionPortInformation: 2,
+      JobObjectExtendedLimitInformation: 3,
+      PROC_THREAD_ATTRIBUTE_HANDLE_LIST: 4,
+      PROC_THREAD_ATTRIBUTE_JOB_LIST: 5,
+      STARTF_USESTDHANDLES: 1,
+      CREATE_SUSPENDED: 4,
+      EXTENDED_STARTUPINFO_PRESENT: 0x80000,
+      CREATE_BREAKAWAY_FROM_JOB: 0x1000000,
+      JOB_OBJECT_MSG_ACTIVE_PROCESS_ZERO: zero,
+      JOB_OBJECT_MSG_NEW_PROCESS: born,
+      JOB_OBJECT_MSG_EXIT_PROCESS: exited,
+      JOB_OBJECT_MSG_ABNORMAL_EXIT_PROCESS: abnormal,
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      strlen: (value) =>
+        Buffer.isBuffer(value) ? value.indexOf(0) : value.length,
+      memcpy: (target, value, size) => value.copy(target, 0, 0, size),
+      GetCurrentProcess: () => "self",
+      GetCurrentProcessId: () => 17,
+      descriptor: () => "descriptor",
+      attributes: (_descriptor, inherit) => ({ inherit }),
+      CreatePipe: (read, write, attributes) => {
+        assert.equal(attributes.inherit, true);
+        const first = pipeCreates++ === 0;
+        if (!failApi(first ? "input-pipe" : "output-pipe")) {
+          read.value = "unowned-read";
+          write.value = "unowned-write";
+          return false;
+        }
+        read.value = first ? "inherited-input" : "pipe";
+        write.value = first ? "input" : "inherited-output";
+        owned.add(read.value);
+        owned.add(write.value);
+        return true;
+      },
+      DuplicateHandle: (
+        process,
+        source,
+        target,
+        duplicate,
+        access,
+        inherit,
+        flags,
+      ) => {
+        assert.deepEqual(
+          [process, target, access, inherit, flags],
+          ["self", "self", 0, true, 2],
+        );
+        const name = "duplicate-" + source.slice("source-".length);
+        if (!failApi(name)) {
+          duplicate.value = "unowned-duplicate";
+          return false;
+        }
+        duplicate.value = name;
+        owned.add(name);
+        return true;
+      },
+      GetProcessTimes: (_process, birth) => {
+        birth.dwHighDateTime = 1;
+        birth.dwLowDateTime = 2;
+        return true;
+      },
+      CreateJobObjectW: () => {
+        calls.push("job-create");
+        lastError =
+          fault === "job-create" ? 5 : fault === "job-collision" ? 183 : 0;
+        if (fault === "job-create") return null;
+        owned.add("job");
+        return "job";
+      },
+      CreateIoCompletionPort: (file, port, key, concurrency) => {
+        assert.deepEqual([file, port, key, concurrency], [-1, null, 0, 1]);
+        if (!failApi("port-create")) return null;
+        owned.add("port");
+        return "port";
+      },
+      SetHandleInformation: (port, flag, value) => {
+        assert.ok(["input", "pipe", "port"].includes(port));
+        assert.deepEqual([flag, value], [1, 0]);
+        return failApi(port === "port" ? "port-inherit" : "parent-inherit");
+      },
+      SetInformationJobObject: (job, kind, value) => {
+        assert.equal(job, "job");
+        if (kind === 2) {
+          assert.deepEqual(
+            [value.CompletionKey, value.CompletionPort],
+            ["job", "port"],
+          );
+          return failApi("association");
+        }
+        assert.deepEqual(
+          [
+            kind,
+            value.BasicLimitInformation.LimitFlags,
+            value.BasicLimitInformation.ActiveProcessLimit,
+          ],
+          [3, 0x2008, 1],
+        );
+        return failApi("limits");
+      },
+      InitializeProcThreadAttributeList: (list, _count, _flags, size) => {
+        if (!list) {
+          size.value = 1;
+          return false;
+        }
+        return failApi("attributes");
+      },
+      calloc: () => failApi("allocation", {}, 8) || null,
+      UpdateProcThreadAttribute: (_list, _flags, kind, value, size) => {
+        if (kind === 4) {
+          assert.deepEqual(value.slice(0, size), [
+            "inherited-input",
+            "inherited-output",
+            "duplicate-file",
+            "duplicate-process",
+            "duplicate-token",
+            "duplicate-pin",
+          ]);
+          assert.ok(!value.includes("port"));
+          return failApi("handle-list");
+        }
+        assert.equal(value.value, "job");
+        return failApi("job-list");
+      },
+      CreateProcessW: (
+        image,
+        command,
+        _process,
+        _thread,
+        inherit,
+        flags,
+        _env,
+        _cwd,
+        start,
+        child,
+      ) => {
+        assert.equal(image, "reader.exe");
+        assert.equal(inherit, true);
+        assert.equal(flags, 4 | 0x80000 | (outsideControl ? 0x1000000 : 0));
+        assert.ok(calls.indexOf("association") < calls.indexOf("job-list"));
+        assert.deepEqual(
+          [start.hStdInput, start.hStdOutput, start.hStdError],
+          ["inherited-input", "inherited-output", "inherited-output"],
+        );
+        if (!failApi("launch")) {
+          child.hProcess = "unowned-process";
+          child.hThread = "unowned-thread";
+          return false;
+        }
+        child.hProcess = "process";
+        child.hThread = "thread";
+        child.dwProcessId = pid;
+        owned.add("process");
+        owned.add("thread");
+        return true;
+      },
+      system_process: () => failApi("system-process"),
+      ResumeThread: () => failApi("resume", 1),
+      DeleteProcThreadAttributeList: () => {
+        assert.equal(attributesDeleted, false);
+        attributesDeleted = true;
+        calls.push("attributes-delete");
+      },
+      free: (value) => {
+        if (!value) return;
+        assert.equal(attributesFreed, false);
+        attributesFreed = true;
+        calls.push("attributes-free");
+      },
+      LocalFree: () => {
+        assert.equal(descriptorClosed, false);
+        descriptorClosed = true;
+        calls.push("descriptor-free");
+        lastError = 90;
+        return fault === "cleanup" ? "descriptor" : null;
+      },
+      line: (pipe, value, maximum) => {
+        assert.equal(pipe, "pipe");
+        assert.equal(maximum, 65536);
+        calls.push("line");
+        childLine.copy(value);
+      },
+      GetTickCount64: () => {
+        ticks++;
+        return ticks === 1
+          ? 100
+          : fault === "deadline-zero" ||
+              (fault === "notification-only" && ticks > 2)
+            ? 30100
+            : 100 + (ticks - 1) * 100;
+      },
+      WaitForSingleObject: (process, deadline) => {
+        if (process !== "process") {
+          assert.ok(["launcher", "owner"].includes(process));
+          assert.equal(deadline, 0);
+          calls.push("fence-wait-" + process);
+          lastError = 77;
+          return fault === "cleanup" && process === "launcher"
+            ? 0xffffffff
+            : 258;
+        }
+        assert.equal(deadline, 30000);
+        calls.push("wait");
+        lastError = 5;
+        return waited;
+      },
+      TerminateJobObject: (job, code) => {
+        assert.deepEqual([job, code], ["domain", 126]);
+        calls.push("fence-job");
+        lastError = 78;
+        return fault !== "cleanup";
+      },
+      TerminateProcess: (process, code) => {
+        assert.ok(["launcher", "owner"].includes(process));
+        assert.equal(code, 126);
+        calls.push("fence-" + process);
+        lastError = 79;
+        return fault !== "cleanup";
+      },
+      GetExitCodeProcess: (process, out) => {
+        assert.equal(process, "process");
+        calls.push("exit");
+        out.value = fault === "exit-query" ? 999 : exitCode;
+        lastError = 5;
+        return fault !== "exit-query";
+      },
+      QueryInformationJobObject: (job, kind, accounting, size, returned) => {
+        assert.deepEqual([job, kind, size], ["job", 1, 1]);
+        assert.ok(!released.has("process"));
+        calls.push("accounting");
+        accounting.ActiveProcesses =
+          accountValues[Math.min(accountReads, accountValues.length - 1)];
+        const failed =
+          fault === "accounting-query" ||
+          (fault === "accounting-after-wakeup" && accountReads === 1);
+        returned.value = fault === "accounting-size" ? 0 : 1;
+        accountReads++;
+        lastError = failed ? 87 : 122;
+        return !failed;
+      },
+      GetQueuedCompletionStatus: (port, message, key, payload, remaining) => {
+        assert.equal(port, "port");
+        assert.ok(!released.has("process"));
         assert.equal(output, "");
-        assert.equal(api.ownership_creation_verified, false);
-        if (frames.length) {
-          const frame = JSON.parse(frames[0].slice(1));
-          assert.equal(frame.lastError, error);
+        assert.equal(remaining, 30000 - (ticks - 1) * 100);
+        waits.push(remaining);
+        calls.push("packet");
+        const value = packets[packetReads++];
+        key.value = fault === "wrong-key" ? "foreign-job" : "job";
+        payload.value =
+          value === zero
+            ? fault === "zero-payload"
+              ? pid
+              : null
+            : fault === "wrong-pid"
+              ? pid + 1
+              : pid;
+        message.value = value ?? 0;
+        if (["completion-api", "failed-packet"].includes(fault)) {
+          payload.value = fault === "failed-packet" ? pid : null;
+          lastError = fault === "failed-packet" ? 258 : 5;
+          return false;
+        }
+        if (value === undefined) {
+          payload.value = null;
+          lastError = 258;
+          return false;
+        }
+        lastError = 122;
+        return true;
+      },
+      ReadFile: (pipe, _extra, size, used, overlapped) => {
+        assert.deepEqual([pipe, size, overlapped], ["pipe", 1, null]);
+        calls.push("eof");
+        used.value = 0;
+        lastError = fault === "eof" ? 5 : 109;
+        return false;
+      },
+      IsProcessInJob: (process, job, belongs) => {
+        assert.deepEqual([process, job], ["process", "domain"]);
+        belongs.value = false;
+        return failApi("outside");
+      },
+      CloseHandle: (handle) => {
+        assert.ok(owned.has(handle), "unowned close " + handle);
+        assert.ok(!released.has(handle), "repeated close " + handle);
+        released.add(handle);
+        calls.push("close-" + handle);
+        lastError = fault === "association-cleanup" ? 6 : 5;
+        return !(
+          (fault === "association-cleanup" &&
+            ["port", "job"].includes(handle)) ||
+          (fault === "cleanup" && ["pipe", "port", "job"].includes(handle)) ||
+          (fault === "inherit-close" && handle === "inherited-input") ||
+          (fault === "input-close" && handle === "input") ||
+          (fault === "final-close" && handle === "pipe")
+        );
+      },
+      fprintf: (_stream, pattern, ...values) => {
+        diagnostics.push(format(pattern, values));
+        lastError = 99;
+        return fault === "diagnostic" ? -1 : 1;
+      },
+      fflush: () => {
+        lastError = 88;
+        return -1;
+      },
+      sprintf_s: (out, maximum, pattern, ...values) => {
+        if (fault === "format" && pattern.startsWith("\x1e")) return -1;
+        const value = format(pattern, values);
+        assert.ok(Buffer.byteLength(value) < maximum);
+        if (out.target)
+          out.target.text = out.target.text.slice(0, out.offset) + value;
+        else out.text = value;
+        lastError = 80;
+        return value.length;
+      },
+      swprintf_s: (out, _maximum, pattern, ...values) => {
+        if (pattern.includes("--ownership-witness") && !failApi("command"))
+          return -1;
+        out.text = format(pattern, values);
+        return out.text.length;
+      },
+      WriteFile: (handle, value, size, used) => {
+        if (handle === "input") {
+          assert.equal(size, 1);
+          used.value = 1;
+          return failApi("input-write");
+        }
+        assert.equal(handle, "authenticated");
+        calls.push("diagnostic-write");
+        lastError = 81;
+        if (fault === "diagnostic") return false;
+        used.value = size;
+        frames.push(value.text);
+        f.child.stdout.write('{"sequence":2,"value":');
+        for (let offset = 0; offset < size; offset += 37)
+          f.child.stdout.write(value.text.slice(offset, offset + 37));
+        return true;
+      },
+      ExitProcess: (code) => {
+        assert.equal(code, 126);
+        throw refused;
+      },
+      printf: (pattern, value) => {
+        assert.deepEqual(
+          [...released].sort(),
+          [...owned].sort(),
+          "Publication preceded cleanup",
+        );
+        assert.ok(calls.includes("eof"));
+        assert.equal(
+          accountValues[Math.min(accountReads - 1, accountValues.length - 1)],
+          0,
+        );
+        output += pattern.replace("%s", text(value));
+      },
+    };
+    if (refuses)
+      assert.throws(
+        () => program.runInNewContext(api),
+        (cause) => cause === refused,
+        String(fault),
+      );
+    else program.runInNewContext(api);
+    assert.deepEqual([...released].sort(), [...owned].sort(), String(fault));
+    assert.equal(descriptorClosed, true);
+    assert.equal(
+      attributesFreed,
+      calls.includes("allocation") && fault !== "allocation",
+    );
+    assert.equal(
+      attributesDeleted,
+      calls.includes("attributes") && fault !== "attributes",
+    );
+    assert.ok(waits.length <= 16);
+    assert.ok(
+      waits.every(
+        (value, index) => value > 0 && (!index || value < waits[index - 1]),
+      ),
+    );
+    if (operation) {
+      assert.equal(calls.includes("eof"), false);
+      assert.equal(calls.includes("outside"), false);
+      const before = [
+        "line",
+        "wait",
+        ...(!waited ? ["exit"] : []),
+        ...(exitAvailable && !exitCode ? ["accounting"] : []),
+      ];
+      assert.deepEqual(
+        calls
+          .filter((value) =>
+            ["line", "wait", "exit", "accounting", "packet"].includes(value),
+          )
+          .slice(0, before.length),
+        before,
+      );
+    }
+    if (!fault) {
+      assert.equal(packetReads, 0);
+      assert.equal(accountReads, 1);
+      assert.equal(ticks, 1);
+    }
+    if (fault === "delayed") {
+      assert.equal(accountReads, 2);
+      assert.equal(packetReads, 1);
+    }
+    if (fault === "lifecycle") {
+      assert.equal(accountReads, 4);
+      assert.deepEqual(waits, [29900, 29800, 29700]);
+    }
+    if (["active", "lost-zero"].includes(fault)) {
+      assert.equal(accountReads, 2);
+      assert.equal(packetReads, 1);
+    }
+    if (fault === "deadline-zero") {
+      assert.equal(accountReads, 2);
+      assert.equal(packetReads, 0);
+    }
+    if (fault === "notification-only") {
+      assert.equal(accountReads, 3);
+      assert.equal(packetReads, 1);
+    }
+    if (fault === "packet-cap") {
+      assert.equal(accountReads, 18);
+      assert.equal(packetReads, 16);
+    }
+    if (
+      [
+        "wrong-key",
+        "zero-payload",
+        "wrong-pid",
+        "unknown",
+        "unexpected",
+        "completion-api",
+        "failed-packet",
+      ].includes(fault)
+    )
+      assert.equal(accountReads, 1);
+    if (refuses) {
+      assert.equal(output, "");
+      assert.equal(api.ownership_creation_verified, false);
+      if (["cleanup", "association-cleanup"].includes(fault)) {
+        assert.equal(resources.cleanupError, fault === "cleanup" ? 5 : 6);
+        assert.equal(
+          diagnostics.filter((line) =>
+            line.startsWith("native-windows-witness-cleanup:"),
+          ).length,
+          fault === "cleanup" ? 4 : 2,
+        );
+      }
+      assert.equal(
+        diagnostics.at(-1),
+        `native-windows-guard: file=custody-reader.c line=1 last-error=${error}\n`,
+      );
+      if (frames.length) {
+        const frame = JSON.parse(frames[0].slice(1));
+        assert.equal(frame.lastError, error);
+        if (operation) {
           assert.deepEqual(frame.witness, {
             operation,
             result: actual,
@@ -2631,65 +3186,78 @@ test("actual witness completion preserves original child and parent refusals bef
               "wait-failed",
               "exit-query",
               "accounting-query",
+              "accounting-after-wakeup",
+              "completion-api",
+              "failed-packet",
             ].includes(fault),
             wait: waited,
             exitAvailable,
             exitCode: exitAvailable ? exitCode : 0,
             accountingAvailable,
-            activeProcesses: accountingAvailable ? 2 : 0,
+            activeProcesses: accountingAvailable ? 1 : 0,
             childBytes: childLine.length,
             childShown: Math.min(1024, childLine.length),
             childTruncated: childLine.length > 1024,
             childHex: childLine.subarray(0, 1024).toString("hex"),
           });
-          if (["truncated", "maximum"].includes(fault))
-            assert.ok(frames[0].length > 2048 && frames[0].length <= 9216);
+          if (fault === "active") assert.equal(frame.witness.childBytes, 2391);
           if (fault === "child-exit" && !outsideControl) sample = frame;
-          assert.deepEqual((await pending).custodyReaderFailure, frame);
-        } else assert.ok(["diagnostic", "format"].includes(fault));
-      } else {
-        program.runInNewContext(api);
-        assert.deepEqual(calls, [
-          ...expectedCalls,
-          "eof",
-          ...(outsideControl ? ["outside"] : []),
-          ...["pipe", "process", "thread", "job"].map(
-            (handle) => "close-" + handle,
-          ),
-        ]);
-        assert.deepEqual(diagnostics, []);
-        assert.equal(
-          output,
-          outsideControl
-            ? '{"ready":true,"reachable":true}'
-            : childLine.toString(),
-        );
-        assert.equal(api.ownership_creation_verified, true);
-      }
-      if (fault) {
-        f.child.stdout.end();
-        f.child.emit("close", 126, null);
-        const primary = await pending;
-        assert.equal(await completion, primary);
-        if (!frames.length)
-          assert.equal(primary.custodyReaderFailure, undefined);
-        assert.throws(() => f.channel.settle());
-        await assert.rejects(f.channel.receive(), (cause) => cause === primary);
-        f.channel.close();
-      } else {
-        const value = { sequence: 2, value: JSON.parse(output) };
-        f.child.stdout.write(JSON.stringify(value) + "\n");
-        assert.deepEqual(await pending, value);
-        f.child.stdout.end();
-        f.child.emit("close", 0, null);
-        assert.deepEqual(await completion, { code: 0, signal: null });
-        f.channel.settle();
-      }
-      f.child.stdin.destroy();
-      f.child.stdout.destroy();
-      f.child.stderr.destroy();
+          if (fault === "completion-api") completionSample = frame;
+          if (fault === "wrong-key") notificationSample = frame;
+          if (fault === "accounting-size") sizeSample = frame;
+        } else assert.equal(frame.witness, undefined);
+        assert.deepEqual((await pending).custodyReaderFailure, frame);
+      } else assert.ok(["diagnostic", "format"].includes(fault));
+      f.child.stdout.end();
+      f.child.emit("close", 126, null);
+      const primary = await pending;
+      assert.equal(await completion, primary);
+      assert.throws(() => f.channel.settle());
+      await assert.rejects(f.channel.receive(), (cause) => cause === primary);
+      f.channel.close();
+    } else {
+      assert.ok(calls.includes("eof"));
+      assert.equal(calls.includes("outside"), outsideControl);
+      assert.equal(
+        output,
+        outsideControl
+          ? '{"ready":true,"reachable":true}'
+          : childLine.toString(),
+      );
+      assert.equal(api.ownership_creation_verified, true);
+      const value = { sequence: 2, value: JSON.parse(output) };
+      f.child.stdout.write(JSON.stringify(value) + "\n");
+      assert.deepEqual(await pending, value);
+      f.child.stdout.end();
+      f.child.emit("close", 0, null);
+      assert.deepEqual(await completion, { code: 0, signal: null });
+      f.channel.settle();
     }
+    f.child.stdin.destroy();
+    f.child.stdout.destroy();
+    f.child.stderr.destroy();
+  }
   for (const mutate of [
+    (v) => {
+      Object.assign(v, structuredClone(completionSample));
+      v.witness.accountingAvailable = false;
+    },
+    (v) => {
+      Object.assign(v, structuredClone(completionSample));
+      v.witness.apiFailure = false;
+    },
+    (v) => {
+      Object.assign(v, structuredClone(notificationSample));
+      v.witness.activeProcesses = 0;
+    },
+    (v) => {
+      Object.assign(v, structuredClone(notificationSample));
+      v.witness.apiFailure = true;
+    },
+    (v) => {
+      Object.assign(v, structuredClone(sizeSample));
+      v.witness.accountingAvailable = true;
+    },
     (v) => {
       v.witness.operation = "unknown";
     },
