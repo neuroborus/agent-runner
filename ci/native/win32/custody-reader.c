@@ -1689,6 +1689,50 @@ static void ownership_census(struct ownership_view *view) {
     LocalFree(sid); need(CloseHandle(token) && CloseHandle(process));
   }
 }
+static BOOL ownership_cwd_unicode(const wchar_t *path, unsigned length) {
+  for (unsigned i = 0; i < length; i++) {
+    unsigned unit = path[i]; if (!unit || (unit >= 0xdc00 && unit <= 0xdfff)) return FALSE;
+    if (unit >= 0xd800 && unit <= 0xdbff && (++i == length || path[i] < 0xdc00 || path[i] > 0xdfff)) return FALSE;
+  }
+  return TRUE;
+}
+/* Directory spelling only: borrow the original process and held workspace. */
+static void ownership_cwd(HANDLE process, const void *peb, HANDLE directory) {
+  void *params = NULL; UNICODE_STRING current = {0}; wchar_t path[4096], expected[4096];
+  const char *operation = "parameters-read"; SIZE_T read = 0, wanted = 0; BOOL result = FALSE; DWORD actual = 0, error = 0;
+  for (unsigned stage = 0; stage < 3; stage++) {
+    const void *address = current.Buffer; void *target = path; wanted = current.Length;
+    if (stage == 0) { address = (const BYTE *)peb+0x20; target = &params; wanted = sizeof(params); }
+    if (stage == 1) { address = (BYTE *)params+0x38; target = &current; wanted = sizeof(current); }
+    operation = stage == 0 ? "parameters-read" : stage == 1 ? "directory-read" : "path-read";
+    read = 0; result = ReadProcessMemory(process, address, target, wanted, &read); error = result ? 0 : GetLastError();
+    if (!result || read != wanted) goto refused;
+    if (stage == 1) {
+      operation = "length-bounds";
+      if (!current.Length || current.Length % 2 || current.MaximumLength % 2 || current.Length >= sizeof(path) ||
+          current.Length > current.MaximumLength) goto refused;
+    }
+  }
+  unsigned n = current.Length/sizeof(wchar_t); operation = "observed-unicode";
+  if (!ownership_cwd_unicode(path, n)) goto refused;
+  path[n] = 0; memset(expected, 0xff, sizeof(expected)); operation = "final-path-query";
+  actual = GetFinalPathNameByHandleW(directory, expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); error = actual ? 0 : GetLastError();
+  if (!actual) goto refused;
+  operation = "final-path-bounds"; if (actual <= 4 || actual >= 4096 || expected[actual]) goto refused;
+  operation = "final-path-unicode"; if (!ownership_cwd_unicode(expected, actual)) goto refused;
+  operation = "final-path-prefix"; if (wmemcmp(expected, L"\\\\?\\", 4)) goto refused;
+  unsigned m = actual-4; operation = "mismatch";
+  /* DOS roots keep their separator; relative and UNC spellings are unsupported. */
+  if (n < 3 || m < 3 || path[1] != L':' || path[2] != L'\\' || expected[5] != L':' || expected[6] != L'\\') goto refused;
+  if (n > 4 && path[n-1] == L'\\') n--;
+  if (m > 4 && expected[m+3] == L'\\') m--;
+  if (n != m || _wcsnicmp(path, expected+4, n)) goto refused;
+  return;
+refused:
+  fprintf(stderr, "native-windows-cwd: operation=%s result=%d read=%zu expected=%zu query=%lu length=%hu maximum=%hu last-error=%lu\n",
+    operation, result, read, wanted, actual, current.Length, current.MaximumLength, error);
+  fflush(stderr); SetLastError(error); need(FALSE);
+}
 static void ownership_witness(HANDLE input) {
   need(system_process(GetCurrentProcess())); require_build(); need(CreateThread(NULL, 0, expire, NULL, 0, NULL)); privilege(SE_DEBUG_NAME); privilege(SE_SECURITY_NAME);
   struct ownership_view view; DWORD read; unsigned received = 0; while (received < sizeof(view)) { need(ReadFile(input, (BYTE *)&view+received, sizeof(view)-received, &read, NULL) && read); received += read; }
@@ -1778,10 +1822,8 @@ static void ownership_witness(HANDLE input) {
     wchar_t path[4096], expected[4096]; DWORD size = 4096; need(QueryFullProcessImageNameW(view.processes[0], 0, path, &size));
     DWORD actual = GetFinalPathNameByHandleW(view.files[5], expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(actual > 4 && actual < 4096 && !_wcsicmp(path, expected+4));
     typedef NTSTATUS (NTAPI *query)(HANDLE, PROCESSINFOCLASS, PVOID, ULONG, PULONG); query get = (query)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess");
-    PROCESS_BASIC_INFORMATION info; void *params; UNICODE_STRING current; need(get && !get(view.processes[0], ProcessBasicInformation, &info, sizeof(info), NULL));
-    remote(view.processes[0], (BYTE *)info.PebBaseAddress+0x20, &params, sizeof(params)); remote(view.processes[0], (BYTE *)params+0x38, &current, sizeof(current));
-    need(current.Length && current.Length < sizeof(path)); remote(view.processes[0], current.Buffer, path, current.Length); path[current.Length/2] = 0;
-    actual = GetFinalPathNameByHandleW(view.files[3], expected, 4096, FILE_NAME_NORMALIZED | VOLUME_NAME_DOS); need(actual > 4 && actual < 4096 && !_wcsicmp(path, expected+4));
+    PROCESS_BASIC_INFORMATION info; need(get && !get(view.processes[0], ProcessBasicInformation, &info, sizeof(info), NULL));
+    ownership_cwd(view.processes[0], info.PebBaseAddress, view.files[3]);
   }
   BOOL explicitHandles = TRUE;
   if (suspended) {

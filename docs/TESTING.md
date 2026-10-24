@@ -2555,6 +2555,13 @@ errors survive independent temporary-handle and descriptor cleanup failures
 without retrying failed cleanup. Existing finite diagnostic-frame and
 compiler-trust attribution coverage remains required. The fixture supplies no
 Windows SDK/runtime evidence or kernel explanation for the observed error5.
+The adjacent source-extracted cwd fixture executes the original-process reads and
+held-directory query, reproducing terminal-backslash spelling disagreement while
+retaining complete case-insensitive equality. It refuses distinct/prefix-sharing
+directories, incomplete reads, invalid lengths/UTF-16/NULs, query failure/overflow,
+missing termination and invalid extended prefixes, retaining evaluated diagnostics
+and primary API errors. It adds no native tools, harness or slow-tier assignment.
+
 The Windows custody fixture also executes the actual witness completion and guard
 bodies, authenticated failure sender and creator fence. Emitted witness contexts
 reach the actual channel consumer with fragmented delivery and disconnected

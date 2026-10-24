@@ -9589,6 +9589,15 @@ failure frame, with capture complete only at the error pipe's EOF, so a later
 control EOF cannot erase them. This bounded context never supplies admission or
 retirement evidence.
 
+The ownership witness reads cwd from the original suspended process and joins it
+to the held workspace's final native DOS path. Complete reads, bounded UTF-16
+lengths and encoding, termination and the exact extended prefix precede comparison.
+Only case and one optional terminal backslash on a non-root directory may differ;
+image comparisons remain exact apart from case. Bounded stderr retains the failing
+operation, read/query results, lengths and immediate API error through the existing
+authenticated witness failure capture. Portable regressions establish no native
+acceptance or measured explanation of the earlier grouped cwd refusal.
+
 The inspected Codex revision in `WINDOWS_CREATION_PRECEDENT` supplies only the
 source precedent for installing `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` before `CreateProcessAsUserW`. This helper

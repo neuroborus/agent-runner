@@ -11733,6 +11733,176 @@ test("the actual shared witness scopes unchanged-policy evidence to a captured o
   }
 });
 
+test("the actual ownership cwd join accepts directory spelling equivalence and preserves bounded refusals", async () => {
+  const source = await readFile(
+      new URL("custody-reader.c", import.meta.url),
+      "utf8",
+    ),
+    body = (name) =>
+      new RegExp(
+        `static (?:BOOL|void) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)[1],
+    translate = (text) =>
+      text
+        .replace(
+          "void *params = NULL; UNICODE_STRING current = {0}; wchar_t path[4096], expected[4096];",
+          "var params, current = {Length:0,MaximumLength:0}, path=[],expected=[];",
+        )
+        .replace(/sizeof\((path|expected)\)/gu, "8192")
+        .replace("sizeof(params)", "8")
+        .replace("sizeof(current)", "16")
+        .replace("sizeof(wchar_t)", "2")
+        .replace("&params", "{set value(value){params=value}}")
+        .replace("&current", "current")
+        .replace("&read", "value=>read=value")
+        .replaceAll(/\((?:const )?BYTE \*\)/gu, "")
+        .replace("expected+4", "expected.slice(4)")
+        .replaceAll("L':'", "58")
+        .replaceAll("L'\\\\'", "92")
+        .replaceAll('L"', '"')
+        .replace(/const (?:char|void) \*/gu, "var ")
+        .replace(/void \*/gu, "var ")
+        .replace(/\b(?:unsigned|SIZE_T|BOOL|DWORD) /gu, "var ")
+        .replaceAll("goto refused;", "break cwd_body;")
+        .replace("refused:", "}"),
+    invocation = source.match(/ownership_cwd\(view\.processes[^;]+;/u)?.[0];
+  assert.ok(invocation);
+  const program =
+      new Script(`function ownership_cwd_unicode(path,length){${translate(body("ownership_cwd_unicode"))}}
+    function ownership_cwd(process,peb,directory){cwd_body:{${translate(body("ownership_cwd"))}}
+    ${invocation}`),
+    work = "C:\\fixture\\work",
+    units = (text) =>
+      Array.from({ length: text.length }, (_, i) => text.charCodeAt(i)),
+    compare = (a, b, n) =>
+      Number(
+        String.fromCharCode(...a.slice(0, n)).toLowerCase() !==
+          String.fromCharCode(...b.slice(0, n)).toLowerCase(),
+      );
+  assert.notEqual(work.toLowerCase(), (work + "\\").toLowerCase());
+  const cases = [
+    [{}],
+    [{ path: work.toUpperCase() }],
+    [{ path: work + "\\" }],
+    [{ final: work + "\\" }],
+    [{ path: work + "😀", final: work + "😀" }],
+    [{ path: "C:\\", final: "C:\\" }],
+    [{ MaximumLength: work.length * 2 }],
+    [{ MaximumLength: 65534 }],
+    ...[
+      work + "-sibling",
+      "C:\\fixture\\peer",
+      work + "\\\\",
+      "C:\\fixture\\wor",
+    ].map((path) => [{ path }, "mismatch"]),
+    [{ path: "C:\\\\", final: "C:\\" }, "mismatch"],
+    ...[0, 3, 8192, 8194].map((Length) => [{ Length }, "length-bounds"]),
+    ...[2, work.length * 2 + 1].map((m) => [
+      { MaximumLength: m },
+      "length-bounds",
+    ]),
+    ...["\ud800", "\udc00", "\ud800x", "\0hidden"].map((s) => [
+      { path: work + s },
+      "observed-unicode",
+    ]),
+    ...["\ud800", "\udc00", "\0hidden"].map((s) => [
+      { final: work + s },
+      "final-path-unicode",
+    ]),
+    ...["parameters-read", "directory-read", "path-read"].flatMap(
+      (operation, read) => [
+        [{ read }, operation],
+        [{ read, api: true }, operation, 5],
+      ],
+    ),
+    [{ query: 0 }, "final-path-query", 87],
+    ...[4, 4096, 4097].map((query) => [{ query }, "final-path-bounds"]),
+    [{ unterminated: true }, "final-path-bounds"],
+    ...["", "\\\\.\\", "\\\\??\\"].map((p) => [
+      { prefix: p },
+      "final-path-prefix",
+    ]),
+  ];
+  for (const [fault, operation, error = 0] of cases) {
+    const path = units(fault.path ?? work),
+      size = path.length * 2,
+      final = units((fault.prefix ?? "\\\\?\\") + (fault.final ?? work)),
+      diagnostics = [];
+    let stage = 0,
+      queries = 0,
+      lastError = 999;
+    const run = () =>
+      program.runInNewContext({
+        view: {
+          processes: ["original-process"],
+          files: [null, null, null, "held-workspace"],
+        },
+        info: { PebBaseAddress: 100 },
+        TRUE: true,
+        FALSE: false,
+        stderr: 2,
+        FILE_NAME_NORMALIZED: 0,
+        VOLUME_NAME_DOS: 0,
+        ReadProcessMemory(process, address, target, wanted, read) {
+          assert.equal(process, "original-process");
+          assert.equal(address, [132, 256, 300][stage]);
+          if (stage === 0) target.value = 200;
+          else if (stage === 1)
+            Object.assign(
+              target,
+              { Buffer: 300, Length: size, MaximumLength: size + 2 },
+              fault,
+            );
+          else path.forEach((unit, i) => (target[i] = unit));
+          read(wanted - Number(stage === fault.read));
+          lastError = 5;
+          return !(stage++ === fault.read && fault.api);
+        },
+        GetFinalPathNameByHandleW(directory, target, capacity) {
+          assert.equal(directory, "held-workspace");
+          assert.equal(capacity, 4096);
+          queries++;
+          final.forEach((unit, i) => (target[i] = unit));
+          if (!fault.unterminated) target[final.length] = 0;
+          lastError = 87;
+          return fault.query ?? final.length;
+        },
+        memset(target) {
+          target.length = 4096;
+          target.fill(0xffff);
+        },
+        wmemcmp: (a, b, n) => compare(a, units(b), n),
+        _wcsnicmp: compare,
+        GetLastError: () => lastError,
+        SetLastError: (value) => (lastError = value),
+        fprintf: (_stream, _format, ...values) => {
+          diagnostics.push(values);
+          lastError = 777;
+        },
+        fflush: () => (lastError = 888),
+        need(ok) {
+          if (!ok) throw lastError;
+        },
+      });
+    if (operation) {
+      assert.throws(run, (cause) => cause === error, JSON.stringify(fault));
+      assert.equal(diagnostics[0][0], operation);
+      assert.equal(diagnostics[0][7], error);
+      if (fault.query !== undefined)
+        assert.equal(diagnostics[0][4], fault.query);
+      if (fault.read !== undefined)
+        assert.equal(diagnostics[0][2], diagnostics[0][3] - 1);
+    } else {
+      run();
+      assert.equal(stage, 3);
+      assert.equal(queries, 1);
+      assert.deepEqual(diagnostics, []);
+    }
+    assert.ok(queries <= 1);
+  }
+});
+
 test("actual ownership restoration distinguishes an untouched baseline from possible or installed policy", async () => {
   const source = await readFile(
       new URL("custody-reader.c", import.meta.url),
