@@ -13,6 +13,7 @@ import {
 } from "./validation-schedule.js";
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
+import { createEffectivePlanRevisions } from "./effective-plan.js";
 import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
@@ -1415,11 +1416,19 @@ export function migratePlanExecutionStateV28(run) {
   });
 }
 
+export function migratePlanExecutionStateV29(run) {
+  // No historical revision or review proof can be inferred from an assessment.
+  return Object.freeze({
+    ...run.pipelineState,
+    effectivePlanRevisions: createEffectivePlanRevisions(),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 29,
+  stateVersion: 30,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1454,6 +1463,7 @@ export const planExecutionPipeline = Object.freeze({
     26: migratePlanExecutionStateV26,
     27: migratePlanExecutionStateV27,
     28: migratePlanExecutionStateV28,
+    29: migratePlanExecutionStateV29,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

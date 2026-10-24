@@ -16,6 +16,10 @@ import {
 } from "./commit-size-assessment.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
+  assertEffectivePlanRevisions,
+  createEffectivePlanRevisions,
+} from "./effective-plan.js";
+import {
   validCapabilityReports,
   freezeReport,
 } from "./capability-requirements.js";
@@ -65,6 +69,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "preflightComplete",
   "settings",
   "commitSizeAssessment",
+  "effectivePlanRevisions",
   "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
@@ -4323,6 +4328,19 @@ export function normalizePipelineState(value) {
       throw workflowError("Plan-execution canonical plan is not normalized.");
     }
   }
+  try {
+    assertEffectivePlanRevisions(value);
+    for (const revision of value.effectivePlanRevisions.revisions) {
+      for (const finding of revision.findings) {
+        if (
+          !isDeepStrictEqual(finding, normalizePersistedFindings([finding])[0])
+        )
+          throw workflowError("Invalid effective-plan finding payload.");
+      }
+    }
+  } catch {
+    throw workflowError("Invalid persisted effective-plan revisions.");
+  }
   const workerSummary = normalizedSummary(
     value.workerSummary,
     "Worker summary",
@@ -4953,7 +4971,17 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution pending commit is inconsistent.");
   }
   const currentFindingIds = new Set(findings.map(({ id }) => id));
-  const previousFindingIds = new Set(previousFindings.map(({ id }) => id));
+  const effectiveRevision = value.effectivePlanRevisions.revisions.findLast(
+    (revision) => revision.accepted,
+  );
+  // Acceptance retires content proof but retains versioned blockers outside
+  // the bounded legacy batch until replacement-specific rebinding.
+  const previousFindingIds = new Set([
+    ...previousFindings.map(({ id }) => id),
+    ...(effectiveRevision?.step === value.currentStep
+      ? effectiveRevision.findings.map(({ id }) => id)
+      : []),
+  ]);
   const reconsiderableFindingIds = new Set([
     ...currentFindingIds,
     ...previousFindingIds,
@@ -5375,6 +5403,7 @@ export function createPlanExecutionState({
       stepImplementation: null,
       implementationEvidenceLegacy: false,
       commitSizeAssessment: createCommitSizeAssessment(),
+      effectivePlanRevisions: createEffectivePlanRevisions(),
       settings:
         settings === null
           ? null
@@ -5541,7 +5570,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 29 ||
+    run.pipelineStateVersion !== 30 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

@@ -170,6 +170,22 @@ version-28 migration preserving existing progress. Production dispatch remains
 inactive pending preservation and effective revisions. See the
 [owning contract](../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
+Execution's private `effective-plan.js` owns the inactive reviewed-revision
+contract. State version 30 persists proposals, exact flat plans, original-step
+correspondence, completed-prefix provenance, complete versioned finding payloads
+and ownership, and fingerprint-bound mode gates. The version-29 migration adds
+empty authority without changing eligibility or progress. Lazy requires distinct
+Worker plan convergence/confirmation; independent requires Reviewer approval; combined
+requires both. Accepted authority must be journaled before boundary selection,
+invalidates dependent content gates and retains consumed allowances.
+Proposal bindings retain historical additional-round grants; reload enforces
+cumulative lineage consumption, and any binding change requires fresh reports.
+Deferred targets map to logical original work. Pending commits remain
+verification-only.
+Production routing still consumes the unchanged canonical plan; validation
+rebinding and replacement materialization are not activated. See the
+[revision contract](../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation).
+
 The configuration capability lives under `src/config/` behind its public
 `index.js`. Strict runner and project parsing, confined file loading, trusted
 profile interpretation, and precedence-based resolution remain private,

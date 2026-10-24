@@ -60,6 +60,17 @@ the original-step lineage, with no budget renewal on reconstruction. Existing
 execution routing, finalization and commit gates remain unchanged while
 eligibility is disabled.
 
+The inactive [effective revision contract](../../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation)
+separates a size proposal from reviewed plan authority. Acceptance preserves
+original requirements, dependencies, later steps, exact checks, unresolved
+finding ownership and completed history. Lazy requires a distinct read-only
+Worker confirmation; independent requires Reviewer approval; combined requires
+primary convergence before that approval. Drift or a corrected plan invalidates
+dependent evidence without renewing consumed allowances. Accepted authority is
+durable before boundaries can change; pending commit effects must reconcile
+first. Frozen plan artifacts remain unchanged and production refinement remains
+inactive.
+
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
 it. Independent and combined modes combine separately accepted Worker and Reviewer

@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-25
+
+- **Reviewed revisions have separate durable authority.** Execution state version
+  30 adds flat effective plans with explicit original-step correspondence,
+  immutable completed provenance and versioned finding ownership. Mode-specific
+  plan gates bind the same proposal and preserve requirements, dependencies,
+  later meaning and checks; size assessment alone cannot approve it. Accepted
+  authority precedes boundary changes, retires dependent content proof and
+  preserves consumed allowances. Legacy migration adds no approval, and pending
+  commits remain verification-only. Production routing stays inactive until
+  validation binding and recoverable replacement execution can consume it.
+  Derivation, approval, persisted validation and compatible migration form one
+  authority contract and land together so acceptance cannot outlive its proof.
+
 ## 2026-10-24
 
 - **Unfinished work has durable authority independent of validation scratch.**

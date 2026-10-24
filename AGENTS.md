@@ -128,6 +128,13 @@ All pipelines additionally require:
 
 `plan-execution` additionally requires:
 
+- Keep frozen plans unchanged. Effective revision authority must preserve exact
+  completed provenance, original-step mapping, finding ownership and checks;
+  require mode-specific plan approval before publishing acceptance. Reconcile
+  pending commit effects first and never renew consumed allowances by refinement.
+  Production refinement remains inactive until validation rebinding and safe
+  replacement execution are implemented.
+
 - In combined mode use independent roles and bootstrap, then converge Worker
   `CHECK_AND_FIX` and a distinct read-only `CLEAN_CONFIRM` before the complete
   independent candidate Reviewer gate. Both approve the same candidate; Reviewer

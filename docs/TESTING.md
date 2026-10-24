@@ -33,6 +33,17 @@ envelope/journal changes also require the affected durable state, effect,
 stop, migration and MCP workflow suites listed below; focused probes do not
 replace those gates.
 
+The fast execution `effective-plan.test.js` suite owns flat revision validation,
+completed provenance, versioned finding payloads and inherited ownership,
+maximum-sized finding batches, logical stop mapping, mode-specific
+plan approval, stale scope/check rejection and idempotent interrupted acceptance.
+It also covers unchanged-text reproposals after binding changes and persisted
+lineage proposal limits, including historical grants across step advancement.
+It uses pure policy plus one lightweight execution-state fixture. Version-29
+migration adds empty authority without inferring approval or touching pending
+effects; the durable legacy-migration and runner-orchestration suites own
+persisted migration composition. Production refinement remains inactive.
+
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical
 disk latency from disposable fixtures without mocking filesystem operations or
