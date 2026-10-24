@@ -1411,6 +1411,38 @@ static void ownership_network_absent(void) {
     FwpmSubLayerGetByKey0(wfp_engine, &ownership_layer, &layer) == FWP_E_SUBLAYER_NOT_FOUND);
   for (unsigned i = 0; i < 4; i++) need(FwpmFilterGetByKey0(wfp_engine, &ownership_filters[i], &filter) == FWP_E_FILTER_NOT_FOUND);
 }
+struct provider_filter_census {
+  const char *operation; DWORD result, cleanupResult; UINT32 count; BOOL complete;
+};
+/* Selection and resource ownership are shared; each caller owns its count rule. */
+static struct provider_filter_census provider_filters(GUID *providerKey, UINT32 limit) {
+  struct provider_filter_census census = {0};
+  census.operation = "FwpmFilterCreateEnumHandle0"; census.count = MAXDWORD;
+  FWPM_FILTER_ENUM_TEMPLATE0 selection = {0};
+  selection.providerKey = providerKey; selection.actionMask = 0xFFFFFFFF;
+  HANDLE enumeration = NULL; FWPM_FILTER0 **filters = NULL;
+  census.result = FwpmFilterCreateEnumHandle0(wfp_engine, &selection, &enumeration);
+  if (census.result == ERROR_SUCCESS && enumeration) {
+    census.operation = "FwpmFilterEnum0";
+    census.result = FwpmFilterEnum0(wfp_engine, enumeration, limit, &filters, &census.count);
+    census.complete = census.result == ERROR_SUCCESS && census.count <= limit && (!census.count || filters);
+    if (census.complete) for (UINT32 i = 0; i < census.count; i++) if (!filters[i]) census.complete = FALSE;
+  }
+  if (filters) FwpmFreeMemory0((void **)&filters);
+  if (enumeration) census.cleanupResult = FwpmFilterDestroyEnumHandle0(wfp_engine, enumeration);
+  return census;
+}
+static BOOL provider_filters_accept(struct provider_filter_census census, BOOL accepted) {
+  BOOL ok = census.complete && accepted && census.cleanupResult == ERROR_SUCCESS;
+  if (!ok) {
+    const char *operation = !census.complete ? census.operation : !accepted ? "count" : "FwpmFilterDestroyEnumHandle0";
+    DWORD result = !census.complete ? census.result : !accepted ? ERROR_SUCCESS : census.cleanupResult;
+    fprintf(stderr, "native-windows-filter-census: operation=%s result=%lu count=%u complete=%d accepted=%d cleanup-result=%lu\n",
+      operation, result, census.count, census.complete, accepted, census.cleanupResult);
+    fflush(stderr); SetLastError(result);
+  }
+  return ok;
+}
 static void ownership_network(BOOL remove, BOOL observe) {
   ownership_keys(); wfp_open();
   const GUID *layers[] = {&FWPM_LAYER_ALE_AUTH_CONNECT_V4, &FWPM_LAYER_ALE_AUTH_CONNECT_V6,
@@ -1465,11 +1497,8 @@ static void ownership_network(BOOL remove, BOOL observe) {
   }
   /* A complete provider census rejects unplanned additional filters. */
   if (observe) {
-    FWPM_FILTER_ENUM_TEMPLATE0 filterTemplate = {0}; filterTemplate.providerKey = &ownership_provider;
-    HANDLE enumeration; FWPM_FILTER0 **filters; UINT32 number;
-    need(FwpmFilterCreateEnumHandle0(wfp_engine, &filterTemplate, &enumeration) == ERROR_SUCCESS &&
-      FwpmFilterEnum0(wfp_engine, enumeration, 5, &filters, &number) == ERROR_SUCCESS && number == 4);
-    FwpmFreeMemory0((void **)&filters); need(FwpmFilterDestroyEnumHandle0(wfp_engine, enumeration) == ERROR_SUCCESS);
+    struct provider_filter_census census = provider_filters(&ownership_provider, 5);
+    need(provider_filters_accept(census, census.count == 4));
   }
   if (remove) need(FwpmSubLayerDeleteByKey0(wfp_engine, &ownership_layer) == ERROR_SUCCESS && FwpmProviderDeleteByKey0(wfp_engine, &ownership_provider) == ERROR_SUCCESS);
   if (!observe) need(FwpmTransactionCommit0(wfp_engine) == ERROR_SUCCESS);
@@ -4168,9 +4197,9 @@ static void recovery_access_network(const struct policy_recovery_network *plan,c
   if(p==ERROR_SUCCESS){need(provider->flags==FWPM_PROVIDER_FLAG_PERSISTENT&&!provider->providerData.size&&!provider->serviceName&&provider->displayData.name&&!wcscmp(provider->displayData.name,L"NativeProof private provider")&&!provider->displayData.description&&
       layer->providerKey&&IsEqualGUID(layer->providerKey,&providerKey)&&layer->flags==FWPM_SUBLAYER_FLAG_PERSISTENT&&layer->weight==65535&&!layer->providerData.size&&layer->displayData.name&&!wcscmp(layer->displayData.name,L"NativeProof private sublayer")&&!layer->displayData.description);
     FwpmFreeMemory0((void **)&provider);FwpmFreeMemory0((void **)&layer);ownership_wfp_security(&providerKey,0);ownership_wfp_security(&layerKey,1);}
-  FWPM_FILTER_ENUM_TEMPLATE0 selection={0};selection.providerKey=&providerKey;HANDLE enumeration;FWPM_FILTER0 **filters;UINT32 count;
-  need(FwpmFilterCreateEnumHandle0(wfp_engine,&selection,&enumeration)==ERROR_SUCCESS&&FwpmFilterEnum0(wfp_engine,enumeration,53,&filters,&count)==ERROR_SUCCESS&&(count==0||(p==ERROR_SUCCESS&&count==52)));
-  FwpmFreeMemory0((void **)&filters);need(FwpmFilterDestroyEnumHandle0(wfp_engine,enumeration)==ERROR_SUCCESS);
+  struct provider_filter_census census = provider_filters(&providerKey, 53);
+  UINT32 count = census.count;
+  need(provider_filters_accept(census, count == 0 || (p == ERROR_SUCCESS && count == 52)));
   if(count){
     need(identities&&identities->kind==2&&identities->count==52);
     PSID user,restricting;need(ConvertStringSidToSidW(case_record.accountSid,&user)&&ConvertStringSidToSidW(case_record.restrictingSid,&restricting));

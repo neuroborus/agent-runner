@@ -10756,7 +10756,15 @@ intents before policy effects. Recovery rejoins protected candidate/context,
 original file identities, all audit subcategories, owned endpoint tuples and
 observed WFP filter IDs. It validates every supported filter's layer, action,
 weight, typed conditions and security before transactional removal; foreign
-filters and substituted IDs cannot authorize cleanup. An unchanged registry
+filters and substituted IDs cannot authorize cleanup. Ownership and recovery
+censuses select their provider across every action and layer, bounded at 5 and
+53 entries. Ownership requires exactly four; recovery requires zero or a present
+provider with 52, retaining the existing provider/sublayer checks. Each census
+frees returned memory and attempts handle destruction before returning evidence.
+Direct API results and count evidence preserve the first refusal while
+reporting destroy failure separately; cleanup failure alone also refuses. These
+regressions establish no native success or failing subexpression of an archived
+composite guard. An unchanged registry
 observation is required before deleting its empty owned key through the verified
 handle; replacement under the original name retains exclusion. Missing observations
 after a lost reply retain exclusion. Partial restoration accepts baseline or
