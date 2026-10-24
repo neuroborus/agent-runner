@@ -2063,13 +2063,15 @@ function startupEffects({
     saved,
     sentinel,
     options: {
-      openTrace: (binding, options) =>
-        openDarwinStartupTrace(binding, {
+      openTrace: (binding, options) => {
+        assert.equal(options.operation, current);
+        return openDarwinStartupTrace(binding, {
           ...options,
           isMatchingCI: false,
           verifyInstalled: async () => assert.fail("Native tool discovery"),
           launch: () => assert.fail("Native trace launch"),
-        }),
+        });
+      },
       write: async (file, policy, options) => {
         assert.deepEqual(options, { flag: "wx", mode: 0o600 });
         policies.push([file, policy]);
@@ -2794,6 +2796,7 @@ function traceFixture({
   beforeRead,
   observeState,
   coldCommand = false,
+  operation = coldCommand ? undefined : "exec",
   bindReplacement = true,
   onFailure,
 } = {}) {
@@ -2816,6 +2819,7 @@ function traceFixture({
       isMatchingCI: true,
       parentPid: 999,
       coldCommand,
+      operation,
       onFailure,
       verifyInstalled: async () => {},
       launch: (file, args, options) => {
@@ -2994,6 +2998,103 @@ function traceFixture({
     },
   };
 }
+
+test("startup trace completion requires the fixed operation's exact exec count", async () => {
+  for (const [operation, coldCommand, execRequired] of [
+    ["policy-only", false, false],
+    ["policy-invalid", false, false],
+    ["exec-control", false, false],
+    ["fixture-control", false, true],
+    ["exec", false, true],
+    ["exec", true, true],
+  ]) {
+    for (const execCount of execRequired ? [0, 1, 2] : [0, 1]) {
+      const label = `${operation}, cold=${coldCommand}, execs=${execCount}`,
+        f = traceFixture({ operation, coldCommand, live: true });
+      assert.equal((await f.trace.arm()).status, "armed", label);
+      const rows = [
+        ...Array(execCount).fill("exec 42 100"),
+        "entry 42 101 getpid",
+        "return 42 102 getpid 0 42",
+        "exit 42 103",
+      ];
+      f.child.stdout.write(rows.join("\n") + "\n");
+      await f.close();
+      const result = await f.trace.finish(),
+        accepted = execCount === (execRequired ? 1 : 0);
+      assert.equal(result.status, accepted ? "observed" : "partial", label);
+      assert.equal(result.captureComplete, accepted, label);
+      assert.equal(result.cleanup, "RETIRED", label);
+      assert.equal(
+        result.failure?.reason,
+        accepted ? undefined : "capture",
+        label,
+      );
+      assert.equal(result.events, accepted ? rows.length : null, label);
+      assert.equal(
+        result.sha256,
+        accepted
+          ? createHash("sha256").update(rows.join("\n")).digest("hex")
+          : null,
+        label,
+      );
+      assert.deepEqual(
+        f.calls.filter(([kind]) => kind === "retire").map(([, pid]) => pid),
+        [900, 901],
+        label,
+      );
+    }
+  }
+});
+
+test("startup tracing refuses missing, unknown and incompatible operation selections", () => {
+  for (const selection of [
+    {},
+    { operation: null },
+    { operation: ["exec"] },
+    { operation: "storage" },
+    { operation: "__proto__" },
+    { coldCommand: true, operation: "policy-only" },
+    { coldCommand: true, operation: "policy-invalid" },
+    { coldCommand: true, operation: "exec-control" },
+    { coldCommand: true, operation: "fixture-control" },
+  ])
+    assert.throws(() =>
+      openDarwinStartupTrace(
+        { identity: IDENTITY },
+        {
+          ...selection,
+          isMatchingCI: true,
+          verifyInstalled: () =>
+            assert.fail("Invalid selection tool discovery"),
+          launch: () => assert.fail("Invalid selection trace launch"),
+        },
+      ),
+    );
+});
+
+test("no-exec control traces still require complete syscalls and exit capture", async () => {
+  for (const rows of [
+    ["return 42 101 getpid 0 42", "exit 42 102"],
+    ["entry 42 101 getpid", "exit 42 102"],
+    ["entry 42 101 getpid", "return 42 102 getpid 0 42"],
+    ["entry 42 101 getpid", "return 42 102 getpid 0 42", "exit 42"],
+  ]) {
+    const f = traceFixture({ operation: "policy-only", live: true });
+    await f.trace.arm();
+    f.child.stdout.write(rows.join("\n") + "\n");
+    await f.close();
+    const result = await f.trace.finish();
+    assert.equal(result.status, "partial");
+    assert.equal(result.captureComplete, false);
+    assert.equal(result.sha256, null);
+    assert.equal(result.cleanup, "RETIRED");
+    assert.deepEqual(
+      f.calls.filter(([kind]) => kind === "retire").map(([, pid]) => pid),
+      [900, 901],
+    );
+  }
+});
 
 test("startup trace argument actions release scratch after normal and copy-fault rows", async () => {
   for (const coldCommand of [false, true]) {
@@ -3992,7 +4093,11 @@ test("fixed startup tracing binds owned native parents and independently retires
   );
   const unavailable = openDarwinStartupTrace(
     {},
-    { isMatchingCI: false, launch: () => assert.fail("native launch") },
+    {
+      operation: "exec",
+      isMatchingCI: false,
+      launch: () => assert.fail("native launch"),
+    },
   );
   assert.equal((await unavailable.arm()).status, "unavailable");
   assert.equal((await unavailable.finish()).cleanup, "NOT_RUN");
@@ -4016,6 +4121,7 @@ test("startup tracing retains the normalized bound PID and refuses invalid macro
     const invalid = openDarwinStartupTrace(
       { identity: { ...IDENTITY, pid } },
       {
+        operation: "exec",
         isMatchingCI: true,
         verifyInstalled: async () => {},
         launch: () => {
@@ -4092,6 +4198,7 @@ test("startup tracing refuses unsupported capture and missing installed tools wi
   const missing = openDarwinStartupTrace(
     { identity: IDENTITY },
     {
+      operation: "exec",
       isMatchingCI: true,
       verifyInstalled: async () => {
         throw Object.assign(new Error("missing"), { code: "ENOENT" });

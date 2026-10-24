@@ -929,7 +929,14 @@ and session failures, operation-valid phase prefixes, bounded loader abort
 classes and path-free causes. Injected controls protect image substitution refusal
 before release, exact negative outcomes, stopping admission on the first failure,
 the distinct confined positive operation and independent retirement/closure
-failures without replacing the first cause. Reporting regressions preserve the
+failures without replacing the first cause. Trace fixtures bind every fixed
+operation from the startup owner: complete `policy-only`, `policy-invalid` and
+`exec-control` captures require no exec-success, while `fixture-control`, confined
+`exec` and cold commands require exactly one. Missing, unknown and incompatible
+selections, unexpected/duplicate exec and missing required exec refuse capture.
+No-exec controls still require syscall entry/return and complete exit; retained
+fixtures protect deadlines, identity substitution, stream drain, cold replacement
+binding and independent observer retirement. Reporting regressions preserve the
 original crash across separate cleanup outcomes and retain its actionable native
 blocker after normalization and serialization.
 The startup gate coverage records the original native birth/image and policy

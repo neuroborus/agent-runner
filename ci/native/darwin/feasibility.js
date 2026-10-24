@@ -1293,6 +1293,7 @@ async function armStartup(
       read: options.observerRead,
     });
   running.startupTrace = (options.openTrace ?? openDarwinStartupTrace)(launch, {
+    operation,
     readObserver: (pid) => observe("startup-observer", pid),
     observeObserver: (value) => observe("startup-observer-observe", value),
     retireObserver: (value) => observe("startup-observer-retire", value),

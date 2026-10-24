@@ -369,6 +369,14 @@ function retirementState(value) {
   return value;
 }
 
+const STARTUP_EXEC_REQUIRED = Object.freeze({
+  "policy-only": false,
+  "policy-invalid": false,
+  "exec-control": false,
+  "fixture-control": true,
+  exec: true,
+});
+
 /** Private diagnostic owner. Tests replace all effects; default launch is CI-only. */
 export function openDarwinStartupTrace(
   binding,
@@ -381,10 +389,17 @@ export function openDarwinStartupTrace(
     retireObserver,
     parentPid = process.pid,
     coldCommand = false,
+    operation = coldCommand ? "exec" : undefined,
     onFailure,
   } = {},
 ) {
   need(typeof coldCommand === "boolean");
+  need(
+    typeof operation === "string" &&
+      Object.hasOwn(STARTUP_EXEC_REQUIRED, operation) &&
+      (!coldCommand || operation === "exec"),
+  );
+  const execRequired = STARTUP_EXEC_REQUIRED[operation];
   let boundPid,
     parkedIdentity,
     targetIdentity,
@@ -537,11 +552,11 @@ export function openDarwinStartupTrace(
             execSeen,
         );
         if (row.kind === "exec") {
-          need(!execSeen);
+          need(execRequired && !execSeen);
           execSeen = true;
           executed.resolve();
         } else if (row.kind === "exit") {
-          need(execSeen);
+          need(execSeen === execRequired);
           exitSeen = true;
         } else if (row.kind === "entry") syscallEntrySeen = true;
         else if (row.kind === "return") syscallReturnSeen = true;
@@ -907,7 +922,7 @@ export function openDarwinStartupTrace(
           ).catch((error) => fail(error, "retirement"));
         }
         const mandatory =
-          execSeen &&
+          execSeen === execRequired &&
           exitSeen &&
           syscallEntrySeen &&
           syscallReturnSeen &&

@@ -1984,9 +1984,17 @@ completion. The private native gates still control exec and target resume.
 to match zero probes as documented by Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c).
 Compilation and BEGIN alone cannot prove capture: bound syscall entry and return
-records, one exec-success and its subsequent exit must actually arrive within the
-existing bounds. Duplicate exec, exit before exec, or records after exit refuse
-capture. Optional numeric records cannot replace any mandatory observation.
+records and the target's complete exit must actually arrive within the existing
+bounds. The trace owner receives the exact fixed startup operation:
+`policy-only`, `policy-invalid` and `exec-control` require no exec-success;
+`fixture-control` and confined `exec` require exactly one before exit. Missing
+fixed-operation selections, unknown operations and incompatible cold selections
+refuse use. Cold command tracing always requires exactly one exec-success and the
+independently bound replacement epoch. Unexpected or duplicate exec, a required
+exec missing before exit, or records after exit refuse capture. The operation
+contract applies both at exit consumption and final validation; syscall coverage,
+complete capture, drained streams and independent observer retirement remain
+mandatory. Optional numeric records cannot replace any mandatory observation.
 There is no `-c` command, `-W` wait, preprocessing, defaultargs or script
 selection. Apple's
 [`dtrace.c`](https://raw.githubusercontent.com/apple-oss-distributions/dtrace/main/cmd/dtrace/dtrace.c)
