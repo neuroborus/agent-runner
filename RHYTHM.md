@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-24
 
+- **Commit size measures final content independently of staging.** The public
+  Git service binds text additions plus deletions to the verified step baseline
+  and inspected candidate fingerprint, including new non-ignored files once.
+  Existing guarded content inspection supplies raw bytes to deterministic
+  shortest-edit line counting; external diff/text conversion and temporary files
+  are unnecessary. Binary and gitlink paths remain separate from text counts,
+  links are not followed, and stale measurements fail closed. Measurement
+  neither grants effect authority nor activates execution assessment or splitting.
+
 - **Detached errors separate observed exits from correlated recovery causes.**
   CLI resume publishes fixed, state-owned diagnostics at the runner's actual
   failed recovery stage, including pre-lease failures. The launcher retains

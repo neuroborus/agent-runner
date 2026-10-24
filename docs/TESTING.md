@@ -113,6 +113,14 @@ Live provider tests remain opt-in as described in the repository README. Normal
 tests never consume model turns. Repeated full-suite runs require a specific
 unresolved risk, not a ritual.
 
+The fast Git `change-measurement.test.js` suite owns staging-independent text
+counts and separate binary paths, mixed staging, ignored files, index-hidden
+changes, raw newline handling, link confinement, path replacements, exact size
+inputs and stale-candidate rejection. It uses isolated repositories through the
+public Git service; measurement itself runs no tests or agents and changes no
+index or history. Adding this unused capability does not change workflow,
+migration or effect ownership and requires no durable slow workflow matrix.
+
 The fast state `journal-checkpoints.test.js` suite owns namespace certification:
 real repeated choosing/ready claims during controlled directory observations
 must preserve unchanged-prefix reuse, while cold reads validate every event.

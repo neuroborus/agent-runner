@@ -216,7 +216,7 @@ All pipelines additionally require:
 | `src/state/index.js`              | Public run-store capability boundary                                 |
 | `src/state/`                      | Private service, files, journals, actions, leases, and validation    |
 | `src/git/index.js`                | Public Git-safety capability boundary                                |
-| `src/git/`                        | Private service, command, content, commit, and handoff modules       |
+| `src/git/`                        | Private commands, content, measurement, commits, and handoffs        |
 | `src/guidance/index.js`           | Public operator-guidance capability boundary                         |
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates   |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |

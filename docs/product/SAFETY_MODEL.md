@@ -54,6 +54,12 @@ change a remote, alter Git identity, amend, reset, rebase, stash, switch
 branches, or create tags. A failed hook or unexpected repository state pauses
 instead of being bypassed.
 
+Change measurement is read-only and bound to an inspected content fingerprint
+and immutable baseline. It counts the final workspace rather than summing
+staged and unstaged diffs, excludes ignored untracked files, and reports binary
+changes separately. Link targets are never followed to obtain line counts.
+Measurement grants no staging, commit, refinement, or acceptance authority.
+
 ## Inputs, artifacts, and state
 
 Task, plan, context, and clarification inputs are hashed and revalidated before

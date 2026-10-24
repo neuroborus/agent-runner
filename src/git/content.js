@@ -140,7 +140,7 @@ function metadataChanged(before, after) {
   );
 }
 
-async function hashRegularFile(filePath) {
+async function hashRegularFile(filePath, includeContent = false) {
   try {
     let handle;
     try {
@@ -150,8 +150,10 @@ async function hashRegularFile(filePath) {
         throw snapshotRace();
       }
       const hash = createHash("sha256");
+      const chunks = [];
       for await (const chunk of handle.createReadStream({ autoClose: false })) {
         hash.update(chunk);
+        if (includeContent) chunks.push(chunk);
       }
       const after = await handle.stat({ bigint: true });
       const pathAfter = await lstat(filePath, { bigint: true });
@@ -166,6 +168,7 @@ async function hashRegularFile(filePath) {
         hash: hash.digest("hex"),
         mode: Number(before.mode & 0o111n) === 0 ? "100644" : "100755",
         size: Number(before.size),
+        ...(includeContent ? { content: Buffer.concat(chunks) } : {}),
       };
     } finally {
       await handle?.close();
@@ -374,11 +377,11 @@ export async function normalizeAllowedPaths(repositoryPath, allowedPaths) {
   );
 }
 
-async function contentEntry(
+export async function contentEntry(
   context,
   repositoryPath,
   path,
-  { allowedPaths, missingAllowed },
+  { allowedPaths, missingAllowed, includeContent = false },
 ) {
   const { runGit } = context;
   const absolutePath = resolve(repositoryPath, ...path.split("/"));
@@ -404,7 +407,7 @@ async function contentEntry(
 
   if (metadata.isFile()) {
     return Object.freeze({
-      ...(await hashRegularFile(absolutePath)),
+      ...(await hashRegularFile(absolutePath, includeContent)),
       kind: "file",
       path,
     });
@@ -422,6 +425,7 @@ async function contentEntry(
         mode: "120000",
         path,
         size: target.length,
+        ...(includeContent ? { content: target } : {}),
       });
     } catch (cause) {
       if (cause instanceof GitSafetyError) {
@@ -491,7 +495,13 @@ async function contentEntry(
   });
 }
 
-async function headContentEntry({ runGit }, repositoryPath, head, path) {
+export async function headContentEntry(
+  { runGit },
+  repositoryPath,
+  head,
+  path,
+  { includeContent = false } = {},
+) {
   const result = await runGit(repositoryPath, [
     "ls-tree",
     "-z",
@@ -527,6 +537,8 @@ async function headContentEntry({ runGit }, repositoryPath, head, path) {
       size: objectId.length,
     });
   }
+  // A worktree file can replace a baseline directory; its children are deletions.
+  if (type === "tree" && mode === "040000") return null;
   if (type !== "blob" || !["100644", "100755", "120000"].includes(mode)) {
     throw new GitSafetyError("Git tree entry has unsupported type.", {
       code: "ERR_UNSUPPORTED_GIT_PATH",
@@ -539,6 +551,7 @@ async function headContentEntry({ runGit }, repositoryPath, head, path) {
     mode,
     path,
     size: blob.stdout.length,
+    ...(includeContent ? { content: blob.stdout } : {}),
   });
 }
 
@@ -648,7 +661,7 @@ export async function indexContentFingerprintAtRoot(
   );
 }
 
-function entriesMatch(left, right) {
+export function entriesMatch(left, right) {
   return (
     right !== null &&
     left.hash === right.hash &&

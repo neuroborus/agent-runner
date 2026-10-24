@@ -53,8 +53,29 @@ write-ahead journal, durable actions, execution leases, and state validation.
 The Git capability lives under `src/git/` behind its public `index.js`. The
 small index exposes only the service factory and shared safety error; its
 private service composes command execution, content and snapshot inspection,
-exact source materialization, commit verification, and polishing handoff
-modules without exposing their implementation contracts to root consumers.
+change measurement, exact source materialization, commit verification, and
+polishing handoff modules without exposing their implementation contracts to
+root consumers.
+
+`measureChanges({projectPath, baseHead, expectedContentFingerprint})` measures
+the final worktree against the caller-verified immutable step-start commit
+(or null for an unborn baseline). Existing staging-independent source inspection
+discovers changed paths and verifies the candidate fingerprint before and after
+measurement. Only discovered change candidates and index-hidden paths are read;
+the latter retain the existing content checks. Each changed path is counted
+once, including new non-ignored files, regardless of partial staging or
+index-only bytes. Replacement refs cannot reinterpret the baseline. Guarded
+reads supply raw baseline and worktree bytes to deterministic shortest-edit
+line counting using Myers' algorithm, without temporary files, external diff
+helpers or text conversion.
+LF terminates a line; raw bytes, CR and missing final newlines remain significant.
+Text additions and deletions sum to `changedLines`; a NUL in either side's first
+8,000 bytes marks a binary path, reported separately in `binaryPaths` without
+invented line counts. Symlinks contribute their target text without following
+it; gitlinks are listed
+separately in `gitlinkPaths`. Content drift rejects the measurement. This
+capability does not stage, invoke agents or validation, assess thresholds, or
+change workflow eligibility.
 
 `inspectHead` reads the current commit object ID and that immutable object's
 subject, including unborn HEAD as `{head: null, subject: null}`. Plan execution
