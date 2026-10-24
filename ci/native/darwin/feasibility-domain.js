@@ -8,7 +8,6 @@ import {
   openDarwinStartupTrace,
   DARWIN_CONSTRUCTOR_TRACE_INTENT,
 } from "./startup-trace.js";
-import { startupObserver } from "./feasibility.js";
 import { nativeDiagnostic } from "../diagnostics.js";
 import {
   digest,
@@ -54,11 +53,10 @@ export async function openDarwinFaultDomain(
     gid = process.getgid(),
     retain = () => {},
     openTrace = openDarwinStartupTrace,
-    observe = (operation, value) =>
-      startupObserver(root, operation, value, helperHash),
+    observe,
   } = {},
 ) {
-  need(typeof retain === "function");
+  need(typeof retain === "function" && typeof observe === "function");
   const directory = feasibilityDomainPath(nonce),
     helper = directory + "/helper";
   const owner = launch(

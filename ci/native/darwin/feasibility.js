@@ -2728,6 +2728,10 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
     digest(policyBytes),
     ENV,
     openDarwinFeasibilitySession,
+    {
+      observe: (operation, value) =>
+        startupObserver(root, operation, value, helperHash),
+    },
   );
   return runDarwinFeasibilityFault(
     root,

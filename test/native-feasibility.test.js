@@ -3917,6 +3917,8 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
             execute: async () => ({
               stdout: JSON.stringify({ parent: custodian }),
             }),
+            observe: () =>
+              assert.fail("Unexpected constructor observer invocation"),
             openTrace: () => ({
               arm: async () => ({ status: "armed" }),
               receipt: async () => Buffer.alloc(512),
@@ -4031,6 +4033,8 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       svuid: 0,
       svgid: 0,
     };
+    const observer = { ...custodian, pid: 9001 };
+    const observerResult = {};
     const policyHash = createHash("sha256")
       .update(darwinFeasibilityPolicy("/fixture"))
       .digest("hex");
@@ -4188,7 +4192,8 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         closeReply();
       }
     });
-    let acquired;
+    let acquired,
+      observerCalls = 0;
     const opening = openDarwinFaultDomain(
       "/fixture",
       SHA,
@@ -4201,6 +4206,21 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       {
         uid: 501,
         gid: 20,
+        observe: (operation, value) => {
+          assert.equal(
+            operation,
+            [
+              "constructor-observer",
+              "constructor-observer-observe",
+              "constructor-observer-retire",
+            ][observerCalls++],
+          );
+          assert.equal(
+            value,
+            operation === "constructor-observer" ? observer.pid : observer,
+          );
+          return observerResult;
+        },
         openTrace: (binding, options) => {
           assert.deepEqual(binding.identity, custodian);
           const capture = createDarwinConstructorCapture(custodian);
@@ -4213,8 +4233,16 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
             capture.consume(line);
           return {
             arm: async () => {
+              assert.equal(
+                await options.readObserver(observer.pid),
+                observerResult,
+              );
+              assert.equal(
+                await options.observeObserver(observer),
+                observerResult,
+              );
               await options.onObserver({
-                identity: { ...custodian, pid: 9001 },
+                identity: observer,
                 kind: "dtrace",
                 parentPid: process.pid,
                 toolSha256: DIGEST,
@@ -4227,6 +4255,10 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
               return capture.receipt(identity);
             },
             finish: async () => {
+              assert.equal(
+                await options.retireObserver(observer),
+                observerResult,
+              );
               if (trailing === "creator-refusal") {
                 assert.equal(
                   child.stdin.writableEnded,
