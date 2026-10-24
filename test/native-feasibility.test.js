@@ -3998,9 +3998,21 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     ["cancel", "recovery-emergency"],
     ["cancel", "admission"],
     ["cancel", "creator-refusal"],
+    ["cancel", "child-refusal"],
+    ["owner-loss", "child-refusal-trace"],
+    ["cancel", "ready-refusal"],
   ]) {
     const recovering =
       trailing?.startsWith("preexec") || trailing?.startsWith("recovery-");
+    const childRefusal = trailing?.startsWith("child-refusal");
+    const readyRefusal = trailing === "ready-refusal";
+    const parentDiagnostic =
+      "native-darwin: operation=fault-final-read domain=status value=0 effects=possible settlement=unsettled\n";
+    const childDiagnostic =
+      "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n";
+    const observerFailure = new Error("Observer retirement unavailable");
+    const admissionFailure = new Error("Custody stream unavailable");
+    let failTrace;
     const owner = {
       pid: 42,
       pidVersion: 7,
@@ -4080,6 +4092,17 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       });
     const releaseFixture = () => {
       send({ ready: record });
+      if (readyRefusal) {
+        child.stderr.write(parentDiagnostic);
+        child.stdout.emit("error", admissionFailure);
+        send({
+          stream: "stderr",
+          hex: Buffer.from(childDiagnostic).toString("hex"),
+        });
+        send({ exit: { code: 126, signal: 0 } });
+        child.emit("close", 78, null);
+        return;
+      }
       if (recovering) {
         send({
           stream: "stderr",
@@ -4121,6 +4144,25 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       if (text.startsWith("creator ")) {
         const receipt = Buffer.from(text.trim().slice(8), "hex");
         assert.equal(receipt.length, 512);
+        if (childRefusal) {
+          child.stderr.write(parentDiagnostic.slice(0, 35));
+          child.stderr.write(parentDiagnostic.slice(35));
+          const frame =
+            JSON.stringify({
+              stream: "stderr",
+              hex: Buffer.from(childDiagnostic).toString("hex"),
+            }) + "\n";
+          child.stdout.write(frame.slice(0, 23));
+          if (trailing === "child-refusal-trace")
+            failTrace(new Error("Constructor capture unavailable"));
+          queueMicrotask(() => {
+            child.stdout.write(frame.slice(23, 59));
+            child.stdout.write(frame.slice(59));
+            send({ exit: { code: 126, signal: 0 } });
+            child.emit("close", 78, null);
+          });
+          return;
+        }
         record = {
           ...record,
           creatorReceiptSha256: createHash("sha256")
@@ -4192,7 +4234,12 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         closeReply();
       }
     });
+    child.stdin.on("finish", () => {
+      if (["admission", "creator-refusal"].includes(trailing))
+        child.emit("close", 126, null);
+    });
     let acquired,
+      sessions = 0,
       observerCalls = 0;
     const opening = openDarwinFaultDomain(
       "/fixture",
@@ -4202,7 +4249,10 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       DIGEST,
       policyHash,
       {},
-      openDarwinFeasibilitySession,
+      (...args) => {
+        sessions++;
+        return openDarwinFeasibilitySession(...args);
+      },
       {
         uid: 501,
         gid: 20,
@@ -4222,6 +4272,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
           return observerResult;
         },
         openTrace: (binding, options) => {
+          failTrace = options.onFailure;
           assert.deepEqual(binding.identity, custodian);
           const capture = createDarwinConstructorCapture(custodian);
           for (const line of [
@@ -4255,10 +4306,15 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
               return capture.receipt(identity);
             },
             finish: async () => {
+              if (acquired.traceResult) return acquired.traceResult;
               assert.equal(
                 await options.retireObserver(observer),
                 observerResult,
               );
+              if (childRefusal) {
+                assert.equal(child.stdin.writableEnded, true);
+                throw observerFailure;
+              }
               if (trailing === "creator-refusal") {
                 assert.equal(
                   child.stdin.writableEnded,
@@ -4346,11 +4402,37 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       assert.deepEqual(actions, []);
       continue;
     }
-    if (["admission", "creator-refusal"].includes(trailing)) {
+    if (
+      childRefusal ||
+      readyRefusal ||
+      ["admission", "creator-refusal"].includes(trailing)
+    ) {
       await assert.rejects(opening, (error) => {
         assert.equal(error.faultDomain, acquired);
         assert.equal(acquired.owner, child);
         assert.equal(child.stdin.writableEnded, true);
+        if (childRefusal || readyRefusal) {
+          assert.equal(error.stderr.toString(), childDiagnostic);
+          assert.equal(error.exitCode, 126);
+          assert.equal(error.signal, null);
+          assert.equal(error.custodyError.stderr.toString(), parentDiagnostic);
+          assert.equal(error.custodyError.exitCode, 78);
+          if (childRefusal) {
+            assert.equal(error.cleanupError, observerFailure);
+            assert.equal(error.observerError, observerFailure);
+          } else {
+            assert.equal(error, admissionFailure);
+            assert.equal(error.cleanupError, undefined);
+          }
+          assert.equal(observerCalls, 3);
+          const cause = darwinFeasibilityCause(caseId, error);
+          assert.equal(cause.code, "setup-failed");
+          assert.match(cause.detail, /exit=126.*fault-access-authority/u);
+          assert.match(
+            darwinFeasibilityCause(caseId, error.custodyError).detail,
+            /fault-final-read.*status=0/u,
+          );
+        }
         if (trailing === "creator-refusal") {
           assert.equal(error.message, "Constructor receipt unavailable");
           assert.equal(error.cleanupError, undefined);
@@ -4359,7 +4441,8 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         return true;
       });
       assert.deepEqual(actions, []);
-      child.emit("close", 126, null);
+      assert.deepEqual(frames, []);
+      assert.equal(sessions, 0);
       continue;
     }
     const domain = await opening;
@@ -4710,6 +4793,8 @@ test("Darwin fault failure hook closes owned gates and checks only unreleased or
       settle_bundle: () => {},
       settle_domain: () => {},
       settle_prerequisite: () => {},
+      stdout: {},
+      fflush: () => 0,
       write: (fd, byte, size) => {
         assert.deepEqual([fd, byte, size], [12, "A", 1]);
         return mode === "write-empty" ? 0 : -1;

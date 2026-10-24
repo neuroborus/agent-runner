@@ -17,6 +17,11 @@ test("Darwin hosted ancestry is scoped to installed paths and experiment purpose
   const reader = await readFile(new URL("custody-reader.c", SOURCE), "utf8");
   // The SDK's <servers/bootstrap.h> already declares bootstrap_parent.
   assert.doesNotMatch(`${source}\n${reader}`, /\bbootstrap_parent\b/u);
+  assert.ok(
+    reader.indexOf("static uint64_t case_number(") <
+      reader.indexOf("= case_number("),
+    "The strict numeric parser must be visible before every caller",
+  );
   for (const experiment of [false, true]) {
     const functions = [
       "installed_cache_path",
@@ -7018,12 +7023,27 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
     source.indexOf("domain_released = true;") <
       source.indexOf('write(release[1], "R"'),
   );
-  const script = new Script(
-    `() => {${body
-      .replace(/\b(?:unsigned|int|pid_t) /gu, "let ")
+  const translate = (body) =>
+    body
+      .replace("unsigned totals[2] = {0, 0}", "let totals = [0, 0]")
+      .replace("unsigned char bytes[4096]", "let bytes = new Uint8Array(4096)")
+      .replace(
+        "struct pollfd stream = {.fd = fd, .events = POLLIN}",
+        "let stream = {fd, events: POLLIN}",
+      )
+      .replace(/\b(?:unsigned|int|pid_t|bool|ssize_t) /gu, "let ")
       .replace("&domain_status", "{set value(v) {domain_status = v;}}")
-      .replaceAll("(void)", "")}}`,
-  );
+      .replaceAll("&stream", "stream")
+      .replaceAll("sizeof(bytes)", "bytes.length")
+      .replace(/\((?:void|unsigned)\)/gu, "");
+  const helpers = ["domain_stream", "domain_exited"].map((name) => {
+    const native = new RegExp(
+      `static bool ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+    return `function ${name}(${name === "domain_stream" ? "bytes, size, stream" : ""}) {${translate(native)}}`;
+  });
+  const script = new Script(`${helpers.join("\n")} () => {${translate(body)}}`);
   for (const fault of [
     null,
     "partial",
@@ -7033,9 +7053,20 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
     "deadline",
     "eintr",
     "close",
+    "signal",
+    "read",
+    "write",
+    "poll",
+    "bound",
+    "capture-deadline",
   ]) {
     const events = [],
       diagnostics = [],
+      output = [],
+      chunks = new Map([
+        [12, [Buffer.from("out")]],
+        [14, [Buffer.from("refusal")]],
+      ]),
       pipes = Array.from({ length: 5 }, (_, at) => [10 + at * 2, 11 + at * 2]);
     if (fault === "partial")
       pipes.splice(1, 4, ...Array.from({ length: 4 }, () => [-1, -1]));
@@ -7046,24 +7077,63 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       domain_status: 0,
       domain_pipes: pipes,
       domain_released: fault === "released",
+      domain_exit_reported: false,
       domain_port_cleanup() {},
+      remember() {},
       getpid: () => (fault === "child" ? 42 : 9000),
       errno: fault === "eintr" ? 4 : 10,
       EINTR: 4,
       WNOHANG: 1,
+      POLLIN: 1,
       NULL: null,
+      stdout: {},
+      WIFEXITED: (status) => !(status & 127),
+      WIFSIGNALED: (status) => Boolean(status & 127),
+      WEXITSTATUS: (status) => status >> 8,
+      WTERMSIG: (status) => status & 127,
+      ferror: () => fault === "write",
+      printf: (format, ...values) =>
+        output.push(
+          format.replace(/%02x|%s|%d/gu, (specifier) => {
+            const value = values.shift();
+            return specifier === "%02x"
+              ? value.toString(16).padStart(2, "0")
+              : String(value);
+          }),
+        ),
+      puts: (value) => output.push(value + "\n"),
       close(fd) {
         events.push(fd);
         return fault === "close" && fd === 10 ? -1 : 0;
       },
       waitpid(pid, status) {
         assert.equal(pid, 42);
-        status.value = 0;
+        status.value = fault === "signal" ? 9 : 126 << 8;
         waits++;
         if (fault === "wait" || (fault === "eintr" && waits === 1)) return -1;
         return fault === "deadline" ? 0 : 42;
       },
-      poll: () => 0,
+      poll: (stream) =>
+        stream === null || fault === "capture-deadline"
+          ? 0
+          : fault === "poll" && stream.fd === 12
+            ? -1
+            : 1,
+      read(fd, bytes) {
+        assert.ok(
+          events.includes(18) && events.includes(19),
+          "Close admission gates before capture",
+        );
+        if (fault === "read" && fd === 12) return -1;
+        if (fault === "bound" && fd === 12) {
+          bytes.fill(120);
+          return bytes.length;
+        }
+        const chunk = chunks.get(fd)?.shift();
+        if (!chunk) return 0;
+        bytes.set(chunk);
+        return chunk.length;
+      },
       remember_cleanup: (...value) => diagnostics.push(value),
     };
     script.runInNewContext(context)();
@@ -7086,14 +7156,50 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
       context.domain_child === -1,
       !["child", "released", "wait", "deadline"].includes(fault),
     );
+    const expected = {
+      wait: "fault-wait",
+      deadline: "fault-wait",
+      close: "fault-close",
+      read: "fault-output-read",
+      write: "fault-output-write",
+      poll: "fault-poll",
+      bound: "fault-output-bound",
+      "capture-deadline": "fault-output-drain",
+    }[fault];
     assert.equal(
       diagnostics.length,
-      ["wait", "deadline", "close"].includes(fault) ? 1 : 0,
+      fault === "write"
+        ? 3
+        : fault === "capture-deadline"
+          ? 2
+          : expected
+            ? 1
+            : 0,
     );
-    if (diagnostics.length)
+    if (expected) assert.equal(diagnostics[0][0], expected);
+    const frames = output
+      .join("")
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map(JSON.parse);
+    const exit = frames.find((frame) => frame.exit)?.exit;
+    assert.equal(
+      exit?.code,
+      context.domain_child < 0 && fault !== "child"
+        ? fault === "signal"
+          ? -1
+          : 126
+        : undefined,
+    );
+    if (exit) assert.equal(exit.signal, fault === "signal" ? 9 : 0);
+    if (!["child", "released", "partial", "capture-deadline"].includes(fault))
       assert.equal(
-        diagnostics[0][0],
-        fault === "close" ? "fault-close" : "fault-wait",
+        Buffer.from(
+          frames.find((frame) => frame.stream === "stderr").hex,
+          "hex",
+        ).toString(),
+        "refusal",
       );
   }
 });

@@ -97,23 +97,66 @@ static void domain_port_cleanup(void) {
 static pid_t domain_controller, domain_child = -1;
 static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
 static bool domain_released, domain_exit_reported;
+static bool domain_stream(const unsigned char *bytes, ssize_t size, const char *stream) {
+  printf("{\"stream\":\"%s\",\"hex\":\"", stream);
+  for (ssize_t at = 0; at < size; at++) printf("%02x", bytes[at]); puts("\"}");
+  if (!ferror(stdout)) return true;
+  remember("fault-output-write", "errno", errno);
+  remember_cleanup("fault-output-write", "errno", errno); return false;
+}
+static bool domain_exited(void);
 /* Failure owns acquired pipe endpoints before any subsequent operation. An
  * unreleased direct child exits on EOF; no numeric-PID signal is authorized. */
 static void settle_domain(void) {
   domain_port_cleanup();
   if (domain_controller != getpid()) return;
+  bool capture = domain_child > 0 && !domain_released, waiting = capture, reaped_child = false;
+  unsigned totals[2] = {0, 0};
   for (unsigned pipe = 0; pipe < 5; pipe++) for (unsigned end = 0; end < 2; end++) {
+    if (capture && (pipe == 1 || pipe == 2) && !end) continue;
     int fd = domain_pipes[pipe][end]; domain_pipes[pipe][end] = -1;
     if (fd >= 0 && close(fd)) remember_cleanup("fault-close", "errno", errno);
   }
-  if (domain_child <= 0 || domain_released) return;
+  if (!capture) return;
   for (unsigned pass = 0; pass < 200; pass++) {
-    pid_t reaped = waitpid(domain_child, &domain_status, WNOHANG);
-    if (reaped == domain_child) { domain_child = -1; return; }
-    if (reaped < 0 && errno != EINTR) { remember_cleanup("fault-wait", "errno", errno); return; }
+    for (unsigned pipe = 1; pipe <= 2; pipe++) {
+      int fd = domain_pipes[pipe][0]; if (fd < 0) continue;
+      struct pollfd stream = {.fd = fd, .events = POLLIN};
+      int available = poll(&stream, 1, 0);
+      if (!available || (available < 0 && errno == EINTR)) continue;
+      ssize_t size = -1; unsigned char bytes[4096];
+      if (available < 0) remember_cleanup("fault-poll", "errno", errno);
+      else {
+        size = read(fd, bytes, sizeof(bytes));
+        if (size < 0 && errno == EINTR) continue;
+        if (size < 0) remember_cleanup("fault-output-read", "errno", errno);
+        else {
+          totals[pipe - 1] += (unsigned)size;
+          if (totals[pipe - 1] > 65536) { remember_cleanup("fault-output-bound", "invariant", 0); size = -1; }
+          else if (size > 0) (void)domain_stream(bytes, size, pipe == 1 ? "stdout" : "stderr");
+        }
+      }
+      if (size <= 0) {
+        domain_pipes[pipe][0] = -1;
+        if (close(fd)) remember_cleanup("fault-close", "errno", errno);
+      }
+    }
+    if (waiting) {
+      pid_t reaped = waitpid(domain_child, &domain_status, WNOHANG);
+      if (reaped == domain_child) { domain_child = -1; waiting = false; reaped_child = true; }
+      else if (reaped < 0 && errno != EINTR) { remember_cleanup("fault-wait", "errno", errno); waiting = false; }
+    }
+    if (!waiting && domain_pipes[1][0] < 0 && domain_pipes[2][0] < 0) break;
     (void)poll(NULL, 0, 10);
   }
-  remember_cleanup("fault-wait", "invariant", 0);
+  if (waiting) remember_cleanup("fault-wait", "invariant", 0);
+  for (unsigned pipe = 1; pipe <= 2; pipe++) {
+    int fd = domain_pipes[pipe][0]; domain_pipes[pipe][0] = -1;
+    if (fd < 0) continue;
+    remember_cleanup("fault-output-drain", "invariant", 0);
+    if (close(fd)) remember_cleanup("fault-close", "errno", errno);
+  }
+  if (reaped_child) (void)domain_exited();
 }
 static void domain_close(int *fd) {
   int held = *fd; *fd = -1;
@@ -134,16 +177,20 @@ static void domain_output(int *fd, const char *stream) {
     posix_check((int)size, "fault-output-read");
     if (!size) { domain_close(fd); return; }
     total += (unsigned)size; invariant(total <= 65536, "fault-output-bound");
-    printf("{\"stream\":\"%s\",\"hex\":\"", stream);
-    for (ssize_t at = 0; at < size; at++) printf("%02x", bytes[at]); puts("\"}");
+    invariant(domain_stream(bytes, size, stream), "fault-output-write");
   }
 }
-static void domain_exited(void) {
-  if (domain_child > 0 || domain_exit_reported) return;
-  invariant(WIFEXITED(domain_status) || WIFSIGNALED(domain_status), "fault-child-status");
+static bool domain_exited(void) {
+  if (domain_child > 0 || domain_exit_reported) return true;
+  if (!(WIFEXITED(domain_status) || WIFSIGNALED(domain_status))) {
+    remember_cleanup("fault-child-status", "invariant", domain_status); return false;
+  }
   domain_exit_reported = true;
   printf("{\"exit\":{\"code\":%d,\"signal\":%d}}\n", WIFEXITED(domain_status) ? WEXITSTATUS(domain_status) : -1,
     WIFSIGNALED(domain_status) ? WTERMSIG(domain_status) : 0);
+  if (!ferror(stdout)) return true;
+  remember("fault-output-write", "errno", errno);
+  remember_cleanup("fault-output-write", "errno", errno); return false;
 }
 static void domain_hex(const void *bytes, size_t length, char out[65]) {
   unsigned char sum[32]; need(CC_SHA256(bytes, (CC_LONG)length, sum));
@@ -761,9 +808,9 @@ static void domain_start(int argc, char **argv) {
     for (unsigned i = 1; i < 3; i++) if (streams[i].fd >= 0 && (streams[i].revents & (POLLIN | POLLHUP))) {
       unsigned char bytes[4096]; ssize_t size = read(streams[i].fd, bytes, sizeof(bytes)); posix_check((int)size, "fault-output-read");
       if (!size) { domain_close(i == 1 ? &out[0] : &err[0]); continue; }
-      printf("{\"stream\":\"%s\",\"hex\":\"", i == 1 ? "stdout" : "stderr"); for (ssize_t at = 0; at < size; at++) printf("%02x",bytes[at]); puts("\"}");
+      invariant(domain_stream(bytes, size, i == 1 ? "stdout" : "stderr"), "fault-output-write");
     }
-    if (out[0] < 0 && err[0] < 0) { domain_reap(); domain_exited(); }
+    if (out[0] < 0 && err[0] < 0) { domain_reap(); invariant(domain_exited(), "fault-child-status"); }
     if (!(streams[0].revents & (POLLIN | POLLHUP))) continue;
     char line[1024]; need(fgets(line, sizeof(line), stdin) && strchr(line, '\n')); char *fields[20]; unsigned count = 0;
     for (char *word = strtok(line, " \n"); word; word = strtok(NULL, " \n")) { need(count < 20); fields[count++] = word; }
@@ -772,7 +819,7 @@ static void domain_start(int argc, char **argv) {
       need(count == 2 && !domain_record.emergency && ((domain_record.stage >= 1 && domain_record.stage <= 3) || domain_record.stage == 5) && domain_pin != MACH_PORT_NULL);
       domain_fenced = true; domain_close(&in[1]);
       if (domain_record.stage != 5) { domain_store(3); domain_retire(); }
-      domain_output(&out[0], "stdout"); domain_output(&err[0], "stderr"); domain_exited();
+      domain_output(&out[0], "stdout"); domain_output(&err[0], "stderr"); invariant(domain_exited(), "fault-child-status");
     }
     printf("{\"sequence\":%u,\"value\":", sequence);
     if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);

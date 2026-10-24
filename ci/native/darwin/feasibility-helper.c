@@ -128,6 +128,7 @@ static void failure(int code) {
   settle_bundle();
   settle_fault();
   settle_domain();
+  if (fflush(stdout)) remember_cleanup("fault-output-write", "errno", errno);
   /* Reaping an EOF-only control settles a no-admission prerequisite. Possible
    * command effects still require their separate empty-session proof. */
   fprintf(stderr, "native-darwin: operation=%s domain=%s value=%d effects=%s settlement=%s\n",

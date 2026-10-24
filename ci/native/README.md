@@ -4124,6 +4124,11 @@ releases. Both custody paths store the creator receipt before import release;
 fault custody stores program/capture digests before its seal1 release. Its existing intent artifact
 retains complete constructor evidence. Recovery preserves original child, parent
 and observer ownership.
+Before fault admission completes, failure settlement closes the unreleased gates,
+drains bounded original-child output and forwards its actual direct-child status.
+Fragmented child refusal evidence survives custodian and trace failure; parent
+diagnostics and observer cleanup errors remain separate. Partial capture still
+refuses admission and supplies no native acceptance or child-predicate diagnosis.
 
 The complete feasibility helper has two build variants: the ordinary helper and
 the same translation unit with `NATIVE_FEASIBILITY_COMMAND` defined. Both use

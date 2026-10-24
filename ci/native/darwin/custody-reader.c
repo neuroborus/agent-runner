@@ -1163,6 +1163,10 @@ static void case_line(int fd, bool encoded) {
   if (encoded) { char out[16385]; hex((void *)bytes, length, out); printf("{\"hex\":\"%s\"}", out); }
   else { bytes[length - 1] = 0; fputs(bytes, stdout); }
 }
+static uint64_t case_number(const char *value, uint64_t maximum) {
+  char *end; errno = 0; uint64_t result = strtoull(value, &end, 10);
+  need(*value && *value != '-' && !errno && !*end && result <= maximum); return result;
+}
 #ifdef NATIVE_CI_EXPERIMENT
 /* Fixed installed observer reads: no arbitrary image or numeric-PID effect. */
 static const char *case_observer_identity(pid_t pid, struct identity *value) {
@@ -1230,10 +1234,6 @@ static void case_members(unsigned asid, bool independent) {
   need(case_mode && asid < INT32_MAX);
   if (!independent) { need(asid > 0 && case_asid == asid); reservation_guard(); }
   audit_emit_view(audit_census(subject_uid, asid), subject_uid, asid);
-}
-static uint64_t case_number(const char *value, uint64_t maximum) {
-  char *end; errno = 0; uint64_t result = strtoull(value, &end, 10);
-  need(*value && *value != '-' && !errno && !*end && result <= maximum); return result;
 }
 static struct identity case_identity(char **fields) {
   struct identity value = {0};

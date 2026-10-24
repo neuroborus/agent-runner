@@ -449,6 +449,8 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-environment",
     "fault-fd-count",
     "fault-fd-list",
+    "fault-final-read",
+    "fault-final-drain",
     "fault-gate-read",
     "fault-gate-value",
     "fault-gate-write",
@@ -485,6 +487,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-output-drain",
     "fault-output-bound",
     "fault-output-read",
+    "fault-output-write",
     "fault-output-state",
     "fault-payload-exec",
     "fault-poll",
@@ -560,6 +563,8 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "audit-census-bsd-again",
     "fault-birth-read",
     "fault-birth-write",
+    "fault-final-read",
+    "fault-final-drain",
     "fault-copy-read",
     "fault-copy-write",
     "fault-journal-read",
@@ -624,6 +629,9 @@ export function darwinFeasibilityCause(stage, error) {
     : ACCESS_OPERATIONS.includes(error?.operation)
       ? `${stage}-${error.operation}`
       : stage;
+  const exitCode = Object.hasOwn(error ?? {}, "exitCode")
+    ? error.exitCode
+    : error?.code;
   const cause = feasibilityFailureCause(
     "darwin",
     operation,
@@ -636,7 +644,7 @@ export function darwinFeasibilityCause(stage, error) {
     },
     error?.code === "ERR_FEASIBILITY_ESCAPE"
       ? "observed-escape"
-      : error?.code === 78 || error?.code === "ERR_FEASIBILITY_UNAVAILABLE"
+      : exitCode === 78 || error?.code === "ERR_FEASIBILITY_UNAVAILABLE"
         ? "prerequisite-unavailable"
         : "setup-failed",
   );

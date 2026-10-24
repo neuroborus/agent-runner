@@ -169,6 +169,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
     context = {
       errno: 0,
       stderr: {},
+      stdout: {},
       NULL: null,
       EACCES: 13,
       ENOENT: 2,
@@ -243,6 +244,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
       },
       fflush() {
         context.errno = 92;
+        return 0;
       },
       _exit(code) {
         throw Object.assign(new Error("Native refusal"), {

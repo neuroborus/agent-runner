@@ -442,6 +442,9 @@ refuse. The original privileged/fault recovery matrices retain their ownership
 checks and record observers before dependent releases.
 Incomplete constructor capture cannot delay the original process retirement
 attempt, and failed process cleanup cannot suppress observer retirement.
+The existing actual-body and transport fixtures also retain original-child
+refusal/status before fault admission, including fragmented frames and separate
+custodian and observer cleanup failures, without releasing either fault role.
 
 These portable, effect-free cases add no native compilation or installed-provider
 proof, validation command or durable slow-tier assignment. Matching hosted CI

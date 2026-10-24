@@ -86,6 +86,8 @@ export async function openDarwinFaultDomain(
     failed,
     bytes = Buffer.alloc(0),
     stderr = Buffer.alloc(0),
+    childStderr = Buffer.alloc(0),
+    custodyExit,
     total = 0,
     running,
     payloadExit,
@@ -99,13 +101,22 @@ export async function openDarwinFaultDomain(
     acquiring = Promise.resolve();
   // Keep the original acquisition reachable even when admission never completes.
   const acquired = { owner, directory };
+  const retainFailure = (error) => {
+    error.custodyError ??= {};
+    Object.assign(error.custodyError, custodyExit, { stderr });
+    error.stderr = !running && childStderr.length ? childStderr : stderr;
+    if (!running && payloadExit) {
+      error.exitCode = payloadExit.code;
+      error.signal = payloadExit.signal;
+    }
+  };
   const rejectAdmission = (error) => {
     error.faultDomain = acquired;
-    error.stderr ??= stderr;
+    retainFailure(error);
     try {
       owner.stdin.end();
     } catch (cleanupError) {
-      error.cleanupError = cleanupError;
+      error.cleanupError ??= cleanupError;
     }
     return error;
   };
@@ -116,6 +127,8 @@ export async function openDarwinFaultDomain(
   const closePayload = (code, signal) => {
     need(!payloadExit);
     payloadExit = { code, signal };
+    if (!running && ready)
+      fail(new Error("Fault child exited before admission"));
     if (running) {
       virtual.stdout.end();
       virtual.stderr.end();
@@ -124,9 +137,9 @@ export async function openDarwinFaultDomain(
   };
   const fail = (error) => {
     failed ??= error;
-    failed.stderr = stderr;
     if (error.exitCode !== undefined) failed.exitCode ??= error.exitCode;
     if (error.signal !== undefined) failed.signal ??= error.signal;
+    retainFailure(failed);
     pending?.reject(failed);
     pending = null;
     ready?.reject(failed);
@@ -170,22 +183,25 @@ export async function openDarwinFaultDomain(
   const closed = new Promise((resolve) => {
     close = resolve;
   });
-  const settle = async () => {
+  const settle = async (admissionFailure = false) => {
     let timer;
     try {
       const exit = await Promise.race([
         closed,
         new Promise((_, reject) => {
           timer = setTimeout(() => {
-            fail(
-              Object.assign(new Error("Fault custody closure deadline"), {
+            const error = Object.assign(
+              new Error("Fault custody closure deadline"),
+              {
                 code: "ERR_FEASIBILITY_DEADLINE",
-              }),
+              },
             );
-            reject(failed);
+            fail(error);
+            reject(error);
           }, 12000);
         }),
       ]);
+      if (admissionFailure) return;
       if (failed) throw failed;
       need(exit.code === 0 && exit.signal === null);
     } finally {
@@ -203,7 +219,7 @@ export async function openDarwinFaultDomain(
         stderr,
         chunk.subarray(0, 65536 - stderr.length),
       ]);
-      if (failed) failed.stderr = stderr;
+      if (failed) retainFailure(failed);
       if (length > 65536 || total > 262144)
         fail(new Error("Fault custody output bound"));
       // Custodian diagnostics stay separate from relayed payload stdio and cannot
@@ -398,7 +414,17 @@ export async function openDarwinFaultDomain(
             ["stdout", "stderr"].includes(value.stream) &&
               /^(?:[a-f0-9]{2})*$/u.test(value.hex),
           );
-          virtual[value.stream].write(Buffer.from(value.hex, "hex"));
+          const chunk = Buffer.from(value.hex, "hex");
+          if (!running && value.stream === "stderr") {
+            const length = childStderr.length + chunk.length;
+            childStderr = Buffer.concat([
+              childStderr,
+              chunk.subarray(0, 65536 - childStderr.length),
+            ]);
+            if (failed) retainFailure(failed);
+            need(length <= 65536);
+          }
+          virtual[value.stream].write(chunk);
         } else if (value.exit) {
           const { code, signal } = value.exit;
           const signalName = Object.entries(constants.signals).find(
@@ -428,6 +454,7 @@ export async function openDarwinFaultDomain(
     }
   });
   owner.once("close", (code, signal) => {
+    custodyExit = { exitCode: code, signal };
     if (bytes.length || pending || ready || code !== 0 || signal)
       fail(
         Object.assign(
@@ -446,6 +473,25 @@ export async function openDarwinFaultDomain(
   } catch (error) {
     throw rejectAdmission(error);
   }
+  const settleAdmission = async (error) => {
+    // Closing custody first lets its original child settle independently of
+    // missing trace records or uncertain observer retirement.
+    rejectAdmission(error);
+    const settling = settle(true).catch((cleanupError) => {
+      error.custodyError.cleanupError = cleanupError;
+    });
+    if (trace) {
+      try {
+        acquired.traceResult = await trace.finish();
+      } catch (cleanupError) {
+        error.observerError = cleanupError;
+        error.cleanupError ??= cleanupError;
+      }
+    }
+    await settling;
+    retainFailure(error);
+    return error;
+  };
   const initial = await new Promise((resolve, reject) => {
     ready = { resolve, reject };
     const timer = setTimeout(() => {
@@ -453,20 +499,11 @@ export async function openDarwinFaultDomain(
     }, 12000);
     closed.finally(() => clearTimeout(timer));
   }).catch(async (error) => {
-    // Closing custody first lets its original child settle independently of
-    // missing trace records or uncertain observer retirement.
-    rejectAdmission(error);
-    if (trace) {
-      try {
-        acquired.traceResult = await trace.finish();
-      } catch (cleanupError) {
-        error.cleanupError ??= cleanupError;
-      }
-    }
-    throw error;
+    throw await settleAdmission(error);
   });
   let custodian;
   try {
+    if (failed) throw failed;
     custodian = normalizeDarwinIdentity(initial.custodian);
     need(
       initial.candidateSha === candidate &&
@@ -492,7 +529,7 @@ export async function openDarwinFaultDomain(
       { launch: () => virtual },
     );
   } catch (error) {
-    throw rejectAdmission(error);
+    throw await settleAdmission(error);
   }
   if (payloadExit) {
     virtual.stdout.end();
