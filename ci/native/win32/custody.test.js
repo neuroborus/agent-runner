@@ -7417,7 +7417,7 @@ test("scheduler refusals retain the exact API/HRESULT independently of last-erro
   }
 });
 
-async function providerCensusProgram(zeroMask = false) {
+async function providerCensusProgram(zeroLayer = false) {
   const source = await readFile(
       new URL("custody-reader.c", import.meta.url),
       "utf8",
@@ -7462,7 +7462,7 @@ async function providerCensusProgram(zeroMask = false) {
         /Fwpm(?:Filter(?:CreateEnumHandle0|Enum0|GetByKey0)|ProviderGetByKey0|SubLayerGetByKey0)\([^)]*\)/gu,
         (call) =>
           call.replace(
-            /&(enumeration|filters|census.count|actual|provider|layer)\b/gu,
+            /&(enumeration|filters|returned|actual|provider|layer)\b/gu,
             "value=>$1=value",
           ),
       )
@@ -7470,18 +7470,20 @@ async function providerCensusProgram(zeroMask = false) {
       .replace(/\*actual->weight.uint64/gu, "actual->weight.uint64")
       .replace(/->/gu, ".")
       .replace(/\bL(?=")/gu, "")
-      .replace(/\b(?:GUID|DWORD|UINT32|HANDLE|BOOL)\b/gu, "let")
-      .replace(
-        "(!census.count || filters)",
-        "(!census.count || filters !== NULL)",
-      );
+      .replace(/\bconst UINT32\b/gu, "const")
+      .replace(/\b(?:GUID|DWORD|UINT32|HANDLE|BOOL)\b/gu, "let");
   let census = body("provider_filters");
-  assert.ok(census.includes("selection.actionMask = 0xFFFFFFFF"));
-  if (zeroMask)
+  if (zeroLayer) {
+    // Reintroduce the baseline create call; the production scan remains intact.
+    assert.ok(census.includes("FwpmFilterCreateEnumHandle0(wfp_engine, NULL,"));
     census = census.replace(
-      "selection.actionMask = 0xFFFFFFFF",
-      "selection.actionMask = 0",
+      "FwpmFilterCreateEnumHandle0(wfp_engine, NULL,",
+      "FwpmFilterCreateEnumHandle0(wfp_engine, &selection,",
     );
+    census = `FWPM_FILTER_ENUM_TEMPLATE0 selection = {0};
+      selection.providerKey = providerKey; selection.actionMask = 0xFFFFFFFF;
+      ${census}`;
+  }
   return new Script(`
     function provider_filters(providerKey,limit){${translate(census)}}
     function provider_filters_accept(census,accepted){${translate(body("provider_filters_accept"))}}
@@ -7501,15 +7503,18 @@ function providerCensusFixture(program, kind, count, fault = {}) {
     arrays = new Set(),
     rows = Array.from({ length: count }, (_, i) => ({
       providerKey,
-      layerKey: "connect-v4",
-      action: { type: kind === "recovery" && i % 3 === 0 ? 0x1002 : 0x1001 },
+      layerKey: ["connect-v4", "receive-v6", "other-layer"][i % 3],
+      action: { type: [0, 0x1001, 0x1002, 0x2006, 0x5003][i % 5] },
     }));
-  let lastError = 999;
+  let lastError = 999,
+    reads = 0;
   const api = {
     ERROR_SUCCESS: 0,
     MAXDWORD: 0xffffffff,
     NULL: null,
     FALSE: false,
+    TRUE: true,
+    FWP_E_LAYER_NOT_FOUND: 0x80320004,
     FWP_E_PROVIDER_NOT_FOUND: 10,
     FWP_E_SUBLAYER_NOT_FOUND: 11,
     FWPM_PROVIDER_FLAG_PERSISTENT: 1,
@@ -7650,34 +7655,39 @@ function providerCensusFixture(program, kind, count, fault = {}) {
     },
     FwpmFilterCreateEnumHandle0(engine, selection, output) {
       assert.equal(engine, "engine");
-      assert.equal(selection.providerKey, providerKey);
-      assert.equal(selection.layerKey, 0);
       calls.push("create");
+      if (selection !== null && !api.layers.includes(selection.layerKey))
+        return api.FWP_E_LAYER_NOT_FOUND;
+      assert.equal(selection, null);
       if (fault.handle !== false) {
-        const handle = { selection: { ...selection } };
+        const handle = {
+          snapshot: rows.map((row) => ({ ...row, action: { ...row.action } })),
+          cursor: 0,
+        };
         handles.add(handle);
         output(handle);
+        fault.afterCreate?.(rows);
       }
       return fault.createResult ?? 0;
     },
     FwpmFilterEnum0(_engine, handle, limit, output, number) {
       assert.ok(handles.has(handle));
-      assert.equal(limit, kind === "ownership" ? 5 : 53);
+      assert.equal(limit, 128);
       calls.push("enumerate");
-      const selected = rows
-        .filter(
-          (row) =>
-            row.providerKey === handle.selection.providerKey &&
-            (row.action.type & handle.selection.actionMask) !== 0,
-        )
-        .slice(0, limit);
-      if (fault.array !== false) {
-        const entries = fault.nullEntry ? selected.map(() => null) : selected;
+      const current = ++reads === (fault.readAt ?? 1) ? fault : {},
+        selected = handle.snapshot.slice(handle.cursor, handle.cursor + limit);
+      handle.cursor += selected.length;
+      if (current.array !== false) {
+        const entries = current.nullEntry ? selected.map(() => null) : selected;
+        if (current.nullEntryAt !== undefined)
+          entries[current.nullEntryAt] = null;
+        if (current.unwrittenEntry) delete entries[entries.length - 1];
         arrays.add(entries);
         output(entries);
       }
-      if (fault.count !== false) number(fault.countOverride ?? selected.length);
-      return fault.enumResult ?? 0;
+      if (current.count !== false)
+        number(current.countOverride ?? selected.length);
+      return current.enumResult ?? 0;
     },
     FwpmFreeMemory0(value, output) {
       if (Array.isArray(value)) {
@@ -7709,29 +7719,44 @@ function providerCensusFixture(program, kind, count, fault = {}) {
   };
 }
 
-test("provider filter census selects every action and retains both production count and content guards", async () => {
-  const corrected = await providerCensusProgram(),
-    legacy = await providerCensusProgram(true);
-  const oldOwnership = providerCensusFixture(legacy, "ownership", 4);
-  assert.throws(
-    oldOwnership.read,
-    (error) =>
-      error.diagnostic.operation === "count" && error.diagnostic.count === 0,
-  );
-  oldOwnership.settled();
-  const oldRecovery = providerCensusFixture(legacy, "recovery", 52);
-  oldRecovery.api.identities = null; // The empty selection bypassed the installed-ID guard.
-  oldRecovery.read();
-  oldRecovery.settled();
+function unrelatedProviderFilters(count) {
+  return Array.from({ length: count }, (_, i) => ({
+    providerKey: i % 2 ? null : "foreign-provider",
+    layerKey: "unrelated-layer",
+    action: { type: i % 2 ? 0 : 0x5003 },
+  }));
+}
+
+test("provider filter census rejects the old zero-layer template before any read", async () => {
+  const legacy = await providerCensusProgram(true);
+  for (const kind of ["ownership", "recovery"]) {
+    const f = providerCensusFixture(
+      legacy,
+      kind,
+      kind === "ownership" ? 4 : 52,
+    );
+    assert.throws(f.read, (error) => {
+      assert.equal(error.lastError, 0x80320004);
+      assert.deepEqual(error.diagnostic, {
+        operation: "FwpmFilterCreateEnumHandle0",
+        result: 2150760452,
+        count: 0xffffffff,
+        complete: false,
+        accepted: false,
+        cleanupResult: 0,
+      });
+      return true;
+    });
+    assert.deepEqual(f.calls, ["create"]);
+    f.settled();
+  }
+});
+
+test("provider filter census retains both production count and content guards", async () => {
+  const corrected = await providerCensusProgram();
   for (const kind of ["ownership", "recovery"]) {
     const expected = kind === "ownership" ? 4 : 52;
-    for (const count of [
-      0,
-      expected - 1,
-      expected,
-      expected + 1,
-      expected + 4,
-    ]) {
+    for (const count of [0, expected - 1, expected, expected + 1]) {
       const f = providerCensusFixture(corrected, kind, count);
       f.rows.push({
         providerKey: "foreign-provider",
@@ -7816,6 +7841,112 @@ test("provider filter census selects every action and retains both production co
   }
 });
 
+test("provider filter census advances the complete snapshot across unrelated providers, actions and layers", async () => {
+  const program = await providerCensusProgram();
+  for (const kind of ["ownership", "recovery"]) {
+    const f = providerCensusFixture(
+        program,
+        kind,
+        kind === "ownership" ? 4 : 52,
+      ),
+      owned = f.rows.splice(0);
+    f.rows.push(...unrelatedProviderFilters(127));
+    for (const row of owned) f.rows.push(row, ...unrelatedProviderFilters(2));
+    const before = JSON.stringify(f.rows);
+    f.read();
+    assert.equal(JSON.stringify(f.rows), before);
+    assert.equal(
+      f.calls.filter((call) => call === "enumerate").length,
+      kind === "ownership" ? 2 : 3,
+    );
+    assert.equal(f.calls.at(-1), "destroy");
+    f.settled();
+  }
+  const fixed = providerCensusFixture(program, "ownership", 4, {
+    afterCreate(rows) {
+      rows.push({ ...rows[0] }, { ...rows[0] });
+      rows[0].providerKey = "foreign-provider";
+    },
+  });
+  fixed.read(); // Creation captured four, although the live list now has five.
+  fixed.settled();
+});
+
+test("provider filter census requires short or empty exhaustion and refuses proven overflow or the global scan limit", async () => {
+  const program = await providerCensusProgram();
+  const emptyEnd = providerCensusFixture(program, "ownership", 4, {
+    readAt: 2,
+    array: false,
+  });
+  emptyEnd.rows.push(...unrelatedProviderFilters(124));
+  emptyEnd.read();
+  assert.deepEqual(emptyEnd.calls, [
+    "create",
+    "enumerate",
+    "free",
+    "enumerate",
+    "destroy",
+  ]);
+  emptyEnd.settled();
+
+  const shortEnd = providerCensusFixture(program, "ownership", 4);
+  shortEnd.rows.unshift(...unrelatedProviderFilters(2043));
+  shortEnd.read(); // A validated 127-entry final page exhausts within the ceiling.
+  assert.equal(
+    shortEnd.calls.filter((call) => call === "enumerate").length,
+    16,
+  );
+  shortEnd.settled();
+
+  for (const kind of ["ownership", "recovery"]) {
+    const expected = kind === "ownership" ? 4 : 52,
+      extra = providerCensusFixture(program, kind, expected, {
+        destroyResult: 7,
+      });
+    extra.rows.push(...unrelatedProviderFilters(128 - expected));
+    extra.rows.push(
+      {
+        providerKey: extra.rows[0].providerKey,
+        layerKey: "unexpected-layer",
+        action: { type: 0x5003 },
+      },
+      ...unrelatedProviderFilters(256),
+    );
+    assert.throws(
+      extra.read,
+      (error) =>
+        error.lastError === 0 &&
+        error.diagnostic.operation === "count" &&
+        error.diagnostic.count === expected + 1 &&
+        error.diagnostic.complete === false &&
+        error.diagnostic.cleanupResult === 7,
+    );
+    assert.equal(extra.calls.filter((call) => call === "enumerate").length, 2);
+    extra.settled();
+
+    // A full final page proves neither exact ownership nor provider absence.
+    const count = kind === "ownership" ? 4 : 0,
+      incomplete = providerCensusFixture(program, kind, count, {
+        destroyResult: 7,
+      });
+    incomplete.rows.push(...unrelatedProviderFilters(2048 - count));
+    assert.throws(incomplete.read, (error) => {
+      assert.equal(error.lastError, 0);
+      assert.equal(error.diagnostic.operation, "scan-limit");
+      assert.equal(error.diagnostic.count, count);
+      assert.equal(error.diagnostic.complete, false);
+      assert.equal(error.diagnostic.accepted, true);
+      assert.equal(error.diagnostic.cleanupResult, 7);
+      return true;
+    });
+    assert.equal(
+      incomplete.calls.filter((call) => call === "enumerate").length,
+      16,
+    );
+    incomplete.settled();
+  }
+});
+
 test("provider filter census settles partial results once and preserves primary refusals through cleanup", async () => {
   const program = await providerCensusProgram();
   for (const kind of ["ownership", "recovery"]) {
@@ -7852,8 +7983,9 @@ test("provider filter census settles partial results once and preserves primary 
         ["create", "enumerate", "destroy"],
       ],
       [{ count: false }, "FwpmFilterEnum0", 0, false],
-      [{ countOverride: count + 2 }, "FwpmFilterEnum0", 0, false],
+      [{ countOverride: 129 }, "FwpmFilterEnum0", 0, false],
       [{ nullEntry: true }, "FwpmFilterEnum0", 0, false],
+      [{ unwrittenEntry: true }, "FwpmFilterEnum0", 0, false],
       [{ countOverride: count - 1 }, "count", 0, true],
       [{}, "FwpmFilterDestroyEnumHandle0", 7, true],
     ]) {
@@ -7892,6 +8024,48 @@ test("provider filter census settles partial results once and preserves primary 
   );
   empty.settled();
   assert.deepEqual(empty.calls, ["create", "enumerate", "destroy"]);
+});
+
+test("provider filter census validates every page before overflow and preserves later read failures", async () => {
+  const program = await providerCensusProgram();
+  for (const fault of [{ nullEntryAt: 5 }, { unwrittenEntry: true }]) {
+    const f = providerCensusFixture(program, "ownership", 6, fault);
+    assert.throws(
+      f.read,
+      (error) =>
+        error.diagnostic.operation === "FwpmFilterEnum0" &&
+        error.diagnostic.count === 0 &&
+        !error.diagnostic.complete,
+    );
+    f.settled();
+  }
+  for (const fault of [{ enumResult: 6 }, { count: false }, { array: false }]) {
+    const f = providerCensusFixture(program, "ownership", 4, {
+      ...fault,
+      readAt: 2,
+      destroyResult: 7,
+    });
+    f.rows.unshift(...unrelatedProviderFilters(128));
+    // A stale first-page count would look valid for this full second page.
+    f.rows.push(...unrelatedProviderFilters(124));
+    assert.throws(f.read, (error) => {
+      assert.equal(error.lastError, fault.enumResult ?? 0);
+      assert.equal(error.diagnostic.operation, "FwpmFilterEnum0");
+      assert.equal(error.diagnostic.count, 0);
+      assert.equal(error.diagnostic.complete, false);
+      assert.equal(error.diagnostic.cleanupResult, 7);
+      return true;
+    });
+    assert.deepEqual(f.calls, [
+      "create",
+      "enumerate",
+      "free",
+      "enumerate",
+      ...(fault.array === false ? [] : ["free"]),
+      "destroy",
+    ]);
+    f.settled();
+  }
 });
 
 async function schedulerProgram() {

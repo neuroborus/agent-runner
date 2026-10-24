@@ -2105,13 +2105,17 @@ one-based hidden enumeration, exact case-insensitive paths, discarded partial
 counts, bounded whole-census restarts and exactly-once collection/item/BSTR release,
 with the original failure preserved through cleanup.
 The same source-body facilities execute the provider-filter census and both
-production caller guards. Provider/action-bit selection reproduces zero-mask
-ownership refusal and falsely empty recovery, then requires all-action selection
-with unchanged count, provider-state, identity, action and layer restrictions.
-Injected unusable outputs and create/enumerate/destroy failures require exactly-once
-resource settlement before caller refusal, preserving primary and cleanup causes
-separately. These effect-free regressions establish no Windows compilation or
-native acceptance.
+production caller guards. Injected creation reproduces the old zero-layer
+`FWP_E_LAYER_NOT_FOUND` result 2150760452 before any read. NULL-template creation
+captures the complete snapshot; successive 128-entry pages count matching providers
+across all actions and layers while skipping unrelated/null-provider associations.
+Validated short or empty pages prove exhaustion; the 2,048-entry global scan ceiling
+refuses incomplete observation independently of provider overflow at 5 or 53.
+Late-page ownership, overflow, unwritten/malformed outputs and first/later API
+failures retain the existing count, provider-state, identity, action and layer
+guards. Exactly-once page/handle settlement precedes caller refusal and preserves
+primary and cleanup causes separately. These effect-free regressions establish no
+Windows compilation or native acceptance.
 Ordinary experiment cold recovery distinguishes the ordered normal finish chain
 from the bound pre-setup abort/helper-retirement chain. Injected records reject
 missing, duplicated or reordered acknowledgements, mixed setup/abort lifecycles,

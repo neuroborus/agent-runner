@@ -1414,19 +1414,35 @@ static void ownership_network_absent(void) {
 struct provider_filter_census {
   const char *operation; DWORD result, cleanupResult; UINT32 count; BOOL complete;
 };
-/* Selection and resource ownership are shared; each caller owns its count rule. */
+/* Snapshot observation and resource ownership are shared; callers own count rules. */
 static struct provider_filter_census provider_filters(GUID *providerKey, UINT32 limit) {
   struct provider_filter_census census = {0};
   census.operation = "FwpmFilterCreateEnumHandle0"; census.count = MAXDWORD;
-  FWPM_FILTER_ENUM_TEMPLATE0 selection = {0};
-  selection.providerKey = providerKey; selection.actionMask = 0xFFFFFFFF;
   HANDLE enumeration = NULL; FWPM_FILTER0 **filters = NULL;
-  census.result = FwpmFilterCreateEnumHandle0(wfp_engine, &selection, &enumeration);
+  census.result = FwpmFilterCreateEnumHandle0(wfp_engine, NULL, &enumeration);
   if (census.result == ERROR_SUCCESS && enumeration) {
-    census.operation = "FwpmFilterEnum0";
-    census.result = FwpmFilterEnum0(wfp_engine, enumeration, limit, &filters, &census.count);
-    census.complete = census.result == ERROR_SUCCESS && census.count <= limit && (!census.count || filters);
-    if (census.complete) for (UINT32 i = 0; i < census.count; i++) if (!filters[i]) census.complete = FALSE;
+    /* Match the adjacent global inventory's page size and finite scan budget. */
+    const UINT32 pageSize = 128, scanLimit = 2048; UINT32 scanned = 0;
+    census.count = 0;
+    while (scanned < scanLimit) {
+      UINT32 returned = MAXDWORD; filters = NULL;
+      census.operation = "FwpmFilterEnum0";
+      census.result = FwpmFilterEnum0(wfp_engine, enumeration, pageSize, &filters, &returned);
+      BOOL valid = census.result == ERROR_SUCCESS && returned <= pageSize && (!returned || filters);
+      for (UINT32 i = 0; valid && i < returned; i++) if (!filters[i]) valid = FALSE;
+      if (!valid) break;
+      for (UINT32 i = 0; i < returned; i++) {
+        if (filters[i]->providerKey && IsEqualGUID(filters[i]->providerKey, providerKey)) {
+          if (++census.count == limit) break;
+        }
+      }
+      scanned += returned;
+      if (filters) FwpmFreeMemory0((void **)&filters);
+      filters = NULL;
+      if (census.count == limit) { census.operation = "count"; break; }
+      if (returned < pageSize) { census.complete = TRUE; break; }
+      census.operation = "scan-limit";
+    }
   }
   if (filters) FwpmFreeMemory0((void **)&filters);
   if (enumeration) census.cleanupResult = FwpmFilterDestroyEnumHandle0(wfp_engine, enumeration);
