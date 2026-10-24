@@ -263,9 +263,16 @@ export function windowsCustodyChannel(
         const launcherContext = buffer
           .subarray(diagnostic + 1, end < 0 ? undefined : end)
           .includes('"launcher":{');
+        const witnessContext = buffer
+          .subarray(diagnostic + 1, end < 0 ? undefined : end)
+          .includes('"witness":{');
         requireWindows(
           (end < 0 ? buffer.length : end + 1) - diagnostic <=
-            (openContext ? 17408 : launcherContext ? 9216 : 2048),
+            (openContext
+              ? 17408
+              : launcherContext || witnessContext
+                ? 9216
+                : 2048),
         );
         if (end < 0) return;
         const value = JSON.parse(
@@ -279,10 +286,79 @@ export function windowsCustodyChannel(
           end + 1 - diagnostic <=
             (Object.hasOwn(value, "open")
               ? 17408
-              : Object.hasOwn(value, "launcher")
+              : Object.hasOwn(value, "launcher") ||
+                  Object.hasOwn(value, "witness")
                 ? 9216
                 : 2048),
         );
+        if (Object.hasOwn(value, "witness")) {
+          closed(value, [...fields, "lastError", "witness"]);
+          fields.push("witness");
+          const witness = value.witness;
+          closed(witness, [
+            "operation",
+            "result",
+            "apiFailure",
+            "wait",
+            "exitAvailable",
+            "exitCode",
+            "accountingAvailable",
+            "activeProcesses",
+            "childBytes",
+            "childShown",
+            "childTruncated",
+            "childHex",
+          ]);
+          const waiting = witness.operation === "WaitForSingleObject",
+            exitQuery = witness.operation === "GetExitCodeProcess",
+            childExit = witness.operation === "child-exit",
+            accountingQuery = witness.operation === "QueryInformationJobObject",
+            active = witness.operation === "ActiveProcesses";
+          requireWindows(
+            value.source === "custody-reader.c" &&
+              ["ownership-witness", "ownership-outside-control"].includes(
+                value.command,
+              ) &&
+              (waiting ||
+                exitQuery ||
+                childExit ||
+                accountingQuery ||
+                active) &&
+              [
+                witness.result,
+                witness.wait,
+                witness.exitCode,
+                witness.activeProcesses,
+              ].every(uint32) &&
+              witness.apiFailure ===
+                (waiting
+                  ? witness.wait === 0xffffffff
+                  : exitQuery || accountingQuery) &&
+              (witness.apiFailure || value.lastError === 0) &&
+              witness.exitAvailable === !(waiting || exitQuery) &&
+              witness.accountingAvailable === active &&
+              (waiting
+                ? witness.wait !== 0 && witness.result === witness.wait
+                : witness.wait === 0) &&
+              (childExit
+                ? witness.exitCode > 0 && witness.result === witness.exitCode
+                : witness.exitCode === 0) &&
+              (active
+                ? witness.activeProcesses > 0 &&
+                  witness.result === witness.activeProcesses
+                : witness.activeProcesses === 0) &&
+              (!(exitQuery || accountingQuery) || witness.result === 0) &&
+              Number.isInteger(witness.childBytes) &&
+              witness.childBytes >= 0 &&
+              witness.childBytes < 65536 &&
+              witness.childShown === Math.min(witness.childBytes, 1024) &&
+              witness.childTruncated ===
+                witness.childBytes > witness.childShown &&
+              typeof witness.childHex === "string" &&
+              /^(?:[a-f0-9]{2}){0,1024}$/u.test(witness.childHex) &&
+              witness.childHex.length === witness.childShown * 2,
+          );
+        }
         if (Object.hasOwn(value, "baseline")) {
           fields.push("baseline");
           const baseline = value.baseline;

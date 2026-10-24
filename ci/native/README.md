@@ -7811,12 +7811,20 @@ suspended with a System-only creator default DACL, explicit two-handle list and
 creation-time Job admission;
 fresh System witnesses inspect token assignments, objects, cwd/image, Job
 membership, creator denial and complete account-principal census before release.
-Witness completion reports the original captured child line on stderr before
-creator fencing, capped at 1024 bytes with its full length and truncation flag.
-Separate wait, exit-query, child-exit and accounting refusals retain actual results,
-saved API errors and explicit output availability despite diagnostic failures.
+Witness completion retains its failure-only context before the guard and emits it
+through the authenticated `reader-failure` route before creator fencing. The
+scheduled reader's stderr need not be connected to the bridge. The closed
+`witness` context takes precedence over launcher-output diagnostics and carries
+the already consumed child-line prefix as hex data, capped at 1024 bytes with its
+full length and truncation flag; no additional child-pipe read occurs. Separate
+wait, exit-query, child-exit and accounting refusals retain actual results, saved
+API errors and explicit output availability. The channel validates their finite
+operations, bounds and consistency under the existing 9216-byte diagnostic ceiling;
+malformed, oversized, mixed or misplaced contexts refuse transport. Diagnostic
+writes and creator-fencing failures cannot replace the original guard error.
 Success framing, held process/Job closure and independent retirement stay required;
-these diagnostics establish neither the native cause nor successful ownership.
+child bytes remain data, never receipts or retirement authority. These diagnostics
+establish neither the native cause nor successful ownership.
 
 Private acknowledgements gate attempts, child retention, reparenting and faults.
 Outside service/WMI/COM/parent/breakaway controls must be available separately;

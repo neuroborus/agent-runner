@@ -2542,10 +2542,15 @@ without retrying failed cleanup. Existing finite diagnostic-frame and
 compiler-trust attribution coverage remains required. The fixture supplies no
 Windows SDK/runtime evidence or kernel explanation for the observed error5.
 The Windows custody fixture also executes the actual witness completion and guard
-bodies. Injected wait/query, nonzero exit/accounting and diagnostic failures retain
-the bounded original child line, explicit unavailable outputs and first cause
-through creator fencing. It checks truncation, short-circuit ordering, retained
-handles and successful ordinary/outside-control framing without Windows tools or
+bodies, authenticated failure sender and creator fence. Emitted witness contexts
+reach the actual channel consumer with fragmented delivery and disconnected
+scheduled-reader stderr. Wait/query, nonzero exit/accounting, diagnostic-write and
+cleanup failures retain the original error, explicit unavailable outputs and the
+already consumed bounded child prefix without another read or launcher-diagnostic
+shadowing. Empty, binary, truncated and maximum-length child data remain hex data;
+malformed, oversized, mixed or misplaced contexts refuse without receipt or
+retirement authority. The fixtures retain short-circuit ordering, exact handle
+ownership and ordinary/outside-control success framing without Windows tools or
 timing waits. This coverage remains in the same harness and proves attribution only.
 The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
 WFP keyword values and exact DROP rejection predicates. Those in

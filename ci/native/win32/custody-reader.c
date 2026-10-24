@@ -128,6 +128,26 @@ static HANDLE control; static char nonce[33], candidate[41];
 static BOOL reader_diagnostics_ready;
 static char reader_command[64] = "setup";
 static __declspec(thread) struct {
+  BOOL active, apiFailure, exitAvailable, accountingAvailable;
+  const char *operation; DWORD result, error, waited, exitCode, activeProcesses;
+  size_t childBytes; unsigned childShown; BYTE child[1024];
+} reader_witness;
+static BOOL reader_witness_failure(const char *source, unsigned line, DWORD error) {
+  if (!reader_witness.active) return FALSE;
+  char frame[9216], encoded[2049] = {0}; DWORD written;
+  for (unsigned i = 0; i < reader_witness.childShown; i++)
+    sprintf_s(encoded+i*2, sizeof(encoded)-i*2, "%02x", reader_witness.child[i]);
+  int size = sprintf_s(frame, sizeof(frame), "\036{\"phase\":\"reader-failure\",\"sequence\":%u,\"command\":\"%s\",\"source\":\"%s\",\"line\":%u,\"lastError\":%lu,\"witness\":{\"operation\":\"%s\",\"result\":%lu,\"apiFailure\":%s,\"wait\":%lu,\"exitAvailable\":%s,\"exitCode\":%lu,\"accountingAvailable\":%s,\"activeProcesses\":%lu,\"childBytes\":%zu,\"childShown\":%u,\"childTruncated\":%s,\"childHex\":\"%s\"}}\n",
+    sequence, reader_command, source, line, reader_witness.error, reader_witness.operation, reader_witness.result,
+    reader_witness.apiFailure ? "true" : "false", reader_witness.waited,
+    reader_witness.exitAvailable ? "true" : "false", reader_witness.exitCode,
+    reader_witness.accountingAvailable ? "true" : "false", reader_witness.activeProcesses,
+    reader_witness.childBytes, reader_witness.childShown,
+    reader_witness.childBytes > reader_witness.childShown ? "true" : "false", encoded);
+  if (size > 0) WriteFile(control, frame, (DWORD)size, &written, NULL);
+  SetLastError(error); return TRUE;
+}
+static __declspec(thread) struct {
   BOOL active, apiFailure, cleanupFailed; const char *operation;
   unsigned index; DWORD cleanupError;
 } reader_baseline;
@@ -286,6 +306,7 @@ static BOOL reader_cold_failure(const char *source, unsigned line, DWORD error) 
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  if(reader_witness_failure(source,line,error)) { ownership_failure_fence(error); return; }
   if(ownership_failure_write(source,line,error)) { ownership_failure_fence(error); return; }
   ownership_failure_fence(error);
   if(reader_cold_failure(source,line,error))return;
@@ -1739,14 +1760,15 @@ static void ownership_fresh(BOOL outsideControl) {
     }
   }
   if (operation) {
-    /* Report the consumed child line before the guard can fence creators. */
-    size_t captured = strlen(result); unsigned shown = captured < 1024 ? (unsigned)captured : 1024;
-    fprintf(stderr, "native-windows-ownership-witness: operation=%s result=%lu api-error=%u error=%lu wait=%lu exit-available=%u exit-code=%lu accounting-available=%u active-processes=%lu\n",
-      operation, actual, (unsigned)apiFailure, error, waited, (unsigned)exitRead, exitRead ? exit : 0,
-      (unsigned)accountingRead, accountingRead ? accounting.ActiveProcesses : 0);
-    fprintf(stderr, "native-windows-ownership-witness-child: bytes=%llu shown=%u truncated=%u %.*s\n",
-      (unsigned long long)captured, shown, (unsigned)(captured > shown), (int)shown, result);
-    fflush(stderr); SetLastError(error); need(FALSE);
+    /* Retain only already consumed bytes; the guard emits them before fencing. */
+    reader_witness.active = TRUE; reader_witness.operation = operation;
+    reader_witness.result = actual; reader_witness.error = error; reader_witness.apiFailure = apiFailure; reader_witness.waited = waited;
+    reader_witness.exitAvailable = exitRead; reader_witness.exitCode = exitRead ? exit : 0;
+    reader_witness.accountingAvailable = accountingRead; reader_witness.activeProcesses = accountingRead ? accounting.ActiveProcesses : 0;
+    reader_witness.childBytes = strlen(result);
+    reader_witness.childShown = reader_witness.childBytes < 1024 ? (unsigned)reader_witness.childBytes : 1024;
+    memcpy(reader_witness.child, result, reader_witness.childShown);
+    SetLastError(error); need(FALSE);
   }
   BYTE extra; DWORD used; need(!ReadFile(parentOut, &extra, 1, &used, NULL) && GetLastError() == ERROR_BROKEN_PIPE && !used);
   if (outsideControl) { BOOL belongs; need(case_job && IsProcessInJob(child.hProcess, case_job, &belongs) && !belongs); }

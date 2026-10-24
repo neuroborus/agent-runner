@@ -2310,11 +2310,32 @@ test("actual witness completion preserves original child and parent refusals bef
     end = source.indexOf("\n}\nstatic void ownership_send", start),
     guard = /static void need_at\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(header)[1];
   assert.ok(start > 0 && end > start);
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|BOOL) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
   const translate = (body) =>
     body
       .replace(/#ifdef NATIVE_CUSTODY_FAILURE\n([\s\S]*?)#endif/gu, "$1")
       .replaceAll("NATIVE_CUSTODY_FAILURE", "reader_failure")
-      .replace("char result[65536]", "const result = {}")
+      .replace("char result[65536]", "const result = Buffer.alloc(65536)")
+      .replace(
+        "char frame[9216], encoded[2049] = {0}; DWORD written;",
+        'const frame={text:""},encoded={text:""}; let written;',
+      )
+      .replace("const char *source", "let source")
+      .replace("source+1", "source.slice(1)")
+      .replace(
+        "HANDLE creators[] = {ownership_launcher.hProcess, ownership_owner.hProcess};",
+        "const creators = [ownership_launcher.hProcess, ownership_owner.hProcess];",
+      )
+      .replaceAll("sizeof(creators)/sizeof(creators[0])", "creators.length")
+      .replaceAll("sizeof(frame)", "9216")
+      .replaceAll("sizeof(encoded)", "2049")
+      .replaceAll("encoded+i*2", "{target:encoded,offset:i*2}")
+      .replaceAll("&written", "value=>written=value")
+      .replaceAll("\\036", "\\x1e")
       .replace(
         "JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting = {0}",
         "const accounting = {}",
@@ -2328,13 +2349,18 @@ test("actual witness completion preserves original child and parent refusals bef
         /&(exit|used|belongs)\b/gu,
         (_, name) => `{set value(value){${name}=value}}`,
       )
-      .replace(/\((?:unsigned long long|unsigned|int)\)/gu, "")
-      .replace(/\b(?:DWORD|BOOL|size_t|unsigned) /gu, "let ");
+      .replace(/\((?:DWORD|unsigned long long|unsigned|int)\)/gu, "")
+      .replace(/\b(?:DWORD|BOOL|size_t|unsigned|int) /gu, "let ");
+  const dispatch = body("reader_failure");
   const program = new Script(`
     function need_at(ok,file,line){${translate(guard)}}
     function need(ok){need_at(ok,"custody-reader.c",1);}
+    function reader_witness_failure(source,line,error){${translate(body("reader_witness_failure"))}}
+    function ownership_failure_fence(error){${translate(body("ownership_failure_fence"))}}
+    function reader_failure(file,line,error){${translate(dispatch.slice(0, dispatch.indexOf("  if(reader_cold_failure")))}}
     ${translate(source.slice(start, end))}
   `);
+  let sample;
   for (const [fault, operation, actual, error] of [
     [null],
     ["wait-failed", "WaitForSingleObject", 0xffffffff, 5],
@@ -2344,21 +2370,49 @@ test("actual witness completion preserves original child and parent refusals bef
     ["accounting-query", "QueryInformationJobObject", 0, 87],
     ["active", "ActiveProcesses", 2, 0],
     ["diagnostic", "child-exit", 126, 0],
+    ["format", "child-exit", 126, 0],
+    ["cleanup", "child-exit", 126, 0],
     ["truncated", "child-exit", 126, 0],
+    ["maximum", "child-exit", 126, 0],
+    ["binary", "child-exit", 126, 0],
+    ["empty", "child-exit", 126, 0],
   ])
-    for (const outsideControl of fault ? [false] : [false, true]) {
+    for (const outsideControl of !fault || fault === "child-exit"
+      ? [false, true]
+      : [false]) {
       const calls = [],
         diagnostics = [],
+        frames = [],
+        f = transport(),
+        pending = f.channel.receive().catch((cause) => cause),
+        completion = f.channel.completion.catch((cause) => cause),
         refused = new Error("exit 126"),
-        exitCode = ["child-exit", "diagnostic", "truncated"].includes(fault)
+        exitCode = [
+          "child-exit",
+          "diagnostic",
+          "format",
+          "cleanup",
+          "truncated",
+          "maximum",
+          "binary",
+          "empty",
+        ].includes(fault)
           ? 126
           : 0,
         childLine =
-          fault === "truncated"
-            ? "x".repeat(2048)
-            : exitCode
-              ? "native-windows-guard: file=witness.c line=7 last-error=5"
-              : '{"held":true}',
+          fault === "binary"
+            ? Buffer.from([0x1e, 34, 92, 0x7f])
+            : Buffer.from(
+                fault === "truncated"
+                  ? "x".repeat(2048)
+                  : fault === "maximum"
+                    ? "x".repeat(65534)
+                    : fault === "empty"
+                      ? ""
+                      : exitCode
+                        ? "native-windows-guard: file=witness.c line=7 last-error=5"
+                        : '{"held":true}',
+              ),
         waited =
           fault === "wait-failed"
             ? 0xffffffff
@@ -2368,9 +2422,30 @@ test("actual witness completion preserves original child and parent refusals bef
         exitAvailable = waited === 0 && fault !== "exit-query",
         accountingAvailable =
           exitAvailable && !exitCode && fault !== "accounting-query";
+      const text = (value) =>
+        Buffer.isBuffer(value)
+          ? value
+              .subarray(
+                0,
+                value.indexOf(0) < 0 ? value.length : value.indexOf(0),
+              )
+              .toString()
+          : (value?.text ?? value);
+      const format = (pattern, values) => {
+        let index = 0;
+        return pattern.replace(/%(02x|zu|lu|[us])/gu, (_, kind) => {
+          const value = values[index++];
+          return kind === "s"
+            ? String(text(value))
+            : kind === "02x"
+              ? Number(value).toString(16).padStart(2, "0")
+              : String(Number(value));
+        });
+      };
       let lastError = 122,
         output = "";
       const api = {
+        Buffer,
         outsideControl,
         child: { hProcess: "process", hThread: "thread" },
         job: "job",
@@ -2379,12 +2454,28 @@ test("actual witness completion preserves original child and parent refusals bef
         ownership_count: 1,
         ownership_released: false,
         ownership_creation_verified: false,
+        ownership_launcher: { hProcess: "launcher" },
+        ownership_owner: { hProcess: "owner" },
+        reader_witness: { active: false, child: Buffer.alloc(1024) },
+        reader_diagnostics_ready: true,
+        reader_command: outsideControl
+          ? "ownership-outside-control"
+          : "ownership-witness",
+        sequence: 2,
+        control: "authenticated",
+        ownership_failure_write: () =>
+          assert.fail("Launcher diagnostic shadowed the witness"),
+        strrchr: (value, separator) =>
+          value.includes(separator)
+            ? value.slice(value.lastIndexOf(separator))
+            : null,
         TRUE: true,
         FALSE: false,
         NULL: null,
         ERROR_SUCCESS: 0,
         ERROR_BROKEN_PIPE: 109,
         WAIT_OBJECT_0: 0,
+        WAIT_TIMEOUT: 258,
         WAIT_FAILED: 0xffffffff,
         JobObjectBasicAccountingInformation: 1,
         stderr: "stderr",
@@ -2392,19 +2483,46 @@ test("actual witness completion preserves original child and parent refusals bef
         SetLastError: (value) => {
           lastError = value;
         },
-        strlen: (value) => value.text.length,
+        strlen: (value) => value.indexOf(0),
+        memcpy: (target, value, size) => value.copy(target, 0, 0, size),
         line: (pipe, value, maximum) => {
           assert.equal(pipe, "pipe");
           assert.equal(maximum, 65536);
+          assert.ok(childLine.length + 1 < maximum);
+          assert.ok(
+            childLine.every((byte) => byte > 0 && byte < 128 && byte !== 10),
+          );
           calls.push("line");
-          value.text = childLine;
+          childLine.copy(value);
         },
         WaitForSingleObject: (process, deadline) => {
+          if (process !== "process") {
+            assert.ok(["launcher", "owner"].includes(process));
+            assert.equal(deadline, 0);
+            calls.push("fence-wait-" + process);
+            lastError = 77;
+            return fault === "cleanup" && process === "launcher"
+              ? 0xffffffff
+              : 258;
+          }
           assert.equal(process, "process");
           assert.equal(deadline, 30000);
           calls.push("wait");
           lastError = 5;
           return waited;
+        },
+        TerminateJobObject: (job, code) => {
+          assert.deepEqual([job, code], ["domain", 126]);
+          calls.push("fence-job");
+          lastError = 78;
+          return fault !== "cleanup";
+        },
+        TerminateProcess: (process, code) => {
+          assert.ok(["launcher", "owner"].includes(process));
+          assert.equal(code, 126);
+          calls.push("fence-" + process);
+          lastError = 79;
+          return fault !== "cleanup";
         },
         GetExitCodeProcess: (process, out) => {
           assert.equal(process, "process");
@@ -2439,16 +2557,10 @@ test("actual witness completion preserves original child and parent refusals bef
           calls.push("close-" + handle);
           return true;
         },
-        fprintf: (stream, format, ...values) => {
+        fprintf: (stream, pattern, ...values) => {
           assert.equal(stream, "stderr");
-          let index = 0;
-          diagnostics.push(
-            format.replace(/%(\.\*s|llu|lu|[us])/gu, (_, kind) => {
-              const value = values[index++];
-              if (kind === ".*s") return values[index++].text.slice(0, value);
-              return kind === "s" ? String(value) : String(Number(value));
-            }),
-          );
+          // Scheduled-reader stderr is disconnected from the bridge channel.
+          diagnostics.push(format(pattern, values));
           lastError = 99;
           return fault === "diagnostic" ? -1 : 1;
         },
@@ -2456,17 +2568,34 @@ test("actual witness completion preserves original child and parent refusals bef
           lastError = 88;
           return -1;
         },
-        reader_failure: () => {
-          assert.equal(diagnostics.length, 2);
-          calls.push("fence");
-          lastError = 6;
+        sprintf_s: (out, maximum, pattern, ...values) => {
+          if (fault === "format" && pattern.startsWith("\x1e")) return -1;
+          const value = format(pattern, values);
+          assert.ok(Buffer.byteLength(value) < maximum);
+          if (out.target)
+            out.target.text = out.target.text.slice(0, out.offset) + value;
+          else out.text = value;
+          lastError = 80;
+          return value.length;
+        },
+        WriteFile: (handle, value, size, used) => {
+          assert.equal(handle, "authenticated");
+          calls.push("diagnostic-write");
+          lastError = 81;
+          if (fault === "diagnostic") return false;
+          used(size);
+          frames.push(value.text);
+          f.child.stdout.write('{"sequence":2,"value":');
+          for (let offset = 0; offset < size; offset += 37)
+            f.child.stdout.write(value.text.slice(offset, offset + 37));
+          return true;
         },
         ExitProcess: (code) => {
           assert.equal(code, 126);
           throw refused;
         },
         printf: (format, value) => {
-          output += format.replace("%s", value?.text);
+          output += format.replace("%s", text(value));
         },
       };
       const expectedCalls = ["line", "wait"];
@@ -2477,33 +2606,47 @@ test("actual witness completion preserves original child and parent refusals bef
           () => program.runInNewContext(api),
           (cause) => cause === refused,
         );
-        assert.deepEqual(calls, [...expectedCalls, "fence"]);
-        assert.deepEqual(
-          [...diagnostics[0].matchAll(/=([^\s]+)/gu)].map((match) => match[1]),
-          [
-            operation,
-            actual,
-            Number(
-              ["wait-failed", "exit-query", "accounting-query"].includes(fault),
-            ),
-            error,
-            waited,
-            Number(exitAvailable),
-            exitAvailable ? exitCode : 0,
-            Number(accountingAvailable),
-            accountingAvailable ? 2 : 0,
-          ].map(String),
-        );
+        assert.deepEqual(calls, [
+          ...expectedCalls,
+          ...(fault === "format" ? [] : ["diagnostic-write"]),
+          "fence-job",
+          "fence-wait-launcher",
+          ...(fault === "cleanup" ? [] : ["fence-launcher"]),
+          "fence-wait-owner",
+          "fence-owner",
+        ]);
         assert.equal(
-          diagnostics[1],
-          `native-windows-ownership-witness-child: bytes=${childLine.length} shown=${Math.min(1024, childLine.length)} truncated=${Number(childLine.length > 1024)} ${childLine.slice(0, 1024)}\n`,
-        );
-        assert.equal(
-          diagnostics[2],
+          diagnostics.at(-1),
           `native-windows-guard: file=custody-reader.c line=1 last-error=${error}\n`,
         );
         assert.equal(output, "");
         assert.equal(api.ownership_creation_verified, false);
+        if (frames.length) {
+          const frame = JSON.parse(frames[0].slice(1));
+          assert.equal(frame.lastError, error);
+          assert.deepEqual(frame.witness, {
+            operation,
+            result: actual,
+            apiFailure: [
+              "wait-failed",
+              "exit-query",
+              "accounting-query",
+            ].includes(fault),
+            wait: waited,
+            exitAvailable,
+            exitCode: exitAvailable ? exitCode : 0,
+            accountingAvailable,
+            activeProcesses: accountingAvailable ? 2 : 0,
+            childBytes: childLine.length,
+            childShown: Math.min(1024, childLine.length),
+            childTruncated: childLine.length > 1024,
+            childHex: childLine.subarray(0, 1024).toString("hex"),
+          });
+          if (["truncated", "maximum"].includes(fault))
+            assert.ok(frames[0].length > 2048 && frames[0].length <= 9216);
+          if (fault === "child-exit" && !outsideControl) sample = frame;
+          assert.deepEqual((await pending).custodyReaderFailure, frame);
+        } else assert.ok(["diagnostic", "format"].includes(fault));
       } else {
         program.runInNewContext(api);
         assert.deepEqual(calls, [
@@ -2517,11 +2660,131 @@ test("actual witness completion preserves original child and parent refusals bef
         assert.deepEqual(diagnostics, []);
         assert.equal(
           output,
-          outsideControl ? '{"ready":true,"reachable":true}' : childLine,
+          outsideControl
+            ? '{"ready":true,"reachable":true}'
+            : childLine.toString(),
         );
         assert.equal(api.ownership_creation_verified, true);
       }
+      if (fault) {
+        f.child.stdout.end();
+        f.child.emit("close", 126, null);
+        const primary = await pending;
+        assert.equal(await completion, primary);
+        if (!frames.length)
+          assert.equal(primary.custodyReaderFailure, undefined);
+        assert.throws(() => f.channel.settle());
+        await assert.rejects(f.channel.receive(), (cause) => cause === primary);
+        f.channel.close();
+      } else {
+        const value = { sequence: 2, value: JSON.parse(output) };
+        f.child.stdout.write(JSON.stringify(value) + "\n");
+        assert.deepEqual(await pending, value);
+        f.child.stdout.end();
+        f.child.emit("close", 0, null);
+        assert.deepEqual(await completion, { code: 0, signal: null });
+        f.channel.settle();
+      }
+      f.child.stdin.destroy();
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
     }
+  for (const mutate of [
+    (v) => {
+      v.witness.operation = "unknown";
+    },
+    (v) => {
+      v.witness.result = -1;
+    },
+    (v) => {
+      v.witness.result++;
+    },
+    (v) => {
+      v.witness.wait = 0x100000000;
+    },
+    (v) => {
+      v.witness.wait = 258;
+    },
+    (v) => {
+      v.witness.exitCode = 0;
+    },
+    (v) => {
+      v.witness.activeProcesses = 1;
+    },
+    (v) => {
+      v.witness.exitAvailable = false;
+    },
+    (v) => {
+      v.witness.accountingAvailable = true;
+    },
+    (v) => {
+      v.witness.apiFailure = true;
+    },
+    (v) => {
+      v.witness.childBytes = 65536;
+    },
+    (v) => {
+      v.witness.childShown--;
+    },
+    (v) => {
+      v.witness.childTruncated = true;
+    },
+    (v) => {
+      v.witness.childHex = "zz";
+    },
+    (v) => {
+      v.witness.childHex += "0";
+    },
+    (v) => {
+      v.witness.extra = true;
+    },
+    (v) => {
+      v.command = "ownership-control";
+    },
+    (v) => {
+      v.source = "custody.h";
+    },
+    (v) => {
+      v.phase = "receipt";
+    },
+    (v) => {
+      v.lastError = 5;
+    },
+    (v) => {
+      delete v.lastError;
+    },
+    ...[
+      "launcher",
+      "baseline",
+      "open",
+      "trust",
+      "transfer",
+      "loader",
+      "retain",
+      "scheduler",
+      "cold",
+    ].map((field) => (v) => {
+      v[field] = {};
+    }),
+    (v) => {
+      v.witness.childHex = "aa".repeat(5000);
+    },
+  ]) {
+    const value = structuredClone(sample);
+    mutate(value);
+    const f = transport(),
+      response = f.channel.receive().catch((cause) => cause);
+    const bytes = Buffer.from("\x1e" + JSON.stringify(value) + "\n");
+    for (let offset = 0; offset < bytes.length; offset += 113)
+      f.child.stdout.write(bytes.subarray(offset, offset + 113));
+    const primary = await response;
+    assert.equal(primary.custodyReaderFailure, undefined);
+    assert.throws(() => f.channel.settle());
+    f.channel.close();
+    f.child.stdin.destroy();
+    f.child.stdout.destroy();
+    f.child.stderr.destroy();
+  }
 });
 
 test("Windows custody EOF refuses a lost response while reader diagnostics remain failures, never receipts", async () => {
@@ -2563,6 +2826,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         signature_trust: { active: false },
+        reader_witness_failure: () => false,
         ownership_failure_write: () => false,
         ownership_failure_fence: () => {},
         reader_cold_failure: () => false,
@@ -3701,6 +3965,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
+          reader_witness_failure: () => false,
           ownership_failure_write: () => false,
           ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
@@ -5644,6 +5909,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           reader_diagnostics_ready: true,
           signature_trust: { active: false },
           strrchr,
+          reader_witness_failure: () => false,
           ownership_failure_write: () => false,
           ownership_failure_fence: () => {},
           reader_cold_failure: () => false,
@@ -5721,6 +5987,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
       fallback.push("open");
       return false;
     },
+    reader_witness_failure: () => false,
     ownership_failure_write: () => false,
     ownership_failure_fence: () => {},
     reader_cold_failure: () => false,
