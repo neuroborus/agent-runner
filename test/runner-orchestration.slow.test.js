@@ -18,6 +18,7 @@ import {
 } from "../src/index.js";
 import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
 import { resolveStopBoundary } from "../src/pipeline-registry.js";
+import { createStateJournal } from "../src/state/journal.js";
 import {
   configurationLoader,
   createAdapter,
@@ -42,8 +43,69 @@ import {
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
 
-for (const pipelineId of ["plan-execution", "polishing"]) {
-  test(`${pipelineId} restart settles preparation before its pending stop without new work`, async (t) => {
+async function writeVersion22Preparation(directory, runId) {
+  // Rebuild the issued certificate as well as the envelope. Merely changing
+  // historical versions would invalidate custody's exact original-prefix proof.
+  const eventPath = join(directory, "events.jsonl");
+  const statePath = join(directory, "state.json");
+  const events = (await readFile(eventPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map(JSON.parse);
+  for (const event of events) {
+    event.schemaVersion = event.state.schemaVersion = 22;
+    event.state.runtimeCompatibility.runStateVersion = 22;
+    delete event.state.preservationRecords;
+  }
+  const first = events.findIndex(({ state }) => state.preparation !== null);
+  const prefix = events.slice(0, first);
+  await writeFile(eventPath, prefix.map(JSON.stringify).join("\n") + "\n");
+  await writeFile(statePath, JSON.stringify(prefix.at(-1).state));
+  const journal = createStateJournal({
+    onTransitionBoundary: async () => {},
+  });
+  const { certificate } = await journal.loadSnapshot(directory, runId);
+  const reservation = { ...events[first].state.preparation, certificate };
+  const { digest, settlement, ...issued } = reservation;
+  reservation.digest = createHash("sha256")
+    .update(JSON.stringify(issued))
+    .digest("hex");
+  const custodyPath = join(directory, ".preparation-custody.jsonl");
+  const records = (await readFile(custodyPath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map(JSON.parse);
+  records[0].value.digest = reservation.digest;
+  let endpoint = null;
+  for (const record of records) {
+    record.previous = endpoint;
+    endpoint = createHash("sha256")
+      .update(JSON.stringify(record))
+      .digest("hex");
+  }
+  await writeFile(custodyPath, records.map(JSON.stringify).join("\n") + "\n");
+  for (const event of events.slice(first)) {
+    event.state.preparation = {
+      ...reservation,
+      settlement:
+        event.state.preparation.settlement === null
+          ? null
+          : { records, endpoint },
+    };
+  }
+  await writeFile(eventPath, events.map(JSON.stringify).join("\n") + "\n");
+  await writeFile(statePath, JSON.stringify(events.at(-1).state));
+  return { certificate, records };
+}
+
+for (const [pipelineId, custody] of [
+  ["plan-execution", "current"],
+  ["polishing", "current"],
+  ["plan-execution", "unsettled"],
+  ["polishing", "settled"],
+]) {
+  const legacy = custody !== "current";
+  test(`${pipelineId} resume recovers ${legacy ? `version-22 ${custody}` : custody} custody before its pending stop`, async (t) => {
     const fixture = await operatorFixture(t, pipelineId);
     const bootId = "11111111-1111-4111-8111-111111111111";
     const options = {
@@ -53,7 +115,12 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
       processIsAlive: () => true,
       processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
     };
-    const store = createRunStore(options);
+    const store = createRunStore({
+      ...options,
+      onPreparationBoundary({ phase }) {
+        if (phase === "before-removal") throw new Error("Removal interrupted");
+      },
+    });
     const trustedValidation = {
       preflight: async () => {},
       execute: assert.fail,
@@ -107,6 +174,13 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
       },
       { canRelease: () => false },
     );
+    if (custody === "settled") {
+      await store.recordPreparationProcess(lease, authority, null);
+      await assert.rejects(
+        store.settlePreparation(lease),
+        /Removal interrupted/u,
+      );
+    }
     const before = await store.loadRun(run.runId);
     assert.equal(before.preparation.targetBoundary, null);
     await store.requestOperatorStop({
@@ -115,6 +189,12 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
       expectedRevision: before.revision,
       idempotencyKey: "preparation-stop",
     });
+    const issued = legacy
+      ? await writeVersion22Preparation(
+          await store.getRunDirectory(run.runId),
+          run.runId,
+        )
+      : null;
     const replacement = createRunStore({
       ...options,
       processId: 200,
@@ -130,6 +210,8 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
     ).resume({ runId: run.runId, action: null });
     assert.equal(result.run.pipelineState.workflowState, "CANCELED");
     assert.equal(result.run.preparation, null);
+    assert.equal(result.run.schemaVersion, RUN_STATE_SCHEMA_VERSION);
+    assert.deepEqual(result.run.preservationRecords, []);
     assert.deepEqual(result.run.counters, before.counters);
     assert.deepEqual(result.run.pipelineState.trustedValidation, trusted);
     assert.equal(await replacement.runIsLeased(run.runId), false);
@@ -139,6 +221,29 @@ for (const pipelineId of ["plan-execution", "polishing"]) {
         activity?.phase === "preparation" && activity.kind === "settled",
     );
     assert.equal(settled.length, 1);
+    if (legacy) {
+      assert.deepEqual(
+        settled[0].state.preparation.certificate,
+        issued.certificate,
+      );
+      assert.deepEqual(
+        settled[0].state.preparation.settlement.records.slice(
+          0,
+          issued.records.length,
+        ),
+        issued.records,
+      );
+      const cleared = events.find(
+        ({ activity }) =>
+          activity?.phase === "preparation" && activity.kind === "cleared",
+      );
+      const migrated = events.find(
+        ({ activity }) =>
+          activity?.phase === "runtime" && activity.kind === "migrated",
+      );
+      assert.equal(cleared.state.schemaVersion, 22);
+      assert.ok(migrated.revision > cleared.revision);
+    }
     assert.equal(
       settled[0].state.preparation.settlement.records.at(-1).kind,
       "retired",

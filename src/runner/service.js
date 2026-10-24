@@ -1119,7 +1119,7 @@ export function createRunner(options = {}) {
   async function recoverCompatibleRun(
     lease,
     runId,
-    { validatePreparedRun } = {},
+    { validatePreparedRun, onRecoveryStage = () => {} } = {},
   ) {
     const storedRun = await runStore.loadRun(runId);
     let configurationChanged = false;
@@ -1167,6 +1167,17 @@ export function createRunner(options = {}) {
       storedRun.pipelineStateVersion !== prepared.run.pipelineStateVersion;
     let run;
     if (runtimeMigrationRequired || pipelineMigrationRequired) {
+      // Custody binds the issued envelope and original journal prefix. Settle
+      // it under that contract before publishing either kind of migration.
+      if (storedRun.preparation != null) {
+        onRecoveryStage("process-recovery");
+        await runStore.recoverPreparation(lease, (owner, inspect) =>
+          terminateOwnedProcess(owner.pid, inspect, {
+            inspectSessionProcesses,
+          }),
+        );
+        onRecoveryStage("state-recovery");
+      }
       const activity = {
         actor: "runner",
         phase: "runtime",
@@ -1415,7 +1426,9 @@ export function createRunner(options = {}) {
       run: loaded,
       configurationBlocked,
       configurationChanged,
-    } = await recoverCompatibleRun(lease, normalized.runId);
+    } = await recoverCompatibleRun(lease, normalized.runId, {
+      onRecoveryStage,
+    });
     if (configurationBlocked) return loaded;
     let recovered = loaded;
     if (recovered.pause?.reason === "project_configuration_changed") {

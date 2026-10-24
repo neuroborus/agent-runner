@@ -11,6 +11,28 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+The fast state `preservation.test.js` suite owns unfinished-work capture and
+checked restoration through the public state/Git boundaries. Isolated
+repositories cover binary/link/mode/deletion round trips, mixed-index
+preservation, checked file/directory and symlink/directory replacements in both
+directions, empty replacement directories, interrupted capture and restoration,
+cancellation retention, future work after a child commit,
+substitution rejection, destination edits during final blob reads and
+version-22 migration without invented authority. Capture-record substitution
+during prepared-file publication is rejected before replacement. Recovery cases
+include interrupted parent sync after replacement or deletion,
+temporary creation before identity publication and interrupted writes after
+identity publication, with content and inode substitution rejection. Parent
+creation is covered before and after durable identity publication, including a
+failed blob read before temporary preparation. The slow
+`runner-orchestration.slow.test.js` suite covers public Runner resume with
+unsettled and settled version-22 preparation custody before envelope migration
+and pending-stop settlement, without new agent or check work.
+Refinement dispatch and effective-plan acceptance remain inactive. Common
+envelope/journal changes also require the affected durable state, effect,
+stop, migration and MCP workflow suites listed below; focused probes do not
+replace those gates.
+
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical
 disk latency from disposable fixtures without mocking filesystem operations or

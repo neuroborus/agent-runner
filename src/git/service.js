@@ -23,6 +23,7 @@ import {
 import { createGitHandoffService } from "./handoff.js";
 import { createSourceMaterializer } from "./materialization.js";
 import { measureChangesAtRoot } from "./measurement.js";
+import { createGitPreservationService } from "./preservation.js";
 
 export { GitSafetyError };
 
@@ -662,6 +663,13 @@ export function createGitService(options = {}) {
 
   return Object.freeze({
     assertUnchanged,
+    ...createGitPreservationService({
+      contentContext,
+      assertSnapshot,
+      assertUnchanged,
+      reconcileInterrupted,
+      snapshot,
+    }),
     ...commitService,
     ...handoffService,
     contentFingerprint,

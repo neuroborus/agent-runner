@@ -13,7 +13,7 @@ import {
 
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 
-function hashEntries(entries) {
+export function hashEntries(entries) {
   const hash = createHash("sha256");
   for (const entry of [...entries].sort((left, right) =>
     Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)),
@@ -377,34 +377,12 @@ export async function normalizeAllowedPaths(repositoryPath, allowedPaths) {
   );
 }
 
-export async function contentEntry(
-  context,
-  repositoryPath,
+export async function fileContentEntry(
+  absolutePath,
   path,
-  { allowedPaths, missingAllowed, includeContent = false },
+  metadata,
+  { includeContent = false } = {},
 ) {
-  const { runGit } = context;
-  const absolutePath = resolve(repositoryPath, ...path.split("/"));
-  if (
-    !(await contentParentIsSafe(repositoryPath, absolutePath, {
-      missingAllowed,
-    }))
-  ) {
-    return deletedEntry(path);
-  }
-  let metadata;
-  try {
-    metadata = await lstat(absolutePath, { bigint: true });
-  } catch (cause) {
-    if (
-      missingAllowed &&
-      (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")
-    ) {
-      return deletedEntry(path);
-    }
-    throw snapshotRace(cause);
-  }
-
   if (metadata.isFile()) {
     return Object.freeze({
       ...(await hashRegularFile(absolutePath, includeContent)),
@@ -434,6 +412,40 @@ export async function contentEntry(
       throw snapshotRace(cause);
     }
   }
+  return null;
+}
+
+export async function contentEntry(
+  context,
+  repositoryPath,
+  path,
+  { allowedPaths, missingAllowed, includeContent = false },
+) {
+  const { runGit } = context;
+  const absolutePath = resolve(repositoryPath, ...path.split("/"));
+  if (
+    !(await contentParentIsSafe(repositoryPath, absolutePath, {
+      missingAllowed,
+    }))
+  ) {
+    return deletedEntry(path);
+  }
+  let metadata;
+  try {
+    metadata = await lstat(absolutePath, { bigint: true });
+  } catch (cause) {
+    if (
+      missingAllowed &&
+      (cause?.code === "ENOENT" || cause?.code === "ENOTDIR")
+    ) {
+      return deletedEntry(path);
+    }
+    throw snapshotRace(cause);
+  }
+  const file = await fileContentEntry(absolutePath, path, metadata, {
+    includeContent,
+  });
+  if (file !== null) return file;
   if (metadata.isDirectory()) {
     let gitlinkRoot;
     try {

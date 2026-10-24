@@ -489,6 +489,22 @@ export function createLeaseManager({
   }
 
   return Object.freeze({
+    async holdCurrent(lease, operation) {
+      const metadata = activeLeases.get(lease);
+      if (metadata === undefined || metadata.released || metadata.busy)
+        throw new RunStoreError(`A current ${activeLeaseName} is required.`, {
+          code: invalidLeaseCode,
+        });
+      metadata.busy = true;
+      try {
+        await assertLeaseFile(metadata);
+        const result = await operation(metadata);
+        await assertLeaseFile(metadata);
+        return result;
+      } finally {
+        metadata.busy = false;
+      }
+    },
     async withCurrentOwner(lease, operation) {
       const metadata = activeLeases.get(lease);
       if (metadata === undefined || metadata.released)

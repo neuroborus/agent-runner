@@ -18,7 +18,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 22;
+export const RUN_STATE_SCHEMA_VERSION = 23;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -55,6 +55,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   19,
   20,
   21,
+  22,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -91,6 +92,7 @@ const STATE_FIELDS = new Set([
   "executionProcess",
   "executionResource",
   "preparation",
+  "preservationRecords",
   "stopRequest",
   "pipelineState",
   "createdAt",
@@ -173,6 +175,45 @@ export class RunStoreError extends Error {
 
 function fail(message, code = "ERR_INVALID_RUN_STATE") {
   throw new RunStoreError(message, { code });
+}
+
+export function preservationError(cause) {
+  return new RunStoreError(
+    "Durable preservation ownership or content is invalid.",
+    {
+      cause,
+      code: "ERR_INVALID_PRESERVATION",
+    },
+  );
+}
+
+function normalizePreservationRecords(value, schemaVersion) {
+  if (schemaVersion < 23 && value === undefined) return [];
+  if (
+    !Array.isArray(value) ||
+    value.length > 1024 ||
+    (schemaVersion < 23 && value.length !== 0)
+  )
+    throw preservationError();
+  const ids = new Set();
+  return value.map((record) => {
+    if (
+      !record ||
+      Object.keys(record).sort().join() !== "fileId,hash,id,identity" ||
+      !/^[a-f0-9]{64}$/u.test(record.hash) ||
+      !record.identity ||
+      Object.keys(record.identity).sort().join() !== "device,inode" ||
+      ![record.identity.device, record.identity.inode].every(
+        (part) => typeof part === "string" && /^\d+$/u.test(part),
+      )
+    )
+      throw preservationError();
+    assertRunId(record.id);
+    assertRunId(record.fileId);
+    if (ids.has(record.id)) throw preservationError();
+    ids.add(record.id);
+    return structuredClone(record);
+  });
 }
 
 function isRecord(value) {
@@ -1410,6 +1451,10 @@ export function normalizeRunState(value, expectedRunId) {
       value.schemaVersion,
     ),
     preparation: normalizePreparation(value.preparation, value),
+    preservationRecords: normalizePreservationRecords(
+      value.preservationRecords,
+      value.schemaVersion,
+    ),
     stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,

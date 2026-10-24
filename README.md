@@ -1333,6 +1333,11 @@ CLI owns the common `--clarify` lifecycle option. Each workspace owns its
 explicit JavaScript workflow. The runner provides state, events, agents, and
 Git services; pipeline workspaces own mode and workflow policy.
 
+The Git/state boundaries also provide inactive unfinished-work preservation
+primitives. They retain verified bytes outside the repository and transient
+validation storage; they do not yet activate plan refinement or add a CLI
+command. See the [architecture contract](docs/ARCHITECTURE.md#root-runner-ownership).
+
 ## Repository Layout
 
 ```text
@@ -1374,6 +1379,7 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── content.js
 │   │   ├── handoff.js
 │   │   ├── index.js
+│   │   ├── preservation.js
 │   │   └── service.js
 │   ├── guidance/
 │   │   ├── content.js
@@ -1399,6 +1405,8 @@ Git services; pipeline workspaces own mode and workflow policy.
 │   │   ├── index.js
 │   │   ├── journal.js
 │   │   ├── lease.js
+│   │   ├── preservation-contract.js
+│   │   ├── preservation.js
 │   │   ├── service.js
 │   │   └── validation.js
 │   └── trusted-validation/

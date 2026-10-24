@@ -77,6 +77,53 @@ separately in `gitlinkPaths`. Content drift rejects the measurement. This
 capability does not stage, invoke agents or validation, assess thresholds, or
 change workflow eligibility.
 
+Unfinished-work preservation is a separate Git/state capability with no active
+refinement routing. `capturePreservation` requires run and worktree leases at a
+reconciled checkpoint. The state journal publishes an intent bound to the exact
+run, revision and inspected snapshot before storage allocation. Git's
+`captureChanges` reuses guarded source inspection and immutable baseline reads
+to capture baseline/current bytes, deletions, executable modes and unfollowed
+link targets for changed paths. Payloads and manifests remain in confined
+external run storage under reserved `.preservation-*` names. State reads back
+every blob and pins directory, manifest and blob identities before publishing
+capture completion. Interrupted attempts remain retained and are never adopted
+as verified payloads.
+
+`restorePreservation` journals the exact authorized paths, accepted current
+snapshot, restoration plan and identities of prepared files and their parents
+before destructive effects. Git's `prepareRestoration` and `applyRestoration`
+require selected paths to match their saved baseline or current content and their
+current HEAD baseline to match the saved baseline. Later child commits on other
+paths remain intact. Recovery verifies unrelated content, index, history, refs,
+remotes, identity, repository/control identities and surviving parent directories,
+including those created during restoration. Confined parent descriptors,
+exclusive temporaries and atomic replacement prevent following aliases or
+adopting substituted writes. Explicitly selected file or link ancestors hide
+descendants without following links and are removed before descendants are
+created. Unselected aliases remain forbidden. Selected directory identities are
+pinned even when they have no saved children. Only empty directories may be
+removed for checked file/directory or link/directory replacements; uninspected
+children survive.
+Each restoration blob read rechecks the journal-bound capture record's identity
+and hash, ownership of the capture directory and stable manifest evidence,
+including after prepared-file publication and before replacement. Completion
+revalidates that capture authority. Final saved-blob reads precede the last
+repository/control, ancestor and destination checks; destination content is
+inspected through its pinned parent immediately before deletion or replacement.
+Prepared and applied writes reconcile without replaying completed operations.
+Recovery syncs the verified surviving parent before accepting an already-applied
+write, completing durability even when interruption followed rename or unlink.
+Temporary creation has its own journaled intent and parent bindings. Before
+identity publication, recovery accepts only an empty regular file or the exact
+saved link target; regular bytes are written only after identity publication.
+Missing parents have a separate creation intent and a durable identity binding
+before descendant work. Recovery rejects an existing parent whose creation
+was interrupted before identity publication rather than adopting it.
+Interrupted writes resume only on that inode with a saved-byte prefix. A ready
+record binds the complete bytes and mode before atomic replacement.
+Cancellation and transient `executionResource` cleanup never dispose of saved
+work; no deletion API is exposed.
+
 `inspectHead` reads the current commit object ID and that immutable object's
 subject, including unborn HEAD as `{head: null, subject: null}`. Plan execution
 uses this observation before writable entry and ahead of generic resume or
@@ -1037,6 +1084,19 @@ processes first, then performs the pipeline's ordinary interrupted-turn Git/inpu
 reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
+
+Common envelope version 23 adds `preservationRecords`: at most 1,024 compact
+references to immutable external capture/restoration records. Each reference
+binds an operation UUID to an exact record UUID, SHA-256 and file identity.
+Only state-owned preservation transitions may append or replace one reference;
+they preserve pipeline state and all other authority. Records, manifests and
+payload bytes stay outside bounded state JSON. Legacy absence normalizes to an
+empty list, and the ordinary leased runtime migration persists that absence
+without inventing preservation authority or rewriting historical events.
+Version-22 preparation recovery settles and clears custody under its issued
+envelope before the ordinary migration; its certificate and custody history
+remain unchanged.
+Execution's version-29 eligibility remains disabled.
 
 Common run-envelope version 18 adds nullable `observations`. Legacy absence
 normalizes to `null` on lock-free reads; the existing leased runtime migration
@@ -3609,7 +3669,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 22 (`1:22`); legacy runs require an explicit leased migration publishing
+version 23 (`1:23`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.

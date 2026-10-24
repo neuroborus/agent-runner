@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-10-24
 
+- **Unfinished work has durable authority independent of validation scratch.**
+  State journals compact references to immutable preservation records before
+  Git can remove authorized paths. Verified manifests retain baseline/current
+  bytes, modes, deletions and unfollowed links externally. Checked restoration
+  survives interruption and later child commits while rejecting content,
+  ancestor, index, control or storage substitution. Cancellation cannot dispose
+  of saved work. Capture, restoration authority and interrupted-write recovery
+  form one contract: removal is unsafe without all three. Common envelope
+  version 23 migrates legacy absence to empty authority; production refinement
+  remains inactive until reviewed revisions and replacement execution can
+  consume these primitives together.
+
 - **Preparation registration is independent of historical publication.** A
   canonical launch reservation authorizes a bounded state-owned custody log;
   attachment and stop admission share a short gate within the unchanged deadline.

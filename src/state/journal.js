@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { assertInactivityContinuity } from "./inactivity.js";
 import { assertObservationContinuity } from "./observations.js";
+import { assertPreservationContinuity } from "./preservation-contract.js";
 import { assertAvailabilityContinuity } from "./availability.js";
 import {
   observeJournalDirectory,
@@ -75,6 +76,7 @@ const TRANSITION_STATE_FIELDS = [
   "executionProcess",
   "executionResource",
   "preparation",
+  "preservationRecords",
   "stopRequest",
   "pipelineState",
 ];
@@ -142,6 +144,7 @@ function normalizeEvent(value, runId, lineNumber) {
         19,
         20,
         21,
+        22,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -207,10 +210,11 @@ function assertInitialEvent(event) {
     event.state.inactivityRecovery !== null ||
     event.state.availabilityRetry !== null ||
     event.state.observations !== null ||
-    event.state.preparation != null
+    event.state.preparation != null ||
+    event.state.preservationRecords?.length > 0
   ) {
     throw new RunStoreError(
-      "Initial run cannot contain recovery, observations, or preparation.",
+      "Initial run cannot contain recovery, observations, preparation, or preservation.",
       {
         code: "ERR_INVALID_EVENT_LOG",
       },
@@ -230,8 +234,9 @@ function assertEventContinuity(
     assertAvailabilityContinuity(previousState, state);
     assertInactivityContinuity(previousState, state, event.activity);
     assertObservationContinuity(previousState, state);
+    assertPreservationContinuity(previousState, state, event.activity);
   } catch {
-    throw new RunStoreError("Provider recovery history is inconsistent.", {
+    throw new RunStoreError("Run recovery history is inconsistent.", {
       code: "ERR_INVALID_EVENT_LOG",
     });
   }

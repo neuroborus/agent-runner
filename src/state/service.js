@@ -42,6 +42,7 @@ import {
   observationActivity,
 } from "./observations.js";
 import { inspectProcessOwner, readProcessIdentity } from "./process-owner.js";
+import { createPreservationStore } from "./preservation.js";
 import { createRecoveryFailureStore } from "./recovery-failures.js";
 import { createStopService } from "./stops.js";
 import {
@@ -256,6 +257,7 @@ export function createRunStore({
   processIdentity = readProcessIdentity,
   onLeasePublicationBoundary = async () => {},
   onRecoveryFailurePublicationBoundary = async () => {},
+  onPreservationBoundary = async () => {},
   onTransitionBoundary = async () => {},
   onPreparationBoundary = async () => {},
   resolveStopBoundary = null,
@@ -275,6 +277,7 @@ export function createRunStore({
     typeof processIdentity !== "function" ||
     typeof onLeasePublicationBoundary !== "function" ||
     typeof onRecoveryFailurePublicationBoundary !== "function" ||
+    typeof onPreservationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
     typeof onPreparationBoundary !== "function" ||
     typeof hostName !== "string" ||
@@ -407,6 +410,65 @@ export function createRunStore({
     processId,
     processIdentity,
     onPublicationBoundary: onRecoveryFailurePublicationBoundary,
+  });
+  const preservation = createPreservationStore({
+    getRunDirectory,
+    loadRun,
+    onBoundary: onPreservationBoundary,
+    withLease: (lease, worktreeLease, operation) =>
+      runLeases.runExclusive(lease, ({ record, runDirectory }) =>
+        worktreeLeases.holdCurrent(worktreeLease, async (worktree) => {
+          let snapshot = await loadSnapshot(runDirectory, record.runId);
+          const state = snapshot.state;
+          if (
+            worktree.record.runId !== state.runId ||
+            worktree.runDirectory !==
+              (await getWorktreeLeaseDirectory(state.projectPath))
+          )
+            throw new RunStoreError(
+              "Preservation requires the run's worktree lease.",
+              { code: "ERR_INVALID_PRESERVATION" },
+            );
+          assertRunCanAdvance(state, resolveStopBoundary);
+          if (
+            state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
+            state.activeTurn !== null ||
+            state.executionProcess !== null ||
+            state.executionResource !== null ||
+            state.preparation != null
+          )
+            throw new RunStoreError(
+              "Preservation requires a migrated, reconciled checkpoint.",
+              { code: "ERR_INVALID_PRESERVATION" },
+            );
+          return operation({
+            runDirectory,
+            state,
+            async publish(reference) {
+              const records = [...snapshot.state.preservationRecords];
+              const index = records.findIndex(({ id }) => id === reference.id);
+              if (index === -1) records.push(reference);
+              else records[index] = reference;
+              const next = normalizeRunState(
+                {
+                  ...snapshot.state,
+                  preservationRecords: records,
+                  revision: snapshot.state.revision + 1,
+                  updatedAt: timestamp(snapshot.state.updatedAt),
+                },
+                record.runId,
+              );
+              await journal.appendTransition(runDirectory, next, snapshot, {
+                actor: "runner",
+                phase: "preservation",
+                kind: "preservation-recorded",
+                message: "Durable unfinished-work authority recorded.",
+              });
+              snapshot = await loadSnapshot(runDirectory, record.runId);
+            },
+          });
+        }),
+      ),
   });
 
   async function inspectRoot() {
@@ -637,6 +699,7 @@ export function createRunStore({
           executionProcess: null,
           executionResource: null,
           preparation: null,
+          preservationRecords: [],
           stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
@@ -1859,6 +1922,9 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    capturePreservation: preservation.capture,
+    restorePreservation: preservation.restore,
+    readPreservation: preservation.read,
     reservePreparation: preparation.reserve,
     recordPreparationProcess: preparation.record,
     settlePreparation: preparation.settle,

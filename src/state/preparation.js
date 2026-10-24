@@ -19,7 +19,6 @@ import {
   normalizePreparationCustody,
   preparationHeader,
   normalizeRunState,
-  RUNTIME_COMPATIBILITY,
   RUN_STATE_SCHEMA_VERSION,
   RunStoreError,
 } from "./validation.js";
@@ -144,8 +143,8 @@ export function createPreparationService({
     const next = normalizeRunState(
       {
         ...snapshot.state,
-        schemaVersion: RUN_STATE_SCHEMA_VERSION,
-        runtimeCompatibility: RUNTIME_COMPATIBILITY,
+        // Recovery retains the issued envelope until custody is cleared. The
+        // ordinary leased migration can then upgrade without changing authority.
         preparation,
         revision: snapshot.state.revision + 1,
         updatedAt: timestamp(snapshot.state.updatedAt),

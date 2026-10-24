@@ -60,6 +60,17 @@ staged and unstaged diffs, excludes ignored untracked files, and reports binary
 changes separately. Link targets are never followed to obtain line counts.
 Measurement grants no staging, commit, refinement, or acceptance authority.
 
+The inactive preservation foundation saves unfinished changes in verified
+external state storage before any checked removal. Both run and worktree
+ownership are required. Raw bytes, deletions, executable modes and unfollowed
+link targets remain recoverable through verified manifests and journaled
+operation intents. Restoration changes only authorized paths whose saved
+baseline remains valid; it rejects unrelated content, index, ancestor, control
+or storage substitution. Saved work survives child commits, interruption,
+cancellation and disconnect independently of transient resource cleanup.
+Preservation grants no revision, commit or acceptance authority and never stages,
+stashes, resets or clones a repository.
+
 ## Inputs, artifacts, and state
 
 Task, plan, context, and clarification inputs are hashed and revalidated before

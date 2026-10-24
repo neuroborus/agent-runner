@@ -104,7 +104,7 @@ export async function openRegularFile(filePath, flags, mode) {
   );
 }
 
-async function syncDirectory(directoryPath) {
+export async function syncDirectory(directoryPath) {
   let handle;
   try {
     handle = await open(directoryPath, "r");
@@ -502,6 +502,7 @@ export async function resolveRunArtifactPath(runDirectory, relativePath) {
     RESERVED_RUN_PATHS.has(topLevelPath.toLowerCase()) ||
     /^events-[0-9]+\.jsonl$/iu.test(topLevelPath) ||
     topLevelPath.toLowerCase().startsWith(".recovery-failure-") ||
+    topLevelPath.toLowerCase().startsWith(".preservation-") ||
     topLevelPath.toLowerCase().startsWith(".mutation-") ||
     topLevelPath.toLowerCase().startsWith(".custody-")
   ) {

@@ -2376,6 +2376,32 @@ effective revisions can safely execute replacements. Intermediate and legacy
 runs cannot acquire eligibility by resuming; changing these settings does not
 activate refinement.
 
+### Durable preservation foundation
+
+The public state/Git capabilities provide inactive preservation primitives for
+unfinished commit work. They do not change version-29 eligibility, invoke an
+assessment, accept a revision or authorize a commit. Production refinement
+remains inactive pending reviewed revisions and replacement execution.
+
+Capture requires both run and worktree leases at a reconciled checkpoint. A
+write-ahead intent binds the exact run, revision and inspected snapshot before
+storage allocation. Verified manifests retain changed paths against the
+immutable baseline, including binary bytes, deletions, executable modes and
+link targets represented as ordinary blobs. Large content remains outside
+bounded state JSON and is never treated as transient validation storage.
+
+Restoration requires a journaled operation and verified saved ownership before
+removal. Only explicitly authorized paths may change, and their current HEAD
+baseline must still match the saved baseline. Child commits outside those paths
+remain intact. Recovery accepts only original or intended content, verifies
+unrelated paths and unchanged index/Git controls, and reconciles prepared atomic
+replacements by identity. Unsafe aliases, substituted ancestors/storage,
+unproved temporaries and external drift cannot authorize overwrites. Interrupted
+capture/restoration, cancellation and disconnect retain saved work; no automatic
+disposal, staging, stash, reset or second clone is involved. Common envelope
+version 23 journals compact immutable-record references with an explicit empty
+legacy migration; the pipeline state version and workflow remain unchanged.
+
 ### 13.2 Candidate convergence and finalization
 
 Semantic candidate convergence precedes the terminal gate. In independent

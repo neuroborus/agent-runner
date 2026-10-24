@@ -67,6 +67,10 @@ contract.
 - Never push, mutate a remote ref, change `origin` or another remote's configuration, or write through a hosting-service API or CLI.
 - Never add a `Co-authored-by` trailer or change Git author/committer identity on the user's behalf.
 - Preserve unrelated user changes in a dirty worktree.
+- Keep unfinished-work preservation in verified external state storage,
+  independent of transient execution resources. Restore only authorized paths
+  after journaled intent, verified bytes and unchanged Git/control ownership;
+  cancellation never disposes of preserved work.
 - Fix validation failures that belong to the current change before handoff, then rerun the affected checks.
 
 ## Mandatory Safety Boundaries
@@ -214,9 +218,9 @@ All pipelines additionally require:
 | `src/runner/index.js`             | Public runner-orchestration capability boundary                      |
 | `src/runner/`                     | Private input, role/session, migration, and orchestration modules    |
 | `src/state/index.js`              | Public run-store capability boundary                                 |
-| `src/state/`                      | Private service, files, journals, actions, leases, and validation    |
+| `src/state/`                      | Private storage, journals, actions, leases, preservation, validation |
 | `src/git/index.js`                | Public Git-safety capability boundary                                |
-| `src/git/`                        | Private commands, content, measurement, commits, and handoffs        |
+| `src/git/`                        | Private commands, content, measurement, preservation, and effects    |
 | `src/guidance/index.js`           | Public operator-guidance capability boundary                         |
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates   |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
