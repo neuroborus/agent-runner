@@ -110,6 +110,19 @@ root runtime and capability tests; private service and execution modules keep
 snapshot validation, exact command vectors, sandboxing, bounded evidence, and
 repository mutation guards within the capability.
 
+Execution's private `commit-size-assessment.js` owns safe threshold arithmetic,
+fingerprint-bound atomic/split decisions and a three-attempt original-step
+lineage ledger. Read-only assessment uses the continuing Worker in lazy mode
+and a distinct configured Reviewer checkpoint in independent/combined modes,
+before further convergence. Only scope/dependency expansion or more than one
+additional preferred target renews assessment of an atomic exception. Proposal
+and assessment allowances survive reconstruction and future replacement steps;
+they grant no execution approval or effect authority. State version 29 persists
+the resolved size settings and disabled eligibility, with a default-only
+version-28 migration preserving existing progress. Production dispatch remains
+inactive pending preservation and effective revisions. See the
+[owning contract](../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
+
 The configuration capability lives under `src/config/` behind its public
 `index.js`. Strict runner and project parsing, confined file loading, trusted
 profile interpretation, and precedence-based resolution remain private,
@@ -463,6 +476,12 @@ Pipeline descriptors validate their own settings and supply built-in defaults.
 The root loader owns only the versioned envelope, strict field validation, and
 resolution precedence; it does not duplicate pipeline-specific role or setting
 lists.
+
+Descriptors may additionally validate relationships among resolved settings;
+configuration applies this hook to complete root settings and merged project
+settings before role resolution. Execution uses it to reject unsafe multiplication
+of its positive-safe-integer `preferredCommitLineLimit` (900) and
+`commitSizeAssessmentMultiplier` (3). Both values remain frozen on resume.
 
 Plan authoring additionally owns the positive-safe-integer
 `preferredCommitLineLimit`, default 900. Root configuration and a safe project

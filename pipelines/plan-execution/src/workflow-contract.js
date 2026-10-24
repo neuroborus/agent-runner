@@ -8,6 +8,12 @@ import {
 } from "@agent-runner/commit-plan";
 
 import { validImplementationEvidence } from "./implementation-evidence.js";
+import {
+  assertCommitSizeAssessment,
+  COMMIT_SIZE_DEFAULTS,
+  commitSizeThreshold,
+  createCommitSizeAssessment,
+} from "./commit-size-assessment.js";
 import { validStepAssessment } from "./plan-position.js";
 import {
   validCapabilityReports,
@@ -58,6 +64,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "artifactRoot",
   "preflightComplete",
   "settings",
+  "commitSizeAssessment",
   "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
@@ -333,6 +340,8 @@ const TRUSTED_VALIDATION_FIELDS = Object.freeze([
 const MAX_TRUSTED_COMMAND_TIMEOUT_MS = 2_147_483_647;
 const TRUSTED_ALIAS_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const SETTINGS_FIELDS = Object.freeze([
+  "preferredCommitLineLimit",
+  "commitSizeAssessmentMultiplier",
   "finalization",
   "maxFixRoundsPerStep",
   "maxDisputesPerFinding",
@@ -4117,6 +4126,11 @@ export function normalizePipelineState(value) {
       value = { ...value, settings };
     }
   }
+  try {
+    assertCommitSizeAssessment(value.commitSizeAssessment, value.settings);
+  } catch {
+    throw workflowError("Invalid persisted commit-size assessment.");
+  }
   const finalizationGuidance = normalizeFinalizationGuidanceDecision(
     value.finalizationGuidance,
   );
@@ -5360,6 +5374,7 @@ export function createPlanExecutionState({
       planContextVersion: 1,
       stepImplementation: null,
       implementationEvidenceLegacy: false,
+      commitSizeAssessment: createCommitSizeAssessment(),
       settings:
         settings === null
           ? null
@@ -5526,7 +5541,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 28 ||
+    run.pipelineStateVersion !== 29 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5969,6 +5984,11 @@ export function assertSettings(settings) {
       throw workflowError(`Plan-execution setting ${field} is invalid.`);
     }
   }
+  try {
+    commitSizeThreshold(settings);
+  } catch {
+    throw workflowError("Plan-execution commit-size threshold is invalid.");
+  }
 }
 
 export function isTrustedCheckSelection(value) {
@@ -6006,6 +6026,14 @@ export function isFinalizationPolicy(value) {
 
 function normalizeSettings(settings) {
   let normalized = settings;
+  if (
+    isRecord(normalized) &&
+    Object.keys(COMMIT_SIZE_DEFAULTS).every(
+      (field) => !Object.hasOwn(normalized, field),
+    )
+  ) {
+    normalized = Object.freeze({ ...COMMIT_SIZE_DEFAULTS, ...normalized });
+  }
   if (
     isRecord(normalized) &&
     !Object.hasOwn(normalized, "finalization") &&

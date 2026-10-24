@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-24
 
+- **Execution size assessment is prepared without activating refinement.**
+  Descriptor-owned target/multiplier settings default to 900/3, reject unsafe
+  arithmetic and persist on resume. A private read-only policy binds atomic
+  reasons or ordered proposals to frozen inputs, scope, dependencies and measured
+  content. Three reservations span each original-step lineage; restart reuses
+  pending work and unchanged atomic exceptions do not repeat. State version 29
+  leaves creation and migration ineligible, keeping production dispatch inactive
+  until preservation and reviewed revisions can protect unfinished work.
+
 - **Commit size measures final content independently of staging.** The public
   Git service binds text additions plus deletions to the verified step baseline
   and inspected candidate fingerprint, including new non-ignored files once.

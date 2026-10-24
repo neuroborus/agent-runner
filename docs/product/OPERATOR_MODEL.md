@@ -13,6 +13,13 @@ validate, rewrite, discard, or commit resumable work manually.
 
 ## Configuration
 
+Execution's descriptor-owned `preferredCommitLineLimit` and
+`commitSizeAssessmentMultiplier` default to 900 and 3, resolve independently
+through root then project configuration and persist for resume. Positive safe
+integers must produce a safe-integer product. These prepared assessment settings
+do not enable splitting: production routing and run eligibility remain inactive.
+See the [execution contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
+
 Runner-root configuration is the only source of trusted profile
 implementations. Root and safe ignored project configuration may define exact
 trusted command vectors. Catalogs merge root then project, deduplicate identical

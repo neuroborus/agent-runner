@@ -12,6 +12,7 @@ import { createTrustedValidationSnapshot } from "../trusted-validation/index.js"
 import {
   assertBackend,
   assertRecord,
+  assertPipelineSettings,
   assertSelection,
   ConfigurationError,
   CURRENT,
@@ -156,6 +157,7 @@ export function resolvePipelineConfiguration(
     ...projectSettings,
     ...normalizedSettingOverrides,
   });
+  assertPipelineSettings(pipeline, settings, `pipelines.${pipelineId}`);
   const selectedRoles = pipeline.resolveActiveRoles(settings);
   if (
     !Array.isArray(selectedRoles) ||

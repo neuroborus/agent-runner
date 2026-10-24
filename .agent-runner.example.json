@@ -59,6 +59,8 @@
       }
     },
     "plan-execution": {
+      "preferredCommitLineLimit": 900,
+      "commitSizeAssessmentMultiplier": 3,
       "mode": "independent",
       "finalization": "auto",
       "maxFixRoundsPerStep": 20,

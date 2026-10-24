@@ -50,6 +50,16 @@ and correction accounting.
 
 ## Bootstrap inventory
 
+Execution has a prepared, inactive
+[commit-size assessment contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
+At reconciled boundaries its policy distinguishes an oversized atomic exception
+from a proposed cohesive split, bound to frozen scope, dependencies, inspected
+content and measurement. A proposal is neither a reviewed effective revision nor
+candidate approval. Assessment is read-only, mode-specific and bounded across
+the original-step lineage, with no budget renewal on reconstruction. Existing
+execution routing, finalization and commit gates remain unchanged while
+eligibility is disabled.
+
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
 it. Independent and combined modes combine separately accepted Worker and Reviewer

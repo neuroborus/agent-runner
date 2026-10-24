@@ -273,6 +273,7 @@ function normalizePipeline(
       : resolvedValue;
   }
 
+  if (applyDefaults) assertPipelineSettings(pipeline, normalized, path);
   const inputRoles = input.roles === undefined ? {} : input.roles;
   assertRecord(inputRoles, `${path}.roles`);
   const unknownRole = Object.keys(inputRoles).find(
@@ -294,6 +295,14 @@ function normalizePipeline(
   );
 
   return Object.freeze(normalized);
+}
+
+export function assertPipelineSettings(pipeline, settings, path) {
+  try {
+    pipeline.validateSettings?.(settings);
+  } catch (cause) {
+    throw new ConfigurationError(`${path}: ${cause.message}`, { cause });
+  }
 }
 
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
@@ -624,6 +633,14 @@ export function normalizeProjectConfiguration(
   for (const pipeline of pipelines) {
     const settings = normalized.pipelines[pipeline.id];
     if (settings !== undefined) {
+      assertPipelineSettings(
+        pipeline,
+        {
+          ...runnerConfiguration.pipelines[pipeline.id],
+          ...settings,
+        },
+        `${rootPath}.pipelines.${pipeline.id}`,
+      );
       assertKnownTrustedSelection(
         settings,
         trustedCommands,

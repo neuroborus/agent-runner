@@ -1,6 +1,11 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import {
+  COMMIT_SIZE_DEFAULTS,
+  commitSizeThreshold,
+  createCommitSizeAssessment,
+} from "./commit-size-assessment.js";
 import { assertExecutionRun as validateRun } from "./bootstrap-progress.js";
 import {
   deriveValidationSchedule,
@@ -115,6 +120,12 @@ const ROLE_ACCESS = Object.freeze({
   arbiter: Object.freeze(["read-only"]),
 });
 const SETTINGS = Object.freeze({
+  preferredCommitLineLimit: positiveIntegerSetting(
+    COMMIT_SIZE_DEFAULTS.preferredCommitLineLimit,
+  ),
+  commitSizeAssessmentMultiplier: positiveIntegerSetting(
+    COMMIT_SIZE_DEFAULTS.commitSizeAssessmentMultiplier,
+  ),
   finalization: Object.freeze({
     defaultValue: DEFAULT_FINALIZATION_POLICY,
     errorMessage:
@@ -1389,11 +1400,26 @@ export function migratePlanExecutionStateV27(run) {
   });
 }
 
+export function migratePlanExecutionStateV28(run) {
+  const current = run.pipelineState;
+  return Object.freeze({
+    ...current,
+    settings:
+      current.settings === null
+        ? null
+        : Object.freeze({
+            ...COMMIT_SIZE_DEFAULTS,
+            ...current.settings,
+          }),
+    commitSizeAssessment: createCommitSizeAssessment(),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 28,
+  stateVersion: 29,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1427,11 +1453,13 @@ export const planExecutionPipeline = Object.freeze({
     25: migratePlanExecutionStateV25,
     26: migratePlanExecutionStateV26,
     27: migratePlanExecutionStateV27,
+    28: migratePlanExecutionStateV28,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
   resolveActiveRoles,
   settings: SETTINGS,
+  validateSettings: commitSizeThreshold,
   taskInputs: TASK_INPUTS,
   runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
   requiredRunOptions: Object.freeze(["project", "task"]),

@@ -114,6 +114,8 @@ test("role resolution applies CLI, role, runner, and native defaults", () => {
     },
   });
   assert.deepEqual(resolved.settings, {
+    preferredCommitLineLimit: 900,
+    commitSizeAssessmentMultiplier: 3,
     finalization: "auto",
     maxFixRoundsPerStep: 8,
     maxDisputesPerFinding: 5,
@@ -353,20 +355,78 @@ test("preferred commit line targets validate and resolve through configuration p
       /preferredCommitLineLimit/u,
     );
   }
+});
+
+test("execution size settings resolve independently and reject unsafe threshold arithmetic", () => {
+  const root = (settings = {}) => ({
+    schemaVersion: 1,
+    defaultBackend: "codex",
+    pipelines: { "plan-execution": settings },
+  });
+  const resolve = (runner, project = null) =>
+    resolvePipelineConfiguration(
+      "plan-execution",
+      runner,
+      {},
+      {},
+      null,
+      project,
+    ).settings;
+  assert.equal(resolve(root()).preferredCommitLineLimit, 900);
+  assert.equal(resolve(root()).commitSizeAssessmentMultiplier, 3);
+  const resolved = resolve(
+    root({ preferredCommitLineLimit: 800, commitSizeAssessmentMultiplier: 4 }),
+    root({ preferredCommitLineLimit: 700 }),
+  );
+  assert.equal(resolved.preferredCommitLineLimit, 700);
+  assert.equal(resolved.commitSizeAssessmentMultiplier, 4);
+  for (const field of [
+    "preferredCommitLineLimit",
+    "commitSizeAssessmentMultiplier",
+  ]) {
+    for (const value of [
+      0,
+      -1,
+      1.5,
+      "900",
+      true,
+      null,
+      Number.MAX_SAFE_INTEGER + 1,
+    ]) {
+      assert.throws(
+        () => resolve(root({ [field]: value })),
+        new RegExp(field, "u"),
+      );
+      assert.throws(
+        () => resolve(root(), root({ [field]: value })),
+        new RegExp(field, "u"),
+      );
+    }
+  }
+  const largest = Number.MAX_SAFE_INTEGER;
+  assert.equal(
+    resolve(
+      root({
+        preferredCommitLineLimit: largest,
+        commitSizeAssessmentMultiplier: 1,
+      }),
+    ).preferredCommitLineLimit,
+    largest,
+  );
+  assert.throws(
+    () => resolve(root({ preferredCommitLineLimit: largest })),
+    /threshold/u,
+  );
   assert.throws(
     () =>
-      resolvePipelineConfiguration(
-        "plan-execution",
-        configuration(700),
-        {},
-        {},
-        null,
-        {
-          schemaVersion: 1,
-          pipelines: { "plan-execution": { preferredCommitLineLimit: 900 } },
-        },
+      resolve(
+        root({
+          preferredCommitLineLimit: 1,
+          commitSizeAssessmentMultiplier: largest,
+        }),
+        root({ preferredCommitLineLimit: 2 }),
       ),
-    /preferredCommitLineLimit/u,
+    /threshold/u,
   );
 });
 

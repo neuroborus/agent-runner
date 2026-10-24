@@ -253,26 +253,28 @@ explicit and shows `claude-primary` and `claude-secondary` aliases.
 
 Pipeline settings use these defaults:
 
-| Pipeline         | Setting                    |       Default |
-| ---------------- | -------------------------- | ------------: |
-| `plan-authoring` | `mode`                     | `independent` |
-| `plan-authoring` | `maxRevisionRounds`        |            20 |
-| `plan-authoring` | `preferredCommitLineLimit` |           900 |
-| `plan-authoring` | `stagnationWindowRounds`   |             3 |
-| `plan-execution` | `mode`                     | `independent` |
-| `plan-execution` | `maxFixRoundsPerStep`      |            20 |
-| `plan-execution` | `finalization`             |        `auto` |
-| `plan-execution` | `maxDisputesPerFinding`    |             5 |
-| `plan-execution` | `maxSameFindingRounds`     |             5 |
-| `plan-execution` | `stagnationWindowRounds`   |             3 |
-| `plan-execution` | `trustedChecks`            |          `[]` |
-| `polishing`      | `mode`                     | `independent` |
-| `polishing`      | `maxFixRounds`             |            20 |
-| `polishing`      | `finalization`             |        `auto` |
-| `polishing`      | `maxDisputesPerFinding`    |             5 |
-| `polishing`      | `maxSameFindingRounds`     |             5 |
-| `polishing`      | `stagnationWindowRounds`   |             3 |
-| `polishing`      | `trustedChecks`            |          `[]` |
+| Pipeline         | Setting                          |       Default |
+| ---------------- | -------------------------------- | ------------: |
+| `plan-authoring` | `mode`                           | `independent` |
+| `plan-authoring` | `maxRevisionRounds`              |            20 |
+| `plan-authoring` | `preferredCommitLineLimit`       |           900 |
+| `plan-authoring` | `stagnationWindowRounds`         |             3 |
+| `plan-execution` | `mode`                           | `independent` |
+| `plan-execution` | `preferredCommitLineLimit`       |           900 |
+| `plan-execution` | `commitSizeAssessmentMultiplier` |             3 |
+| `plan-execution` | `maxFixRoundsPerStep`            |            20 |
+| `plan-execution` | `finalization`                   |        `auto` |
+| `plan-execution` | `maxDisputesPerFinding`          |             5 |
+| `plan-execution` | `maxSameFindingRounds`           |             5 |
+| `plan-execution` | `stagnationWindowRounds`         |             3 |
+| `plan-execution` | `trustedChecks`                  |          `[]` |
+| `polishing`      | `mode`                           | `independent` |
+| `polishing`      | `maxFixRounds`                   |            20 |
+| `polishing`      | `finalization`                   |        `auto` |
+| `polishing`      | `maxDisputesPerFinding`          |             5 |
+| `polishing`      | `maxSameFindingRounds`           |             5 |
+| `polishing`      | `stagnationWindowRounds`         |             3 |
+| `polishing`      | `trustedChecks`                  |          `[]` |
 
 `mode` accepts `independent`, `lazy`, and `combined` in every pipeline. A missing value
 resolves to `independent`. The tracked [example](.agent-runner.example.json) selects
@@ -331,6 +333,16 @@ safely. This heuristic changes neither the plan format nor execution validation.
 The resolved value is persisted and reused on resume; legacy runs receive 900.
 `agent-run pipelines` lists descriptor-owned setting defaults, and MCP
 `pipelines_list` exposes the same defaults.
+
+Execution separately owns `preferredCommitLineLimit: 900` and
+`commitSizeAssessmentMultiplier: 3` under `pipelines.plan-execution`, with the
+same project precedence and persisted resolution. Both are positive safe
+integers, and their product must be a safe integer. The prepared size-assessment
+policy uses a strictly greater threshold (2,701, not 2,700, at the defaults),
+allows justified atomic exceptions, and grants no commit authority. Assessment
+dispatch and plan refinement remain inactive; new and migrated runs retain
+their existing execution boundaries. See the
+[assessment contract](pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
 The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second
@@ -805,7 +817,7 @@ nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 24, and polishing version 16. Their ordered migrations resolve missing
+version 29, and polishing version 16. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

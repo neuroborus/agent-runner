@@ -2306,6 +2306,64 @@ The Worker must not create a Git commit during implementation, finalization, or
 finding resolution. Commit creation is allowed only in the dedicated,
 runner-authorized `COMMIT` turn after the gate passes.
 
+### Commit-size assessment foundation
+
+The descriptor owns `preferredCommitLineLimit = 900` and
+`commitSizeAssessmentMultiplier = 3`. Both accept only positive safe integers;
+their product must also be a safe integer after root/project resolution. Project
+values take precedence per setting. The resolved pair is persisted at creation
+and reused on resume without configuration reload. This execution policy is
+separate from authoring's anticipated additions-plus-deletions heuristic.
+
+The private `commit-size-assessment.js` contract prepares assessment only for
+eligible commit-plan work at a reconciled boundary after implementation or
+content-changing repairs, before another convergence/review loop. Pending commit
+effects exclude assessment until settlement. Text additions plus deletions must
+be strictly above the product: 2,700 does not qualify; 2,701 does. Binary and
+gitlink counts remain separate. Size alone cannot fail a step or require an
+override, including when the bounded assessment allowance is exhausted.
+
+| Mode          | Read-only assessment checkpoint                                               |
+| ------------- | ----------------------------------------------------------------------------- |
+| `lazy`        | Distinct turn in the continuing logical Worker session                        |
+| `independent` | Distinct configured Reviewer checkpoint, independent of Worker                |
+| `combined`    | Same independent Reviewer checkpoint, without waiting for primary convergence |
+
+Existing session selection and reconstruction rules apply; assessment introduces
+no role, provider branch, write permission or source-fork exception. Its focused
+instructions request a concrete atomic justification or a cohesive ordered
+replacement plan. Replacement subjects and contiguous numbering use the shared
+commit-plan parser. Structural validity grants no semantic scope approval.
+The proposal must preserve requirements, dependencies, findings, checks and later
+steps, with independently valid intermediate states rather than arbitrary patch
+chunks. Assessment grants no revision, preservation, materialization or commit
+authority; those operations are not active.
+
+The runner-controlled binding records the original-step lineage, frozen plan
+and input fingerprints, assessed implementation scope and dependencies, baseline
+HEAD, content fingerprint, measured text size, separate binary/gitlink counts,
+target and threshold. Results echo its deterministic fingerprint. Scope and
+dependency fingerprints describe implementation within frozen requirements;
+changed frozen inputs are rejected, never accepted as new requirements.
+
+Each original step and all eventual replacements share at most three reserved
+assessments, including split proposals. Publish a pending reservation before
+invocation; restart reuses the same checkpoint and consumes no second attempt.
+Only a matching result settles it; unresolved changed reservations require
+reconciliation. Later content repairs alone do not repeat an atomic assessment.
+Reassessment requires changed implementation scope/dependencies or growth of
+strictly more than one further preferred target over the last assessment. Neither
+refinement nor reconstruction resets this lineage allowance or correction budgets.
+
+State version 29 adds `commitSizeAssessment`, initially ineligible with no
+lineages. The ordered version-28 migration adds that same disabled record and
+default settings without reloading configuration or changing workflow, bootstrap,
+findings, correction accounting, approvals or pending effects. **Production
+assessment dispatch remains inactive** until durable preservation and reviewed
+effective revisions can safely execute replacements. Intermediate and legacy
+runs cannot acquire eligibility by resuming; changing these settings does not
+activate refinement.
+
 ### 13.2 Candidate convergence and finalization
 
 Semantic candidate convergence precedes the terminal gate. In independent
@@ -3757,7 +3815,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 28, preserving
+74. every supported legacy version migrates through state version 29, preserving
     its saved mode and defaulting missing modes to `independent`, without
     reviving terminal runs or replaying completed or
     pending commit effects; unfinished work freezes guidance and repeats

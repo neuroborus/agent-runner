@@ -93,6 +93,8 @@ const PLAN = `## Commit 1: feat(test): add behavior
 
 Implement the requested behavior.`;
 const SETTINGS = Object.freeze({
+  preferredCommitLineLimit: 900,
+  commitSizeAssessmentMultiplier: 3,
   finalization: "auto",
   maxFixRoundsPerStep: 5,
   maxDisputesPerFinding: 2,
@@ -1755,7 +1757,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 28,
+    pipelineStateVersion: 29,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2168,7 +2170,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 28,
+      pipelineStateVersion: 29,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,
