@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-24
 
+- **Preparation registration is independent of historical publication.** A
+  canonical launch reservation authorizes a bounded state-owned custody log;
+  attachment and stop admission share a short gate within the unchanged deadline.
+  Complete process proofs and nullable targets survive without replaying history
+  before readiness. Verified retirement precedes endpoint-bound canonical
+  settlement, log removal and ownership release; restart never releases an old
+  attempt. The source-supported publication coupling motivates this repair,
+  without attributing unavailable historical outcomes or owner loss to it.
+
 - **Preparation release closes at its original deadline.** Trusted capability
   probes carry one absolute monotonic launch-to-close deadline through durable
   registration and supervisor admission. Delayed publication or queued IPC

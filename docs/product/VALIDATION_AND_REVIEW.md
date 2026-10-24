@@ -243,6 +243,13 @@ and verifies retirement without converting expiry into availability. A bounded
 registration-timeout diagnosis does not assert an isolation incompatibility or
 invent an observed payload exit or signal.
 
+Preparation publishes its canonical reservation before launch, then attaches the
+complete process proof through bounded state-owned custody operations independent
+of journal size. Stop revocation and admission share a gate. After retirement,
+complete canonical settlement precedes cleanup or another probe. This grants no
+required-check evidence and changes no frozen vector, capability or outcome; see
+[preparation custody](../ARCHITECTURE.md#preparation-custody).
+
 A valid but unavailable frozen request pauses durably as `environment_blocked`
 before provider work, including at creation before any preflight evidence exists.
 Resume retries the saved request after environment repair. Changing declarations

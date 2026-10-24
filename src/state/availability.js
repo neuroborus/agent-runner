@@ -153,9 +153,11 @@ export function assertAvailabilityContinuity(previous, current) {
   if (unchanged) return;
   if (
     previous.activeTurn !== null ||
+    previous.preparation != null ||
     previous.executionProcess !== null ||
     previous.executionResource !== null ||
     current.activeTurn !== null ||
+    current.preparation != null ||
     current.executionProcess !== null ||
     current.executionResource !== null ||
     after.reconciledRevision !== previous.revision ||

@@ -163,6 +163,7 @@ export function createInactivityCoordinator({
       if (run.activeTurn !== null) {
         if (
           run.activeTurn.role !== role ||
+          run.preparation != null ||
           run.executionProcess !== null ||
           run.executionResource !== null
         )
@@ -204,6 +205,7 @@ export function createInactivityCoordinator({
       await git.assertUnchanged(repository);
       const run = await runStore.loadRun(runId);
       if (
+        run.preparation != null ||
         run.executionProcess !== null ||
         run.executionResource !== null ||
         run.activeTurn !== null

@@ -53,6 +53,7 @@ export function createStopService({
   runLeases,
   timestamp,
   resolveStopBoundary,
+  preparation,
 }) {
   async function request(input) {
     if (
@@ -188,6 +189,7 @@ export function createStopService({
           runId,
         );
         const migrating = current.schemaVersion !== RUN_STATE_SCHEMA_VERSION;
+        await preparation.revoke(directory, current, stopRequest);
         await journal.appendTransition(directory, next, snapshot, {
           actor: "runner",
           phase: migrating ? "runtime" : "stop",
@@ -220,6 +222,7 @@ export function createStopService({
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       const current = snapshot.state;
       if (
+        current.preparation != null ||
         current.executionProcess !== null ||
         current.executionResource !== null
       ) {
@@ -272,6 +275,7 @@ export function createStopService({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
+        snapshot.state.preparation != null ||
         snapshot.state.executionProcess !== null ||
         snapshot.state.executionResource !== null
       ) {

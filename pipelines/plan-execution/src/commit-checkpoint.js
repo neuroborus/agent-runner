@@ -27,6 +27,7 @@ export function classifyStopCheckpoint(run, checkpoint) {
       inspected.pipelineId !== "plan-execution" ||
       inspected.pause !== null ||
       inspected.activeTurn !== null ||
+      inspected.preparation != null ||
       inspected.executionProcess !== null ||
       inspected.executionResource !== null ||
       Object.keys(inspected.hashes).length !== 0 ||

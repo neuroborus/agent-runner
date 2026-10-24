@@ -555,6 +555,7 @@ export function createTrustedValidationService(options = {}) {
       signal,
       onProcess,
       onResource,
+      onPreparation,
       storageForbiddenPaths = [],
     },
     preparationOnly = false,
@@ -620,7 +621,9 @@ export function createTrustedValidationService(options = {}) {
     }
     if (
       (preparationOnly || needsStorage(command.capabilities)) &&
-      (typeof onProcess !== "function" || typeof onResource !== "function")
+      (typeof onProcess !== "function" ||
+        typeof onResource !== "function" ||
+        (preparationOnly && typeof onPreparation !== "function"))
     ) {
       throw new TrustedValidationError(
         "Trusted storage requires durable resource and process ownership.",
@@ -792,6 +795,15 @@ export function createTrustedValidationService(options = {}) {
         preparationOnly,
       });
       if (allocated !== null) await storage.verify(allocated);
+      if (preparationOnly) processActive = true;
+      const registerProcess = preparationOnly
+        ? await onPreparation({
+            commandIdentity: command.identity,
+            commandFingerprint: trustedSnapshot.commandFingerprint,
+            configurationFingerprint: trustedSnapshot.configurationFingerprint,
+            contentFingerprint: before.contentFingerprint,
+          })
+        : onProcess;
       result = await runCommand(execution.command, {
         cwd:
           command.capabilities?.sourceProjection === true
@@ -804,13 +816,20 @@ export function createTrustedValidationService(options = {}) {
         terminationGraceMs,
         timeoutMs: preparationOnly ? Math.min(timeoutMs, 10_000) : timeoutMs,
         signal,
+        onNoLaunch: preparationOnly
+          ? async () => {
+              await registerProcess.noLaunch();
+              processActive = false;
+            }
+          : undefined,
         onProcess:
           allocated === null && !preparationOnly
             ? onProcess
-            : async (pid, proof) => {
+            : async (pid, proof, admission) => {
                 if (pid !== null) processActive = true;
-                await onProcess(pid, proof);
+                const allowed = await registerProcess(pid, proof, admission);
                 if (pid === null) processActive = false;
+                return allowed;
               },
       });
       if (processActive)

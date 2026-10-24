@@ -54,6 +54,7 @@ export function assertStopProgress(previous, next, resolver) {
 export function runRetainsOwnership(state) {
   return (
     stopIsPending(state) ||
+    state.preparation != null ||
     state.executionProcess != null ||
     state.executionResource != null
   );
@@ -66,7 +67,7 @@ export function assertRunCanAdvance(state, resolver) {
       { code: "ERR_STOP_RECONCILIATION_REQUIRED" },
     );
   }
-  if (state.executionProcess != null) {
+  if (state.preparation != null || state.executionProcess != null) {
     throw new RunStoreError(
       "Owned execution must stop before advancing its checkpoint.",
       {

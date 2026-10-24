@@ -17,6 +17,7 @@ import {
   RunnerError,
 } from "../src/index.js";
 import { inspectOwnedSessionProcesses } from "../src/agents/index.js";
+import { resolveStopBoundary } from "../src/pipeline-registry.js";
 import {
   configurationLoader,
   createAdapter,
@@ -40,6 +41,111 @@ import {
   APPLICABILITY_BATCH_SCHEMA,
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+for (const pipelineId of ["plan-execution", "polishing"]) {
+  test(`${pipelineId} restart settles preparation before its pending stop without new work`, async (t) => {
+    const fixture = await operatorFixture(t, pipelineId);
+    const bootId = "11111111-1111-4111-8111-111111111111";
+    const options = {
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      processId: 100,
+      processIsAlive: () => true,
+      processIdentity: (pid) => ({ bootId, startTicks: String(pid) }),
+    };
+    const store = createRunStore(options);
+    const trustedValidation = {
+      preflight: async () => {},
+      execute: assert.fail,
+      inspectRequirements: assert.fail,
+    };
+    const adapter = { ...createExecutionAdapter(), run: assert.fail };
+    const configuration = {
+      ...RUNNER_CONFIGURATION,
+      trustedCommands: {
+        probe: {
+          command: "node required-check",
+          executable: process.execPath,
+          arguments: ["--eval", "throw new Error('must not execute')"],
+        },
+      },
+      pipelines: { [pipelineId]: { trustedChecks: ["probe"] } },
+    };
+    const { run } = await runnerFor(
+      fixture,
+      { codex: adapter },
+      { runStore: store, trustedValidation, configuration },
+    ).create({
+      pipelineId,
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    });
+    const git = createGitService();
+    const repository = await git.snapshot({ projectPath: fixture.projectPath });
+    const lease = await store.acquireRunLease(run.runId);
+    const trusted = run.pipelineState.trustedValidation;
+    const authority = await store.reservePreparation(lease, {
+      commandIdentity: trusted.commands[0].identity,
+      commandFingerprint: trusted.commandFingerprint,
+      configurationFingerprint: trusted.configurationFingerprint,
+      contentFingerprint: repository.contentFingerprint,
+    });
+    const identity = options.processIdentity(4242);
+    await store.recordPreparationProcess(
+      lease,
+      authority,
+      4242,
+      {
+        processIdentity: identity,
+        launchCutoff: identity,
+        namespaceId: readlinkSync("/proc/self/ns/pid"),
+        ancestryBaseline: [{ ...identity, pid: 4242 }],
+        controlGroup: "a".repeat(64),
+      },
+      { canRelease: () => false },
+    );
+    const before = await store.loadRun(run.runId);
+    assert.equal(before.preparation.targetBoundary, null);
+    await store.requestOperatorStop({
+      runId: run.runId,
+      kind: "cancel_requested",
+      expectedRevision: before.revision,
+      idempotencyKey: "preparation-stop",
+    });
+    const replacement = createRunStore({
+      ...options,
+      processId: 200,
+      processIdentity: (pid) => ({
+        bootId: "22222222-2222-4222-8222-222222222222",
+        startTicks: String(pid),
+      }),
+    });
+    const result = await runnerFor(
+      fixture,
+      { codex: adapter },
+      { runStore: replacement, trustedValidation, configuration },
+    ).resume({ runId: run.runId, action: null });
+    assert.equal(result.run.pipelineState.workflowState, "CANCELED");
+    assert.equal(result.run.preparation, null);
+    assert.deepEqual(result.run.counters, before.counters);
+    assert.deepEqual(result.run.pipelineState.trustedValidation, trusted);
+    assert.equal(await replacement.runIsLeased(run.runId), false);
+    const { events } = await replacement.loadRunHistory(run.runId);
+    const settled = events.filter(
+      ({ activity }) =>
+        activity?.phase === "preparation" && activity.kind === "settled",
+    );
+    assert.equal(settled.length, 1);
+    assert.equal(
+      settled[0].state.preparation.settlement.records.at(-1).kind,
+      "retired",
+    );
+    await git.assertUnchanged(repository);
+  });
+}
 
 test("combined bootstrap retains exhausted observations and exact coverage across runner replacement before writable entry", async (t) => {
   const fixture = await operatorFixture(t, "plan-execution");

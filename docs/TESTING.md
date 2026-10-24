@@ -178,3 +178,18 @@ finalized commit is installed, the supervising agent starts a fresh real Claude
 lazy plan-authoring run and requires preflight to advertise read-only,
 workspace-write, and local-commit access plus a provider response before
 dependent provider work continues.
+
+Preparation custody regressions extend `test/state/journal-checkpoints.test.js`'s
+real growing/rotating journal fixtures and normalization counters with byte,
+hashing and publication work. The monitored service/executor/supervisor path
+covers cold, warm, evicted and oversized checkpoints, nullable execution and
+polishing targets, delayed stop observation, deadline/cancellation (including
+supervisor exit before attachment's first identity check), both admission race
+orders, owner replacement, partial-tail replacement/completion during repair and
+endpoint-bound interrupted settlement/removal, and orphan custody after cold
+canonical rollback. Existing journal tamper/rollback/rotation,
+full result and process-custody proofs remain required. Runner orchestration covers both pipelines'
+preparation retirement and canonical settlement before pending-stop completion
+after owner replacement. This lifecycle affects every slow-suite
+row above, plus the complete slow release gate; focused synthetic regressions do
+not replace the operator's post-install saved-case acceptance.

@@ -1668,7 +1668,12 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     return killLauncher(signal);
   };
   child.kill = (signal = "SIGTERM") => {
-    if (closed || child.exitCode !== null || child.signalCode !== null)
+    if (
+      closed ||
+      !Number.isSafeInteger(child.pid) ||
+      child.exitCode !== null ||
+      child.signalCode !== null
+    )
       return false;
     terminationRequested = true;
     if (!startRequested) {
@@ -1915,7 +1920,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           ancestryBaseline,
           controlGroup,
         };
-        await onProcess(child.ownedPid, proof);
+        const allowed = await onProcess(child.ownedPid, proof, {
+          canRelease: () =>
+            !closed &&
+            !terminationRequested &&
+            !signal?.aborted &&
+            (deadlineNs === undefined || monotonicNow() < BigInt(deadlineNs)),
+        });
         registered = true;
         ownerToken = ownedProcessToken(child.ownedPid, processIdentity);
         if (deadlineNs !== undefined && monotonicNow() >= BigInt(deadlineNs)) {
@@ -1924,6 +1935,10 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           return;
         }
         if (closed || terminationRequested) return;
+        if (allowed === false) {
+          child.kill("SIGKILL");
+          return;
+        }
         startRequested = true;
         child.ownedPayloadRequested = true;
         activeProcesses.set(child.ownedPid, child);

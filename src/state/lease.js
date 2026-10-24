@@ -3,6 +3,7 @@ import { join } from "node:path";
 import {
   publishExclusiveFile,
   readOptionalPublishedText,
+  readStableText,
   removeFile,
 } from "./files.js";
 import { inspectProcessOwner } from "./process-owner.js";
@@ -488,6 +489,43 @@ export function createLeaseManager({
   }
 
   return Object.freeze({
+    async withCurrentOwner(lease, operation) {
+      const metadata = activeLeases.get(lease);
+      if (metadata === undefined || metadata.released)
+        throw new RunStoreError("A current execution owner is required.", {
+          code: invalidLeaseCode,
+        });
+      const assertOwner = async () => {
+        let source;
+        try {
+          source = await readStableText(
+            join(metadata.runDirectory, leaseFilename),
+            4096,
+          );
+        } catch (cause) {
+          if (cause?.code !== "ENOENT") throw cause;
+          throw new RunStoreError("Execution ownership changed.", {
+            code: invalidLeaseCode,
+          });
+        }
+        const persisted = parseLease(
+          source,
+          metadata.record.runId,
+          leaseDescription,
+          invalidLeaseCode,
+          includeRunId,
+        );
+        if (
+          JSON.stringify(persisted) !== JSON.stringify(metadata.record) ||
+          (await inspectOwner(persisted)) !== "live"
+        )
+          throw new RunStoreError("Execution ownership changed.", {
+            code: invalidLeaseCode,
+          });
+      };
+      await assertOwner();
+      return operation({ ...metadata, assertOwner });
+    },
     acquire,
     inspect,
     isLeased,

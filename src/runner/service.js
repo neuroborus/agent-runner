@@ -299,6 +299,7 @@ export function createRunner(options = {}) {
   async function recordAdapterCleanupPending(run, lease) {
     if (
       run.executionResource === null ||
+      run.preparation != null ||
       run.executionProcess !== null ||
       stopPending(run)
     )
@@ -326,7 +327,11 @@ export function createRunner(options = {}) {
         (owner) => owner?.identity === run.executionResource.commandIdentity,
       )?.recover;
     const recover = adapterRecovery ?? trustedValidation.recoverResources;
-    if (run.executionProcess !== null || typeof recover !== "function") {
+    if (
+      run.preparation != null ||
+      run.executionProcess !== null ||
+      typeof recover !== "function"
+    ) {
       throw new RunnerError(
         "Execution storage cleanup requires verified process retirement.",
         { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
@@ -741,6 +746,7 @@ export function createRunner(options = {}) {
       configurationFailure !== null &&
       !stopPending(run) &&
       run.activeTurn === null &&
+      run.preparation == null &&
       run.executionProcess === null &&
       run.executionResource == null
     ) {
@@ -783,6 +789,12 @@ export function createRunner(options = {}) {
         configurationFailure,
       });
     // Recover an orphaned supervised process before examining or replaying work.
+    if (run.preparation != null) {
+      onRecoveryStage("process-recovery");
+      run = await runStore.recoverPreparation(lease, (owner, inspect) =>
+        terminateOwnedProcess(owner.pid, inspect, { inspectSessionProcesses }),
+      );
+    }
     if (run.executionProcess !== null) {
       onRecoveryStage("process-recovery");
       const owner = await runStore.inspectExecutionProcess(run.runId);
@@ -1122,6 +1134,7 @@ export function createRunner(options = {}) {
         configurationChanged &&
         !stopPending(storedRun) &&
         storedRun.activeTurn === null &&
+        storedRun.preparation == null &&
         storedRun.executionProcess === null &&
         storedRun.executionResource == null
       ) {

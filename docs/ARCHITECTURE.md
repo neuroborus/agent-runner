@@ -3071,6 +3071,60 @@ as it rejects new command execution. This adds no eager capability work ahead
 of consumed-commit or completed-handoff verification; pipelines must keep that
 verification-only recovery ahead of any new preparation.
 
+### Preparation custody
+
+Common envelope version 22 adds nullable `preparation` authority; older runtimes
+reject it and legacy migration grants no process proof. Before the inert
+supervisor launches, the state capability fully publishes a canonical reservation
+and initializes its confined custody log. The reservation binds the attempt,
+execution lease and owner, original certified journal prefix/revision, frozen
+input/content and trusted command/configuration fingerprints, allocated resource
+identity, initial stop state, and descriptor-proven commit target. An explicit
+null target supports ordinary execution and polishing preparation; unsupported
+deferred stops still reject. The reservation authorizes future work only.
+
+Launch starts the unchanged absolute preparation deadline. Attachment and
+one-shot admission use fresh stable custody/lease reads, directory identity and
+process-identity rechecks. The log identifies the issued reservation by revision
+and digest without copying or hashing its history certificate. It preserves the
+complete existing process proof, including ancestry and control group, within
+16 records and 2 MiB; no proof is truncated. Cancellation during attachment
+retains the captured proof with denied admission even if the supervisor has
+exited; settlement still requires verified retirement. These compact operations
+bypass canonical mutation queues, history loading/normalization and progress
+generation.
+The short state-owned custody gate serializes them with stop revocation. Stop
+acceptance retains canonical mutation serialization and publishes its bounded
+request/revision/timing/target disposition under that gate before canonical
+acceptance. Immediate or mismatched stops deny admission independently of monitor
+observation; matching deferred stops retain current-target permission. Interrupted
+acceptance cannot reopen a denied reservation. Monitor abort precedes stop-activity
+publication; all gate waits and attachment work consume the original deadline.
+
+After verified close and descendant retirement, canonical settlement verifies the
+original certificate and records the complete custody log with its exact endpoint.
+Journal append/sync, state replacement and progress publication finish before log
+removal and canonical clearing. Retries reuse settlement rather than duplicate
+facts. Storage cleanup, further preparation, availability, checkpoint advancement
+and ownership release wait for that lifecycle. A reservation remains visible to
+lock-free ownership projections and blocks worktree reclamation. Recovery never
+releases an old attempt: it reconciles attachment, applies the existing independent
+tree-retirement proofs, and settles the same endpoint. An incomplete final record
+can be removed only after original-prefix verification and phase-specific
+no-launch or retirement proof. Truncation binds the inspected file's identity,
+observations and exact prefix length, then rechecks the synced prefix and
+handle/path evidence; changed or completed tails retain ownership.
+Missing or conflicting authority stays reserved.
+An orphan custody log also rejects state and ownership reads after cold canonical
+rollback; a lock-free read first reloads to recognize concurrent reservation
+publication or settlement.
+Neither attachment nor admission proves that the probe ran, exited, or passed.
+Canonical replay enforces reservation, immutable authority, settlement and clearing
+in order; custody transitions cannot change workflow state or validation evidence.
+Live custody-prefix evidence survives history-checkpoint eviction, and repeated
+recovery reuses irreversible revocation without exhausting the bounded log.
+Ordinary trusted-command execution retains its existing canonical process path.
+
 Trusted declarations optionally carry `capabilities`, a closed object with
 `scratch: true`, `cache: true`, `sourceProjection: true`, and
 `artifacts: [{ url, sha256 }]`. Omit a capability to leave it disabled. Scratch
@@ -3554,9 +3608,9 @@ misnamed, oversized, or incomplete sealed segments. Only the last segment may
 have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
-compatibility token `1:21` establish the segmented format. New runs begin with
-version 21 in the original journal; legacy runs require an explicit leased
-migration publishing a version-21 record there before rollover is permitted.
+compatibility token `1:21` established the segmented format. New runs use
+version 22 (`1:22`); legacy runs require an explicit leased migration publishing
+a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.
 If the original segment lacks space for the migration record, publication fails

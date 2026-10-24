@@ -91,6 +91,7 @@ async function fixture(t, capabilities = {}) {
     onResource: async (value) => records.push(value),
     onProcess: async () => {},
   };
+  input.onPreparation = async () => input.onProcess;
   return {
     root,
     projectPath,
@@ -379,8 +380,10 @@ test("uncertain probe registration stops inspection before preparing another com
       ...f.input,
       snapshot: selected,
       inventory: selected.commands.map(({ command }) => command),
-      async onProcess(pid) {
-        if (pid === null) throw new Error("Retirement journal failed.");
+      async onPreparation() {
+        return async (pid) => {
+          if (pid === null) throw new Error("Retirement journal failed.");
+        };
       },
     }),
     { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
@@ -421,6 +424,7 @@ test("runner inspection pins durable authority and uses monitored lease callback
       },
     },
     monitor: {
+      persist: (operation) => operation(),
       async check() {
         calls.push("stop-check");
       },

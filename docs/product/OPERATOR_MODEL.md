@@ -131,6 +131,15 @@ delegated check is resolved only when runner inspection succeeds. Required check
 remain exclusive to finalization, and consumed commit and completed handoff verification precede new
 preparation effects.
 
+Preparation reservations remain owned work even before a process proof is attached.
+Interrupted registration, settlement or custody-log removal must reconcile before
+cleanup, another command or lease release. Recovery never releases an old probe;
+missing or ambiguous evidence retains exclusion. Operators must use normal resume
+or stop reconciliation, preserving frozen configuration and prior accounting.
+See [preparation custody](../ARCHITECTURE.md#preparation-custody). External saved-case
+acceptance after reviewed implementation and installation remains operator-owned;
+synthetic fixtures do not establish that acceptance.
+
 Plan execution and polishing each independently require a boolean
 source-projection need in every capability report. A role may identify only the
 frozen exact command; it cannot choose a path or broaden authority. Ordered

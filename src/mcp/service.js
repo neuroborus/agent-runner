@@ -356,13 +356,18 @@ function executionProjection(run, leaseOwner) {
   const leaseOwnerStatus = leaseOwner?.status ?? "none";
   const state = ["live", "unverifiable"].includes(leaseOwnerStatus)
     ? "running"
-    : run.activeTurn === null && run.executionProcess === null
+    : run.activeTurn === null &&
+        run.executionProcess === null &&
+        run.preparation == null
       ? "idle"
       : "interrupted";
   return {
     state,
     leaseOwner: leaseOwnerStatus,
-    processRecord: run.executionProcess === null ? "none" : "persisted",
+    processRecord:
+      run.executionProcess === null && run.preparation == null
+        ? "none"
+        : "persisted",
     role: run.activeTurn?.role ?? null,
     phase: run.activeTurn?.phase ?? null,
   };

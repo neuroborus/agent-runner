@@ -20,6 +20,8 @@ const PREPARATION_FIELDS = new Map([
   ["runtime/provider-policy-recorded", ["providerPolicies"]],
   ["runtime/observations-interrupted", ["observations"]],
   ["execution/stopped", ["executionProcess"]],
+  ["preparation/settled", ["preparation"]],
+  ["preparation/cleared", ["preparation"]],
   ["execution/resource-recorded", ["executionResource"]],
   ["execution/resource-cleaned", ["executionResource"]],
   ["stop/resumed", ["pause", "activeTurn", "pipelineState"]],

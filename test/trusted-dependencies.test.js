@@ -99,6 +99,8 @@ async function fixture(
       events.push(record?.phase ?? "cleaned");
     },
     onProcess: (pid, proof) => store.recordExecutionProcess(lease, pid, proof),
+    onPreparation: async () =>
+      Object.assign(async () => {}, { noLaunch: async () => {} }),
   };
   const acquisition = {
     schedule(callback, ms) {
@@ -182,11 +184,14 @@ async function fixture(
           bubblewrapPath: "/usr/bin/bwrap",
         });
       },
-      async runCommand() {
-        launches++;
-        return passed;
-      },
       ...options,
+      async runCommand(command, settings) {
+        const result = options.runCommand
+          ? await options.runCommand(command, settings)
+          : (launches++, passed);
+        if (settings.preparationOnly) await settings.onNoLaunch();
+        return result;
+      },
     });
   return {
     root,

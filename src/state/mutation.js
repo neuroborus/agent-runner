@@ -75,11 +75,14 @@ export function createMutationBoundary({
   processIsAlive,
   processIdentity,
   onPublicationBoundary,
+  prefix = PREFIX,
 }) {
   const ownerOptions = { hostName, processIsAlive, processIdentity };
   async function claims(directory, ownerToken) {
-    const names = (await readdir(directory)).filter((name) =>
-      /^\.mutation-[a-f0-9-]{36}$/u.test(name),
+    const names = (await readdir(directory)).filter(
+      (name) =>
+        name.startsWith(prefix) &&
+        /^[a-f0-9-]{36}$/u.test(name.slice(prefix.length)),
     );
     if (names.length > MAX_CLAIMS) {
       throw new RunStoreError("Run mutation claim capacity is exhausted.", {
@@ -91,7 +94,7 @@ export function createMutationBoundary({
       const path = join(directory, name);
       const source = await readOptionalPublishedText(path);
       if (source === null) continue;
-      const record = parseClaim(source, name.slice(PREFIX.length));
+      const record = parseClaim(source, name.slice(prefix.length));
       if (
         record.token !== ownerToken &&
         ["dead", "replaced"].includes(
@@ -108,7 +111,7 @@ export function createMutationBoundary({
 
   return async (directory, operation) => {
     const token = randomUUID();
-    const path = join(directory, PREFIX + token);
+    const path = join(directory, prefix + token);
     const record = {
       schemaVersion: 1,
       token,

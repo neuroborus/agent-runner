@@ -438,6 +438,13 @@ registration, checked again by the supervisor at payload admission. Expiry or
 cancellation permanently closes release; pending registration and verified
 retirement must drain, with uncertain ownership retained. Reconciliation never
 turns an expired preparation into availability or required-check evidence.
+Common envelope version 22 routes only preparation through canonical reservation,
+bounded attachment/admission, and endpoint-bound canonical settlement. The root's
+custody gate preserves accepted immediate stops even with delayed observation;
+matching deferred targets retain current-step permission, while an explicit null
+target supports ordinary preparation. No restart releases an old attempt, and
+custody settles before cleanup, availability or further work. Existing consumed-
+effect verification remains first; see [preparation custody](../../../docs/ARCHITECTURE.md#preparation-custody).
 
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per

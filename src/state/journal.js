@@ -74,6 +74,7 @@ const TRANSITION_STATE_FIELDS = [
   "activeTurn",
   "executionProcess",
   "executionResource",
+  "preparation",
   "stopRequest",
   "pipelineState",
 ];
@@ -140,6 +141,7 @@ function normalizeEvent(value, runId, lineNumber) {
         18,
         19,
         20,
+        21,
         RUN_STATE_SCHEMA_VERSION,
       ].includes(value.schemaVersion)
     ) {
@@ -204,10 +206,11 @@ function assertInitialEvent(event) {
   if (
     event.state.inactivityRecovery !== null ||
     event.state.availabilityRetry !== null ||
-    event.state.observations !== null
+    event.state.observations !== null ||
+    event.state.preparation != null
   ) {
     throw new RunStoreError(
-      "Initial run cannot contain provider recovery or observations.",
+      "Initial run cannot contain recovery, observations, or preparation.",
       {
         code: "ERR_INVALID_EVENT_LOG",
       },
@@ -232,6 +235,7 @@ function assertEventContinuity(
       code: "ERR_INVALID_EVENT_LOG",
     });
   }
+  assertPreparationContinuity(previousState, state, event.activity);
   const previousChildren = previousState.sessionLineage.children;
   const children = state.sessionLineage.children;
   const immutableFieldChanged = IMMUTABLE_STATE_FIELDS.some(
@@ -289,6 +293,51 @@ function assertEventContinuity(
     );
   }
   return nextStopProof;
+}
+
+function assertPreparationContinuity(previous, current, activity) {
+  const before = previous.preparation;
+  const after = current.preparation;
+  if (isDeepStrictEqual(before, after)) return;
+  const invalid = () => {
+    throw new RunStoreError("Preparation history is inconsistent.", {
+      code: "ERR_INVALID_EVENT_LOG",
+    });
+  };
+  if (activity?.actor !== "runner" || activity.phase !== "preparation")
+    invalid();
+  const stationary = ({ preparation, revision, updatedAt, ...state }) => state;
+  if (!isDeepStrictEqual(stationary(previous), stationary(current))) invalid();
+  if (before == null) {
+    const trusted = previous.pipelineState.trustedValidation;
+    if (
+      activity.kind !== "reserved" ||
+      after.revision !== current.revision ||
+      after.settlement !== null ||
+      previous.executionProcess !== null ||
+      !isDeepStrictEqual(after.resource, previous.executionResource) ||
+      !isDeepStrictEqual(after.stopRequest, previous.stopRequest) ||
+      after.bindings.commandFingerprint !== trusted?.commandFingerprint ||
+      after.bindings.configurationFingerprint !==
+        trusted?.configurationFingerprint ||
+      !trusted.commands.some(
+        ({ identity }) => identity === after.bindings.commandIdentity,
+      )
+    )
+      invalid();
+  } else if (after == null) {
+    if (activity.kind !== "cleared" || before.settlement === null) invalid();
+  } else {
+    const { settlement: priorSettlement, ...issued } = before;
+    const { settlement, ...retained } = after;
+    if (
+      activity.kind !== "settled" ||
+      priorSettlement !== null ||
+      settlement === null ||
+      !isDeepStrictEqual(issued, retained)
+    )
+      invalid();
+  }
 }
 
 function assertStopContinuity(
@@ -412,6 +461,7 @@ function assertStopContinuity(
       "activeTurn",
       "executionProcess",
       "executionResource",
+      "preparation",
       "counters",
       "hashes",
       "sessionLineage",
@@ -1118,6 +1168,11 @@ export function createStateJournal({
   }
 
   return Object.freeze({
+    verifyCertificate: (directory, certificate) =>
+      verifyPrefix(directory, {
+        certificate,
+        state: { runId: certificate.runId, revision: certificate.lastRevision },
+      }),
     appendTransition: async (directory, state, snapshot, activity) => {
       try {
         if (snapshot.lastEvent != null)

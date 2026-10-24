@@ -32,6 +32,10 @@ import { createStateJournal } from "./journal.js";
 import { createLeaseManager } from "./lease.js";
 import { createMutationBoundary } from "./mutation.js";
 import {
+  createPreparationService,
+  hasPreparationCustody,
+} from "./preparation.js";
+import {
   beginObservationAttempt,
   interruptObservations,
   recordObservations,
@@ -253,6 +257,7 @@ export function createRunStore({
   onLeasePublicationBoundary = async () => {},
   onRecoveryFailurePublicationBoundary = async () => {},
   onTransitionBoundary = async () => {},
+  onPreparationBoundary = async () => {},
   resolveStopBoundary = null,
 } = {}) {
   if (typeof stateRoot !== "string" || !isAbsolute(stateRoot)) {
@@ -271,6 +276,7 @@ export function createRunStore({
     typeof onLeasePublicationBoundary !== "function" ||
     typeof onRecoveryFailurePublicationBoundary !== "function" ||
     typeof onTransitionBoundary !== "function" ||
+    typeof onPreparationBoundary !== "function" ||
     typeof hostName !== "string" ||
     hostName.length === 0 ||
     hostName.length > 255 ||
@@ -630,6 +636,7 @@ export function createRunStore({
           activeTurn: null,
           executionProcess: null,
           executionResource: null,
+          preparation: null,
           stopRequest: null,
           pipelineState:
             input.pipelineState === undefined ? {} : input.pipelineState,
@@ -709,7 +716,23 @@ export function createRunStore({
   }
 
   async function loadSnapshot(runDirectory, runId) {
-    const snapshot = await journal.loadSnapshot(runDirectory, runId);
+    let snapshot = await journal.loadSnapshot(runDirectory, runId);
+    if (
+      snapshot.state.preparation === null &&
+      (await hasPreparationCustody(runDirectory))
+    ) {
+      // A lock-free read may precede reservation publication. Reload before
+      // rejecting custody whose canonical authority was lost or rolled back.
+      snapshot = await journal.loadSnapshot(runDirectory, runId);
+      if (
+        snapshot.state.preparation === null &&
+        (await hasPreparationCustody(runDirectory))
+      )
+        throw new RunStoreError(
+          "Unmerged preparation custody has no authority.",
+          { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+        );
+    }
     assertDisjointStateRoot(
       runDirectory,
       snapshot.state.projectPath,
@@ -920,6 +943,7 @@ export function createRunStore({
       );
       // Diagnostic retirement cannot precede proof that owned work is settled.
       if (
+        snapshot.state.preparation != null ||
         snapshot.state.executionProcess !== null ||
         snapshot.state.executionResource !== null
       )
@@ -1069,7 +1093,8 @@ export function createRunStore({
       }
       if (
         ready &&
-        (snapshot.state.executionProcess !== null ||
+        (snapshot.state.preparation != null ||
+          snapshot.state.executionProcess !== null ||
           snapshot.state.executionResource !== null)
       ) {
         throw new RunStoreError(
@@ -1120,6 +1145,7 @@ export function createRunStore({
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
       if (
+        snapshot.state.preparation != null ||
         !Number.isSafeInteger(pipelineStateVersion) ||
         pipelineStateVersion < snapshot.state.pipelineStateVersion ||
         pipelineStateVersion < 1 ||
@@ -1256,6 +1282,7 @@ export function createRunStore({
       if (
         state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
         state.activeTurn !== null ||
+        state.preparation != null ||
         state.executionProcess !== null ||
         state.executionResource !== null
       ) {
@@ -1399,6 +1426,7 @@ export function createRunStore({
       if (
         state.activeTurn?.role !== role ||
         state[field].role !== role ||
+        state.preparation != null ||
         state.executionProcess !== null ||
         state.executionResource !== null
       ) {
@@ -1648,7 +1676,28 @@ export function createRunStore({
     return deepFreeze({ activities, cursor });
   }
 
+  const preparation = createPreparationService({
+    runLeases,
+    journal,
+    loadSnapshot,
+    timestamp,
+    hostName,
+    processId,
+    processIdentity,
+    processIsAlive,
+    resolveStopBoundary,
+    onBoundary: onPreparationBoundary,
+    gate: createMutationBoundary({
+      hostName,
+      processId,
+      processIsAlive,
+      processIdentity,
+      onPublicationBoundary: onLeasePublicationBoundary,
+      prefix: ".custody-",
+    }),
+  });
   const stops = createStopService({
+    preparation,
     resolveStopBoundary,
     actions,
     getRunDirectory,
@@ -1733,6 +1782,12 @@ export function createRunStore({
     const normalized = normalizeExecutionResource(resource);
     return runLeases.runExclusive(lease, async ({ record, runDirectory }) => {
       const snapshot = await loadSnapshot(runDirectory, record.runId);
+      if (snapshot.state.preparation != null) {
+        throw new RunStoreError(
+          "Preparation custody must settle before storage changes.",
+          { code: "ERR_EXECUTION_PROCESS_ACTIVE" },
+        );
+      }
       const previous = snapshot.state.executionResource;
       const { owner: previousOwner, ...withoutOwner } = previous ?? {};
       const settlesAcquisition =
@@ -1804,6 +1859,10 @@ export function createRunStore({
         });
   }
   return Object.freeze({
+    reservePreparation: preparation.reserve,
+    recordPreparationProcess: preparation.record,
+    settlePreparation: preparation.settle,
+    recoverPreparation: preparation.recover,
     startObservationAttempt,
     recordObservationBatch,
     recordExecutionResource,

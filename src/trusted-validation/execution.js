@@ -229,12 +229,17 @@ export async function runExactCommand(
     timeoutMs,
     signal,
     onProcess,
+    onNoLaunch,
     monotonicNow = process.hrtime.bigint,
     spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
-  signal?.throwIfAborted();
+  if (signal?.aborted) {
+    await onNoLaunch?.();
+    signal.throwIfAborted();
+  }
   if (process.platform === "win32") {
+    await onNoLaunch?.();
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -273,6 +278,7 @@ export async function runExactCommand(
           }),
     });
   } catch {
+    await onNoLaunch?.();
     return {
       status: "BLOCKED",
       exitCode: null,
@@ -282,6 +288,9 @@ export async function runExactCommand(
     };
   }
   let closedAfterDeadline = false;
+  const processClosed = new Promise((resolvePromise) => {
+    child.once("close", resolvePromise);
+  });
   const closed = new Promise((resolvePromise) => {
     child.once("error", () => resolvePromise({ type: "error" }));
     child.once("close", (exitCode, signal) => {
@@ -323,7 +332,18 @@ export async function runExactCommand(
   signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
-    await child.ownedCompletion;
+    if (preparationOnly && child.pid === undefined) {
+      // Node reports failed launches asynchronously without assigning a PID.
+      // Drain close and supervision before durably settling that no-launch fact.
+      const [, supervision] = await Promise.allSettled([
+        processClosed,
+        child.ownedCompletion,
+      ]);
+      if (child.pid === undefined && (await closed).type === "error") {
+        await onNoLaunch?.();
+        signal?.throwIfAborted();
+      } else if (supervision.status === "rejected") throw supervision.reason;
+    } else await child.ownedCompletion;
     return {
       status: "BLOCKED",
       exitCode: null,

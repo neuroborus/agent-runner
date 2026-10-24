@@ -336,8 +336,9 @@ test("caps preparation at ten seconds while honoring shorter snapshot timeouts",
       },
     },
     {
-      runCommand(_command, options) {
+      async runCommand(_command, options) {
         observed.push(options.timeoutMs);
+        await options.onNoLaunch();
         return {
           status: "PASS",
           exitCode: 0,
@@ -363,6 +364,8 @@ test("caps preparation at ten seconds while honoring shorter snapshot timeouts",
       projectPath,
       snapshot: trusted,
       async onProcess() {},
+      onPreparation: async () =>
+        Object.assign(async () => {}, { noLaunch: async () => {} }),
       async onResource() {},
     });
   }
@@ -1801,7 +1804,7 @@ function preparation(
     },
   });
   const controller = new AbortController();
-  const completion = service.inspectRequirements({
+  const input = {
     inventory: [snapshot.commands[0].command],
     snapshot,
     projectPath: process.cwd(),
@@ -1825,7 +1828,9 @@ function preparation(
         if (failRetirement) throw publicationFailure;
       }
     },
-  });
+  };
+  input.onPreparation = async () => input.onProcess;
+  const completion = service.inspectRequirements(input);
   // Observe rejection immediately while the test controls pending operations.
   void completion.catch(() => {});
   t.after(async () => {

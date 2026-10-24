@@ -66,6 +66,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
     if (!(stopImmediately(current) || (waiting && stopPending(current))))
       return current;
     if (stopping === null) {
+      if (!controller.signal.aborted) controller.abort(stopError());
       stopping = (async () => {
         const activity = {
           actor: "runner",
@@ -79,7 +80,6 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
         await publish(activity, next);
         return next;
       })();
-      if (!controller.signal.aborted) controller.abort(stopError());
     }
     await stopping;
     return current;
@@ -173,6 +173,7 @@ export function createStopMonitor({ runId, lease, runStore, publish }) {
       watcher.abort();
       await watching;
       await stopping?.catch(() => {});
+      await pendingWrite;
       if (monitoringFailure !== null) throw monitoringFailure;
     },
   });
@@ -314,6 +315,11 @@ export async function reconcileOperatorStop({
   onRecoveryStage("state-recovery");
   let current = await runStore.loadRun(run.runId);
   if (!stopPending(current)) return current;
+  if (current.preparation != null) {
+    current = await runStore.recoverPreparation(lease, (owner, inspect) =>
+      terminateOwnedProcess(owner.pid, inspect, { inspectSessionProcesses }),
+    );
+  }
   if (current.executionProcess !== null) {
     onRecoveryStage("process-recovery");
     const owner = await runStore.inspectExecutionProcess(current.runId);

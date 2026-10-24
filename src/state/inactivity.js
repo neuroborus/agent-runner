@@ -140,7 +140,9 @@ export function assertInactivityContinuity(previous, current, activity) {
     activity?.phase === "inactivity" &&
     activity.actor === (after ?? before).role;
   const retired =
-    current.executionProcess === null && current.executionResource === null;
+    current.preparation == null &&
+    current.executionProcess === null &&
+    current.executionResource === null;
   if (
     !validActivity ||
     (before !== null &&

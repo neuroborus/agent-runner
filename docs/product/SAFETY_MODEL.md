@@ -160,6 +160,16 @@ late registration must drain and retire rather than revive the attempt.
 The supervisor independently checks the same absolute monotonic deadline before
 admitting queued start IPC. Completion awaits registration and retirement;
 uncertain durable publication or descendant retirement keeps ownership reserved.
+Preparation's canonical launch reservation and bounded subordinate custody log
+retain exclusion through verified retirement, canonical settlement and log removal.
+A state-owned gate serializes admission with durable stop dispositions before
+canonical acceptance, so delayed monitoring cannot admit a blocking stop accepted
+before attachment. Matching deferred targets retain permission; explicit null
+targets are valid without granting deferred-stop support. A replacement owner
+can reconcile or retire an old attempt, never release it. Missing authority stays
+reserved; legacy process proofs and independent descendant inspection are unchanged.
+See [preparation custody](../ARCHITECTURE.md#preparation-custody).
+
 Trusted command capability requests are closed and fingerprinted. Scratch/cache
 declarations cannot name host paths or environment bindings. Artifact declarations
 pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,

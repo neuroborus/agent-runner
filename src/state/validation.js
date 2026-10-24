@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import {
@@ -10,9 +12,13 @@ import { normalizeInactivityState } from "./inactivity.js";
 import { normalizeAvailabilityState } from "./availability.js";
 import { normalizeLaunchRecovery } from "./launch-recovery.js";
 import { normalizeObservationState } from "./observations.js";
-import { validStopTiming, validStopSettlement } from "./stop-contract.js";
+import {
+  validStopBoundary,
+  validStopTiming,
+  validStopSettlement,
+} from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 21;
+export const RUN_STATE_SCHEMA_VERSION = 22;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -48,6 +54,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   18,
   19,
   20,
+  21,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -83,6 +90,7 @@ const STATE_FIELDS = new Set([
   "activeTurn",
   "executionProcess",
   "executionResource",
+  "preparation",
   "stopRequest",
   "pipelineState",
   "createdAt",
@@ -940,7 +948,10 @@ function normalizeProcessAncestryBaseline(value, processIdentity) {
   });
 }
 
-function normalizeExecutionProcess(value, schemaVersion) {
+export function normalizeExecutionProcess(
+  value,
+  schemaVersion = RUN_STATE_SCHEMA_VERSION,
+) {
   if ((value === undefined && schemaVersion < 5) || value === null) return null;
   assertRecord(value, "run.executionProcess");
   const fields = ["pid", "hostname", "processIdentity", "namespaceId"];
@@ -1002,6 +1013,232 @@ function normalizeExecutionProcess(value, schemaVersion) {
     ancestryBaseline,
     controlGroup,
   };
+}
+
+export function preparationHeader(reservation) {
+  return {
+    runId: reservation.owner.runId,
+    id: reservation.id,
+    revision: reservation.revision,
+    digest: reservation.digest,
+  };
+}
+
+export function normalizePreparationCustody(records, reservation) {
+  const invalid = () =>
+    fail(
+      "Preparation custody is invalid.",
+      "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+  if (!Array.isArray(records) || records.length < 1 || records.length > 16)
+    invalid();
+  let previous = null;
+  let process = null;
+  let admitted = null;
+  let retired = false;
+  let stopRevision = reservation.revision;
+  const stopIds = new Set();
+  let denied =
+    reservation.stopRequest?.reconciledRevision === null &&
+    (reservation.stopRequest.effectiveTiming !== "after-current-commit" ||
+      !isDeepStrictEqual(
+        reservation.stopRequest.targetBoundary,
+        reservation.targetBoundary,
+      ));
+  for (const record of records) {
+    assertRecord(record, "preparation custody record");
+    const line = JSON.stringify(record);
+    if (
+      Object.keys(record).length !== 3 ||
+      record.previous !== previous ||
+      !Object.hasOwn(record, "value")
+    )
+      invalid();
+    const { kind, value } = record;
+    if (previous === null) {
+      if (
+        kind !== "reserved" ||
+        !isDeepStrictEqual(value, preparationHeader(reservation))
+      )
+        invalid();
+    } else if (kind === "attached") {
+      if (process !== null || admitted !== null || retired) invalid();
+      process = normalizeExecutionProcess(value);
+      if (
+        process === null ||
+        process.processIdentity === null ||
+        process.namespaceId === null ||
+        process.ancestryBaseline === null ||
+        process.controlGroup === null ||
+        !isDeepStrictEqual(process, value)
+      )
+        invalid();
+    } else if (kind === "admitted") {
+      if (
+        process === null ||
+        admitted !== null ||
+        retired ||
+        typeof value !== "boolean" ||
+        (value && denied)
+      )
+        invalid();
+      admitted = value;
+    } else if (kind === "stop") {
+      assertRecord(value, "preparation stop disposition");
+      if (
+        retired ||
+        value.reservationId !== reservation.id ||
+        Object.keys(value).length !== 7 ||
+        !/^[a-f0-9]{64}$/u.test(value.requestId) ||
+        !Number.isSafeInteger(value.expectedRevision) ||
+        value.expectedRevision < 1 ||
+        !Number.isSafeInteger(value.acceptedRevision) ||
+        value.acceptedRevision <= value.expectedRevision ||
+        value.acceptedRevision <= stopRevision ||
+        stopIds.has(value.requestId) ||
+        !["pause_requested", "cancel_requested"].includes(value.kind) ||
+        !(value.effectiveTiming === "immediate"
+          ? value.targetBoundary === null
+          : value.effectiveTiming === "after-current-commit" &&
+            validStopBoundary(value.targetBoundary))
+      )
+        invalid();
+      stopRevision = value.acceptedRevision;
+      stopIds.add(value.requestId);
+      denied ||=
+        value.effectiveTiming !== "after-current-commit" ||
+        !isDeepStrictEqual(value.targetBoundary, reservation.targetBoundary);
+    } else if (kind === "revoked") {
+      if (value !== null || retired) invalid();
+      denied = true;
+    } else if (kind === "no-launch") {
+      if (retired || process !== null || value !== null) invalid();
+      retired = true;
+    } else if (kind === "retired") {
+      if (retired || value !== null || process === null) invalid();
+      retired = true;
+    } else invalid();
+    previous = createHash("sha256").update(line).digest("hex");
+  }
+  return { records, endpoint: previous, process, admitted, retired, denied };
+}
+
+function normalizePreparation(value, state) {
+  if ((value === undefined && state.schemaVersion < 22) || value === null)
+    return null;
+  assertRecord(value, "run.preparation");
+  const fields = new Set([
+    "id",
+    "revision",
+    "owner",
+    "certificate",
+    "bindings",
+    "resource",
+    "targetBoundary",
+    "stopRequest",
+    "settlement",
+    "digest",
+  ]);
+  rejectUnknownFields(value, fields, "run.preparation");
+  assertRunId(value.id);
+  assertRecord(value.owner, "preparation.owner");
+  assertRunId(value.owner.token);
+  assertRecord(value.certificate, "preparation.certificate");
+  assertRecord(value.bindings, "preparation.bindings");
+  for (const [name, keys] of [
+    [
+      "owner",
+      [
+        "schemaVersion",
+        "runId",
+        "token",
+        "pid",
+        "hostname",
+        "processIdentity",
+        "acquiredAt",
+      ],
+    ],
+    [
+      "bindings",
+      [
+        "commandIdentity",
+        "commandFingerprint",
+        "configurationFingerprint",
+        "contentFingerprint",
+        "inputFingerprint",
+      ],
+    ],
+    [
+      "certificate",
+      ["runId", "firstRevision", "lastRevision", "directory", "bindings"],
+    ],
+  ]) {
+    rejectUnknownFields(value[name], new Set(keys), `preparation.${name}`);
+    if (Object.keys(value[name]).length !== keys.length)
+      fail("Preparation authority is incomplete.");
+  }
+  if (
+    state.schemaVersion < 22 ||
+    Object.keys(value).length !== fields.size ||
+    !Number.isSafeInteger(value.revision) ||
+    value.revision < 2 ||
+    value.revision > state.revision ||
+    value.certificate.runId !== state.runId ||
+    value.certificate.firstRevision !== 1 ||
+    value.certificate.lastRevision !== value.revision - 1 ||
+    !Array.isArray(value.certificate.bindings) ||
+    value.certificate.bindings.length < 1 ||
+    value.certificate.bindings.length > 1024 ||
+    value.owner.runId !== state.runId ||
+    value.owner.schemaVersion !== 2 ||
+    typeof value.owner.hostname !== "string" ||
+    value.owner.hostname.length < 1 ||
+    value.owner.hostname.length > 255 ||
+    UNSAFE_TEXT_PATTERN.test(value.owner.hostname) ||
+    !Number.isSafeInteger(value.owner.pid) ||
+    value.owner.pid < 1 ||
+    validateProcessIdentity(value.owner.processIdentity) === null ||
+    !(
+      value.targetBoundary === null || validStopBoundary(value.targetBoundary)
+    ) ||
+    !Object.hasOwn(value, "stopRequest") ||
+    (value.settlement !== null &&
+      (!Array.isArray(value.settlement.records) ||
+        value.settlement.records.length > 16 ||
+        !/^[a-f0-9]{64}$/u.test(value.settlement.endpoint)))
+  )
+    fail("Preparation reservation is invalid.");
+  normalizeTimestamp(value.owner.acquiredAt, "preparation.owner.acquiredAt");
+  normalizeExecutionResource(value.resource);
+  normalizeStopRequest(value.stopRequest, {
+    ...state,
+    revision: value.revision - 1,
+  });
+  for (const key of [
+    "commandIdentity",
+    "commandFingerprint",
+    "configurationFingerprint",
+    "contentFingerprint",
+    "inputFingerprint",
+  ])
+    if (!/^[a-f0-9]{64}$/u.test(value.bindings[key]))
+      fail("Preparation bindings are invalid.");
+  const { digest, settlement, ...authority } = value;
+  if (
+    digest !==
+    createHash("sha256").update(JSON.stringify(authority)).digest("hex")
+  )
+    fail("Preparation authority digest is invalid.");
+  if (settlement !== null) {
+    const facts = normalizePreparationCustody(settlement.records, value);
+    if (
+      Object.keys(settlement).length !== 2 ||
+      !facts.retired ||
+      facts.endpoint !== settlement.endpoint
+    )
+      fail("Preparation settlement is invalid.");
+  }
+  return cloneRecord(value, "run.preparation");
 }
 
 export function normalizeExecutionResource(
@@ -1172,6 +1409,7 @@ export function normalizeRunState(value, expectedRunId) {
       value.executionResource,
       value.schemaVersion,
     ),
+    preparation: normalizePreparation(value.preparation, value),
     stopRequest: normalizeStopRequest(value.stopRequest, value),
     pipelineState: cloneRecord(value.pipelineState, "run.pipelineState"),
     createdAt,

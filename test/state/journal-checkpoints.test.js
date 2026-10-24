@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { ChildProcess } from "node:child_process";
+import crypto from "node:crypto";
 import {
+  constants,
   copyFileSync,
   mkdirSync,
   readdirSync,
@@ -28,14 +31,29 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import {
+  readProcessIdentity,
+  resolveOwnedProcessLauncher,
+  spawnOwnedProcess,
+  terminateOwnedProcess,
+} from "../../src/agents/index.js";
+import { createStopMonitor } from "../../src/runner/stops.js";
+import { inspectTrustedRequirements } from "../../src/runner/trusted-requirements.js";
+import {
+  createTrustedValidationService,
+  createTrustedValidationSnapshot,
+  runExactCommand,
+} from "../../src/trusted-validation/index.js";
+import { sandboxTrustedCommand } from "../../src/trusted-validation/execution.js";
+
 import { createRunStore } from "../../src/state/index.js";
 import { createStateJournal } from "../../src/state/journal.js";
 
-async function fixture(t, options = {}) {
+async function fixture(t, { pipelineId = "plan-execution", ...options } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-checkpoint-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const input = {
-    pipelineId: "plan-execution",
+    pipelineId,
     pipelineStateVersion: 1,
     projectPath: join(root, "project"),
     taskPath: join(root, "task"),
@@ -1535,3 +1553,1082 @@ test("reused and streamed records keep dispatch redaction and each event's stop 
     new RegExp(`${dispatch.id}|${stop.requestId}`, "u"),
   );
 });
+
+const preparationSnapshot = createTrustedValidationSnapshot(
+  {
+    check: {
+      command: "node required-check",
+      executable: process.execPath,
+      arguments: [
+        "--eval",
+        "throw new Error('configured check body must not run')",
+      ],
+    },
+  },
+  ["check"],
+);
+const preparationBindings = {
+  commandIdentity: preparationSnapshot.commands[0].identity,
+  commandFingerprint: preparationSnapshot.commandFingerprint,
+  configurationFingerprint: preparationSnapshot.configurationFingerprint,
+  contentFingerprint: "a".repeat(64),
+};
+const boundary = {
+  capability: "verified-commit-v1",
+  step: 1,
+  completedCommits: 0,
+  baselineHead: "a".repeat(40),
+};
+
+async function preparationFixture(t, options = {}) {
+  const f = await fixture(t, options);
+  f.current = await f.store.transitionRun(f.created.lease, {
+    pipelineState: {
+      ...f.created.state.pipelineState,
+      trustedValidation: preparationSnapshot,
+    },
+  });
+  f.reserve = () =>
+    f.store.reservePreparation(f.created.lease, preparationBindings);
+  f.proof = async () => {
+    const identity = await readProcessIdentity(process.pid);
+    return {
+      processIdentity: identity,
+      launchCutoff: identity,
+      namespaceId: "pid:[1]",
+      ancestryBaseline: [{ ...identity, pid: process.pid }],
+      controlGroup: "a".repeat(64),
+    };
+  };
+  f.attach = async (authority, canRelease = () => true) =>
+    f.store.recordPreparationProcess(
+      f.created.lease,
+      authority,
+      process.pid,
+      await f.proof(),
+      { canRelease },
+    );
+  f.retire = (authority) =>
+    f.store.recordPreparationProcess(f.created.lease, authority, null);
+  f.settle = () => f.store.settlePreparation(f.created.lease);
+  f.recover = (retire) => f.store.recoverPreparation(f.created.lease, retire);
+  f.saved = () => f.store.loadRun(f.current.runId);
+  f.history = () => f.store.loadRunHistory(f.current.runId);
+  f.stop = async (
+    kind = "cancel_requested",
+    timing = "immediate",
+    expectedRevision,
+  ) =>
+    f.store.requestOperatorStop({
+      runId: f.current.runId,
+      kind,
+      timing,
+      expectedRevision: expectedRevision ?? (await f.saved()).revision,
+      idempotencyKey: `${kind}-${timing}`,
+    });
+  return f;
+}
+
+// Reuse the journal growth/rotation fixture and normalization counter above.
+// Count actual bytes and hashing as well as expensive canonical publications.
+for (const mode of [
+  "cold",
+  "warm",
+  "evicted",
+  "oversized",
+  "polishing",
+  "stopped",
+  "interrupted-execution",
+  "interrupted-polishing",
+  "expired",
+  "canceled",
+  "canceled-before-attachment",
+  "not-launched",
+  "not-launched-async",
+  "not-launched-canceled",
+  "replaced-proof",
+  "lost-admission",
+  "queued-publication",
+]) {
+  test(`preparation custody: monitored ${mode} registration is independent of history publication`, async (t) => {
+    const work = { bytes: 0, compact: 0, hashed: 0, publications: 0 };
+    const registering = Promise.withResolvers(),
+      release = Promise.withResolvers(),
+      closed = Promise.withResolvers();
+    let elapsed = 0;
+    let launchClosed = false;
+    let originalCustody;
+    let base;
+    let holdPublication = false;
+    let attachmentPending = false;
+    const controller = new AbortController();
+    const interrupted = mode.startsWith("interrupted-");
+    const notLaunched = mode.startsWith("not-launched");
+    const blocked = notLaunched || ["stopped", "expired"].includes(mode);
+    const tampering = ["replaced-proof", "lost-admission"].includes(mode);
+    if (notLaunched) {
+      const kill = ChildProcess.prototype.kill;
+      t.mock.method(ChildProcess.prototype, "kill", function (...args) {
+        // A regression must fail before a failed native handle can signal PID 0.
+        assert.ok(Number.isSafeInteger(this.pid), "no process was created");
+        return kill.apply(this, args);
+      });
+    }
+    const f = await preparationFixture(t, {
+      pipelineId: mode.includes("polishing") ? "polishing" : "plan-execution",
+      resolveStopBoundary:
+        mode === "queued-publication" ? () => boundary : null,
+      async processIdentity(pid) {
+        if (
+          mode === "canceled-before-attachment" &&
+          pid !== process.pid &&
+          !attachmentPending
+        ) {
+          attachmentPending = true;
+          registering.resolve();
+          await release.promise;
+        }
+        return readProcessIdentity(pid);
+      },
+      async onTransitionBoundary(point) {
+        work.publications++;
+        if (holdPublication && point === "event-appended") {
+          holdPublication = false;
+          registering.resolve();
+          await release.promise;
+        }
+      },
+      async onPreparationBoundary({ phase, directory }) {
+        if (mode === "canceled-before-attachment" && phase === "admitted")
+          throw new Error("denied attachment interrupted");
+        if (
+          (mode === "replaced-proof" && phase === "attached") ||
+          (mode === "lost-admission" && phase === "admitted")
+        ) {
+          const path = join(directory, ".preparation-custody.jsonl");
+          originalCustody = await readFile(path, "utf8");
+          const records = originalCustody.trimEnd().split("\n").map(JSON.parse);
+          if (mode === "replaced-proof") records.at(-1).value.pid++;
+          else records.pop();
+          await writeFile(
+            path,
+            records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+          );
+        }
+        if (phase === "no-launch") {
+          if (mode !== "not-launched") {
+            assert.equal(launchClosed, true);
+            assert.equal(child.pid, undefined);
+          }
+          samples.push({ ...work, normalizations: decodes.normalized.length });
+        }
+        if (phase !== "attached") return;
+        if (interrupted) throw new Error("attachment interrupted");
+        if (["expired", "canceled"].includes(mode)) {
+          registering.resolve();
+          await release.promise;
+        }
+      },
+    });
+    const seeded = await seedActivities(
+      f,
+      mode === "warm" ? 1030 : 105,
+      "Preparation history.",
+      f.current,
+    );
+    if (mode === "oversized")
+      await f.store.transitionRun(f.created.lease, {
+        pipelineState: {
+          ...seeded.latest.pipelineState,
+          records: Array(90).fill("x".repeat(100_000)),
+        },
+      });
+    if (mode === "cold") {
+      // A new store may not use the old store's live execution capability.
+      await f.created.lease.release();
+      f.store = createRunStore({
+        stateRoot: f.stateRoot,
+        onTransitionBoundary() {
+          work.publications++;
+        },
+      });
+      f.created = {
+        ...f.created,
+        lease: await f.store.acquireRunLease(f.current.runId),
+      };
+      t.after(() => f.created.lease.release().catch(() => {}));
+    }
+    if (mode === "evicted")
+      for (let index = 0; index < 8; index++) {
+        const extra = await f.store.createRun(f.input);
+        await extra.lease.release();
+      }
+    const decodes = eventDecodes(t);
+    const nativeOpen = filesystem.open;
+    t.mock.method(filesystem, "open", async (path, ...args) => {
+      const handle = await nativeOpen(path, ...args);
+      const nativeRead = handle.read.bind(handle);
+      t.mock.method(handle, "read", async (...values) => {
+        const result = await nativeRead(...values);
+        if (/events(?:-[0-9]+)?\.jsonl$/u.test(String(path)))
+          work.bytes += result.bytesRead;
+        else work.compact += result.bytesRead;
+        return result;
+      });
+      return handle;
+    });
+    const nativeHash = crypto.createHash;
+    t.mock.method(crypto, "createHash", (...args) => {
+      const hash = nativeHash(...args),
+        update = hash.update.bind(hash);
+      hash.update = (value, ...rest) => {
+        work.hashed += Buffer.byteLength(value);
+        return update(value, ...rest);
+      };
+      return hash;
+    });
+    syncBuiltinESMExports();
+    t.after(() => {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    });
+    const waiting = Promise.withResolvers();
+    const monitor = createStopMonitor({
+      runId: f.current.runId,
+      lease: f.created.lease,
+      publish: async () => {},
+      runStore: {
+        ...f.store,
+        async waitForRunChange(_id, { signal }) {
+          waiting.resolve();
+          await new Promise((resolve) =>
+            signal.aborted
+              ? resolve()
+              : signal.addEventListener("abort", resolve, { once: true }),
+          );
+          return f.current;
+        },
+      },
+    });
+    await waiting.promise;
+    t.after(() => monitor.close());
+    const samples = [];
+    let proofBytes = 0,
+      capturedProof,
+      child;
+    const service = createTrustedValidationService({
+      git: {
+        snapshot: async () => ({
+          projectPath: f.input.projectPath,
+          contentFingerprint: preparationBindings.contentFingerprint,
+        }),
+        assertUnchanged: async () => {},
+      },
+      sandboxCommand(command, settings) {
+        const sandbox = sandboxTrustedCommand(command, {
+          ...settings,
+          bubblewrapPath: "/usr/bin/bwrap",
+        });
+        assert.deepEqual(sandbox.command.arguments.slice(-3), [
+          process.execPath,
+          "--eval",
+          "",
+        ]);
+        assert.ok(
+          !sandbox.command.arguments.includes(command.arguments.at(-1)),
+        );
+        // Controlled sandbox transport; retain the real inert supervisor and IPC.
+        return {
+          command: { executable: process.execPath, arguments: ["--eval", ""] },
+          environment: process.env,
+          ownershipMode: "native-sandbox-provider",
+        };
+      },
+      async runCommand(command, settings) {
+        if (mode === "stopped") await f.stop(); // Watcher remains deliberately delayed.
+        let publication;
+        if (mode === "queued-publication") {
+          await f.stop("pause_requested", "after-current-commit");
+          holdPublication = true;
+          publication = monitor.persist(() =>
+            f.store.recordStopActivity(f.created.lease, {
+              actor: "runner",
+              phase: "stop",
+              kind: "stopping",
+              message: "Publishing stop activity.",
+            }),
+          );
+          void publication.catch(() => {});
+          await registering.promise;
+        }
+        const before = { ...work, normalizations: decodes.normalized.length };
+        base = process.hrtime.bigint();
+        const result = await runExactCommand(command, {
+          ...settings,
+          monotonicNow: () => base + BigInt(elapsed) * 1_000_000n,
+          spawnProcess(file, args, options) {
+            if (mode === "not-launched") throw new Error("launch unavailable");
+            child = spawnOwnedProcess(file, args, {
+              ...options,
+              resolveLauncher: (cwd, settings) =>
+                notLaunched
+                  ? {
+                      file: join(f.input.projectPath, "missing-supervisor"),
+                      arguments: [],
+                      isolatedNamespace: false,
+                    }
+                  : resolveOwnedProcessLauncher(cwd, {
+                      ...settings,
+                      bubblewrap: process.execPath,
+                      cache: new Map(),
+                      namespaceId: "pid:[4026531836]",
+                      probe: () => ({ status: 1 }),
+                    }),
+              onProcess: async (pid, proof, admission) => {
+                if (pid === null) {
+                  samples.push({
+                    ...work,
+                    normalizations: decodes.normalized.length,
+                  });
+                  if (mode === "queued-publication") release.resolve();
+                } else {
+                  proofBytes = Buffer.byteLength(JSON.stringify(proof));
+                  capturedProof = structuredClone(proof);
+                }
+                return options.onProcess(pid, proof, admission);
+              },
+            });
+            child.once("close", () => {
+              launchClosed = true;
+              closed.resolve();
+            });
+            if (mode === "not-launched-canceled")
+              controller.abort(new Error("preparation canceled during spawn"));
+            return child;
+          },
+        });
+        await publication;
+        assert.equal(result.status, blocked ? "BLOCKED" : "PASS");
+        assert.equal(child?.ownedPayloadRequested ?? false, !blocked);
+        assert.equal(samples[0].normalizations, before.normalizations);
+        assert.equal(samples[0].publications, before.publications);
+        assert.equal(
+          samples[0].bytes,
+          before.bytes,
+          "registration reads no historical journal bytes",
+        );
+        assert.ok(samples[0].compact > before.compact);
+        assert.ok(
+          samples[0].hashed - before.hashed < proofBytes * 16 + 20_000,
+          "compact hashing is bounded by the process proof",
+        );
+        assert.ok(
+          work.publications > before.publications,
+          "settlement publishes complete canonical evidence",
+        );
+        return result;
+      },
+    });
+    const inspecting = inspectTrustedRequirements(
+      {
+        trustedValidation: service,
+        runStore: f.store,
+        lease: f.created.lease,
+        run: f.current,
+        monitor,
+        checkConfiguration: async () => {},
+        validatePersistedBoundary: async () => {},
+        storageForbiddenPaths: () => [],
+      },
+      {
+        inventory: [preparationSnapshot.commands[0].command],
+        signal: controller.signal,
+      },
+    );
+    void inspecting.catch(() => {});
+    t.after(async () => {
+      release.resolve();
+      child?.kill("SIGKILL");
+      await inspecting.catch(() => {});
+    });
+    if (["expired", "canceled", "canceled-before-attachment"].includes(mode)) {
+      await registering.promise;
+      if (mode === "expired") elapsed = 10_000;
+      else controller.abort(new Error("preparation canceled"));
+      if (mode === "canceled-before-attachment") {
+        await closed.promise;
+        assert.equal(await readProcessIdentity(child.ownedPid), null);
+      }
+      release.resolve();
+    }
+    if (
+      interrupted ||
+      mode === "canceled" ||
+      mode === "canceled-before-attachment" ||
+      tampering ||
+      mode === "not-launched-canceled"
+    ) {
+      await assert.rejects(inspecting);
+      if (mode === "canceled-before-attachment") {
+        const records = (
+          await readFile(
+            join(f.created.directoryPath, ".preparation-custody.jsonl"),
+            "utf8",
+          )
+        )
+          .trimEnd()
+          .split("\n")
+          .map(JSON.parse);
+        const attachment = records.find(({ kind }) => kind === "attached");
+        assert.ok(
+          attachment,
+          "the exited supervisor's complete proof is retained",
+        );
+        const attached = attachment.value;
+        assert.equal(attached.pid, child.ownedPid);
+        for (const [name, value] of Object.entries(capturedProof))
+          assert.deepEqual(attached[name], value);
+        assert.equal(records.at(-1).kind, "admitted");
+        assert.equal(records.at(-1).value, false);
+        await assert.rejects(
+          f.recover(async () => {
+            throw new Error("retirement uncertain");
+          }),
+          /retirement uncertain/u,
+        );
+        assert.ok((await f.saved()).preparation);
+        await assert.rejects(f.created.lease.release(), {
+          code: "ERR_EXECUTION_PROCESS_ACTIVE",
+        });
+      }
+      if (originalCustody !== undefined) {
+        await assert.rejects(f.recover(assert.fail));
+        assert.ok((await f.saved()).preparation);
+        await writeFile(
+          join(f.created.directoryPath, ".preparation-custody.jsonl"),
+          originalCustody,
+        );
+      }
+      if (mode === "not-launched-canceled")
+        assert.equal((await f.saved()).preparation, null);
+      else
+        await f.recover((owner, inspect) =>
+          terminateOwnedProcess(owner.pid, inspect),
+        );
+      assert.equal(child.ownedPayloadRequested, false);
+    } else
+      assert.equal((await inspecting).status, blocked ? "BLOCKED" : "READY");
+    const saved = await f.saved();
+    assert.equal(saved.preparation, null);
+    assert.equal(saved.executionProcess, null);
+    assert.deepEqual(saved.counters, seeded.latest.counters);
+    const history = await f.store.loadRunHistory(saved.runId);
+    const settled = history.events.filter(
+      (event) => event.activity?.kind === "settled",
+    );
+    assert.equal(settled.length, 1);
+    assert.deepEqual(
+      settled[0].state.preparation.targetBoundary,
+      mode === "queued-publication" ? boundary : null,
+    );
+    assert.equal(
+      settled[0].state.preparation.settlement.records.at(-1).kind,
+      notLaunched ? "no-launch" : "retired",
+    );
+    assert.ok(decodes.normalized.length > 0);
+  });
+}
+
+for (const order of ["stop-first", "attach-first", "interrupted-acceptance"]) {
+  test(
+    `preparation custody: ${order} uses the same compact admission gate`,
+    { timeout: 5000 },
+    async (t) => {
+      const entered = Promise.withResolvers(),
+        release = Promise.withResolvers();
+      let claims = 0;
+      const operations = [];
+      t.after(async () => {
+        release.resolve();
+        await Promise.allSettled(operations);
+      });
+      let interrupt = order === "interrupted-acceptance";
+      const f = await preparationFixture(t, {
+        onLeasePublicationBoundary({ filePath, phase }) {
+          if (
+            phase === "published" &&
+            filePath.includes("/.custody-") &&
+            ++claims === 3
+          )
+            release.resolve();
+        },
+        async onPreparationBoundary({ phase }) {
+          if (
+            order !== "interrupted-acceptance" &&
+            phase === (order === "stop-first" ? "stop" : "attached")
+          ) {
+            entered.resolve();
+            await release.promise;
+          }
+          if (phase === "stop" && interrupt) {
+            interrupt = false;
+            throw new Error("acceptance interrupted");
+          }
+        },
+      });
+      const authority = await f.reserve();
+      if (interrupt) {
+        await assert.rejects(f.stop(), /acceptance interrupted/u);
+        assert.equal(await f.attach(authority), false);
+      } else {
+        const first = order === "attach-first" ? f.attach(authority) : f.stop();
+        operations.push(first);
+        await entered.promise;
+        const second =
+          order === "attach-first" ? f.stop() : f.attach(authority);
+        operations.push(second);
+        const results = await Promise.all(operations);
+        assert.equal(
+          claims,
+          3,
+          "the second caller contended at the held custody gate",
+        );
+        assert.equal(
+          results[order === "attach-first" ? 0 : 1],
+          order === "attach-first",
+        );
+      }
+      const log = await readFile(
+        join(f.created.directoryPath, ".preparation-custody.jsonl"),
+        "utf8",
+      );
+      assert.ok(log.includes('"kind":"stop"'));
+      await assert.rejects(f.created.lease.release(), {
+        code:
+          order === "interrupted-acceptance"
+            ? "ERR_EXECUTION_PROCESS_ACTIVE"
+            : "ERR_STOP_RECONCILIATION_REQUIRED",
+      });
+      await f.retire(authority);
+      await f.settle();
+      assert.equal((await f.saved()).preparation, null);
+    },
+  );
+}
+
+for (const target of [null, boundary, { ...boundary, step: 2 }]) {
+  test(`preparation custody: explicit ${target === null ? "null" : target.step} target preserves deferred-stop rules`, async (t) => {
+    let selected = target;
+    const f = await preparationFixture(t, {
+      resolveStopBoundary: () => selected,
+    });
+    const authority = await f.reserve();
+    if (target === null) {
+      await assert.rejects(f.stop("pause_requested", "after-current-commit"), {
+        code: "ERR_STOP_BOUNDARY_UNSUPPORTED",
+      });
+      assert.equal(await f.attach(authority), true);
+    } else {
+      selected = boundary;
+      await f.stop("pause_requested", "after-current-commit");
+      assert.equal(await f.attach(authority), target.step === 1);
+    }
+    await f.retire(authority);
+    await f.settle();
+  });
+}
+
+test("preparation custody: cancellation cannot defer an immediate pause", async (t) => {
+  const f = await preparationFixture(t, {
+    resolveStopBoundary: () => boundary,
+  });
+  const authority = await f.reserve();
+  await f.stop("pause_requested");
+  const receipt = await f.stop("cancel_requested", "after-current-commit");
+  assert.equal(receipt.effectiveTiming, "immediate");
+  assert.equal(await f.attach(authority), false);
+  await f.retire(authority);
+  await f.settle();
+});
+
+test("preparation custody: admission rejects a hard link added after safe open", async (t) => {
+  let armed = false;
+  const f = await preparationFixture(t, {
+    onPreparationBoundary({ phase }) {
+      if (phase === "admitted") armed = true;
+    },
+  });
+  const authority = await f.reserve();
+  const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+  const linked = join(f.stateRoot, "linked-custody");
+  const inode = (await stat(path)).ino;
+  const handle = await open(path, "r");
+  const prototype = Object.getPrototypeOf(handle);
+  await handle.close();
+  const nativeStat = prototype.stat;
+  t.mock.method(prototype, "stat", async function (...args) {
+    const metadata = await nativeStat.apply(this, args);
+    if (armed && args.length === 0 && metadata.ino === inode) {
+      armed = false;
+      await link(path, linked);
+    }
+    return metadata;
+  });
+  await assert.rejects(f.attach(authority), { code: "ERR_UNSAFE_STATE_FILE" });
+  await rm(linked);
+  await f.retire(authority);
+  await f.settle();
+});
+
+test("preparation custody: competing interrupted stop acceptance preserves the recoverable log", async (t) => {
+  let interrupt = true;
+  const f = await preparationFixture(t, {
+    onPreparationBoundary({ phase }) {
+      if (phase === "stop" && interrupt) {
+        interrupt = false;
+        throw new Error("acceptance interrupted");
+      }
+    },
+  });
+  const authority = await f.reserve();
+  await assert.rejects(f.stop("pause_requested"), /acceptance interrupted/u);
+  const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+  const source = await readFile(path, "utf8");
+  await assert.rejects(f.stop(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  assert.equal(await readFile(path, "utf8"), source);
+  assert.equal((await f.saved()).stopRequest, null);
+  assert.equal(await f.attach(authority), false);
+  await f.retire(authority);
+  await f.settle();
+});
+
+test("preparation custody: other live reservations cannot evict a stop disposition's prefix proof", async (t) => {
+  const f = await preparationFixture(t);
+  const authority = await f.reserve();
+  const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+  const header = await readFile(path, "utf8");
+  await f.stop();
+  const stopped = await readFile(path, "utf8");
+  const pending = [];
+  for (let index = 0; index < 8; index++) {
+    const created = await f.store.createRun({
+      ...f.input,
+      pipelineState: {
+        ...f.input.pipelineState,
+        trustedValidation: preparationSnapshot,
+      },
+    });
+    t.after(() => created.lease.release().catch(() => {}));
+    pending.push({
+      lease: created.lease,
+      authority: await f.store.reservePreparation(
+        created.lease,
+        preparationBindings,
+      ),
+    });
+  }
+  await writeFile(path, header);
+  await assert.rejects(f.attach(authority), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  await writeFile(path, stopped);
+  const line = stopped.trimEnd().split("\n").at(-1);
+  const duplicate = {
+    ...JSON.parse(line),
+    previous: crypto.createHash("sha256").update(line).digest("hex"),
+  };
+  await appendFile(path, JSON.stringify(duplicate) + "\n");
+  await assert.rejects(f.attach(authority), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  await writeFile(path, stopped);
+  pending.push({ lease: f.created.lease, authority });
+  for (const entry of pending) {
+    await f.store.recordPreparationProcess(
+      entry.lease,
+      entry.authority,
+      undefined,
+    );
+    await f.store.settlePreparation(entry.lease);
+  }
+});
+
+for (const phase of [
+  "attached",
+  "admitted",
+  "retired",
+  "before-removal",
+  "removed",
+  "settlement-publication",
+]) {
+  test(`preparation custody: ${phase} interruption reconciles one exact endpoint`, async (t) => {
+    let fail = true,
+      settling = false;
+    let originalLive = true;
+    const identity = await readProcessIdentity(process.pid);
+    const owners = {
+      processIdentity: async () => identity,
+      processIsAlive: (pid) => pid !== 41001 || originalLive,
+    };
+    const f = await preparationFixture(t, {
+      ...owners,
+      processId: 41001,
+      onPreparationBoundary({ phase: point }) {
+        if (point === phase && fail) {
+          fail = false;
+          throw new Error("custody interrupted");
+        }
+      },
+      onTransitionBoundary(point) {
+        if (
+          phase === "settlement-publication" &&
+          settling &&
+          point === "event-appended" &&
+          fail
+        ) {
+          fail = false;
+          throw new Error("custody interrupted");
+        }
+      },
+    });
+    const authority = await f.reserve();
+    if (["attached", "admitted"].includes(phase))
+      await assert.rejects(f.attach(authority), /custody interrupted/u);
+    else {
+      assert.equal(await f.attach(authority), true);
+      if (phase === "retired")
+        await assert.rejects(f.retire(authority), /custody interrupted/u);
+      else {
+        await f.retire(authority);
+        settling = true;
+        await assert.rejects(f.settle(), /custody interrupted/u);
+      }
+    }
+    originalLive = false;
+    const replacement = createRunStore({
+      stateRoot: f.stateRoot,
+      ...owners,
+      processId: 41002,
+    });
+    const lease = await replacement.acquireRunLease(f.current.runId);
+    t.after(() => lease.release().catch(() => {}));
+    const recover = (retire) => replacement.recoverPreparation(lease, retire);
+    if (phase === "attached") {
+      for (let attempt = 0; attempt < 18; attempt++)
+        await assert.rejects(
+          recover(async () => {
+            throw new Error("retirement uncertain");
+          }),
+          /retirement uncertain/u,
+        );
+      const records = (
+        await readFile(
+          join(f.created.directoryPath, ".preparation-custody.jsonl"),
+          "utf8",
+        )
+      )
+        .trimEnd()
+        .split("\n")
+        .map(JSON.parse);
+      assert.equal(records.filter(({ kind }) => kind === "revoked").length, 1);
+    }
+    let retirements = 0;
+    const recovered = await recover(async (owner, inspect) => {
+      retirements++;
+      assert.equal(owner.pid, process.pid);
+      assert.equal((await inspect()).status, "live");
+      // State policy fixture: production supplies the existing tree retire proof.
+    });
+    assert.equal(recovered.preparation, null);
+    assert.equal(retirements, ["attached", "admitted"].includes(phase) ? 1 : 0);
+    assert.equal(
+      (await f.history()).events.filter(
+        (event) => event.activity?.kind === "settled",
+      ).length,
+      1,
+    );
+    assert.deepEqual(await recover(assert.fail), recovered);
+  });
+}
+
+test("preparation custody: partial final records require the issued prefix and verified retirement", async (t) => {
+  const f = await preparationFixture(t);
+  const authority = await f.reserve();
+  await f.attach(authority);
+  const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+  await appendFile(path, '{"kind":"ret');
+  await assert.rejects(
+    f.recover(async () => {
+      throw new Error("retirement uncertain");
+    }),
+    /retirement uncertain/u,
+  );
+  assert.ok((await f.saved()).preparation);
+  await f.recover(async () => {});
+  assert.equal((await f.saved()).preparation, null);
+});
+
+for (const change of ["replacement", "tail-completion"]) {
+  test(`preparation custody: tail repair rejects ${change} after inspection`, async (t) => {
+    const f = await preparationFixture(t);
+    const authority = await f.reserve();
+    await f.attach(authority);
+    const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+    const prefix = await readFile(path, "utf8");
+    const previous = crypto
+      .createHash("sha256")
+      .update(prefix.trimEnd().split("\n").at(-1))
+      .digest("hex");
+    const line = JSON.stringify({ kind: "revoked", value: null, previous });
+    await appendFile(path, line.slice(0, -1));
+    let changed;
+    const nativeOpen = filesystem.open;
+    const opened = t.mock.method(
+      filesystem,
+      "open",
+      async (filePath, flags, ...args) => {
+        if (
+          changed === undefined &&
+          ((filePath === path &&
+            flags === (constants.O_RDWR | (constants.O_NOFOLLOW ?? 0))) ||
+            (String(filePath).includes("..preparation-custody.jsonl.") &&
+              flags === "wx"))
+        ) {
+          if (change === "replacement") {
+            changed = await readFile(path, "utf8");
+            await writeFile(path + ".replacement", changed);
+            await rename(path + ".replacement", path);
+          } else {
+            await appendFile(path, "}\n");
+            changed = await readFile(path, "utf8");
+          }
+        }
+        return nativeOpen(filePath, flags, ...args);
+      },
+    );
+    syncBuiltinESMExports();
+    t.after(() => {
+      opened.mock.restore();
+      syncBuiltinESMExports();
+    });
+    let retirements = 0;
+    const retire = async () => {
+      retirements++;
+    };
+    await assert.rejects(f.recover(retire), { code: "ERR_INVALID_EVENT_LOG" });
+    assert.equal(retirements, 1);
+    assert.equal(await readFile(path, "utf8"), changed);
+    assert.equal((await f.saved()).preparation.settlement, null);
+    await assert.rejects(f.created.lease.release(), {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    });
+    await f.recover(retire);
+    const settled = (await f.history()).events.filter(
+      (event) => event.activity?.kind === "settled",
+    );
+    assert.equal(settled.length, 1);
+    const records = settled[0].state.preparation.settlement.records;
+    assert.equal(records.at(-1).kind, "retired");
+    assert.equal(
+      records.some((record) => record.kind === "revoked"),
+      change === "tail-completion",
+    );
+    assert.equal((await f.saved()).preparation, null);
+  });
+}
+
+test("preparation custody: settlement rechecks the exact log endpoint before removal", async (t) => {
+  let original;
+  const f = await preparationFixture(t, {
+    async onPreparationBoundary({ phase, directory }) {
+      if (phase !== "before-removal") return;
+      const path = join(directory, ".preparation-custody.jsonl");
+      original = await readFile(path, "utf8");
+      await appendFile(path, "{");
+    },
+  });
+  const authority = await f.reserve();
+  await f.attach(authority);
+  await f.retire(authority);
+  await assert.rejects(f.settle(), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+  assert.equal(await readFile(path, "utf8"), original + "{");
+  assert.ok((await f.saved()).preparation.settlement);
+  await assert.rejects(f.created.lease.release(), {
+    code: "ERR_EXECUTION_PROCESS_ACTIVE",
+  });
+});
+
+test("preparation custody: missing registration and changed original history retain ownership", async (t) => {
+  const f = await preparationFixture(t);
+  await f.reserve();
+  await assert.rejects(f.recover(assert.fail), {
+    code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+  });
+  const path = join(f.created.directoryPath, "events.jsonl");
+  const source = await readFile(path, "utf8");
+  await writeFile(path, source.replace('"model":"base"', '"model":"next"'));
+  await assert.rejects(f.recover(assert.fail));
+  await assert.rejects(f.created.lease.release());
+});
+
+test("preparation custody: cold rollback cannot hide an unmerged custody log", async (t) => {
+  const f = await preparationFixture(t);
+  const eventsPath = join(f.created.directoryPath, "events.jsonl");
+  const statePath = join(f.created.directoryPath, "state.json");
+  const beforeEvents = await readFile(eventsPath, "utf8");
+  const beforeState = await readFile(statePath, "utf8");
+  const authority = await f.reserve();
+  await f.attach(authority);
+  const reservedEvents = await readFile(eventsPath, "utf8");
+  const reservedState = await readFile(statePath, "utf8");
+  const custodyPath = join(
+    f.created.directoryPath,
+    ".preparation-custody.jsonl",
+  );
+  const custody = await readFile(custodyPath, "utf8");
+  await writeFile(eventsPath, beforeEvents);
+  await writeFile(statePath, beforeState);
+  const replacement = createRunStore({ stateRoot: f.stateRoot });
+  for (const inspect of [
+    () => replacement.loadRun(f.current.runId),
+    () => replacement.runIsLeased(f.current.runId),
+    () => replacement.acquireRunLease(f.current.runId),
+  ])
+    await assert.rejects(inspect(), {
+      code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    });
+  assert.equal(await readFile(custodyPath, "utf8"), custody);
+  assert.equal(await readFile(eventsPath, "utf8"), beforeEvents);
+  assert.equal(await readFile(statePath, "utf8"), beforeState);
+  await writeFile(eventsPath, reservedEvents);
+  await writeFile(statePath, reservedState);
+  await f.retire(authority);
+  await f.settle();
+});
+
+for (const settled of [false, true]) {
+  test(`preparation custody: lock-free reads reconcile concurrent ${settled ? "settlement" : "reservation"}`, async (t) => {
+    const f = await preparationFixture(t);
+    const nativeStat = filesystem.lstat;
+    const path = join(f.created.directoryPath, ".preparation-custody.jsonl");
+    let authority;
+    let armed = true;
+    t.mock.method(filesystem, "lstat", async (filePath, ...args) => {
+      if (!armed || filePath !== path) return nativeStat(filePath, ...args);
+      armed = false;
+      authority = await f.reserve();
+      const metadata = await nativeStat(filePath, ...args);
+      if (settled) {
+        await f.store.recordPreparationProcess(
+          f.created.lease,
+          authority,
+          undefined,
+        );
+        await f.settle();
+      }
+      return metadata;
+    });
+    syncBuiltinESMExports();
+    t.after(() => {
+      t.mock.restoreAll();
+      syncBuiltinESMExports();
+    });
+    const read = await f.saved();
+    assert.equal(read.preparation?.id ?? null, settled ? null : authority.id);
+    if (!settled) {
+      await f.store.recordPreparationProcess(
+        f.created.lease,
+        authority,
+        undefined,
+      );
+      await f.settle();
+    }
+  });
+}
+
+test("preparation custody: cold canonical replay rejects clearing without settlement", async (t) => {
+  const f = await preparationFixture(t);
+  const authority = await f.reserve();
+  await f.attach(authority);
+  await f.retire(authority);
+  await f.settle();
+  const path = join(f.created.directoryPath, "events.jsonl");
+  const events = (await readFile(path, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map(JSON.parse);
+  events.find(
+    ({ activity }) => activity?.kind === "settled",
+  ).state.preparation = null;
+  await writeFile(path, events.map(JSON.stringify).join("\n") + "\n");
+  const replacement = createRunStore({ stateRoot: f.stateRoot });
+  await assert.rejects(replacement.loadRun(f.current.runId), {
+    code: "ERR_INVALID_EVENT_LOG",
+  });
+});
+
+test("preparation custody: replacement owner cannot reuse a live issuer's release capability", async (t) => {
+  let originalLive = true;
+  const identity = await readProcessIdentity(process.pid);
+  const options = {
+    processId: 41001,
+    processIdentity: async () => identity,
+    processIsAlive: (pid) => pid !== 41001 || originalLive,
+  };
+  const f = await preparationFixture(t, options);
+  const authority = await f.reserve();
+  await f.attach(authority);
+  originalLive = false;
+  const replacement = createRunStore({
+    stateRoot: f.stateRoot,
+    ...options,
+    processId: 41002,
+  });
+  const lease = await replacement.acquireRunLease(f.current.runId);
+  t.after(() => lease.release().catch(() => {}));
+  await assert.rejects(f.attach(authority), { code: "ERR_INVALID_RUN_LEASE" });
+  await assert.rejects(
+    replacement.recordPreparationProcess(
+      lease,
+      authority,
+      process.pid,
+      await f.proof(),
+      { canRelease: () => true },
+    ),
+    { code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE" },
+  );
+  await replacement.recoverPreparation(lease, async (owner) =>
+    assert.equal(owner.pid, process.pid),
+  );
+  assert.equal((await replacement.loadRun(f.current.runId)).preparation, null);
+});
+
+for (const publication of [
+  "event-appended",
+  "state-replaced",
+  "progress-replaced",
+]) {
+  test(`preparation custody: interrupted reservation ${publication} never issues launch authority`, async (t) => {
+    let fail = false;
+    const f = await preparationFixture(t, {
+      onTransitionBoundary(point) {
+        if (fail && point === publication) {
+          fail = false;
+          throw new Error("reservation interrupted");
+        }
+      },
+    });
+    fail = true;
+    await assert.rejects(f.reserve(), /reservation interrupted/u);
+    assert.ok((await f.saved()).preparation);
+    await assert.rejects(f.recover(assert.fail));
+    await assert.rejects(f.created.lease.release(), {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    });
+  });
+}

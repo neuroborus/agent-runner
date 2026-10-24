@@ -145,9 +145,12 @@ test("retains large result copies across journal rotation, interruption, and rej
     .map(JSON.parse);
   assert.deepEqual(
     barrierEvents.map(({ schemaVersion }) => schemaVersion),
-    [20, 21],
+    [20, RUN_STATE_SCHEMA_VERSION],
   );
-  assert.equal((await store.recoverRun(lease)).schemaVersion, 21);
+  assert.equal(
+    (await store.recoverRun(lease)).schemaVersion,
+    RUN_STATE_SCHEMA_VERSION,
+  );
   const result = largeFinalizationResult("é");
   const retained = {
     workflowState: "FINALIZE",
