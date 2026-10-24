@@ -1925,7 +1925,8 @@ and finished is 1. Duplicate/misplaced footers, extra fields, wrong values and
 malformed preceding events reject the entire observation. A zero-count footer
 is empty inspection, never denial evidence.
 
-The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
+The following startup/cold-mode contracts remain separate from the constructor
+mode described below. The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
 through fixed noninteractive sudo in matching hosted macOS CI. Its fixed program
 observes the held child's full syscall entry/return and startup probes, without
 destructive actions, unrelated predicates or fallback tools. Additional diagnostic
@@ -4071,54 +4072,62 @@ host, access or resource getter names alias. No name deduplication can discard
 an owned reference or consume another entry's reference.
 
 The ordinary MIG cache is not a complete inventory of runtime replies. Pinned
-[`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mach_init.c)
-allocates a separate task fallback through `mach_reply_port` at initialization
-and after fork. The helper's own dyld interposition table records ordinary
-allocator returns at that producer in a bounded, PID-bound ledger. The callback
-forwards the original result using fixed storage, without an additional RPC,
-auxiliary allocation, diagnostics or cleanup.
-It ignores null/dead sentinels, discards copied parent bookkeeping at the first
-child allocation, and refuses overflow or duplicate/incompatible provenance.
-PID-aware atomic initialization preserves completed allocations when first
-callers race; a child takes over an unfinished parent's initialization instead
-of waiting on that parent's marker. Atomic slot reservation bounds concurrent
-returns; unpublished slots are null and cannot authorize a name.
-Child entry preserves already recorded allocations from its own process; reexec
-starts with new image bookkeeping. Neither a hidden runtime global nor a private
-TSD offset is inspected. No name from a census can enter the ledger.
+[`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach_init.c)
+allocates a distinct task fallback at initialization and after fork. Ordinary
+launch and fault custody therefore use a fixed constructor mode in the existing
+`startup-trace.js` owner, rather than dyld interception or a hidden runtime global.
+The original parent remains behind P while the observer is armed, its sudo/DTrace
+chain is independently identified and its installed tool digests are recorded.
+The fault parent's hello follows sealed reexec. Both parents are revalidated
+before release and retain their single-threaded privileged fork guard.
 
-The hosted Xcode 16.4 macOS 15.5 SDK also omits `mach-o/dyld-interposing.h`.
-The helper owns a single typed replacement/replacee pair following the raw x64
-interposition contract in Apple's
-[`dyld-interposing.h` at `fd8d0c4d52320ebf64db34f3cb280310d905c5ae`](https://github.com/apple-oss-distributions/dyld/blob/fd8d0c4d52320ebf64db34f3cb280310d905c5ae/include/mach-o/dyld-interposing.h).
-The ordered function pointers identify `domain_runtime_reply_allocate` and the
-original `mach_reply_port`. The compiler's `used` attribute retains the entry in
-`__DATA,__interpose` even without a C reader; a compile-time size check requires
-exactly two pointer widths. Both functions retain the SDK's zero-argument
-`mach_port_t` call type. The existing Apple/x86-64 guard confines this raw-pointer
-layout to its declared target; authenticated-pointer targets require their own
-contract. The declaration implements that ABI directly with attribution to the
-primary source, without importing the upstream macro or header.
+The literal, mandatory `proc:::create`, `proc:::start`, Mach-return, private-read
+and exec/exit probe descriptions must compile against the installed provider.
+Both public `read` and `read_nocancel` syscall forms use the same fixed private
+descriptor/count fence; libc's cancellation choice cannot bypass observation.
+`args[0]->pr_pid` uses the provider's public process translation, never a guessed
+CTF layout. Pinned XNU `systrace.c` reports the actual
+`mach_trap::mach_reply_port:return` result in arg0. Create/start timestamps and
+constructor/read thread identities must establish ordering for the original
+child. Unsupported installed probes, translations or ordering refuse release;
+source references establish neither installed availability nor hosted success.
 
-The allocator itself needs an owned declaration as well. Pinned XNU
-[`mach_traps.h:82-85` at `43a90889846e00bfb5cf1d255cdc0a701a1e05a4`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/mach_traps.h#L82-L85)
-declares `extern mach_port_name_t mach_reply_port(void)` under
-`!KERNEL && PRIVATE`. That placement establishes the user-space prototype,
-not public SDK visibility. The helper declares only that exact zero-argument
-prototype in the scoped reply section of `custody.h`, before its allocator callback
-and retained interposition entry. Only `feasibility-domain.h` and the experimental
-launcher enable that section with `NATIVE_RUNTIME_REPLIES`; both feasibility build
-variants retain it without enabling `PRIVATE` in the source or compiler arguments.
-The bounded producer ledger and checked special-reply lookup are shared primitives;
-sanitation, reference ownership and refusal policy stay in their existing owners.
-The original direct allocator reference and retained pair remain unchanged;
-the declaration does not establish installed export availability, successful
-native linking or dyld interception. Those remain hosted observations, separately
-from the cached special-reply export lookup below.
+After environment/libc setup, the child publishes a version-one pre-census frame
+and blocks on a private 512-byte read. The root parent independently samples its
+birth/audit identity and holds its audit session after fork, before relaying the
+receipt. The child inherits no custody reference. The CR1 receipt binds parent,
+trusted fork epoch, original child PID/birth/audit credentials and at most eight
+distinct constructor names. Exact length, canonical numbers, zero padding and
+one-shot import reject malformed/trailing input, namespace substitution and replay.
+A pre-census frame never satisfies the completed-controls receipt.
+
+Kernel read fences carry constructor sequence/count boundaries. Delivery may be
+buffered across CPUs: every sequence through the pre-census fence must arrive
+before import; arrival order is not kernel event order. The existing exact-type
+census admits legitimate constructor/cache aliases as one name. Missing names,
+incompatible aliases, changed caches and unknown live rights still refuse.
+After census, ordinary launcher controls and checked cleanup, the child publishes
+a distinct final frame and parks on a one-byte private read. Fault payload
+controls retain their sandboxed post-exec phase; constructor evidence authorizes
+only the original pre-exec namespace.
+
+That final read ends the observer program without waiting for payload exit.
+The final fence and END record must agree with unchanged constructor evidence;
+successful exit, fully drained error-free streams and independent retirement of
+all observer identities precede R. Forced observer termination cannot establish
+complete capture. Only prepared, nonallocating descriptor closure/release and
+exec follow sealing. Public exec/exit function addresses are resolved before the
+checkpoint; exec refusal preserves errno with fixed buffers and raw writes. Missing, invalid, duplicate, overflowed or dropped records,
+intervening exec and uncertain custody/retirement withhold release. Existing
+journals retain acquired identities and possible effects before dependent
+releases. Both custody paths store the creator receipt before import release;
+fault custody stores program/capture digests before its seal1 release. Its existing intent artifact
+retains complete constructor evidence. Recovery preserves original child, parent
+and observer ownership.
 
 The complete feasibility helper has two build variants: the ordinary helper and
 the same translation unit with `NATIVE_FEASIBILITY_COMMAND` defined. Both use
-C11 atomics, `-arch x86_64`, the selected `-isysroot`, and the existing sandbox and
+C11, `-arch x86_64`, the selected `-isysroot`, and the existing sandbox and
 BSM linkage. Their source/header identities remain bound by the existing build
 owner. The SDK surface audit covers these transitive owners together:
 
@@ -4126,7 +4135,7 @@ owner. The SDK surface audit covers these transitive owners together:
 | -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `feasibility-helper.c`           | Its C/POSIX headers cover fixed file, socket, credential, signal and wait operations; `CommonCrypto/CommonDigest.h` supplies SHA-256; `libproc.h`, `sys/proc.h` and `sys/proc_info.h` supply process identities and census records; `sys/acl.h`, `sys/attr.h` and `sys/mount.h` supply held ACL and volume inspection; `bsm/audit.h` and `mach/mach.h` supply audit tokens, task identities, Mach traps and rights; `sandbox.h` supplies policy application. |
 | `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor.                                                                                                                                                                      |
-| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes general custody declarations; `NATIVE_AUDIT_DOMAIN` includes shared identity, audit-session and bounded census operations. The separate `NATIVE_RUNTIME_REPLIES` section uses `stdatomic.h`, `dlfcn.h` and `mach/mig.h` for the producer ledger and checked cached accessor, with the existing pinned allocator declaration and x64 interposition contract. No private SDK header is added.                              |
+| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes general custody declarations; `NATIVE_AUDIT_DOMAIN` includes shared identity, audit-session and bounded census operations. The separate `NATIVE_RUNTIME_REPLIES` section uses `dlfcn.h` and `mach/mig.h` for strict bounded receipt import, stable observation bookkeeping and the checked cached accessor. No private SDK header is added.                                                                              |
 | `feasibility-sandbox.h`          | Its public C/POSIX types and `dlfcn.h` support the pinned variadic sandbox-check ABI and separately checked function/data lookups.                                                                                                                                                                                                                                                                                                                           |
 | Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/select.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                   |
 
@@ -4135,13 +4144,9 @@ flags remain supplied by those SDK interfaces; no substitute numeric definitions
 are introduced. The separately resolved exports remain `sandbox_check`, the
 `SANDBOX_CHECK_NO_REPORT` data object, `proc_signal_with_audittoken` and the cached
 special-reply accessor described below. Their existing checks still gate use.
-Cycle 117 observed the absent private cached-reply header; completed cycle 118
-then observed the absent interposition header in both build variants. Cycle 119
-reached the undeclared ordinary reply allocator in both variants. A compiler
-refusal does not establish availability of later declarations or exports.
-This source audit and portable fixtures supply no installed SDK, complete
-compilation, native interposition or retirement proof. Both native build variants
-and the original controls still require fresh matching hosted CI.
+These source declarations and portable fixtures supply no installed SDK,
+complete compilation or native retirement proof. Both native build variants and
+the original controls still require fresh matching hosted CI.
 
 Before the child's first identity/audit RPC, it separately borrows the exact
 ordinary cache from `mig_get_reply_port` and the special cache from
@@ -4150,8 +4155,8 @@ ordinary cache from `mig_get_reply_port` and the special cache from
 returns an existing cached special reply, allocating only when that cache is
 absent. The helper never calls the allocating/rebinding
 `thread_get_special_reply_port` trap as a query. Ordinary and special caches
-cannot alias. A cache borrow and a producer record may identify the same ordinary
-receive right without minting an owned reference or duplicate census entry.
+cannot alias. A checked cache borrow and a constructor record may identify the same
+name without minting an owned reference or duplicate census entry.
 All observed producer names must appear with their exact type; cache replacement
 or a new allocation during census/release invalidates the inspected evidence.
 
@@ -4179,12 +4184,12 @@ release errors; that operation supplies no additional provenance. All borrowed
 ordinary and special rights remain runtime-owned through exec or refusal.
 Checked cleanup releases only the independently acquired getter/local copies,
 even when one aliases a borrowed reply name. Unknown receive rights remain
-untouched and fence exec, including `IKOT_NONE` objects. A producer call that
-dyld did not interpose remains unknown; its name is never inferred by exclusion.
-Portable callback fixtures establish no native loader interception, identification
-of the archived unknown right, confinement or retirement success. Fresh original
+untouched and fence exec, including `IKOT_NONE` objects. A constructor lacking a complete joined receipt remains unknown; its name is
+never inferred by exclusion. Portable fixtures establish no installed provider
+availability, identification of an archived unknown right, confinement or
+retirement success. Fresh original
 hosted execution must prove those facts.
-Special-cache and producer-ledger refusals retain their closed native operation
+Special-cache and imported-observation refusals retain their closed native operation
 through the existing redacted failure decoder; raw port metadata grants no
 authority and is not copied into public failure details.
 

@@ -660,6 +660,9 @@ export function createDarwinCustodyReader(value, options = {}) {
     "case-members",
     "case-empty",
     "case-signal",
+    "case-observer",
+    "case-observer-observe",
+    "case-observer-retire",
     "case-receipt",
     "case-receipt-read",
     "case-receipt-optional",
@@ -1218,6 +1221,28 @@ export function createDarwinCustodyReader(value, options = {}) {
       return new TextDecoder("utf-8", { fatal: true }).decode(
         Buffer.from(value.hex, "hex"),
       );
+    },
+    async creatorReceipt(bytes) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          Buffer.isBuffer(bytes) &&
+          bytes.length === 512,
+      );
+      requireDarwin(
+        (await command("case-creator", bytes.toString("hex"))) === null,
+      );
+    },
+    async constructorObserver(operation, value) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          ["read", "observe", "retire"].includes(operation),
+      );
+      return operation === "read"
+        ? command("case-observer", value)
+        : command(
+            "case-observer-" + operation,
+            ...darwinIdentityArguments(value),
+          );
     },
     async sendOwnership(payload, value) {
       requireDarwin(

@@ -92,6 +92,9 @@ const operationPhases = [
   "case-session-read",
   "case-session-close",
   "case-signal",
+  "case-observer",
+  "case-observer-observe",
+  "case-observer-retire",
   "case-fence",
   "access-audit-start",
   "access-audit",
@@ -274,6 +277,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         ...(ownership
           ? [
               "case-start",
+              "case-creator",
+              "case-observer",
+              "case-observer-observe",
+              "case-observer-retire",
               "case-eof",
               "authority",
               "case-control",
@@ -565,6 +572,14 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
                 "retirement",
                 "owner",
                 "fault",
+                ...(declared.custody.purpose === "experiment"
+                  ? [
+                      "constructor-intent",
+                      "constructor-observer",
+                      "constructor-child",
+                      "constructor-sealed",
+                    ]
+                  : []),
                 ...(access
                   ? [
                       "pf-prerequisite",
@@ -644,7 +659,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
                 observationDigest(declared.custody.context).slice(0, 32),
           );
         }
-        const members = admitted?.payload ? [admitted.payload] : [];
+        const pendingPayload = admitted?.payload ?? admitted?.creatorChild;
+        const members = pendingPayload ? [pendingPayload] : [];
         for (const { record } of receipts.filter(({ record }) =>
           ["members", "retirement"].includes(record.kind),
         )) {
@@ -683,14 +699,22 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             .flatMap(({ record }) => record.custodians ?? []),
         };
       }
-      if (ownership && recovered.admitted?.payload)
+      if (
+        ownership &&
+        (recovered.admitted?.payload ?? recovered.admitted?.creatorChild)
+      )
         reads.push(
           await native.recoverOwnershipSession(
-            recovered.admitted.payload,
-            recovered.admitted.sessionCustody,
+            recovered.admitted.payload ?? recovered.admitted.creatorChild,
+            recovered.admitted.sessionCustody ??
+              recovered.admitted.creatorSessionCustody,
           ),
         );
-      if (ownership && !recovered.admitted?.payload)
+      if (
+        ownership &&
+        !recovered.admitted?.payload &&
+        !recovered.admitted?.creatorChild
+      )
         requireObservation(
           !custody.some(({ phase }) => phase === "case-session"),
         );

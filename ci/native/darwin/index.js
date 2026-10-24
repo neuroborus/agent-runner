@@ -171,3 +171,8 @@ export {
   recoverDarwinExperimentPreparation,
   createDarwinExperimentSystemEffects,
 } from "./experiment-preparation.js";
+
+export {
+  DARWIN_CONSTRUCTOR_TRACE_INTENT,
+  createDarwinConstructorCapture,
+} from "./startup-trace.js";

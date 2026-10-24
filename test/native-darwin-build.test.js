@@ -5,6 +5,7 @@ import test from "node:test";
 import { Script } from "node:vm";
 import {
   buildDarwinFeasibility,
+  createDarwinConstructorCapture,
   darwinFeasibilityCause,
 } from "../ci/native/darwin/index.js";
 
@@ -4726,7 +4727,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     portCleanup = portBody("domain_port_cleanup"),
     portDiagnostic = portBody("domain_port_diagnostic"),
     repliesBegin = portBody("domain_runtime_replies_begin"),
-    replyAllocate = portBody("domain_runtime_reply_allocate"),
     specialReplyLoad = portBody("domain_special_reply_load"),
     specialReplyLookup = portBody("domain_special_reply_lookup");
   assert.ok(
@@ -4738,31 +4738,15 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       portCleanup &&
       portDiagnostic &&
       repliesBegin &&
-      replyAllocate &&
       specialReplyLoad &&
       specialReplyLookup &&
       start > 0 &&
       end > start,
   );
-  const interpose =
-    /static const struct \{([^}]+)\}\s+domain_runtime_reply_interpose\s+__attribute__\(\(([^;]+)\)\)\s*=\s*\{\s*(\w+)\s*,\s*(\w+)\s*\};/u.exec(
-      custody,
-    );
-  assert.ok(interpose, "The helper must emit its own dyld interposition entry");
-  // The pinned user-space trap declaration is PRIVATE in XNU. Its owned
-  // prototype must precede both references without widening SDK visibility.
-  const allocator = /^extern mach_port_name_t mach_reply_port\(void\);$/mu.exec(
+  assert.doesNotMatch(
     custody,
+    /__interpose|domain_runtime_reply_allocate|extern mach_port_name_t mach_reply_port/u,
   );
-  assert.ok(
-    allocator,
-    "The original allocator needs its exact owned prototype",
-  );
-  assert.ok(
-    allocator.index <
-      custody.indexOf("static mach_port_t domain_runtime_reply_allocate("),
-  );
-  assert.ok(allocator.index < interpose.index);
   for (const owner of [source, helper, custody, sandbox, command, builder])
     assert.doesNotMatch(owner, /#\s*define\s+PRIVATE\b|-DPRIVATE\b/u);
   assert.match(
@@ -4773,16 +4757,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     helper,
     /#ifdef NATIVE_FEASIBILITY_COMMAND\s+#include "feasibility-command\.h"\s+#endif/u,
   );
-  assert.match(
-    interpose[1],
-    /^\s*mach_port_t \(\*replacement\)\(void\);\s*mach_port_t \(\*replacee\)\(void\);\s*$/u,
-  );
-  assert.match(interpose[2], /(?:^|,\s*)used(?:,|$)/u);
-  assert.match(interpose[2], /section\("__DATA,__interpose"\)/u);
-  assert.deepEqual(interpose.slice(3), [
-    "domain_runtime_reply_allocate",
-    "mach_reply_port",
-  ]);
   assert.doesNotMatch(
     source + custody,
     /#include <mach-o\/dyld-interposing\.h>/u,
@@ -4795,16 +4769,24 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     source,
     /#define NATIVE_RUNTIME_REPLIES 1\s+#include "custody.h"\s+#undef NATIVE_RUNTIME_REPLIES/u,
   );
-  assert.match(
-    custody,
-    /#ifdef NATIVE_RUNTIME_REPLIES\s+#include <stdatomic.h>\s+#include <dlfcn.h>/u,
-  );
+  assert.match(custody, /#ifdef NATIVE_RUNTIME_REPLIES\s+#include <dlfcn.h>/u);
   assert.doesNotMatch(source + custody, /#include <mach\/mach_sync_ipc\.h>/u);
   // Project only C declarations, output pointers and sizeof into JS. The
   // sanitation decisions and the original child launch body execute unchanged.
   const translate = (body) =>
     body
+      .replaceAll("(void)", "")
       .replace("extern mach_port_t bootstrap_port;", "")
+      .replace("extern char **environ;", "")
+      .replace(
+        'char *arguments[] = {domain_helper, "exec", domain_policy, domain_helper, "fault", NULL};',
+        'const argumentsList = [domain_helper, "exec", domain_policy, domain_helper, "fault", null];',
+      )
+      .replace(
+        "domain_prepared_exec(domain_helper, arguments, environ)",
+        "execl(domain_helper, ...argumentsList)",
+      )
+      .replace("sizeof(domain_runtime_replies)", "8")
       .replaceAll("(domain_special_reply_fn)", "")
       .replace(/\bdomain_special_reply_fn /gu, "let ")
       .replace(
@@ -4831,17 +4813,17 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       .replaceAll("sizeof(birth)", "1")
       .replaceAll("sizeof(parent)", "24")
       .replace(
-        /\(mach_vm_address_t\)|\(unsigned long long\)|\(unsigned\)/gu,
+        /\(mach_vm_address_t\)|\(unsigned long long\)|\(unsigned\)|\(int\)/gu,
         "",
       )
       .replace(/\b(\d+)u\b/gu, "$1")
       .replace(
-        /\b(?:pid_t|task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|unsigned|int) /gu,
+        /\b(?:pid_t|task_t|thread_t|mach_port_t|natural_t|mach_vm_address_t|mach_port_type_t|kern_return_t|bool|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t|ssize_t|unsigned|int) /gu,
         "let ",
       );
   const script = new Script(`
     function domain_runtime_replies_begin(owner) {${translate(repliesBegin)}}
-    function domain_runtime_reply_allocate() {${translate(replyAllocate)}}
+
     function domain_special_reply_lookup() {${translate(specialReplyLookup)}}
     function domain_special_reply_load() {${translate(specialReplyLoad)}}
     function domain_ports_begin() {${translate(portsBegin)}}
@@ -4851,9 +4833,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     function domain_access_observe(phase) {${translate(observation)}}
     function domain_access_release(self, access, type) {${translate(releaseBody)}}
     function domain_sanitize() {${translate(sanitation)}}
-    var domain_runtime_reply_interpose = {
-      replacement: ${interpose[3]}, replacee: ${interpose[4]},
-    };
     () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
   `);
   const SEND = 0x10000,
@@ -4925,29 +4904,18 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       { runtimeReplies: [120, 121] },
     ],
     [
-      "interleaved allocation returns retain independent producer slots",
-      { runtimeReplies: [117, 119], concurrentProducer: true },
-    ],
-    [
-      "a racing first producer cannot erase another completed allocation",
-      { runtimeReplies: [119, 117], concurrentInitialization: true },
-    ],
-    [
-      "child discards an unfinished parent's initialization without waiting",
-      {
-        inheritedOwner: 41,
-        producerOwner: -41,
-        inheritedRuntime: [117],
-        runtimeReplies: [119],
-      },
-    ],
-    [
       "ordinary MIG cache may borrow an observed ordinary allocation",
       { runtimeReplies: [104] },
     ],
     [
-      "allocator forwards null and dead results without recording references",
+      "special reply cache and a constructor observation share one censused name",
+      { runtimeReplies: [108] },
+    ],
+    [
+      "invalid constructor results cannot authorize a receive right",
       { runtimeReplies: [0, DEAD, 117] },
+      "fault-runtime-reply-port",
+      0,
     ],
     [
       "another process's ledger cannot authorize this process's receive right",
@@ -4971,7 +4939,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       "fault-port-authority",
       0,
     ],
-    ...[101, 102, 103, 108].map((name) => [
+    ...[101, 102, 103].map((name) => [
       `ordinary allocation cannot alias unrelated authority ${name}`,
       { runtimeReplies: [name] },
       "fault-runtime-reply-port",
@@ -5480,7 +5448,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       cleanup = [],
       releaseFailures = [],
       referenceReleases = [],
-      allocatorReturns = [],
       notifyCopies = [],
       executed = {},
       originalBirth = { pid: 42 },
@@ -5499,8 +5466,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       cachedReply = options.reply ?? 104,
       specialReply = options.specialReply ?? 108,
       allocationReply,
-      nestedProducer = false,
-      racedInitialization = false,
       environmentReady = false,
       notifyReads = 0,
       loaderError = options.specialBindingStaleError ? "stale" : null,
@@ -5549,6 +5514,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         ? (options.inheritedRuntime?.length ?? 1)
         : 0,
       domain_runtime_reply_overflow: false,
+      domain_runtime_reply_imported: false,
+      domain_runtime_reply_epoch: 0,
+      memset: (values) => values.fill(0),
+      F_SETFD: 1,
+      FD_CLOEXEC: 1,
+      fcntl: () => 0,
+      environ: {},
       resource_uncertain: false,
       RLIMIT_NPROC: 1,
       PROC_PIDLISTFDS: 1,
@@ -5587,6 +5559,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       posix_check(result, op) {
         assert.ok(result >= 0, op);
       },
+      domain_exec_failure(_fd, prefix, _suffix, error) {
+        const [, operation, kind] = /operation=([^ ]+) domain=([^ ]+)/u.exec(
+          prefix,
+        );
+        context.remember(operation, kind, error);
+        context.failure(126);
+      },
       domain_check(ok, op) {
         context.invariant(ok, op);
       },
@@ -5614,11 +5593,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         return 1;
       },
       read(fd, target) {
-        assert.equal(fd, 18);
-        target.value = options.gate ?? "P";
+        assert.equal(fd, 4);
+        target.value = options.gate ?? "R";
         return 1;
       },
-      dup2: () => 0,
+      dup2: (_from, to) => to,
       proc_pidinfo(_pid, _operation, _unused, fds) {
         fds.push(...[0, 1, 2, 3, 4].map((proc_fd) => ({ proc_fd })));
         return fds.length;
@@ -5831,37 +5810,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       thread_get_special_reply_port: () =>
         assert.fail("The allocating trap cannot query a cached reply"),
-      mach_reply_port() {
-        allocatorReturns.push(allocationReply);
-        return allocationReply;
-      },
-      atomic_compare_exchange_strong(target, expected, value) {
-        if (options.concurrentInitialization && !racedInitialization) {
-          racedInitialization = true;
-          const pending = allocationReply;
-          allocationReply = 119;
-          runtimeAllocate();
-          allocationReply = pending;
-        }
-        if (target.value !== expected.value) {
-          expected.value = target.value;
-          return false;
-        }
-        target.value = value;
-        return true;
-      },
-      atomic_fetch_add(target, value) {
-        const previous = target.value;
-        target.value += value;
-        if (options.concurrentProducer && !nestedProducer) {
-          nestedProducer = true;
-          const pending = allocationReply;
-          allocationReply = 119;
-          runtimeAllocate();
-          allocationReply = pending;
-        }
-        return previous;
-      },
       mig_dealloc_reply_port: () =>
         assert.fail("The runtime cache is borrowed, never invalidated"),
       mach_port_names(_self, names, count, types, typeCount) {
@@ -5963,33 +5911,26 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       fflush() {},
     };
     const launch = script.runInNewContext(context);
-    let allocatorCalls = 0;
-    // Model outside-image dispatch from the actual emitted pair. The callback's
-    // own mach_reply_port call still reaches the original trap, never this path.
-    // This checks wiring and ownership only; no native dyld execution occurs.
     const runtimeAllocate = () => {
-      const entry = context.domain_runtime_reply_interpose;
-      assert.equal(entry.replacee, context.mach_reply_port, label);
-      assert.equal(
-        entry.replacement,
-        context.domain_runtime_reply_allocate,
-        label,
-      );
-      const expected = allocationReply;
-      allocatorCalls++;
-      const actual = entry.replacement();
-      assert.equal(actual, expected, label);
-      return actual;
+      context.domain_runtime_replies[context.domain_runtime_reply_count++] =
+        allocationReply;
     };
-    if (!options.unobservedRuntime)
-      for (const name of options.concurrentProducer
-        ? options.runtimeReplies.slice(0, 1)
-        : options.concurrentInitialization
-          ? [117]
-          : (options.runtimeReplies ?? [117])) {
-        allocationReply = name;
-        assert.equal(runtimeAllocate(), name, label);
-      }
+    context.domain_creator_checkpoint = () => {
+      calls.push(["creator-checkpoint"]);
+      context.domain_runtime_reply_imported = true;
+      const values = options.unobservedRuntime
+        ? []
+        : (options.runtimeReplies ?? [117]);
+      context.domain_runtime_reply_count = values.length;
+      context.domain_runtime_replies = values.slice(0, 8);
+      context.domain_runtime_reply_overflow = values.length > 8;
+      return true;
+    };
+    context.domain_creator_final = () => {
+      calls.push(["creator-final"]);
+      context.close(3);
+      return true;
+    };
     assert.throws(launch, (error) => {
       if (!operation) return error === executed;
       assert.equal(error.operation, operation, label);
@@ -6017,11 +5958,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       );
       return true;
     });
-    assert.equal(
-      allocatorReturns.length,
-      allocatorCalls,
-      "Each interposed call returns one original allocation without recursion",
-    );
     assert.equal(
       calls.some(([op]) => op === "exec"),
       !operation || !!options.execFailure,
@@ -6176,9 +6112,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     assert.equal(context.domain_reply_borrowed, 0, label);
     assert.equal(context.domain_special_reply_borrowed, 0, label);
     const observedReplies = [
-      ...(options.unobservedRuntime
+      ...(!calls.some(([op]) => op === "creator-checkpoint") ||
+      options.unobservedRuntime
         ? []
-        : (options.runtimeReplies ?? [117]).filter(valid)),
+        : (options.runtimeReplies ?? [117])),
       ...(options.replaceRuntime === "census" &&
       calls.some(([op]) => op === "census")
         ? [119]
@@ -7079,7 +7016,7 @@ test("Darwin fault acquisition retains partial pipes and the unreleased direct c
   );
   assert.ok(
     source.indexOf("domain_released = true;") <
-      source.indexOf('write(release[1], "P"'),
+      source.indexOf('write(release[1], "R"'),
   );
   const script = new Script(
     `() => {${body
@@ -7194,6 +7131,7 @@ test("Darwin fault recovery requires reaping and complete original-domain retire
         pin: "pin",
         domain_record: { stage: closed ? 6 : 5, emergency: 1 },
         domain_open() {},
+        domain_observers_retired: () => true,
         need(ok) {
           assert.ok(ok);
         },
@@ -7216,14 +7154,25 @@ test("Darwin fault recovery requires reaping and complete original-domain retire
     "backstop",
     "cancel",
     "pin",
+    "observer",
   ]) {
     const events = [],
       owner = {
         token: { val: [90001, 90001, 90002, 90001, 90002, 42, 55, 1] },
       };
-    let stopped = fault !== "live",
+    let stopped = !["live", "observer"].includes(fault),
       scans = 0;
     const context = {
+      domain_observers_retired: () => {
+        assert.equal(
+          context.domain_child,
+          -1,
+          "Observer uncertainty cannot prevent original child retirement",
+        );
+        if (fault === "observer")
+          throw new Error("Uncertain observer identity");
+        return true;
+      },
       domain_record: { stage: 3, uid: 90001, asid: 55, members: 0, known: [] },
       domain_child: 42,
       domain_status: 0,
@@ -7293,6 +7242,7 @@ test("Darwin fault recovery requires reaping and complete original-domain retire
       assert.throws(retire);
       assert.ok(!events.includes("store:5"), fault);
       if (fault === "unreaped") assert.equal(scans, 32);
+      if (fault === "observer") assert.ok(events.includes("signal"));
     } else {
       retire();
       assert.equal(context.domain_child, -1);
@@ -7382,4 +7332,181 @@ test("Darwin fault retirement rejects credential drift in known zombies and unst
     (source.match(/domain_file_same\(&before,\s*&named\)/gu) ?? []).length,
     3,
   );
+});
+
+test("native creator import accepts only one closed receipt for the original child namespace", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const body = /static bool domain_creator_import[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("uint64_t fields[23] = {0};", "const fields = Array(23).fill(0);")
+    .replace(/\b(?:uint64_t|unsigned|size_t) /gu, "let ")
+    .replace(/\((?:uint64_t|unsigned|mach_port_t)\)/gu, "")
+    .replace("if (bytes[at])", "if (bytes.charCodeAt(at))");
+  const handshake = (name) =>
+    new RegExp(`static bool ${name}[^\\n]+\\{([\\s\\S]*?)\\n\\}`, "u")
+      .exec(source)[1]
+      .replace("struct domain_creator_frame frame =", "const frame =")
+      .replace(
+        /\.version = (\d+), \.phase = (\d+), \.identity = identity/u,
+        "version:$1,phase:$2,identity",
+      )
+      .replace(
+        "char bytes[DOMAIN_CREATOR_BYTES];",
+        "const bytes = {value:null};",
+      )
+      .replaceAll("&frame", "frame")
+      .replaceAll("sizeof(frame)", "1")
+      .replaceAll("sizeof(bytes)", "512")
+      .replace(
+        "domain_creator_import(bytes,",
+        "domain_creator_import(bytes.value,",
+      );
+  const script =
+    new Script(`function domain_creator_import(bytes, expected, parent) {${body}}
+    function checkpoint(output,input,identity){${handshake("domain_creator_checkpoint")}}
+    function final(output,identity){${handshake("domain_creator_final")}}
+    ({imported:domain_creator_import,checkpoint,final});`);
+  const identity = {
+    pid: 42,
+    pidVersion: 3,
+    asid: 9,
+    auid: 90001,
+    uid: 90001,
+    gid: 90002,
+    ruid: 90001,
+    rgid: 90002,
+    svuid: 90001,
+    svgid: 90002,
+    startSeconds: 100,
+    startMicroseconds: 2,
+  };
+  const expected = {
+    token: { val: [90001, 90001, 90002, 90001, 90002, 42, 9, 3] },
+    bsd: {
+      pbi_start_tvsec: 100,
+      pbi_start_tvusec: 2,
+      pbi_svuid: 90001,
+      pbi_svgid: 90002,
+    },
+  };
+  const capture = createDarwinConstructorCapture({ ...identity, pid: 41 });
+  for (const row of [
+    "created 41 1000 42",
+    "started 42 1001 7",
+    "constructor 42 1002 7 1 117",
+    "constructor 42 1003 7 2 104",
+    "fence 42 1004 7 1 2 512",
+  ])
+    capture.consume(row);
+  const receipt = capture.receipt(identity).toString("ascii");
+  const changed = (from, to) =>
+    receipt.replace(from, to).slice(0, 512).padEnd(512, "\0");
+  const cases = [
+    [receipt, true],
+    [receipt, false, 511],
+    [changed("CR1", "CR2"), false],
+    [changed("CR1 41", "CR1 40"), false],
+    [changed(" 1000 ", " 0 "), false],
+    [changed(" 42 9 3 ", " 41 9 3 "), false],
+    [changed(" 42 9 3 ", " 42 8 3 "), false],
+    [changed(" 42 9 3 ", " 42 9 4 "), false],
+    [changed(" 100 2 ", " 101 2 "), false],
+    [changed(" 117 104\n", " 117 117\n"), false],
+    [changed(" 117 104\n", " 0 104\n"), false],
+    [changed(" 117 104\n", " 4294967295 104\n"), false],
+    [changed(" 117 104\n", " 0117 104\n"), false],
+    [changed(" 2 117 104\n", " 9 117 104\n"), false],
+    [changed(" 2 117 104\n", " 0\n"), false],
+    [receipt.replace("\n", " "), false],
+    [receipt.slice(0, 511) + "x", false],
+  ];
+  for (const [bytes, accepted, readBytes = 512] of cases) {
+    const events = [];
+    const context = {
+      DOMAIN_CREATOR_BYTES: 512,
+      UINT64_MAX: Number(0xffffffffffffffffn),
+      UINT32_MAX: 0xffffffff,
+      domain_runtime_reply_owner: 42,
+      domain_runtime_reply_imported: false,
+      domain_runtime_replies: Array(8).fill(0),
+      domain_runtime_reply_epoch: 0,
+      domain_runtime_reply_count: 0,
+      getpid: () => 42,
+      getppid: () => 41,
+      write: (fd, frame) => {
+        events.push(["frame", fd, frame.version, frame.phase]);
+        assert.equal(frame.identity, expected);
+        return 1;
+      },
+      read: (fd, target, size) => {
+        events.push(["read", fd, size]);
+        target.value = bytes;
+        return readBytes;
+      },
+      close: (fd) => {
+        events.push(["close", fd]);
+        return 0;
+      },
+      memcmp: (value, prefix, count) =>
+        value.slice(0, count) === prefix ? 0 : 1,
+    };
+    const { imported, checkpoint, final } = script.runInNewContext(context);
+    assert.equal(checkpoint(3, 4, expected), accepted);
+    assert.deepEqual(events, [
+      ["frame", 3, 1, 1],
+      ["read", 4, 512],
+    ]);
+    assert.equal(final(3, expected), accepted);
+    if (accepted) {
+      assert.deepEqual(context.domain_runtime_replies.slice(0, 2), [117, 104]);
+      assert.equal(context.domain_runtime_reply_epoch, 1000);
+      assert.deepEqual(events.slice(2), [
+        ["frame", 3, 1, 2],
+        ["close", 3],
+      ]);
+      assert.equal(
+        imported(bytes, expected, 41),
+        false,
+        "A phase replay cannot replace imported observation state",
+      );
+    } else assert.equal(context.domain_runtime_reply_imported, false);
+  }
+});
+
+test("sealed exec refusal preserves errno using only prepared buffers and raw I/O", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  assert.match(source, /\(\*volatile domain_prepared_exec\)\([^;]+ = execve;/u);
+  const body = /static void domain_exec_failure[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "volatile char bytes[512]; char reverse[10];",
+      "const bytes=[],reverse=[];",
+    )
+    .replace(/\bunsigned /gu, "let ")
+    .replaceAll("(unsigned)", "")
+    .replace("(char)('0' + value % 10)", "String.fromCharCode(48 + value % 10)")
+    .replace("value /= 10;", "value = Math.floor(value / 10);")
+    .replace("(const void *)", "")
+    .replace("(void)", "");
+  assert.doesNotMatch(body, /printf|malloc|dlsym|mach_/u);
+  const run = new Script(`(fd,prefix,suffix,error)=>{${body}}`);
+  for (const error of [0, 8, 126, 2147483647]) {
+    const exited = {},
+      writes = [];
+    const refused = run.runInNewContext({
+      String,
+      Math,
+      write: (fd, bytes, used) =>
+        writes.push([fd, bytes.slice(0, used).join("")]),
+      domain_prepared_exit: (code) => {
+        assert.equal(code, 126);
+        throw exited;
+      },
+    });
+    assert.throws(
+      () => refused(2, "operation=execve errno=", "\n", error),
+      (value) => value === exited,
+    );
+    assert.deepEqual(writes, [[2, `operation=execve errno=${error}\n`]]);
+  }
 });

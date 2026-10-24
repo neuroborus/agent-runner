@@ -233,8 +233,9 @@ static void signal_identity(struct identity value, int signal) {
   if (error && error != ESRCH) { remember("audit-signal", "errno", error); failure(126); }
 }
 static bool startup_observer_request(int argc, char **argv) {
-  return argc >= 2 && ((argc == 3 && !strcmp(argv[1], "startup-observer")) ||
-    (argc == 14 && (!strcmp(argv[1], "startup-observer-observe") || !strcmp(argv[1], "startup-observer-retire"))));
+  return argc >= 2 && ((argc == 3 && (!strcmp(argv[1], "startup-observer") || !strcmp(argv[1], "constructor-observer"))) ||
+    (argc == 14 && (!strcmp(argv[1], "startup-observer-observe") || !strcmp(argv[1], "startup-observer-retire") ||
+      !strcmp(argv[1], "constructor-observer-observe") || !strcmp(argv[1], "constructor-observer-retire"))));
 }
 static const char *startup_observer(pid_t pid, struct identity *value) {
   struct identity again;
@@ -254,6 +255,15 @@ static bool startup_observer_live(struct identity expected) {
     actual.bsd.pbi_start_tvsec == expected.bsd.pbi_start_tvsec && actual.bsd.pbi_start_tvusec == expected.bsd.pbi_start_tvusec &&
     actual.bsd.pbi_svuid == expected.bsd.pbi_svuid && actual.bsd.pbi_svgid == expected.bsd.pbi_svgid);
   return true;
+}
+/* Constructor admission requires disappearance, not a zombie or a changed
+ * namespace reported as completion by the diagnostic startup contract. */
+static bool constructor_observer_live(struct identity expected) {
+  struct proc_bsdinfo b; errno = 0;
+  int size = proc_pidinfo(expected.token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
+  if (!size) { need(errno == ESRCH || errno == ENOENT); return false; }
+  need(size == sizeof(b) && b.pbi_status != SZOMB && b.pbi_start_tvsec == expected.bsd.pbi_start_tvsec && b.pbi_start_tvusec == expected.bsd.pbi_start_tvusec);
+  need(startup_observer_live(expected)); return true;
 }
 static void prerequisites(void) {
   struct identity self;
@@ -565,7 +575,7 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_FEASIBILITY_COMMAND
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
+  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-parent") || !strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
   /* These execs continue an acquired fault domain; reset globals cannot prove
    * that its original effects never started, even when startup now fails. */
   admitted_effects = (argc >= 2 && !strcmp(argv[1], "fault-custody")) || getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
@@ -586,23 +596,30 @@ int main(int argc, char **argv) {
     invariant(audit_signal != NULL, "audit-binding");
     invariant(feasibility_sandbox_available(sandbox_binding), "sandbox-binding");
     if (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody")) domain_start(argc, argv);
+    else if (!strcmp(argv[1], "fault-parent")) { need(argc == 4 && !strcmp(argv[3], "-")); domain_parent_verify(argv[2]); }
     else { need(argc == 4); domain_verify(!strcmp(argv[1], "fault-closed"), argv[2], argv[3]); }
     return 0;
   }
   if (!strcmp(argv[1], "prerequisites") && argc == 3) { int fd = directory(argv[2]);
     int closed = close(fd); if (closed) remember_cleanup("directory-close", "errno", errno); posix_check(closed, "directory-close"); prerequisites(); }
-  else if (!strcmp(argv[1], "startup-observer") && argc == 3) {
+  else if ((!strcmp(argv[1], "startup-observer") || !strcmp(argv[1], "constructor-observer")) && argc == 3) {
     struct identity value; unsigned long long selected = number(argv[2]); need(selected > 1 && selected <= INT32_MAX); pid_t pid = (pid_t)selected;
     const char *kind = startup_observer(pid, &value);
-    printf("{\"kind\":\"%s\",\"parentPid\":%u,\"identity\":", kind, value.bsd.pbi_ppid); emit_identity(value); puts("}");
+    printf("{\"kind\":\"%s\",\"parentPid\":%u,", kind, value.bsd.pbi_ppid);
+    if (!strcmp(argv[1], "constructor-observer")) {
+      char hash[65]; need(audit_observer_digest(!strcmp(kind, "sudo") ? "/usr/bin/sudo" : "/usr/sbin/dtrace", hash));
+      printf("\"toolSha256\":\"%s\",", hash);
+    }
+    fputs("\"identity\":", stdout); emit_identity(value); puts("}");
   }
   else if (observer) {
     need(number(argv[12]) <= UINT32_MAX && number(argv[13]) <= UINT32_MAX); struct identity value = parse_identity(argv + 2);
-    if (!strcmp(argv[1], "startup-observer-retire") && startup_observer_live(value)) {
+    bool (*observing)(struct identity) = !strncmp(argv[1], "constructor-", 12) ? constructor_observer_live : startup_observer_live;
+    if ((!strcmp(argv[1], "startup-observer-retire") || !strcmp(argv[1], "constructor-observer-retire")) && observing(value)) {
       signal_identity(value, SIGKILL);
-      for (int i = 0; i < 1000 && startup_observer_live(value); i++) usleep(10000);
+      for (int i = 0; i < 1000 && observing(value); i++) usleep(10000);
     }
-    printf("{\"status\":\"%s\"}\n", startup_observer_live(value) ? "LIVE" : "RETIRED");
+    printf("{\"status\":\"%s\"}\n", observing(value) ? "LIVE" : "RETIRED");
   }
   else if (!strcmp(argv[1], "identity") && (argc == 3 || argc == 4)) {
     unsigned long long pid = number(argv[2]); need(pid > 1 && pid <= INT32_MAX);

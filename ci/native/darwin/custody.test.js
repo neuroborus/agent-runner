@@ -3734,6 +3734,15 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
   const translate = (text) =>
     text
       .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT[\s\S]*?#else\n([\s\S]*?)#endif/gu,
+        "$1",
+      )
+      .replace("sizeof(domain_runtime_replies)", "8")
+      .replace(
+        "memset(domain_runtime_replies, 0, 8);",
+        "domain_runtime_replies.fill(0);",
+      )
+      .replace(
         "struct proc_bsdinfo identity = {0}; siginfo_t status = {0};",
         "let identity={};const status={si_pid:0,si_code:0,si_status:0};",
       )
@@ -3832,7 +3841,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
   );
   assert.match(
     launcher,
-    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static void descriptors/u,
+    /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1;\s+static void descriptors/u,
   );
   assert.match(
     launcher,
@@ -3854,7 +3863,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [launcher, "launch_need_at", "ok,file,line"],
       [launcher, "launch_replies_changed", "count,runtime"],
       [custody, "domain_runtime_replies_begin", "owner"],
-      [custody, "domain_runtime_reply_allocate", ""],
       [custody, "domain_special_reply_lookup", ""],
     ]
       .map(
@@ -3863,7 +3871,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .join("\n") +
     `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}` +
-    `\nfunction experiment_mach_rights(){launch_replies_begin();after_reply_binding();${translate(experiment)}}`;
+    `\nfunction experiment_mach_rights(){launch_replies_begin();domain_runtime_reply_imported=true;after_reply_binding();${translate(experiment)}}`;
   const start = reader.indexOf("static void case_start("),
     setup = reader
       .slice(
@@ -3934,9 +3942,9 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ...[3, 6].map((notify) => [{ notify }]),
     [{ notify: 6, readback: 6 }, "TASK_RESOURCE_NOTIFY_PORT/null", 6, 33],
     [{ producer: [11, 3] }],
-    [{ producer: [0, 0xffffffff] }],
+    [{ producer: [0, 0xffffffff] }, "runtime-reply-producer", 0, 33],
     [{ producer: [11, 11] }, "runtime-reply-producer", 11, 33],
-    [{ producer: [6] }, "runtime-reply-producer", 6, 33],
+    [{ producer: [6] }],
     [
       { producer: Array.from({ length: 9 }, (_, i) => 11 + i) },
       "runtime-reply-producer",
@@ -4553,7 +4561,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       const change = (at) => {
         if (machCase.changeCache === at) cachedReply = 13;
         if (machCase.changeSpecial === at) cachedSpecial = 14;
-        if (machCase.producerAt === at) native.domain_runtime_reply_allocate();
+        if (machCase.producerAt === at) native.importConstructorRecord();
         if (machCase.mutateProducer === at) api.domain_runtime_replies[0] = 12;
         if (machCase.changeOwner === at) api.launch_reply_owner = 99;
       };
@@ -4589,18 +4597,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         domain_runtime_reply_owner: 41,
         domain_runtime_reply_count: 1,
         domain_runtime_reply_overflow: false,
+        domain_runtime_reply_imported: false,
+        domain_runtime_reply_epoch: 0,
         domain_runtime_replies: Array(8).fill(996),
         RTLD_DEFAULT: -2,
-        atomic_compare_exchange_strong(target, expected, value) {
-          assert.equal(expected.value, target.value);
-          target.value = value;
-          return true;
-        },
-        atomic_fetch_add(target, count) {
-          const prior = target.value;
-          target.value += count;
-          return prior;
-        },
         dlerror() {
           return ++lookupReads === 1
             ? "stale"
@@ -4618,7 +4618,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
                 return cachedSpecial;
               };
         },
-        mach_reply_port() {
+        receipt_name() {
           const name = machCase.producer?.[allocation++] ?? 11;
           machCalls.push(["producer", name]);
           return name;
@@ -4765,7 +4765,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
             ...(live && !machCase.missing ? [access] : []),
             ...new Set(
               (machCase.producer ?? []).filter(
-                (name) => api.MACH_PORT_VALID(name) && name !== cachedReply,
+                (name) =>
+                  api.MACH_PORT_VALID(name) &&
+                  name !== cachedReply &&
+                  name !== cachedSpecial,
               ),
             ),
           ].filter((name) => name !== machCase.omit);
@@ -4816,16 +4819,17 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     }
     const program = new Script(
         functions +
-          `\nconst entered=launch_stage;
+          `\nfunction importConstructorRecord(){domain_runtime_replies_begin(getpid());const name=receipt_name();domain_runtime_replies[domain_runtime_reply_count++]=name;domain_runtime_reply_overflow=domain_runtime_reply_count>8;return name;}
+          const entered=launch_stage;
           launch_stage=(...args)=>{const saved=errno;entered(...args);stage_preserved(saved);};
-          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,domain_runtime_reply_allocate,launch_need_at,setup,capture});`,
+          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,importConstructorRecord,launch_need_at,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
     if (machCase) {
       reporter = 42;
       for (const name of machCase.producer ?? [])
-        assert.equal(native.domain_runtime_reply_allocate(), name);
+        assert.equal(native.importConstructorRecord(), name);
       if (machCase.fatal) {
         assert.throws(
           native.experiment_mach_rights,

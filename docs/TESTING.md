@@ -420,50 +420,35 @@ query/authority and release failures preserve the first refusal and independent
 cleanup cause. Descriptor closure and explicit bootstrap/debug/registered/exception
 sanitation remain covered.
 
-The same actual-body fixture begins reference ownership at child entry, before
-the first observation, and rejects copied parent bookkeeping as cleanup authority.
-Its actual allocator callback records bounded ordinary reply returns before the
-child launch body runs; the existing sanitation fixture separately models the
-ordinary MIG and special reply caches. It covers child PID rebinding, fresh
-reexec bookkeeping, null/dead allocator results, racing initializers, unfinished
-parent initialization, interleaved allocations, overflow,
-duplicate/incompatible provenance and an ordinary cache sharing a producer name.
-Getter/local send copies may alias borrowed ordinary or special replies without
-consuming the runtime's references. Missing/dead or aliased caches, replacement
-before/during census or release, new producer events during census/release,
-changed exact types and missing census entries refuse exec. An unobserved ordinary
-receive and an additional receive-only `IKOT_NONE` right both remain unknown:
-the census cannot supply their provenance. Environment setup precedes the final
-census, which refuses an unknown right introduced by that setup before exec.
-Partial cache/thread/host acquisition, failed access type queries and simultaneous
-array/getter release failures retain
-their distinct original and cleanup outcomes. These deterministic cases add no
-native execution, validation command or slow-tier assignment. They identify no
-historical unknown right and establish no native dyld interception or closure.
+The same actual-body fixtures begin reference ownership at child entry and
+reject copied parent bookkeeping as cleanup authority. Their original exact-type
+census, cache-binding, acquired-copy and independent cleanup cases remain.
+Constructor observation replaces the former interposer-only callback, declaration
+and concurrency assertions. The production constructor parser reproduces a reply
+created before child entry, requires its actual fork/child join and waits for every
+sequence through a kernel read fence even when delivery is buffered out of order.
+The native CR1 import body rejects malformed/trailing frames, duplicate or
+sentinel names, overflow, wrong parent, birth/audit substitution and replay.
+Constructor/cache aliases retain one censused name and the cache's exact type.
 
-That existing fixture also reads the owned interposition declaration, requires
-the retained `__DATA,__interpose` entry and its ordered, typed replacement/replacee
-pair, and rejects the unavailable `mach-o/dyld-interposing.h` include. It models
-outside-image allocation dispatch through the actual declared pair. The original
-allocator stub remains distinct from that dispatch, and each intercepted call
-must return exactly one original allocation without recursion. The existing
-PID/fork, concurrency, cache, overflow, missed-producer, census and cleanup cases
-all retain their original assertions through this entry. These portable
-observations protect declaration and ownership wiring only; they do not execute
-dyld, compile an SDK shim or prove installed header/export availability. Both
-ordinary and command-enabled helper builds remain matching hosted CI obligations.
-No validation command or slow-tier assignment is added.
+Existing startup-trace fixtures exercise this fixed mode through arming, private
+receipt acquisition, final read fencing and successful observer closure without
+payload exit. Cancellation, nonzero exit, diagnostics, truncation and uncertain
+independent retirement withhold release. Fault transport and preparation fixtures
+retain separate parent hello/P, pre-census receipt, post-cleanup seal/R and payload
+stdio phases. Environment setup precedes census; completed controls cannot be
+satisfied by a pre-census frame. Post-receipt constructors and changed bindings
+refuse. The original privileged/fault recovery matrices retain their ownership
+checks and record observers before dependent releases.
+Incomplete constructor capture cannot delay the original process retirement
+attempt, and failed process cleanup cannot suppress observer retirement.
 
-That fixture also requires the exact owned `mach_port_name_t mach_reply_port(void)`
-prototype in the scoped shared header before both the allocator callback and interposition entry. It checks
-the common domain include alongside the optional command include and rejects
-broad `PRIVATE` enablement across the complete helper's transitive source owners
-and build arguments. The same actual allocator and interposition bodies still
-exercise the original ownership matrix; no replacement fixture or SDK shim is
-introduced. The existing ordinary/command build fixtures retain their source
-pins and link flags. These source guards do not compile either variant or prove
-the installed allocator export; matching hosted compilation, linking and runtime
-verification remain required.
+These portable, effect-free cases add no native compilation or installed-provider
+proof, validation command or durable slow-tier assignment. Matching hosted CI
+must still establish installed translation/probe availability, both native build
+variants, actual constructor receipts, every original control and independent
+retirement. The existing explicit native harness owns custody/preparation
+coverage; the ordinary fast tier owns startup, build and feasibility fixtures.
 
 The same fixture executes the cached special-reply loader body with injected
 `dlsym` and `dlerror`. It protects the pinned zero-argument `mach_port_t` call

@@ -4,8 +4,14 @@ import { EventEmitter } from "node:events";
 import { constants } from "node:os";
 import { PassThrough, Writable } from "node:stream";
 import { promisify } from "node:util";
+import {
+  openDarwinStartupTrace,
+  DARWIN_CONSTRUCTOR_TRACE_INTENT,
+} from "./startup-trace.js";
+import { startupObserver } from "./feasibility.js";
 import { nativeDiagnostic } from "../diagnostics.js";
 import {
+  digest,
   normalizeDarwinIdentity,
   sameDarwinIdentity,
   darwinIdentityArguments,
@@ -47,6 +53,9 @@ export async function openDarwinFaultDomain(
     uid = process.getuid(),
     gid = process.getgid(),
     retain = () => {},
+    openTrace = openDarwinStartupTrace,
+    observe = (operation, value) =>
+      startupObserver(root, operation, value, helperHash),
   } = {},
 ) {
   need(typeof retain === "function");
@@ -81,7 +90,15 @@ export async function openDarwinFaultDomain(
     stderr = Buffer.alloc(0),
     total = 0,
     running,
-    payloadExit;
+    payloadExit,
+    trace,
+    parent,
+    creator,
+    creatorReceiptHash,
+    sealed = false,
+    releasePossible = false,
+    observerPending,
+    acquiring = Promise.resolve();
   // Keep the original acquisition reachable even when admission never completes.
   const acquired = { owner, directory };
   const rejectAdmission = (error) => {
@@ -202,6 +219,55 @@ export async function openDarwinFaultDomain(
   );
   owner.stdout.on("error", fail);
   owner.stderr.on("error", fail);
+  const creatorFrame = (value, phase) => {
+    need(
+      value &&
+        Object.keys(value).sort().join(",") === "phase,record,version" &&
+        value.version === 1 &&
+        value.phase === phase,
+    );
+    const record = value.record;
+    need(
+      record &&
+        Object.keys(record).sort().join(",") ===
+          "asid,candidateSha,caseId,constructorCaptureSha256,constructorProgramSha256,creatorReceiptSha256,custodian,descendant,emergency,helperSha256,intentSha256,members,owner,policySha256,receiptSha256,stage" &&
+        record.stage === 1 &&
+        record.emergency === false &&
+        record.intentSha256 === "" &&
+        record.constructorProgramSha256 === "" &&
+        record.constructorCaptureSha256 === "" &&
+        Array.isArray(record.members) &&
+        record.members.length === 0 &&
+        /^[a-f0-9]{64}$/u.test(record.receiptSha256),
+    );
+    return record;
+  };
+  const verifyParent = async () => {
+    const { stdout } = await execute(
+      "/usr/bin/sudo",
+      [
+        "-n",
+        "--",
+        "/usr/bin/env",
+        "-i",
+        ...PRIVILEGED_ENV,
+        helper,
+        "fault-parent",
+        nonce,
+        "-",
+      ],
+      { cwd: root, env, timeout: 12000, maxBuffer: 65536 },
+    );
+    need(!failed && sameDarwinIdentity(JSON.parse(stdout).parent, parent));
+  };
+  const acquire = (operation) => {
+    acquiring = acquiring
+      .then(() => {
+        need(!failed);
+        return operation();
+      })
+      .catch(fail);
+  };
   owner.stdout.on("data", (chunk) => {
     try {
       total += chunk.length;
@@ -214,8 +280,119 @@ export async function openDarwinFaultDomain(
           ),
         );
         bytes = bytes.subarray(end + 1);
-        if (value.ready) {
-          need(ready);
+        if (value.observerStored === true) {
+          need(observerPending);
+          const done = observerPending;
+          observerPending = null;
+          done();
+        } else if (value.hello) {
+          need(!parent && !trace);
+          parent = normalizeDarwinIdentity(value.hello.custodian);
+          need(
+            value.hello.candidateSha === candidate &&
+              value.hello.caseId === caseId &&
+              value.hello.stage === 0 &&
+              value.hello.helperSha256 === helperHash &&
+              value.hello.policySha256 === policyHash,
+          );
+          acquired.parent = parent;
+          acquire(async () => {
+            trace = openTrace(
+              { identity: parent },
+              {
+                constructorMode: true,
+                readObserver: (pid) => observe("constructor-observer", pid),
+                observeObserver: (identity) =>
+                  observe("constructor-observer-observe", identity),
+                retireObserver: (identity) =>
+                  observe("constructor-observer-retire", identity),
+                onFailure: fail,
+                onObserver: async ({ identity, toolSha256 }) => {
+                  need(
+                    !failed &&
+                      !observerPending &&
+                      /^[a-f0-9]{64}$/u.test(toolSha256),
+                  );
+                  await new Promise((resolve, reject) => {
+                    observerPending = resolve;
+                    owner.stdin.write(
+                      "O " +
+                        darwinIdentityArguments(identity).join(" ") +
+                        " " +
+                        toolSha256 +
+                        "\n",
+                      (error) => {
+                        if (error) reject(error);
+                      },
+                    );
+                  });
+                },
+              },
+            );
+            acquired.trace = trace;
+            need((await trace.arm()).status === "armed");
+            await verifyParent();
+            owner.stdin.write("P\n");
+          });
+        } else if (value.creator) {
+          need(Object.keys(value).length === 1 && parent && trace && !creator);
+          creator = creatorFrame(value.creator, 1);
+          need(
+            creator.stage === 1 &&
+              creator.candidateSha === candidate &&
+              creator.caseId === caseId &&
+              creator.helperSha256 === helperHash &&
+              creator.policySha256 === policyHash &&
+              sameDarwinIdentity(creator.custodian, parent),
+          );
+          acquire(async () => {
+            const receipt = await trace.receipt(creator.owner);
+            creatorReceiptHash = digest(receipt);
+            need(!failed);
+            owner.stdin.write("creator " + receipt.toString("hex") + "\n");
+          });
+        } else if (value.sealed) {
+          const record = creatorFrame(value.sealed, 2);
+          need(
+            Object.keys(value).length === 1 &&
+              !sealed &&
+              creator &&
+              trace &&
+              sameDarwinIdentity(record.owner, creator.owner) &&
+              sameDarwinIdentity(record.custodian, parent) &&
+              record.creatorReceiptSha256 === creatorReceiptHash &&
+              [
+                "candidateSha",
+                "caseId",
+                "helperSha256",
+                "policySha256",
+                "asid",
+              ].every((field) => record[field] === creator[field]) &&
+              JSON.stringify(record.descendant) ===
+                JSON.stringify(creator.descendant),
+          );
+          sealed = true;
+          acquire(async () => {
+            const observed = await trace.finish();
+            acquired.traceResult = observed;
+            need(
+              observed.status === "observed" &&
+                observed.captureComplete &&
+                observed.cleanup === "RETIRED" &&
+                observed.programSha256 ===
+                  DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
+                /^[a-f0-9]{64}$/u.test(observed.sha256) &&
+                sameDarwinIdentity(observed.creator.identity, creator.owner) &&
+                observed.creator.receiptSha256 === creatorReceiptHash,
+            );
+            await verifyParent();
+            releasePossible = true;
+            owner.stdin.write(
+              `seal1 ${observed.programSha256} ${observed.sha256}\n`,
+            );
+          });
+        } else if (value.ready) {
+          need(ready && sealed && releasePossible);
           ready.resolve(value.ready);
           ready = null;
         } else if (value.stream) {
@@ -277,8 +454,18 @@ export async function openDarwinFaultDomain(
       if (ready) fail(new Error("Fault custody admission deadline"));
     }, 12000);
     closed.finally(() => clearTimeout(timer));
-  }).catch((error) => {
-    throw rejectAdmission(error);
+  }).catch(async (error) => {
+    // Closing custody first lets its original child settle independently of
+    // missing trace records or uncertain observer retirement.
+    rejectAdmission(error);
+    if (trace) {
+      try {
+        acquired.traceResult = await trace.finish();
+      } catch (cleanupError) {
+        error.cleanupError ??= cleanupError;
+      }
+    }
+    throw error;
   });
   let custodian;
   try {
@@ -290,6 +477,13 @@ export async function openDarwinFaultDomain(
         initial.helperSha256 === helperHash &&
         initial.policySha256 === policyHash &&
         initial.asid > 0 &&
+        initial.asid === creator.asid &&
+        initial.creatorReceiptSha256 === creatorReceiptHash &&
+        initial.constructorProgramSha256 ===
+          acquired.traceResult.programSha256 &&
+        initial.constructorCaptureSha256 === acquired.traceResult.sha256 &&
+        sameDarwinIdentity(initial.owner, creator.owner) &&
+        sameDarwinIdentity(custodian, parent) &&
         custodian.asid !== initial.asid,
     );
     virtual.pid = initial.owner.pid;
@@ -416,6 +610,7 @@ export async function openDarwinFaultDomain(
     helper,
     policyHash,
     initial: structuredClone(initial),
+    constructorEvidence: acquired.traceResult,
     inspect: async (_root, operation, ...args) => {
       if (operation === "files") return rpc("files");
       if (operation === "cancel" || operation === "retire") {

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-24 — Bind Darwin runtime replies to observed child creation
+
+Ordinary launcher and fault custody replace dyld interception with one bounded,
+fixed constructor-observation mode. Fork-bound child receipts and kernel read
+fences precede the exact census; a separate final fence, complete capture and
+independent observer retirement precede release. Parent namespaces supply no
+child authority, borrowed rights remain untouched and cleanup releases acquired
+references only. Existing journals retain partial ownership for recovery. Portable
+fixtures protect this protocol; original hosted CI must still prove installed
+support, every native control and independent retirement on the final candidate.
+
 ## 2026-10-23 — Distinguish command I/O from audit delivery
 
 Windows command diagnostics retain original target/marker I/O, held IDs and

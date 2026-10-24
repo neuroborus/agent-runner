@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { deflateSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { DARWIN_CONSTRUCTOR_TRACE_INTENT } from "./startup-trace.js";
 import { kernelPfFixture, stockPfFixture } from "./pf.fixture.js";
 import { darwinPfExpectedRules, darwinPfAuthorityDigest } from "./pf-kernel.js";
 import { createProviderEffects as fixedProviderEffects } from "../provider-effects.mjs";
@@ -36,6 +37,7 @@ import {
   createDarwinExperimentSystemEffects,
   createDarwinBuildEffects,
   createDarwinSystemEffects,
+  createDarwinConstructorCapture,
   normalizeDarwinPreparation,
   DARWIN_HELPER_NAMES,
   DARWIN_LITERAL_ARGUMENTS,
@@ -4132,6 +4134,10 @@ function buildTranscripts(experiment = false, complete = false) {
           live(launcher, planEntries[4].path);
           control.push({ helper: launcher, payload: null });
           value = { pid: launcher.pid };
+        } else if (name === "case-creator") {
+          assert.equal(Buffer.from(args[0], "hex").length, 512);
+          control.push({ helper: launcher, payload, controls: true });
+          value = null;
         } else if (name === "case-control") {
           assert.ok(control.length);
           value = control.shift();
@@ -4181,7 +4187,15 @@ function buildTranscripts(experiment = false, complete = false) {
               auid: uid,
             };
             live(payload, planEntries[5].path);
-            control.push({ helper: launcher, payload, controls: true });
+            control.push(
+              experiment
+                ? {
+                    helper: launcher,
+                    payload,
+                    creator: { version: 1, phase: 1 },
+                  }
+                : { helper: launcher, payload, controls: true },
+            );
           } else if (args[0] === "0" && args[1] === "R") {
             payload = { ...payload, pidVersion: 2 };
             live(payload, planEntries[5].path);
@@ -4727,6 +4741,40 @@ function buildTranscripts(experiment = false, complete = false) {
   };
   const options = {
     fs,
+    openConstructorTrace: ({ identity: parent }) => {
+      const capture = createDarwinConstructorCapture(parent);
+      let original;
+      return {
+        arm: async () => ({ status: "armed" }),
+        receipt: async (identity) => {
+          original = identity;
+          for (const row of [
+            `created ${parent.pid} 100 ${identity.pid}`,
+            `started ${identity.pid} 101 7`,
+            `constructor ${identity.pid} 102 7 1 117`,
+            `fence ${identity.pid} 103 7 1 1 512`,
+          ])
+            capture.consume(row);
+          return capture.receipt(identity);
+        },
+        finish: async () => {
+          if (!original) return { status: "partial", cleanup: "RETIRED" };
+          for (const row of [
+            `imported ${original.pid} 104 512`,
+            `fence ${original.pid} 105 7 2 1 1`,
+            `terminal ${original.pid} 106 1 2`,
+          ])
+            capture.consume(row);
+          return {
+            status: "observed",
+            captureComplete: true,
+            cleanup: "RETIRED",
+            programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+            creator: capture.complete(),
+          };
+        },
+      };
+    },
     env: f.options.env,
     ownerUid: () => 1001,
     readerOptions: {
@@ -6370,14 +6418,26 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     "fresh-members-missing",
     "tcp-deadline",
     "mach-control-timeout",
+    "constructor-incomplete",
   ]) {
     const access = ["tcp-deadline", "mach-control-timeout"].includes(fault),
       id = access ? "access.read-only" : "ownership.cancel",
       f = buildTranscripts(true),
       binding = experimentCase(f, id),
-      effects = createDarwinSystemEffects(f.input, f.options),
       recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
       work = new AbortController();
+    if (fault === "constructor-incomplete")
+      f.options.openConstructorTrace = () => ({
+        arm: async () => ({ status: "refused" }),
+        finish: async () => {
+          assert.ok(
+            f.events.includes("case-signal"),
+            "Original process retirement must precede an incomplete observer wait",
+          );
+          return { status: "partial", cleanup: "RETIRED" };
+        },
+      });
+    const effects = createDarwinSystemEffects(f.input, f.options);
     f.caseFault(fault);
     let prepared;
     if (
@@ -6392,6 +6452,7 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "gid-alias",
         "subject-authority",
         "mach-control-timeout",
+        "constructor-incomplete",
       ].includes(fault)
     )
       await assert.rejects(
@@ -6420,10 +6481,12 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
       assert.notEqual(result.status, "OBSERVED");
     }
     work.abort();
-    await effects.settle(recipe, prepared, {
+    const settlement = await effects.settle(recipe, prepared, {
       signal: new AbortController().signal,
       execution: execution(recipe),
     });
+    if (fault === "constructor-incomplete")
+      assert.equal(settled(settlement).status, "RETIRED");
     await assert.rejects(
       effects.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
     );

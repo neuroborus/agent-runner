@@ -875,14 +875,17 @@ export async function startupObserver(
   { run = execute, read = readFile } = {},
 ) {
   let args;
-  if (operation === "startup-observer") {
+  if (["startup-observer", "constructor-observer"].includes(operation)) {
     need(Number.isSafeInteger(value) && value > 1 && value <= 0x7fffffff);
     args = [String(value)];
   } else {
     need(
-      ["startup-observer-observe", "startup-observer-retire"].includes(
-        operation,
-      ),
+      [
+        "startup-observer-observe",
+        "startup-observer-retire",
+        "constructor-observer-observe",
+        "constructor-observer-retire",
+      ].includes(operation),
     );
     args = darwinFeasibilityIdentityArguments(value);
     need(Number(args[5]) > 1);
@@ -2850,6 +2853,7 @@ export async function runDarwinFeasibilityFault(
       policyFile,
       sandboxed: true,
       completeDomainBoundary: Boolean(domain),
+      ...(domain ? { constructorEvidence: domain.constructorEvidence } : {}),
     };
     const intentFile = path.join(root, "evidence", `${caseId}-intent.json`),
       intentHash = digest(JSON.stringify(receipt));

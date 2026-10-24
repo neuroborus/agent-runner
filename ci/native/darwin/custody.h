@@ -4,72 +4,25 @@
 /* Only the feasibility helper and experimental launcher opt into reply
  * provenance. Sanitation, reference ownership and failure policy stay local. */
 #ifdef NATIVE_RUNTIME_REPLIES
-#include <stdatomic.h>
 #include <dlfcn.h>
 #include <mach/mig.h>
 #if !defined(__APPLE__) || !defined(__x86_64__)
-#error Runtime reply interposition requires the matching macOS x64 SDK.
+#error Runtime reply receipts require the matching macOS x64 SDK.
 #endif
-/* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4,
- * osfmk/mach/mach_traps.h:82-85 declares this user-space trap under PRIVATE.
- * Keep its exact prototype without enabling unrelated private SDK interfaces.
- * The direct reference still requires the original installed allocator export. */
-extern mach_port_name_t mach_reply_port(void);
-
-/* The runtime owns these receive references. mach_init's task fallback is not
- * the MIG thread cache, and neither is the cached special reply. Observe the
- * ordinary allocator's return at its producer, including initialization/fork,
- * rather than guessing an unnamed receive right from a later census. Only a
- * PID read and fixed bookkeeping surround the original allocation trap; no
- * auxiliary allocation, RPC, diagnostics or failure cleanup may reenter it. */
-static _Atomic(pid_t) domain_runtime_reply_owner;
-static _Atomic(mach_port_t) domain_runtime_replies[8];
-static _Atomic(unsigned) domain_runtime_reply_count;
-static _Atomic(bool) domain_runtime_reply_overflow;
+/* Imported names are observations, never acquired references. Forked bookkeeping
+ * has no authority in a new namespace. The fixed receipt is consumed once. */
+static pid_t domain_runtime_reply_owner;
+static mach_port_t domain_runtime_replies[8];
+static unsigned domain_runtime_reply_count;
+static bool domain_runtime_reply_overflow, domain_runtime_reply_imported;
+static uint64_t domain_runtime_reply_epoch;
 static void domain_runtime_replies_begin(pid_t owner) {
-  for (;;) {
-    pid_t observed = domain_runtime_reply_owner;
-    if (observed == owner) return;
-    /* A negative current PID owns initialization. A fork inherits a different
-     * PID, including an unfinished parent's marker, and must never wait on it. */
-    if (observed == -owner) continue;
-    if (!atomic_compare_exchange_strong(&domain_runtime_reply_owner, &observed, -owner)) continue;
-    domain_runtime_reply_count = 0; domain_runtime_reply_overflow = false;
-    for (unsigned i = 0; i < 8; i++) domain_runtime_replies[i] = MACH_PORT_NULL;
-    domain_runtime_reply_owner = owner;
-    return;
-  }
+  if (domain_runtime_reply_owner == owner) return;
+  domain_runtime_reply_owner = owner; domain_runtime_reply_count = 0;
+  domain_runtime_reply_overflow = domain_runtime_reply_imported = false;
+  domain_runtime_reply_epoch = 0;
+  memset(domain_runtime_replies, 0, sizeof(domain_runtime_replies));
 }
-static mach_port_t domain_runtime_reply_allocate(void) {
-  pid_t owner = getpid();
-  domain_runtime_replies_begin(owner);
-  mach_port_t reply = mach_reply_port();
-  if (MACH_PORT_VALID(reply)) {
-    /* Reserve before publishing: concurrent runtime callers must never share
-     * an array slot or write past its bound. An unpublished slot still refuses
-     * admission. */
-    unsigned slot = atomic_fetch_add(&domain_runtime_reply_count, 1);
-    if (slot < 8)
-      domain_runtime_replies[slot] = reply;
-    else domain_runtime_reply_overflow = true;
-  }
-  return reply;
-}
-/* dyld applies this only to callers outside this image; the callback calls the
- * original allocator. A missed producer grants no authority: its right remains
- * unknown and fences exec. No hidden runtime global or TSD offset is read. */
-/* Owned x64 two-pointer layout following Apple dyld
- * fd8d0c4d52320ebf64db34f3cb280310d905c5ae, include/mach-o/dyld-interposing.h.
- * The x64 guard excludes authenticated-pointer targets. Keep the entry
- * emitted even though C code never reads it; dyld consumes the named section. */
-static const struct {
-  mach_port_t (*replacement)(void);
-  mach_port_t (*replacee)(void);
-} domain_runtime_reply_interpose __attribute__((used, section("__DATA,__interpose"))) = {
-  domain_runtime_reply_allocate, mach_reply_port
-};
-_Static_assert(sizeof(domain_runtime_reply_interpose) == 2 * sizeof(void *),
-  "The x64 dyld interposition entry requires exactly two pointers.");
 /* XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4's
  * libsyscall/mach/mach/mach_sync_ipc.h declares
  * mach_port_t mig_get_special_reply_port(void); mach_port.c implements its
@@ -196,7 +149,7 @@ static bool installed_input_path(const char *name) {
 }
 static bool experiment_installed_path(const char *name) {
 #ifdef NATIVE_CI_EXPERIMENT
-  return installed_input_path(name);
+  return installed_input_path(name) || !strcmp(name, "/usr/sbin/dtrace");
 #else
   (void)name; return false;
 #endif
@@ -645,5 +598,87 @@ static void audit_emit_view(struct audit_domain_view view, uid_t uid, au_asid_t 
   }
   fputs("]}", stdout);
 }
+/* Fixed ordinary observer images only. Held bytes and metadata are sampled
+ * independently of the traced process; no arbitrary path enters this reader. */
+static bool audit_observer_digest(const char *name, char hash[65]) {
+  if (strcmp(name, "/usr/bin/sudo") && strcmp(name, "/usr/sbin/dtrace")) return false;
+  int fd = open(name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC); if (fd < 0) return false;
+  struct stat before, after, named; unsigned char bytes[8192], sum[32]; CC_SHA256_CTX context;
+  bool ok = !fstat(fd, &before) && S_ISREG(before.st_mode) && before.st_uid == 0 &&
+    !(before.st_mode & 022) && before.st_size > 0 && before.st_size <= 134217728 && CC_SHA256_Init(&context);
+  ssize_t used = 0; uint64_t total = 0;
+  while (ok && (used = read(fd, bytes, sizeof(bytes))) > 0) {
+    total += (uint64_t)used; ok = total <= (uint64_t)before.st_size && CC_SHA256_Update(&context, bytes, (CC_LONG)used);
+  }
+  ok = ok && used == 0 && total == (uint64_t)before.st_size && CC_SHA256_Final(sum, &context) &&
+    !fstat(fd, &after) && !lstat(name, &named);
+  const struct stat *checks[] = {&after, &named};
+  for (unsigned i = 0; ok && i < 2; i++) {
+    const struct stat *value = checks[i];
+    ok = before.st_dev == value->st_dev && before.st_ino == value->st_ino && before.st_mode == value->st_mode &&
+      before.st_uid == value->st_uid && before.st_gid == value->st_gid && before.st_size == value->st_size && before.st_nlink == value->st_nlink &&
+      before.st_mtimespec.tv_sec == value->st_mtimespec.tv_sec && before.st_mtimespec.tv_nsec == value->st_mtimespec.tv_nsec &&
+      before.st_ctimespec.tv_sec == value->st_ctimespec.tv_sec && before.st_ctimespec.tv_nsec == value->st_ctimespec.tv_nsec;
+  }
+  int closed = close(fd); if (!ok || closed) return false;
+  for (unsigned i = 0; i < 32; i++) snprintf(hash + 2*i, 3, "%02x", sum[i]); return true;
+}
+#ifdef NATIVE_RUNTIME_REPLIES
+#define DOMAIN_CREATOR_BYTES 512
+/* Data relocations resolve these public functions before fork/runtime setup;
+ * volatile pointer loads prevent call folding back into a lazy symbol stub. */
+static int (*volatile domain_prepared_exec)(const char *, char *const [], char *const []) = execve;
+static void (*volatile domain_prepared_exit)(int) = _exit;
+static void domain_exec_failure(int fd, const char *prefix, const char *suffix, int error) {
+  volatile char bytes[512]; char reverse[10]; unsigned used = 0, digits = 0, value = (unsigned)error;
+  for (unsigned i = 0; prefix[i] && used < 511; i++) bytes[used++] = prefix[i];
+  do { reverse[digits++] = (char)('0' + value % 10); value /= 10; } while (value && digits < 10);
+  while (digits && used < 511) bytes[used++] = reverse[--digits];
+  for (unsigned i = 0; suffix[i] && used < 511; i++) bytes[used++] = suffix[i];
+  (void)write(fd, (const void *)bytes, used); domain_prepared_exit(126);
+}
+struct domain_creator_frame { unsigned version, phase; struct identity identity; };
+/* Closed ASCII wire shape; no structure layout crosses the JS boundary. */
+static bool domain_creator_import(const char bytes[DOMAIN_CREATOR_BYTES], struct identity expected, pid_t parent) {
+  uint64_t fields[23] = {0}; unsigned count = 0; size_t at = 4;
+  if (memcmp(bytes, "CR1 ", 4) || domain_runtime_reply_imported || domain_runtime_reply_owner != getpid()) return false;
+  for (;;) {
+    if (count == 23 || at >= DOMAIN_CREATOR_BYTES || bytes[at] < '0' || bytes[at] > '9') return false;
+    uint64_t value = 0; size_t first = at;
+    do {
+      unsigned digit = (unsigned)(bytes[at++] - '0');
+      if (value > (UINT64_MAX - digit) / 10) return false;
+      value = value * 10 + digit;
+    } while (at < DOMAIN_CREATOR_BYTES && bytes[at] >= '0' && bytes[at] <= '9');
+    if (at - first > 1 && bytes[first] == '0') return false;
+    fields[count++] = value;
+    if (at >= DOMAIN_CREATOR_BYTES) return false;
+    if (bytes[at] == '\n') { at++; break; }
+    if (bytes[at++] != ' ') return false;
+  }
+  for (; at < DOMAIN_CREATOR_BYTES; at++) if (bytes[at]) return false;
+  if (count < 15 || fields[0] != (uint64_t)parent || !fields[1] || !fields[14] || fields[14] > 8 || count != 15 + fields[14]) return false;
+  for (unsigned i = 0; i < 8; i++) if (fields[2+i] != expected.token.val[i]) return false;
+  if (fields[10] != expected.bsd.pbi_start_tvsec || fields[11] != expected.bsd.pbi_start_tvusec ||
+      fields[12] != expected.bsd.pbi_svuid || fields[13] != expected.bsd.pbi_svgid || expected.token.val[5] != (unsigned)getpid()) return false;
+  for (unsigned i = 0; i < fields[14]; i++) {
+    if (!fields[15+i] || fields[15+i] >= UINT32_MAX) return false;
+    for (unsigned j = 0; j < i; j++) if (fields[15+i] == fields[15+j]) return false;
+  }
+  domain_runtime_reply_epoch = fields[1]; domain_runtime_reply_count = (unsigned)fields[14];
+  for (unsigned i = 0; i < domain_runtime_reply_count; i++) domain_runtime_replies[i] = (mach_port_t)fields[15+i];
+  domain_runtime_reply_imported = true; return true;
+}
+static bool domain_creator_checkpoint(int output, int input, struct identity identity) {
+  struct domain_creator_frame frame = {.version = 1, .phase = 1, .identity = identity};
+  char bytes[DOMAIN_CREATOR_BYTES];
+  return write(output, &frame, sizeof(frame)) == sizeof(frame) &&
+    read(input, bytes, sizeof(bytes)) == sizeof(bytes) && domain_creator_import(bytes, identity, getppid());
+}
+static bool domain_creator_final(int output, struct identity identity) {
+  struct domain_creator_frame frame = {.version = 1, .phase = 2, .identity = identity};
+  return domain_runtime_reply_imported && write(output, &frame, sizeof(frame)) == sizeof(frame) && !close(output);
+}
+#endif
 #endif
 #endif

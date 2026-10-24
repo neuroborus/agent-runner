@@ -40,19 +40,21 @@ static void launch_need_at(bool ok, const char *file, unsigned line);
 #undef need
 #define need(ok) launch_need_at(!!(ok), __FILE__, __LINE__)
 #endif
+static int launch_diagnostic = -1;
 static void descriptors(void) {
   struct proc_fdinfo fds[4096];
   int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
   need(size > 0 && size < (int)sizeof(fds) && size % sizeof(fds[0]) == 0);
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++)
-    if (fds[i].proc_fd >= 5) need(!close(fds[i].proc_fd));
+    if (fds[i].proc_fd >= 5 && fds[i].proc_fd != launch_diagnostic) need(!close(fds[i].proc_fd));
   size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
-  need(size == 5 * (int)sizeof(fds[0]));
+  unsigned expected = launch_diagnostic == 5 ? 6 : 5;
+  need(size == expected * (int)sizeof(fds[0]));
   unsigned mask = 0;
   for (size_t i = 0; i < (size_t)size / sizeof(fds[0]); i++) {
-    need(fds[i].proc_fd >= 0 && fds[i].proc_fd < 5); mask |= 1U << fds[i].proc_fd;
+    need(fds[i].proc_fd >= 0 && fds[i].proc_fd < expected); mask |= 1U << fds[i].proc_fd;
   }
-  need(mask == 31);
+  need(mask == (1U << expected) - 1);
   need(!fcntl(3, F_SETFD, FD_CLOEXEC) && !fcntl(4, F_SETFD, FD_CLOEXEC));
 }
 static pid_t launcher_pid, launch_child;
@@ -81,6 +83,7 @@ static void launch_failure(const char *operation, long result, int error, int re
 static pid_t launch_reply_owner;
 static mach_port_t launch_bootstrap_local, launch_reply_borrowed, launch_special_borrowed;
 static domain_special_reply_fn launch_special_reply;
+static char launch_exec_suffix[256];
 /* Early setup guards precede mach_rights. Only this child's captured local
  * reference belongs to them; copied parent state supplies no cleanup authority. */
 static void launch_need_at(bool ok, const char *file, unsigned line) {
@@ -125,7 +128,7 @@ static const char *launch_replies_changed(unsigned count, const mach_port_t *run
   if (launch_reply_owner != getpid()) return "runtime-reply-owner";
   if (mig_get_reply_port() != launch_reply_borrowed) return "mig_get_reply_port/identity";
   if (!launch_special_reply || launch_special_reply() != launch_special_borrowed) return "mig_get_special_reply_port/identity";
-  if (domain_runtime_reply_owner != getpid() || domain_runtime_reply_overflow || domain_runtime_reply_count != count)
+  if (domain_runtime_reply_owner != getpid() || !domain_runtime_reply_imported || domain_runtime_reply_overflow || domain_runtime_reply_count != count)
     return "runtime-reply-producer";
   for (unsigned i = 0; i < count; i++)
     if (runtime[i] != domain_runtime_replies[i]) return "runtime-reply-producer";
@@ -246,10 +249,10 @@ static void mach_rights(void) {
   if (!MACH_PORT_VALID(special) || special == self || special == thread || special == host || special == reply || (service && special == access)) goto mach_cleanup;
   runtime_count = domain_runtime_reply_count;
   operation = "runtime-reply-producer"; result = runtime_count;
-  if (domain_runtime_reply_owner != getpid() || domain_runtime_reply_overflow || runtime_count > 8) goto mach_cleanup;
+  if (domain_runtime_reply_owner != getpid() || !domain_runtime_reply_imported || domain_runtime_reply_overflow || runtime_count > 8) goto mach_cleanup;
   for (unsigned i = 0; i < runtime_count; i++) {
     runtime[i] = domain_runtime_replies[i]; result = runtime[i];
-    if (!MACH_PORT_VALID(runtime[i]) || runtime[i] == self || runtime[i] == thread || runtime[i] == host || runtime[i] == special || (service && runtime[i] == access)) goto mach_cleanup;
+    if (!MACH_PORT_VALID(runtime[i]) || runtime[i] == self || runtime[i] == thread || runtime[i] == host || (service && runtime[i] == access)) goto mach_cleanup;
     for (unsigned j = 0; j < i; j++) if (runtime[j] == runtime[i]) goto mach_cleanup;
   }
   replies_bound = true;
@@ -419,6 +422,10 @@ static void child_stdio(int workspace, bool provider) {
 static void child_exec(char **argv, char **environment, bool provider) {
   if (provider) { execve(argv[6], &argv[12], environment); _exit(126); }
   /* This copy cannot survive successful exec. Only a failed exec uses it. */
+#ifdef NATIVE_CI_EXPERIMENT
+  (void)domain_prepared_exec(argv[6], &argv[12], environment); int error = errno;
+  domain_exec_failure(launch_diagnostic, "native-darwin-launch: owner=child operation=execve result=-1 errno=", launch_exec_suffix, error);
+#else
   int diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 3);
   if (diagnostic < 0) launch_failure("fcntl-stderr", diagnostic, errno, 0, -1, 0);
   int result = dup2(1, 2); if (result != 2) launch_failure("dup2-stderr", result, errno, 0, -1, 0);
@@ -428,6 +435,7 @@ static void child_exec(char **argv, char **environment, bool provider) {
     "execve", (long)result, error, 0, (long)-1, launcher_pid, getpid(),
     (unsigned long long)launcher_identity.bsd.pbi_start_tvsec, (unsigned long long)launcher_identity.bsd.pbi_start_tvusec);
   errno = error; _exit(126);
+#endif
 }
 static struct identity parked_identity(int fd, pid_t child) {
   struct pollfd waitReady = { .fd = fd, .events = POLLIN }; struct identity parked;
@@ -713,14 +721,48 @@ int main(int argc, char **argv) {
     need(!getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32);
     launch_stage("sandbox", NULL, 0, 0);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
+#ifdef NATIVE_CI_EXPERIMENT
+    char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
+    need(length > 0 && (size_t)length < sizeof(home));
+    char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
+      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
+    launch_diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 5); need(launch_diagnostic == 5);
+    int suffix_size = snprintf(launch_exec_suffix, sizeof(launch_exec_suffix), " revents=0 read=-1 launcher=%d reporter=%d start-seconds=%llu start-micros=%llu\n",
+      launcher_pid, getpid(), (unsigned long long)launcher_identity.bsd.pbi_start_tvsec, (unsigned long long)launcher_identity.bsd.pbi_start_tvusec);
+    need(suffix_size > 0 && suffix_size < sizeof(launch_exec_suffix));
+    alarm(30);
+    struct identity creator_identity = inspect(getpid());
+    need(domain_creator_checkpoint(3, 4, creator_identity));
+#endif
     mach_rights();
     launch_stage("domain-controls", NULL, 0, 0);
     descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
          identity.bsd.pbi_gid == gid && identity.bsd.pbi_rgid == gid && identity.bsd.pbi_svgid == gid &&
          identity.token.val[0] == uid && identity.token.val[6] == (unsigned)audit.ai_asid);
+#ifdef NATIVE_CI_EXPERIMENT
+    struct stat named; need(!lstat(argv[6], &named) && named.st_dev == image.st_dev &&
+      named.st_ino == image.st_ino && named.st_mode == image.st_mode && named.st_uid == 0 &&
+      named.st_gid == gid && named.st_nlink == 1 && named.st_size == image.st_size &&
+      named.st_mtimespec.tv_sec == image.st_mtimespec.tv_sec && named.st_mtimespec.tv_nsec == image.st_mtimespec.tv_nsec &&
+      named.st_ctimespec.tv_sec == image.st_ctimespec.tv_sec && named.st_ctimespec.tv_nsec == image.st_ctimespec.tv_nsec);
+#endif
     launch_stage("parked-publication", NULL, 0, 0);
+#ifdef NATIVE_CI_EXPERIMENT
+    need(!launch_replies_changed(domain_runtime_reply_count, domain_runtime_replies));
+    need(audit_identity_same(identity, creator_identity) && dup2(1, 2) == 2 && domain_creator_final(3, identity));
+#else
     need(write(3, &identity, sizeof(identity)) == sizeof(identity) && !close(3));
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+    char final_gate; ssize_t final_read = read(4, &final_gate, 1);
+    if (final_read != 1) domain_exec_failure(launch_diagnostic,
+      final_read < 0 ? "native-darwin: operation=creator-release-read domain=errno value=" : "native-darwin: operation=creator-release-read domain=status value=",
+      " effects=possible settlement=unsettled\n", final_read < 0 ? errno : (int)final_read);
+    if (final_gate != 'R') domain_exec_failure(launch_diagnostic, "native-darwin: operation=creator-release-value domain=invariant value=", " effects=possible settlement=unsettled\n", 0);
+    if (close(4)) domain_exec_failure(launch_diagnostic, "native-darwin: operation=creator-release-close domain=errno value=", " effects=possible settlement=unsettled\n", errno);
+    alarm(0);
+#else
     need(command(4, 30000) == 'R' && !close(4));
     struct stat named; need(!lstat(argv[6], &named) && named.st_dev == image.st_dev &&
       named.st_ino == image.st_ino && named.st_mode == image.st_mode && named.st_uid == 0 &&
@@ -731,14 +773,31 @@ int main(int argc, char **argv) {
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
       "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
+#endif
     argv[12] = argv[6]; child_exec(argv, provider ? providerEnv : env, provider);
   }
   if (provider) { close(4); close(5); }
   free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
+#ifdef NATIVE_CI_EXPERIMENT
+  struct domain_creator_frame pre, post;
+  need(read(ready[0], &pre, sizeof(pre)) == sizeof(pre) && pre.version == 1 && pre.phase == 1 && pre.identity.token.val[5] == (unsigned)child);
+  struct identity first = inspect(child); need(audit_identity_same(first, pre.identity));
+  (void)audit_hold(first.token.val[6]); need(audit_identity_same(first, inspect(child)));
+  printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(first); puts(",\"creator\":{\"version\":1,\"phase\":1}}"); fflush(stdout);
+  char creator[DOMAIN_CREATOR_BYTES];
+  need(read(0, creator, sizeof(creator)) == sizeof(creator) && write(release[1], creator, sizeof(creator)) == sizeof(creator));
+  need(read(ready[0], &post, sizeof(post)) == sizeof(post) && post.version == 1 && post.phase == 2 &&
+    audit_identity_same(first, post.identity));
+  char trailing; need(read(ready[0], &trailing, 1) == 0 && !close(ready[0]));
+  struct identity parked = post.identity;
+#else
   struct identity parked = parked_identity(ready[0], child);
+#endif
   /* Acquire after fork: only root custody gets the session reference. This
    * original launcher remains a recoverable holder if reader IPC is lost. */
+#ifndef NATIVE_CI_EXPERIMENT
   (void)audit_hold(parked.token.val[6]);
+#endif
   struct identity live = inspect(child);
   need(!memcmp(&live.token, &parked.token, sizeof(live.token)) &&
        live.bsd.pbi_start_tvsec == parked.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == parked.bsd.pbi_start_tvusec);

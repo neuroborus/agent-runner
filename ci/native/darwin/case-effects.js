@@ -23,6 +23,10 @@ import {
   assessDarwinEnumeration,
   assertDarwinSessionCustody,
 } from "./retirement.js";
+import {
+  openDarwinStartupTrace,
+  DARWIN_CONSTRUCTOR_TRACE_INTENT,
+} from "./startup-trace.js";
 import { buildDarwinPolicy } from "./policy.js";
 import { createDarwinEffectiveReaders } from "./effective.js";
 
@@ -88,7 +92,9 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     expectedBytes = Buffer.from(
       access?.seatbelt ?? darwinOwnershipPolicy(request),
     );
-  let failure,
+  let constructorTrace,
+    constructorResult,
+    failure,
     admitted = recovered?.admitted,
     admissionPin = recovered?.pin,
     retirement,
@@ -260,164 +266,209 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     return actual;
   };
   const retire = async () => {
-    // Always reread the exclusive root receipt, even when admission was cached.
-    const record = await recoverReceipt();
-    requireObservation(record.helpers.length > 0);
-    const payload = record.payload
-        ? inDomain(record.payload, record.payload.asid)
-        : null,
-      launcher = root(
-        record.helpers.find(({ role }) => role === "launcher")?.identity,
-      );
-    if (
-      payload &&
-      !known.some((identity) => sameDarwinIdentity(identity, payload))
-    )
-      known.push(payload);
-    const deadline = now() + 30000;
-    admissionsClosed = true;
-    await reader.fenceOwnership();
-    const custodians = [
-      ...(recovered?.custodians ?? []),
-      ...(record.sessionCustody ? [record.sessionCustody.owner] : []),
-    ]
-      .map(root)
-      .filter(
-        (identity, i, all) =>
-          all.findIndex((entry) => sameDarwinIdentity(entry, identity)) === i,
-      );
-    let sessionCustody = payload
-      ? assertDarwinSessionCustody(record.sessionCustody, payload)
-      : null;
-    if (
-      payload &&
-      !sameDarwinIdentity(sessionCustody.owner, current.admission.helper)
-    ) {
-      sessionCustody = assertDarwinSessionCustody(
-        await reader.recoverOwnershipSession(payload, sessionCustody),
-        payload,
-      );
-      if (sessionCustody.closed)
-        requireObservation(
-          recovered.history.some(
-            ({ kind, record }) =>
-              kind === "retirement" &&
-              record.status === "RETIRED" &&
-              record.requestSha256 === requestSha256,
-          ),
+    let observerRetirement;
+    const retireObservers = () =>
+      (observerRetirement ??= (async () => {
+        let uncertain;
+        try {
+          if (constructorTrace) {
+            constructorResult ??= await constructorTrace.finish();
+            requireObservation(constructorResult.cleanup === "RETIRED");
+          }
+        } catch (cause) {
+          uncertain = cause;
+        }
+        for (const { record: observer } of recovered?.history?.filter(
+          ({ kind }) => kind === "constructor-observer",
+        ) ?? []) {
+          try {
+            requireObservation(
+              (await reader.constructorObserver("retire", observer.identity))
+                .status === "RETIRED",
+            );
+          } catch (cause) {
+            uncertain ??= cause;
+          }
+        }
+        return uncertain;
+      })());
+    // Original process settlement cannot depend on a complete observer capture.
+    // The finally branch still retires observers if original cleanup refuses.
+    try {
+      // Always reread the exclusive root receipt, even when admission was cached.
+      const record = await recoverReceipt();
+      requireObservation(record.helpers.length > 0);
+      const pendingPayload = record.payload ?? record.creatorChild;
+      const payload = pendingPayload
+          ? inDomain(pendingPayload, pendingPayload.asid)
+          : null,
+        launcher = root(
+          record.helpers.find(({ role }) => role === "launcher")?.identity,
         );
-    }
-    await persist("retirement", {
-      phase: "stop-admissions",
-      requestSha256,
-      payload,
-      launcher,
-      members: known,
-      sessionCustody,
-      custodians,
-    });
-    // New root custody is receipted before retiring any original holder.
-    for (const identity of [...custodians, ...(recovered?.subjects ?? [])]) {
       if (
-        identity.pid === current.admission.helper.pid ||
-        identity.pid === launcher.pid
+        payload &&
+        !known.some((identity) => sameDarwinIdentity(identity, payload))
       )
-        continue;
-      const stopped = await reader.signalOwnership(identity);
+        known.push(payload);
+      const deadline = now() + 30000;
+      admissionsClosed = true;
+      await reader.fenceOwnership();
+      const custodians = [
+        ...(recovered?.custodians ?? []),
+        ...((record.sessionCustody ?? record.creatorSessionCustody)
+          ? [(record.sessionCustody ?? record.creatorSessionCustody).owner]
+          : []),
+      ]
+        .map(root)
+        .filter(
+          (identity, i, all) =>
+            all.findIndex((entry) => sameDarwinIdentity(entry, identity)) === i,
+        );
+      let sessionCustody = payload
+        ? assertDarwinSessionCustody(
+            record.sessionCustody ?? record.creatorSessionCustody,
+            payload,
+          )
+        : null;
+      if (
+        payload &&
+        !sameDarwinIdentity(sessionCustody.owner, current.admission.helper)
+      ) {
+        sessionCustody = assertDarwinSessionCustody(
+          await reader.recoverOwnershipSession(payload, sessionCustody),
+          payload,
+        );
+        if (sessionCustody.closed)
+          requireObservation(
+            recovered.history.some(
+              ({ kind, record }) =>
+                kind === "retirement" &&
+                record.status === "RETIRED" &&
+                record.requestSha256 === requestSha256,
+            ),
+          );
+      }
+      await persist("retirement", {
+        phase: "stop-admissions",
+        requestSha256,
+        payload,
+        launcher,
+        members: known,
+        sessionCustody,
+        custodians,
+      });
+      // New root custody is receipted before retiring any original holder.
+      for (const identity of [...custodians, ...(recovered?.subjects ?? [])]) {
+        if (
+          identity.pid === current.admission.helper.pid ||
+          identity.pid === launcher.pid
+        )
+          continue;
+        const stopped = await reader.signalOwnership(identity);
+        requireObservation(
+          ["sent", "not-found", "zombie"].includes(stopped.outcome),
+        );
+        await reader.retired(identity);
+      }
+      const stopped = await reader.signalOwnership(launcher);
       requireObservation(
         ["sent", "not-found", "zombie"].includes(stopped.outcome),
       );
-      await reader.retired(identity);
-    }
-    const stopped = await reader.signalOwnership(launcher);
-    requireObservation(
-      ["sent", "not-found", "zombie"].includes(stopped.outcome),
-    );
-    let result,
-      work = 0;
-    for (let pass = 0; payload && !sessionCustody.closed && pass < 32; pass++) {
-      requireObservation(now() <= deadline);
-      result = await members(payload.asid);
-      if (!result.live.length) break;
-      for (const identity of result.live) {
-        requireObservation(++work <= 1024);
-        await persist("retirement", {
-          phase: "signal",
-          requestSha256,
-          identity,
-          members: known,
-        });
-        const signalled = await reader.signalOwnership(identity);
-        requireObservation(
-          ["sent", "not-found", "zombie"].includes(signalled.outcome),
-        );
-      }
-    }
-    if (!payload || sessionCustody.closed)
-      result = await reader.emptyOwnership();
-    requireObservation(
-      result &&
-        (!payload || sessionCustody.closed || result.live.length === 0) &&
-        now() <= deadline,
-    );
-    if (payload && !sessionCustody.closed) {
-      const zombies = new Set(result.zombies.map(({ pid }) => pid)),
-        checked = new Set();
-      for (const identity of known)
-        if (!zombies.has(identity.pid) && !checked.has(identity.pid)) {
-          checked.add(identity.pid);
-          requireObservation(now() <= deadline);
-          await reader.retired(identity, { reserved: true });
+      let result,
+        work = 0;
+      for (
+        let pass = 0;
+        payload && !sessionCustody.closed && pass < 32;
+        pass++
+      ) {
+        requireObservation(now() <= deadline);
+        result = await members(payload.asid);
+        if (!result.live.length) break;
+        for (const identity of result.live) {
+          requireObservation(++work <= 1024);
+          await persist("retirement", {
+            phase: "signal",
+            requestSha256,
+            identity,
+            members: known,
+          });
+          const signalled = await reader.signalOwnership(identity);
+          requireObservation(
+            ["sent", "not-found", "zombie"].includes(signalled.outcome),
+          );
         }
-    }
-    await reader.retired(launcher);
-    for (const helper of record.helpers.filter(
-      ({ role }) => role === "verifier",
-    ))
-      await reader.retired(helper.identity);
-    for (const identity of recovered?.subjects ?? [])
-      if (identity.asid > 0) await reader.retiredRootDomain(identity);
-    const actual = await unchanged(),
-      verification = await reader.verifyOwnership(
+      }
+      if (!payload || sessionCustody.closed)
+        result = await reader.emptyOwnership();
+      requireObservation(
+        result &&
+          (!payload || sessionCustody.closed || result.live.length === 0) &&
+          now() <= deadline,
+      );
+      if (payload && !sessionCustody.closed) {
+        const zombies = new Set(result.zombies.map(({ pid }) => pid)),
+          checked = new Set();
+        for (const identity of known)
+          if (!zombies.has(identity.pid) && !checked.has(identity.pid)) {
+            checked.add(identity.pid);
+            requireObservation(now() <= deadline);
+            await reader.retired(identity, { reserved: true });
+          }
+      }
+      await reader.retired(launcher);
+      for (const helper of record.helpers.filter(
+        ({ role }) => role === "verifier",
+      ))
+        await reader.retired(helper.identity);
+      for (const identity of recovered?.subjects ?? [])
+        if (identity.asid > 0) await reader.retiredRootDomain(identity);
+      const actual = await unchanged(),
+        verification = await reader.verifyOwnership(
+          sessionCustody?.closed ? 0 : (payload?.asid ?? 0),
+        ),
+        freshVerifier = root(verification.verifier);
+      assessDarwinEnumeration(
+        verification.enumeration,
+        request,
         sessionCustody?.closed ? 0 : (payload?.asid ?? 0),
-      ),
-      freshVerifier = root(verification.verifier);
-    assessDarwinEnumeration(
-      verification.enumeration,
-      request,
-      sessionCustody?.closed ? 0 : (payload?.asid ?? 0),
-      sessionCustody?.closed ? [] : known,
-    );
-    requireObservation(
-      verification.enumeration.live.length === 0 && now() <= deadline,
-    );
-    retirement = {
-      status: "RETIRED",
-      candidateSha: request.candidateSha,
-      nonce: request.nonce,
-      requestSha256,
-      domain: {
-        uid: request.uid,
-        gid: request.gid,
-        asid: payload?.asid ?? null,
-      },
-      helpersSettled: true,
-      reservation: "RETAINED",
-      freshVerifier,
-      sessionCustody,
-      custodians,
-      independent: true,
-      emergencyCleanup: false,
-      nativeEventSha256: observationDigest({
-        result,
-        actual,
-        verification,
-        stopped,
-      }),
-    };
-    await persist("retirement", retirement);
-    requireObservation(now() <= deadline);
-    return structuredClone(retirement);
+        sessionCustody?.closed ? [] : known,
+      );
+      requireObservation(
+        verification.enumeration.live.length === 0 && now() <= deadline,
+      );
+      const observerUncertain = await retireObservers();
+      if (observerUncertain) throw observerUncertain;
+      requireObservation(now() <= deadline);
+      retirement = {
+        status: "RETIRED",
+        candidateSha: request.candidateSha,
+        nonce: request.nonce,
+        requestSha256,
+        domain: {
+          uid: request.uid,
+          gid: request.gid,
+          asid: payload?.asid ?? null,
+        },
+        helpersSettled: true,
+        reservation: "RETAINED",
+        freshVerifier,
+        sessionCustody,
+        custodians,
+        independent: true,
+        emergencyCleanup: false,
+        nativeEventSha256: observationDigest({
+          result,
+          actual,
+          verification,
+          stopped,
+        }),
+      };
+      await persist("retirement", retirement);
+      requireObservation(now() <= deadline);
+      return structuredClone(retirement);
+    } finally {
+      await retireObservers();
+    }
   };
   const prepare = checked(async () => {
     requireObservation(!admissionsClosed);
@@ -471,7 +522,58 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     requireObservation(
       (await reader.helper(helper)).sha256 === request.launcher.sha256,
     );
+    if (binding.purpose === "experiment") {
+      await persist("constructor-intent", {
+        parent: helper,
+        intent: DARWIN_CONSTRUCTOR_TRACE_INTENT,
+      });
+      constructorTrace = (state.openConstructorTrace ?? openDarwinStartupTrace)(
+        { identity: helper },
+        {
+          constructorMode: true,
+          readObserver: (pid) => reader.constructorObserver("read", pid),
+          observeObserver: (identity) =>
+            reader.constructorObserver("observe", identity),
+          retireObserver: (identity) =>
+            reader.constructorObserver("retire", identity),
+          onObserver: (observer) => persist("constructor-observer", observer),
+          onFailure: (cause) => {
+            failure ??= cause;
+          },
+        },
+      );
+      requireObservation((await constructorTrace.arm()).status === "armed");
+      requireObservation(
+        (await reader.helper(helper)).sha256 === request.launcher.sha256,
+      );
+    }
     await reader.sendOwnership(false, "P");
+    if (constructorTrace) {
+      const pre = await reader.ownershipControl();
+      observationObject(pre, ["helper", "payload", "creator"]);
+      observationObject(pre.creator, ["version", "phase"]);
+      requireObservation(
+        pre.creator.version === 1 &&
+          pre.creator.phase === 1 &&
+          sameDarwinIdentity(pre.helper, helper),
+      );
+      const identity = inDomain(pre.payload, pre.payload.asid);
+      admitted.creatorChild = identity;
+      admitted.creatorSessionCustody = assertDarwinSessionCustody(
+        await reader.holdOwnershipSession(identity, helper),
+        identity,
+      );
+      await persist("admission", admitted);
+      // Persist original identity before transferring any receipt/release authority.
+      const receipt = await constructorTrace.receipt(identity, current.signal);
+      await persist("constructor-child", {
+        identity,
+        parent: helper,
+        receiptSha256: digest(receipt),
+        receipt: receipt.toString("hex"),
+      });
+      await reader.creatorReceipt(receipt);
+    }
     const parked = await reader.ownershipControl();
     observationObject(parked, ["helper", "payload", "controls"]);
     requireObservation(parked.controls === true);
@@ -480,7 +582,8 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     known.push(admitted.payload);
     admitted.controls = true;
     admitted.sessionCustody = assertDarwinSessionCustody(
-      await reader.holdOwnershipSession(admitted.payload, helper),
+      admitted.creatorSessionCustody ??
+        (await reader.holdOwnershipSession(admitted.payload, helper)),
       admitted.payload,
     );
     await persist("admission", admitted);
@@ -498,6 +601,24 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       authorities.push(authority);
     }
     await state.admit(current.signal);
+    if (constructorTrace) {
+      constructorResult = await constructorTrace.finish();
+      requireObservation(
+        constructorResult.status === "observed" &&
+          constructorResult.captureComplete &&
+          constructorResult.cleanup === "RETIRED" &&
+          constructorResult.programSha256 ===
+            DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
+          sameDarwinIdentity(
+            constructorResult.creator.identity,
+            admitted.payload,
+          ),
+      );
+      await persist("constructor-sealed", constructorResult);
+      requireObservation(
+        (await reader.helper(helper)).sha256 === request.launcher.sha256,
+      );
+    }
     await reader.sendOwnership(false, "R");
     let ready;
     if (literal(recipe.id) || access) {

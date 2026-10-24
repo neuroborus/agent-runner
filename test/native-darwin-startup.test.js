@@ -21,6 +21,8 @@ import {
   withNativeDiagnostics,
 } from "../ci/native/index.js";
 import {
+  DARWIN_CONSTRUCTOR_TRACE_INTENT,
+  createDarwinConstructorCapture,
   darwinFeasibilityCause,
   darwinFeasibilityIdentityArguments,
   darwinFeasibilityPhases,
@@ -2748,6 +2750,10 @@ test("native observer root admission keeps exact arities, Worker identity checks
     "startup-observer": 3,
     "startup-observer-observe": 14,
     "startup-observer-retire": 14,
+
+    "constructor-observer": 3,
+    "constructor-observer-observe": 14,
+    "constructor-observer-retire": 14,
   };
   for (const selector of [
     ...Object.keys(arities),
@@ -2774,8 +2780,54 @@ test("native observer root admission keeps exact arities, Worker identity checks
   );
   assert.match(
     source,
-    /startup_observer_live\(value\)\) \{\s+signal_identity\(value, SIGKILL\)/u,
+    /observing\(value\)\) \{\s+signal_identity\(value, SIGKILL\)/u,
   );
+  const strictBody =
+    /static bool constructor_observer_live[^\n]+\{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace("struct proc_bsdinfo b;", "const b = {};")
+      .replace("int size", "const size")
+      .replace("&b", "b")
+      .replaceAll("sizeof(b)", "1");
+  const strict = new Script(`(expected)=>{${strictBody}}`);
+  for (const fault of [
+    null,
+    "absent",
+    "zombie",
+    "birth",
+    "version",
+    "denied",
+  ]) {
+    const context = {
+      errno: 0,
+      ESRCH: 3,
+      ENOENT: 2,
+      SZOMB: 5,
+      PROC_PIDTBSDINFO: 1,
+      proc_pidinfo: (_pid, _kind, _zombie, target) => {
+        Object.assign(target, {
+          pbi_start_tvsec: fault === "birth" ? 101 : 100,
+          pbi_start_tvusec: 1,
+          pbi_status: fault === "zombie" ? 5 : 1,
+        });
+        if (["absent", "denied"].includes(fault)) {
+          context.errno = fault === "absent" ? 3 : 13;
+          return 0;
+        }
+        return 1;
+      },
+      startup_observer_live: () => fault !== "version",
+      need: (ok) => assert.ok(ok),
+    };
+    const observe = strict.runInNewContext(context);
+    const expected = {
+      token: { val: [0, 0, 0, 0, 0, 900, 1, 1] },
+      bsd: { pbi_start_tvsec: 100, pbi_start_tvusec: 1 },
+    };
+    if (fault && fault !== "absent")
+      assert.throws(() => observe(expected), fault);
+    else assert.equal(observe(expected), fault !== "absent");
+  }
 });
 
 const TRACE_START = [
@@ -2796,6 +2848,7 @@ function traceFixture({
   beforeRead,
   observeState,
   coldCommand = false,
+  constructorMode = false,
   operation = coldCommand ? undefined : "exec",
   bindReplacement = true,
   onFailure,
@@ -2819,6 +2872,7 @@ function traceFixture({
       isMatchingCI: true,
       parentPid: 999,
       coldCommand,
+      constructorMode,
       operation,
       onFailure,
       verifyInstalled: async () => {},
@@ -2837,83 +2891,102 @@ function traceFixture({
         ]);
         assert.equal(
           createHash("sha256").update(program).digest("hex"),
-          (coldCommand
-            ? DARWIN_COLD_STARTUP_TRACE_INTENT
-            : DARWIN_STARTUP_TRACE_INTENT
+          (constructorMode
+            ? DARWIN_CONSTRUCTOR_TRACE_INTENT
+            : coldCommand
+              ? DARWIN_COLD_STARTUP_TRACE_INTENT
+              : DARWIN_STARTUP_TRACE_INTENT
           ).programSha256,
         );
-        assert.ok(
-          program.includes(
-            `#pragma D option strsize=${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes + 1 : 129}\n`,
-          ),
-        );
-        if (coldCommand)
-          assert.deepEqual(
-            program.match(/^#pragma D option dynvarsize=.*$/gmu),
-            ["#pragma D option dynvarsize=16777216"],
-          );
-        else assert.doesNotMatch(program, /\bdynvarsize\b/u);
-        assert.equal(
-          program.split(
-            `copyinstr(self->pointer, ${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes : 128})`,
-          ).length - 1,
-          1,
-        );
-        assert.ok(program.includes("%S\\n"));
-        assert.ok(program.includes('probefunc == "abort_with_payload" ? arg4'));
-        if (!coldCommand) assert.doesNotMatch(program, /\barg[235]\b/u);
-        else {
-          for (const name of [
-            "sysconf",
-            "pthread_get_stackaddr_np",
-            "pthread_get_stacksize_np",
-          ])
-            assert.ok(
-              program.includes(`${name}:return /pid == $1 && target_exec/`),
-            );
-          assert.ok(program.includes('probefunc == "mmap"'));
-          assert.ok(program.includes('probefunc == "mprotect"'));
-          assert.ok(program.includes("(uint64_t)arg5"));
-        }
-        for (const line of program
-          .split("\n")
-          .filter((line) => line.includes(":::")))
-          assert.ok(
-            line.startsWith("dtrace:::BEGIN") || line.includes("/pid == $1"),
-          );
-        assert.equal(
-          program.match(/\/pid == \$1\//gu)?.length,
-          coldCommand ? 2 : 4,
-        );
-        for (const probe of [
-          "syscall:::entry",
-          "syscall:::return",
-          "proc:::exec-success",
-          "proc:::exit",
-        ])
+        if (!constructorMode) {
           assert.ok(
             program.includes(
-              `${probe} /pid == $1${coldCommand && probe.startsWith("syscall") ? " && target_exec" : ""}/ {`,
+              `#pragma D option strsize=${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes + 1 : 129}\n`,
             ),
           );
-        if (coldCommand)
+          if (coldCommand)
+            assert.deepEqual(
+              program.match(/^#pragma D option dynvarsize=.*$/gmu),
+              ["#pragma D option dynvarsize=16777216"],
+            );
+          else assert.doesNotMatch(program, /\bdynvarsize\b/u);
+          assert.equal(
+            program.split(
+              `copyinstr(self->pointer, ${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes : 128})`,
+            ).length - 1,
+            1,
+          );
+          assert.ok(program.includes("%S\\n"));
+          assert.ok(
+            program.includes('probefunc == "abort_with_payload" ? arg4'),
+          );
+          if (!coldCommand) assert.doesNotMatch(program, /\barg[235]\b/u);
+          else {
+            for (const name of [
+              "sysconf",
+              "pthread_get_stackaddr_np",
+              "pthread_get_stacksize_np",
+            ])
+              assert.ok(
+                program.includes(`${name}:return /pid == $1 && target_exec/`),
+              );
+            assert.ok(program.includes('probefunc == "mmap"'));
+            assert.ok(program.includes('probefunc == "mprotect"'));
+            assert.ok(program.includes("(uint64_t)arg5"));
+          }
+          for (const line of program
+            .split("\n")
+            .filter((line) => line.includes(":::")))
+            assert.ok(
+              line.startsWith("dtrace:::BEGIN") || line.includes("/pid == $1"),
+            );
+          assert.equal(
+            program.match(/\/pid == \$1\//gu)?.length,
+            coldCommand ? 2 : 4,
+          );
+          for (const probe of [
+            "syscall:::entry",
+            "syscall:::return",
+            "proc:::exec-success",
+            "proc:::exit",
+          ])
+            assert.ok(
+              program.includes(
+                `${probe} /pid == $1${coldCommand && probe.startsWith("syscall") ? " && target_exec" : ""}/ {`,
+              ),
+            );
+          if (coldCommand)
+            assert.match(
+              program,
+              /proc:::exec-success \/pid == \$1\/ \{ target_exec = 1; printf/u,
+            );
           assert.match(
             program,
-            /proc:::exec-success \/pid == \$1\/ \{ target_exec = 1; printf/u,
+            /^dtrace:::BEGIN \{ printf\("armed %d %llu\\n", pid, timestamp\); \}$/mu,
           );
-        assert.match(
-          program,
-          /^dtrace:::BEGIN \{ printf\("armed %d %llu\\n", pid, timestamp\); \}$/mu,
-        );
-        assert.match(
-          program,
-          /^proc:::exit \/pid == \$1\/ \{ printf\("exit %d %llu\\n", pid, timestamp\); exit\(0\); \}$/mu,
-        );
-        assert.equal(program.match(/\bexit\(/gu)?.length, 1);
-        assert.doesNotMatch(
-          program,
-          /\$target|\$[02-9]|copyin\(|system\(|raise\(|stop\(|chill\(|panic\(/u,
-        );
+          assert.match(
+            program,
+            /^proc:::exit \/pid == \$1\/ \{ printf\("exit %d %llu\\n", pid, timestamp\); exit\(0\); \}$/mu,
+          );
+          assert.equal(program.match(/\bexit\(/gu)?.length, 1);
+          assert.doesNotMatch(
+            program,
+            /\$target|\$[02-9]|copyin\(|system\(|raise\(|stop\(|chill\(|panic\(/u,
+          );
+        } else {
+          assert.match(program, /mach_trap::mach_reply_port:return/u);
+          assert.match(program, /args\[0\]->pr_pid/u);
+          assert.match(program, /constructors, \(uint64_t\)arg0/u);
+          assert.match(
+            program,
+            /syscall::read:entry,syscall::read_nocancel:entry/u,
+          );
+          assert.match(
+            program,
+            /syscall::read:return,syscall::read_nocancel:return/u,
+          );
+          assert.doesNotMatch(program, /copyin|offsetof|system\(|stop\(/u);
+        }
         assert.equal(options.stdio[0], "ignore");
         if (acknowledge)
           queueMicrotask(() => child.stdout.write(`armed ${tracerPid} 100\n`));
@@ -2928,6 +3001,7 @@ function traceFixture({
           });
         const changed = pid === tracerPid && tracerReads++ >= 2;
         return {
+          ...(constructorMode ? { toolSha256: SHA } : {}),
           kind:
             pid === tracerPid && !(changed && substituted === "image")
               ? "dtrace"
@@ -4342,4 +4416,125 @@ test("startup trace intent and arm precede release, with changed bindings fenced
       return true;
     },
   );
+});
+
+test("constructor capture joins buffered fork-bound evidence before census and seals without payload exit", async () => {
+  const f = traceFixture({ constructorMode: true });
+  assert.equal((await f.trace.arm()).status, "armed");
+  const child = { ...IDENTITY, pid: 43 };
+  // The read fence can be delivered before another CPU's constructor buffer.
+  f.child.stdout.write(
+    "fence 43 105 7 1 1 512\ncreated 42 101 43\nstarted 43 102 7\n",
+  );
+  let resolved = false;
+  const waiting = f.trace.receipt(child).then((value) => {
+    resolved = true;
+    return value;
+  });
+  await Promise.resolve();
+  assert.equal(resolved, false);
+  f.child.stdout.write("constructor 43 103 7 1 117\n");
+  const receipt = await waiting;
+  assert.equal(receipt.length, 512);
+  assert.match(receipt.toString(), /^CR1 42 101 /u);
+  f.child.stdout.write(
+    "terminal 43 108 1 2\nfence 43 107 7 2 1 1\nimported 43 106 512\n",
+  );
+  await f.close();
+  const result = await f.trace.finish();
+  assert.equal(result.status, "observed");
+  assert.equal(result.cleanup, "RETIRED");
+  assert.deepEqual(result.creator.constructors, [117]);
+});
+
+test("constructor receipts refuse namespace substitution, incomplete sequences, changed evidence and phase replay", () => {
+  const parent = IDENTITY,
+    child = { ...IDENTITY, pid: 43 };
+  const rows = [
+    "created 42 101 43",
+    "started 43 102 7",
+    "constructor 43 103 7 1 117",
+    "fence 43 104 7 1 1 512",
+  ];
+  const open = () => {
+    const capture = createDarwinConstructorCapture(parent);
+    rows.forEach((row) => capture.consume(row));
+    return capture;
+  };
+  assert.throws(() => open().receipt(parent));
+  assert.throws(
+    () =>
+      createDarwinConstructorCapture(parent).consume("fence 43 104 7 1 0 512"),
+    "A positive installed constructor observation is required",
+  );
+  assert.throws(() => {
+    const capture = createDarwinConstructorCapture(parent);
+    rows
+      .filter((row) => !row.startsWith("constructor"))
+      .forEach((row) => capture.consume(row));
+    capture.receipt(child);
+  });
+  for (const row of [
+    "constructor 43 103 7 1 117",
+    "constructor 43 105 7 2 118",
+    "fence 43 104 7 1 1 512",
+    "invalid 43 105",
+    "constructor 44 103 7 2 118",
+    "constructor 43 103 8 2 118",
+    "constructor 43 103 7 9 118",
+    "constructor 43 103 7 2 4294967295",
+  ]) {
+    const capture = open();
+    capture.receipt(child);
+    assert.throws(() => capture.consume(row), row);
+  }
+  for (const end of [
+    [],
+    ["fence 43 107 7 2 1 1"],
+    ["imported 43 106 511", "fence 43 107 7 2 1 1", "terminal 43 108 1 2"],
+  ]) {
+    const capture = open();
+    capture.receipt(child);
+    end.forEach((row) => capture.consume(row));
+    assert.throws(() => capture.complete());
+  }
+});
+
+test("constructor completion withholds release after cancellation, observer uncertainty or incomplete output", async () => {
+  for (const fault of ["cancel", "retirement", "stderr", "truncated", "exit"]) {
+    const f = traceFixture({
+      constructorMode: true,
+      cleanupFailure: fault === "retirement",
+    });
+    assert.equal((await f.trace.arm()).status, "armed");
+    f.child.stdout.write(
+      "created 42 101 43\nstarted 43 102 7\nfence 43 104 7 1 1 512\n",
+    );
+    const child = { ...IDENTITY, pid: 43 };
+    if (fault === "cancel") {
+      const controller = new AbortController(),
+        waiting = f.trace.receipt(child, controller.signal);
+      controller.abort();
+      await assert.rejects(waiting, /interrupted/u);
+      f.child.stdout.write("constructor 43 103 7 1 117\n");
+    } else {
+      f.child.stdout.write("constructor 43 103 7 1 117\n");
+      await f.trace.receipt(child);
+    }
+    f.child.stdout.write(
+      "imported 43 105 512\nfence 43 106 7 2 1 1\nterminal 43 107 1 2\n",
+    );
+    if (fault === "stderr") f.child.stderr.write("drop\n");
+    if (fault === "truncated") f.child.stdout.write("constructor ");
+    await f.close(fault === "exit" ? 1 : 0);
+    const result = await f.trace.finish();
+    assert.ok(
+      result.status !== "observed" || result.cleanup !== "RETIRED",
+      fault,
+    );
+    assert.ok(
+      f.calls.some(([operation]) => operation === "observe"),
+      fault,
+    );
+  }
 });

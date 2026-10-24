@@ -69,6 +69,8 @@ import {
   darwinFeasibilityCause,
   openDarwinFeasibilitySession,
   openDarwinFaultDomain,
+  createDarwinConstructorCapture,
+  DARWIN_CONSTRUCTOR_TRACE_INTENT,
   runDarwinFeasibilityBundle,
   runDarwinFeasibilityFault,
 } from "../ci/native/darwin/index.js";
@@ -3828,7 +3830,57 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
           "native-darwin-cleanup: operation=fault-access-release domain=mach value=15 effects=possible settlement=unsettled\n"
         : "native-darwin: operation=bsd-identity domain=errno value=5 effects=possible settlement=unsettled\n";
     const streamError = new Error("Custody output unavailable");
-    child.stdin.on("data", () => {
+    const original = {
+      ...custodian,
+      pid: 42,
+      auid: 90001,
+      uid: 90001,
+      ruid: 90001,
+      svuid: 90001,
+      gid: 90002,
+      rgid: 90002,
+      svgid: 90002,
+      asid: 55,
+    };
+    const record = {
+      candidateSha: SHA,
+      caseId: "cancel",
+      stage: 1,
+      helperSha256: DIGEST,
+      policySha256: DIGEST,
+      asid: 55,
+      custodian,
+      owner: original,
+      receiptSha256: DIGEST,
+      emergency: false,
+      intentSha256: "",
+      members: [],
+      descendant: {},
+      creatorReceiptSha256: "",
+      constructorProgramSha256: "",
+      constructorCaptureSha256: "",
+    };
+    const send = (value) => child.stdout.write(JSON.stringify(value) + "\n");
+    child.stdin.on("data", (chunk) => {
+      const command = chunk.toString();
+      if (command === "P\n") {
+        send({ creator: { version: 1, phase: 1, record } });
+        return;
+      }
+      if (command.startsWith("creator ")) {
+        record.creatorReceiptSha256 = createHash("sha256")
+          .update(Buffer.from(command.trim().slice(8), "hex"))
+          .digest("hex");
+        send({ sealed: { version: 1, phase: 2, record } });
+        return;
+      }
+      if (command.startsWith("seal1 ")) {
+        const [, program, capture] = command.trim().split(" ");
+        record.constructorProgramSha256 = program;
+        record.constructorCaptureSha256 = capture;
+        send({ ready: record });
+        return;
+      }
       try {
         if (
           !["native-exit", "access-refusal", "diagnostic-sink"].includes(fault)
@@ -3862,23 +3914,28 @@ test("Darwin fault custody channel retains native failure diagnostics and handle
           {
             uid: 501,
             gid: 20,
+            execute: async () => ({
+              stdout: JSON.stringify({ parent: custodian }),
+            }),
+            openTrace: () => ({
+              arm: async () => ({ status: "armed" }),
+              receipt: async () => Buffer.alloc(512),
+              finish: async () => ({
+                status: "observed",
+                captureComplete: true,
+                cleanup: "RETIRED",
+                programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+                sha256: DIGEST,
+                creator: {
+                  identity: original,
+                  receiptSha256: createHash("sha256")
+                    .update(Buffer.alloc(512))
+                    .digest("hex"),
+                },
+              }),
+            }),
             launch: () => {
-              queueMicrotask(() =>
-                child.stdout.write(
-                  JSON.stringify({
-                    ready: {
-                      candidateSha: SHA,
-                      caseId: "cancel",
-                      stage: 1,
-                      helperSha256: DIGEST,
-                      policySha256: DIGEST,
-                      asid: 55,
-                      custodian,
-                      owner: { pid: 42 },
-                    },
-                  }) + "\n",
-                ),
-              );
+              queueMicrotask(() => send({ hello: { ...record, stage: 0 } }));
               return child;
             },
           },
@@ -3938,6 +3995,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     ["cancel", "recovery-close"],
     ["cancel", "recovery-emergency"],
     ["cancel", "admission"],
+    ["cancel", "creator-refusal"],
   ]) {
     const recovering =
       trailing?.startsWith("preexec") || trailing?.startsWith("recovery-");
@@ -4000,6 +4058,9 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       owner: { ...owner, pidVersion: 6 },
       descendant: {},
       members: [],
+      creatorReceiptSha256: "",
+      constructorProgramSha256: "",
+      constructorCaptureSha256: "",
     };
     const frames = [],
       actions = [];
@@ -4013,7 +4074,68 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         stream: "stdout",
         hex: Buffer.from(JSON.stringify(value) + "\n").toString("hex"),
       });
+    const releaseFixture = () => {
+      send({ ready: record });
+      if (recovering) {
+        send({
+          stream: "stderr",
+          hex: Buffer.from(
+            "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n",
+          ).toString("hex"),
+        });
+        send({
+          exit:
+            trailing === "preexec-signal"
+              ? { code: -1, signal: 5 }
+              : { code: 126, signal: 0 },
+        });
+      } else {
+        send({
+          stream: "stderr",
+          hex: Buffer.from(
+            "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\nnative-darwin-phase: phase=exec-enter\n",
+          ).toString("hex"),
+        });
+        payload({
+          event: "armed",
+          ownerPid: owner.pid,
+          childPid: descendant.pid,
+          controls: true,
+        });
+      }
+    };
     child.stdin.on("data", (chunk) => {
+      const text = chunk.toString();
+      if (text.startsWith("O ")) {
+        send({ observerStored: true });
+        return;
+      }
+      if (text === "P\n") {
+        send({ creator: { version: 1, phase: 1, record } });
+        return;
+      }
+      if (text.startsWith("creator ")) {
+        const receipt = Buffer.from(text.trim().slice(8), "hex");
+        assert.equal(receipt.length, 512);
+        record = {
+          ...record,
+          creatorReceiptSha256: createHash("sha256")
+            .update(receipt)
+            .digest("hex"),
+        };
+        send({ sealed: { version: 1, phase: 2, record } });
+        return;
+      }
+      if (text.startsWith("seal1 ")) {
+        const [, program, capture] = text.trim().split(" ");
+        record = {
+          ...record,
+          constructorProgramSha256: program,
+          constructorCaptureSha256: capture,
+        };
+        releaseFixture();
+        return;
+      }
       const [sequence, operation, ...args] = chunk.toString().trim().split(" ");
       actions.push(operation);
       let value = null;
@@ -4079,6 +4201,57 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       {
         uid: 501,
         gid: 20,
+        openTrace: (binding, options) => {
+          assert.deepEqual(binding.identity, custodian);
+          const capture = createDarwinConstructorCapture(custodian);
+          for (const line of [
+            "created 9000 100 42",
+            "started 42 101 7",
+            "constructor 42 102 7 1 117",
+            "fence 42 103 7 1 1 512",
+          ])
+            capture.consume(line);
+          return {
+            arm: async () => {
+              await options.onObserver({
+                identity: { ...custodian, pid: 9001 },
+                kind: "dtrace",
+                parentPid: process.pid,
+                toolSha256: DIGEST,
+              });
+              return { status: "armed" };
+            },
+            receipt: (identity) => {
+              if (trailing === "creator-refusal")
+                throw new Error("Constructor receipt unavailable");
+              return capture.receipt(identity);
+            },
+            finish: async () => {
+              if (trailing === "creator-refusal") {
+                assert.equal(
+                  child.stdin.writableEnded,
+                  true,
+                  "Child settlement must not wait for observer retirement",
+                );
+                return { status: "partial", cleanup: "RETIRED" };
+              }
+              for (const line of [
+                "imported 42 104 512",
+                "fence 42 105 7 2 1 1",
+                "terminal 42 106 1 2",
+              ])
+                capture.consume(line);
+              return {
+                status: "observed",
+                captureComplete: true,
+                cleanup: "RETIRED",
+                programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+                sha256: DIGEST,
+                creator: capture.complete(),
+              };
+            },
+          };
+        },
         retain: (value) => {
           acquired = value;
         },
@@ -4097,39 +4270,14 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
               send({ ready: { ...record, candidateSha: "f".repeat(40) } });
               return;
             }
-            send({ ready: record });
-            if (recovering) {
-              send({
-                stream: "stderr",
-                hex: Buffer.from(
-                  "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n",
-                ).toString("hex"),
-              });
-              send({
-                exit:
-                  trailing === "preexec-signal"
-                    ? { code: -1, signal: 5 }
-                    : { code: 126, signal: 0 },
-              });
-              return;
-            }
-            send({
-              stream: "stderr",
-              hex: Buffer.from(
-                "native-darwin-phase: phase=policy-enter\nnative-darwin-phase: phase=policy-applied\nnative-darwin-phase: phase=exec-enter\n",
-              ).toString("hex"),
-            });
-            payload({
-              event: "armed",
-              ownerPid: owner.pid,
-              childPid: descendant.pid,
-              controls: true,
-            });
+            send({ hello: { ...record, stage: 0 } });
           });
           return child;
         },
         execute: async (file, args) => {
           assert.equal(file, "/usr/bin/sudo");
+          if (args.includes("fault-parent"))
+            return { stdout: JSON.stringify({ parent: custodian }) };
           const closed = args.includes("fault-closed");
           if (closed && trailing === "recovery-close")
             throw new Error("Custodian remains unverified");
@@ -4166,11 +4314,16 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       assert.deepEqual(actions, []);
       continue;
     }
-    if (trailing === "admission") {
+    if (["admission", "creator-refusal"].includes(trailing)) {
       await assert.rejects(opening, (error) => {
         assert.equal(error.faultDomain, acquired);
         assert.equal(acquired.owner, child);
         assert.equal(child.stdin.writableEnded, true);
+        if (trailing === "creator-refusal") {
+          assert.equal(error.message, "Constructor receipt unavailable");
+          assert.equal(error.cleanupError, undefined);
+          assert.equal(acquired.traceResult.cleanup, "RETIRED");
+        }
         return true;
       });
       assert.deepEqual(actions, []);

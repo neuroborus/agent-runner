@@ -2092,6 +2092,24 @@ tool runs on development hosts, policy is unchanged, and tracing cannot grant
 denial evidence, readiness or acceptance. Observer uncertainty fences progress.
 This enables startup attribution without a new policy grant; a matching native
 cause and source-supported startup correction remain external prerequisites.
+A separate fixed constructor mode of the same observer supplies ordinary Darwin
+pre-exec creator evidence. It arms behind the original parent's P barrier, binds
+installed sudo/DTrace identities and tool digests, and uses mandatory typed public
+proc translations plus XNU's Mach-return arg0. Kernel create/start and private
+read fences join the original child and the complete bounded constructor sequence;
+buffer arrival order cannot stand in for that sequence. Shared custody imports one
+closed 512-byte, versioned receipt bound to parent, fork epoch and child birth/audit
+identity. Both launcher and fault census owners retain exact types, checked cache
+aliases and acquired-reference cleanup. Pre-census frames remain distinct from
+completed controls. The root parent holds audit custody only after fork.
+Observation continues through census and checked cleanup, then ends at the child's
+final private read without waiting for payload exit. Unchanged evidence, successful
+observer exit, drained error-free streams and independent observer retirement
+precede R and the prepared nonallocating exec tail. Fault controls remain post-exec;
+receipts cannot authorize that replacement namespace. Existing journals and
+recovery retain original parent, child and observer identities. Missing installed
+support or incomplete evidence refuses release; hosted CI remains the native proof
+owner. Startup/cold-command diagnostics and reviewed/provider admission are unchanged.
 Per-job reports project only their platform and applicable source/prerequisite
 findings and cannot yield aggregate GO. The aggregate inventory remains all
 three platforms, 23 system cases and six provider checks each, with the four

@@ -565,6 +565,7 @@ export function darwinPreparationContext(input, options) {
     env,
     fs,
     now: options.now ?? (() => performance.now()),
+    openConstructorTrace: options.openConstructorTrace,
     read,
     receipt,
     write,

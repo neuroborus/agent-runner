@@ -1163,6 +1163,39 @@ static void case_line(int fd, bool encoded) {
   if (encoded) { char out[16385]; hex((void *)bytes, length, out); printf("{\"hex\":\"%s\"}", out); }
   else { bytes[length - 1] = 0; fputs(bytes, stdout); }
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Fixed installed observer reads: no arbitrary image or numeric-PID effect. */
+static const char *case_observer_identity(pid_t pid, struct identity *value) {
+  *value = inspect(pid); char image[PATH_MAX], after[PATH_MAX];
+  need(proc_pidpath(pid, image, sizeof(image)) > 0);
+  const char *kind = !strcmp(image, "/usr/sbin/dtrace") ? "dtrace" : !strcmp(image, "/usr/bin/sudo") ? "sudo" : NULL;
+  need(kind);
+  struct stat st; need(!lstat(image, &st) && installed_input(image, &st));
+  struct identity again = inspect(pid);
+  need(audit_identity_same(*value, again) && value->bsd.pbi_ppid == again.bsd.pbi_ppid &&
+    proc_pidpath(pid, after, sizeof(after)) > 0 && !strcmp(image, after)); return kind;
+}
+static bool case_observer_live(struct identity expected) {
+  struct proc_bsdinfo b; errno = 0;
+  int size = proc_pidinfo(expected.token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
+  if (!size) { need(errno == ESRCH || errno == ENOENT); return false; }
+  need(size == sizeof(b) && b.pbi_status != SZOMB);
+  struct identity actual; case_observer_identity(expected.token.val[5], &actual);
+  need(audit_identity_same(expected, actual)); return true;
+}
+static void case_observer(char **fields, bool retire) {
+  struct identity expected = {0};
+  for (unsigned i = 0; i < 8; i++) expected.token.val[i] = case_number(fields[i], UINT32_MAX);
+  expected.bsd.pbi_start_tvsec = case_number(fields[8], UINT64_MAX); expected.bsd.pbi_start_tvusec = case_number(fields[9], 999999);
+  expected.bsd.pbi_svuid = case_number(fields[10], UINT32_MAX); expected.bsd.pbi_svgid = case_number(fields[11], UINT32_MAX);
+  need(expected.token.val[5] > 1 && expected.token.val[5] <= INT_MAX);
+  if (retire && case_observer_live(expected)) {
+    int error = proc_signal_with_audittoken(&expected.token, SIGKILL); need(!error || error == ESRCH);
+    for (unsigned pass = 0; pass < 1000 && case_observer_live(expected); pass++) (void)poll(NULL, 0, 10);
+  }
+  printf("{\"status\":\"%s\"}", case_observer_live(expected) ? "LIVE" : "RETIRED");
+}
+#endif
 static void case_send(bool payload, const char *value) {
   need(payload || !case_fenced);
   need(case_mode && case_pid && strlen(value) == 1 &&
@@ -2722,6 +2755,18 @@ int main(int argc, char **argv) {
       need(poll(&wait, 1, 30000) == 1 && !(wait.revents & (POLLERR | POLLNVAL)) && read(case_data, &trailing, 1) == 0);
       fputs("{\"complete\":true}", stdout);
     } else if (!strcmp(tokens[0], "case-output")) { need(n == 2); case_line(case_data, true);
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(tokens[0], "case-observer")) {
+      need(case_mode && n == 3); struct identity value; const char *kind = case_observer_identity(number(tokens[2]), &value);
+      char hash[65]; need(audit_observer_digest(!strcmp(kind, "sudo") ? "/usr/bin/sudo" : "/usr/sbin/dtrace", hash));
+      printf("{\"kind\":\"%s\",\"parentPid\":%u,\"toolSha256\":\"%s\",\"identity\":", kind, value.bsd.pbi_ppid, hash); emit(value); putchar('}');
+    } else if (!strcmp(tokens[0], "case-observer-observe") || !strcmp(tokens[0], "case-observer-retire")) {
+      need(case_mode && n == 14); case_observer(&tokens[2], !strcmp(tokens[0], "case-observer-retire"));
+    } else if (!strcmp(tokens[0], "case-creator")) {
+      need(case_mode && case_pid && !case_fenced && n == 3 && strlen(tokens[2]) == 1024);
+      char bytes[512]; for (unsigned i = 0; i < 512; i++) bytes[i] = digit(tokens[2][2*i])*16 + digit(tokens[2][2*i+1]);
+      need(write(case_in, bytes, sizeof(bytes)) == sizeof(bytes)); fputs("null", stdout);
+#endif
     } else if (!strcmp(tokens[0], "case-send")) { need(n == 4); case_send(number(tokens[2]) == 1, tokens[3]);
     } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4], false);
     } else if (!strcmp(tokens[0], "case-receipt-read")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, false);
