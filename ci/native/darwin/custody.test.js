@@ -3728,7 +3728,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
   );
   const body = (source, name) =>
     new RegExp(
-      `static (?:void|char|struct identity|mach_port_t|domain_special_reply_fn|const char \\*)\\s*${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|char|struct identity|mach_port_t|domain_special_reply_fn|long long|const char \\*)\\s*${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const translate = (text) =>
@@ -3804,6 +3804,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replace("reply_failure:", "}")
       .replace("runtime[8] = {0}", "runtime = Array(8).fill(0)")
       .replaceAll("(domain_special_reply_fn)", "")
+      .replaceAll("*query", "query.value")
       .replace("const char *operation", "let operation")
       .replace("const char *prior", "let prior")
       .replace("const char *binding", "let binding")
@@ -3824,12 +3825,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         "$1",
       )
       .replace(
-        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt|observed|only|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
+        /&(refs|bootstrap_query|send_query|host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt|observed|only|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
         (_, name) =>
           `{get value(){return ${name}},set value(value){${name}=value}}`,
       )
       .replaceAll(
-        /\((?:unsigned long long|unsigned|int|long|id_t|size_t|void|void \*|mach_vm_address_t|mach_vm_size_t)\)/gu,
+        /\((?:unsigned long long|long long|unsigned|int|long|id_t|size_t|void|void \*|mach_vm_address_t|mach_vm_size_t)\)/gu,
         "",
       )
       .replaceAll("sizeof(identity)", "48")
@@ -3843,7 +3844,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replaceAll("sizeof(*types)", "4")
       .replaceAll("&argv[12]", "argv.slice(12)")
       .replaceAll(
-        /\b(?:int|long|unsigned|bool|ssize_t|size_t|pid_t|gid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
+        /\b(?:long long|mach_port_urefs_t|int|long|unsigned|bool|ssize_t|size_t|pid_t|gid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
         "let ",
       );
   const [ordinary, protectedBody] = body(launcher, "mach_rights").split(
@@ -3893,6 +3894,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [launcher, "launch_replies_changed", "count,runtime"],
       [custody, "domain_runtime_replies_begin", "owner"],
       [custody, "domain_special_reply_lookup", ""],
+      [custody, "domain_send_refs", "name,query"],
     ]
       .map(
         ([source, name, args]) =>
@@ -3969,7 +3971,18 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       "mach_port_names/authority",
       unknownType,
     ]),
-    ...[0, 0xffffffff, 3, 6, 7].map((bootstrap) => [{ bootstrap }]),
+    ...[0, 0xffffffff, 3, 6, 7, 200].map((bootstrap) => [{ bootstrap }]),
+    ...[
+      {},
+      { bootstrapRefsQuery: 15 },
+      { refusedRefsQuery: 15 },
+      { refusedRefs: 0 },
+      { refusedRefs: 0xffffffff },
+    ].map((options) => [
+      { bootstrapExtra: true, bootstrap: 50, unknownType: SEND, ...options },
+      "mach_port_names/authority",
+      SEND,
+    ]),
     ...[3, 6].map((notify) => [{ notify }]),
     [{ notify: 6, readback: 6 }, "TASK_RESOURCE_NOTIFY_PORT/null", 6, 33],
     [{ producer: [11, 3] }],
@@ -4253,6 +4266,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       ]),
       actions = [],
       machCalls = [],
+      referenceSamples = [],
       stageAttempts = [],
       cloexec = new Set(),
       replaced = {},
@@ -4260,7 +4274,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     const record = (format, values) => {
       let index = 0;
       const line = format.replace(
-        /%(?:\.48s|llu|ld|#x|[dus])/gu,
+        /%(?:\.48s|llu|lld|ld|#x|[dus])/gu,
         (specifier) => {
           const raw = values[index++],
             value = String(specifier.endsWith("s") ? raw : Number(raw));
@@ -4743,6 +4757,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         MACH_PORT_TYPE_RECEIVE: RECEIVE,
         MACH_PORT_TYPE_SEND_ONCE: ONCE,
         MACH_PORT_TYPE_DEAD_NAME: DEAD,
+        MACH_PORT_RIGHT_SEND: 0,
         MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
         TASK_BOOTSTRAP_PORT: 3,
         TASK_DEBUG_CONTROL_PORT: 4,
@@ -4802,6 +4817,34 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           out.value =
             name === access ? accessType : (machCase.replyType ?? RECEIVE);
           return name === access ? (machCase.typeQuery ?? 0) : 0;
+        },
+        mach_port_get_refs(self, name, right, out) {
+          assert.deepEqual([self, right], [1, 0]);
+          assert.ok(api.MACH_PORT_VALID(name));
+          const refused = stageAttempts.at(-1)?.values[0] === "mach-cleanup";
+          if (!refused) {
+            assert.equal(name, bootstrap);
+            assert.equal(
+              released.some((entry) => entry.kind === "bootstrap"),
+              false,
+            );
+          }
+          const count =
+            acquired.filter((entry) => entry.name === name).length -
+            released.filter((entry) => entry.name === name && !entry.status)
+              .length +
+            Number(machCase.bootstrapExtra && name === bootstrap) +
+            Number(name === cachedSpecial);
+          const query =
+            (refused
+              ? machCase.refusedRefsQuery
+              : machCase.bootstrapRefsQuery) ?? 0;
+          out.value =
+            (refused ? machCase.refusedRefs : undefined) ?? Math.max(1, count);
+          referenceSamples.push({ name, refused, query, refs: out.value });
+          machCalls.push(["send-refs", name]);
+          api.errno = 73;
+          return query;
         },
         mach_port_deallocate(self, name) {
           assert.equal(self, 1);
@@ -5017,6 +5060,27 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       const portFacts = machCalls.filter(
         (entry) => Array.isArray(entry) && entry[0] === "refusal",
       );
+      assert.ok(referenceSamples.length <= 2);
+      const beforeRefs = referenceSamples.find((sample) => !sample.refused),
+        refusedRefs = referenceSamples.find((sample) => sample.refused),
+        availableRefs = (sample) =>
+          sample && !sample.query ? sample.refs : -1;
+      if (machCase.bootstrapExtra) {
+        assert.equal(beforeRefs.refs, 2);
+        assert.equal(refusedRefs.refs, machCase.refusedRefs ?? 1);
+      }
+      const provenance = [
+        machCase.bootstrap ?? 10,
+        beforeRefs?.query ?? -1,
+        availableRefs(beforeRefs),
+        beforeRefs
+          ? operation === "mach_port_deallocate/bootstrap"
+            ? 15
+            : 0
+          : -1,
+        refusedRefs?.query ?? -1,
+        availableRefs(refusedRefs),
+      ];
       assert.ok(
         !machCalls.some(
           (entry) =>
@@ -5051,7 +5115,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
                 : name === 200
                   ? "task-access"
                   : "unproved";
-        assert.deepEqual(portFacts, [["refusal", 42, name, result, binding]]);
+        assert.equal(refusedRefs?.name, name);
+        assert.deepEqual(portFacts, [
+          ["refusal", 42, name, result, binding, ...provenance],
+        ]);
         if (arrays.length)
           assert.ok(
             machCalls.indexOf(portFacts[0]) <
@@ -5059,7 +5126,13 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
                 (entry) => Array.isArray(entry) && entry[0] === "array-release",
               ),
           );
-      } else assert.deepEqual(portFacts, []);
+      } else
+        assert.deepEqual(
+          portFacts,
+          operation === "mach_port_deallocate/bootstrap"
+            ? [["refusal", 42, 0, 0, "unproved", ...provenance]]
+            : [],
+        );
       assert.equal(lookupReads, 2);
       const accessType = machCase.type ?? SEND;
       const unowned =

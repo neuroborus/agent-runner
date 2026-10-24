@@ -326,14 +326,16 @@ static void domain_access_release(task_t self, mach_port_t access, mach_port_typ
 }
 /* Diagnostic reads occur at the first failed census predicate, before releases.
  * They grant no authority and never replace that predicate's original refusal. */
-static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_type) {
-  int saved = errno, query, object_query = -1;
+static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_type, mach_port_t bootstrap, int bootstrap_query, long long bootstrap_refs, int bootstrap_release) {
+  int saved = errno, query, object_query = -1, send_query = -1;
+  long long send_refs = domain_send_refs(name, &send_query);
   mach_port_type_t current = MACH_PORT_TYPE_NONE; natural_t kind = 0; mach_vm_address_t object = 0;
   query = mach_port_type(mach_task_self(), name, &current);
   if (query == KERN_SUCCESS && (current & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_RECEIVE)))
     object_query = mach_port_kobject(mach_task_self(), name, &kind, &object);
-  fprintf(stderr, "native-darwin-fault-port: name=%u census-type=%#x type-query=%d type=%#x object-query=%d object-kind=%u object=%llu\n",
-    name, census_type, query, current, object_query, kind, (unsigned long long)object);
+  fprintf(stderr, "native-darwin-fault-port: name=%u census-type=%#x type-query=%d type=%#x object-query=%d object-kind=%u object=%llu pid=%d bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
+    name, census_type, query, current, object_query, kind, (unsigned long long)object,
+    getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
   fflush(stderr); errno = saved;
 }
 static void domain_sanitize(void) {
@@ -388,7 +390,16 @@ static void domain_sanitize(void) {
   } else domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, -1, -1);
   domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
   /* Clearing the kernel slot does not consume libSystem's local reference. */
-  domain_mach(domain_port_release(&domain_bootstrap_local, "fault-bootstrap-release"), "fault-bootstrap-release");
+  mach_port_t bootstrap = domain_bootstrap_local; int bootstrap_query = -1;
+  long long bootstrap_refs = domain_send_refs(bootstrap, &bootstrap_query);
+  kern_return_t bootstrap_release = domain_port_release(&domain_bootstrap_local, "fault-bootstrap-release");
+  if (bootstrap_release != KERN_SUCCESS) {
+    int saved = errno;
+    fprintf(stderr, "native-darwin-fault-bootstrap: pid=%d name=%u query=%d refs=%lld release=%d\n",
+      getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release);
+    fflush(stderr); errno = saved;
+  }
+  domain_mach(bootstrap_release, "fault-bootstrap-release");
   domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
   /* XNU omits both resource-notify selectors without CONFIG_PROC_RESOURCE_LIMITS.
    * Only that paired result on our own task establishes unavailability. A live
@@ -482,7 +493,7 @@ static void domain_sanitize(void) {
     for (unsigned j = 0; j < i; j++) if (names[j] == names[i]) allowed = false;
     if (!allowed) {
       remember("fault-port-authority", "invariant", 0);
-      domain_port_diagnostic(names[i], types[i]); census_ok = false;
+      domain_port_diagnostic(names[i], types[i], bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release); census_ok = false;
     }
   }
   /* Unknown live rights refuse exec; destroying them cannot prove confinement. */
@@ -493,7 +504,7 @@ static void domain_sanitize(void) {
       !special_seen ? special : !host_seen ? host : !access_seen ? access : MACH_PORT_NULL;
     if (!MACH_PORT_VALID(missing)) for (unsigned i = 0; i < runtime_count; i++)
       if (!(runtime_seen & (1u << i))) { missing = domain_runtime_replies[i]; break; }
-    domain_port_diagnostic(missing, MACH_PORT_TYPE_NONE); census_ok = false;
+    domain_port_diagnostic(missing, MACH_PORT_TYPE_NONE, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release); census_ok = false;
   }
   kern_return_t names_release = mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names));
   kern_return_t types_release = mach_vm_deallocate(self, (mach_vm_address_t)types, nt*sizeof(*types));

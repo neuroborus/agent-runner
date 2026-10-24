@@ -8834,8 +8834,16 @@ selector policy above: supported slots must clear and read back null, and every
 acquired getter copy must settle before registered-port, exception and census
 sanitation. Resource copies gain no census exemption; their release failures
 retain separate cleanup diagnostics and preserve the first refusal. A census
-refusal reports only its affected name/type and observed binding before cleanup
-RPCs. The earlier original child's affected census name/type and its cache/API or
+refusal reports its affected name/type and observed binding before cleanup
+RPCs. Both sanitation paths also retain the bootstrap local name, one pre-release
+SEND reference query and the existing release result, alongside one SEND query
+for the first refused name and the reporting PID. Unattempted queries and
+unavailable counts are -1; failed queries cannot publish their output as a count.
+A failed bootstrap release retains its observation without retrying the release.
+Counts and equal local names, including aliases or reuse, establish neither
+endpoint identity nor ownership; matching-host producer/reference evidence is
+still required for a further repair. The earlier original child's affected census
+name/type and its cache/API or
 producer binding remain unproved; this repair cannot identify that right by
 exclusion. Missing installed callable/export evidence remains a binding refusal,
 not a trap fallback. Matching hosted compilation, export lookup, interception,

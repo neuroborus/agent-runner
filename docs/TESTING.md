@@ -395,6 +395,12 @@ precedes independent array/reference release; combined release failures preserve
 the first cause. No fixture identifies the earlier child's unknown right or proves
 installed callable availability, SDK compilation or native interception. Those
 precise hosted observations remain required; the check inventory stays unchanged.
+The same actual-body fixtures execute the shared SEND-reference query and retain
+the pre-bootstrap-release and first-refusal observations with PID and release
+status. Counted aliases and copied parent bookkeeping cannot change admission or
+cleanup ownership. Failed queries with written outputs, zero/full-width counts,
+failed releases and failed diagnostics preserve unavailable values, the original
+refusal and errno. No query adds a release or supplies endpoint identity.
 Resource-notify cases cover paired selector unavailability, supported clearing
 and null readback, mixed selector results, other errors and uncertain failed-getter
 output. Nonnull readback and aliased-copy release failures retain independent

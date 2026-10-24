@@ -36,6 +36,16 @@ static domain_special_reply_fn domain_special_reply_lookup(void) {
   if (dlerror()) callable = NULL;
   return callable;
 }
+/* Local SEND counts establish neither endpoint identity nor ownership. A failed
+ * query has no available count, even if the API wrote its output parameter. */
+static long long domain_send_refs(mach_port_t name, int *query) {
+  int saved = errno; mach_port_urefs_t refs = 0;
+  *query = -1;
+  if (MACH_PORT_VALID(name))
+    *query = mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_SEND, &refs);
+  errno = saved;
+  return *query == KERN_SUCCESS ? (long long)refs : -1;
+}
 #endif
 #ifndef NATIVE_AUDIT_DOMAIN_ONLY
 #include <mach-o/loader.h>

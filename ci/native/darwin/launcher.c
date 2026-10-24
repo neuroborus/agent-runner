@@ -142,6 +142,8 @@ static void mach_rights(void) {
   mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL, reply = launch_reply_borrowed, special = launch_special_borrowed;
   mach_port_t held_host = MACH_PORT_NULL, held_access = MACH_PORT_NULL, held_bootstrap = MACH_PORT_NULL;
   mach_port_t held_thread = MACH_PORT_NULL, runtime[8] = {0}, refused_name = MACH_PORT_NULL;
+  mach_port_t bootstrap = MACH_PORT_NULL; int bootstrap_query = -1, bootstrap_release = -1;
+  long long bootstrap_refs = -1;
   mach_port_type_t refused_type = MACH_PORT_TYPE_NONE; const char *binding = "unproved";
   unsigned runtime_count = 0, runtime_seen = 0; bool replies_bound = false;
   mach_port_type_t access_type = MACH_PORT_TYPE_NONE, reply_type = MACH_PORT_TYPE_NONE;
@@ -154,6 +156,7 @@ static void mach_rights(void) {
   operation = "runtime-reply-owner"; result = launch_reply_owner; error = errno;
   if (launch_reply_owner != getpid()) goto mach_cleanup;
   held_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
+  bootstrap = held_bootstrap;
   thread = mach_thread_self(); held_thread = MACH_PORT_VALID(thread) ? thread : MACH_PORT_NULL;
   operation = "mach_thread_self"; result = thread; error = errno;
   if (!MACH_PORT_VALID(thread) || thread == self) goto mach_cleanup;
@@ -200,7 +203,9 @@ static void mach_rights(void) {
   if (result != KERN_SUCCESS) goto mach_cleanup;
   if (MACH_PORT_VALID(held_bootstrap)) {
     mach_port_t local = held_bootstrap; held_bootstrap = MACH_PORT_NULL;
+    bootstrap_refs = domain_send_refs(local, &bootstrap_query);
     operation = "mach_port_deallocate/bootstrap"; result = mach_port_deallocate(self, local); error = errno;
+    bootstrap_release = (int)result;
     if (result != KERN_SUCCESS) goto mach_cleanup;
   }
   operation = "task_set_special_port/TASK_DEBUG_CONTROL_PORT"; result = task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL); error = errno;
@@ -305,12 +310,15 @@ mach_cleanup: {
     if (!prior && notify_release != KERN_SUCCESS) { prior = "mach_port_deallocate/notify"; prior_result = notify_release; prior_error = notify_error; }
     if (!prior && readback_release != KERN_SUCCESS) { prior = "mach_port_deallocate/readback"; prior_result = readback_release; prior_error = readback_error; }
     launch_stage("mach-cleanup", prior, prior_result, prior_error);
-    /* One failed census fact, before release RPCs, never a broader inventory
-     * or a guessed explanation for an earlier child's unknown right. */
-    if (operation && MACH_PORT_VALID(refused_name)) {
+    /* One refused-name fact or failed bootstrap release, before cleanup RPCs,
+     * never a broader inventory or an explanation of an earlier child's right. */
+    if (operation && (MACH_PORT_VALID(refused_name) || (bootstrap_release != -1 && bootstrap_release != KERN_SUCCESS))) {
+      int saved = errno, send_query = -1;
+      long long send_refs = domain_send_refs(refused_name, &send_query);
       (void)signal(SIGPIPE, SIG_IGN);
-      fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s\n", getpid(), refused_name, refused_type, binding);
-      fflush(stderr);
+      fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
+        getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
+      fflush(stderr); errno = saved;
     }
     /* One entry per acquisition, even when local names alias. Never retry a
      * failed release or let it replace the original refusal. */
