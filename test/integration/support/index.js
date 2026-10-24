@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -372,7 +372,7 @@ export function createBackend(
 
 export async function fixture(
   t,
-  { autoCleanup = true, plan = TWO_STEP_PLAN } = {},
+  { autoCleanup = true, plan = TWO_STEP_PLAN, projectFiles = {} } = {},
 ) {
   const workspace = await mkdtemp(join(tmpdir(), "agent-runner-workflows-"));
   const projectPath = join(workspace, "project");
@@ -401,11 +401,23 @@ export async function fixture(
     writeFile(join(projectPath, ".gitignore"), "/LOCAL_ARTIFACTS/\n"),
     writeFile(join(projectPath, "src", "base.js"), "export const base = 1;\n"),
     writeFile(join(taskPath, "task.md"), "Implement the requested value.\n"),
+    ...Object.entries(projectFiles).map(async ([path, content]) => {
+      const target = join(projectPath, path);
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, content);
+    }),
   ]);
   if (plan !== null) {
     await writeFile(join(taskPath, "plan.md"), plan);
   }
-  await executeFile("git", ["-C", projectPath, "add", ".gitignore", "src"]);
+  await executeFile("git", [
+    "-C",
+    projectPath,
+    "add",
+    ".gitignore",
+    "src",
+    ...Object.keys(projectFiles),
+  ]);
   await executeFile("git", [
     "-C",
     projectPath,

@@ -8,6 +8,8 @@ import {
 } from "../agents/index.js";
 import { listPipelines } from "../pipeline-registry.js";
 import {
+  DEFAULT_MAX_EVENT_LOG_BYTES,
+  normalizeMaxEventLogBytes,
   DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
   normalizeProviderInactivityTimeoutMs,
   DEFAULT_AVAILABILITY_POLICY,
@@ -28,6 +30,7 @@ export const CONFIG_SCHEMA_VERSION = 1;
 export const CURRENT = "current";
 const PROFILE_NAME_PATTERN = /^[a-z][a-z0-9-]{0,63}$/u;
 const TOP_LEVEL_FIELDS = new Set([
+  "maxEventLogBytes",
   "artifactRoot",
   "providerInactivityTimeoutMs",
   "availabilityRetryMaxDelayMs",
@@ -299,6 +302,13 @@ function normalizePipeline(
 export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
   assertRecord(input, "configuration");
   rejectUnknownFields(input, TOP_LEVEL_FIELDS, "configuration");
+  if (input.maxEventLogBytes !== undefined) {
+    try {
+      normalizeMaxEventLogBytes(input.maxEventLogBytes);
+    } catch (cause) {
+      throw new ConfigurationError(cause.message, { cause });
+    }
+  }
   if (input.providerInactivityTimeoutMs !== undefined) {
     try {
       normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
@@ -405,6 +415,7 @@ export function normalizeConfiguration(input, providers = PROVIDER_REGISTRY) {
 
   const normalized = {
     schemaVersion: CONFIG_SCHEMA_VERSION,
+    maxEventLogBytes: input.maxEventLogBytes ?? DEFAULT_MAX_EVENT_LOG_BYTES,
     artifactRoot: input.artifactRoot ?? DEFAULT_ARTIFACT_ROOT,
     providerInactivityTimeoutMs:
       input.providerInactivityTimeoutMs ??
@@ -482,6 +493,13 @@ export function normalizeProjectConfiguration(
   const rootPath = "projectConfiguration";
   assertRecord(input, rootPath);
   rejectUnknownFields(input, PROJECT_TOP_LEVEL_FIELDS, rootPath);
+  if (input.maxEventLogBytes !== undefined) {
+    try {
+      normalizeMaxEventLogBytes(input.maxEventLogBytes);
+    } catch (cause) {
+      throw new ConfigurationError(cause.message, { cause });
+    }
+  }
   if (input.providerInactivityTimeoutMs !== undefined) {
     try {
       normalizeProviderInactivityTimeoutMs(input.providerInactivityTimeoutMs);
@@ -585,6 +603,7 @@ export function normalizeProjectConfiguration(
   );
   for (const field of [
     "artifactRoot",
+    "maxEventLogBytes",
     "providerInactivityTimeoutMs",
     "availabilityRetryMaxDelayMs",
     "defaultBackend",

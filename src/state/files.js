@@ -311,6 +311,66 @@ export async function readOptionalText(filePath) {
   }
 }
 
+// Inspect only the size observed on the safe descriptor. Concurrent appends
+// cannot extend this read; complete-record offsets always count raw bytes.
+export async function readBoundedLines(filePath, maxBytes, onLine) {
+  let handle;
+  try {
+    handle = await openRegularFile(filePath, constants.O_RDONLY);
+    const { size } = await handle.stat();
+    if (size > maxBytes) {
+      throw new RunStoreError(
+        "Managed file exceeds its bounded read ceiling.",
+        {
+          code: "ERR_EVENT_LOG_LIMIT",
+        },
+      );
+    }
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let position = 0;
+    let validByteLength = 0;
+    let parts = [];
+    let length = 0;
+    while (position < size) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        Math.min(buffer.length, size - position),
+        position,
+      );
+      if (bytesRead === 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+      let start = 0;
+      for (
+        let end = chunk.indexOf(10, start);
+        end !== -1;
+        end = chunk.indexOf(10, start)
+      ) {
+        const part = chunk.subarray(start, end);
+        parts.push(part);
+        length += part.length;
+        onLine(Buffer.concat(parts, length).toString("utf8"));
+        parts = [];
+        length = 0;
+        start = end + 1;
+        validByteLength = position + start;
+      }
+      if (start < bytesRead) {
+        const part = Buffer.from(chunk.subarray(start));
+        parts.push(part);
+        length += part.length;
+      }
+      position += bytesRead;
+    }
+    return { validByteLength, hasPartialTail: position > validByteLength };
+  } catch (cause) {
+    if (cause?.code === "ENOENT") return null;
+    throw cause;
+  } finally {
+    await handle?.close();
+  }
+}
+
 export async function readOptionalPublishedText(filePath) {
   for (let attempt = 0; ; attempt += 1) {
     await settleExclusivePublication(filePath);

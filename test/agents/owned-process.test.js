@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
+import { on } from "node:events";
 import { readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -41,20 +42,33 @@ function hostSessionLauncher(cwd, { ownershipMode }) {
   });
 }
 
-async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
+async function inspectionSequenceFixture(
+  t,
+  sequence,
+  { record = false, unrelatedPid = null, inspectionTimes = null } = {},
+) {
+  // Synthetic classification is independent of host scheduling; elapsed-budget
+  // regressions below supply their own clocks. Retry windows still use Date.now.
+  // Generated owners also capture launch ancestry before starting a supervisor.
+  t.mock.method(performance, "now", () => 0);
   const directory = await mkdtemp(join(tmpdir(), "owned-process-inspection-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
   const preloadPath = join(directory, "inspection-sequence.cjs");
   const inspectionPath = record ? join(directory, "inspections.txt") : null;
   await writeFile(
     preloadPath,
-    `if (process.argv[1] === "session") {
+    `Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
+if (process.argv[1] === "session") {
   const { createHash } = require("node:crypto");
   const fs = require("node:fs");
   const original = fs.readdirSync;
   const originalRead = fs.readFileSync;
   const sequence = ${JSON.stringify(sequence)};
   let index = 0;
+  const inspectionTimes = ${JSON.stringify(inspectionTimes)};
+  if (inspectionTimes !== null) {
+    Date.now = () => inspectionTimes[Math.min(index, inspectionTimes.length - 1)];
+  }
   const bootId = originalRead("/proc/sys/kernel/random/boot_id", "utf8").trim();
   const ownStat = originalRead("/proc/" + process.pid + "/stat", "utf8");
   const ownFields = ownStat.slice(ownStat.lastIndexOf(")") + 2).trim().split(/\\s+/);
@@ -73,9 +87,24 @@ async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
           code: "EACCES",
         });
       }
+      // Keep successful fixtures scoped to owned processes and declared churn.
+      const unrelated = new Set();
+      const unrelatedPid = ${JSON.stringify(unrelatedPid)};
+      if (unrelatedPid !== null) {
+        unrelated.add(String(unrelatedPid));
+        try {
+          for (const child of originalRead(
+            "/proc/" + unrelatedPid + "/task/" + unrelatedPid + "/children",
+            "utf8",
+          ).trim().split(/\\s+/).filter(Boolean)) unrelated.add(child);
+        } catch (cause) {
+          if (!["ENOENT", "ESRCH"].includes(cause.code)) throw cause;
+        }
+      }
       return Reflect.apply(original, this, [path, ...argumentsList]).filter(
         (name) => {
           if (!/^\\d+$/.test(name) || name === String(process.pid)) return false;
+          if (unrelated.has(name)) return true;
           try {
             const stat = originalRead("/proc/" + name + "/stat", "utf8");
             const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\\s+/);
@@ -105,11 +134,12 @@ async function inspectionSequenceFixture(t, sequence, { record = false } = {}) {
   };
 }
 
-async function inspectionSequenceEnvironment(t, sequence) {
-  return (await inspectionSequenceFixture(t, sequence)).environment;
+async function inspectionSequenceEnvironment(t, sequence, options) {
+  return (await inspectionSequenceFixture(t, sequence, options)).environment;
 }
 
 async function productionTopologyEnvironment(t, bootId) {
+  t.mock.method(performance, "now", () => 0);
   const { process: pid, parent, anchor, session } = TOPOLOGY_PIDS;
   const directory = await mkdtemp(join(tmpdir(), "owned-process-topology-"));
   t.after(() => rm(directory, { force: true, recursive: true }));
@@ -118,6 +148,7 @@ async function productionTopologyEnvironment(t, bootId) {
   await writeFile(
     preloadPath,
     `if (process.argv[1] === "session") {
+  Object.defineProperty(performance, "now", { configurable: true, value: () => 0 });
   const fs = require("node:fs");
   const originalRead = fs.readFileSync;
   const originalList = fs.readdirSync;
@@ -157,31 +188,60 @@ async function productionTopologyEnvironment(t, bootId) {
 
 function detachedDescendantCommand() {
   return `const { spawn } = require("node:child_process");
-const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
-  detached: true,
-  stdio: "ignore",
-});
-child.unref();`;
+const child = spawn(process.execPath,
+  ["-e", 'setInterval(() => {}, 1000); process.send("ready");'],
+  { detached: true, stdio: ["ignore", "ignore", "ignore", "ipc"] });
+child.once("message", (message) => {
+  if (message !== "ready") throw new Error("Unexpected descendant readiness");
+  child.disconnect();
+  child.unref();
+});`;
 }
 
-function spawnUnrelatedProcessChurn() {
-  return spawn(
+function spawnUnrelatedProcessChurn(t) {
+  const churn = spawn(
     process.execPath,
     [
       "-e",
       `const { spawn } = require("node:child_process");
 let remaining = 100;
+let active = null;
+let stopping = false;
 function launch() {
-  if (remaining <= 0) return setTimeout(() => process.exit(0), 100);
+  if (stopping) return process.disconnect();
+  if (remaining <= 0) return;
   remaining -= 1;
-  const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
-  child.once("exit", launch);
+  active = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+  active.once("close", () => {
+    active = null;
+    launch();
+  });
 }
+process.on("message", (message) => {
+  if (message !== "stop") return;
+  stopping = true;
+  if (active === null) process.disconnect();
+});
 process.send("ready");
 launch();`,
     ],
     { stdio: ["ignore", "ignore", "ignore", "ipc"] },
   );
+  const closed = new Promise((resolve) => churn.once("close", resolve));
+  t.after(async () => {
+    if (churn.connected) {
+      await new Promise((resolve, reject) => {
+        churn.send("stop", (cause) => {
+          if (cause && cause.code !== "ERR_IPC_CHANNEL_CLOSED") reject(cause);
+          else resolve();
+        });
+      });
+    }
+    await closed;
+    assert.equal(churn.exitCode, 0);
+    assert.equal(churn.signalCode, null);
+  });
+  return churn;
 }
 
 async function waitForChurn(churn) {
@@ -244,6 +304,7 @@ function processRaceOptions(sequences = {}) {
   return {
     options: {
       ancestryBaseline: ancestryBaseline([1, "1"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -262,19 +323,6 @@ function processRaceOptions(sequences = {}) {
     ownerToken,
     reads,
   };
-}
-
-async function waitForFile(path, timeoutMs = 1_000) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      return await readFile(path, "utf8");
-    } catch (cause) {
-      if (cause?.code !== "ENOENT") throw cause;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error(`File was not written within ${timeoutMs}ms: ${path}`);
 }
 
 async function waitForProcessRetirement(pid, identity, timeoutMs = 1_000) {
@@ -317,16 +365,23 @@ test("read-only launcher mounts still protect namespace-root paths", () => {
   );
 });
 
-test("owned processes can write to /dev/null", { timeout: 5_000 }, async () => {
-  const child = spawnOwnedProcess(
-    process.execPath,
-    ["-e", 'require("node:fs").writeFileSync("/dev/null", "owned process");'],
-    { onProcess: async () => {} },
-  );
+test(
+  "owned processes can write to /dev/null",
+  { timeout: 5_000 },
+  async (t) => {
+    const child = spawnOwnedProcess(
+      process.execPath,
+      ["-e", 'require("node:fs").writeFileSync("/dev/null", "owned process");'],
+      {
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
+        onProcess: async () => {},
+      },
+    );
 
-  const { outcome } = await child.ownedCompletion;
-  assert.deepEqual(outcome, { type: "close", exitCode: 0, signal: null });
-});
+    const { outcome } = await child.ownedCompletion;
+    assert.deepEqual(outcome, { type: "close", exitCode: 0, signal: null });
+  },
+);
 
 test("selects complete nested isolation and caches it by ownership mode", () => {
   const calls = [];
@@ -425,6 +480,7 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
   const ownerToken = "a".repeat(64);
   const options = {
     ancestryBaseline: ancestryBaseline([1, "1"]),
+    now: () => 0,
     getuid: () => 1000,
     list: () => ["101"],
     read(path) {
@@ -513,6 +569,9 @@ test("uses ancestry and rejects incomplete owned-session evidence", () => {
 });
 
 test("retries process churn from each current and ancestry read", async (t) => {
+  // A scheduler pause must not change synthetic procfs classifications.
+  let elapsed = 0;
+  t.mock.method(performance, "now", () => (elapsed += 250));
   const stableCurrent = processStat(101, 202, 3);
   const stableAncestor = processStat(202, 1, 3, "5678");
   const cases = [
@@ -695,6 +754,7 @@ test(
   async (t) => {
     let frozenBaseline;
     const baselineOwner = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      env: await inspectionSequenceEnvironment(t, ["complete"]),
       onProcess: async (pid, proof) => {
         if (pid !== null) frozenBaseline = proof.ancestryBaseline;
       },
@@ -704,19 +764,18 @@ test(
     });
     await baselineOwner.ownedCompletion;
     assert.ok(Array.isArray(frozenBaseline));
-    const churn = spawnUnrelatedProcessChurn();
-    t.after(() => {
-      try {
-        churn.kill("SIGKILL");
-      } catch {}
-    });
+    const churn = spawnUnrelatedProcessChurn(t);
     await waitForChurn(churn);
 
+    // Classification must not depend on scheduler pauses; budgets are tested separately.
+    let elapsed = 0;
+    t.mock.method(performance, "now", () => (elapsed += 250));
     for (let index = 0; index < 25; index += 1) {
       assert.deepEqual(
         inspectOwnedSessionProcesses(Number.MAX_SAFE_INTEGER, "f".repeat(64), {
           ancestryBaseline: frozenBaseline,
           list: () => churnProcessList(churn),
+          now: () => 0,
         }),
         [],
       );
@@ -729,15 +788,13 @@ test(
   "host-session supervision completes during unrelated process churn",
   { timeout: 5_000 },
   async (t) => {
-    const churn = spawnUnrelatedProcessChurn();
-    t.after(() => {
-      try {
-        churn.kill("SIGKILL");
-      } catch {}
-    });
+    const churn = spawnUnrelatedProcessChurn(t);
     await waitForChurn(churn);
     const registrations = [];
     const child = spawnOwnedProcess(process.execPath, ["-e", ""], {
+      env: await inspectionSequenceEnvironment(t, ["complete"], {
+        unrelatedPid: churn.pid,
+      }),
       onProcess: async (pid) => registrations.push(pid),
       ownershipMode: "native-sandbox-provider",
       resolveLauncher: hostSessionLauncher,
@@ -754,6 +811,7 @@ test(
 function inaccessibleProcessOptions(startTicks = ["1234"]) {
   let identityReads = 0;
   return {
+    now: () => 0,
     getuid: () => 1000,
     list: () => ["101"],
     read(path) {
@@ -787,6 +845,7 @@ test("anchors the production SSH and tmux topology to frozen ancestry", () => {
   assert.deepEqual(
     inspectOwnedSessionProcesses("44", ownerToken, {
       ancestryBaseline: ancestryBaseline([303, "6789"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -866,6 +925,7 @@ test("does not let a baseline anchor hide observed owned evidence", async (t) =>
       assert.deepEqual(
         inspectOwnedSessionProcesses(44, "a".repeat(64), {
           ancestryBaseline: ancestryBaseline([303, "6789"]),
+          now: () => 0,
           getuid: () => 1000,
           list: () => ["101"],
           read(path) {
@@ -928,6 +988,7 @@ test("fails closed for stale, reused, malformed, or wrong-boot anchors", async (
       assert.equal(
         inspectOwnedSessionProcesses(44, ownerToken, {
           ancestryBaseline: fixture.baseline,
+          now: () => 0,
           getuid: () => 1000,
           list: () => ["101"],
           read(path) {
@@ -958,6 +1019,7 @@ test("fails closed for an ancestry cycle before the frozen anchor", () => {
   assert.equal(
     inspectOwnedSessionProcesses(44, "a".repeat(64), {
       ancestryBaseline: ancestryBaseline([303, "6789"]),
+      now: () => 0,
       getuid: () => 1000,
       list: () => ["101"],
       read(path) {
@@ -985,6 +1047,7 @@ test("fails closed before scanning when current boot evidence is unavailable", (
   assert.equal(
     inspectOwnedSessionProcesses(44, "a".repeat(64), {
       ancestryBaseline: ancestryBaseline([1, "1"]),
+      now: () => 0,
       list: () => {
         listed = true;
         return [];
@@ -1066,15 +1129,19 @@ test(
   "bounds persistent incomplete inspection and retires an empty supervisor",
   { timeout: 5_000 },
   async (t) => {
-    // Drive the parent's watchdog separately from the real supervisor's
-    // inspection grace; host load must not decide which proof is observed.
+    // Freeze only the parent's watchdog; the real supervisor must consume its
+    // inspection grace and retire before durable deregistration completes.
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     const deregistrationStarted = Promise.withResolvers();
     const releaseDeregistration = Promise.withResolvers();
     const inspection = await inspectionSequenceFixture(t, ["incomplete"], {
       record: true,
+      // A scheduler pause must not expire the deadline before the retry. Other
+      // live fixtures keep real time; this one proves the inspection sequence.
+      inspectionTimes: [0, 0, 50],
     });
+    let parentInspections = 0;
     let registeredIdentity;
     const child = spawnOwnedProcess(
       process.execPath,
@@ -1082,6 +1149,13 @@ test(
       {
         descendantGraceMs: 50,
         env: inspection.environment,
+        // A real host scan can be incomplete and correctly retain registration,
+        // leaving this fixture waiting for a callback that must not run then.
+        // Parent uncertainty has separate coverage below.
+        inspectSessionProcesses() {
+          parentInspections += 1;
+          return [];
+        },
         onProcess: async (pid, proof) => {
           if (pid === null) {
             deregistrationStarted.resolve();
@@ -1095,7 +1169,9 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
     t.after(async () => {
+      releaseDeregistration.resolve();
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
         registeredIdentity !== undefined &&
@@ -1104,8 +1180,11 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
     let completed = false;
     const completion = assert
@@ -1115,7 +1194,14 @@ test(
       .then(() => {
         completed = true;
       });
-    await deregistrationStarted.promise;
+    assert.equal(
+      await Promise.race([
+        deregistrationStarted.promise.then(() => true),
+        completion.then(() => false),
+      ]),
+      true,
+      "completion must reach durable deregistration",
+    );
     try {
       await new Promise(setImmediate);
       assert.equal(
@@ -1135,6 +1221,7 @@ test(
       "persistent uncertainty must consume the bounded retry window",
     );
     assert.deepEqual(registrations, [child.ownedPid, null]);
+    assert.ok(parentInspections > 0);
     assert.equal(child.ownedContainmentRetained, true);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   },
@@ -1144,6 +1231,8 @@ test(
   "retires a retained supervisor when parent descendant inspection is unavailable",
   { timeout: 5_000 },
   async (t) => {
+    // Observe supervisor closure, not the parent's unrelated watchdog deadline.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     let registeredIdentity;
     const child = spawnOwnedProcess(
@@ -1162,6 +1251,7 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
@@ -1171,8 +1261,11 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
 
     await assert.rejects(child.ownedCompletion, {
@@ -1185,9 +1278,11 @@ test(
 );
 
 test(
-  "rechecks descendant absence after a transient parent inspection failure",
+  "rechecks descendant absence after parent inspection and termination-message failures",
   { timeout: 5_000 },
   async (t) => {
+    // Keep the watchdog from adding inspections before the close notification.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const registrations = [];
     let inspections = 0;
     let registeredIdentity;
@@ -1210,6 +1305,21 @@ test(
         stdio: "ignore",
       },
     );
+    const closed = new Promise((resolve) => child.once("close", resolve));
+    const send = child.send.bind(child);
+    t.mock.method(child, "send", (message, callback) => {
+      if (message.type !== "terminate") return send(message, callback);
+      // Refuse this write without also delivering a real termination request.
+      // The failed callback adds a fallback scan before the close scan.
+      process.nextTick(() =>
+        callback(
+          Object.assign(new Error("Termination channel closed."), {
+            code: "ERR_IPC_CHANNEL_CLOSED",
+          }),
+        ),
+      );
+      return false;
+    });
     t.after(async () => {
       const currentIdentity = await readProcessIdentity(child.pid);
       if (
@@ -1219,14 +1329,17 @@ test(
       ) {
         try {
           process.kill(child.pid, "SIGKILL");
-        } catch {}
+        } catch (cause) {
+          if (cause?.code !== "ESRCH") throw cause;
+        }
       }
+      await closed;
     });
 
     await assert.rejects(child.ownedCompletion, {
       code: "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
     });
-    assert.equal(inspections, 2);
+    assert.equal(inspections, 3);
     assert.deepEqual(registrations, [child.ownedPid, null]);
     assert.throws(() => process.kill(child.pid, 0), { code: "ESRCH" });
   },
@@ -1239,15 +1352,15 @@ test(
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-registration-exit-"),
     );
-    t.after(() => rm(directory, { force: true, recursive: true }));
     const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
     const owners = [];
     const supervisors = [];
     t.after(async () => {
-      for (const owner of owners) {
-        try {
+      for (const { owner, closed } of owners) {
+        if (owner.exitCode === null && owner.signalCode === null) {
           owner.kill("SIGKILL");
-        } catch {}
+        }
+        await closed;
       }
       for (const { pid, processIdentity } of supervisors) {
         const current = await readProcessIdentity(pid);
@@ -1257,13 +1370,17 @@ test(
         ) {
           try {
             process.kill(pid, "SIGKILL");
-          } catch {}
+          } catch (cause) {
+            if (cause?.code !== "ESRCH") throw cause;
+          }
+          await waitForProcessRetirement(pid, processIdentity);
         }
       }
+      await rm(directory, { force: true, recursive: true });
     });
 
-    // The after-registration marker models a durable journal side effect that
-    // completed immediately before the owner died and its callback returned.
+    // Both markers park inside the registration callback. The after phase
+    // models a durable side effect completed before that callback returns.
     for (const phase of ["before", "after"]) {
       const ownerPath = join(directory, `${phase}-owner.mjs`);
       const supervisorPath = join(directory, `${phase}-supervisor.json`);
@@ -1282,11 +1399,14 @@ const child = spawnOwnedProcess(
     descendantGraceMs: 50,
     env: process.env,
     onProcess: async (pid, proof) => {
-      if (pid !== null && ${JSON.stringify(phase)} === "after") {
-        await writeFile(
-          ${JSON.stringify(registrationPath)},
-          JSON.stringify({ pid, processIdentity: proof.processIdentity }),
-        );
+      if (pid !== null) {
+        if (${JSON.stringify(phase)} === "after") {
+          await writeFile(
+            ${JSON.stringify(registrationPath)},
+            JSON.stringify({ pid, processIdentity: proof.processIdentity }),
+          );
+        }
+        process.send({ type: "registration", phase: ${JSON.stringify(phase)} });
       }
       await new Promise(() => {});
     },
@@ -1304,27 +1424,53 @@ const child = spawnOwnedProcess(
   },
 );
 await writeFile(${JSON.stringify(supervisorPath)}, JSON.stringify({ pid: child.pid }));
+process.send({ type: "supervisor" });
 await child.ownedCompletion;
 `,
       );
       const owner = spawn(
         process.execPath,
         [ownerPath, pathToFileURL(OWNED_PROCESS_MODULE).href],
-        { env: environment, stdio: "ignore" },
+        { env: environment, stdio: ["ignore", "ignore", "ignore", "ipc"] },
       );
-      owners.push(owner);
-      const ownerExit = new Promise((resolve, reject) => {
-        owner.once("error", reject);
+      const ownerClosed = new Promise((resolve) =>
+        owner.once("close", resolve),
+      );
+      owners.push({ owner, closed: ownerClosed });
+      const ownerExit = new Promise((resolve) => {
         owner.once("exit", (code, signal) => resolve({ code, signal }));
       });
-      const { pid } = JSON.parse(await waitForFile(supervisorPath));
-      if (phase === "after") await waitForFile(registrationPath);
+      let supervisorWritten = false;
+      let registrationParked = false;
+      for await (const [message] of on(owner, "message", {
+        close: ["exit"],
+        signal: t.signal,
+      })) {
+        if (message.type === "supervisor") supervisorWritten = true;
+        if (message.type === "registration" && message.phase === phase) {
+          registrationParked = true;
+        }
+        if (supervisorWritten && registrationParked) break;
+      }
+      assert.equal(supervisorWritten, true);
+      assert.equal(registrationParked, true);
+      const { pid } = JSON.parse(await readFile(supervisorPath, "utf8"));
       const processIdentity = await readProcessIdentity(pid);
       assert.notEqual(processIdentity, null);
       supervisors.push({ pid, processIdentity });
+      if (phase === "after") {
+        const registration = JSON.parse(
+          await readFile(registrationPath, "utf8"),
+        );
+        assert.equal(registration.pid, pid);
+        assert.deepEqual(registration.processIdentity, processIdentity);
+      } else {
+        await assert.rejects(access(registrationPath), { code: "ENOENT" });
+      }
 
       owner.kill("SIGKILL");
       assert.deepEqual(await ownerExit, { code: null, signal: "SIGKILL" });
+      await ownerClosed;
       await waitForProcessRetirement(pid, processIdentity);
       await assert.rejects(access(startedPath), { code: "ENOENT" });
     }
@@ -1338,10 +1484,46 @@ test(
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-owner-exit-"),
     );
-    t.after(() => rm(directory, { force: true, recursive: true }));
     const ownerPath = join(directory, "owner.mjs");
     const registrationPath = join(directory, "registration.txt");
     const failurePath = join(directory, "failure.txt");
+    let owner;
+    let closed;
+    let registration;
+    t.after(async () => {
+      try {
+        if (owner === undefined) return;
+        if (owner.exitCode === null && owner.signalCode === null) {
+          owner.kill("SIGKILL");
+        }
+        await closed;
+        if (registration === undefined) {
+          try {
+            registration = JSON.parse(await readFile(registrationPath, "utf8"));
+          } catch (cause) {
+            if (cause?.code !== "ENOENT") throw cause;
+            return;
+          }
+        }
+        const currentIdentity = await readProcessIdentity(registration.pid);
+        if (
+          currentIdentity?.bootId === registration.processIdentity.bootId &&
+          currentIdentity.startTicks === registration.processIdentity.startTicks
+        ) {
+          try {
+            process.kill(registration.pid, "SIGKILL");
+          } catch (cause) {
+            if (cause?.code !== "ESRCH") throw cause;
+          }
+          await waitForProcessRetirement(
+            registration.pid,
+            registration.processIdentity,
+          );
+        }
+      } finally {
+        await rm(directory, { force: true, recursive: true });
+      }
+    });
     const environment = await inspectionSequenceEnvironment(t, ["incomplete"]);
     await writeFile(
       ownerPath,
@@ -1377,7 +1559,7 @@ try {
 }
 `,
     );
-    const owner = spawn(
+    owner = spawn(
       process.execPath,
       [
         ownerPath,
@@ -1387,6 +1569,7 @@ try {
       ],
       { env: environment, stdio: "ignore" },
     );
+    closed = new Promise((resolve) => owner.once("close", resolve));
     const exitCode = await new Promise((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error("run owner did not exit within its bound")),
@@ -1398,23 +1581,17 @@ try {
         resolve(code);
       });
     });
-    const registration = JSON.parse(await readFile(registrationPath, "utf8"));
-    t.after(async () => {
-      const currentIdentity = await readProcessIdentity(registration.pid);
-      if (
-        currentIdentity?.bootId === registration.processIdentity.bootId &&
-        currentIdentity.startTicks === registration.processIdentity.startTicks
-      ) {
-        try {
-          process.kill(registration.pid, "SIGKILL");
-        } catch {}
-      }
-    });
+    await closed;
+    registration = JSON.parse(await readFile(registrationPath, "utf8"));
 
     assert.equal(exitCode, 0);
     assert.equal(
       await readFile(failurePath, "utf8"),
       "ERR_EXECUTION_PROCESS_UNVERIFIABLE",
+    );
+    await waitForProcessRetirement(
+      registration.pid,
+      registration.processIdentity,
     );
     assert.throws(() => process.kill(registration.pid, 0), { code: "ESRCH" });
   },
@@ -1425,17 +1602,16 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
+    const environment = await inspectionSequenceEnvironment(t, ["complete"]);
     const detached = spawnOwnedProcess(
       process.execPath,
-      [
-        "-e",
-        `const { spawn } = require("node:child_process");
-       const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
-         { detached: true, stdio: "ignore" });
-       child.unref();`,
-      ],
-      { descendantGraceMs: 25, onProcess: async () => {} },
+      ["-e", detachedDescendantCommand()],
+      {
+        descendantGraceMs: 25,
+        env: environment,
+        onProcess: async () => {},
+      },
     );
     const cleanup = await detached.ownedCompletion;
     assert.equal(cleanup.descendantsStopped, true);
@@ -1448,6 +1624,7 @@ test(
       ["-e", "setInterval(() => {}, 1000)"],
       {
         descendantGraceMs: 25,
+        env: environment,
         onProcess: async (pid) => {
           registrations.push(pid);
           if (pid !== null) registered.resolve();
@@ -1469,6 +1646,8 @@ test(
     timeout: 5_000,
   },
   async (t) => {
+    // Registration owns an inert supervisor; inspection budgets have separate coverage.
+    t.mock.method(performance, "now", () => 0);
     const directory = await mkdtemp(
       join(tmpdir(), "owned-process-registration-cancel-"),
     );
@@ -1526,7 +1705,8 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
+    t.mock.method(performance, "now", () => 0);
     const failure = Object.assign(new Error("registration failed"), {
       code: "ERR_TEST_REGISTRATION",
     });
@@ -1564,6 +1744,7 @@ test(
       ],
       {
         descendantGraceMs: 100,
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
         onProcess: async (pid, proof) => {
           registrations.push(pid);
           if (pid === null) return;
@@ -1633,11 +1814,12 @@ test(
   {
     timeout: 5_000,
   },
-  async () => {
+  async (t) => {
     const child = spawnOwnedProcess(
       process.execPath,
       ["-e", "process.exit(0)"],
       {
+        env: await inspectionSequenceEnvironment(t, ["complete"]),
         onProcess: async () => {},
       },
     );

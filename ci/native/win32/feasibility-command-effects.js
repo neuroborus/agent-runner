@@ -1,0 +1,2395 @@
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { PassThrough } from "node:stream";
+import { createInterface } from "node:readline";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rmdir,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  nativeException,
+  nativeDiagnostic,
+  diagnosticCommand,
+  observeNativeProcess,
+} from "../diagnostics.js";
+import { observationDigest } from "../index.js";
+import { feasibilityFailureCause } from "../feasibility/index.js";
+import {
+  digest,
+  closed as assertClosed,
+  normalizeWindowsIdentity,
+  sameWindowsIdentity,
+} from "./protocol.js";
+import { createWindowsAuditDecoder } from "./audit-decoder.js";
+import { WINDOWS_BUILD_COMMAND_MS, windowsCompilerArguments } from "./build.js";
+import {
+  windowsFeasibilityImports,
+  windowsFeasibilityCause,
+  windowsFeasibilityDiagnostics,
+} from "./feasibility.js";
+
+const execute = diagnosticCommand(
+    "win32/feasibility-command-effects.js",
+    promisify(execFile),
+  ),
+  SOURCE = fileURLToPath(new URL("./", import.meta.url));
+const need = (v) => {
+  if (!v) throw new Error("Incomplete Windows command custody");
+};
+const regular = async (file) => {
+  const st = await lstat(file);
+  need(
+    st.isFile() &&
+      !st.isSymbolicLink() &&
+      st.size > 0 &&
+      st.size <= 134217728 &&
+      (await realpath(file)) === file,
+  );
+  return readFile(file);
+};
+/** The finite file experiment consumes typed Security fields. Localized access
+ * lists are not evidence and can contain line breaks. Full reader rules stay
+ * unchanged; the native XmlLite parser still bounds/validates the entire XML. */
+export function windowsCommandAuditRead(native) {
+  need(
+    ["event", "bookmark"].includes(native?.kind) &&
+      Array.isArray(native.fields) &&
+      native.fields.length <= 96,
+  );
+  if (native.kind === "bookmark") return { native, logonId: null };
+  const selected = new Set([
+    "Provider",
+    "Channel",
+    "EventID",
+    "Version",
+    "Keywords",
+    "TimeCreated",
+    "EventRecordID",
+    "ObjectType",
+    "ProcessId",
+    "ObjectName",
+    "SubjectUserSid",
+    "AccessMask",
+  ]);
+  const fields = [],
+    names = new Set();
+  let logonId;
+  for (const field of native.fields) {
+    need(
+      /^(?:[a-f0-9]{4}){1,127}$/u.test(field.nameHex) &&
+        /^(?:[a-f0-9]{4}){0,4095}$/u.test(field.hex),
+    );
+    const name = Buffer.from(field.nameHex, "hex").toString("utf16le");
+    need(!names.has(name));
+    names.add(name);
+    if (selected.has(name)) fields.push(field);
+    if (name === "SubjectLogonId") {
+      const value = Buffer.from(field.hex, "hex").toString("utf16le");
+      need(/^0x[a-fA-F0-9]{1,16}$/u.test(value));
+      logonId = BigInt(value).toString(16).padStart(16, "0");
+    }
+  }
+  // Loss events intentionally reach the strict decoder even without a subject.
+  return { native: { kind: "event", fields }, logonId };
+}
+function commandAuditSnapshot(value, read, installed) {
+  const original = value.original.cleanup;
+  need(
+    /^[a-f0-9]{64}$/u.test(original.systemSha256) &&
+      read.systemSha256 === original.systemSha256 &&
+      read.included === installed &&
+      Array.isArray(read.files) &&
+      read.files.length === 4 &&
+      new Set(read.files.map((file) => file.identity)).size === 4,
+  );
+  for (let i = 0; i < 4; i++) {
+    const file = original.files[i];
+    need(
+      /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
+        file.identity === value.original.files[i].identity &&
+        read.files[i].identity === file.identity &&
+        /^[a-f0-9]{64}$/u.test(file.baselineSaclSha256) &&
+        /^(?:[a-f0-9]{2}){8,16384}$/u.test(file.saclHex) &&
+        read.files[i].saclSha256 ===
+          (installed
+            ? digest(Buffer.from(file.saclHex, "hex"))
+            : file.baselineSaclSha256),
+    );
+  }
+}
+function commandSetupFailure(operation, error) {
+  error.feasibilityCause ??= windowsFeasibilityCause(
+    `broker-${operation}`,
+    error,
+  );
+  return error;
+}
+/** Setup establishes held broker authority and installed policy. Only the
+ * independently observed real command control establishes event delivery. */
+export function windowsCommandBrokerSetup(value, observation) {
+  const { baseline, before, after } = observation,
+    broker = normalizeWindowsIdentity(value.observer),
+    original = value.original.files[3];
+  commandAuditSnapshot(value, baseline.audit, false);
+  commandAuditSnapshot(value, before.audit, true);
+  commandAuditSnapshot(value, after.audit, true);
+  need(
+    observation.captureComplete === true &&
+      [baseline, before, after].every((read) =>
+        sameWindowsIdentity(broker, read.identity),
+      ) &&
+      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.tokenId) &&
+      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(before.token.modifiedId) &&
+      JSON.stringify(baseline.token) === JSON.stringify(before.token) &&
+      JSON.stringify(before.token) === JSON.stringify(after.token) &&
+      before.token.details.appContainer === false &&
+      before.token.details.restricted === false &&
+      before.token.details.restrictingSids === 0 &&
+      before.token.details.integrity >= 12288 &&
+      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(
+        before.token.details.authenticationId,
+      ) &&
+      /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(original.identity) &&
+      /^[a-f0-9]{64}$/u.test(original.daclSha256) &&
+      original.sha256 === digest(value.nonce) &&
+      [baseline.gate, before.gate, after.gate].every(
+        (gate) => JSON.stringify(gate) === JSON.stringify(original),
+      ),
+  );
+  if (
+    ![before, after].every(
+      (read) =>
+        read.effective.available === true &&
+        read.effective.success === true &&
+        read.effective.failure === true &&
+        read.effective.error === 0,
+    )
+  )
+    throw Object.assign(new Error("Effective broker auditing unavailable"), {
+      code: 78,
+    });
+  return digest(JSON.stringify(observation));
+}
+const commandEvidence = (value, detail, code = "missing-observation") => {
+  if (!value)
+    throw Object.assign(new Error("Windows command evidence rejected"), {
+      feasibilityCause: { code, detail },
+    });
+};
+const hash = (value) =>
+  typeof value === "string" && /^[a-f0-9]{64}$/u.test(value);
+const effectiveCommandAudit = (value) =>
+  value?.available === true &&
+  value.success === true &&
+  value.failure === true &&
+  value.error === 0;
+const operatingCommandAudit = (audit, identity, token) =>
+  audit?.operating?.level === 2 &&
+  audit.operating.userSid === identity.userSid &&
+  token !== undefined &&
+  JSON.stringify(audit.operating.token) === JSON.stringify(token);
+function commandCaseAuditing(value, row, action, completed) {
+  const audit = row.auditing,
+    indices = [["inspect", "edit", "outside"].indexOf(action), 3];
+  commandEvidence(
+    row.ioCompleted === completed,
+    "The command token observation is out of phase with checked I/O completion.",
+  );
+  commandEvidence(
+    operatingCommandAudit(audit, row.identity, row.token),
+    "The operating context did not join the held command token.",
+  );
+  commandEvidence(
+    effectiveCommandAudit(audit?.effective),
+    "The operating command token lacks effective success/failure auditing.",
+  );
+  commandEvidence(
+    Array.isArray(audit.files) &&
+      audit.files.length === 2 &&
+      indices.every(
+        (index, i) =>
+          index >= 0 &&
+          audit.files[i].identity === value.original.files[index].identity &&
+          audit.files[i].saclSha256 ===
+            digest(
+              Buffer.from(value.original.cleanup.files[index].saclHex, "hex"),
+            ),
+      ),
+    "The command target/marker SACL did not join the installed held objects.",
+  );
+}
+/** A reply cannot replace native token, held object, or Security observations. */
+export function assessWindowsCommandObservation(
+  spec,
+  observation,
+  reply,
+  nonce,
+) {
+  const before = normalizeWindowsIdentity(observation.before),
+    after = normalizeWindowsIdentity(observation.after);
+  commandEvidence(
+    sameWindowsIdentity(before, after) &&
+      before.userSid === spec.userSid &&
+      before.sessionId === spec.sessionId &&
+      observation.creationJob === true &&
+      observation.imageSha256 === spec.helperSha256 &&
+      observation.beforeToken.appContainer === false &&
+      observation.beforeToken.integrity === 8192 &&
+      typeof observation.beforeToken.restricted === "boolean" &&
+      (spec.control || observation.beforeToken.restricted === true) &&
+      Number.isInteger(observation.beforeToken.restrictingSids) &&
+      observation.beforeToken.restrictingSids <= 32 &&
+      (spec.control
+        ? observation.beforeToken.restrictingSids === 0
+        : observation.beforeToken.restrictingSids > 0) &&
+      /^[a-f0-9]{8}:[a-f0-9]{8}$/u.test(spec.authenticationId) &&
+      observation.beforeToken.authenticationId === spec.authenticationId &&
+      hash(observation.beforeToken.restrictedSidsSha256) &&
+      JSON.stringify(observation.beforeToken) ===
+        JSON.stringify(observation.afterToken),
+    "Command process, image, token or creation-time Job custody did not join.",
+  );
+  const auditing = observation.auditing;
+  commandEvidence(
+    effectiveCommandAudit(auditing?.before?.effective) &&
+      effectiveCommandAudit(auditing?.after?.effective) &&
+      operatingCommandAudit(auditing.before, before, observation.beforeToken) &&
+      operatingCommandAudit(auditing.after, after, observation.afterToken) &&
+      JSON.stringify(auditing.before) === JSON.stringify(auditing.after) &&
+      Array.isArray(auditing.before.files) &&
+      auditing.before.files.length === 2 &&
+      [observation.object.before, observation.gate.before].every(
+        (object, i) =>
+          auditing.before.files[i].identity === object.identity &&
+          hash(auditing.before.files[i].saclSha256),
+      ),
+    "Effective command auditing or held target/marker SACL readback is incomplete.",
+  );
+  commandEvidence(
+    reply.exitCode === 0 &&
+      reply.stdout ===
+        (spec.action === "inspect"
+          ? nonce
+          : spec.permit
+            ? "attempt:written"
+            : "attempt:denied"),
+    "The fixed command did not acknowledge its expected result.",
+  );
+  const start = BigInt(observation.start.time),
+    end = BigInt(observation.end.time);
+  commandEvidence(
+    observation.captureComplete === true &&
+      end > start &&
+      BigInt(before.creationTime) > start &&
+      BigInt(before.creationTime) < end &&
+      observation.end.sequence === observation.start.sequence + 1,
+    "The acknowledged native capture window is incomplete.",
+  );
+  const events = observation.events.filter(
+    ({ raw, time, logonId }) =>
+      raw.pid === before.pid &&
+      raw.subjectSid === before.userSid &&
+      logonId === spec.authenticationId?.replace(":", "") &&
+      BigInt(time) > start &&
+      BigInt(time) < end,
+  );
+  const mask = spec.action === "inspect" ? 1 : 2;
+  const target = events.filter(
+    ({ raw }) =>
+      raw.target.toLowerCase() === spec.target.toLowerCase() &&
+      (raw.accessMask & mask) !== 0,
+  );
+  commandEvidence(
+    target.length > 0 &&
+      target.every(({ raw }) =>
+        spec.permit
+          ? raw.opcode === "4663" && raw.auditFailure === false
+          : raw.opcode === "4656" && raw.auditFailure === true,
+      ),
+    "Security object access did not establish the permitted control or denial.",
+  );
+  commandEvidence(
+    events.some(
+      ({ raw, recordId, time }) =>
+        raw.target.toLowerCase() === spec.gateFile.toLowerCase() &&
+        raw.opcode === "4663" &&
+        raw.auditFailure === false &&
+        (raw.accessMask & 1) !== 0 &&
+        target.every(
+          (v) =>
+            BigInt(recordId) > BigInt(v.recordId) &&
+            BigInt(time) >= BigInt(v.time),
+        ),
+    ),
+    "The audited held gate did not acknowledge completed target I/O.",
+  );
+  for (const object of [observation.object, observation.gate])
+    commandEvidence(
+      object.before.identity === object.after.identity &&
+        /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(object.before.identity) &&
+        hash(object.before.daclSha256) &&
+        hash(object.after.daclSha256),
+      "A held file/DACL observation lost its original native identity.",
+    );
+  commandEvidence(
+    observation.gate.before.sha256 === digest(nonce) &&
+      observation.gate.after.sha256 === digest(nonce) &&
+      observation.gate.before.daclSha256 ===
+        observation.gate.after.daclSha256 &&
+      observation.object.before.sha256 === digest(nonce) &&
+      observation.object.after.sha256 ===
+        digest(
+          spec.permit && spec.action !== "inspect" ? nonce + "-edited" : nonce,
+        ) &&
+      (spec.action !== "outside" ||
+        observation.object.before.daclSha256 ===
+          observation.object.after.daclSha256),
+    "The held sentinel changed outside its permitted operation.",
+    "observed-escape",
+  );
+  return digest(JSON.stringify({ spec, observation }));
+}
+
+/** The last command marker cannot replace a fresh post-domain broker witness. */
+export function windowsCommandTerminalCapture(value, capture, logons) {
+  const broker = normalizeWindowsIdentity(value.observer),
+    token = value.brokerSetup.before.token.details,
+    boundary = value.auditRetirement;
+  need(
+    /^[1-9][0-9]{0,19}$/u.test(boundary) &&
+      BigInt(boundary) > BigInt(broker.creationTime) &&
+      (!value.lastAuditTime ||
+        BigInt(boundary) > BigInt(value.lastAuditTime)) &&
+      capture.events.some(
+        ({ raw, time }) =>
+          raw.pid === broker.pid &&
+          raw.subjectSid === broker.userSid &&
+          logons.get(raw.id) === token.authenticationId.replace(":", "") &&
+          raw.opcode === "4663" &&
+          raw.auditFailure === false &&
+          (raw.accessMask & 1) !== 0 &&
+          raw.target.toLowerCase() === value.gateFile.toLowerCase() &&
+          BigInt(time) > BigInt(boundary),
+      ),
+  );
+  return digest(JSON.stringify(capture));
+}
+export function windowsCommandEnvironment(home, directory, systemRoot) {
+  for (const value of [home, directory, systemRoot])
+    need(
+      typeof value === "string" &&
+        /^[A-Za-z]:\\/u.test(value) &&
+        path.win32.normalize(value) === value &&
+        !/[\0\r\n"%<>&']/u.test(value),
+    );
+  return {
+    PATH: `${path.win32.join(directory, "codex-path")};${path.win32.join(systemRoot, "System32")}`,
+    SystemRoot: systemRoot,
+    WINDIR: systemRoot,
+    USERPROFILE: home,
+    HOME: home,
+    CODEX_HOME: home,
+    TEMP: home,
+    TMP: home,
+    CI: "true",
+    GITHUB_ACTIONS: "true",
+    RUNNER_ENVIRONMENT: "github-hosted",
+    RUNNER_OS: "Windows",
+  };
+}
+// FileVersionInfo reads the selected file's version resource. LINK's help text
+// has no supported success-status contract here; never admit its exit 1100.
+// https://learn.microsoft.com/en-us/dotnet/api/system.diagnostics.fileversioninfo.getversioninfo
+async function readInstalledLinkerVersion(linker, command, options) {
+  const systemRoot = options.env.SystemRoot;
+  if (
+    typeof systemRoot !== "string" ||
+    !path.win32.isAbsolute(systemRoot) ||
+    path.win32.normalize(systemRoot) !== systemRoot ||
+    /[\0\r\n]/u.test(systemRoot)
+  )
+    throw Object.assign(new Error("Windows version query unavailable"), {
+      code: 78,
+    });
+  // Encode the filename as data, including spaces and PowerShell metacharacters.
+  const filename = Buffer.from(linker, "utf8").toString("base64"),
+    script = [
+      "$ErrorActionPreference = 'Stop'; try {",
+      `$file = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${filename}'));`,
+      "$version = [Diagnostics.FileVersionInfo]::GetVersionInfo($file);",
+      "if ([string]::IsNullOrEmpty($version.FileVersion) -or -not [StringComparer]::OrdinalIgnoreCase.Equals($file, $version.FileName)) { exit 1 };",
+      "$parts = @($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart);",
+      "[Console]::Out.WriteLine('native-linker-version=' + ($parts -join '.')); exit 0",
+      "} catch { exit 1 }",
+    ].join(" ");
+  options.signal?.throwIfAborted();
+  const result = await command(
+    path.win32.join(
+      systemRoot,
+      "System32",
+      "WindowsPowerShell",
+      "v1.0",
+      "powershell.exe",
+    ),
+    [
+      "-NoLogo",
+      "-NoProfile",
+      "-NonInteractive",
+      "-EncodedCommand",
+      Buffer.from(script, "utf16le").toString("base64"),
+    ],
+    { ...options, maxBuffer: 4096 },
+  );
+  options.signal?.throwIfAborted();
+  need(
+    result &&
+      (result.code === undefined || result.code === 0) &&
+      (result.exitCode === undefined || result.exitCode === 0) &&
+      !result.signal &&
+      !result.killed &&
+      !result.timedOut &&
+      !result.truncated &&
+      typeof result.stdout === "string" &&
+      Buffer.byteLength(result.stdout, "utf8") <= 128 &&
+      result.stderr === "",
+  );
+  const match =
+    /^native-linker-version=([0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5})\r?\n$/u.exec(
+      result.stdout,
+    );
+  need(
+    match &&
+      match[0] === result.stdout &&
+      match[1]
+        .split(".")
+        .every(
+          (part) => /^(?:0|[1-9][0-9]*)$/u.test(part) && Number(part) <= 65535,
+        ) &&
+      Number(match[1].split(".")[0]) > 0,
+  );
+  return match[1];
+}
+/** Reuse the working installed MSVC/SDK selection; this builds only the finite
+ * variant of the existing helper and records its actual source/SDK bytes. */
+export async function buildWindowsCommandHelper(
+  root,
+  components,
+  signal,
+  options = {},
+) {
+  return buildWindowsAuditHelper("command", root, components, signal, options);
+}
+/** Compile/link the default reader recipe only; this creates no custody or review. */
+export async function buildWindowsCustodyReader(
+  root,
+  components,
+  signal,
+  options = {},
+) {
+  return buildWindowsAuditHelper("custody", root, components, signal, options);
+}
+async function buildWindowsAuditHelper(
+  variant,
+  root,
+  components,
+  signal,
+  {
+    command = execute,
+    read = regular,
+    environment = process.env,
+    inspect = windowsFeasibilityImports,
+  } = {},
+) {
+  need(
+    command !== execute ||
+      (process.platform === "win32" &&
+        process.arch === "x64" &&
+        process.env.GITHUB_ACTIONS === "true"),
+  );
+  let operation = "compiler-discovery",
+    inspectionFailed = false;
+  const pins = new Map();
+  const pinned = async (file) => {
+    const bytes = await read(file);
+    pins.set(file, digest(bytes));
+    return bytes;
+  };
+  try {
+    const options = {
+      signal,
+      timeout: 10000,
+      maxBuffer: 1048576,
+      windowsHide: true,
+      env: environment,
+    };
+    const compiler = (await command("where.exe", ["cl.exe"], options)).stdout
+      .trim()
+      .split(/\r?\n/u)[0];
+    need(path.win32.isAbsolute(compiler));
+    operation = "sdk-discovery";
+    const version = environment.WindowsSDKVersion?.replace(/\\$/u, "");
+    if (!version || !/^[0-9.]+$/u.test(version) || !environment.WindowsSdkDir)
+      throw Object.assign(new Error("SDK unavailable"), { code: 78 });
+    operation = "compiler-discovery";
+    let banner;
+    try {
+      banner = await command(compiler, ["/Bv"], options);
+    } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
+      if (error.code !== 2 || error.signal || error.killed || error.timedOut)
+        throw error;
+      banner = error;
+    }
+    const compilerVersion = /Compiler Version ([0-9.]+) for x64/u.exec(
+      `${banner.stdout}\n${banner.stderr}`,
+    )?.[1];
+    need(compilerVersion);
+    components.push({
+      role: "tool",
+      name: "msvc",
+      version: compilerVersion,
+      sha256: digest(await pinned(compiler)),
+    });
+    const linker = path.win32.join(path.win32.dirname(compiler), "link.exe");
+    operation = "linker-discovery";
+    const linkerComponent = {
+      role: "tool",
+      name: "msvc-linker",
+      version: "unqueried",
+      sha256: digest(await pinned(linker)),
+    };
+    components.push(linkerComponent);
+    const linkerVersion = await readInstalledLinkerVersion(
+      linker,
+      command,
+      options,
+    );
+    need(digest(await read(linker)) === linkerComponent.sha256);
+    linkerComponent.version = linkerVersion;
+    operation = "sdk-discovery";
+    const sdk = await pinned(
+      path.win32.join(
+        environment.WindowsSdkDir,
+        "Include",
+        version,
+        "um",
+        "Windows.h",
+      ),
+    );
+    components.push({
+      role: "tool",
+      name: "windows-sdk-header",
+      version,
+      sha256: digest(sdk),
+    });
+    operation = "source-read";
+    const sources = [],
+      sourceFiles =
+        variant === "command"
+          ? [
+              ["feasibility-helper.c", "windows-command-source"],
+              ["feasibility-command.h", "windows-command-header"],
+              ["effective-reader.h", "windows-command-xml"],
+              ["audit-policy-remove.h", "windows-audit-removal-source"],
+            ]
+          : [
+              ["custody-reader.c", "windows-custody-source"],
+              ["custody.h", "windows-custody-header"],
+              ["account.h", "windows-custody-account"],
+              ["effective-reader.h", "windows-custody-policy"],
+              ["audit-policy-remove.h", "windows-audit-removal-source"],
+            ];
+    for (const [file, name] of sourceFiles) {
+      const bytes = await pinned(path.join(SOURCE, file));
+      sources.push(bytes);
+      components.push({
+        role: "tool",
+        name,
+        version: "1",
+        sha256: digest(bytes),
+      });
+    }
+    const basename =
+      variant === "command" ? "command-helper" : "custody-reader";
+    const helper = path.win32.join(root, "build", basename + ".exe");
+    const object =
+      variant === "command"
+        ? path.win32.join(root, "build", basename + ".obj")
+        : helper + ".obj";
+    const recipe = windowsCompilerArguments(
+      path.join(SOURCE, "custody-reader.c"),
+      helper,
+    );
+    const boundary = recipe.indexOf("/link");
+    const compileArguments =
+      variant === "custody"
+        ? [
+            ...recipe
+              .slice(0, boundary)
+              .filter((arg) => !arg.startsWith("/Fe")),
+            "/c",
+          ]
+        : null;
+    const linkArguments =
+      variant === "custody"
+        ? ["/NOLOGO", `/OUT:${helper}`, object, ...recipe.slice(boundary + 1)]
+        : null;
+    operation = "helper-compile";
+    signal?.throwIfAborted();
+    await command(
+      compiler,
+      compileArguments ?? [
+        "/nologo",
+        "/std:c17",
+        "/O2",
+        "/W4",
+        "/MT",
+        "/Brepro",
+        "/DNATIVE_COMMAND_EXPERIMENT",
+        "/c",
+        path.join(SOURCE, "feasibility-helper.c"),
+        `/Fo${object}`,
+      ],
+      {
+        ...options,
+        timeout: WINDOWS_BUILD_COMMAND_MS,
+        cwd: path.win32.join(root, "build"),
+      },
+    );
+    operation = "helper-link";
+    signal?.throwIfAborted();
+    await command(
+      linker,
+      linkArguments ?? [
+        "/NOLOGO",
+        "/Brepro",
+        "/INCREMENTAL:NO",
+        "/MANIFEST:EMBED",
+        `/OUT:${helper}`,
+        object,
+        "advapi32.lib",
+        "userenv.lib",
+        "bcrypt.lib",
+        "ws2_32.lib",
+        "wevtapi.lib",
+        "xmllite.lib",
+        "ole32.lib",
+        "uuid.lib",
+      ],
+      {
+        ...options,
+        timeout: WINDOWS_BUILD_COMMAND_MS,
+        cwd: path.win32.join(root, "build"),
+      },
+    );
+    operation = "helper-image-inspection";
+    for (const [file, pin] of pins) need(digest(await read(file)) === pin);
+    const bytes = await read(helper);
+    try {
+      inspect(bytes);
+    } catch (error) {
+      inspectionFailed = true;
+      throw error;
+    }
+    const helperSha256 = digest(bytes);
+    components.push({
+      role: "helper",
+      name:
+        variant === "command"
+          ? "windows-command-helper"
+          : "windows-custody-reader",
+      version: "1",
+      sha256: helperSha256,
+    });
+    return {
+      helper,
+      helperSha256,
+      sdkSha256: digest(sdk),
+      abiSha256: digest(Buffer.concat(sources)),
+    };
+  } catch (error) {
+    try {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
+    } catch {
+      /* Preserve the build's original exception before projection. */
+    }
+    let continuationUnsafe =
+      !inspectionFailed &&
+      !["helper-compile", "helper-link"].includes(operation);
+    if (!continuationUnsafe) {
+      try {
+        for (const [file, pin] of pins) need(digest(await read(file)) === pin);
+      } catch (changed) {
+        try {
+          nativeException("windows-audit-build-inputs", changed);
+        } catch {
+          /* Changed inputs still prohibit continuation. */
+        }
+        continuationUnsafe = true;
+      }
+    }
+    throw Object.assign(
+      new Error("Windows command helper build failed.", { cause: error }),
+      {
+        buildContinuationUnsafe: continuationUnsafe,
+        buildOnlyInspectionFailed: inspectionFailed,
+        feasibilityCause:
+          error.code === "ERR_FEASIBILITY_WINDOWS_PE"
+            ? windowsFeasibilityCause(operation, error)
+            : feasibilityFailureCause(
+                "command",
+                operation,
+                error,
+                [
+                  "compiler-discovery",
+                  "linker-discovery",
+                  "sdk-discovery",
+                ].includes(operation) && [78, "ENOENT"].includes(error.code)
+                  ? "prerequisite-unavailable"
+                  : "setup-failed",
+              ),
+      },
+    );
+  }
+}
+
+/** Exclusive preparation tree and directly owned build processes. No recursive
+ * removal primitive, path substitution, PID signalling or broker-stage inference. */
+export function createWindowsCommandPreparation({
+  temporary = mkdtemp,
+  canonical = realpath,
+  stat = lstat,
+  createDirectory = mkdir,
+  list = readdir,
+  removeFile = unlink,
+  removeDirectory = rmdir,
+  command = execute,
+} = {}) {
+  let allocation,
+    root,
+    closing = false;
+  const directories = new Map(),
+    work = new Set(),
+    processes = [];
+  const identity = (st) => {
+    need(
+      typeof st.dev === "bigint" && typeof st.ino === "bigint" && st.ino > 0n,
+    );
+    return { dev: st.dev, ino: st.ino };
+  };
+  const matches = (st, id) => id && st.dev === id.dev && st.ino === id.ino;
+  const run = (operation) => {
+    need(!closing);
+    const pending = Promise.resolve().then(operation);
+    work.add(pending);
+    pending.finally(() => work.delete(pending)).catch(() => {});
+    return pending;
+  };
+  return {
+    acquired: () => Boolean(allocation) || work.size > 0,
+    run,
+    async allocate(parent) {
+      const created = await temporary(
+        path.win32.join(parent, "native-command-win32-"),
+      );
+      allocation = { path: created, identity: null }; // Before canonicalization.
+      const st = await stat(created, { bigint: true });
+      need(st.isDirectory() && !st.isSymbolicLink());
+      allocation.identity = identity(st);
+      const canonicalRoot = await canonical(created);
+      need(
+        matches(
+          await stat(canonicalRoot, { bigint: true }),
+          allocation.identity,
+        ),
+      );
+      root = canonicalRoot;
+      for (const name of [
+        "build",
+        "home",
+        "schema-home",
+        "schema",
+        "workspace",
+      ]) {
+        const directory = path.win32.join(root, name);
+        await createDirectory(directory);
+        directories.set(directory, null); // A failed identity read remains owned but uncertain.
+        const child = await stat(directory, { bigint: true });
+        need(child.isDirectory() && !child.isSymbolicLink());
+        directories.set(directory, identity(child));
+      }
+      return root;
+    },
+    command(image, args, options) {
+      need(!closing);
+      need(
+        command !== execute ||
+          (process.platform === "win32" &&
+            process.arch === "x64" &&
+            process.env.GITHUB_ACTIONS === "true"),
+      );
+      const pending = command(image, args, options);
+      let record;
+      if (pending.child) {
+        const child = pending.child;
+        record = { closed: false, emergency: false };
+        processes.push(record);
+        record.completion = new Promise((resolve) =>
+          child.once("close", (code, signal) => {
+            record.closed = true;
+            record.emergency ||= signal !== null;
+            resolve();
+          }),
+        );
+      }
+      return run(() => pending).catch((error) => {
+        if (record)
+          record.emergency ||=
+            error.killed === true ||
+            error.timedOut === true ||
+            error.code === "ABORT_ERR";
+        throw error;
+      });
+    },
+    async settle(signal) {
+      closing = true;
+      // A deadline race can leave the preparation promise or execFile callback
+      // active. Observe completion before inspecting/removing any owned bytes.
+      await Promise.allSettled([...work]);
+      await Promise.all(processes.map((record) => record.completion));
+      let failure,
+        entries = 0;
+      const retain = (error) => {
+        failure ??= error;
+      };
+      const sameDirectory = async (file, id) => {
+        signal?.throwIfAborted();
+        const st = await stat(file, { bigint: true });
+        need(st.isDirectory() && !st.isSymbolicLink() && matches(st, id));
+      };
+      const remove = async (directory, id, depth) => {
+        await sameDirectory(directory, id);
+        need(depth <= 8);
+        const names = await list(directory);
+        need((entries += names.length) <= 2048);
+        for (const name of names) {
+          try {
+            need(
+              name && name !== "." && name !== ".." && !/[\\/:\0]/u.test(name),
+            );
+            const file = path.win32.join(directory, name),
+              before = await stat(file, { bigint: true });
+            need(!before.isSymbolicLink() && (await canonical(file)) === file);
+            if (before.isDirectory()) {
+              // Top-level directories must be original acquisitions. Descendants
+              // stay inside those scopes after complete process/custody retirement.
+              const pinned =
+                depth === 0 ? directories.get(file) : identity(before);
+              need(pinned);
+              await remove(file, pinned, depth + 1);
+            } else {
+              need(before.isFile());
+              await sameDirectory(directory, id);
+              need(
+                matches(await stat(file, { bigint: true }), identity(before)),
+              );
+              await removeFile(file);
+            }
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            retain(error);
+          }
+        }
+        await sameDirectory(directory, id);
+        await removeDirectory(directory);
+      };
+      if (processes.some((record) => !record.closed || record.emergency))
+        throw Object.assign(
+          new Error("Build process retirement was uncertain"),
+          { emergency: true },
+        );
+      if (allocation) {
+        try {
+          await sameDirectory(allocation.path, allocation.identity);
+          await remove(root ?? allocation.path, allocation.identity, 0);
+        } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
+          retain(error);
+        }
+        try {
+          await stat(allocation.path, { bigint: true });
+          retain(new Error("Owned preparation root remains"));
+        } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
+          if (error.code !== "ENOENT") retain(error);
+        }
+      }
+      if (failure) throw failure;
+      return {
+        independent: true,
+        processesRetired: true,
+        fixturesRemoved: true,
+        emergency: false,
+        witnessSha256: digest(
+          JSON.stringify({
+            allocated: Boolean(allocation),
+            processes: processes.length,
+            entries,
+          }),
+        ),
+      };
+    },
+  };
+}
+
+/** Only independently closed, empty custody authorizes restoration. Capture
+ * failure still fails settlement, but cannot strand verified owned audit changes. */
+export async function settleWindowsCommandCustody(effects) {
+  let domain,
+    stopped,
+    observed,
+    failure,
+    restorationReady = false,
+    emergency = false;
+  const retain = (error, operation) => {
+    if (failure && failure !== error)
+      failure.feasibilityCleanup ??= error.feasibilityCleanup ?? {
+        code: "cleanup-unobserved",
+        detail: `Windows command ${operation} remains unproved.`,
+      };
+    failure ??= error;
+    emergency ||= error.emergency === true;
+  };
+  try {
+    domain = await effects.retireDomain();
+    need(domain.empty === true && domain.admissionsClosed === true);
+    await effects.prepareFinish(domain);
+    restorationReady = true;
+  } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
+    retain(error, "domain retirement");
+  }
+  try {
+    stopped = await effects.closeObserver();
+    need(stopped.captureRetired === true);
+  } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
+    retain(error, "capture retirement");
+  }
+  try {
+    observed = await effects.verifyObserver();
+    need(observed.completeDomain === true);
+    if (observed.failure) retain(observed.failure, "observer retirement");
+  } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
+    retain(error, "observer retirement");
+  }
+  let final;
+  if (restorationReady && observed?.completeDomain === true) {
+    try {
+      final = await effects.finish();
+    } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
+      retain(error, "policy restoration");
+    }
+  } else {
+    try {
+      await effects.abandonFinish();
+    } catch (error) {
+      nativeException("win32/feasibility-command-effects.js:exception", error);
+      retain(error, "recovery custody retirement");
+    }
+  }
+  if (failure) {
+    failure.emergency = emergency;
+    throw failure;
+  }
+  return { domain, stopped, observed, final };
+}
+/** Original handles remain authoritative. Check final sentinel bytes/DACLs
+ * before releasing the finish owner to restore and remove the owned fixtures. */
+export function windowsCommandCleanupSnapshot(original, final) {
+  need(
+    original?.length === 4 &&
+      final?.length === 4 &&
+      final.every((file, i) => file.identity === original[i].identity) &&
+      [2, 3].every(
+        (i) => JSON.stringify(final[i]) === JSON.stringify(original[i]),
+      ),
+  );
+  return digest(JSON.stringify(final[2]));
+}
+
+/** Hold the subject while alive; a new PID lookup after exit is not custody.
+ * Transport errors retain their first cause and cannot satisfy retirement. */
+export async function openWindowsCommandWatcher(
+  helper,
+  args,
+  environment,
+  signal,
+  launch = spawn,
+  onFailure = () => {},
+) {
+  need(!signal.aborted);
+  const child = launch(helper, args, {
+    env: environment,
+    stdio: ["pipe", "pipe", "pipe"],
+    windowsHide: true,
+  });
+  let failure,
+    stderr = Buffer.alloc(0),
+    stderrInvalid = false,
+    count = 0;
+  const retain = (error) => {
+    nativeException("windows-command-watcher", error);
+    if (!failure) {
+      failure = error;
+      onFailure(error);
+    }
+  };
+  child.stdin.on("error", retain);
+  child.stdout.on("error", retain);
+  const done = new Promise((resolve, reject) => {
+    child.once("error", (error) => {
+      retain(error);
+      reject(failure);
+    });
+    child.once("close", (code, killed) => {
+      const invalid = stderrInvalid || !child.stderr.readableEnded,
+        diagnosis = invalid ? null : windowsFeasibilityDiagnostics(stderr);
+      const error = Object.assign(new Error("Native watcher failed"), {
+        code,
+        signal: killed,
+        stderr,
+        nativeDiagnosticInvalid: invalid || (stderr.length > 0 && !diagnosis),
+      });
+      error.feasibilityCause = windowsFeasibilityCause(
+        "command-watcher",
+        error,
+      );
+      if (diagnosis?.cleanup) {
+        const { operation, domain, value } = diagnosis.cleanup;
+        error.feasibilityCleanup = {
+          code: "cleanup-unobserved",
+          detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+        };
+      }
+      if (failure) {
+        failure.watcherCompletion = {
+          code,
+          signal: killed,
+          stderr,
+          nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+        };
+        failure.feasibilityCleanup ??= error.feasibilityCleanup;
+        reject(failure);
+      } else if (code === 0 && !killed && !invalid && !stderr.length) resolve();
+      else {
+        retain(error);
+        reject(error);
+      }
+    });
+  });
+  done.catch(() => {});
+  const frames = [],
+    lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+  const iterator = lines[Symbol.asyncIterator]();
+  observeNativeProcess("windows-command-watcher", child);
+  child.stderr.on("data", (v) => {
+    count += v.length;
+    if (!stderrInvalid) {
+      if (stderr.length + v.length <= 4096) stderr = Buffer.concat([stderr, v]);
+      else {
+        stderrInvalid = true;
+        stderr = Buffer.alloc(0);
+      }
+    }
+    if (count > 65536) {
+      retain(new Error("Native watcher exceeded bound"));
+      lines.close();
+    }
+  });
+  child.stderr.on("error", (error) => {
+    stderrInvalid = true;
+    retain(error);
+    lines.close();
+  });
+  const abort = () => child.kill();
+  signal.addEventListener("abort", abort, { once: true });
+  if (signal.aborted) abort();
+  let ready;
+  try {
+    const first = await iterator.next();
+    if (first.done) await done;
+    need(!signal.aborted && !first.done && first.value.length < 1048576);
+    ready = JSON.parse(first.value);
+    need(ready.ready === true);
+    normalizeWindowsIdentity(ready.identity);
+  } catch (error) {
+    nativeException("win32/feasibility-command-effects.js:exception", error);
+    child.stdin.end();
+    child.kill();
+    await done.catch(() => {});
+    throw failure ?? error;
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+  return {
+    identity: ready.identity,
+    child,
+    async abandon() {
+      child.stdin.end();
+      await done;
+    },
+    async initialize(value) {
+      child.stdin.write(value);
+      const next = await iterator.next();
+      if (next.done) await done;
+      need(
+        !next.done &&
+          next.value.length < 1048576 &&
+          JSON.parse(next.value).custodyReady === true,
+      );
+    },
+    async inspect() {
+      child.stdin.write("D");
+      const next = await iterator.next();
+      if (next.done) await done;
+      need(!next.done && next.value.length < 1048576);
+      return JSON.parse(next.value);
+    },
+    async finish(active = signal, verifyRestoration) {
+      need(!active.aborted);
+      if (verifyRestoration) {
+        child.stdin.write("R");
+        try {
+          const next = await iterator.next();
+          if (next.done) await done;
+          need(
+            !next.done &&
+              next.value.length < 1048576 &&
+              JSON.parse(next.value).restorationReady === true,
+          );
+          await verifyRestoration();
+          need(!active.aborted);
+          child.stdin.end("V");
+        } catch (error) {
+          // EOF keeps the writer from deleting fixtures after a failed read.
+          child.stdin.end();
+          await done.catch(() => {});
+          throw error;
+        }
+      } else child.stdin.end("R");
+      for await (const line of { [Symbol.asyncIterator]: () => iterator }) {
+        need(line.length < 1048576 && frames.length < 4);
+        frames.push(JSON.parse(line));
+      }
+      await done;
+      need(
+        frames.at(-1)?.retired === true &&
+          frames.at(-1).completeDomain === true,
+      );
+      return frames.at(-1);
+    },
+  };
+}
+
+export function createWindowsCommandEffects(dispatch, inputs) {
+  const started = performance.now();
+  const preparation = createWindowsCommandPreparation();
+  let broker,
+    closed,
+    reading,
+    failed,
+    phase = "broker-setup",
+    failurePhase,
+    brokerDiagnosticFirst,
+    brokerDiagnosticPhase,
+    prepared,
+    decoder,
+    observationSignal,
+    closing = false,
+    retiring = false,
+    retirementFailure,
+    start,
+    watcher,
+    cleanupReader,
+    restorationReader,
+    restorationVerifier,
+    cleanupReady = false,
+    readerVerifier,
+    observerVerifier,
+    setupVerified = false,
+    controlVerified = false,
+    serverAdmission,
+    cleanupDeadline = Infinity;
+  const pending = new Map(),
+    xml = new Map(),
+    logons = new Map(),
+    rpc = new PassThrough(),
+    errorOutput = new PassThrough(),
+    input = new PassThrough();
+  let probeOutput = "",
+    controlStderr = null,
+    controlStderrInvalid = false,
+    controlDiagnosticFirst,
+    controlBeforeBroker,
+    controlExitCode,
+    controlError,
+    bytes = 0;
+  const nativeEnvironment = () => ({
+    ...prepared.environment,
+    NATIVE_COMMAND_LIFETIME_MS: String(
+      Math.max(
+        1,
+        Math.ceil(
+          Math.min(started + 150000, cleanupDeadline) - performance.now(),
+        ),
+      ),
+    ),
+  });
+  const controlFailure = () => {
+    if (controlError) return controlError;
+    if (
+      controlStderr === null ||
+      (!controlStderr.length && !controlStderrInvalid && !controlExitCode)
+    )
+      return null;
+    const diagnosis = controlStderrInvalid
+      ? null
+      : windowsFeasibilityDiagnostics(controlStderr);
+    const error = Object.assign(new Error("Native control child failed"), {
+      code: controlExitCode,
+      stderr: controlStderr,
+      nativeDiagnosticInvalid:
+        controlStderrInvalid || (controlStderr.length > 0 && !diagnosis),
+    });
+    error.feasibilityCause = windowsFeasibilityCause(
+      "permitted-control",
+      error,
+    );
+    if (diagnosis?.cleanup) {
+      const { operation, domain, value } = diagnosis.cleanup;
+      error.feasibilityCleanup = {
+        code: "cleanup-unobserved",
+        detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+      };
+    }
+    controlError = error;
+    return error;
+  };
+  const fail = (error) => {
+    nativeException("windows-command-broker", error);
+    if (retiring) retirementFailure ??= error;
+    if (!failed) {
+      failed = error;
+      failurePhase = phase;
+    }
+    for (const [key, entry] of pending)
+      if (!["D", "S"].includes(key)) {
+        entry.reject(failed);
+        pending.delete(key);
+      }
+  };
+  const call = (operation) => {
+    const key = operation.split(" ")[0],
+      settlement = ["D", "S"].includes(key);
+    need(broker?.stdin.writable && !pending.has(key));
+    if (!settlement) need(!failed && !closing && !observationSignal.aborted);
+    if (["V", "G", "A", "C"].includes(key)) need(setupVerified);
+    if (["R", "J", "K"].includes(key)) need(controlVerified);
+    if (key === "D") closing = true;
+    return new Promise((resolve, reject) => {
+      pending.set(key, { resolve, reject });
+      broker.stdin.write(operation + "\n");
+    });
+  };
+  const native = async (args, signal) =>
+    JSON.parse(
+      (
+        await (!broker ? preparation.command : execute)(prepared.helper, args, {
+          env: nativeEnvironment(),
+          signal,
+          timeout: 10000,
+          maxBuffer: 1048576,
+          windowsHide: true,
+        })
+      ).stdout,
+    );
+  const verifier = async (value, imageKind, signal) => {
+    need(
+      ["helper", "provider"].includes(imageKind) &&
+        value.imageSha256 ===
+          (imageKind === "provider"
+            ? inputs.packages.codex.component.sha256
+            : prepared.helperSha256),
+    );
+    const id = normalizeWindowsIdentity(value.identity),
+      owner = prepared.observer;
+    const observed = await native(
+      [
+        "command-check",
+        String(owner.pid),
+        owner.creationTime,
+        prepared.jobHandle,
+        String(id.pid),
+        id.creationTime,
+        value.imageSha256,
+        imageKind,
+      ],
+      signal,
+    );
+    need(
+      sameWindowsIdentity(observed.identity, id) &&
+        JSON.stringify(observed.token) === JSON.stringify(value.token) &&
+        observed.creationJob === true,
+    );
+    return observed;
+  };
+  const watch = (args, signal) =>
+    openWindowsCommandWatcher(
+      prepared.helper,
+      args,
+      nativeEnvironment(),
+      signal,
+      spawn,
+      fail,
+    );
+  const observation = async (spec, signal) => {
+    const before = await call("N"),
+      independentBefore = await verifier(
+        { ...before, imageSha256: prepared.helperSha256 },
+        "helper",
+        signal,
+      );
+    commandCaseAuditing(prepared, before, spec.action, false);
+    await call("T");
+    const after = await call("F"),
+      independentAfter = await verifier(
+        { ...after, imageSha256: prepared.helperSha256 },
+        "helper",
+        signal,
+      );
+    commandCaseAuditing(prepared, after, spec.action, true);
+    // Join delivery while the original command is still parked and held.
+    // Releasing it first loses native birth/liveness authority for the marker.
+    const end = await call("B"),
+      state = decoder.state();
+    const settled = await call("U");
+    prepared.lastAuditTime = end.time;
+    return {
+      controlExitCode: settled.exitCode,
+      before: independentBefore.identity,
+      after: independentAfter.identity,
+      beforeToken: independentBefore.token,
+      afterToken: independentAfter.token,
+      auditing: { before: before.auditing, after: after.auditing },
+      imageSha256: prepared.helperSha256,
+      creationJob: true,
+      captureComplete: state.ready && !failed,
+      start,
+      end,
+      events: state.events
+        .slice(start.records, end.records)
+        .map((event) => ({ ...event, logonId: logons.get(event.raw.id) })),
+      object: { before: before.object, after: after.object },
+      gate: { before: before.gate, after: after.gate },
+    };
+  };
+  return {
+    noCustody: () => !broker && !preparation.acquired(),
+    retainFailure: fail,
+    async failure() {
+      if (broker) {
+        await closed;
+        await reading.catch(fail);
+        // The native exit frame follows pipe EOF. Otherwise collect
+        // the complete broker transcript, never a merely complete-looking prefix.
+        if (controlStderr !== null) {
+          controlStderrInvalid ||=
+            controlExitCode === undefined && !broker.stdout.readableEnded;
+          const child = controlFailure();
+          if (child && failed !== child) {
+            if (failed) {
+              failed.controlCompletion = {
+                code: controlExitCode,
+                stderr: controlStderr,
+                nativeDiagnosticInvalid: child.nativeDiagnosticInvalid,
+                feasibilityCause: child.feasibilityCause,
+                feasibilityCleanup: child.feasibilityCleanup,
+              };
+              child.brokerCompletion = failed.brokerCompletion ?? {
+                code: failed.code,
+                signal: failed.signal,
+                stderr: failed.stderr,
+                nativeDiagnosticInvalid: failed.nativeDiagnosticInvalid,
+                feasibilityCause: failed.feasibilityCause,
+              };
+              child.feasibilityCleanup ??= failed.feasibilityCleanup;
+            }
+            if (
+              !failed ||
+              (controlDiagnosticFirst &&
+                !child.nativeDiagnosticInvalid &&
+                (controlBeforeBroker ||
+                  !brokerDiagnosticFirst ||
+                  failed.nativeDiagnosticInvalid))
+            ) {
+              child.cause = failed;
+              failed = child;
+              failurePhase = "permitted-control";
+            }
+          }
+        }
+      }
+      return failed;
+    },
+    prepare(nonce, components, signal) {
+      return preparation.run(async () => {
+        need(
+          dispatch.platform === "win32" &&
+            process.platform === "win32" &&
+            process.arch === "x64",
+        );
+        need(
+          process.env.RUNNER_TEMP &&
+            path.win32.isAbsolute(process.env.RUNNER_TEMP),
+        );
+        const root = await preparation.allocate(process.env.RUNNER_TEMP);
+        prepared = {
+          root,
+          nonce,
+          home: path.join(root, "home"),
+          workspace: path.join(root, "workspace"),
+          files: {
+            inspect: path.join(root, "workspace", "inspection"),
+            edit: path.join(root, "workspace", "edit"),
+            outside: path.join(root, "outside"),
+          },
+          gateFile: path.join(root, "workspace", "gate"),
+          gate: `\\\\.\\pipe\\native.command.${nonce}`,
+        };
+        Object.assign(
+          prepared,
+          await buildWindowsCommandHelper(root, components, signal, {
+            command: preparation.command,
+          }),
+        );
+        prepared.environment = windowsCommandEnvironment(
+          prepared.home,
+          inputs.packages.codex.directory,
+          process.env.SystemRoot,
+        );
+        for (const file of [
+          ...Object.values(prepared.files),
+          prepared.gateFile,
+        ])
+          await writeFile(file, nonce, { flag: "wx" });
+        let preflight;
+        try {
+          preflight = await native(["command-preflight"], signal);
+        } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
+          throw Object.assign(
+            new Error("Native command prerequisites failed.", { cause: error }),
+            {
+              feasibilityCause: windowsFeasibilityCause(
+                "native-prerequisites",
+                error,
+              ),
+            },
+          );
+        }
+        Object.assign(prepared, preflight);
+        decoder = createWindowsAuditDecoder(
+          {
+            xml: (bytes) => {
+              const key = digest(bytes),
+                value = xml.get(key);
+              need(value);
+              xml.delete(key);
+              return value;
+            },
+          },
+          {
+            sdkSha256: prepared.sdkSha256,
+            abiSha256: prepared.abiSha256,
+            versions: preflight.versions,
+            mappingSha256: observationDigest(preflight.versions),
+          },
+        );
+        return prepared;
+      });
+    },
+    async setup(value, signal) {
+      let operation = "startup";
+      try {
+        observationSignal = signal;
+        broker = spawn(
+          value.helper,
+          [
+            "command-broker",
+            value.root,
+            value.nonce,
+            inputs.packages.codex.file,
+            inputs.packages.codex.component.sha256,
+            value.helper,
+            value.helperSha256,
+          ],
+          {
+            env: nativeEnvironment(),
+            stdio: ["pipe", "pipe", "pipe"],
+            windowsHide: true,
+          },
+        );
+        const ready = new Promise((resolve, reject) =>
+          pending.set("ready", { resolve, reject }),
+        );
+        let brokerStderr = Buffer.alloc(0),
+          brokerStderrInvalid = false;
+        closed = new Promise((resolve) => {
+          broker.once("error", fail);
+          broker.once("close", (code, killed) => {
+            resolve({ code, signal: killed });
+            rpc.end();
+            errorOutput.end();
+            const incomplete =
+              brokerStderrInvalid || !broker.stderr.readableEnded;
+            const diagnosis = incomplete
+              ? null
+              : windowsFeasibilityDiagnostics(brokerStderr);
+            const first = failed,
+              brokerOriginal =
+                diagnosis &&
+                (brokerDiagnosticFirst ||
+                  (first === controlError &&
+                    controlError?.nativeDiagnosticInvalid));
+            const error = Object.assign(
+              new Error("Native broker closed", { cause: first }),
+              {
+                code,
+                signal: killed,
+                stderr: brokerStderr,
+                nativeDiagnosticInvalid:
+                  incomplete || (brokerStderr.length > 0 && !diagnosis),
+              },
+            );
+            const origin = brokerOriginal
+              ? (brokerDiagnosticPhase ?? failurePhase ?? phase)
+              : (failurePhase ?? brokerDiagnosticPhase ?? phase);
+            const brokerCause = windowsFeasibilityCause(origin, error);
+            error.feasibilityCause = windowsFeasibilityCause(
+              origin,
+              brokerOriginal ? error : (first ?? error),
+            );
+            if (diagnosis?.cleanup) {
+              const { operation, domain, value } = diagnosis.cleanup;
+              error.feasibilityCleanup = {
+                code: "cleanup-unobserved",
+                detail: `Native cleanup ${operation} failed (${domain}=${value}).`,
+              };
+              if (first) first.feasibilityCleanup ??= error.feasibilityCleanup;
+            }
+            if (first)
+              first.brokerCompletion = {
+                code,
+                signal: killed,
+                stderr: brokerStderr,
+                nativeDiagnosticInvalid: error.nativeDiagnosticInvalid,
+                feasibilityCause: brokerCause,
+              };
+            // Arrival order is only a candidate. The complete bounded carrier and
+            // real close facts must validate before it can outrank a later failure.
+            // Keep an already retained, valid earlier child as the original cause.
+            if (
+              brokerOriginal &&
+              !(
+                controlError &&
+                first === controlError &&
+                controlBeforeBroker &&
+                !controlError.nativeDiagnosticInvalid
+              )
+            )
+              failed = error;
+            if (
+              code !== 0 ||
+              killed ||
+              error.nativeDiagnosticInvalid ||
+              brokerStderr.length
+            )
+              fail(error);
+            for (const entry of pending.values()) entry.reject(failed ?? error);
+            pending.clear();
+          });
+        });
+        broker.stdin.on("error", (error) => {
+          fail(error);
+          for (const key of ["D", "S"]) {
+            pending.get(key)?.reject(error);
+            pending.delete(key);
+          }
+        });
+        broker.stdout.on("error", fail);
+        observeNativeProcess("win32/feasibility-command-effects.js", broker);
+        broker.stderr.on("data", (v) => {
+          if (v.length && brokerDiagnosticFirst === undefined) {
+            brokerDiagnosticFirst = !failed;
+            brokerDiagnosticPhase = phase;
+          }
+          if (!brokerStderrInvalid) {
+            if (brokerStderr.length + v.length <= 4096)
+              brokerStderr = Buffer.concat([brokerStderr, v]);
+            else {
+              brokerStderrInvalid = true;
+              brokerStderr = Buffer.alloc(0);
+            }
+          }
+          bytes += v.length;
+          if (bytes > 33554432)
+            fail(new Error("Native capture exceeded bound"));
+        });
+        broker.stderr.on("error", (error) => {
+          brokerStderrInvalid = true;
+          fail(error);
+        });
+        reading = (async () => {
+          const lines = createInterface({
+            input: broker.stdout,
+            crlfDelay: Infinity,
+          });
+          broker.stdout.once("close", () => {
+            if (!broker.stdout.readableEnded)
+              fail(new Error("Native broker output closed before EOF"));
+            lines.close();
+          });
+          for await (const line of lines) {
+            let frame;
+            try {
+              need(line.length <= 600000);
+              bytes += Buffer.byteLength(line);
+              need(bytes <= 33554432);
+              frame = JSON.parse(line);
+              if (
+                failed &&
+                !["D", "S"].includes(frame.event) &&
+                !(
+                  setupVerified &&
+                  ["audit", "capture-end"].includes(frame.event)
+                ) &&
+                !(
+                  ["probe-output", "probe-stderr", "probe-exit"].includes(
+                    frame.event,
+                  ) && controlStderr !== null
+                )
+              )
+                continue;
+              if (frame.event === "probe-exit") {
+                need(
+                  controlStderr !== null &&
+                    Object.keys(frame).length === 2 &&
+                    controlExitCode === undefined &&
+                    Number.isInteger(frame.exitCode) &&
+                    frame.exitCode >= 0 &&
+                    frame.exitCode <= 0xffffffff,
+                );
+                controlExitCode = frame.exitCode;
+                const child = controlFailure();
+                if (child) fail(child);
+              } else if (frame.event === "audit") {
+                need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex"),
+                  header = Buffer.alloc(4);
+                const decoded = windowsCommandAuditRead(frame.decoded);
+                xml.set(digest(raw), decoded.native);
+                logons.set(digest(raw), decoded.logonId);
+                header.writeUInt32LE(raw.length);
+                await decoder.push(Buffer.concat([header, raw]));
+              } else if (
+                frame.event === "rpc" ||
+                frame.event === "stderr" ||
+                frame.event === "probe-output" ||
+                frame.event === "probe-stderr"
+              ) {
+                need(/^(?:[a-f0-9]{2}){1,4096}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex");
+                nativeDiagnostic(`windows-command:${frame.event}`, {
+                  [frame.event.endsWith("stderr") ? "stderr" : "stdout"]: raw,
+                });
+                if (frame.event === "probe-output") {
+                  probeOutput += raw.toString("utf8");
+                  need(probeOutput.length <= 4096);
+                } else if (
+                  frame.event === "probe-stderr" &&
+                  controlStderr !== null
+                ) {
+                  controlDiagnosticFirst ??= !failed;
+                  controlBeforeBroker ??= brokerDiagnosticFirst === undefined;
+                  if (!controlStderrInvalid) {
+                    if (controlStderr.length + raw.length <= 4096)
+                      controlStderr = Buffer.concat([controlStderr, raw]);
+                    else {
+                      controlStderrInvalid = true;
+                      controlStderr = Buffer.alloc(0);
+                    }
+                  }
+                } else if (frame.event !== "probe-stderr")
+                  (frame.event === "rpc" ? rpc : errorOutput).write(raw);
+              } else if (["rpc-end", "stderr-end"].includes(frame.event))
+                (frame.event === "rpc-end" ? rpc : errorOutput).end();
+              else if (frame.event === "capture-end") {
+                need(/^(?:[a-f0-9]{2}){4,65536}$/u.test(frame.hex));
+                const raw = Buffer.from(frame.hex, "hex"),
+                  header = Buffer.alloc(16);
+                xml.set(digest(raw), frame.decoded);
+                header.writeUInt32LE(0xffffffff);
+                header.writeUInt32LE(frame.bytes, 4);
+                header.writeUInt32LE(frame.records, 8);
+                header.writeUInt32LE(raw.length, 12);
+                await decoder.push(Buffer.concat([header, raw]));
+              } else {
+                if (frame.event === "U" && controlStderr !== null) {
+                  need(
+                    Number.isInteger(frame.exitCode) &&
+                      frame.exitCode >= 0 &&
+                      frame.exitCode <= 0xffffffff &&
+                      controlExitCode === frame.exitCode,
+                  );
+                  controlExitCode = frame.exitCode;
+                }
+                if (frame.event === "ready")
+                  await decoder.push(Buffer.alloc(4));
+                if (frame.event === "B") {
+                  const raw = Buffer.alloc(20);
+                  raw.writeUInt32LE(0xfffffffe);
+                  raw.writeUInt32LE(frame.sequence, 4);
+                  raw.writeBigUInt64LE(BigInt(frame.time), 8);
+                  raw.writeUInt32LE(frame.records, 16);
+                  await decoder.push(raw);
+                }
+                const entry = pending.get(frame.event);
+                need(entry);
+                pending.delete(frame.event);
+                entry.resolve(frame);
+              }
+            } catch (error) {
+              if (
+                controlStderr !== null &&
+                (!frame || ["probe-stderr", "probe-exit"].includes(frame.event))
+              )
+                controlStderrInvalid = true;
+              nativeException(
+                "win32/feasibility-command-effects.js:exception",
+                error,
+              );
+              fail(error);
+            }
+          }
+        })();
+        reading.catch(fail);
+        const admitted = await ready;
+        operation = "ready-admission";
+        value.observer = normalizeWindowsIdentity(admitted.identity);
+        const admission = admitted.admission;
+        assertClosed(admission, [
+          "pid",
+          "thread",
+          "creationTime",
+          "exitCode",
+          "assigned",
+          "listed",
+          "referencesReleased",
+        ]);
+        need(
+          [admission.pid, admission.thread].every(
+            (id) => Number.isInteger(id) && id > 0 && id <= 0xffffffff,
+          ) &&
+            admission.pid !== value.observer.pid &&
+            typeof admission.creationTime === "string" &&
+            /^[1-9][0-9]{0,19}$/u.test(admission.creationTime) &&
+            BigInt(admission.creationTime) <= 0xffffffffffffffffn &&
+            admission.exitCode === 0 &&
+            admission.assigned === 0 &&
+            admission.listed === 0 &&
+            admission.referencesReleased === true,
+        );
+        value.jobHandle = admitted.jobHandle;
+        need(
+          /^[1-9][0-9]{0,19}$/u.test(value.jobHandle) &&
+            admitted.files.length === 4,
+        );
+        value.sentinelSha256 = digest(JSON.stringify(admitted.files[2]));
+        value.original = admitted;
+        operation = "cleanup-reader-admission";
+        watcher = await watch(
+          [
+            "command-watch",
+            String(value.observer.pid),
+            value.observer.creationTime,
+            value.helperSha256,
+            value.nonce,
+            value.jobHandle,
+          ],
+          signal,
+        );
+        cleanupReader = await watch(
+          [
+            "command-finish",
+            String(value.observer.pid),
+            value.observer.creationTime,
+            value.helperSha256,
+            value.nonce,
+            value.jobHandle,
+          ],
+          signal,
+        );
+        const original = value.original.cleanup;
+        need(
+          [original.intentHandle, original.closedHandle].every((v) =>
+            /^[1-9][0-9]{0,19}$/u.test(v),
+          ),
+        );
+        need(original.files.length === 6);
+        need(
+          /^[a-f0-9]{64}$/u.test(original.systemSha256) &&
+            /^[a-f0-9]{64}$/u.test(original.nullSha256) &&
+            /^[1-9][0-9]{0,19}$/u.test(original.nullHandle),
+        );
+        const custodyInput =
+          `${original.systemSha256} ${original.nullSha256} ${original.nullHandle} ${original.intentHandle} ${original.closedHandle}\n` +
+          original.files
+            .map((file) => {
+              need(
+                /^[1-9][0-9]{0,19}$/u.test(file.handle) &&
+                  /^[a-f0-9]{16}:[a-f0-9]{32}$/u.test(file.identity) &&
+                  /^(?:[a-f0-9]{2})+$/u.test(file.baselineHex) &&
+                  /^(?:[a-f0-9]{2})*$/u.test(file.saclHex),
+              );
+              return `${file.handle} ${file.identity} ${file.baselineHex} ${file.saclHex || "-"}\n`;
+            })
+            .join("");
+        await cleanupReader.initialize(custodyInput);
+        restorationReader = await watch(
+          [
+            "command-verify",
+            String(value.observer.pid),
+            value.observer.creationTime,
+            value.helperSha256,
+            value.nonce,
+            value.jobHandle,
+          ],
+          signal,
+        );
+        need(
+          !sameWindowsIdentity(
+            restorationReader.identity,
+            cleanupReader.identity,
+          ),
+        );
+        await restorationReader.initialize(custodyInput);
+        restorationVerifier = await watch(
+          [
+            "command-watch",
+            String(restorationReader.identity.pid),
+            restorationReader.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
+        );
+        cleanupReady = true;
+        readerVerifier = await watch(
+          [
+            "command-watch",
+            String(cleanupReader.identity.pid),
+            cleanupReader.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
+        );
+        observerVerifier = await watch(
+          [
+            "command-watch",
+            String(watcher.identity.pid),
+            watcher.identity.creationTime,
+            value.helperSha256,
+            value.nonce,
+          ],
+          signal,
+        );
+        const inspect = () =>
+          native(
+            [
+              "command-broker-check",
+              String(value.observer.pid),
+              value.observer.creationTime,
+              value.helperSha256,
+              admitted.tokenHandle,
+              admitted.gateHandle,
+              value.jobHandle,
+              ...original.files.slice(0, 3).map((file) => file.handle),
+            ],
+            signal,
+          );
+        operation = "baseline-read";
+        const baseline = await inspect();
+        need(
+          sameWindowsIdentity(baseline.identity, value.observer) &&
+            JSON.stringify(baseline.gate) === JSON.stringify(admitted.files[3]),
+        );
+        commandAuditSnapshot(value, baseline.audit, false);
+        operation = "audit-installation";
+        const installation = (await call("I"))?.installation;
+        operation = "installed-audit-read";
+        const before = await inspect();
+        commandAuditSnapshot(value, before.audit, true);
+        if (
+          !before.effective.available ||
+          !before.effective.success ||
+          !before.effective.failure ||
+          before.effective.error !== 0
+        )
+          throw Object.assign(
+            new Error("Effective broker auditing unavailable"),
+            { code: 78 },
+          );
+        const after = await inspect(),
+          state = decoder.state();
+        const observation = {
+          baseline,
+          before,
+          after,
+          installation,
+          captureComplete: state.ready && !failed,
+        };
+        operation = "setup-join";
+        windowsCommandBrokerSetup(value, observation);
+        value.brokerSetup = observation;
+        setupVerified = true;
+        return observation;
+      } catch (error) {
+        throw commandSetupFailure(operation, error);
+      }
+    },
+    async schema(value) {
+      phase = "installed-schema";
+      need(setupVerified);
+      probeOutput = "";
+      need(
+        (await call("V")).exitCode === 0 &&
+          ["codex-cli 0.160.0\r\n", "codex-cli 0.160.0\n"].includes(
+            probeOutput,
+          ),
+      );
+      probeOutput = "";
+      need((await call("G")).exitCode === 0);
+      return {
+        params: JSON.parse(
+          await regular(
+            path.join(value.root, "schema", "v2", "CommandExecParams.json"),
+          ),
+        ),
+        response: JSON.parse(
+          await regular(
+            path.join(value.root, "schema", "v2", "CommandExecResponse.json"),
+          ),
+        ),
+      };
+    },
+    async arm(value, signal) {
+      phase = "capture-admission";
+      need((await readdir(value.home)).length === 0);
+      const admitted = await call("A");
+      const independent = await verifier(admitted, "provider", signal);
+      serverAdmission = independent;
+      input.on("data", (chunk) => {
+        if (
+          failed ||
+          closing ||
+          observationSignal.aborted ||
+          !controlVerified ||
+          chunk.length > 65536
+        ) {
+          fail(new Error("Command admission closed"));
+          return;
+        }
+        broker.stdin.write("J " + chunk.toString("hex") + "\n");
+      });
+      input.on("end", () => {
+        if (!closing && !failed) call("E").catch(fail);
+      });
+      return {
+        ...independent,
+        imageSha256: admitted.imageSha256,
+        captureReady: decoder.state().ready,
+        independent: true,
+        transport: { input, output: rpc, errorOutput },
+      };
+    },
+    release: () => call("R"),
+    async control(value, signal) {
+      phase = "permitted-control";
+      controlStderr = Buffer.alloc(0);
+      need(setupVerified && serverAdmission && !controlVerified);
+      start = await call("B");
+      probeOutput = "";
+      await call("C");
+      const observed = await observation({ action: "outside" }, signal);
+      const child = controlFailure();
+      if (child) throw child;
+      const reply = {
+        exitCode: observed.controlExitCode,
+        stdout: probeOutput,
+        stderr: "",
+      };
+      assessWindowsCommandObservation(
+        {
+          action: "outside",
+          control: true,
+          permit: true,
+          target: value.files.outside,
+          gateFile: value.gateFile,
+          helperSha256: value.helperSha256,
+          userSid: serverAdmission.identity.userSid,
+          sessionId: serverAdmission.identity.sessionId,
+          authenticationId: serverAdmission.token.authenticationId,
+        },
+        observed,
+        reply,
+        value.nonce,
+      );
+      await call("X");
+      controlVerified = true;
+      return { observation: observed, reply };
+    },
+    async begin(value, spec) {
+      phase = "command-observation";
+      need(typeof spec.permit === "boolean");
+      start = await call("B");
+      await call(
+        `K ${["inspect", "edit", "outside"].indexOf(spec.action)} ${Number(spec.permit)}`,
+      );
+    },
+    observe: (value, spec, signal) => observation(spec, signal),
+    async retire(value, signal) {
+      if (!failed) phase = "command-close";
+      retiring = true;
+      cleanupDeadline = performance.now() + 30000;
+      value ??= prepared;
+      if (!broker)
+        return { ...(await preparation.settle(signal)), preparationOnly: true };
+      need(broker && value);
+      if (!watcher || !cleanupReady) {
+        // Installation cannot start before these owners acknowledge custody.
+        // Still retire every acquired owner; incomplete custody cannot pass.
+        try {
+          await call("D");
+        } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
+          fail(error);
+        }
+        try {
+          await call("S");
+        } catch (error) {
+          nativeException(
+            "win32/feasibility-command-effects.js:exception",
+            error,
+          );
+          fail(error);
+        }
+        await closed;
+        await reading;
+        for (const owner of [
+          watcher,
+          observerVerifier,
+          cleanupReader,
+          readerVerifier,
+          restorationReader,
+          restorationVerifier,
+        ]) {
+          try {
+            if ([cleanupReader, restorationReader].includes(owner))
+              await owner?.abandon();
+            else await owner?.finish(signal);
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            fail(error);
+          }
+        }
+        throw failed ?? new Error("Early native custody was incomplete");
+      }
+      let capture,
+        sentinelSha256,
+        emergency = false,
+        fixturesRetired = false;
+      const outcome = await settleWindowsCommandCustody({
+        async retireDomain() {
+          // Even a broken broker pipe cannot replace the early native custody.
+          try {
+            const stopped = await call("D");
+            if (setupVerified) {
+              need(/^[1-9][0-9]{0,19}$/u.test(stopped.auditFrom));
+              value.auditRetirement = stopped.auditFrom;
+            }
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            fail(error);
+          }
+          const domain = await cleanupReader.inspect();
+          need(domain.empty === true && domain.admissionsClosed === true);
+          emergency ||= domain.emergency === true;
+          if (domain.emergency)
+            fail(
+              Object.assign(new Error("Emergency native retirement"), {
+                emergency: true,
+              }),
+            );
+          return domain;
+        },
+        async prepareFinish(domain) {
+          sentinelSha256 = windowsCommandCleanupSnapshot(
+            value.original.files,
+            domain.files,
+          );
+        },
+        async closeObserver() {
+          let stopped, failure;
+          try {
+            stopped = await call("S");
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            fail(error);
+            failure = error;
+          }
+          const completion = await closed;
+          await reading;
+          if (failure) throw failure;
+          need(completion.code === 0 && !completion.signal);
+          capture = setupVerified ? decoder.finish() : { admitted: false };
+          if (setupVerified)
+            windowsCommandTerminalCapture(value, capture, logons);
+          need(stopped?.captureRetired === true);
+          return stopped;
+        },
+        async verifyObserver() {
+          let held,
+            failure,
+            watcherRetired = false;
+          try {
+            held = await watcher.finish(signal);
+            emergency ||= [124, 126].includes(held.exitCode);
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure = error;
+          }
+          try {
+            need(
+              observerVerifier &&
+                (await observerVerifier.finish(signal)).retired === true,
+            );
+            watcherRetired = true;
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure ??= error;
+          }
+          if (failure) {
+            const completion = await closed;
+            failure.emergency ||=
+              [124, 126].includes(completion.code) ||
+              [124, 126].includes(failure.code);
+            if (watcherRetired) {
+              try {
+                const domain = await cleanupReader.inspect();
+                need(
+                  domain.ownerRetired === true &&
+                    domain.empty === true &&
+                    domain.admissionsClosed === true,
+                );
+                sentinelSha256 = windowsCommandCleanupSnapshot(
+                  value.original.files,
+                  domain.files,
+                );
+                return { completeDomain: true, failure };
+              } catch (diagnosticError) {
+                nativeException(
+                  "win32/feasibility-command-effects.js:exception",
+                  diagnosticError,
+                );
+                // Failed delivery alone never supplies native retirement proof.
+              }
+            }
+            throw failure;
+          }
+          return held;
+        },
+        async abandonFinish() {
+          let failure;
+          try {
+            await cleanupReader.abandon();
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure = error;
+          }
+          try {
+            if (readerVerifier) await readerVerifier.finish(signal);
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure ??= error;
+          }
+          for (const [owner, method] of [
+            [restorationReader, "abandon"],
+            [restorationVerifier, "finish"],
+          ]) {
+            try {
+              await owner?.[method](signal);
+            } catch (error) {
+              failure ??= error;
+            }
+          }
+          if (failure) throw failure;
+        },
+        async finish() {
+          let restored,
+            reader,
+            failure,
+            restorationStarted = false;
+          try {
+            restored = await cleanupReader.finish(signal, async () => {
+              restorationStarted = true;
+              let failure;
+              try {
+                const actual = await restorationReader.finish(signal);
+                need(actual.independent === true && actual.restored === true);
+              } catch (error) {
+                failure = error;
+              }
+              try {
+                const settled = await restorationVerifier.finish(signal);
+                need(settled.retired === true && settled.exitCode === 0);
+              } catch (error) {
+                failure ??= error;
+              }
+              if (failure) throw failure;
+            });
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure = error;
+          }
+          if (!restorationStarted) {
+            // A writer failure before the barrier still leaves both early
+            // restoration owners to settle independently.
+            for (const [owner, method] of [
+              [restorationReader, "abandon"],
+              [restorationVerifier, "finish"],
+            ]) {
+              try {
+                await owner[method](signal);
+              } catch (error) {
+                nativeException(
+                  "win32/feasibility-command-effects.js:exception",
+                  error,
+                );
+                failure ??= error;
+              }
+            }
+          }
+          try {
+            reader = await readerVerifier.finish(signal);
+          } catch (error) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              error,
+            );
+            failure ??= error;
+          }
+          fixturesRetired =
+            restored?.restored === true &&
+            restored?.fixturesRemoved === true &&
+            reader?.retired === true;
+          if (failure || retirementFailure) throw failure ?? retirementFailure;
+          need(fixturesRetired);
+          return { restored, reader };
+        },
+      }).catch(async (error) => {
+        error.feasibilityCleanup ??= failed?.feasibilityCleanup;
+        if (fixturesRetired) {
+          try {
+            await preparation.settle(signal);
+          } catch (cleanup) {
+            nativeException(
+              "win32/feasibility-command-effects.js:exception",
+              cleanup,
+            );
+            error.preparationCleanup = cleanup;
+          }
+        }
+        error.emergency ||= emergency;
+        throw error;
+      });
+      await preparation.settle(signal);
+      return {
+        independent: true,
+        completeDomain: true,
+        admissionsClosed: true,
+        serverRetired: true,
+        helpersRetired: true,
+        observerRetired: true,
+        readerRetired: true,
+        jobClosed: true,
+        emergency: false,
+        auditRestored: true,
+        fixturesRemoved: true,
+        sentinelSha256,
+        witnessSha256: digest(JSON.stringify([outcome, capture])),
+      };
+    },
+  };
+}

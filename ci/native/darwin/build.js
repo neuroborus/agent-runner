@@ -1,0 +1,587 @@
+import { spawn } from "node:child_process";
+import path from "node:path";
+import {
+  nativeException,
+  nativeDiagnostic,
+  hasNativeDiagnostics,
+} from "../diagnostics.js";
+import { observationObject, observationDigest } from "../index.js";
+import { darwinCustodyChannel } from "./channel.js";
+import { darwinSignatureDiagnostics } from "./signature-logs.js";
+import { purposeData } from "./experiment-policy.js";
+import {
+  normalizeDarwinIdentity,
+  sameDarwinIdentity,
+  requireDarwin,
+} from "./protocol.js";
+
+export const DARWIN_HELPER_NAMES = Object.freeze([
+  "launcher",
+  "argv-fixture",
+  "ownership-fixture",
+  "access-fixture",
+  "file-helper",
+  "git-executor",
+  "git-fixture",
+  "observer-helper",
+  "custody-reader",
+  "build-helper",
+]);
+// Two version queries and compile/sign for each fixed helper, plus cleanup.
+export const DARWIN_BUILD_CUSTODY_MS =
+  120000 + (2 + DARWIN_HELPER_NAMES.length * 2) * 60000;
+export const darwinCompilerArguments = (
+  source,
+  target,
+  env,
+  purpose = "reviewed",
+) => [
+  "-std=c17",
+  "-O2",
+  "-Wall",
+  "-Wextra",
+  "-arch",
+  "x86_64",
+  "-isysroot",
+  env.SDKROOT,
+  ...(purpose === "experiment"
+    ? [
+        "-DNATIVE_CI_EXPERIMENT=1",
+        "-include",
+        path.join(path.dirname(source), "experiment.h"),
+        "-MD",
+        "-MF",
+        target + ".deps",
+      ]
+    : []),
+  source,
+  "-o",
+  target,
+  "-Wl,-no_uuid",
+  "-fblocks",
+  "-framework",
+  "Security",
+  "-framework",
+  "CoreFoundation",
+  "-lbsm",
+  "-lsandbox",
+];
+
+/** A persisted experimental SDK observation is never native admission. */
+export function darwinBuildSdk(sdk, root) {
+  observationObject(sdk, ["path", "dev", "ino", "settingsSha256"]);
+  requireDarwin(
+    sdk.path === root &&
+      typeof root === "string" &&
+      path.isAbsolute(root) &&
+      path.normalize(root) === root &&
+      !root.endsWith("/") &&
+      root.length < 4096 &&
+      !/[\u0000-\u001f\u007f]/u.test(root) &&
+      [sdk.dev, sdk.ino].every(
+        (value) =>
+          typeof value === "string" &&
+          /^(?:0|[1-9][0-9]{0,19})$/u.test(value) &&
+          BigInt(value) <= 18446744073709551615n,
+      ) &&
+      typeof sdk.settingsSha256 === "string" &&
+      /^[a-f0-9]{64}$/u.test(sdk.settingsSha256),
+  );
+  return structuredClone(sdk);
+}
+
+/** Only the documented CLT and Xcode macOS SDK layouts identify an owner. */
+export function darwinDeveloperDirectory(sdk) {
+  if (/^\/Library\/Developer\/CommandLineTools\/SDKs\/[^/]+$/u.test(sdk))
+    return "/Library/Developer/CommandLineTools";
+  const match =
+    /^(\/Applications\/[^/]+\.app\/Contents\/Developer)\/Platforms\/MacOSX\.platform\/Developer\/SDKs\/[^/]+$/u.exec(
+      sdk,
+    );
+  requireDarwin(match);
+  return match[1];
+}
+
+export function darwinBuildToolchain(value, sdk, developer) {
+  observationObject(value, ["developer", "compiler", "delegated"]);
+  observationObject(value.developer, ["path", "dev", "ino"]);
+  requireDarwin(
+    developer === darwinDeveloperDirectory(sdk) &&
+      value.developer.path === developer &&
+      [value.developer.dev, value.developer.ino].every(
+        (id) =>
+          typeof id === "string" &&
+          /^(?:0|[1-9][0-9]{0,19})$/u.test(id) &&
+          BigInt(id) <= 18446744073709551615n,
+      ) &&
+      Array.isArray(value.delegated) &&
+      value.delegated.length > 0 &&
+      value.delegated.length < 16,
+  );
+  const bin =
+      developer +
+      (developer === "/Library/Developer/CommandLineTools"
+        ? "/usr/bin/"
+        : "/Toolchains/XcodeDefault.xctoolchain/usr/bin/"),
+    tools = [value.compiler, ...value.delegated];
+  for (const tool of tools) {
+    observationObject(tool, ["path", "sha256", "cdhash", "dev", "ino"]);
+    requireDarwin(
+      typeof tool.path === "string" &&
+        tool.path.startsWith(bin) &&
+        path.dirname(tool.path) + "/" === bin &&
+        path.normalize(tool.path) === tool.path &&
+        tool.path.length < 4096 &&
+        !/[\u0000-\u001f\u007f]/u.test(tool.path) &&
+        /^[a-f0-9]{64}$/u.test(tool.sha256) &&
+        /^[a-f0-9]{40}$/u.test(tool.cdhash) &&
+        [tool.dev, tool.ino].every(
+          (id) =>
+            typeof id === "string" &&
+            /^(?:0|[1-9][0-9]{0,19})$/u.test(id) &&
+            BigInt(id) <= 18446744073709551615n,
+        ),
+    );
+  }
+  requireDarwin(new Set(tools.map((tool) => tool.path)).size === tools.length);
+  return structuredClone(value);
+}
+
+/** Only these vectors can cross the compiler entry. Source/output approval is
+ * read before exec; a hash of a generated command is not that approval. */
+export function darwinBuildOperation(request, manifest, output) {
+  const purpose = manifest.purpose ?? "reviewed";
+  requireDarwin(
+    ["reviewed", "experiment"].includes(purpose) &&
+      purpose === (manifest.darwinPreparation?.purpose ?? "reviewed"),
+  );
+  const sdk =
+    purpose === "experiment"
+      ? darwinBuildSdk(
+          manifest.darwinPreparation.command.sdk,
+          manifest.environment.SDKROOT,
+        )
+      : null;
+  const toolchain = sdk
+    ? darwinBuildToolchain(
+        manifest.darwinPreparation.command.toolchain,
+        sdk.path,
+        manifest.environment.DEVELOPER_DIR,
+      )
+    : null;
+  const operation = (value) => ({
+    ...purposeData(manifest),
+    ...value,
+    ...(sdk ? { sdk, toolchain } : {}),
+  });
+  observationObject(request, [
+    ...(purpose === "experiment" ? ["purpose"] : []),
+    "candidateSha",
+    "platform",
+    "toolSha256",
+    "file",
+    "args",
+    "cwd",
+    "env",
+    "deadlineMs",
+  ]);
+  const tool = manifest.tools.find((entry) => entry.path === request.file);
+  requireDarwin(
+    (purpose !== "experiment" || request.purpose === "experiment") &&
+      request.platform === "darwin" &&
+      request.candidateSha === manifest.candidateSha &&
+      tool?.sha256 === request.toolSha256 &&
+      request.file ===
+        {
+          compiler: "/usr/bin/clang",
+          sdk: "/usr/bin/xcrun",
+          signer: "/usr/bin/codesign",
+        }[tool.name] &&
+      request.cwd === output &&
+      observationDigest(request.env) ===
+        observationDigest({
+          CI: "true",
+          GITHUB_ACTIONS: "true",
+          LANG: "C",
+          SDKROOT: manifest.environment.SDKROOT,
+          ...(toolchain ? { DEVELOPER_DIR: toolchain.developer.path } : {}),
+        }) &&
+      Number.isSafeInteger(request.deadlineMs) &&
+      request.deadlineMs > 0 &&
+      request.deadlineMs <= 30000,
+  );
+  const equal = (args) =>
+    observationDigest(args) === observationDigest(request.args);
+  if (tool.name === "compiler" && equal(["--version"]))
+    return operation({ mode: "compiler-version", tool });
+  if (
+    tool.name === "sdk" &&
+    equal([...(sdk ? ["--sdk", sdk.path] : []), "--show-sdk-build-version"])
+  )
+    return operation({ mode: "sdk-version", tool });
+  for (const helper of manifest.helpers) {
+    requireDarwin(DARWIN_HELPER_NAMES.includes(helper.name));
+    const target = path.join(output, helper.name),
+      source = manifest.darwinPreparation.sources.find(
+        (entry) =>
+          entry.name === helper.name + ".c" &&
+          entry.sha256 === helper.sourceSha256,
+      );
+    const sourceInput = source && {
+      path: path.join(manifest.darwinPreparation.sourceDirectory, source.name),
+      sha256: source.sha256,
+    };
+    if (
+      tool.name === "compiler" &&
+      sourceInput &&
+      equal(
+        darwinCompilerArguments(
+          sourceInput.path,
+          target,
+          manifest.environment,
+          purpose,
+        ),
+      )
+    ) {
+      const header =
+        purpose === "experiment"
+          ? {
+              path: path.join(path.dirname(sourceInput.path), "experiment.h"),
+              sha256: manifest.darwinPreparation.sources.find(
+                (entry) => entry.name === "experiment.h",
+              )?.sha256,
+            }
+          : null;
+      requireDarwin(!header || /^[a-f0-9]{64}$/u.test(header.sha256));
+      return operation({
+        mode: "compile",
+        tool,
+        source: sourceInput,
+        target,
+        helper,
+        ...(header ? { header } : {}),
+      });
+    }
+    if (
+      tool.name === "signer" &&
+      equal(["--force", "--sign", "-", "--timestamp=none", target])
+    )
+      return operation({ mode: "sign", tool, target, helper });
+  }
+  throw new Error("Unapproved Darwin build vector");
+}
+
+function transport(entry, args, deadlineMs) {
+  requireDarwin(
+    process.platform === "darwin" &&
+      process.arch === "x64" &&
+      process.env.CI === "true" &&
+      process.env.GITHUB_ACTIONS === "true" &&
+      process.env.ImageOS === "macos15",
+  );
+  const child = spawn(
+    entry.tools.elevation.path,
+    [
+      "-n",
+      "--",
+      entry.tools.environment.path,
+      "-i",
+      "CI=true",
+      "GITHUB_ACTIONS=true",
+      entry.helper.path,
+      ...args,
+    ],
+    {
+      cwd: path.dirname(entry.helper.path),
+      env: { PATH: "/nonexistent" },
+      stdio: ["pipe", "pipe", hasNativeDiagnostics() ? "pipe" : "ignore"],
+    },
+  );
+  const diagnostics = darwinSignatureDiagnostics({ deadlineMs });
+  return {
+    channel: darwinCustodyChannel(child, {
+      deadlineMs,
+      diagnostics: diagnostics?.diagnostics,
+    }),
+    bindSignatureCaller: diagnostics?.bind,
+  };
+}
+function commandResult(value) {
+  for (const stream of ["stdout", "stderr"]) {
+    const hex = value?.[stream + "Hex"];
+    if (
+      typeof hex === "string" &&
+      hex.length <= 131072 &&
+      /^(?:[a-f0-9]{2})*$/u.test(hex)
+    )
+      nativeDiagnostic("darwin-build-command", {
+        [stream]: Buffer.from(hex, "hex"),
+      });
+  }
+  observationObject(value, ["exitCode", "signal", "stdoutHex", "stderrHex"]);
+  requireDarwin(
+    Number.isInteger(value.exitCode) &&
+      value.exitCode >= 0 &&
+      value.exitCode <= 255 &&
+      value.signal === null &&
+      [value.stdoutHex, value.stderrHex].every(
+        (bytes) =>
+          typeof bytes === "string" && /^(?:[a-f0-9]{2})*$/u.test(bytes),
+      ) &&
+      value.stdoutHex.length + value.stderrHex.length <= 131072,
+  );
+  const decode = (bytes) =>
+    new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(bytes, "hex"));
+  return {
+    exitCode: value.exitCode,
+    signal: value.signal,
+    stdout: decode(value.stdoutHex),
+    stderr: decode(value.stderrHex),
+  };
+}
+
+/** Private native helper parks an already-execed tool, including version
+ * queries. The separately admitted custody reader verifies its actual image. */
+export async function runDarwinBuildCommand(
+  request,
+  operation,
+  entry,
+  reader,
+  persist,
+  { signal, open = transport, beforeRelease } = {},
+) {
+  request = structuredClone(request);
+  operation = structuredClone(operation);
+  entry = structuredClone(entry);
+  requireDarwin(
+    !signal?.aborted &&
+      ["reviewed", "experiment"].includes(request.purpose ?? "reviewed") &&
+      (request.purpose ?? "reviewed") === (operation.purpose ?? "reviewed") &&
+      (request.purpose !== "experiment" ||
+        typeof reader.compilerPolicy === "function"),
+  );
+  if (request.purpose === "experiment") {
+    darwinBuildSdk(operation.sdk, request.env.SDKROOT);
+    darwinBuildToolchain(
+      operation.toolchain,
+      operation.sdk.path,
+      request.env.DEVELOPER_DIR,
+    );
+  }
+  const targetSha256 =
+    operation.mode === "sign"
+      ? entry.targetSha256
+      : (operation.source?.sha256 ?? "-");
+  const args = [
+    operation.mode,
+    request.file,
+    request.toolSha256,
+    entry.toolCdhash,
+    request.cwd,
+    request.env.SDKROOT,
+    operation.source?.path ?? "-",
+    targetSha256,
+    operation.target ?? "-",
+    String(Math.max(1, Math.floor(request.deadlineMs / 1000))),
+    ...(request.purpose === "experiment"
+      ? [
+          operation.header?.sha256 ?? "-",
+          operation.sdk.dev,
+          operation.sdk.ino,
+          operation.sdk.settingsSha256,
+          operation.toolchain.developer.path,
+          operation.toolchain.developer.dev,
+          operation.toolchain.developer.ino,
+          String(1 + operation.toolchain.delegated.length),
+          ...[
+            operation.toolchain.compiler,
+            ...operation.toolchain.delegated,
+          ].flatMap((tool) => [
+            tool.path,
+            tool.sha256,
+            tool.cdhash,
+            tool.dev + ":" + tool.ino,
+          ]),
+        ]
+      : []),
+  ];
+  const save = (record) =>
+    persist({
+      ...purposeData(request),
+      ...record,
+    });
+  const { channel, bindSignatureCaller } = await open(
+      entry,
+      args,
+      request.deadlineMs,
+    ),
+    id = observationDigest(request);
+  let helper,
+    worker,
+    firstFailure,
+    complete = false;
+  const abort = () => channel.close();
+  signal?.addEventListener("abort", abort, { once: true });
+  try {
+    const announced = await channel.receive();
+    observationObject(announced, ["helper"]);
+    helper = normalizeDarwinIdentity(announced.helper);
+    bindSignatureCaller?.(helper);
+    const actualHelper = await reader.helper(helper);
+    requireDarwin(
+      helper.asid > 0 &&
+        actualHelper.sha256 === entry.helper.sha256 &&
+        actualHelper.signature.cdhash === entry.helper.cdhash &&
+        !signal?.aborted,
+    );
+    if (entry.directoryIdentity) {
+      const [dev, , , ino] = entry.directoryIdentity.split(":");
+      requireDarwin(
+        actualHelper.directories.filter(
+          (directory) =>
+            directory.fd === 3 &&
+            directory.dev === dev &&
+            directory.ino === ino &&
+            directory.uid === 0 &&
+            directory.gid === 0 &&
+            directory.mode === 0o700,
+        ).length === 1,
+      );
+    }
+    await save({ phase: "helper", requestSha256: id, helper });
+    const custody = await reader.rootDomain(helper);
+    requireDarwin(
+      custody.complete === true &&
+        custody.independent === true &&
+        custody.members.length === 1 &&
+        sameDarwinIdentity(custody.members[0], helper),
+    );
+    await channel.send("P");
+    const parked = await channel.receive();
+    observationObject(parked, ["worker"]);
+    worker = normalizeDarwinIdentity(parked.worker);
+    const actualWorker = await reader.helper(worker);
+    requireDarwin(
+      helper.pid !== worker.pid &&
+        worker.asid === helper.asid &&
+        sameDarwinIdentity(actualWorker.identity, worker) &&
+        actualWorker.sha256 === request.toolSha256 &&
+        actualWorker.signature.cdhash === entry.toolCdhash &&
+        !signal?.aborted,
+    );
+    // Historical injected readers predate this independent native policy read.
+    const compilerPolicy = reader.compilerPolicy
+      ? await reader.compilerPolicy(worker)
+      : null;
+    await save({
+      phase: "worker",
+      requestSha256: id,
+      helper,
+      worker,
+      compilerPolicy,
+    });
+    await beforeRelease?.();
+    requireDarwin(!signal?.aborted);
+    await channel.send("R");
+    const result = commandResult(await channel.receive());
+    nativeDiagnostic("darwin-build-command", {
+      exitCode: result.exitCode,
+      signal: result.signal,
+    });
+    const workerSettlement = await reader.retired(worker);
+    requireDarwin(
+      workerSettlement.status === "RETIRED" &&
+        workerSettlement.independent === true &&
+        workerSettlement.emergencyCleanup === false,
+    );
+    const domain = await reader.rootDomain(helper);
+    requireDarwin(
+      domain.complete === true &&
+        domain.independent === true &&
+        domain.members.length === 1 &&
+        sameDarwinIdentity(domain.members[0], helper),
+    );
+    if (result.exitCode === 0)
+      await save({
+        phase: "publication-possible",
+        requestSha256: id,
+        output: request.cwd,
+        target: operation.target ?? null,
+        helper,
+        worker,
+      });
+    requireDarwin(!signal?.aborted);
+    await channel.send("S");
+    const exit = await channel.completion,
+      helperSettlement = await reader.retired(helper);
+    requireDarwin(
+      exit.code === 0 &&
+        exit.signal === null &&
+        !signal?.aborted &&
+        helperSettlement.status === "RETIRED" &&
+        helperSettlement.independent === true &&
+        helperSettlement.emergencyCleanup === false,
+    );
+    const finalDomain = await reader.rootDomain(helper);
+    requireDarwin(
+      finalDomain.complete === true &&
+        finalDomain.independent === true &&
+        finalDomain.members.length === 0,
+    );
+    complete = true;
+    return {
+      ...purposeData(request),
+      ...result,
+      timedOut: false,
+      independent: true,
+      identity: worker,
+      helperIdentity: helper,
+      compilerPolicy,
+      requestSha256: id,
+      toolSha256: request.toolSha256,
+      nativeEventSha256: observationDigest({
+        actualHelper,
+        actualWorker,
+        compilerPolicy,
+        result,
+        workerSettlement,
+        helperSettlement,
+        domain,
+        finalDomain,
+      }),
+      settlement: {
+        status: "RETIRED",
+        independent: true,
+        emergencyCleanup: false,
+      },
+    };
+  } catch (cause) {
+    firstFailure = cause;
+    try {
+      nativeException("darwin/build.js:exception", cause);
+    } catch {
+      /* Preserve admission failure. */
+    }
+    throw cause;
+  } finally {
+    signal?.removeEventListener("abort", abort);
+    channel.close();
+    if (!complete) {
+      try {
+        await save({
+          phase: "uncertain",
+          requestSha256: id,
+          helper: helper ?? null,
+          worker: worker ?? null,
+        });
+      } catch (cause) {
+        try {
+          nativeException("darwin/build.js:exception", cause);
+        } catch {
+          /* Preserve cleanup failure. */
+        }
+        if (!firstFailure) throw cause;
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+export const LINUX_FILE_PROOF_BUILD_MS = 10000 + 2 * (20000 + 5000 + 5000);

@@ -328,6 +328,9 @@ export function resolvePipelineConfiguration(
     }
   }
   return Object.freeze({
+    maxEventLogBytes:
+      normalizedProjectConfiguration?.maxEventLogBytes ??
+      normalizedConfiguration.maxEventLogBytes,
     artifactRoot:
       normalizedProjectConfiguration?.artifactRoot ??
       normalizedConfiguration.artifactRoot,
