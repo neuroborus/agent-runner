@@ -353,6 +353,12 @@ EOF/HUP, timeout, poll/read errors and substituted parked identities while
 retaining successful control/data framing. Failed exec retains its saved cause;
 successful exec closes the diagnostic copy. Injected descriptor mappings keep
 ordinary setup stderr separate until exec and preserve provider/payload stdio.
+The same fixture executes the experiment's initial setup and descriptor bodies:
+FD5 reservation must precede injected SDK work, reject failure or any other fd,
+and retain the original stderr, immediate errno and checked owned-reference cleanup.
+Later FD0–5 sanitation, creator/control descriptors, redirected-stderr failure
+transport and successful exec's CLOEXEC closure retain coverage. No native tools,
+harness assignment or slow-tier check is added; matching macOS CI remains required.
 Diagnostic-write and identity/status inspection failures cannot replace the first
 cause or consume protocol data; stderr diagnostics survive transport failure.
 The same launch-body fixture injects fatal termination during reply binding,

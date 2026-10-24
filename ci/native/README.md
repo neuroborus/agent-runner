@@ -8861,6 +8861,14 @@ setup errors. Ordinary children keep that channel through trusted setup and the
 P/R barriers, then join stderr to their original data socket at the exec handoff.
 A close-on-exec diagnostic copy preserves failed-exec errors and cannot reach
 the payload. Child diagnostics use the launcher's saved verified birth.
+Experiment children reserve that copy as exactly FD5 immediately after the initial
+FD0–4 census, before limits, audit-session, credentials or sandbox SDK work.
+Allocation refusal retains its single result and immediate errno through the
+existing checked cleanup. Later sanitation preserves FD5 in the exact FD0–5
+census; FD3/4 keep creator/control ownership and stderr redirection leaves the
+saved original diagnostic channel available. The earlier allocation corrects a
+source-supported ordering defect; its original result and occupant remain unknown,
+and fresh matching macOS CI is still required.
 Successful frames and payload descriptors are unchanged. Setup and
 handshake refusals report the first native operation, direct result, applicable
 saved errno, poll revents and read count/EOF. Bounded secondary observations retain

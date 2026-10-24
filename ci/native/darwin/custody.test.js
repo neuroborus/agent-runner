@@ -3752,6 +3752,23 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .replace("struct identity parked;", "const parked={token:{val:[]}};")
       .replace("char bytes[512];", "const bytes={};")
+      .replace("struct proc_fdinfo fds[4096];", "const fds=[];")
+      .replaceAll("sizeof(fds[0])", "8")
+      .replaceAll("sizeof(fds)", "32768")
+      .replace("auditinfo_addr_t audit = {0};", "const audit={ai_termid:{}};")
+      .replace(
+        "struct rlimit limit = { .rlim_cur = 32, .rlim_max = 32 }, observed;",
+        "const limit={rlim_cur:32,rlim_max:32},observed={};",
+      )
+      .replaceAll(/&(audit|limit)\b/gu, "$1")
+      .replace(
+        "getrlimit(RLIMIT_NPROC, &observed)",
+        "getrlimit(RLIMIT_NPROC, observed)",
+      )
+      .replaceAll("sizeof(audit)", "64")
+      .replace("char *error = NULL;", "let error = null;")
+      .replace("&error", "null")
+      .replaceAll("(const char *)", "")
       .replace(
         "struct sigaction ignored = {0}, previous;",
         "const ignored={sa_mask:{}},previous={};",
@@ -3800,13 +3817,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .replace(/int errors\[8\] = \{([^;]+)\};/u, "const errors=[$1];")
       .replace(/\b(\d+)u\b/gu, "$1")
+      .replaceAll("1U", "1")
       .replaceAll("~0U", "0xffffffff")
       .replaceAll(
         /&(identity|status|waitReady|wait|p|parked|byte|value)\b/gu,
         "$1",
       )
       .replace(
-        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt|observed|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
+        /&(host|access|notify|readback|type|address|access_type|reply_type|names|types|n|nt|observed|only|domain_runtime_reply_owner|domain_runtime_reply_count)\b/gu,
         (_, name) =>
           `{get value(){return ${name}},set value(value){${name}=value}}`,
       )
@@ -3825,7 +3843,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replaceAll("sizeof(*types)", "4")
       .replaceAll("&argv[12]", "argv.slice(12)")
       .replaceAll(
-        /\b(?:int|long|unsigned|bool|ssize_t|pid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
+        /\b(?:int|long|unsigned|bool|ssize_t|size_t|pid_t|gid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
         "let ",
       );
   const [ordinary, protectedBody] = body(launcher, "mach_rights").split(
@@ -3848,6 +3866,16 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     /if \(!child\) \{\s+#ifdef NATIVE_CI_EXPERIMENT\s+launch_replies_begin\(\);\s+#endif\s+launch_stage\("child-entry"/u,
   );
   assert.doesNotMatch(experiment, /mig_dealloc_reply_port|mach_port_destroy/u);
+  const earlySetup = launcher
+    .slice(
+      launcher.indexOf("    need(dup2(ready[1], 3)"),
+      launcher.indexOf("\n#ifdef NATIVE_CI_EXPERIMENT\n    char home"),
+    )
+    .replaceAll(/#(?:ifdef NATIVE_CI_EXPERIMENT|endif)/gu, "");
+  const experimentExec = body(launcher, "child_exec").replace(
+    /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else[\s\S]*?#endif/u,
+    "$1",
+  );
   const functions =
     [
       [reader, "case_launch_failure", "operation,result,error,revents,used"],
@@ -3861,6 +3889,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [launcher, "parked_identity", "fd,child"],
       [launcher, "launch_replies_begin", ""],
       [launcher, "launch_need_at", "ok,file,line"],
+      [launcher, "descriptors", ""],
       [launcher, "launch_replies_changed", "count,runtime"],
       [custody, "domain_runtime_replies_begin", "owner"],
       [custody, "domain_special_reply_lookup", ""],
@@ -3871,7 +3900,9 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       )
       .join("\n") +
     `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}` +
-    `\nfunction experiment_mach_rights(){launch_replies_begin();domain_runtime_reply_imported=true;after_reply_binding();${translate(experiment)}}`;
+    `\nfunction experiment_mach_rights(){launch_replies_begin();domain_runtime_reply_imported=true;after_reply_binding();${translate(experiment)}}` +
+    `\nfunction early_child_setup(){${translate(earlySetup)}}` +
+    `\nfunction experiment_child_exec(argv,environment,provider){${translate(experimentExec)}}`;
   const start = reader.indexOf("static void case_start("),
     setup = reader
       .slice(
@@ -3986,6 +4017,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     ],
     [{ preMach: true }, "fchdir", -1],
     [{ preMach: true, bootstrap: 3, release: "bootstrap" }, "fchdir", -1],
+    ...[-1, 6].map((reservation) => [
+      { reservation },
+      "fcntl-stderr",
+      reservation,
+      24,
+    ]),
+    [{ reservation: -1, release: "bootstrap" }, "fcntl-stderr", -1, 24],
+    [{ reservation: 5 }],
     [{ wrongOwner: true }, "runtime-reply-owner", 99],
     ...["before", "census", "release"].flatMap((at) => [
       [
@@ -4248,6 +4287,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       launcher_identity: {},
       launch_child: 42,
       launch_reply_owner: 0,
+      launch_diagnostic: -1,
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
       TASK_HOST_PORT: 1,
@@ -4299,6 +4339,18 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       argv: Array.from({ length: 14 }, (_, i) => String(i)),
       env: ["LANG=en_US.UTF-8"],
       F_DUPFD_CLOEXEC: 64,
+      F_SETFD: 2,
+      FD_CLOEXEC: 1,
+      PROC_PIDLISTFDS: 4,
+      ready: [7, 8],
+      release: [9, 10],
+      uid: 501,
+      gid: 502,
+      AU_ASSIGN_ASID: -1,
+      AU_DEFAUDITSID: 0,
+      AU_IPv4: 4,
+      RLIMIT_NPROC: 7,
+      policy: "fixture",
       POLLIN: 1,
       P_PID: 1,
       WEXITED: 1,
@@ -4347,6 +4399,15 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       stdout: {},
       provider: false,
       proc_pidinfo(pid, kind, arg, out, size) {
+        if (kind === 4) {
+          assert.deepEqual([pid, arg, size], [42, 0, 32768]);
+          out.splice(
+            0,
+            out.length,
+            ...[...descriptors.keys()].map((proc_fd) => ({ proc_fd })),
+          );
+          return out.length * 8;
+        }
         assert.equal(
           reporter,
           41,
@@ -4437,8 +4498,21 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         return result;
       },
       fcntl(fd, operation, minimum) {
-        assert.deepEqual([fd, operation, minimum], [2, 64, 3]);
-        let copy = minimum;
+        if (operation === 2) {
+          assert.ok(fd === 3 || fd === 4);
+          assert.equal(minimum, 1);
+          cloexec.add(fd);
+          return 0;
+        }
+        if (machCase?.reservation !== undefined) {
+          assert.deepEqual([fd, operation, minimum], [2, 64, 5]);
+          assert.deepEqual([...descriptors.keys()].sort(), [0, 1, 2, 3, 4]);
+          assert.equal(descriptors.get(2), "diagnostic");
+          machCalls.push("reserve");
+          api.errno = 24;
+          if (machCase.reservation === -1) return -1;
+        } else assert.deepEqual([fd, operation, minimum], [2, 64, 3]);
+        let copy = machCase?.reservation ?? minimum;
         while (descriptors.has(copy)) copy++;
         descriptors.set(copy, descriptors.get(fd));
         cloexec.add(copy);
@@ -4509,6 +4583,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         return 1;
       },
       close(fd) {
+        if (machCase?.reservation !== undefined) {
+          assert.ok(fd >= 5 && fd !== api.launch_diagnostic);
+          descriptors.delete(fd);
+          return 0;
+        }
         assert.equal(fd, 8);
         return 0;
       },
@@ -4542,6 +4621,28 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         return fault === "setup" && to === 2 ? 22 : 0;
       },
     };
+    for (const name of [
+      "setrlimit",
+      "setaudit_addr",
+      "getaudit_addr",
+      "setgroups",
+      "setgid",
+      "setuid",
+      "getgroups",
+      "getrlimit",
+      "sandbox_init",
+    ])
+      api[name] = (...args) => {
+        assert.equal(api.launch_diagnostic, 5);
+        assert.equal(descriptors.get(5), "diagnostic");
+        machCalls.push(name);
+        if (name === "getaudit_addr") args[0].ai_asid = 12;
+        if (name === "getgroups") args[1].value = api.gid;
+        if (name === "getrlimit")
+          Object.assign(args[1], { rlim_cur: 32, rlim_max: 32 });
+        if (name === "sandbox_init") descriptors.set(8, "sdk");
+        return name === "getgroups" ? 1 : 0;
+      };
     const acquired = [],
       released = [],
       arrays = [],
@@ -4627,6 +4728,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           change("before");
           if (machCase.wrongOwner) api.launch_reply_owner = 99;
           if (machCase.preMach) native.child_stdio(10, false);
+          if (machCase.reservation !== undefined) {
+            native.child_stdio(10, false);
+            descriptors.set(8, "creator");
+            descriptors.set(9, "release");
+            native.early_child_setup();
+          }
         },
         KERN_INVALID_ARGUMENT: 4,
         KERN_FAILURE: 5,
@@ -4822,7 +4929,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           `\nfunction importConstructorRecord(){domain_runtime_replies_begin(getpid());const name=receipt_name();domain_runtime_replies[domain_runtime_reply_count++]=name;domain_runtime_reply_overflow=domain_runtime_reply_count>8;return name;}
           const entered=launch_stage;
           launch_stage=(...args)=>{const saved=errno;entered(...args);stage_preserved(saved);};
-          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,importConstructorRecord,launch_need_at,setup,capture});`,
+          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,importConstructorRecord,launch_need_at,descriptors,early_child_setup,experiment_child_exec,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
@@ -5024,7 +5131,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           [3, 4, 5],
         );
       }
-      assert.ok(stageAttempts.length <= 11);
+      assert.ok(stageAttempts.length <= (machCase.reservation === 5 ? 14 : 11));
       assert.ok(
         Buffer.byteLength(diagnostics.map(({ line }) => line).join("")) < 8192,
       );
@@ -5047,6 +5154,48 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       assert.equal(reads, 0);
       assert.deepEqual(output, []);
       assert.equal(descriptors.get(2), "diagnostic");
+      if (machCase.reservation !== undefined) {
+        assert.equal(machCalls.filter((call) => call === "reserve").length, 1);
+        assert.equal(
+          machCalls.includes("setrlimit"),
+          machCase.reservation === 5,
+        );
+        if (machCase.reservation === 5) {
+          native.descriptors();
+          assert.deepEqual([...descriptors.keys()].sort(), [0, 1, 2, 3, 4, 5]);
+          assert.deepEqual(
+            [descriptors.get(3), descriptors.get(4)],
+            ["creator", "release"],
+          );
+          assert.ok(cloexec.has(5));
+          const redirect = /dup2\(1, 2\) == 2/u.exec(
+            launcher.slice(
+              launcher.indexOf('launch_stage("parked-publication"'),
+            ),
+          )[0];
+          assert.ok(new Script(redirect).runInNewContext(api));
+          api.domain_prepared_exec = () => {
+            api.errno = 2;
+            return -1;
+          };
+          api.domain_exec_failure = (fd, prefix, suffix, error) => {
+            assert.equal(descriptors.get(fd), "diagnostic");
+            assert.deepEqual([fd, error], [5, 2]);
+            throw new Error("exec refused");
+          };
+          api.launch_exec_suffix = " fixture\n";
+          assert.throws(
+            () => native.experiment_child_exec(api.argv, api.env, false),
+            /exec refused/u,
+          );
+          api.domain_prepared_exec = api.execve;
+          assert.throws(
+            () => native.experiment_child_exec(api.argv, api.env, false),
+            (cause) => cause === replaced,
+          );
+          assert.deepEqual([...descriptors.keys()], [0, 1, 2]);
+        }
+      }
       continue;
     }
     if (fault === "child" || fault === "exec" || fault.startsWith("mach-"))

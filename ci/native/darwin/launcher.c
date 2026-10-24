@@ -706,6 +706,10 @@ int main(int argc, char **argv) {
     child_stdio(workspace, provider);
     launch_stage("child-descriptors", NULL, 0, 0);
     need(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4); descriptors();
+#ifdef NATIVE_CI_EXPERIMENT
+    launch_diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 5); int diagnostic_error = errno;
+    if (!(launch_diagnostic == 5)) launch_failure("fcntl-stderr", launch_diagnostic, diagnostic_error, 0, -1, 0);
+#endif
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
     struct rlimit limit = { .rlim_cur = 32, .rlim_max = 32 }, observed;
@@ -726,7 +730,6 @@ int main(int argc, char **argv) {
     need(length > 0 && (size_t)length < sizeof(home));
     char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
       "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
-    launch_diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 5); need(launch_diagnostic == 5);
     int suffix_size = snprintf(launch_exec_suffix, sizeof(launch_exec_suffix), " revents=0 read=-1 launcher=%d reporter=%d start-seconds=%llu start-micros=%llu\n",
       launcher_pid, getpid(), (unsigned long long)launcher_identity.bsd.pbi_start_tvsec, (unsigned long long)launcher_identity.bsd.pbi_start_tvusec);
     need(suffix_size > 0 && suffix_size < sizeof(launch_exec_suffix));
