@@ -236,6 +236,12 @@ new run persists the resolved value once, so resumes and concurrent runs use
 their own unchanged snapshots. For example, `"trustedCommandTimeoutMs":
 7200000` selects two hours. Capability preparation remains limited to the
 smaller of the resolved value and 10 seconds.
+That single launch-to-close bound includes durable process registration and is
+never renewed by delayed registration or start IPC. Expired or cancelled
+preparation cannot release a payload later; reconciliation drains registration
+and verifies retirement without converting expiry into availability. A bounded
+registration-timeout diagnosis does not assert an isolation incompatibility or
+invent an observed payload exit or signal.
 
 A valid but unavailable frozen request pauses durably as `environment_blocked`
 before provider work, including at creation before any preflight evidence exists.

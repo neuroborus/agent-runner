@@ -800,6 +800,7 @@ export function createTrustedValidationService(options = {}) {
         environment: execution.environment,
         ownershipMode: execution.ownershipMode,
         readinessRequired: execution.readinessRequired ?? false,
+        preparationOnly,
         terminationGraceMs,
         timeoutMs: preparationOnly ? Math.min(timeoutMs, 10_000) : timeoutMs,
         signal,
@@ -908,8 +909,13 @@ export function createTrustedValidationService(options = {}) {
         "process-tree-supervision",
         "spawn",
         "timeout",
+        "registration-timeout",
         "acquisition",
       ].includes(result.reason) ||
+      (result.reason === "registration-timeout" &&
+        (!preparationOnly ||
+          result.status !== "BLOCKED" ||
+          !result.timedOut)) ||
       (result.status === "PASS" &&
         (result.exitCode !== 0 || result.signal !== null || result.timedOut)) ||
       (result.status === "FAIL" &&
@@ -926,7 +932,10 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     if (preparationOnly)
-      return Object.freeze({ available: result.status === "PASS" });
+      return Object.freeze({
+        available: result.status === "PASS",
+        reason: result.reason,
+      });
     return Object.freeze({
       status: result.status,
       commandIdentity: command.identity,
@@ -1022,7 +1031,9 @@ export function createTrustedValidationService(options = {}) {
               commandIdentity: command.identity,
               reason: "unavailable",
               evidence: Object.freeze([
-                "The runner could not prepare the frozen command capabilities.",
+                result.reason === "registration-timeout"
+                  ? "The fixed preparation deadline expired before readiness; registration was drained and the process retired."
+                  : "The runner could not prepare the frozen command capabilities.",
               ]),
             }),
           );

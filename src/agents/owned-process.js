@@ -247,8 +247,11 @@ const SUPERVISOR_SOURCE = String.raw`
 const { readdirSync } = require("node:fs");
 const { spawn } = require("node:child_process");
 const { createHash } = require("node:crypto");
-const [mode, graceText, executable, encodedArguments, extraText, initialToken] =
+const [mode, graceText, executable, encodedArguments, extraText, initialToken, deadlineText] =
   process.argv.slice(1);
+const deadlineNs = deadlineText === undefined || deadlineText === "-"
+  ? null
+  : /^(?:0|[1-9]\d{0,31})$/.test(deadlineText) ? BigInt(deadlineText) : process.exit(126);
 const grace = Number(graceText);
 const argumentsList = JSON.parse(encodedArguments);
 const extra = Number(extraText);
@@ -261,6 +264,15 @@ let launchCutoff;
 let ancestryBaseline;
 let controlGroup;
 let retentionTimer;
+let releaseClosed = false;
+function preparationExpired() {
+  if (deadlineNs === null || process.hrtime.bigint() < deadlineNs) return false;
+  releaseClosed = true;
+  if (process.connected) {
+    process.send({ type: "preparation-expired" }, () => process.exit(124));
+  } else process.exit(124);
+  return true;
+}
 const inspectionBudget = ${inspectionBudget.toString()};
 const exitedProcessEvidence = ${exitedProcessEvidence.toString()};
 const inspectExitedCandidate = ${inspectExitedCandidate.toString()};
@@ -642,6 +654,7 @@ function finish() {
   });
 }
 function terminate(signal = "SIGTERM", verify = false) {
+  releaseClosed = true;
   // Before the start message, this inert supervisor cannot have descendants.
   if (target === undefined) process.exit(124);
   const inspectionComplete = signalDescendants(signal);
@@ -666,7 +679,8 @@ process.on("message", (message) => {
     terminate(message.signal);
     return;
   }
-  if (message?.type !== "start" || target !== undefined) return;
+  if (message?.type !== "start" || target !== undefined || releaseClosed) return;
+  if (preparationExpired()) return;
   if (typeof message.ownerToken !== "string" || message.ownerToken.length !== 64) {
     process.exit(126);
   }
@@ -687,6 +701,7 @@ process.on("message", (message) => {
   ownerToken = message.ownerToken;
   const stdio = [0, 1, 2];
   for (let index = 0; index < extra; index += 1) stdio.push(index + 4);
+  if (preparationExpired()) return;
   try {
     target = spawn(executable, argumentsList, {
       env: { ...process.env, AGENT_RUNNER_OWNED_PROCESS: ownerToken },
@@ -1522,9 +1537,11 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   }
   const {
     captureAncestryBaseline = captureProcessAncestryBaseline,
+    deadlineNs,
     descendantGraceMs = DEFAULT_DESCENDANT_GRACE_MS,
     inspectSessionProcesses = inspectOwnedSessionProcesses,
     onProcess,
+    monotonicNow = process.hrtime.bigint,
     ownershipMode = "ordinary",
     resolveLauncher = resolveOwnedProcessLauncher,
     signal,
@@ -1535,6 +1552,10 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     typeof captureAncestryBaseline !== "function" ||
     typeof inspectSessionProcesses !== "function" ||
     typeof onProcess !== "function" ||
+    typeof monotonicNow !== "function" ||
+    (deadlineNs !== undefined &&
+      (typeof deadlineNs !== "string" ||
+        !/^(?:0|[1-9]\d{0,31})$/u.test(deadlineNs))) ||
     !OWNERSHIP_MODES.has(ownershipMode) ||
     typeof resolveLauncher !== "function" ||
     !Number.isSafeInteger(descendantGraceMs) ||
@@ -1574,6 +1595,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       JSON.stringify(argumentsList),
       String(extra),
       ownerToken,
+      deadlineNs ?? "-",
     ],
     {
       ...spawnOptions,
@@ -1586,7 +1608,8 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let terminationRequested = false;
   let terminationTimer;
   let terminationFailureTimer;
-  let rejectCompletion;
+  let finishCompletion;
+  let terminationFailure = null;
   let retainedContainmentFailure = null;
   let closed = false;
   const killChild = child.kill.bind(child);
@@ -1594,6 +1617,24 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   let launchCutoff = null;
   let controlGroup = null;
   let startRequested = false;
+  child.ownedPayloadRequested = false;
+  const pendingSends = new Set();
+  const send = (message, onFailure) => {
+    const sent = new Promise((resolve) => {
+      const complete = (cause) => {
+        if (cause != null && !closed) onFailure();
+        resolve();
+      };
+      try {
+        child.send(message, complete);
+      } catch (cause) {
+        complete(cause);
+      }
+    });
+    pendingSends.add(sent);
+    void sent.then(() => pendingSends.delete(sent));
+    return sent;
+  };
   const killLauncher = (signal) => {
     if (launcher.isolatedNamespace) {
       try {
@@ -1627,18 +1668,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
     return killLauncher(signal);
   };
   child.kill = (signal = "SIGTERM") => {
-    if (child.exitCode !== null || child.signalCode !== null) return false;
+    if (closed || child.exitCode !== null || child.signalCode !== null)
+      return false;
     terminationRequested = true;
     if (!startRequested) {
       killLauncher(signal);
     } else if (child.connected) {
-      try {
-        child.send({ type: "terminate", signal }, (cause) => {
-          if (cause !== null && cause !== undefined) kill(signal);
-        });
-      } catch {
-        kill(signal);
-      }
+      void send({ type: "terminate", signal }, () => kill(signal));
     } else {
       kill(signal);
     }
@@ -1659,13 +1695,13 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
           if (closed) return;
           child.unref();
           child.channel?.unref?.();
-          rejectCompletion?.(
+          terminationFailure =
             retainedContainmentFailure ??
-              ownedError(
-                "Owned process namespace did not terminate within its bound.",
-                "ERR_EXECUTION_PROCESS_ACTIVE",
-              ),
-          );
+            ownedError(
+              "Owned process namespace did not terminate within its bound.",
+              "ERR_EXECUTION_PROCESS_ACTIVE",
+            );
+          void finishCompletion();
         },
         descendantGraceMs * 2 + 1,
       );
@@ -1674,23 +1710,31 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
   };
   let abort;
   child.ownedCompletion = new Promise((resolve, reject) => {
-    rejectCompletion = reject;
     let registered = false;
     let registration = null;
     let failure = null;
     let supervision = null;
     let settled = false;
     const finish = async () => {
-      if (settled || !closed) return;
+      if (settled || (!closed && terminationFailure === null)) return;
+      clearTimeout(terminationTimer);
+      clearTimeout(terminationFailureTimer);
       // A successful durable registration must be cleared before completion.
       if (registration !== null) {
         await registration.catch(() => {});
-        if (settled || !closed) return;
+        if (settled) return;
       }
+      await Promise.all(pendingSends);
+      if (settled) return;
       settled = true;
       clearTimeout(terminationTimer);
       clearTimeout(terminationFailureTimer);
       signal?.removeEventListener("abort", abort);
+      child.removeListener("message", onMessage);
+      if (!closed) {
+        reject(terminationFailure);
+        return;
+      }
       activeProcesses.delete(child.ownedPid);
       let terminationContainmentVerified = false;
       if (
@@ -1738,7 +1782,7 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       if (supervision === null) {
         if (registered && safelyStopped) {
           resolve({
-            outcome: { type: "close", exitCode: null, signal: "SIGKILL" },
+            outcome: { type: "close", exitCode: null, signal: null },
             descendantsStopped: true,
           });
           return;
@@ -1755,17 +1799,33 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
       }
       resolve(supervision);
     };
+    finishCompletion = () => finish().catch(reject);
     child.once("error", (cause) => {
+      if (settled) return;
       failure = cause;
       supervision = { outcome: { type: "error" }, descendantsStopped: false };
-      closed = true;
-      void finish();
+      if (Number.isSafeInteger(child.pid)) child.kill("SIGKILL");
     });
     child.once("close", () => {
+      if (settled) return;
       closed = true;
-      void finish();
+      void finishCompletion();
     });
-    child.on("message", async (message) => {
+    const onMessage = async (message) => {
+      if (closed || settled) return;
+      if (message?.type === "preparation-expired") {
+        child.ownedPreparationExpired = true;
+        terminationRequested = true;
+        // This message is emitted only before the supervisor spawns a target.
+        // Close still must be observed before clearing durable registration.
+        supervision = {
+          outcome: { type: "close", exitCode: null, signal: null },
+          descendantsStopped: false,
+          descendantsActive: false,
+          inspectionComplete: true,
+        };
+        return;
+      }
       if (message?.type === "containment-failure") {
         const unverifiable = message.code === "unverifiable";
         retainedContainmentFailure ??= ownedError(
@@ -1858,10 +1918,16 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
         await onProcess(child.ownedPid, proof);
         registered = true;
         ownerToken = ownedProcessToken(child.ownedPid, processIdentity);
+        if (deadlineNs !== undefined && monotonicNow() >= BigInt(deadlineNs)) {
+          child.ownedPreparationExpired = true;
+          child.kill("SIGKILL");
+          return;
+        }
         if (closed || terminationRequested) return;
         startRequested = true;
+        child.ownedPayloadRequested = true;
         activeProcesses.set(child.ownedPid, child);
-        child.send(
+        await send(
           {
             type: "start",
             ownerToken,
@@ -1869,22 +1935,18 @@ export function spawnOwnedProcess(file, argumentsList = [], options = {}) {
             ancestryBaseline,
             controlGroup,
           },
-          (cause) => {
-            if (cause !== null && cause !== undefined) child.kill("SIGKILL");
-          },
+          () => child.kill("SIGKILL"),
         );
-      })();
-      try {
-        await registration;
-      } catch (cause) {
+      })().catch((cause) => {
         failure = cause;
         supervision = { outcome: { type: "error" }, descendantsStopped: false };
         child.kill("SIGKILL");
-      } finally {
-        registration = null;
-        if (closed) void finish();
-      }
-    });
+      });
+      await registration;
+      registration = null;
+      if (closed) void finishCompletion();
+    };
+    child.on("message", onMessage);
     abort = () => child.kill("SIGKILL");
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();

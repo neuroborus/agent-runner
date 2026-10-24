@@ -433,6 +433,11 @@ source-projection authority. Version 1 and version 2 retain their exact policy
 and evidence bindings and use the deterministic one-hour fallback. Migration
 never upgrades authority or reloads declarations. Capability preparation uses
 the smaller of the snapshot deadline and 10 seconds.
+This is one absolute monotonic launch-to-close deadline including durable
+registration, checked again by the supervisor at payload admission. Expiry or
+cancellation permanently closes release; pending registration and verified
+retirement must drain, with uncertain ownership retained. Reconciliation never
+turns an expired preparation into availability or required-check evidence.
 
 Bootstrap and validation migration report bounded exact-command needs alongside
 each active role's inventory. `capabilityRequirements` permits 256 reports per

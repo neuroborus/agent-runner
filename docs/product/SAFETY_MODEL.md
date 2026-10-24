@@ -154,6 +154,12 @@ worktree exclusion and reconciliation.
 The runner connects that protocol to an owned-process abort boundary. Provider
 and trusted-command processes wait for durable registration before executing;
 runner loss closes their private control pipe and starts bounded cleanup.
+Trusted preparation uses one unchanged launch-to-close deadline, including
+registration. Expiry and cancellation irreversibly deny payload release;
+late registration must drain and retire rather than revive the attempt.
+The supervisor independently checks the same absolute monotonic deadline before
+admitting queued start IPC. Completion awaits registration and retirement;
+uncertain durable publication or descendant retirement keeps ownership reserved.
 Trusted command capability requests are closed and fingerprinted. Scratch/cache
 declarations cannot name host paths or environment bindings. Artifact declarations
 pin canonical HTTPS URLs and SHA-256 digests; they do not authorize raw network,

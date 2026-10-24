@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import {
   chmod,
   mkdir,
@@ -15,8 +15,13 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 
-import { readProcessIdentity } from "../src/agents/index.js";
+import {
+  readProcessIdentity,
+  resolveOwnedProcessLauncher,
+  spawnOwnedProcess,
+} from "../src/agents/index.js";
 import { createGitService } from "../src/git/index.js";
 import {
   createTrustedValidationService,
@@ -1666,3 +1671,453 @@ for (const testCase of [
     );
   });
 }
+
+function sessionLauncher(cwd, { ownershipMode }) {
+  return resolveOwnedProcessLauncher(cwd, {
+    bubblewrap: process.execPath,
+    cache: new Map(),
+    namespaceId: "pid:[4026531836]",
+    ownershipMode,
+    probe: () => ({ status: 1 }),
+  });
+}
+
+// Keep real service -> executor -> supervisor routing. Only publication and
+// clock delivery are controlled; the process proof and retirement are real.
+function preparation(
+  t,
+  {
+    failRegistration = false,
+    failRetirement = false,
+    probeExitCode = 0,
+    supervisorExpired = false,
+    holdClose = false,
+  } = {},
+) {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const snapshot = createTrustedValidationSnapshot(
+    {
+      check: {
+        command: "node check.js",
+        executable: process.execPath,
+        arguments: ["--eval", "throw new Error('check body must not run')"],
+      },
+    },
+    ["check"],
+    40_000,
+  );
+  const registered = Promise.withResolvers();
+  const registration = Promise.withResolvers();
+  const retiring = Promise.withResolvers();
+  const retirement = Promise.withResolvers();
+  const physicalClose = Promise.withResolvers();
+  let releaseClose;
+  const publicationFailure = Object.assign(
+    new Error("publication interrupted"),
+    {
+      code: "ERR_TEST_PUBLICATION",
+    },
+  );
+  const base = process.hrtime.bigint();
+  let elapsedMs = 0;
+  let child;
+  let executionResult;
+  const work = {
+    registrations: 0,
+    retirements: 0,
+    inspections: 0,
+    repositoryChecks: 0,
+  };
+  const service = createTrustedValidationService({
+    git: {
+      async snapshot() {
+        return {
+          projectPath: process.cwd(),
+          contentFingerprint: createHash("sha256")
+            .update("content")
+            .digest("hex"),
+        };
+      },
+      async assertUnchanged() {
+        work.repositoryChecks += 1;
+      },
+    },
+    sandboxCommand(command, options) {
+      assert.equal(command.identity, snapshot.commands[0].identity);
+      assert.equal(options.preparationOnly, true);
+      return {
+        command: {
+          executable: process.execPath,
+          arguments: [
+            "--eval",
+            `require("node:fs").writeSync(3,Buffer.from([1]));process.exit(${probeExitCode})`,
+          ],
+        },
+        environment: process.env,
+        ownershipMode: "native-sandbox-provider",
+        readinessRequired: true,
+      };
+    },
+    async runCommand(command, options) {
+      assert.equal(options.timeoutMs, 10_000);
+      assert.equal(options.preparationOnly, true);
+      executionResult = await runExactCommand(command, {
+        ...options,
+        monotonicNow: () => base + BigInt(elapsedMs) * 1_000_000n,
+        spawnProcess(file, argumentsList, spawnOptions) {
+          assert.equal(spawnOptions.deadlineNs, String(base + 10_000_000_000n));
+          child = spawnOwnedProcess(file, argumentsList, {
+            ...spawnOptions,
+            resolveLauncher(cwd, launcherOptions) {
+              const launcher = sessionLauncher(cwd, launcherOptions);
+              if (!supervisorExpired) return launcher;
+              return {
+                ...launcher,
+                arguments: launcher.arguments.map((value, index) =>
+                  index === 1
+                    ? `process.hrtime.bigint = () => ${spawnOptions.deadlineNs}n;\n${value}`
+                    : value,
+                ),
+              };
+            },
+            inspectSessionProcesses() {
+              work.inspections += 1;
+              return null;
+            },
+          });
+          if (holdClose) {
+            const emit = child.emit.bind(child);
+            child.emit = (event, ...values) => {
+              if (event !== "close") return emit(event, ...values);
+              releaseClose = () => emit(event, ...values);
+              physicalClose.resolve();
+              return true;
+            };
+          }
+          return child;
+        },
+      });
+      return executionResult;
+    },
+  });
+  const controller = new AbortController();
+  const completion = service.inspectRequirements({
+    inventory: [snapshot.commands[0].command],
+    snapshot,
+    projectPath: process.cwd(),
+    signal: controller.signal,
+    async onResource() {
+      assert.fail("this probe allocates no resource");
+    },
+    async onProcess(pid, proof) {
+      if (pid !== null) {
+        work.registrations += 1;
+        assert.deepEqual(proof.launchCutoff, proof.processIdentity);
+        assert.ok(proof.ancestryBaseline.length > 0);
+        assert.match(proof.controlGroup, /^[a-f0-9]{64}$/u);
+        registered.resolve();
+        await registration.promise;
+        if (failRegistration) throw publicationFailure;
+      } else {
+        work.retirements += 1;
+        retiring.resolve();
+        await retirement.promise;
+        if (failRetirement) throw publicationFailure;
+      }
+    },
+  });
+  // Observe rejection immediately while the test controls pending operations.
+  void completion.catch(() => {});
+  t.after(async () => {
+    registration.resolve();
+    retirement.resolve();
+    child?.kill("SIGKILL");
+    releaseClose?.();
+    await completion.catch(() => {});
+  });
+  return {
+    registered: registered.promise,
+    registration,
+    retiring: retiring.promise,
+    retirement,
+    completion,
+    controller,
+    work,
+    publicationFailure,
+    physicalClose: physicalClose.promise,
+    releaseClose: () => releaseClose(),
+    advance(value) {
+      elapsedMs = value;
+    },
+    get child() {
+      return child;
+    },
+    get result() {
+      return executionResult;
+    },
+  };
+}
+
+for (const elapsed of [9_999, 10_000, 10_001]) {
+  test(
+    `preparation registration at ${elapsed}ms uses the original deadline`,
+    { timeout: 5_000 },
+    async (t) => {
+      const run = preparation(t);
+      await run.registered;
+      run.advance(elapsed); // Deliberately do not deliver the timeout callback.
+      run.registration.resolve();
+      await run.retiring;
+      let completed = false;
+      void run.completion.finally(() => {
+        completed = true;
+      });
+      await new Promise(setImmediate);
+      assert.equal(
+        completed,
+        false,
+        "durable retirement precedes availability",
+      );
+      run.retirement.resolve();
+      const report = await run.completion;
+      assert.equal(report.status, elapsed < 10_000 ? "READY" : "BLOCKED");
+      assert.equal(run.child.ownedPayloadRequested, elapsed < 10_000);
+      assert.equal(run.result.timedOut, elapsed >= 10_000);
+      assert.equal(run.result.exitCode, elapsed < 10_000 ? 0 : null);
+      assert.equal(run.result.signal, null);
+      assert.equal(run.work.registrations, 1);
+      assert.equal(run.work.retirements, 1);
+      assert.equal(run.work.repositoryChecks, 1);
+      assert.equal(
+        run.work.inspections,
+        0,
+        "an inert supervisor needs no session scan",
+      );
+      if (elapsed >= 10_000) {
+        assert.equal(run.result.reason, "registration-timeout");
+        assert.match(report.blockers[0].evidence[0], /deadline expired/u);
+      }
+      const settled = { ...run.work };
+      t.mock.timers.tick(100_000);
+      await new Promise(setImmediate);
+      assert.deepEqual(
+        run.work,
+        settled,
+        "no callback publishes after completion",
+      );
+    },
+  );
+}
+
+test(
+  "observed close after expiry cannot pass when timer delivery is delayed",
+  { timeout: 5_000 },
+  async (t) => {
+    const run = preparation(t, { probeExitCode: 7 });
+    await run.registered;
+    run.child.stdio[4].once("data", () => run.advance(10_000));
+    run.registration.resolve();
+    await run.retiring;
+    run.retirement.resolve();
+    assert.equal((await run.completion).status, "BLOCKED");
+    assert.equal(run.child.ownedPayloadRequested, true);
+    assert.deepEqual(run.result, {
+      status: "BLOCKED",
+      exitCode: 7,
+      signal: null,
+      timedOut: true,
+      reason: "timeout",
+    });
+  },
+);
+
+test(
+  "drains supervisor admission expiry without inventing a payload outcome",
+  { timeout: 5_000 },
+  async (t) => {
+    const run = preparation(t, { supervisorExpired: true });
+    await run.registered;
+    run.registration.resolve();
+    await run.retiring;
+    run.retirement.resolve();
+    assert.equal((await run.completion).status, "BLOCKED");
+    assert.equal(run.child.ownedPayloadRequested, true);
+    assert.deepEqual(run.result, {
+      status: "BLOCKED",
+      exitCode: null,
+      signal: null,
+      timedOut: true,
+      reason: "registration-timeout",
+    });
+    assert.equal(run.work.inspections, 0);
+  },
+);
+
+for (const stop of ["expiry", "cancellation", "close", "error"]) {
+  test(
+    `drains pending registration after ${stop} without releasing payload`,
+    { timeout: 5_000 },
+    async (t) => {
+      const run = preparation(t);
+      await run.registered;
+      const closed = new Promise((resolve) => run.child.once("close", resolve));
+      if (stop === "expiry") {
+        run.advance(10_000);
+        t.mock.timers.tick(10_000);
+      } else if (stop === "cancellation") {
+        run.controller.abort();
+      } else if (stop === "error") {
+        run.child.emit("error", run.publicationFailure);
+      } else {
+        run.child.kill("SIGKILL");
+      }
+      await closed;
+      let completed = false;
+      void run.completion.then(
+        () => {
+          completed = true;
+        },
+        () => {
+          completed = true;
+        },
+      );
+      t.mock.timers.tick(100_000);
+      await new Promise(setImmediate);
+      assert.equal(completed, false);
+      assert.equal(run.work.retirements, 0);
+      run.registration.resolve();
+      await run.retiring;
+      assert.equal(run.child.ownedPayloadRequested, false);
+      run.retirement.resolve();
+      if (stop === "cancellation")
+        await assert.rejects(run.completion, { name: "AbortError" });
+      else assert.equal((await run.completion).status, "BLOCKED");
+      assert.equal(run.work.retirements, 1);
+      assert.equal(run.work.inspections, 0);
+    },
+  );
+}
+
+test(
+  "termination watchdog drains registration and reserves an unverified close",
+  { timeout: 5_000 },
+  async (t) => {
+    const run = preparation(t, { holdClose: true });
+    await run.registered;
+    run.advance(10_000);
+    t.mock.timers.tick(10_000);
+    await run.physicalClose;
+    t.mock.timers.tick(2_001);
+    let completed = false;
+    void run.completion.catch(() => {
+      completed = true;
+    });
+    await new Promise(setImmediate);
+    assert.equal(
+      completed,
+      false,
+      "watchdog cannot bypass pending registration",
+    );
+    run.registration.resolve();
+    await assert.rejects(run.completion, {
+      code: "ERR_EXECUTION_PROCESS_ACTIVE",
+    });
+    assert.equal(run.work.retirements, 0);
+    assert.equal(run.work.repositoryChecks, 0);
+    const settled = { ...run.work };
+    run.releaseClose();
+    t.mock.timers.tick(100_000);
+    await new Promise(setImmediate);
+    assert.deepEqual(
+      run.work,
+      settled,
+      "late close cannot publish retirement after return",
+    );
+  },
+);
+
+for (const phase of ["Registration", "Retirement"]) {
+  test(
+    `interrupted ${phase.toLowerCase()} publication retains uncertain ownership`,
+    { timeout: 5_000 },
+    async (t) => {
+      const run = preparation(t, { [`fail${phase}`]: true });
+      await run.registered;
+      const closed = once(run.child, "close");
+      run.advance(10_000);
+      run.registration.resolve();
+      await closed;
+      if (phase === "Retirement") await run.retiring;
+      run.retirement.resolve();
+      await assert.rejects(run.completion, {
+        code: "ERR_EXECUTION_PROCESS_ACTIVE",
+      });
+      assert.equal(run.work.retirements, phase === "Registration" ? 0 : 1);
+      assert.equal(run.work.repositoryChecks, 0);
+      assert.equal(run.child.ownedPayloadRequested, false);
+      const settled = { ...run.work };
+      t.mock.timers.tick(100_000);
+      await new Promise(setImmediate);
+      assert.deepEqual(run.work, settled);
+    },
+  );
+}
+
+test("supervisor rejects queued start IPC at the same absolute deadline", () => {
+  const source = sessionLauncher(process.cwd(), {
+    ownershipMode: "native-sandbox-provider",
+  }).arguments[1];
+  for (const clocks of [[999n, 999n], [1000n], [1001n], [999n, 1000n]]) {
+    let spawned = 0;
+    const messages = [];
+    const handlers = new Map();
+    const expired = new Error("supervisor exited");
+    let now = 0;
+    const context = {
+      process: {
+        argv: [
+          "node",
+          "namespace",
+          "1000",
+          "unused",
+          "[]",
+          "0",
+          "token",
+          "1000",
+        ],
+        connected: true,
+        hrtime: { bigint: () => clocks[Math.min(now++, clocks.length - 1)] },
+        on: (event, handler) => handlers.set(event, handler),
+        send(message, callback) {
+          messages.push(message);
+          callback?.();
+        },
+        exit(code) {
+          assert.equal(code, 124);
+          throw expired;
+        },
+      },
+      require(name) {
+        if (name === "node:fs") return {};
+        if (name === "node:crypto") return { createHash };
+        assert.equal(name, "node:child_process");
+        return {
+          spawn() {
+            spawned += 1;
+            return { once() {} };
+          },
+        };
+      },
+    };
+    runInNewContext(source, context);
+    const start = () =>
+      handlers.get("message")({ type: "start", ownerToken: "a".repeat(64) });
+    if (clocks.at(-1) < 1000n) start();
+    else assert.throws(start, (cause) => cause === expired);
+    assert.equal(spawned, clocks.at(-1) < 1000n ? 1 : 0);
+    assert.equal(
+      messages.at(-1).type,
+      spawned ? "ready" : "preparation-expired",
+    );
+  }
+});

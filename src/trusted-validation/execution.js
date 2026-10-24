@@ -223,11 +223,13 @@ export async function runExactCommand(
     cwd,
     environment,
     ownershipMode = "ordinary",
+    preparationOnly = false,
     readinessRequired = false,
     terminationGraceMs = DEFAULT_TERMINATION_GRACE_MS,
     timeoutMs,
     signal,
     onProcess,
+    monotonicNow = process.hrtime.bigint,
     spawnProcess = onProcess === undefined ? spawn : spawnOwnedProcess,
   },
 ) {
@@ -241,6 +243,13 @@ export async function runExactCommand(
       reason: "process-tree-supervision",
     };
   }
+  // hrtime uses the same monotonic origin in the runner and its supervisor.
+  // Start before launch, including synchronous launch work and registration.
+  const deadlineNs = preparationOnly
+    ? monotonicNow() + BigInt(timeoutMs) * 1_000_000n
+    : undefined;
+  const deadlineExpired = () =>
+    deadlineNs !== undefined && monotonicNow() >= deadlineNs;
   let child;
   try {
     child = spawnProcess(command.executable, command.arguments, {
@@ -258,6 +267,9 @@ export async function runExactCommand(
             onProcess,
             ownershipMode,
             descendantGraceMs: terminationGraceMs,
+            ...(preparationOnly
+              ? { deadlineNs: String(deadlineNs), monotonicNow }
+              : {}),
           }),
     });
   } catch {
@@ -269,11 +281,13 @@ export async function runExactCommand(
       reason: "spawn",
     };
   }
+  let closedAfterDeadline = false;
   const closed = new Promise((resolvePromise) => {
     child.once("error", () => resolvePromise({ type: "error" }));
-    child.once("close", (exitCode, signal) =>
-      resolvePromise({ type: "close", exitCode, signal }),
-    );
+    child.once("close", (exitCode, signal) => {
+      closedAfterDeadline = deadlineExpired();
+      resolvePromise({ type: "close", exitCode, signal });
+    });
   });
   let ready = !readinessRequired;
   child.stdout?.resume();
@@ -284,7 +298,17 @@ export async function runExactCommand(
   });
   let timeout;
   const expired = new Promise((resolvePromise) => {
-    timeout = setTimeout(() => resolvePromise({ type: "timeout" }), timeoutMs);
+    const remainingMs =
+      deadlineNs === undefined
+        ? timeoutMs
+        : Math.max(
+            0,
+            Math.ceil(Number(deadlineNs - monotonicNow()) / 1_000_000),
+          );
+    timeout = setTimeout(
+      () => resolvePromise({ type: "timeout" }),
+      remainingMs,
+    );
     timeout.unref();
   });
   let abort;
@@ -293,7 +317,9 @@ export async function runExactCommand(
     signal?.addEventListener("abort", abort, { once: true });
     if (signal?.aborted) abort();
   });
-  const outcome = await Promise.race([closed, expired, aborted]);
+  let outcome = await Promise.race([closed, expired, aborted]);
+  if (outcome.type === "close" && closedAfterDeadline)
+    outcome = { type: "timeout" };
   signal?.removeEventListener("abort", abort);
   clearTimeout(timeout);
   if (outcome.type === "error" || !Number.isSafeInteger(child.pid)) {
@@ -313,32 +339,54 @@ export async function runExactCommand(
     if (child.ownedCompletion === undefined) {
       terminated = await terminateProcessGroup(child.pid, terminationGraceMs);
     } else child.kill("SIGKILL");
+    let closeTimer;
     const finalOutcome = await Promise.race([
       closed,
-      delay(terminationGraceMs).then(() => null),
+      new Promise((resolve) => {
+        closeTimer = setTimeout(() => resolve(null), terminationGraceMs);
+      }),
     ]);
+    clearTimeout(closeTimer);
     if (!terminated) {
       throw new TrustedExecutionError(
         "Trusted validation process tree could not be terminated.",
         { code: "ERR_TRUSTED_VALIDATION_PROCESS_TREE_ACTIVE" },
       );
     }
-    await child.ownedCompletion;
+    const supervision = await child.ownedCompletion;
     signal?.throwIfAborted();
+    const observed =
+      child.ownedCompletion === undefined ? finalOutcome : supervision?.outcome;
     return {
       status: "BLOCKED",
-      exitCode: Number.isSafeInteger(finalOutcome?.exitCode)
-        ? finalOutcome.exitCode
+      exitCode: Number.isSafeInteger(observed?.exitCode)
+        ? observed.exitCode
         : null,
-      signal:
-        typeof finalOutcome?.signal === "string" ? finalOutcome.signal : null,
+      signal: typeof observed?.signal === "string" ? observed.signal : null,
       timedOut: true,
-      reason: ready ? "timeout" : "isolation",
+      reason:
+        child.ownedPreparationExpired ||
+        (preparationOnly && child.ownedPayloadRequested === false)
+          ? "registration-timeout"
+          : preparationOnly || ready
+            ? "timeout"
+            : "isolation",
     };
   }
   const supervision = await child.ownedCompletion;
   signal?.throwIfAborted();
   const executed = supervision?.outcome ?? outcome;
+  if (child.ownedPreparationExpired) {
+    return {
+      status: "BLOCKED",
+      exitCode: Number.isSafeInteger(executed.exitCode)
+        ? executed.exitCode
+        : null,
+      signal: typeof executed.signal === "string" ? executed.signal : null,
+      timedOut: true,
+      reason: "registration-timeout",
+    };
+  }
   if (executed.type === "error") {
     return {
       status: "BLOCKED",

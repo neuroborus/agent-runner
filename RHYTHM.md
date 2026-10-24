@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-24
 
+- **Preparation release closes at its original deadline.** Trusted capability
+  probes carry one absolute monotonic launch-to-close deadline through durable
+  registration and supervisor admission. Delayed publication or queued IPC
+  cannot renew the allowance. Expiry and cancellation drain registration and
+  verified retirement without releasing late work; uncertain ownership stays
+  reserved. Registration expiry is distinct from observed isolation failure,
+  and requested termination never supplies an unobserved payload signal.
+
 - **Execution size assessment is prepared without activating refinement.**
   Descriptor-owned target/multiplier settings default to 900/3, reject unsafe
   arithmetic and persist on resume. A private read-only policy binds atomic

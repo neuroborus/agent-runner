@@ -324,6 +324,11 @@ projection authority. Legacy version-1 and version-2 snapshots retain their
 policy, exact fingerprints, and evidence bindings with the deterministic one-
 hour fallback, without configuration reload or authority upgrades. Capability
 preparation uses the smaller of the snapshot deadline and 10 seconds.
+This is one absolute monotonic launch-to-close deadline including durable
+registration, checked again by the supervisor at payload admission. Expiry or
+cancellation permanently closes release; pending registration and verified
+retirement must drain, with uncertain ownership retained. Reconciliation never
+turns an expired preparation into availability or required-check evidence.
 
 Unavailable frozen requests create a durable `environment_blocked` pause before
 provider work. Early pauses retain `preflightComplete: false`, null baseline,

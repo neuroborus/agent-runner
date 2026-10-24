@@ -3237,6 +3237,17 @@ run snapshot. The public `trustedCommandTimeoutMs` default is 60 minutes, and
 capability preparation uses `Math.min(timeoutMs, 10_000)`. The service has no
 construction-time timeout override, so no second deadline of this operational
 class can bypass the per-run configuration contract.
+Preparation starts one absolute `process.hrtime.bigint()` deadline before
+launch, including durable registration through observed close. The runner and
+supervisor compare that same monotonic deadline after registration and at
+payload admission; queued IPC never starts a new relative allowance. Expiry or
+cancellation permanently closes release authority. Pending registration, IPC
+callbacks, and verified retirement drain before completion, even after expiry;
+uncertain publication or retirement retains ownership. A registration deadline
+failure is distinguished from observed isolation failure, and an unobserved
+payload exit or signal remains null rather than copying launcher status or a
+requested termination signal. Preparation still runs only the empty sandbox
+probe and grants no required-check evidence.
 
 Command completion, failure, timeout, and cancellation retire descendants before
 confined cleanup and repository mutation checks. Resume and operator-stop recovery
