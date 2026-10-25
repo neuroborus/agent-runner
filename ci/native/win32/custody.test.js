@@ -12663,6 +12663,285 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
   }
 });
 
+test("literal output drains the original pipe before exit and shares the release deadline", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:BOOL|DWORD|int) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const project = (text) =>
+    text
+      .replace(
+        "memset(&original_literal_output,0,sizeof(original_literal_output));",
+        "original_literal_output=freshOutput();",
+      )
+      .replace(
+        "const struct literal_output_fact *value=&original_literal_output;",
+        "const value=original_literal_output;",
+      )
+      .replaceAll("value->", "value.")
+      .replaceAll("output+used-1", "{target:output,offset:used-1}")
+      .replaceAll("byte=='\\n'", "byte===10")
+      .replaceAll(
+        "&original_literal_output.exitCode",
+        "{get value(){return original_literal_output.exitCode},set value(v){original_literal_output.exitCode=v}}",
+      )
+      .replace(
+        /&(available|used|byte)\b/gu,
+        (_match, name) =>
+          `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replaceAll("(DWORD)", "")
+      .replace(/\b(?:DWORD|ULONGLONG|BYTE|BOOL|int) /gu, "let ");
+  const script = new Script(
+    [
+      ["refusal_remaining", ""],
+      ["ownership_literal_refuse", "reason,error"],
+      ["ownership_literal_read", "process,input,bytes,maximum"],
+      ["ownership_literal_context", "output,maximum,used"],
+    ]
+      .map(
+        ([name, args]) => `function ${name}(${args}){${project(body(name))}}`,
+      )
+      .join("\n") +
+      "\n({read:ownership_literal_read,remaining:refusal_remaining,context:ownership_literal_context})",
+  );
+  for (const fault of [
+    "empty-exit",
+    "partial-exit",
+    "buffered-exit",
+    "delayed-output",
+    "exit-during-poll",
+    "delayed-exit",
+    "live-empty",
+    "live-partial",
+    "complete-live",
+    "expired",
+    "drain-expiry",
+    "peek-error",
+    "read-error",
+    "short-read",
+    "wait-error",
+    "wait-result",
+    "exit-error",
+    "bad-byte",
+    "frame-bound",
+    "nonzero-buffered",
+  ]) {
+    let tick = fault === "expired" ? 31000 : 1000,
+      error = 109;
+    let done = [
+      "empty-exit",
+      "partial-exit",
+      "buffered-exit",
+      "exit-error",
+      "nonzero-buffered",
+    ].includes(fault);
+    let queued = Buffer.from(
+      ["partial-exit", "live-partial", "delayed-exit"].includes(fault)
+        ? "{"
+        : [
+              "buffered-exit",
+              "complete-live",
+              "exit-error",
+              "read-error",
+              "short-read",
+              "frame-bound",
+              "nonzero-buffered",
+              "drain-expiry",
+            ].includes(fault)
+          ? "ok\n"
+          : "",
+    );
+    if (fault === "bad-byte") queued = Buffer.from([0]);
+    const calls = [],
+      bytes = [];
+    const freshOutput = () => ({
+      active: false,
+      complete: false,
+      exitRead: false,
+      used: 0,
+      available: 0,
+      readBytes: 0,
+      waited: 0,
+      waitError: 0,
+      exitCode: 0,
+      exitError: 0,
+      pipeError: 0,
+    });
+    const api = {
+      freshOutput,
+      original_literal_output: freshOutput(),
+      original_refusal: { tick: 1000 },
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      MAXDWORD: 0xffffffff,
+      WAIT_OBJECT_0: 0,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 0xffffffff,
+      GetTickCount64: () => tick,
+      GetLastError: () => error,
+      SetLastError: (v) => {
+        error = v;
+      },
+      PeekNamedPipe(input, _buffer, _size, _read, available) {
+        assert.equal(input, 7);
+        calls.push("peek");
+        if (fault === "peek-error") {
+          error = 5;
+          return false;
+        }
+        available.value = queued.length;
+        return true;
+      },
+      ReadFile(input, out, size, used) {
+        assert.equal(input, 7);
+        assert.equal(size, 1);
+        assert.ok(queued.length);
+        calls.push("read");
+        tick++;
+        if (fault === "read-error") {
+          error = 87;
+          return false;
+        }
+        if (fault === "short-read") {
+          used.value = 0;
+          return true;
+        }
+        out.value = queued[0];
+        queued = queued.subarray(1);
+        used.value = 1;
+        if (fault === "drain-expiry") tick = 31000;
+        return true;
+      },
+      WaitForSingleObject(process, remaining) {
+        assert.equal(process, 43);
+        calls.push("wait");
+        assert.ok(remaining >= 0 && remaining <= 31000 - tick);
+        if (fault === "wait-error") {
+          error = 6;
+          return 0xffffffff;
+        }
+        if (fault === "wait-result") return 128;
+        if (fault === "exit-during-poll" && !done) {
+          queued = Buffer.from("ok\n");
+          done = true;
+          return 0;
+        }
+        if (done) return 0;
+        if (!remaining) return 258;
+        if (["delayed-output", "delayed-exit"].includes(fault)) {
+          tick += Math.min(remaining, 7);
+          done = true;
+          if (fault === "delayed-output") queued = Buffer.from("ok\n");
+          return 0;
+        }
+        tick += remaining;
+        return 258;
+      },
+      GetExitCodeProcess(process, out) {
+        assert.equal(process, 43);
+        assert.equal(queued.length, 0);
+        calls.push("exit");
+        if (fault === "exit-error") {
+          error = 87;
+          return false;
+        }
+        out.value = ["empty-exit", "partial-exit", "nonzero-buffered"].includes(
+          fault,
+        )
+          ? 0xc0000022
+          : 0;
+        return true;
+      },
+      sprintf_s(out, maximum, format, ...values) {
+        let i = 0;
+        const value = format.replace(/%(?:lu|ld|[su])/gu, (match) =>
+          match === "%s" ? String(values[i++]) : String(Number(values[i++])),
+        );
+        assert.equal(i, values.length);
+        assert.ok(value.length < maximum);
+        out.target.text = out.target.text.slice(0, out.offset) + value;
+        return value.length;
+      },
+    };
+    const run = script.runInNewContext(api);
+    const accepted = run.read(43, 7, bytes, fault === "frame-bound" ? 2 : 32);
+    assert.equal(
+      accepted,
+      [
+        "buffered-exit",
+        "delayed-output",
+        "exit-during-poll",
+        "nonzero-buffered",
+      ].includes(fault),
+      fault,
+    );
+    assert.equal(api.original_refusal.tick, 1000, fault);
+    assert.ok(tick <= 31000, fault);
+    const fact = api.original_literal_output;
+    if (accepted) {
+      assert.equal(Buffer.from(bytes.slice(0, fact.used)).toString(), "ok");
+      assert.equal(fact.complete, true);
+      assert.equal(fact.exitRead, true);
+      assert.ok(calls.lastIndexOf("read") < calls.indexOf("exit"));
+    } else {
+      const expected =
+        {
+          "empty-exit": "no-frame",
+          "partial-exit": "partial-frame",
+          "delayed-exit": "partial-frame",
+          "peek-error": "peek",
+          "read-error": "read",
+          "short-read": "short-read",
+          "wait-error": "wait",
+          "wait-result": "wait-result",
+          "exit-error": "exit",
+          "bad-byte": "frame-byte",
+          "frame-bound": "frame-bound",
+        }[fault] ?? "deadline";
+      assert.equal(fact.refusal, expected, fault);
+      assert.equal(
+        error,
+        {
+          "peek-error": 5,
+          "read-error": 87,
+          "wait-error": 6,
+          "exit-error": 87,
+        }[fault] ?? 0,
+        fault,
+      );
+    }
+    if (["empty-exit", "partial-exit", "delayed-exit"].includes(fault))
+      assert.ok(
+        run.remaining() > 29980,
+        "Early refusal leaves the collector its original remaining time",
+      );
+    if (fault === "nonzero-buffered") assert.equal(fact.exitCode, 0xc0000022);
+    if (fault === "expired") assert.deepEqual(calls, []);
+    if (fault === "wait-error") {
+      assert.equal(fact.waited, 0xffffffff);
+      assert.equal(fact.waitError, 6);
+    }
+    const context = { text: "native-windows-original-child: context\n" };
+    const size = run.context(context, 1024, context.text.length);
+    assert.equal(size, context.text.length);
+    assert.equal(
+      context.text.split("\n").length,
+      2,
+      "Keep the existing single context-line grammar",
+    );
+    assert.ok(context.text.includes("output-refusal=" + fact.refusal));
+    assert.ok(context.text.includes("pipe-error=" + fact.pipeError));
+    assert.ok(context.text.includes("exit=" + fact.exitCode));
+  }
+});
+
 test("original-child refusal collection owns bounded partial publication and cancellation until the fatal reader exits", async () => {
   const source = await readFile(
     new URL("custody-reader.c", import.meta.url),
@@ -12789,8 +13068,10 @@ test("original-child refusal collection owns bounded partial publication and can
     "other-command",
     "unreleased",
     "already-expired",
+    "remaining",
   ]) {
-    let tick = fault === "already-expired" ? 30001 : 0,
+    let tick =
+        fault === "already-expired" ? 30001 : fault === "remaining" ? 7000 : 0,
       lastError = 109,
       worker = false,
       locked = false,
@@ -12872,6 +13153,7 @@ test("original-child refusal collection owns bounded partial publication and can
         },
       })),
       refusal_lock: {},
+      ownership_literal_context: (_context, _maximum, size) => size,
       stderr: {},
       GetLastError: () => lastError,
       SetLastError: (v) => {
@@ -12947,7 +13229,7 @@ test("original-child refusal collection owns bounded partial publication and can
         return 400;
       },
       WaitForSingleObject(thread, remaining) {
-        assert.deepEqual([thread, remaining], [400, 30000]);
+        assert.deepEqual([thread, remaining], [400, 30000 - tick]);
         if (fault === "wait") {
           lastError = 6;
           return 4294967295;
@@ -13115,6 +13397,13 @@ test("original-child refusal collection owns bounded partial publication and can
       assert.equal(api.original_refusal.report.examined, 64);
     if (fault === "byte-cap") assert.match(output, /truncated=1/u);
     if (fault === "empty") assert.match(output, /empty=1/u);
+    if (
+      ["already-expired", "create", "wait", "query-pending"].includes(fault)
+    ) {
+      assert.match(output, /unavailable=1/u);
+      assert.match(output, /incomplete=1/u);
+      assert.match(output, /empty=0/u);
+    }
     if (fault === "denied") assert.match(output, /inaccessible=1/u);
     if (fault === "wait") assert.match(output, /wait-error=6/u);
     if (fault?.endsWith("-close"))

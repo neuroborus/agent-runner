@@ -96,7 +96,9 @@ export function createWindowsCaseEffects(state, current, save) {
     retirement,
     fault,
     failure,
+    literalOutput,
     launchPossible = false;
+  const captureLiteral = binding.purpose === "experiment" && literal(recipe.id);
   const known = [],
     witnesses = new Set();
   const persist = async (kind, record) => {
@@ -404,6 +406,14 @@ export function createWindowsCaseEffects(state, current, save) {
     const verifier = systemIdentity(parked.verifier);
     admitted.helpers.push({ role: "verifier", identity: verifier });
     if (mode !== "receipt-before") await persist("admission", admitted);
+    if (captureLiteral) {
+      literalOutput = {
+        bytes: Buffer.from(await reader.ownershipOutput()),
+        payload: structuredClone(admitted.payload),
+        imageSha256: request.executable.sha256,
+        requestSha256,
+      };
+    }
     return structuredClone(admitted);
   });
   return {
@@ -653,8 +663,21 @@ export function createWindowsCaseEffects(state, current, save) {
       };
     },
     async literal(admission) {
-      const output = await reader.ownershipOutput(),
-        native = await witness();
+      let output;
+      if (captureLiteral) {
+        const captured = literalOutput;
+        literalOutput = undefined;
+        requireObservation(
+          captured &&
+            admission?.record?.status === "ADMITTED" &&
+            captured.requestSha256 === admission.record.requestSha256 &&
+            captured.imageSha256 === request.executable.sha256 &&
+            sameWindowsIdentity(captured.payload, admitted.payload) &&
+            sameWindowsIdentity(captured.payload, admission.record.payload),
+        );
+        output = captured.bytes;
+      } else output = await reader.ownershipOutput();
+      const native = await witness();
       requireObservation(
         native.payloadSignaled === true &&
           native.exitCode === 0 &&

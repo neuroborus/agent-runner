@@ -3293,6 +3293,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
       if (f.ownershipDamage === "substituted-object" && value.policy)
         result.objects[0].identitySha256 = "f".repeat(64);
       if (f.ownershipDamage === "missing-witness") result.settled = false;
+      f.ownershipWitness?.(result);
       return result;
     }
     assert.fail(operation);
@@ -8846,6 +8847,143 @@ test("Windows launch observation rejects substituted identities, owner slots and
           ? error === cause
           : /Unverified/u.test(error.message),
     );
+  }
+});
+
+test("experiment literal capture precedes delayed witnesses and remains bound and single-use", async () => {
+  for (const fault of [
+    "literal",
+    "storage",
+    "missing-output",
+    "binding",
+    "image",
+    "exit",
+    "policy",
+    "witness",
+  ]) {
+    const { f, options, job, preparation } = await preparedExperimentFixture();
+    f.manifest.windowsPreparation.cases = preparation.system.cases;
+    const recipe = windowsSystemRecipes().find(
+      ({ id }) =>
+        id === "ownership." + (fault === "storage" ? "storage" : "literal"),
+    );
+    const system = createWindowsExperimentSystemEffects(
+      job,
+      preparation,
+      options,
+      new Map(),
+    );
+    let tick = 0,
+      released = false,
+      releaseTick,
+      postWitnesses = 0,
+      reads = 0,
+      capturedAt;
+    const cause = new Error("Original literal output unavailable");
+    const original = f.accessNative;
+    f.accessNative = (operation, args, ...rest) => {
+      if (
+        operation === "ownership-send" &&
+        Buffer.from(args[0], "hex").toString() === "R"
+      ) {
+        released = true;
+        releaseTick = tick;
+      }
+      if (operation === "ownership-output") {
+        assert.equal(released, true);
+        assert.equal(postWitnesses, 0);
+        capturedAt = tick;
+        reads++;
+        assert.ok(tick - releaseTick < 30000);
+        if (fault === "missing-output") throw cause;
+      }
+      return original(operation, args, ...rest);
+    };
+    f.ownershipWitness = (value) => {
+      if (!released) return;
+      postWitnesses++;
+      tick += 16000;
+      if (fault === "policy" && postWitnesses === 1) value.objects[0].mask ^= 1;
+      if (fault === "witness" && postWitnesses === 1) value.settled = false;
+      if (fault === "image" && postWitnesses === 3)
+        value.payloadImageSha256 = "f".repeat(64);
+      if (fault === "exit" && postWitnesses === 3) value.exitCode = 0xc0000022;
+    };
+    const binding = preparation.system.bindings.find(
+      ({ id }) => id === recipe.id,
+    ).policyBinding;
+    const prepared = await system.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy: () => {},
+    });
+    const observe = async () => {
+      prepared.admitted = await prepared.admitLiteral();
+      assert.equal(postWitnesses, 1);
+      await prepared.effects.verifyComposition();
+      assert.equal(postWitnesses, 2);
+      assert.ok(
+        tick - releaseTick > 30000,
+        "The already captured frame survives both witness delays",
+      );
+      if (fault === "binding")
+        prepared.admitted.record.payload.creationTime = "99999";
+      const observation = await system.literal(prepared);
+      assert.equal(postWitnesses, 3);
+      assert.equal(
+        assertWindowsLiteralObservation(
+          prepared.input,
+          WINDOWS_LITERAL_ARGUMENTS,
+          prepared.admitted.record,
+          observation,
+        ).status,
+        "OBSERVED",
+      );
+    };
+    if (["literal", "storage"].includes(fault)) {
+      await observe();
+      await assert.rejects(system.literal(prepared), /Unverified/u);
+      assert.equal(
+        postWitnesses,
+        3,
+        "A second observation cannot reuse capture or invoke another witness",
+      );
+    } else await assert.rejects(observe());
+    assert.equal(reads, 1, fault);
+    assert.equal(capturedAt, releaseTick, fault);
+    if (fault === "missing-output") assert.equal(postWitnesses, 0);
+    const operations = f.rawEvents.map((frame) => frame.split(" ")[0]);
+    const release = f.rawEvents.findIndex(
+      (frame) => frame.startsWith("ownership-send ") && frame.endsWith(" 52"),
+    );
+    const output = operations.indexOf("ownership-output");
+    assert.ok(release >= 0 && output > release);
+    assert.ok(
+      operations.slice(release + 1, output).includes("ownership-receipt"),
+      "Durable released admission precedes capture",
+    );
+    const settled = await system.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: {
+        id: recipe.id,
+        effects: Object.fromEntries(
+          NATIVE_EFFECT_CLASSES.map((effect) => [
+            effect,
+            { admission: "possible" },
+          ]),
+        ),
+      },
+    });
+    assert.ok(
+      Object.values(settled).every(
+        (value) => value.settlement.status === "RETIRED",
+      ),
+      fault,
+    );
+    const account = [...f.accounts.values()].find(
+      (value) => value.contextSha256 === observationDigest(binding.context),
+    );
+    assert.ok(account, fault);
+    assert.equal(account.retired, true, fault);
   }
 });
 

@@ -175,6 +175,24 @@ Settlement labels publish already-obtained broker,
 capture closure, independent-domain and restoration outcomes without replaying effects.
 Diagnostic sink failures cannot bypass retirement checks or change their outcome.
 
+The ordinary Windows experiment literal path captures the original child's
+output immediately after R and durable released-admission recording, before
+the two post-release witnesses. Its private single-use bytes remain joined to
+the admitted original process/image/request; later literal observation retains
+all independent witnesses, policy/image and successful-exit predicates, outside
+controls and retirement. Reviewed and nonliteral paths retain their existing
+ordering, and the original argv fixture is unchanged.
+Only this literal reader replaces blocking line input with bounded pipe/process
+observation. Available bytes drain before exit interpretation, including a
+complete frame buffered before child exit. A signaled child with no frame or a
+partial frame refuses even while the launcher retains pipe writers. Reading,
+literal completion and refusal collection consume the same remaining 30-second
+R-anchored budget; no witness delay or output read resets it. Protocol refusal
+uses an explicit reason and zero API error; failed APIs retain their actual
+errors rather than manufacturing pipe error 109. The existing context line
+retains byte counts, framing completeness and actual peek/read/wait/exit results
+without changing authenticated transport or supplying an acceptance receipt.
+
 The ordinary Windows experiment reader collects one bounded diagnostic for the
 original `ownership-output` refusal before closing original process/image
 custody or disposing the host. It preserves command/sequence/source/line/error,
@@ -197,10 +215,11 @@ Query/enumeration/render/normal closure stay on their creating thread. Expiry
 requests cancellation only of an available query handle, publishes synchronized
 partial data and continues the original fatal path without waiting for a stuck
 query. Fatal-reader-owned static state/unfinished thread custody survives until
-process exit. Empty, inaccessible, malformed, unavailable, over-budget, truncated
+process exit. Unstarted or expired queries remain unavailable/incomplete and
+never become an empty completed inspection. Empty, inaccessible, malformed, unavailable, over-budget, truncated
 and closure/cancellation uncertainty remain distinct. Neither cancellation nor
-reader exit proves independent retirement. The original `0xc0000022` exit and
-later error 109 retain their existing framing; absent or corroborating records
+reader exit proves independent retirement. The original child exit and actual
+API errors retain their existing framing; absent or corroborating records
 leave the denied operation unestablished. Further repairs require fresh joined
 matching-host evidence and a reviewed plan.
 

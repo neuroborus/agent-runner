@@ -1407,9 +1407,75 @@ static struct {
   /* Hex transport doubles raw text; reserve 1024 encoded bytes for framing. */
   HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[32256];
 } original_refusal;
+struct literal_output_fact {
+  BOOL active, complete, exitRead;
+  LONG peekResult, readResult;
+  DWORD used, available, readBytes, waited, waitError, exitCode, exitError, pipeError;
+  const char *refusal;
+};
+static struct literal_output_fact original_literal_output;
 static DWORD refusal_remaining(void) {
   ULONGLONG elapsed=GetTickCount64()-original_refusal.tick;
   return elapsed<30000?(DWORD)(30000-elapsed):0;
+}
+static BOOL ownership_literal_refuse(const char *reason, DWORD error) {
+  original_literal_output.refusal=reason;SetLastError(error);return FALSE;
+}
+/* The original retained child and pipe share the collector's R-anchored budget.
+ * Launcher-held writers need not close when that child exits. Drain a buffered
+ * frame before interpreting exit; no EOF barrier or new wait budget is added. */
+static BOOL ownership_literal_read(HANDLE process, HANDLE input, char *bytes, DWORD maximum) {
+  memset(&original_literal_output,0,sizeof(original_literal_output));
+  original_literal_output.active=TRUE;original_literal_output.peekResult=-1;original_literal_output.readResult=-1;
+  original_literal_output.waited=MAXDWORD;original_literal_output.refusal="none";
+  BOOL exitObserved=FALSE;
+  for(;;){
+    DWORD remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse("deadline",0);
+    DWORD available=0;
+    original_literal_output.peekResult=PeekNamedPipe(input,NULL,0,NULL,&available,NULL);
+    original_literal_output.pipeError=original_literal_output.peekResult?0:GetLastError();
+    original_literal_output.available=available;
+    if(!original_literal_output.peekResult)return ownership_literal_refuse("peek",original_literal_output.pipeError);
+    while(available){
+      if(!refusal_remaining())return ownership_literal_refuse("deadline",0);
+      if(original_literal_output.used+1>=maximum)return ownership_literal_refuse("frame-bound",0);
+      BYTE byte;DWORD used=0;
+      original_literal_output.readResult=ReadFile(input,&byte,1,&used,NULL);
+      original_literal_output.pipeError=original_literal_output.readResult?0:GetLastError();
+      original_literal_output.readBytes=used;
+      if(!original_literal_output.readResult)return ownership_literal_refuse("read",original_literal_output.pipeError);
+      if(used!=1)return ownership_literal_refuse("short-read",0);
+      if(byte<=0||byte>=128)return ownership_literal_refuse("frame-byte",0);
+      available--;
+      if(byte=='\n'){bytes[original_literal_output.used]=0;original_literal_output.complete=TRUE;break;}
+      bytes[original_literal_output.used++]=byte;
+    }
+    if(!original_literal_output.complete&&original_literal_output.available)continue;
+    remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse("deadline",0);
+    original_literal_output.waited=WaitForSingleObject(process,original_literal_output.complete?remaining:0);
+    original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.waited==WAIT_OBJECT_0){
+      /* The child can write and exit between an empty peek and this poll. */
+      if(!original_literal_output.complete&&!exitObserved){exitObserved=TRUE;continue;}
+      original_literal_output.exitRead=GetExitCodeProcess(process,&original_literal_output.exitCode);
+      original_literal_output.exitError=original_literal_output.exitRead?0:GetLastError();
+      if(!original_literal_output.exitRead)return ownership_literal_refuse("exit",original_literal_output.exitError);
+      if(original_literal_output.complete)return TRUE;
+      return ownership_literal_refuse(original_literal_output.used?"partial-frame":"no-frame",0);
+    }
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse("wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT)return ownership_literal_refuse("wait-result",0);
+    if(original_literal_output.complete)return ownership_literal_refuse("deadline",0);
+    remaining=refusal_remaining();
+    if(!remaining)return ownership_literal_refuse("deadline",0);
+    original_literal_output.waited=WaitForSingleObject(process,remaining<10?remaining:10);
+    original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse("wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT&&original_literal_output.waited!=WAIT_OBJECT_0)return ownership_literal_refuse("wait-result",0);
+    /* Even a signaled wait returns through PeekNamedPipe before exit handling. */
+  }
 }
 static void refusal_publish(const char *line, struct refusal_report *report) {
   AcquireSRWLockExclusive(&refusal_lock);
@@ -1418,6 +1484,13 @@ static void refusal_publish(const char *line, struct refusal_report *report) {
     else{memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;}
   }
   original_refusal.report=*report;ReleaseSRWLockExclusive(&refusal_lock);
+}
+static int ownership_literal_context(char *output, DWORD maximum, int used) {
+  if(used<=0||!original_literal_output.active)return used;
+  const struct literal_output_fact *value=&original_literal_output;
+  int size=sprintf_s(output+used-1,maximum-used+1," output-refusal=%s output-bytes=%lu output-complete=%u peek=%ld available=%lu read=%ld read-bytes=%lu pipe-error=%lu output-wait=%lu output-wait-error=%lu exit-read=%u exit=%lu exit-error=%lu\n",
+    value->refusal,value->used,!!value->complete,value->peekResult,value->available,value->readResult,value->readBytes,value->pipeError,value->waited,value->waitError,!!value->exitRead,value->exitCode,value->exitError);
+  return size>0?used-1+size:-1;
 }
 static void refusal_transport(const char *output, DWORD used) {
   /* sdk-api c12073e: this GENERIC_WRITE client handle permits PIPE_NOWAIT.
@@ -1567,6 +1640,7 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   for(unsigned i=0;i<16;i++)sprintf_s(identity+i*2,sizeof(identity)-i*2,"%02x",original_refusal.imageId.FileId.Identifier[i]);
   BOOL encoded=refusal_hex(original_refusal.image,image,sizeof(image))&&refusal_hex(original_refusal.subject,subject,sizeof(subject));
   int size=encoded?sprintf_s(context,sizeof(context),"native-windows-original-child: context command=%s sequence=%lu source=%s line=%lu error=%lu candidate=%s nonce=%s pid=%lu birth=%llu image-utf16=%s image-volume=%llu image-id=%s image-sha256=%s subject-utf16=%s release=%llu refusal=%llu dispatch-succeeded=%u creation-verified=%u resume-time=unavailable\n",original_refusal.command,original_refusal.sequence,original_refusal.source,original_refusal.line,error,candidate,nonce,original_refusal.pid,original_refusal.birth,image,original_refusal.imageId.VolumeSerialNumber,identity,original_refusal.hash,subject,original_refusal.from,original_refusal.to,!!original_refusal.sent,!!original_refusal.creationVerified):-1;
+  size=ownership_literal_context(context,sizeof(context),size);
   if(size>0)refusal_publish(context,&report);else{report.truncated=TRUE;refusal_publish(NULL,&report);}
   DWORD createError=0,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1,threadClose=-1;
   if(refusal_remaining()&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
@@ -1583,10 +1657,10 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   }
   if(!published&&size>0){used=(DWORD)size;memcpy(output,context,used);}
   if(waited==WAIT_OBJECT_0&&original_refusal.thread){threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();if(!threadClose)original_refusal.thread=NULL;}
-  BOOL unavailable=report.query[0]>0||report.query[1]>0||report.query[2]>0;
+  BOOL unavailable=report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
   BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
   BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published;
-  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu\n",!!report.finished,!!incomplete,report.finished&&!report.examined&&report.query[0]==0,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError);
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu\n",!!report.finished,!!incomplete,!incomplete&&!report.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError);
   if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
   SetLastError(saved);errno=savedErrno;
 }
@@ -4895,14 +4969,21 @@ int wmain(int argc, wchar_t **argv) {
       ownership_bind_observer(bounded_number(values[2], MAXDWORD), number(values[3])); printf("{\"bound\":true}");
     } else if (!strcmp(values[0], "ownership-launch")) { need(!preparation_only); ownership_launch(values, n);
     } else if (!strcmp(values[0], "ownership-control") || !strcmp(values[0], "ownership-output")) {
-      need(n == 2 && ownership_launcher.hProcess); char bytes[98304]; line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, package_mode ? sizeof(bytes) : 16384);
+      need(n == 2 && ownership_launcher.hProcess); char bytes[98304]; BOOL captured=FALSE;
+#ifdef NATIVE_CI_EXPERIMENT
+      if(!strcmp(values[0],"ownership-output")&&ownership_literal){
+        need(ownership_released&&ownership_creation_verified&&ownership_count&&ownership_processes[0]);
+        need(ownership_literal_read(ownership_processes[0],ownership_output,bytes,16384));captured=TRUE;
+      }
+#endif
+      if(!captured)line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, package_mode ? sizeof(bytes) : 16384);
       if (!strcmp(values[0], "ownership-control")) {
         need(strstr(bytes, nonce));
         if (strstr(bytes, "\"phase\":\"helper\"")) { need(ownership_stage == 0); ownership_stage = 1; }
         else if (strstr(bytes, "\"phase\":\"setup\"")) { need(ownership_stage == 2); ownership_stage = 3; }
         else { need(strstr(bytes, "\"phase\":\"ready\"") && ownership_stage == 4); ownership_stage = 5; }
       }
-      if (!strcmp(values[0], "ownership-output") && ownership_literal) need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
+      if (!captured && !strcmp(values[0], "ownership-output") && ownership_literal) need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
       printf("{\"hex\":\""); hex((BYTE *)bytes, strlen(bytes));
       if (!strcmp(values[0], "ownership-output")) hex((BYTE *)"\n", 1);
       printf("\"}");

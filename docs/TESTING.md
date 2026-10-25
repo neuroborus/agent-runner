@@ -2623,6 +2623,17 @@ active-count-one refusal retains an opaque synthetic 1024-of-2391-byte prefix.
 This coverage remains in the same harness and supplies no native PASS.
 The same custody fixture executes the original-child refusal collector's worker,
 bounded publisher and terminal wait with injected clocks/Event Log/thread APIs.
+The actual literal pipe/process body covers signaled children with absent or
+partial frames while writers remain open, buffered output after exit, delayed
+delivery, live-child expiry, failed/short pipe reads and actual wait/exit errors.
+Controlled clocks prove output and completion consume the original release
+budget and leave only its remainder for one-shot collection. Unstarted or
+expired collection is unavailable/incomplete, never a completed empty result.
+Context-field projection retains the existing single-line diagnostic grammar.
+Existing case-effect fixtures force both post-release witnesses beyond that
+budget after early capture, then verify single-use process/image/request binding,
+successful-path policy/image/exit and independent witness guards, and recovery
+after refusal. The original argv fixture and all nonliteral paths remain intact.
 It covers one release-based deadline, shared 64-record/64-KiB encoded-frame caps,
 synchronized partial publication, thread-affine normal closure, available-handle
 cancellation, pending-query lifetime and separate projection/closure failures.
