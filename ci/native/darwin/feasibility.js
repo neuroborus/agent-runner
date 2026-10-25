@@ -421,6 +421,14 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-birth-write",
     "fault-bootstrap-port",
     "fault-bootstrap-release",
+    "fault-bootstrap-capture",
+    "fault-bootstrap-clear",
+    "fault-bootstrap-empty",
+    "fault-bootstrap-cache",
+    "fault-bootstrap-threads",
+    "fault-bootstrap-restore",
+    "fault-bootstrap-match",
+    "fault-bootstrap-copy-release",
     "fault-control-audit-binding",
     "fault-control-audit-create",
     "fault-control-audit-hold",
@@ -555,6 +563,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "image-close",
   ];
   const statusOperations = [
+    "fault-bootstrap-threads",
     "audit-census-list",
     "audit-census-capacity",
     "audit-census-pid",

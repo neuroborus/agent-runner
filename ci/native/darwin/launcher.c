@@ -84,6 +84,21 @@ static pid_t launch_reply_owner;
 static mach_port_t launch_bootstrap_local, launch_reply_borrowed, launch_special_borrowed;
 static domain_special_reply_fn launch_special_reply;
 static char launch_exec_suffix[256];
+static void launch_replies_begin(void);
+static pid_t launch_bootstrap_fork(void) {
+  struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &launch_child, launch_replies_begin);
+  if (outcome.count) {
+    (void)signal(SIGPIPE, SIG_IGN);
+    for (unsigned i = 0; i < outcome.count; i++) if (outcome.issues[i].cleanup) {
+      struct domain_bootstrap_issue issue = outcome.issues[i];
+      fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s domain=%s result=%d\n", issue.operation, issue.kind, issue.value);
+    }
+    struct domain_bootstrap_issue issue = outcome.issues[0];
+    launch_failure(issue.operation, !strcmp(issue.kind, "errno") ? -1 : issue.value,
+      !strcmp(issue.kind, "errno") ? issue.value : 0, 0, -1, launch_child);
+  }
+  return outcome.child;
+}
 /* Early setup guards precede mach_rights. Only this child's captured local
  * reference belongs to them; copied parent state supplies no cleanup authority. */
 static void launch_need_at(bool ok, const char *file, unsigned line) {
@@ -702,12 +717,13 @@ int main(int argc, char **argv) {
    * Reject an unexpected multithreaded launcher instead of forking it. */
   struct proc_taskinfo task;
   need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == (int)sizeof(task) && task.pti_threadnum == 1);
+#ifdef NATIVE_CI_EXPERIMENT
+  pid_t child = launch_bootstrap_fork();
+#else
   pid_t child = fork(); if (child < 0) launch_failure("fork", child, errno, 0, -1, 0);
+#endif
   if (child > 0) launch_child = child;
   if (!child) {
-#ifdef NATIVE_CI_EXPERIMENT
-    launch_replies_begin();
-#endif
     launch_stage("child-entry", NULL, 0, 0);
     close(ready[0]); close(release[1]);
     launch_stage("child-stdio", NULL, 0, 0);

@@ -401,6 +401,26 @@ status. Counted aliases and copied parent bookkeeping cannot change admission or
 cleanup ownership. Failed queries with written outputs, zero/full-width counts,
 failed releases and failed diagnostics preserve unavailable values, the original
 refusal and errno. No query adds a release or supplies endpoint identity.
+The fast Darwin build fixture also executes the shared bootstrap fork guard and
+the fault owner's refusal path. Injected getters/setters protect verified null
+inheritance, the final single-thread check, exact parent slot/exported-value
+restoration after successful or failed fork and preparation failure, and one
+release attempt per successful getter copy including aliases. Failed getter
+outputs own nothing; aliased child names never authorize releasing a parent's
+snapshot. Child producer binding precedes its first Mach readback. Missing or
+nonnull readbacks, changed caches, restoration failures and failed releases keep
+the first refusal and independent cleanup causes.
+The fault wrapper retains each diagnostic name until failure emission and arms
+the existing child timeout on pre-binding refusal without resetting a bound child.
+The launcher custody fixture executes its actual wrapper, retaining the direct
+child before restoration can
+fail and protecting diagnostics from SIGPIPE without replacing the original
+error. Initial custodian reexec and existing final-exec/census fixtures remain
+required. These regressions use the existing fast/native-harness discovery,
+add no command or slow tier, and establish no hosted library equivalence,
+private cache ownership, native launch success or retirement. The
+[native owner](../ci/native/README.md#darwin-private-admission-and-literal-launch-foundation)
+records primary ownership contracts and the remaining matching-host proof limits.
 Resource-notify cases cover paired selector unavailability, supported clearing
 and null readback, mixed selector results, other errors and uncertain failed-getter
 output. Nonnull readback and aliased-copy release failures retain independent

@@ -12,6 +12,372 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+test("Darwin bootstrap fork prevents inherited acquisitions and settles only getter copies", async () => {
+  const [header, domain] = await Promise.all(
+    ["custody.h", "feasibility-domain.h"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const parameters = {
+    domain_bootstrap_check: "out, ok, operation, kind, value, cleanup",
+    domain_bootstrap_read: "out, expected, operation, cleanup",
+    domain_bootstrap_fork: "out, retained, bind",
+    domain_fault_bind: "",
+    domain_fault_fork: "",
+  };
+  const functions = Object.entries(parameters).map(([name, args]) => {
+    const source = name.startsWith("domain_fault_") ? domain : header;
+    const body = new RegExp(
+      `static (?:bool|void|pid_t) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)?.[1];
+    assert.ok(body, name);
+    return `function ${name}(${args}) {${body
+      .replaceAll("->", ".")
+      .replace(
+        "(struct domain_bootstrap_issue){operation, kind, value, cleanup}",
+        "{operation, kind, value, cleanup}",
+      )
+      .replace("extern mach_port_t bootstrap_port;", "")
+      .replace("sizeof(*out)", "0")
+      .replace("struct proc_taskinfo threads;", "let threads = {};")
+      .replaceAll("&threads", "threads")
+      .replaceAll("sizeof(threads)", "64")
+      .replace("struct domain_bootstrap_fork outcome;", "let outcome = {};")
+      .replace("struct domain_bootstrap_issue issue", "let issue")
+      .replace(
+        "char operations[8][80];",
+        "const operations = Array.from({length: 8}, () => []);",
+      )
+      .replace("sizeof(operations[i])", "80")
+      .replaceAll("&outcome", "outcome")
+      .replaceAll("&domain_child", "child_ref")
+      .replaceAll("*retained", "retained.value")
+      .replaceAll("&observed", "observed")
+      .replaceAll("&saved", "saved")
+      .replace(
+        "mach_port_t observed = MACH_PORT_NULL;",
+        "let observed = {value: 0};",
+      )
+      .replace("mach_port_t saved = MACH_PORT_NULL;", "let saved = {value: 0};")
+      .replace(
+        "mach_port_t cached = bootstrap_port;",
+        "let cached = bootstrap_port;",
+      )
+      .replace(/\b(?:kern_return_t|bool|unsigned|int) /gu, "let ")
+      .replace(/\b(observed|saved) ==/gu, "$1.value ==")
+      .replace(
+        /MACH_PORT_VALID\((observed|saved)\)/gu,
+        "MACH_PORT_VALID($1.value)",
+      )
+      .replace(
+        /mach_port_deallocate\(mach_task_self\(\), (observed|saved)\)/gu,
+        "mach_port_deallocate(mach_task_self(), $1.value)",
+      )
+      .replace(
+        "task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, saved)",
+        "task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, saved.value)",
+      )
+      .replace(
+        "domain_bootstrap_read(out, saved,",
+        "domain_bootstrap_read(out, saved.value,",
+      )}}`;
+  });
+  const script = new Script(`${functions.join("\n")} domain_fault_fork;`);
+  const cases = [
+    [{}, []],
+    [{ slot: 0 }, []],
+    [{ cached: 99 }, []],
+    [{ fork: 0 }, []],
+    [{ capture: 5 }, [["bootstrap-capture", "mach", 5]]],
+    [{ clear: 5 }, [["bootstrap-clear", "mach", 5]]],
+    [
+      { clear: 5, matchQuery: 15 },
+      [
+        ["bootstrap-clear", "mach", 5],
+        ["bootstrap-match", "mach", 15],
+      ],
+    ],
+    [{ emptyQuery: 5 }, [["bootstrap-empty", "mach", 5]]],
+    [{ empty: 88 }, [["bootstrap-empty", "invariant", 0]]],
+    [{ fork: -1 }, [["fork", "errno", 11]]],
+    [{ threads: 2 }, [["bootstrap-threads", "invariant", 0]]],
+    [{ threadRead: 0 }, [["bootstrap-threads", "status", 0]]],
+    [{ threadRead: -1 }, [["bootstrap-threads", "errno", 9]]],
+    [
+      { restore: 5 },
+      [
+        ["bootstrap-restore", "mach", 5],
+        ["bootstrap-match", "invariant", 0],
+      ],
+    ],
+    [{ matchQuery: 5 }, [["bootstrap-match", "mach", 5]]],
+    [{ match: 88 }, [["bootstrap-match", "invariant", 0]]],
+    [
+      { release: true },
+      [
+        ["bootstrap-copy-release", "mach", 15],
+        ["bootstrap-copy-release", "mach", 15],
+      ],
+    ],
+    [
+      { empty: 88, release: true },
+      [
+        ["bootstrap-empty", "invariant", 0],
+        ["bootstrap-copy-release", "mach", 15],
+        ["bootstrap-copy-release", "mach", 15],
+        ["bootstrap-copy-release", "mach", 15],
+      ],
+    ],
+    [
+      { fork: -1, restore: 5, release: true },
+      [
+        ["fork", "errno", 11],
+        ["bootstrap-restore", "mach", 5],
+        ["bootstrap-match", "invariant", 0],
+        ["bootstrap-copy-release", "mach", 15],
+      ],
+    ],
+    [{ fork: 0, childSlot: 10 }, [["bootstrap-empty", "invariant", 0]]],
+    [{ fork: 0, childQuery: 5 }, [["bootstrap-empty", "mach", 5]]],
+    [
+      { fork: 0, childSlot: 10, release: true },
+      [
+        ["bootstrap-empty", "invariant", 0],
+        ["bootstrap-copy-release", "mach", 15],
+      ],
+    ],
+    [{ changeCache: true }, [["bootstrap-cache", "invariant", 0]]],
+    [{ preCache: true }, [["bootstrap-cache", "invariant", 0]]],
+    [{ fork: 0, changeCache: true }, [["bootstrap-cache", "invariant", 0]]],
+    [{ fork: 0, childReadCache: true }, [["bootstrap-cache", "invariant", 0]]],
+    [{ restoreCache: true }, [["bootstrap-cache", "invariant", 0]]],
+  ];
+  for (const [options, expected] of cases) {
+    const label = JSON.stringify(options),
+      calls = [],
+      acquired = [],
+      released = [],
+      remembered = [],
+      cleanup = [];
+    let pid = 41,
+      slot = options.slot ?? 10,
+      gets = 0,
+      sets = 0,
+      forked = false,
+      outcome;
+    const cached = options.cached ?? slot;
+    const refused = new Error("Native refusal");
+    const api = {
+      bootstrap_port: cached,
+      domain_child: -1,
+      domain_port_owner: 41,
+      child_ref: {
+        get value() {
+          return api.domain_child;
+        },
+        set value(value) {
+          api.domain_child = value;
+        },
+      },
+      errno: 0,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      TASK_BOOTSTRAP_PORT: 4,
+      PROC_PIDTASKINFO: 3,
+      MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
+      getpid: () => pid,
+      mach_task_self: () => 1,
+      memset(target) {
+        outcome = target;
+        Object.assign(target, { child: 0, count: 0, issues: [] });
+      },
+      domain_runtime_replies_begin(owner) {
+        assert.equal(owner, pid);
+        calls.push("bind");
+      },
+      alarm(seconds) {
+        assert.equal(pid, 42);
+        assert.equal(seconds, 20);
+        calls.push("alarm");
+      },
+      invariant(ok) {
+        assert.ok(ok, label);
+      },
+      domain_ports_begin() {
+        assert.equal(pid, 42);
+        assert.equal(api.bootstrap_port, 0);
+        assert.ok(calls.includes("alarm"));
+        api.domain_port_owner = pid;
+        api.domain_runtime_replies_begin(pid);
+      },
+      proc_pidinfo(owner, flavor, argument, threads, size) {
+        assert.equal(owner, 41);
+        assert.equal(flavor, 3);
+        assert.equal(argument, 0);
+        assert.equal(size, 64);
+        assert.equal(slot, 0);
+        threads.pti_threadnum = options.threads ?? 1;
+        if (options.preCache) api.bootstrap_port = 77;
+        api.errno = 9;
+        return options.threadRead ?? 64;
+      },
+      task_get_special_port(self, which, output) {
+        assert.equal(self, 1);
+        assert.equal(which, 4);
+        gets++;
+        const phase =
+          gets === 1
+            ? "capture"
+            : pid === 42
+              ? "child"
+              : sets < 2
+                ? "empty"
+                : "match";
+        const status =
+          phase === "capture" ? options.capture : options[`${phase}Query`];
+        output.value = status ? 666 : (options[phase] ?? slot);
+        calls.push(["get", phase, output.value]);
+        if (!status && api.MACH_PORT_VALID(output.value))
+          acquired.push(output.value);
+        if (phase === "child") assert.ok(calls.includes("bind"));
+        if (phase === "child" && options.childReadCache)
+          api.bootstrap_port = 77;
+        return status ?? 0;
+      },
+      task_set_special_port(self, which, value) {
+        assert.equal(self, 1);
+        assert.equal(which, 4);
+        const status = ++sets === 1 ? options.clear : options.restore;
+        if (sets === 2)
+          assert.equal(
+            api.domain_child,
+            outcome.child > 0 ? outcome.child : -1,
+          );
+        calls.push(["set", value]);
+        if (!status) slot = value;
+        if (sets === 2 && options.restoreCache) api.bootstrap_port = 77;
+        return status ?? 0;
+      },
+      mach_port_deallocate(self, name) {
+        assert.equal(self, 1);
+        assert.ok(
+          acquired.filter((value) => value === name).length >
+            released.filter((value) => value === name).length,
+          label,
+        );
+        released.push(name);
+        return options.release ? 15 : 0;
+      },
+      fork() {
+        assert.equal(slot, 0, label);
+        assert.equal(api.bootstrap_port, 0, label);
+        forked = true;
+        api.errno = 11;
+        if (options.fork === 0) {
+          pid = 42;
+          slot = options.childSlot ?? 0;
+          acquired.length = 0;
+        }
+        if (options.changeCache) api.bootstrap_port = 77;
+        return options.fork ?? 57;
+      },
+      snprintf(output, size, format, operation) {
+        assert.equal(size, 80);
+        assert.equal(format, "fault-%s");
+        output[0] = `fault-${operation}`;
+      },
+      remember(operation, kind, value) {
+        remembered.push([operation, kind, value]);
+      },
+      remember_cleanup(operation, kind, value) {
+        cleanup.push([operation, kind, value]);
+      },
+      failure() {
+        assert.equal(api.domain_child, outcome.child > 0 ? outcome.child : -1);
+        // Native failure emission reads the borrowed names after all issues.
+        assert.equal(remembered[0][0][0], `fault-${expected[0][0]}`, label);
+        if (cleanup.length) {
+          const first = outcome.issues.find((issue) => issue.cleanup);
+          assert.equal(cleanup[0][0][0], `fault-${first.operation}`, label);
+        }
+        throw refused;
+      },
+    };
+    const run = script.runInNewContext(api);
+    if (expected.length)
+      assert.throws(run, (error) => error === refused, label);
+    else assert.equal(run(), options.fork ?? 57, label);
+    assert.deepEqual(
+      remembered.map(([operation, kind, value]) => [operation[0], kind, value]),
+      expected.map(([operation, kind, value]) => [
+        `fault-${operation}`,
+        kind,
+        value,
+      ]),
+      label,
+    );
+    if (remembered.length) {
+      const [name, kind, value] = remembered[0];
+      const operation = name[0];
+      const cause = darwinFeasibilityCause("fault", {
+        code: 126,
+        stderr: `native-darwin: operation=${operation} domain=${kind} value=${value} effects=possible settlement=unsettled\n`,
+      });
+      assert.ok(
+        cause.detail.includes(`Native ${operation} failed (${kind}=${value}).`),
+        label,
+      );
+    }
+    assert.equal(
+      cleanup.length,
+      outcome.issues.filter((issue) => issue.cleanup).length,
+      label,
+    );
+    assert.equal(outcome.count, expected.length, label);
+    assert.equal(
+      forked,
+      !options.capture &&
+        !options.clear &&
+        !options.emptyQuery &&
+        !options.empty &&
+        !options.preCache &&
+        (options.threads ?? 1) === 1 &&
+        (options.threadRead ?? 64) === 64,
+      label,
+    );
+    assert.deepEqual([...released].sort(), [...acquired].sort(), label);
+    if (pid === 41) {
+      assert.equal(
+        api.bootstrap_port,
+        options.restoreCache ? 77 : cached,
+        label,
+      );
+      if (!options.capture) {
+        assert.deepEqual(
+          calls.filter((call) => Array.isArray(call) && call[0] === "set"),
+          [
+            ["set", 0],
+            ["set", options.slot ?? 10],
+          ],
+          label,
+        );
+        assert.equal(slot, options.restore ? 0 : (options.slot ?? 10), label);
+      }
+    } else {
+      assert.equal(calls.filter((call) => call === "alarm").length, 1, label);
+      assert.equal(sets, 1, label);
+      assert.equal(
+        api.bootstrap_port,
+        options.changeCache || options.childReadCache ? 77 : 0,
+        label,
+      );
+      // Even an aliased child getter never authorizes the parent's snapshot.
+      assert.equal(released.length, options.childSlot ? 1 : 0, label);
+    }
+  }
+});
+
 test("Darwin hosted ancestry is scoped to installed paths and experiment purpose", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8");
   const reader = await readFile(new URL("custody-reader.c", SOURCE), "utf8");
@@ -4681,15 +5047,14 @@ test("Darwin custodian lifecycle observations balance their own public getter re
   const entry = source.indexOf('domain_access_observe("custodian-entry")'),
     reexec = source.indexOf("execv(domain_helper, argv)"),
     beforeFork = source.indexOf('domain_access_observe("custodian-fork")'),
-    fork = source.indexOf("pid_t child = fork()", beforeFork),
+    fork = source.indexOf("pid_t child = domain_fault_fork()", beforeFork),
     child = source.indexOf('domain_access_observe("child-fork")', fork);
   assert.ok(
     entry > 0 &&
       entry < reexec &&
       reexec < beforeFork &&
       beforeFork < fork &&
-      fork < source.indexOf("alarm(20)", fork) &&
-      source.indexOf("alarm(20)", fork) < child &&
+      fork < child &&
       child < source.indexOf("audit_fresh(domain_record.uid)", child) &&
       child < source.indexOf("setuid(domain_record.uid)", child),
   );
@@ -4778,8 +5143,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
   );
   assert.match(custody, /#ifdef NATIVE_RUNTIME_REPLIES\s+#include <dlfcn.h>/u);
   assert.doesNotMatch(source + custody, /#include <mach\/mach_sync_ipc\.h>/u);
-  // Project only C declarations, output pointers and sizeof into JS. The
-  // sanitation decisions and the original child launch body execute unchanged.
+  // Project only C declarations, output pointers and sizeof into JS. The fork
+  // guard now binds ports before this child body; run that real initializer
+  // here too. Nonnull bootstrap inputs retain defensive sanitation coverage;
+  // the separate fork fixture owns the null-inheritance contract.
   const translate = (body) =>
     body
       .replaceAll("(void)", "")
@@ -4842,7 +5209,10 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     function domain_access_observe(phase) {${translate(observation)}}
     function domain_access_release(self, access, type) {${translate(releaseBody)}}
     function domain_sanitize() {${translate(sanitation)}}
-    () => {${translate(source.slice(start + "  if (!child) {".length, end))}}
+    () => {
+      domain_ports_begin();
+      ${translate(source.slice(start + "  if (!child) {".length, end))}
+    }
   `);
   const SEND = 0x10000,
     RECEIVE = 0x20000,
@@ -5596,7 +5966,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       domain_io(result, expected, op) {
         assert.equal(result, expected, op);
       },
-      alarm: (seconds) => calls.push(["alarm", seconds]),
       close: (fd) => {
         calls.push(["close", fd]);
         return 0;

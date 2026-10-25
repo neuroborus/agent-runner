@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-25 — Prevent Darwin bootstrap acquisition at child creation
+
+The ordinary experimental launcher and fault custodian now guard their existing
+single-threaded fork with verified null bootstrap inheritance and exact parent
+restoration. Primary XNU getter, setter and task-creation contracts support that
+boundary; they do not establish ownership of the two observed residual SEND
+references. Unproved references are left untouched instead of released by count.
+Only explicit getter copies settle, once per acquisition including aliases, and
+created-child custody precedes restoration refusals. Reply provenance and the
+strict census remain mandatory. Original matching-host compilation, controls and
+independent retirement still determine native acceptance.
+
 ## 2026-10-24 — Bind Darwin runtime replies to observed child creation
 
 Ordinary launcher and fault custody replace dyld interception with one bounded,

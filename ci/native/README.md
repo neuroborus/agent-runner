@@ -8893,8 +8893,8 @@ for the first refused name and the reporting PID. Unattempted queries and
 unavailable counts are -1; failed queries cannot publish their output as a count.
 A failed bootstrap release retains its observation without retrying the release.
 Counts and equal local names, including aliases or reuse, establish neither
-endpoint identity nor ownership; matching-host producer/reference evidence is
-still required for a further repair. The earlier original child's affected census
+endpoint identity nor ownership; producer/reference evidence is still required
+to authorize a post-hoc release. The earlier original child's affected census
 name/type and its cache/API or
 producer binding remain unproved; this repair cannot identify that right by
 exclusion. Missing installed callable/export evidence remains a binding refusal,
@@ -8902,6 +8902,43 @@ not a trap fallback. Matching hosted compilation, export lookup, interception,
 original workflows and independent retirement are still required; portable
 fixtures establish none of those native successes. Other TCP/audit/fault-port
 causes and complete native acceptance remain open.
+
+Ordinary experimental launcher and fault custody now prevent bootstrap acquisition
+at their existing single-threaded fork boundary. The guard acquires one explicit
+getter copy of the parent slot, borrows the exported `bootstrap_port` value without
+releasing it, clears both slot and exported value and verifies the null slot before
+fork. The child receives a fresh IPC space, binds its reply producer bookkeeping
+before its first Mach readback and independently requires a null slot and exported
+value before continuing. It never releases the parent's getter name, even if that
+integer aliases a newly acquired child name. The parent restores its exact exported
+value and slot after successful or failed fork and after preparation failure, reads
+the restored slot independently and releases each successful getter copy once,
+including aliases. `COPY_SEND` restoration does not consume the saved userspace copy.
+The created child is retained before any restoration refusal; first failures and
+independent release/restoration failures remain separate. No failed getter output
+is adopted and no release is retried. Reviewed and provider launch paths are unchanged.
+
+The ownership account follows pinned Apple XNU
+[`task.defs`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/task.defs)
+and [`std_types.defs`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/std_types.defs)
+for getter output and setter `COPY_SEND`,
+[`ipc_tt.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/ipc_tt.c)
+for fresh-space initialization, slot copying and kernel-owned releases, and
+[`kern_fork.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/kern/kern_fork.c),
+[`task.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/task.c)
+and [`kern_exec.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/bsd/kern/kern_exec.c)
+for fork/exec task creation from the current task. Tagged
+[`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach_init.c)
+defines the exported value but does not account for its runtime bootstrap producer;
+[`Libsystem initialization`](https://github.com/apple-oss-distributions/Libsystem/blob/8d7f9f7460f00a49ea1a79e86076d73fe1d36940/init.c)
+orders Mach initialization before private XPC initialization and the child hooks.
+These sources do not establish ownership of the two previously observed residual
+SEND references. Unproved parent references remain untouched; no private cache reset or
+post-hoc count-based release is performed. Initial fault-custodian reexec remains
+unchanged; its subsequent guarded fork and final payload exec inherit the verified
+null bootstrap slot. The strict final census still refuses all unproved live rights.
+Exact hosted-library equivalence, actual fork/constructor behavior, native compilation,
+all original controls and independent retirement remain matching-host proof requirements.
 Only a classified ordinary host port is permitted; a privileged or
 unknown one fails. Remaining
 descriptors are private stdio and close-on-exec admission pipes. After fork, only

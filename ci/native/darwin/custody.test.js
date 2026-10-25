@@ -19,6 +19,147 @@ import {
   withNativeDiagnostics,
 } from "../diagnostics.js";
 
+test("Darwin experimental launcher retains the fork child before bootstrap restoration refusal", async () => {
+  const source = await readFile(new URL("launcher.c", import.meta.url), "utf8");
+  const body =
+    /static pid_t launch_bootstrap_fork\(void\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(body);
+  assert.match(
+    source,
+    /#ifdef NATIVE_CI_EXPERIMENT\s+pid_t child = launch_bootstrap_fork\(\);\s+#else\s+pid_t child = fork\(\);/u,
+  );
+  const script = new Script(`function run() {${body
+    .replace("struct domain_bootstrap_fork outcome;", "let outcome = {};")
+    .replaceAll("&outcome", "outcome")
+    .replaceAll("&launch_child", "retained_ref")
+    .replaceAll("struct domain_bootstrap_issue issue", "let issue")
+    .replaceAll("(void)", "")
+    .replace("unsigned i", "let i")}}
+    run;`);
+  for (const [child, issues] of [
+    [57, []],
+    [0, []],
+    [
+      57,
+      [
+        {
+          operation: "bootstrap-restore",
+          kind: "mach",
+          value: 5,
+          cleanup: true,
+        },
+        {
+          operation: "bootstrap-copy-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+      ],
+    ],
+    [
+      -1,
+      [
+        { operation: "fork", kind: "errno", value: 11, cleanup: false },
+        {
+          operation: "bootstrap-restore",
+          kind: "mach",
+          value: 5,
+          cleanup: true,
+        },
+      ],
+    ],
+    [
+      0,
+      [
+        {
+          operation: "bootstrap-empty",
+          kind: "invariant",
+          value: 0,
+          cleanup: false,
+        },
+      ],
+    ],
+    [
+      57,
+      [
+        {
+          operation: "bootstrap-copy-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+      ],
+    ],
+  ]) {
+    const diagnostics = [],
+      refusals = [],
+      refused = new Error("Native refusal");
+    const api = {
+      launch_child: 0,
+      retained_ref: {
+        get value() {
+          return api.launch_child;
+        },
+        set value(value) {
+          api.launch_child = value;
+        },
+      },
+      stderr: 2,
+      SIGPIPE: 13,
+      SIG_IGN: 1,
+      signal(number, disposition) {
+        assert.equal(number, 13);
+        assert.equal(disposition, 1);
+        api.ignoredPipe = true;
+      },
+      launch_replies_begin() {},
+      domain_bootstrap_fork(outcome, retained, bind) {
+        assert.equal(bind, api.launch_replies_begin);
+        Object.assign(outcome, { child, issues, count: issues.length });
+        if (child > 0) retained.value = child;
+      },
+      strcmp: (a, b) => Number(a !== b),
+      fprintf(stream, format, operation, kind, value) {
+        assert.equal(api.ignoredPipe, true);
+        assert.equal(stream, 2);
+        assert.ok(format.startsWith("native-darwin-launch-cleanup:"));
+        diagnostics.push({ operation, kind, value });
+      },
+      launch_failure(operation, result, error, revents, used, retained) {
+        assert.equal(api.launch_child, child > 0 ? child : 0);
+        assert.equal(retained, api.launch_child);
+        assert.equal(revents, 0);
+        assert.equal(used, -1);
+        refusals.push({ operation, result, error });
+        throw refused;
+      },
+    };
+    const run = script.runInNewContext(api);
+    if (issues.length) assert.throws(run, (error) => error === refused);
+    else assert.equal(run(), child);
+    assert.deepEqual(
+      diagnostics,
+      issues
+        .filter((issue) => issue.cleanup)
+        .map(({ operation, kind, value }) => ({ operation, kind, value })),
+    );
+    assert.deepEqual(
+      refusals,
+      issues.length
+        ? [
+            {
+              operation: issues[0].operation,
+              result: issues[0].kind === "errno" ? -1 : issues[0].value,
+              error: issues[0].kind === "errno" ? issues[0].value : 0,
+            },
+          ]
+        : [],
+    );
+  }
+});
+
 test("Darwin native access sockaddr builders decode exact experiment scope and preserve unscoped addresses", async () => {
   // Execute the two small C constructors with injected sockaddr/inet operations;
   // this is portable source coverage, not Darwin compilation or native proof.
@@ -3862,10 +4003,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     launcher,
     /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1;\s+static void descriptors/u,
   );
-  assert.match(
-    launcher,
-    /if \(!child\) \{\s+#ifdef NATIVE_CI_EXPERIMENT\s+launch_replies_begin\(\);\s+#endif\s+launch_stage\("child-entry"/u,
-  );
+  assert.match(launcher, /if \(!child\) \{\s+launch_stage\("child-entry"/u);
   assert.doesNotMatch(experiment, /mig_dealloc_reply_port|mach_port_destroy/u);
   const earlySetup = launcher
     .slice(

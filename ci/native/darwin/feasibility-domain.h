@@ -97,6 +97,26 @@ static void domain_port_cleanup(void) {
 static pid_t domain_controller, domain_child = -1;
 static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
 static bool domain_released, domain_exit_reported;
+static void domain_fault_bind(void) {
+  alarm(20);
+  extern mach_port_t bootstrap_port;
+  invariant(bootstrap_port == MACH_PORT_NULL, "fault-bootstrap-cache");
+  domain_ports_begin();
+}
+static pid_t domain_fault_fork(void) {
+  struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &domain_child, domain_fault_bind);
+  if (outcome.child == 0 && domain_port_owner != getpid()) alarm(20);
+  /* remember/remember_cleanup borrow these pointers until failure finishes. */
+  char operations[8][80];
+  for (unsigned i = 0; i < outcome.count; i++) {
+    struct domain_bootstrap_issue issue = outcome.issues[i];
+    snprintf(operations[i], sizeof(operations[i]), "fault-%s", issue.operation);
+    remember(operations[i], issue.kind, issue.value);
+    if (issue.cleanup) remember_cleanup(operations[i], issue.kind, issue.value);
+  }
+  if (outcome.count) failure(126);
+  return outcome.child;
+}
 static bool domain_stream(const unsigned char *bytes, ssize_t size, const char *stream) {
   printf("{\"stream\":\"%s\",\"hex\":\"", stream);
   for (ssize_t at = 0; at < size; at++) printf("%02x", bytes[at]); puts("\"}");
@@ -747,9 +767,9 @@ static void domain_start(int argc, char **argv) {
   domain_access_observe("custodian-fork");
   struct proc_taskinfo threads;
   invariant(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &threads, sizeof(threads)) == sizeof(threads) && threads.pti_threadnum == 1, "fault-fork-threads");
-  pid_t child = fork(); posix_check(child, "fault-fork");
+  pid_t child = domain_fault_fork();
   if (!child) {
-    alarm(20); domain_ports_begin(); domain_access_observe("child-fork");
+    domain_access_observe("child-fork");
     posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
     struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}; posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
     posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");

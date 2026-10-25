@@ -1,8 +1,8 @@
 /* Shared protected bytes, signatures and audit-token identity reads. */
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
-/* Only the feasibility helper and experimental launcher opt into reply
- * provenance. Sanitation, reference ownership and failure policy stay local. */
+/* Only the feasibility helper and experimental launcher opt into shared reply
+ * provenance and bootstrap creation plumbing. Sanitation and failure policy stay local. */
 #ifdef NATIVE_RUNTIME_REPLIES
 #include <dlfcn.h>
 #include <mach/mig.h>
@@ -45,6 +45,83 @@ static long long domain_send_refs(mach_port_t name, int *query) {
     *query = mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_SEND, &refs);
   errno = saved;
   return *query == KERN_SUCCESS ? (long long)refs : -1;
+}
+/* XNU 43a9088: task.defs/std_types.defs use COPY_SEND for the setter;
+ * ipc_task_init creates a fresh space and copies the parent's bootstrap slot.
+ * Prevent runtime acquisition there instead of releasing unproved userspace refs.
+ * The exported bootstrap value is borrowed here, never an owned acquisition. */
+struct domain_bootstrap_issue {
+  const char *operation, *kind; int value; bool cleanup;
+};
+struct domain_bootstrap_fork {
+  pid_t child; unsigned count; struct domain_bootstrap_issue issues[8];
+};
+static bool domain_bootstrap_check(struct domain_bootstrap_fork *out, bool ok, const char *operation, const char *kind, int value, bool cleanup) {
+  if (!ok) out->issues[out->count++] = (struct domain_bootstrap_issue){operation, kind, value, cleanup};
+  return ok;
+}
+static bool domain_bootstrap_read(struct domain_bootstrap_fork *out, mach_port_t expected, const char *operation, bool cleanup) {
+  mach_port_t observed = MACH_PORT_NULL;
+  kern_return_t got = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &observed);
+  bool ok = domain_bootstrap_check(out, got == KERN_SUCCESS, operation, "mach", got, cleanup);
+  if (got == KERN_SUCCESS) {
+    ok = domain_bootstrap_check(out, observed == expected, operation, "invariant", 0, cleanup) && ok;
+    if (MACH_PORT_VALID(observed)) {
+      kern_return_t released = mach_port_deallocate(mach_task_self(), observed);
+      ok = domain_bootstrap_check(out, released == KERN_SUCCESS, "bootstrap-copy-release", "mach", released, true) && ok;
+    }
+  }
+  return ok;
+}
+static void domain_bootstrap_fork(struct domain_bootstrap_fork *out, pid_t *retained, void (*bind)(void)) {
+  memset(out, 0, sizeof(*out)); out->child = -1;
+  extern mach_port_t bootstrap_port;
+  mach_port_t saved = MACH_PORT_NULL;
+  kern_return_t got = task_get_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, &saved);
+  if (!domain_bootstrap_check(out, got == KERN_SUCCESS, "bootstrap-capture", "mach", got, false)) return;
+  mach_port_t cached = bootstrap_port;
+  /* Callers have independently verified one thread. No cache right is released
+   * or private runtime reset called. Parent fork handlers also see null. */
+  bootstrap_port = MACH_PORT_NULL;
+  kern_return_t cleared = task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, MACH_PORT_NULL);
+  bool ready = domain_bootstrap_check(out, cleared == KERN_SUCCESS, "bootstrap-clear", "mach", cleared, false);
+  if (ready) ready = domain_bootstrap_read(out, MACH_PORT_NULL, "bootstrap-empty", false);
+  if (ready) {
+    struct proc_taskinfo threads;
+    int inspected = proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &threads, sizeof(threads)), error = errno;
+    ready = domain_bootstrap_check(out, inspected == sizeof(threads), "bootstrap-threads", inspected < 0 ? "errno" : "status", inspected < 0 ? error : inspected, false);
+    if (ready) ready = domain_bootstrap_check(out, threads.pti_threadnum == 1, "bootstrap-threads", "invariant", 0, false);
+  }
+  if (ready) {
+    ready = domain_bootstrap_check(out, bootstrap_port == MACH_PORT_NULL, "bootstrap-cache", "invariant", 0, false);
+  }
+  if (ready) {
+    out->child = fork(); int error = errno;
+    if (out->child > 0) *retained = out->child;
+    domain_bootstrap_check(out, out->child >= 0, "fork", "errno", error, false);
+    domain_bootstrap_check(out, bootstrap_port == MACH_PORT_NULL, "bootstrap-cache", "invariant", 0, false);
+  }
+  if (out->child == 0) {
+    /* The parent's getter name was not inherited into this new IPC space.
+     * It must never enter child cleanup, even if a new local name aliases it. */
+    if (!out->count) {
+      bind();
+      domain_bootstrap_read(out, MACH_PORT_NULL, "bootstrap-empty", false);
+      domain_bootstrap_check(out, bootstrap_port == MACH_PORT_NULL, "bootstrap-cache", "invariant", 0, false);
+    }
+  } else {
+    /* Restore after a failed fork or preparation too. COPY_SEND leaves saved
+     * owned until its one release; the independent readback owns another copy. */
+    bootstrap_port = cached;
+    kern_return_t restored = task_set_special_port(mach_task_self(), TASK_BOOTSTRAP_PORT, saved);
+    domain_bootstrap_check(out, restored == KERN_SUCCESS, "bootstrap-restore", "mach", restored, true);
+    domain_bootstrap_read(out, saved, "bootstrap-match", true);
+    if (MACH_PORT_VALID(saved)) {
+      kern_return_t released = mach_port_deallocate(mach_task_self(), saved);
+      domain_bootstrap_check(out, released == KERN_SUCCESS, "bootstrap-copy-release", "mach", released, true);
+    }
+    domain_bootstrap_check(out, bootstrap_port == cached, "bootstrap-cache", "invariant", 0, true);
+  }
 }
 #endif
 #ifndef NATIVE_AUDIT_DOMAIN_ONLY

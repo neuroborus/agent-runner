@@ -2102,6 +2102,16 @@ closed 512-byte, versioned receipt bound to parent, fork epoch and child birth/a
 identity. Both launcher and fault census owners retain exact types, checked cache
 aliases and acquired-reference cleanup. Pre-census frames remain distinct from
 completed controls. The root parent holds audit custody only after fork.
+The ordinary experiment clears and independently reads back the bootstrap slot
+before the existing single-threaded fork, temporarily borrowing the exported
+bootstrap value without releasing a userspace reference. A fresh child binds
+producer bookkeeping and independently verifies null inheritance. The parent
+restores its exact slot and exported value and settles its owned getter copies,
+including aliases, after successful or failed fork. A created child is retained
+before restoration failures are reported. Unproved parent references are
+untouched; no private reset or count-based release is authorized. Reviewed/provider
+launch policy and the strict final child census remain unchanged. Primary contracts
+and hosted-proof limits belong to the native owner.
 Observation continues through census and checked cleanup, then ends at the child's
 final private read without waiting for payload exit. Unchanged evidence, successful
 observer exit, drained error-free streams and independent observer retirement
