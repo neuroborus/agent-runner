@@ -138,6 +138,198 @@ function approve(state) {
   return acceptEffectivePlanRevision(state, boundary);
 }
 
+test("progress derives proposals, accepted replacements and verified completion without changing authority", () => {
+  const project = (state, changedLines = 3000) => {
+    const run = {
+      runId: "11111111-1111-4111-8111-111111111111",
+      taskPath: "/task",
+      pipelineState: state,
+    };
+    const before = reload(state);
+    const progress =
+      planExecutionPipeline.projections.status(run).refinementProgress;
+    const artifact = planExecutionPipeline.projections.planProgress(run);
+    assert.deepEqual(state, before);
+    assert.equal(artifact.path, "/task/plan.progress.md");
+    assert.deepEqual(
+      [...artifact.content.matchAll(/^## Commit (.+)$/gmu)].map(
+        (match) => match[1],
+      ),
+      [...canonicalPlan.matchAll(/^## Commit (.+)$/gmu)].map(
+        (match) => match[1],
+      ),
+    );
+    assert.match(
+      artifact.content,
+      new RegExp(`\\[\\^runner-size-2\\]: Measurement: ${changedLines}`, "u"),
+    );
+    assert.match(
+      artifact.content,
+      /Decision: SPLIT\. Reason: Introduce the reader/u,
+    );
+    assert.equal(progress.preferredCommitLineLimit, 900);
+    assert.equal(progress.threshold, 2700);
+    assert.equal(
+      artifact.content
+        .split("\n")
+        .filter((line) => /\d+\.\d+ \(effective Commit/u.test(line))
+        .every((line) => line.startsWith("    - ")),
+      true,
+    );
+    return progress;
+  };
+  const assessedProgress = project(assessed());
+  assert.equal(assessedProgress.originalSteps[1].refinement, "proposed");
+  assert.deepEqual(
+    assessedProgress.originalSteps[1].proposedReplacements.map(
+      ({ label, subject }) => ({ label, subject }),
+    ),
+    parseCommitPlan(replacementPlan).steps.map(({ number, subject }) => ({
+      label: `2.${number}`,
+      subject,
+    })),
+  );
+  let state = propose(assessed());
+  let progress = project(state);
+  assert.equal(progress.effectiveRevision, 0);
+  assert.equal(progress.originalSteps[1].refinement, "proposed");
+  assert.deepEqual(
+    progress.originalSteps[1].proposedReplacements.map(({ status, head }) => ({
+      status,
+      head,
+    })),
+    [
+      { status: "pending", head: null },
+      { status: "pending", head: null },
+    ],
+  );
+  assert.deepEqual(progress.originalSteps[1].replacements, []);
+  state = approve(state);
+  progress = project(state);
+  assert.equal(progress.effectiveRevision, 1);
+  assert.equal(progress.originalSteps[1].refinement, "accepted");
+  state.replacementExecution.separations = [{ revision: 1, phase: "ready" }];
+  assert.equal(project(state).originalSteps[1].refinement, "executing");
+  state = {
+    ...state,
+    completedCommits: [...state.completedCommits, "b".repeat(40)],
+    currentStep: 3,
+  };
+  progress = project(state);
+  assert.deepEqual(
+    progress.originalSteps[1].replacements.map(({ label, status, head }) => ({
+      label,
+      status,
+      head,
+    })),
+    [
+      { label: "2.1", status: "completed", head: "b".repeat(40) },
+      { label: "2.2", status: "active", head: null },
+    ],
+  );
+  const reassessed = assessed("combined", state, 2, 4000);
+  const reassessedProgress = project(reassessed, 4000);
+  assert.equal(reassessedProgress.originalSteps[1].refinement, "proposed");
+  assert.deepEqual(
+    reassessedProgress.originalSteps[1].proposedReplacements.map(
+      ({ label }) => label,
+    ),
+    ["2.2", "2.3"],
+  );
+  const nested = propose(reassessed);
+  const nestedProgress = planExecutionPipeline.projections.status({
+    taskPath: "/task",
+    pipelineState: nested,
+  }).refinementProgress;
+  assert.equal(nestedProgress.effectiveRevision, 1);
+  assert.deepEqual(
+    nestedProgress.originalSteps[1].proposedReplacements.map(
+      ({ label }) => label,
+    ),
+    ["2.2", "2.3"],
+  );
+  assert.equal(
+    nestedProgress.originalSteps[1].replacements[0].head,
+    "b".repeat(40),
+  );
+  state = {
+    ...state,
+    completedCommits: [...state.completedCommits, "c".repeat(40)],
+    currentStep: 4,
+  };
+  progress = project(state);
+  assert.equal(progress.originalSteps[1].refinement, "completed");
+  assert.equal(progress.originalSteps[1].status, "completed");
+  assert.equal(progress.originalSteps[2].status, "active");
+});
+
+test("progress preserves original body indentation and trailing Markdown whitespace", () => {
+  const plan =
+    "## Commit 1: feat(core): preserve snippets\n\n    first();\n    second();\n\nKeep the trailing break.  \n";
+  const state = {
+    ...createPlanExecutionState({ settings: SETTINGS }),
+    canonicalPlan: plan,
+  };
+  const artifact = planExecutionPipeline.projections.planProgress({
+    runId: "11111111-1111-4111-8111-111111111111",
+    taskPath: "/task",
+    pipelineState: state,
+  });
+  assert.ok(artifact.content.includes(plan));
+});
+
+test("progress defers legacy safety publications until size settings are migrated", () => {
+  const state = {
+    ...createPlanExecutionState({ settings: SETTINGS }),
+    canonicalPlan,
+    settings: { ...SETTINGS },
+  };
+  delete state.settings.preferredCommitLineLimit;
+  delete state.settings.commitSizeAssessmentMultiplier;
+  const run = { taskPath: "/task", pipelineState: state };
+  assert.equal(planExecutionPipeline.projections.planProgress(run), null);
+  assert.equal(
+    planExecutionPipeline.projections.status(run).refinementProgress,
+    null,
+  );
+  run.pipelineState = planExecutionPipeline.migrations[28](run);
+  assert.equal(
+    planExecutionPipeline.projections.status(run).refinementProgress.threshold,
+    2700,
+  );
+  assert.equal(run.pipelineState.commitSizeAssessment.eligible, false);
+});
+
+test("atomic progress retains measured evidence and escapes multiline Markdown reasons", () => {
+  const state = assessed();
+  const attempt = state.commitSizeAssessment.lineages[0].attempts[0];
+  attempt.result = {
+    ...attempt.result,
+    decision: "ATOMIC",
+    replacementPlan: "",
+    reason: "Keep one contract.\n## Commit 9: fake <approval>",
+  };
+  const run = {
+    runId: "11111111-1111-4111-8111-111111111111",
+    taskPath: "/task",
+    pipelineState: state,
+  };
+  const progress =
+    planExecutionPipeline.projections.status(run).refinementProgress;
+  assert.equal(progress.originalSteps[1].refinement, "atomic");
+  assert.equal(progress.originalSteps[1].decision, "ATOMIC");
+  assert.equal(progress.originalSteps[1].reason, attempt.result.reason);
+  assert.deepEqual(progress.originalSteps[1].replacements, []);
+  const { content } = planExecutionPipeline.projections.planProgress(run);
+  assert.doesNotMatch(content, /^## Commit 9:/mu);
+  assert.match(
+    content,
+    /Reason: Keep one contract\. ## Commit 9: fake \\<approval\\>/u,
+  );
+  assert.match(content, /strictly more than 2700/u);
+  assert.doesNotMatch(content, /effective Commit|2\.1/u);
+});
+
 for (const mode of ["lazy", "independent", "combined"]) {
   test(`${mode} accepts only its distinct plan gates, never an assessment or candidate approval`, () => {
     let state = propose(assessed(mode));

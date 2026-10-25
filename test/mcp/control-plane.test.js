@@ -20,6 +20,60 @@ import {
 
 const RUN_ID = "11111111-1111-4111-8111-111111111111";
 
+test("status, wait and activity share derived revision progress with an explicit current-snapshot revision", async () => {
+  const run = {
+    runId: RUN_ID,
+    revision: 5,
+    pipelineId: "plan-execution",
+    taskPath: "/task",
+    activeTurn: null,
+    executionProcess: null,
+    pause: null,
+    pipelineState: {
+      workflowState: "DONE",
+      currentStep: null,
+      completedCommits: ["a".repeat(40)],
+      findings: [],
+      findingOverrides: [],
+      canonicalPlan:
+        "## Commit 1: feat(core): add behavior\n\nImplement behavior.",
+      settings: {
+        mode: "combined",
+        preferredCommitLineLimit: 900,
+        commitSizeAssessmentMultiplier: 3,
+      },
+    },
+  };
+  const control = createMcpControlPlane({
+    runner: { status: async () => ({ run, directoryPath: "/state/run" }) },
+    runStore: {
+      inspectRunLeaseOwner: async () => ({ status: "none" }),
+      readPublicActivity: async () => ({ cursor: 5, activities: [] }),
+    },
+  });
+  const status = await control.runStatus({ runId: RUN_ID });
+  const page = await control.runActivity({
+    runId: RUN_ID,
+    cursor: 0,
+    limit: 10,
+  });
+  const waited = await control.runWait({
+    runId: RUN_ID,
+    cursor: 5,
+    timeoutMs: 0,
+  });
+  assert.deepEqual(page.refinementProgress, status.refinementProgress);
+  assert.deepEqual(waited.refinementProgress, status.refinementProgress);
+  assert.equal(page.refinementProgressRevision, 5);
+  assert.equal(
+    status.refinementProgress.artifactPath,
+    "/task/plan.progress.md",
+  );
+  assert.equal(status.refinementProgress.effectiveRevision, 0);
+  assert.equal(status.refinementProgress.threshold, 2700);
+  assert.equal(status.refinementProgress.originalSteps[0].head, "a".repeat(40));
+});
+
 test("status and wait expose bounded observation evidence without private run or session data", async () => {
   const run = {
     runId: RUN_ID,

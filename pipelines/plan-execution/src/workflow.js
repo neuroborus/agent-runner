@@ -8186,9 +8186,11 @@ ${step.subject}`),
   } catch (cause) {
     if (
       dispositionPausePersistence ||
-      ["ERR_AVAILABILITY_RECOVERY", "ERR_INACTIVITY_RECOVERY"].includes(
-        cause?.code,
-      )
+      [
+        "ERR_AVAILABILITY_RECOVERY",
+        "ERR_INACTIVITY_RECOVERY",
+        "ERR_PLAN_PROGRESS_PUBLICATION",
+      ].includes(cause?.code)
     )
       throw cause;
     if (isOwnershipFailure(cause) && state().workflowState !== "COMMIT") {

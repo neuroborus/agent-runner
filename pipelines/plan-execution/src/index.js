@@ -14,6 +14,7 @@ import {
 
 import { prepareImplementationRecovery } from "./implementation-evidence.js";
 import { createEffectivePlanRevisions } from "./effective-plan.js";
+import { projectPlanProgress, renderPlanProgress } from "./plan-progress.js";
 import {
   clearedCandidateAndTerminalGate,
   finalizationGatePassed,
@@ -517,6 +518,7 @@ function projectStatus(run) {
   return Object.freeze({
     currentStep: state.currentStep,
     planPath: state.planPath ?? join(run.taskPath, "plan.md"),
+    refinementProgress: projectPlanProgress(run),
     findings: Object.freeze(
       publicFindings(state).map(({ id, problem }) =>
         Object.freeze({ id, summary: problem }),
@@ -1525,6 +1527,7 @@ export const planExecutionPipeline = Object.freeze({
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,
+    planProgress: renderPlanProgress,
     status: projectStatus,
   }),
   validateResumeAction,

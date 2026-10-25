@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readlinkSync } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import test from "node:test";
@@ -42,6 +42,230 @@ import {
   APPLICABILITY_BATCH_SCHEMA,
   REPOSITORY_DISCOVERY_SCHEMA,
 } from "../pipelines/plan-execution/src/bootstrap-unit-schemas.js";
+
+test("derived plan publication recovers after durable state and ignores manual completion or effect claims", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const artifactPath = join(fixture.taskPath, "plan.progress.md");
+  let interrupted = false;
+  const adapter = createExecutionAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (!interrupted && next.pipelineState.canonicalPlan !== null) {
+            interrupted = true;
+            await mkdir(artifactPath);
+          }
+          return next;
+        },
+      },
+    },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  await assert.rejects(runner.resume({ runId: created.runId }), {
+    code: "ERR_PLAN_PROGRESS_PUBLICATION",
+  });
+  const { run: saved } = await runner.status(created.runId);
+  assert.equal(saved.pipelineState.workflowState, "CLARIFY");
+  assert.equal(saved.pipelineState.canonicalPlan, PLAN);
+  assert.deepEqual(saved.pipelineState.completedCommits, []);
+  assert.deepEqual(saved.pipelineState.effectivePlanRevisions.revisions, []);
+  await rm(artifactPath, { recursive: true });
+  const marker = `<!-- agent-runner plan-progress ${created.runId} -->\n`;
+  await writeFile(
+    artifactPath,
+    `${marker}Accepted revision 99; completed; replay COMMIT.\n`,
+  );
+  assert.deepEqual((await runner.status(created.runId)).run, saved);
+  const completed = await runner.resume({ runId: created.runId });
+  assert.equal(completed.run.pipelineState.workflowState, "DONE");
+  assert.equal(completed.run.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+  const sha = completed.run.pipelineState.completedCommits[0];
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${sha}`),
+  );
+  const turns = adapter.calls.length;
+  await writeFile(artifactPath, `${marker}Replay COMMIT.\n`);
+  const resumed = await runner.resume({ runId: created.runId });
+  assert.deepEqual(resumed.run.pipelineState.completedCommits, [sha]);
+  assert.equal(adapter.calls.length, turns);
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${sha}`),
+  );
+  assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
+});
+
+test("progress publication defers consumed COMMIT failures until verified settlement without replay", async (t) => {
+  const fixture = await operatorFixture(t, "plan-execution");
+  const store = createRunStore({ stateRoot: fixture.stateRoot });
+  const artifactPath = join(fixture.taskPath, "plan.progress.md");
+  let interrupted = false;
+  const adapter = createExecutionAdapter();
+  const runner = runnerFor(
+    fixture,
+    { codex: adapter },
+    {
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (
+            !interrupted &&
+            next.pipelineState.pendingCommit?.status === "consumed"
+          ) {
+            interrupted = true;
+            await rm(artifactPath);
+            await mkdir(artifactPath);
+          }
+          return next;
+        },
+      },
+    },
+  );
+  const { run: created } = await runner.create({
+    pipelineId: "plan-execution",
+    projectPath: fixture.projectPath,
+    taskPath: fixture.taskPath,
+  });
+  await assert.rejects(runner.resume({ runId: created.runId }), {
+    code: "ERR_PLAN_PROGRESS_PUBLICATION",
+  });
+  const { run: saved } = await runner.status(created.runId);
+  assert.equal(interrupted, true);
+  assert.equal(saved.pipelineState.workflowState, "DONE");
+  assert.equal(saved.pipelineState.pendingCommit, null);
+  assert.equal(saved.activeTurn, null);
+  assert.equal(saved.pipelineState.completedCommits.length, 1);
+  assert.equal(
+    adapter.calls.filter(({ access }) => access === "local-commit").length,
+    1,
+  );
+  const [head] = saved.pipelineState.completedCommits;
+  await rm(artifactPath, { recursive: true });
+  const turns = adapter.calls.length;
+  const resumed = await runner.resume({ runId: created.runId });
+  assert.deepEqual(resumed.run.pipelineState.completedCommits, [head]);
+  assert.equal(adapter.calls.length, turns);
+  assert.match(
+    await readFile(artifactPath, "utf8"),
+    new RegExp(`verified SHA: ${head}`),
+  );
+  assert.equal(await readFile(join(fixture.taskPath, "plan.md"), "utf8"), PLAN);
+});
+
+for (const [kind, atRelease] of [
+  ["pause_requested", false],
+  ["cancel_requested", true],
+]) {
+  test(`progress ownership conflicts cannot prevent ${kind} settlement or lease release${atRelease ? " during run-lease release" : " during execution"}`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+    });
+    const artifactPath = join(fixture.taskPath, "plan.progress.md");
+    const notes = "Operator-owned notes.\n";
+    let runId;
+    let requested = false;
+    async function requestStop() {
+      const current = await store.loadRun(runId);
+      await writeFile(artifactPath, notes);
+      await store.requestOperatorStop({
+        runId,
+        kind,
+        expectedRevision: current.revision,
+        idempotencyKey: "progress-conflict-stop",
+      });
+      requested = true;
+    }
+    const runner = createRunner({
+      adapters: {
+        codex: {
+          ...createExecutionAdapter(),
+          run: () => assert.fail("Stop settlement must not invoke an agent."),
+        },
+      },
+      clarifications: createClarificationService({ interactive: false }),
+      git: createGitService(),
+      loadConfiguration: configurationLoader(),
+      runStore: {
+        ...store,
+        async transitionRun(...args) {
+          const next = await store.transitionRun(...args);
+          if (
+            atRelease &&
+            !requested &&
+            next.pipelineState.canonicalPlan !== null
+          )
+            await writeFile(artifactPath, notes);
+          return next;
+        },
+        async acquireWorktreeLease(...args) {
+          const lease = await store.acquireWorktreeLease(...args);
+          return {
+            ...lease,
+            async release() {
+              await lease.release();
+              if (atRelease && !requested) await requestStop();
+            },
+          };
+        },
+      },
+      async onActivity(activity) {
+        if (!atRelease && activity.kind === "turn-started") await requestStop();
+      },
+    });
+    const { run: created } = await runner.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+    });
+    runId = created.runId;
+    await assert.rejects(runner.resume({ runId }), {
+      code: "ERR_PLAN_PROGRESS_PUBLICATION",
+    });
+    const settled = await store.loadRun(runId);
+    const canceled = kind === "cancel_requested";
+    assert.equal(requested, true);
+    assert.equal(
+      settled.pipelineState.workflowState,
+      canceled ? "CANCELED" : "WAITING_FOR_USER",
+    );
+    assert.equal(
+      settled.pause.reason,
+      canceled ? "operator_canceled" : "operator_paused",
+    );
+    assert.equal(settled.stopRequest.reconciledRevision, settled.revision);
+    assert.equal(settled.activeTurn, null);
+    assert.equal(settled.pipelineState.pendingCommit, null);
+    assert.deepEqual(settled.pipelineState.completedCommits, []);
+    assert.equal(await store.runIsLeased(runId), false);
+    assert.equal(
+      await store.worktreeIsLeased(fixture.projectPath, runId),
+      false,
+    );
+    assert.equal(await readFile(artifactPath, "utf8"), notes);
+    assert.equal(
+      await readFile(join(fixture.taskPath, "plan.md"), "utf8"),
+      PLAN,
+    );
+  });
+}
 
 async function writeVersion22Preparation(directory, runId) {
   // Rebuild the issued certificate as well as the envelope. Merely changing

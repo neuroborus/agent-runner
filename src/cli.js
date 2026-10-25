@@ -167,6 +167,32 @@ function writeActivity(stdout, activity) {
   );
 }
 
+function refinementProgressLines(progress) {
+  if (progress == null) return [];
+  const line = (text) => text.replace(/[\p{Cc}\p{Zl}\p{Zp}]+/gu, " ");
+  return [
+    `Plan progress: ${progress.artifactPath}`,
+    `Effective revision: ${progress.effectiveRevision}; advisory planning target: ${progress.preferredCommitLineLimit}; execution assessment threshold: >${progress.threshold}`,
+    ...progress.originalSteps.flatMap((entry) => [
+      `Original step ${entry.originalStep}: ${entry.subject}; ${entry.status}${entry.refinement ? `; refinement ${entry.refinement}` : ""}${entry.head ? `; verified SHA: ${entry.head}` : ""}`,
+      ...(entry.measurement
+        ? [
+            `  Measured: ${entry.measurement.changedLines} changed text lines; ${entry.measurement.binaryFiles} binary files; ${entry.measurement.gitlinks} gitlinks; decision: ${entry.decision ?? "pending"}`,
+            `  Reason: ${line(entry.reason ?? "No size decision recorded")}`,
+          ]
+        : []),
+      ...entry.replacements.map(
+        (replacement) =>
+          `  ${replacement.label} (effective Commit ${replacement.step}): ${replacement.subject}; ${replacement.status}; verified SHA: ${replacement.head ?? "pending"}`,
+      ),
+      ...entry.proposedReplacements.map(
+        (replacement) =>
+          `  Proposed ${replacement.label}: ${replacement.subject}; pending; verified SHA: pending`,
+      ),
+    ]),
+  ];
+}
+
 function shortFingerprint(value) {
   return typeof value === "string" ? value.slice(0, 12) : null;
 }
@@ -295,6 +321,7 @@ function runSummary({ directoryPath, run }) {
   if (status.planPath !== null) {
     lines.push(`Plan: ${status.planPath}`);
   }
+  lines.push(...refinementProgressLines(status.refinementProgress));
   if (status.findings.length > 0) {
     lines.push("Open findings:");
     for (const finding of status.findings) {
@@ -656,11 +683,18 @@ export async function main(
       }
       return 0;
     }
+    let lastRefinementProgress;
     const commandRunner =
       runner ??
       createCommandRunner({
         onActivity(activity) {
           writeActivity(stdout, activity);
+          const progress = JSON.stringify(activity.refinementProgress);
+          if (progress !== lastRefinementProgress) {
+            const lines = refinementProgressLines(activity.refinementProgress);
+            if (lines.length) stdout.write(`${lines.join("\n")}\n`);
+            lastRefinementProgress = progress;
+          }
         },
       });
     if (command === "run") {

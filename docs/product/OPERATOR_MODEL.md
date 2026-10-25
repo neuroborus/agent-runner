@@ -203,6 +203,15 @@ Run state lives under the user's OS state directory, outside both the target
 repository and task directory. Each transition is a complete write-ahead event
 followed by atomic current-state replacement. The human-readable progress file
 is derived and can be regenerated; the event journal remains authoritative.
+Execution also publishes a run-owned `plan.progress.md` beside unchanged
+`plan.md`, showing size decisions, original/replacement progress and verified
+SHAs. CLI/MCP status and activity derive the same information from state;
+Markdown edits cannot accept revisions, complete work or replay effects. Resume
+regenerates missing/stale owned output after interrupted publication. Other
+owners and unsafe or nonignored repository-local paths are rejected. Artifact
+conflicts cannot prevent operator pause/cancel settlement or safe lease release;
+publication failures are reported after settlement. See the
+[refinement progress contract](../../pipelines/plan-execution/docs/SPEC.md#derived-refinement-progress).
 Accepted structured results have 2 MiB of serialized UTF-8 headroom, with finite
 larger state and recovery containers. Journals roll over into bounded segments
 while retaining the complete authoritative history and crash-recovery ordering;

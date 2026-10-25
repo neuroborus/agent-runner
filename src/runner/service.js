@@ -45,6 +45,7 @@ import { createInactivityCoordinator } from "./inactivity.js";
 import { createAvailabilityCoordinator } from "./availability.js";
 import { pipelineForRun } from "./migration.js";
 import { inspectTrustedRequirements } from "./trusted-requirements.js";
+import { createPlanProgressPublisher } from "./plan-progress.js";
 import {
   createStopMonitor,
   reconcileOperatorStop,
@@ -176,6 +177,7 @@ export function createRunner(options = {}) {
   const adapters = options.adapters;
   const clarifications = options.clarifications ?? createClarificationService();
   const git = options.git ?? createGitService();
+  const publishPlanProgress = createPlanProgressPublisher({ git });
   const inspectSessionProcesses =
     options.inspectSessionProcesses ?? inspectOwnedSessionProcesses;
   const loadConfiguration =
@@ -242,6 +244,14 @@ export function createRunner(options = {}) {
   }
 
   async function publish(activity, run) {
+    const pipeline = getPipeline(run.pipelineId);
+    // Derived output cannot interrupt stop reconciliation. Regenerate after
+    // durable settlement; consumed effects also defer publication below.
+    if (!stopPending(run))
+      await publishPlanProgress(
+        run,
+        pipeline.projections.planProgress?.(run) ?? null,
+      );
     if (activity === undefined || activity === null) {
       return;
     }
@@ -251,6 +261,13 @@ export function createRunner(options = {}) {
         revision: run.revision,
         recordedAt: run.updatedAt,
         ...activity,
+        ...(pipeline.projections.planProgress === undefined
+          ? {}
+          : {
+              refinementProgress: deepFreeze(
+                pipeline.projections.status(run).refinementProgress,
+              ),
+            }),
       }),
     );
   }
@@ -917,6 +934,10 @@ export function createRunner(options = {}) {
     let completed;
     try {
       await monitor.check();
+      await publishPlanProgress(
+        run,
+        pipeline.projections.planProgress?.(run) ?? null,
+      );
       completed = await pipeline.workflow.run({
         action,
         run,
@@ -1005,11 +1026,20 @@ export function createRunner(options = {}) {
       } catch (cause) {
         if (cause?.code !== "ERR_STOP_RECONCILIATION_REQUIRED") throw cause;
         const current = await runStore.loadRun(runId);
-        await withStopReconciliationLease(
-          current,
-          () => reconcilePendingStop(lease, runId),
-          lease,
-        );
+        try {
+          await withStopReconciliationLease(
+            current,
+            () => reconcilePendingStop(lease, runId),
+            lease,
+          );
+        } catch (reconciliationCause) {
+          // Publication may fail after durable settlement. The state-owned
+          // release still rejects any pending stop or uncertain execution.
+          try {
+            await lease.release();
+          } catch {}
+          throw reconciliationCause;
+        }
       }
     }
     throw new RunnerError("Operator stop reconciliation is still pending.", {

@@ -208,6 +208,26 @@ preserving consumed effects and allowances. Revised implementation evidence
 cannot be rebound by ordinal. See the
 [validation foundation](../pipelines/plan-execution/docs/SPEC.md#revision-bound-validation-foundation).
 
+Execution's private `plan-progress.js` derives refinement status and Markdown
+from frozen plan text, assessment/revision ledgers, separation readiness and
+verified completed commits. Its descriptor exposes the artifact projection and
+`status.refinementProgress`; CLI and MCP use that same projection. Root Runner's
+private `plan-progress.js` confines atomic publication to `plan.progress.md`
+beside the frozen plan after state publication, with run ownership, regular-file,
+canonical-parent and repository ignore checks. Reads, temporary writes,
+replacement, synchronization and cleanup stay anchored to a validated open
+directory descriptor. Runner defers publication throughout a consumed commit
+until verification and durable settlement, so artifact failure cannot strand an
+unattempted effect. Pending operator stops also defer publication until durable
+reconciliation. Publication failure after settlement still permits state-checked
+lease release, including reconciliation initiated during release.
+A per-run publication queue serializes concurrent activity
+producers and discards older snapshots after observing a newer state revision.
+Publication failure preserves durable authority for leased
+resume/regeneration; status remains read-only.
+The artifact is never a workflow input. See the
+[derived progress contract](../pipelines/plan-execution/docs/SPEC.md#derived-refinement-progress).
+
 Execution's private `replacement-execution.js` coordinates assessment, reviewed
 revision acceptance, complete role rediscovery and preservation through injected
 capabilities. Version 32 persists separation IDs, the inspected snapshot,

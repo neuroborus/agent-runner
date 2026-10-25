@@ -92,6 +92,49 @@ function fakeRunner(overrides = {}) {
   };
 }
 
+test("status renders the derived refinement artifact, thresholds and verified original/replacement progress", async () => {
+  const result = commandResult();
+  Object.assign(result.run.pipelineState, {
+    canonicalPlan:
+      "## Commit 1: feat(core): add behavior\n\nImplement behavior.",
+    settings: {
+      mode: "combined",
+      preferredCommitLineLimit: 900,
+      commitSizeAssessmentMultiplier: 3,
+    },
+  });
+  const stdout = createSink();
+  const stderr = createSink();
+  assert.equal(
+    await main(["status", "--run", RUN_ID], {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async status() {
+          return result;
+        },
+      }),
+    }),
+    0,
+  );
+  assert.match(stdout.read(), /Plan progress: \/task\/plan\.progress\.md/u);
+  assert.match(
+    stdout.read(),
+    /Effective revision: 0; advisory planning target: 900; execution assessment threshold: >2700/u,
+  );
+  assert.match(
+    stdout.read(),
+    /Original step 1: feat\(core\): add behavior; completed/u,
+  );
+  assert.match(
+    stdout.read(),
+    new RegExp(
+      `Original step 1: feat\\(core\\): add behavior; completed; verified SHA: ${"b".repeat(40)}`,
+    ),
+  );
+  assert.equal(stderr.read(), "");
+});
+
 test("guidance prints the complete shared rendering without constructing a pipeline runner", async () => {
   const stdout = createSink();
   const stderr = createSink();

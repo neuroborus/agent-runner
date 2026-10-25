@@ -346,6 +346,18 @@ passes its own complete gates and exact-subject commit. Frozen plans stay
 unchanged, and legacy/intermediate runs remain ineligible on resume. See the
 [assessment contract](pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
+Execution publishes `plan.progress.md` beside unchanged `plan.md`, retaining its
+exact headings and adding size-decision footnotes, original/replacement states,
+exact subjects and verified SHAs. Decimal labels are for display only. CLI status
+and live activity plus MCP status/wait/activity expose the same state-derived
+progress, including the artifact path and accepted effective revision. The 900-line
+planning target is advisory; execution assessment starts strictly above 2,700
+lines at the defaults. Editing the progress file grants no authority. Resume
+regenerates missing/stale owned output; preserve its run ownership comment.
+Runner refuses unrelated files, links and repository-local paths that are not
+already ignored. See the
+[progress contract](pipelines/plan-execution/docs/SPEC.md#derived-refinement-progress).
+
 The stagnation window detects consecutive blocked correction rounds. In
 independent mode the first full window invokes one fresh Arbiter and a second
 full window pauses for the user. Lazy mode has no Arbiter and pauses at the
@@ -1303,6 +1315,9 @@ projects descriptor-owned setting values, defaults, and recommendations.
 history after a cursor and a next cursor. Use activity for explicit inspection
 or recovery. `run_wait` can emit the same bounded events as progress
 notifications while the model sleeps; live rendering depends on the MCP host.
+Execution's `refinementProgress` includes the current derived plan view;
+activity identifies that snapshot with `refinementProgressRevision`, independent
+of its historical page cursor.
 Public projections contain no inactive role configuration or provider-private
 data. When present, `launchRecovery` is the same strict checkpoint/class value
 shown by CLI status.

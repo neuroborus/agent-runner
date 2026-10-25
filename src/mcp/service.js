@@ -405,6 +405,7 @@ function statusProjection({ directoryPath, run }, leaseOwner) {
     pause,
     clarificationPath: clarification.path,
     planPath: status.planPath,
+    refinementProgress: status.refinementProgress ?? null,
     pendingInput: pendingInput(run),
     findings: status.findings,
     completedCommits: status.completedCommits,
@@ -877,7 +878,15 @@ export function createMcpControlPlane(options = {}) {
       afterRevision: input.cursor,
       limit: input.limit,
     });
-    return { runId: input.runId, mode: resolvedMode(run), ...page };
+    return {
+      runId: input.runId,
+      mode: resolvedMode(run),
+      refinementProgress:
+        getPipeline(run.pipelineId).projections.status(run)
+          .refinementProgress ?? null,
+      refinementProgressRevision: run.revision,
+      ...page,
+    };
   }
 
   async function runWait(input, context = {}) {

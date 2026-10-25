@@ -7,6 +7,17 @@ remain in the owning documentation.
 
 ## 2026-10-25
 
+- **Refinement progress is derived, never execution authority.** Runner publishes
+  a confined, run-owned `plan.progress.md` beside unchanged frozen plans after
+  durable state publication. Original exact headings gain size-decision
+  footnotes; replacements show pending/active/completed state and verified SHAs.
+  CLI/MCP status and activity share the same projection, separating advisory
+  planning targets from strict execution assessment thresholds. Per-run
+  serialization prevents concurrent activity from replacing newer progress
+  with older state. Interrupted
+  publication regenerates from accepted state without rolling back authority or
+  replaying consumed effects; manual Markdown claims cannot advance work.
+
 - **New execution runs can execute reviewed replacements without losing future work.**
   Version 32 connects bounded assessment, flat reviewed revisions, complete
   revision-bound inventories and external preservation. The runner captures the

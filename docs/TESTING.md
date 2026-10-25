@@ -45,6 +45,25 @@ migration adds empty authority without inferring approval or touching pending
 effects; the durable legacy-migration and runner-orchestration suites own
 persisted migration composition.
 
+Its progress cases also cover proposed/accepted/executing/completed refinement,
+atomic justification, exact original headings, display labels, measurements and
+verified child SHAs without mutating authority, original Markdown body preservation,
+and deferred legacy progress until size settings migrate. Fast `runner-plan-progress.test.js`
+owns confined publication, interrupted replacement, missing/stale regeneration,
+ownership/link/ignore rejection, ancestor substitution during ignore checks
+without redirected writes or leaked temporaries, and inert manual Markdown
+claims. Controlled overlapping publications cover serialization, stale-revision
+suppression, same-revision retry and consumed-commit deferral. CLI and MCP unit
+suites cover the shared projection and current-snapshot
+activity revision.
+The slow Runner orchestration suite additionally proves interruption after
+durable state publication, deferral of artifact failures throughout consumed
+COMMIT, and regeneration after verified commit settlement without duplicate
+commit effects or changing the frozen plan. Progress ownership conflicts also
+cover durable pause/cancel settlement and run/worktree lease release, including
+reconciliation initiated during run-lease release, without overwriting the
+conflicting file or invoking an agent.
+
 The fast execution `revision-validation.test.js` suite owns accepted-revision
 and exact-replacement bindings, mode-required complete role inventories,
 additive commands/reports and future applicability, unchanged correspondence,
