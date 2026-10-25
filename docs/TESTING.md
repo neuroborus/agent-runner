@@ -28,8 +28,9 @@ failed blob read before temporary preparation. The slow
 `runner-orchestration.slow.test.js` suite covers public Runner resume with
 unsettled and settled version-22 preparation custody before envelope migration
 and pending-stop settlement, without new agent or check work.
-Refinement dispatch and effective-plan acceptance remain inactive. Common
-envelope/journal changes also require the affected durable state, effect,
+Preserved replacement execution consumes these primitives only after reviewed
+revision acceptance and complete capability discovery. Common envelope/journal
+changes also require the affected durable state, effect,
 stop, migration and MCP workflow suites listed below; focused probes do not
 replace those gates.
 
@@ -42,7 +43,7 @@ lineage proposal limits, including historical grants across step advancement.
 It uses pure policy plus one lightweight execution-state fixture. Version-29
 migration adds empty authority without inferring approval or touching pending
 effects; the durable legacy-migration and runner-orchestration suites own
-persisted migration composition. Production refinement remains inactive.
+persisted migration composition.
 
 The fast execution `revision-validation.test.js` suite owns accepted-revision
 and exact-replacement bindings, mode-required complete role inventories,
@@ -54,6 +55,43 @@ assignment omissions while their owning unit can still be corrected. Pure policy
 and controlled bootstrap effects keep these cases deterministic. Durable legacy migrations,
 effect recovery and Runner orchestration remain separate slow-tier obligations;
 focused source tests do not establish their acceptance.
+
+The fast execution `replacement-execution.test.js` suite owns new-run activation,
+all-mode replacement gates, the exact threshold, preserved source reconstruction,
+interrupted acceptance/restoration, consumed-commit verification without replay,
+correction isolation from later unsplit steps,
+bounded references for large cumulative captures, request admission before
+restoration, inaccessible binary sources and absent admission support without
+candidate removal, versioned sibling finding decisions and same-ID active version changes,
+revision-discovery capacity
+and product-decision outcomes, compatible-answer resume before and after a role
+receipt in all modes, refresh after a verified sibling, and renamed owned-finding
+rejection, interrupted clarification-bound plan rejection before any new effects,
+correction-grown splits with interrupted restoration and revision-discovery
+answers in all modes, clarification after an amendment on a later sibling,
+and suspended versioned reconsideration requests across reconstruction, mixed
+fix/dispute refinement in independent and combined modes through interrupted
+restoration and recorded withdrawal,
+read-only refinement contamination stops, exact output-exhaustion checkpoint
+reconstruction, unchanged rejected-plan repair pauses, and disabled legacy
+migration. Input-drift and read-only-contamination cases retain historical
+inventories after revision preparation, including pending restoration.
+They also cover the interval after receipt archival and before rediscovery.
+Controlled effects keep it independent of native sessions. The
+existing state preservation suite also covers verified manifest/blob references for saved
+binary/deleted content and rejects new or changed restoration authority during
+stop reconciliation. The slow runner-orchestration suite owns real leased
+preservation, restart after restoration publication, and immediate pause/cancel
+recovery after a path write; the slow state
+operator-stop suite owns deferred logical-boundary admission, recovery and
+settlement across verified children, including unborn baselines, and legacy
+boundary admission/journal replay before migration.
+These additions retain the existing exact slow commands and full
+slow gate; focused checks do not replace their required acceptance.
+The provider suites cover exact-file admission without model turns: Codex keeps
+root reads separate from temporary write exclusions, and Claude rejects binary
+sources hidden by the selected runner-boundary command masks. The runner policy
+suite checks admission forwarding after immutable policy-receipt validation.
 
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical

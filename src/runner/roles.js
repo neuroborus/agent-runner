@@ -354,6 +354,10 @@ function configuredAdapter(
   };
   return Object.freeze({
     probe: resolveCapabilities,
+    async canReadFiles(request) {
+      await resolveCapabilities();
+      return (await adapter.canReadFiles?.(request)) === true;
+    },
     run: (request) =>
       runAdapter(adapter, configuration.backend, request, providers),
   });

@@ -263,6 +263,40 @@ test("adapter probing verifies the immutable receipt before provider work", asyn
   assert.equal(providerRuns, 0);
 });
 
+test("exact-file admission uses the selected adapter only after policy receipt validation", async () => {
+  const order = [];
+  const request = { access: "workspace-write", paths: ["/state/saved/blob"] };
+  const adapter = {
+    async probe() {
+      order.push("probe");
+      return capabilities();
+    },
+    async canReadFiles(value) {
+      assert.deepEqual(value, request);
+      order.push("read-access");
+      return true;
+    },
+    async run() {
+      assert.fail("Read admission cannot start a model turn.");
+    },
+  };
+  const selected = roleAdapters(
+    {
+      pipelineId: planExecutionPipeline.id,
+      roles: { worker: CONFIGURATION },
+      sessionLineage: { source: null },
+    },
+    planExecutionPipeline,
+    { codex: adapter },
+    PROVIDER_REGISTRY,
+    async () => order.push("receipt"),
+  );
+  assert.equal(await selected.worker.canReadFiles(request), true);
+  assert.deepEqual(order, ["probe", "receipt", "read-access"]);
+  delete adapter.canReadFiles;
+  assert.equal(await selected.worker.canReadFiles(request), false);
+});
+
 test("an abort race does not derive stop proof from raw cause fields", async () => {
   const controller = new AbortController();
   const stopReason = Object.assign(new Error("Operator stop requested."), {

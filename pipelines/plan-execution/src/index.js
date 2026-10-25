@@ -172,6 +172,7 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "local_artifacts_not_ignored",
   "lazy_output_invalid",
   "review_output_invalid",
+  "effective_plan_output_invalid",
   "unsafe_git_state",
 ]);
 const RESUMABLE_WORKFLOW_STATES = new Set([
@@ -244,6 +245,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
     "A read-only turn contaminated the repository; abandon this run and restart from an uncontaminated worktree.",
   review_output_invalid:
     "The candidate Reviewer result remains invalid and requires an explicit read-only retry.",
+  effective_plan_output_invalid:
+    "The rejected replacement plan is unchanged and requires an explicit read-only repair retry.",
   task_input_changed: "A task or plan input changed after the run began.",
   unexpected_git_identity_change:
     "The effective Git identity changed during execution.",
@@ -266,6 +269,7 @@ const PUBLIC_DETAIL_REASONS = new Set([
   "plan_revision_required",
   "lazy_output_invalid",
   "review_output_invalid",
+  "effective_plan_output_invalid",
 ]);
 const PUBLIC_FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const MAX_PUBLIC_EVIDENCE_ITEMS = 32;
@@ -637,6 +641,7 @@ function validateResumeAction(run, action) {
             "finalization_evidence_rejected",
             "lazy_output_invalid",
             "review_output_invalid",
+            "effective_plan_output_invalid",
           ].includes(run.pause?.reason) &&
             RESUMABLE_WORKFLOW_STATES.has(run.pause?.resumeState)))))
   ) {
@@ -1447,11 +1452,28 @@ export function migratePlanExecutionStateV30(run) {
   });
 }
 
+export function migratePlanExecutionStateV31(run) {
+  // Previously persisted runs never gain production refinement on resume.
+  return Object.freeze({
+    ...run.pipelineState,
+    commitSizeAssessment: {
+      ...run.pipelineState.commitSizeAssessment,
+      eligible: false,
+    },
+    replacementExecution: {
+      separations: [],
+      corrections: [],
+      findingAccounting: [],
+      inputChanges: [],
+    },
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 31,
+  stateVersion: 32,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1488,6 +1510,7 @@ export const planExecutionPipeline = Object.freeze({
     28: migratePlanExecutionStateV28,
     29: migratePlanExecutionStateV29,
     30: migratePlanExecutionStateV30,
+    31: migratePlanExecutionStateV31,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

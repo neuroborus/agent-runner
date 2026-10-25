@@ -185,6 +185,7 @@ export function stopSettlement(
   patch,
   activity,
   configurationFailure = null,
+  continuesDeferredBoundary = false,
 ) {
   if (configurationFailure !== null) {
     patch = {
@@ -200,7 +201,11 @@ export function stopSettlement(
       activeTurn: null,
     };
   }
-  if (!stopPending(current)) return { patch, activity };
+  if (
+    !stopPending(current) ||
+    (continuesDeferredBoundary && configurationFailure === null)
+  )
+    return { patch, activity };
   const canceled = current.stopRequest.kind === "cancel_requested";
   return {
     patch: {

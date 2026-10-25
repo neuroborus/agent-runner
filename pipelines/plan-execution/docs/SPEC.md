@@ -2349,7 +2349,7 @@ commit-plan parser. Structural validity grants no semantic scope approval.
 The proposal must preserve requirements, dependencies, findings, checks and later
 steps, with independently valid intermediate states rather than arbitrary patch
 chunks. Assessment grants no revision, preservation, materialization or commit
-authority; those operations are not active.
+authority; acceptance and separation have distinct persisted gates.
 
 The runner-controlled binding records the original-step lineage, frozen plan
 and input fingerprints, assessed implementation scope and dependencies, baseline
@@ -2370,18 +2370,16 @@ refinement nor reconstruction resets this lineage allowance or correction budget
 State version 29 adds `commitSizeAssessment`, initially ineligible with no
 lineages. The ordered version-28 migration adds that same disabled record and
 default settings without reloading configuration or changing workflow, bootstrap,
-findings, correction accounting, approvals or pending effects. **Production
-assessment dispatch remains inactive** until durable preservation and reviewed
-effective revisions can safely execute replacements. Intermediate and legacy
-runs cannot acquire eligibility by resuming; changing these settings does not
-activate refinement.
+findings, correction accounting, approvals or pending effects. Version 32 activates assessment only at creation of new commit-plan runs.
+Intermediate and legacy runs cannot acquire eligibility by resuming; changing
+these settings does not activate refinement for those runs.
 
 ### Durable preservation foundation
 
-The public state/Git capabilities provide inactive preservation primitives for
-unfinished commit work. They do not change version-29 eligibility, invoke an
-assessment, accept a revision or authorize a commit. Production refinement
-remains inactive pending reviewed revisions and replacement execution.
+The public state/Git capabilities preserve unfinished commit work. The
+primitives alone cannot change eligibility, invoke an assessment, accept a
+revision or authorize a commit. Eligible execution coordinates their use only
+after reviewed acceptance and complete replacement validation.
 
 Capture requires both run and worktree leases at a reconciled checkpoint. A
 write-ahead intent binds the exact run, revision and inspected snapshot before
@@ -2405,9 +2403,9 @@ legacy migration; the pipeline state version and workflow remain unchanged.
 ### Reviewed effective revision foundation
 
 The private `effective-plan.js` policy persists proposed and accepted flat
-revisions separately from frozen `canonicalPlan` and `plan.md`. Production
-dispatch remains inactive: creation and migration cannot enable refinement,
-select replacements, materialize work or authorize effects.
+revisions separately from frozen `canonicalPlan` and `plan.md`. Eligible
+execution consumes accepted authority; proposals alone cannot select
+replacements, materialize work or authorize effects.
 
 A proposal replaces only the current unfinished effective step with two to
 sixteen commits validated by `packages/commit-plan`. The runner copies all other
@@ -2466,23 +2464,22 @@ mode-specific candidate convergence. Acceptance retires pending
 protocol markers with their invalidated proof, retaining the lazy and finalization
 correction ledgers and recovery counts. Consumed candidate-review and terminal-
 confirmation corrections are bound to each proposal and inherited across the
-original lineage even after their scoped proof is retired; future replacement
-execution must preserve those consumed allowances.
+original lineage even after their scoped proof is retired; replacement
+execution preserves those consumed allowances.
 
 Pipeline state version 30 adds `effectivePlanRevisions`. The version-29 migration
 adds only an empty ledger, preserving eligibility, frozen inputs, inventories,
 approvals, findings, budgets and pending effects. Historical assessments never
 become fabricated revision approval. Validation rebinding and replacement
-execution remain separate inactive foundations.
+execution retain their separate preparation and effect gates.
 
 ### Revision-bound validation foundation
 
 `revision-validation.js` composes the existing bounded bootstrap with accepted
 effective authority. Pipeline state version 31 adds `effectiveValidation`, an
 ordered set of revision-specific role receipts and nullable merged schedules.
-Frozen-plan inventories remain unchanged. Production refinement and replacement
-materialization remain inactive; these records grant no writable or commit
-authority.
+Frozen-plan inventories remain unchanged. These receipts alone grant no
+writable, materialization or commit authority.
 
 Each role independently rediscovers the complete catalog and applicability
 read-only. Scope and unit IDs bind accepted revision number and fingerprint,
@@ -2508,6 +2505,10 @@ acceptance and reload, even after the active amendment clears. Discovery rejects
 omitted amendment commands or infrastructure. Applicability rejects a dropped
 assignment as soon as its last possible descendant has been inspected, leaving
 the responsible unit unaccepted under the existing role correction allowance.
+An amendment inherited from the split parent retains its descendant mapping
+across clarification rediscovery. An amendment confirmed later in the accepted
+revision remains assigned to its exact replacement, including later siblings;
+it is not remapped as another parent amendment.
 
 Only complete bounded coverage can publish a role receipt. Lazy requires Worker;
 independent and combined require both separately accepted roles. The compact
@@ -2526,6 +2527,148 @@ effects and accounting. If accepted revisions exist, unbound pending units and
 implementation evidence are retired, retaining subdivision totals. It never
 fabricates applicability, approval, or legacy refinement eligibility. Pending
 commits still settle by verification before discovery or new effects.
+
+### Preserved replacement execution
+
+Pipeline state version 32 activates assessment/revision execution only for newly
+created commit-plan runs. The version-31 migration adds an empty
+`replacementExecution` ledger and preserves disabled eligibility without
+creating approval, validation, saved bytes or effect authority. All older
+migrations still traverse that disabled boundary. Resolved settings remain
+frozen. Independent remains the default/recommended mode; lazy is explicit.
+
+At a reconciled content checkpoint, `replacement-execution.js` measures against
+the immutable step-start HEAD. It binds the exact effective step, sorted changed
+paths, frozen inputs, validation infrastructure and inspected content. Repeated
+unchanged checkpoints in the same invocation need no repeat measurement. The
+strict threshold and three-assessment original lineage ledger still apply.
+Atomic decisions continue through ordinary gates; size alone never pauses work.
+Split results are proposals only. Distinct read-only mode-specific plan gates
+precede acceptance. Rejected plans return to bounded read-only Worker draft
+correction without arbitration or writable authority. Neither reconstruction
+nor a corrected draft renews consumed proposal allowances.
+An unchanged repair retains its rejected proposal and findings, pausing at
+`effective_plan_output_invalid` for an explicit retry of the same read-only
+repair. It cannot attempt acceptance or retire the rejected report.
+
+Output exhaustion retains the exact read-only assessment, plan-review/repair or
+revision-discovery checkpoint, independently of the suspended content phase.
+Resume reconstructs that checkpoint without reserving another assessment or
+granting a fresh correction allowance.
+Repository mutation during any read-only refinement turn persists the ordinary
+`read_only_agent_mutated_repository` stop before preservation or commit; failed
+publication recovery cannot suppress that contamination diagnosis.
+
+Accepted authority is published before selection changes. Each mode-required
+role then completes additive revision discovery; every complete capability
+report must be satisfied before separation. Frozen role inventories remain
+historical, while the selected schedule and capability inspection consume the
+accepted revision's complete receipts. Unchanged later subjects/bodies and all
+future checks retain validated correspondence. Completed bootstrap work units
+are retired when their complete revision schedule is selected; their receipts,
+correction consumption and subdivision totals survive.
+Discovery capacity exhaustion retains its field/limit diagnostics under the
+ordinary capacity pause. A material product decision uses the clarification
+service's `IMPLEMENT` compatibility route, preserving the suspended content
+checkpoint separately from accepted revision authority and lineage accounting.
+Recording a product question journals its prior input binding and checkpoint
+through `replacement-inputs.js`. Authorized answer consumption records the new
+binding and archives any completed revision receipts without rewriting them.
+Phase-local pending correction markers retire before implementation resumes;
+consumed counters, correction history and versioned finding obligations remain.
+The unchanged accepted plan requires fresh mode-specific read-only plan approval
+against the answer, followed by complete role rediscovery; earlier role additions
+remain mandatory. Pending work units retire while correction and subdivision
+consumption survives. Subsequent size assessments may use the authorized new
+binding, retaining earlier attempts and the same three-attempt lineage limit.
+A clarification that invalidates accepted boundaries requires a revised plan and
+new run. A saved negative plan review remains blocking after interruption;
+recovery publishes the same plan-revision stop before discovery or workspace
+effects, including when the original pause publication was interrupted.
+A plan-revision outcome retains its reason and evidence;
+none of these outcomes can authorize separation.
+Frozen-input drift and read-only contamination retire active selection,
+implementation and gate evidence while retaining historical inventories needed
+to validate durable revision receipts. Pending separation records remain
+recoverable under the blocking outcome without restoring execution authority.
+
+A separation record binds the revision, unique preservation/restore operation
+IDs, inspected snapshot and capture/restore/ready phase. Root runtime supplies
+both held leases to state-owned preservation, using the latest serialized
+capture revision even when capability preparation has published events. The
+entire unfinished candidate is captured and every byte read back before any
+removal. One journaled restoration restores all captured paths to their saved
+accepted baseline without touching the index. Its verified clean snapshot is
+published before ordinary Worker implementation. Interrupted restoration settles
+through the same operation before generic repository-drift checks; substituted
+storage, controls or unrelated content cause a safety pause.
+Ready publication retires the former candidate's pending correction marker
+before entering `IMPLEMENT`, retaining consumed lineage budgets and owned findings.
+Immediate pause/cancellation recovery settles an already journaled restoration
+before inspecting generic drift. Recovery cannot start capture or a new
+restoration; unstarted operations remain suspended until an authorized resume.
+
+Worker reconstructs only the selected replacement from verified external
+manifest and content-addressed blob references. The state service verifies all
+saved bytes before returning references; prompts contain no complete file bytes.
+Read only the listed manifests and needed blobs, checking manifest/file hashes,
+sizes and saved before/after descriptors. References grant no preservation writes
+or access to unrelated state. Their cumulative context is bounded to 65,536
+UTF-8 bytes. Before restoration, the complete first reconstruction prompt must
+also fit the existing 32 MiB adapter contract; capacity failure preserves the
+saved candidate without starting a new restoration. The Worker adapter must also
+confirm command-level read access to every exact referenced manifest and
+non-deleted before/after blob. Admission
+uses the selected provider's proved policy and host file readability, without a
+model turn or new mount grants. Claude runner-boundary command masks hide host
+`/tmp` and `/run`; native Read cannot substitute for byte-exact binary recovery.
+Inaccessible sources or missing adapter admission support pause as
+`environment_blocked` with the candidate and captured bytes intact, and resume
+rechecks access before restoration. This is ordinary initial implementation with
+durable step-start evidence, including reconstruction after
+native-session loss. No complete large diff is retained in the inspected
+workspace while arbitrary subsets commit. Future work stays in external
+preservation storage; later replacements start from the preceding verified
+child's baseline, never restore over an earlier child, and can reread saved
+work. Cancellation and cleanup cannot dispose of that work.
+
+Every replacement passes its complete mode-specific candidate convergence,
+finalization, distinct terminal confirmation and exact one-shot commit gate. Persisted implementation
+or gate evidence under an accepted revision requires its ready separation and
+selected complete revision schedule; unprepared authority cannot carry approval.
+Versioned findings remain owned by their mapped replacements and are included
+in their context. Finding-specific dispute decisions, pending disputes and
+Reviewer reconsideration requests, stable-finding consumption and exact overrides
+are stored against the reviewed payload fingerprint and
+ownership. Sibling working IDs start empty; only the same owned version can
+inherit those records. Reusing an ID for another finding grants no prior decision
+or consumption. Reconstruction suspends owned pending disputes, their counts
+and Reviewer reconsideration requests in the versioned ledger and restores them
+at candidate convergence; `IMPLEMENT` does not project those requests or resolve
+them. A disposition that removes the last active payload retains its final
+history entry against that version. Review and clean-confirmation normalization checks stable IDs
+against applicable owned payloads as well as the sibling's current findings;
+renaming an unchanged owned finding is invalid output. Switching the active payload also retires its old ID-only working
+records before binding the new version. Any correction newly charged by that
+transition belongs to the new version; earlier version consumption and lineage
+totals remain preserved. Siblings retain lineage fix/stagnation budgets,
+lineage output-correction consumption and semantic-finalization retry allowances;
+these inherited correction records apply only to their refined original step.
+Later unsplit steps retain their ordinary scoped correction rules. Content
+approvals are invalidated rather than renumbered. Only verified
+settlement appends a child SHA and selects the next effective step. Pending or
+ambiguous consumed effects settle verification-only before any refinement.
+
+Deferred stops retain the original logical step's start checkpoint across flat
+splits and child commits. Verified intermediate-child settlement preserves the
+pending stop, while the last child atomically completes it. The original step
+is complete only when all mapped replacements have verified commits. An unborn
+original baseline remains `null` throughout its replacement sequence; the first
+child commit cannot substitute its own HEAD into the stop target. No new CLI
+command, Markdown authority, staging exception or commit authority is introduced
+by replacement preparation.
+Legacy stop admission and journal replay use the frozen plan's original
+boundaries when no effective-revision ledger exists, before pipeline migration.
 
 ### 13.2 Candidate convergence and finalization
 
@@ -3419,6 +3562,7 @@ finalization_cannot_pass
 finalization_evidence_rejected
 lazy_output_invalid
 review_output_invalid
+effective_plan_output_invalid
 read_only_agent_mutated_repository
 unexpected_git_ref_change
 unexpected_remote_configuration_change
@@ -3978,7 +4122,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 31, preserving
+74. every supported legacy version migrates through state version 32, preserving
     its saved mode and defaulting missing modes to `independent`, without
     fabricating effective-revision approval, reviving terminal runs or replaying
     completed or pending commit effects; unfinished work freezes guidance and repeats

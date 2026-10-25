@@ -763,6 +763,7 @@ test("interrupted review and acceptance reuse durable receipts without renewing 
 test("version-29 migration adds no revision authority and preserves consumed effects and saved accounting", () => {
   const current = createPlanExecutionState({ settings: SETTINGS });
   const legacy = reload(current);
+  legacy.commitSizeAssessment.eligible = false;
   delete legacy.effectivePlanRevisions;
   const migrated = planExecutionPipeline.migrations[29]({
     pipelineState: legacy,
@@ -786,7 +787,7 @@ test("version-29 migration adds no revision authority and preserves consumed eff
 });
 
 for (const mode of ["lazy", "independent", "combined"]) {
-  test(`${mode} revision acceptance preserves valid persisted finding progress while production routing remains inactive`, async (t) => {
+  test(`${mode} revision acceptance preserves valid persisted finding progress before materialization`, async (t) => {
     const stop = Object.assign(new Error("stop before writable work"), {
       code: "ERR_RUN_REVISION_CHANGED",
     });

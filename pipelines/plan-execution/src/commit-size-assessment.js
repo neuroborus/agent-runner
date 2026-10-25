@@ -61,9 +61,8 @@ export function commitSizeThreshold(settings) {
   return target * multiplier;
 }
 
-export function createCommitSizeAssessment() {
-  // Activation is deliberately absent from creation, migration and routing.
-  return { eligible: false, lineages: [] };
+export function createCommitSizeAssessment({ eligible = false } = {}) {
+  return { eligible, lineages: [] };
 }
 
 export function createCommitSizeBinding({ measurement, ...scope }, settings) {
@@ -156,12 +155,23 @@ export function normalizeCommitSizeDecision(value, binding) {
   return Object.freeze({ ...value });
 }
 
-export function assertCommitSizeAssessment(value, settings) {
+function inputBindingMatches(before, after, inputChanges) {
+  let current = before;
+  if (current === after) return true;
+  for (const change of inputChanges) {
+    if (change.before === current && change.after !== null)
+      current = change.after;
+    if (current === after) return true;
+  }
+  return false;
+}
+
+export function assertCommitSizeAssessment(value, settings, inputChanges = []) {
   if (
     !exact(value, ["eligible", "lineages"]) ||
     typeof value.eligible !== "boolean" ||
     !Array.isArray(value.lineages) ||
-    (value.eligible && settings === null) ||
+    (value.lineages.length > 0 && settings === null) ||
     (!value.eligible && value.lineages.length !== 0) ||
     new Set(value.lineages.map((lineage) => lineage?.originalStep)).size !==
       value.lineages.length
@@ -187,9 +197,12 @@ export function assertCommitSizeAssessment(value, settings) {
         attempt.binding.preferredCommitLineLimit !==
           settings.preferredCommitLineLimit ||
         attempt.binding.threshold !== commitSizeThreshold(settings) ||
-        ["planFingerprint", "inputFingerprint"].some(
-          (field) =>
-            attempt.binding[field] !== lineage.attempts[0].binding[field],
+        attempt.binding.planFingerprint !==
+          lineage.attempts[0].binding.planFingerprint ||
+        !inputBindingMatches(
+          lineage.attempts[Math.max(0, index - 1)].binding.inputFingerprint,
+          attempt.binding.inputFingerprint,
+          inputChanges,
         ) ||
         (attempt.result === null && index !== lineage.attempts.length - 1)
       ) {
@@ -203,14 +216,19 @@ export function assertCommitSizeAssessment(value, settings) {
 
 // Called only at a reconciled boundary before another convergence/review loop.
 // The caller must publish the returned ledger before invoking the checkpoint.
-// No production workflow calls this policy until preservation and revisions exist.
+// Production callers reconcile effects and preserve work before separation.
 export function reserveCommitSizeAssessment(
   ledger,
   binding,
   settings,
-  { planKind = "commit", reconciled = false, commitPending = true } = {},
+  {
+    planKind = "commit",
+    reconciled = false,
+    commitPending = true,
+    inputChanges = [],
+  } = {},
 ) {
-  assertCommitSizeAssessment(ledger, settings);
+  assertCommitSizeAssessment(ledger, settings, inputChanges);
   if (
     !ledger.eligible ||
     planKind !== "commit" ||
@@ -225,9 +243,12 @@ export function reserveCommitSizeAssessment(
   const previous = lineage?.attempts.at(-1);
   if (
     previous &&
-    ["planFingerprint", "inputFingerprint"].some(
-      (field) => previous.binding[field] !== binding[field],
-    )
+    (previous.binding.planFingerprint !== binding.planFingerprint ||
+      !inputBindingMatches(
+        previous.binding.inputFingerprint,
+        binding.inputFingerprint,
+        inputChanges,
+      ))
   ) {
     throw new Error("Frozen assessment inputs changed.");
   }
@@ -246,6 +267,7 @@ export function reserveCommitSizeAssessment(
   if (binding.changedLines <= commitSizeThreshold(settings)) return null;
   if (
     previous &&
+    previous.binding.inputFingerprint === binding.inputFingerprint &&
     previous.binding.scopeFingerprint === binding.scopeFingerprint &&
     previous.binding.dependenciesFingerprint ===
       binding.dependenciesFingerprint &&
@@ -265,7 +287,7 @@ export function reserveCommitSizeAssessment(
     ...ledger,
     lineages: [...ledger.lineages.filter((item) => item !== lineage), updated],
   };
-  assertCommitSizeAssessment(next, settings);
+  assertCommitSizeAssessment(next, settings, inputChanges);
   return assessmentRequest(next, binding, settings, updated.attempts.length);
 }
 
@@ -279,8 +301,14 @@ function assessmentRequest(ledger, binding, settings, attempt) {
   };
 }
 
-export function recordCommitSizeDecision(ledger, binding, result, settings) {
-  assertCommitSizeAssessment(ledger, settings);
+export function recordCommitSizeDecision(
+  ledger,
+  binding,
+  result,
+  settings,
+  inputChanges = [],
+) {
+  assertCommitSizeAssessment(ledger, settings, inputChanges);
   const normalized = normalizeCommitSizeDecision(result, binding);
   const lineage = ledger.lineages.find(
     ({ originalStep }) => originalStep === binding.originalStep,

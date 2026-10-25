@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { executeOwnedProcess, spawnOwnedProcess } from "../owned-process.js";
+import { canReadFiles } from "../file-access.js";
 import packageMetadata from "../../../package.json" with { type: "json" };
 import {
   ADAPTER_FAILURE_CLASS,
@@ -2097,5 +2098,19 @@ export function createCodexAdapter(options = {}) {
     return result;
   }
 
-  return Object.freeze({ id: CODEX_BACKEND_ID, probe, run });
+  return Object.freeze({
+    id: CODEX_BACKEND_ID,
+    probe,
+    async canReadFiles({ access, paths }) {
+      const capabilities = await probe();
+      const capability = {
+        "read-only": "readOnly",
+        "workspace-write": "workspaceWrite",
+        "local-commit": "localCommit",
+      }[access];
+      // Codex's root read grant is unchanged by its temporary write exclusions.
+      return capabilities[capability] === true && canReadFiles(paths);
+    },
+    run,
+  });
 }

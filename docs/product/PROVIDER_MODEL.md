@@ -326,6 +326,12 @@ local-commit executor never started. Raw cause fields cannot override the
 validated record. Provider flags, transports, sandbox composition, protocol
 parsing, and native error recognition remain inside the provider directory.
 
+Before replacement separation, provider-owned exact-file read admission checks
+the verified external source paths against host readability and the selected
+command policy. It starts no model turn and grants no new filesystem access.
+Unavailable admission retains the candidate under the execution-owned
+environment pause; native text reads do not prove binary reconstruction access.
+
 Normalized `authentication_required` failures enter the shared durable
 reauthentication pause only after the runner proves the repository is safe;
 they never enter availability backoff and retire any active episode they

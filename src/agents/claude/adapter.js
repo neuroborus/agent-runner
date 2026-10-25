@@ -21,6 +21,7 @@ import { allocateClaudeStorage, environmentError } from "./storage.js";
 import { claudeAvailabilityReason } from "./availability.js";
 import {
   CLAUDE_COMMAND_LAUNCHER_TOKEN,
+  canReadClaudeFiles,
   claudeCommandLauncherSettings,
   createClaudeCommandLauncher,
 } from "./command-launcher.js";
@@ -1894,5 +1895,13 @@ export function createClaudeAdapter(options = {}) {
     return result;
   }
 
-  return Object.freeze({ id: CLAUDE_BACKEND_ID, probe, run });
+  return Object.freeze({
+    id: CLAUDE_BACKEND_ID,
+    probe,
+    async canReadFiles({ access, paths }) {
+      await probe();
+      return canReadClaudeFiles(paths, isolationPolicies?.[access]);
+    },
+    run,
+  });
 }

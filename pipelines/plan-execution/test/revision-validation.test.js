@@ -182,9 +182,14 @@ function revised(mode = "combined", patch = {}) {
   });
 }
 
-function workFor(state, role, mutate = () => {}) {
+function workFor(
+  state,
+  role,
+  mutate = () => {},
+  inputFingerprint = fingerprint({}),
+) {
   const scope = revisionBootstrapScope(state, role, {
-    inputFingerprint: fingerprint({}),
+    inputFingerprint,
     infrastructureFingerprint: hash(role),
   });
   const prior = scope.previousValidation;
@@ -424,6 +429,32 @@ test("revision acceptance preserves confirmed amendment commands, applicability 
     acceptRevisionValidation(state, "worker", complete.scope, complete.work),
   );
   assertRevisionValidation(accepted);
+  const answer = hash("compatible parent amendment answer");
+  const rebound = {
+    ...accepted,
+    effectiveValidation: [],
+    replacementExecution: {
+      ...accepted.replacementExecution,
+      inputChanges: [
+        {
+          before: complete.scope.binding.inputFingerprint,
+          after: answer,
+          checkpoint: "IMPLEMENT",
+          revision: accepted.effectiveValidation[0].revision,
+          validation: accepted.effectiveValidation[0],
+          reports: [],
+        },
+      ],
+    },
+  };
+  const rediscovered = revisionBootstrapScope(rebound, "worker", {
+    inputFingerprint: answer,
+    infrastructureFingerprint: hash("worker"),
+  });
+  assert.deepEqual(rediscovered.inheritedAssignments.at(-1), {
+    command: amended,
+    steps: [2, 3],
+  });
   assertRevisionValidation({
     ...accepted,
     validationAmendment: null,
@@ -446,6 +477,85 @@ test("revision acceptance preserves confirmed amendment commands, applicability 
     );
     assert.throws(() => assertRevisionValidation(corrupt), omission);
   }
+});
+
+test("clarification rediscovery keeps a later replacement amendment on its exact target", () => {
+  let state = revised("lazy");
+  const first = workFor(state, "worker");
+  state = acceptRevisionValidation(
+    state,
+    "worker",
+    first.scope,
+    finish(first.scope, first.work),
+  );
+  const archived = state.effectiveValidation[0];
+  const inputFingerprint = hash("compatible answer");
+  const amended = "node validation/amended.js";
+  state = {
+    ...state,
+    currentStep: 3,
+    completedCommits: [...state.completedCommits, "b".repeat(40)],
+    effectiveValidation: [],
+    validationAmendment: {
+      step: 3,
+      requiredChecks: [check("C1", amended)],
+      confirmationFingerprint: hash("later replacement amendment"),
+    },
+    validationInfrastructure: ["package.json", "validation/amended.js"],
+    replacementExecution: {
+      ...state.replacementExecution,
+      inputChanges: [
+        {
+          before: first.scope.binding.inputFingerprint,
+          after: inputFingerprint,
+          checkpoint: "REVIEW",
+          revision: archived.revision,
+          validation: archived,
+          reports: [],
+        },
+      ],
+    },
+  };
+  const { scope, work } = workFor(
+    state,
+    "worker",
+    (discovery) => {
+      discovery.requiredChecks.push(check("C4", amended));
+      discovery.validationInfrastructure.push("validation/amended.js");
+    },
+    inputFingerprint,
+  );
+  assert.deepEqual(
+    scope.inheritedAssignments.find(({ command }) => command === amended).steps,
+    [3],
+  );
+  let complete = work;
+  while (complete.accepted.length < complete.units.length) {
+    const result = batch(complete);
+    result.assignments = result.assignments
+      .map((entry) =>
+        entry.checkId === "C4"
+          ? { ...entry, steps: entry.steps.filter((step) => step === 3) }
+          : entry,
+      )
+      .filter(({ steps }) => steps.length);
+    complete = acceptBootstrapBatch(scope, complete, result);
+  }
+  const accepted = reload(
+    acceptRevisionValidation(state, "worker", scope, complete),
+  );
+  assertRevisionValidation(accepted);
+  assert.deepEqual(
+    accepted.effectiveValidation[0].worker.inventory.requiredChecks.find(
+      ({ command }) => command === amended,
+    ).steps,
+    [3],
+  );
+  const corrupt = reload(accepted);
+  corrupt.effectiveValidation[0].worker.inventory.requiredChecks.find(
+    ({ command }) => command === amended,
+  ).steps = [2];
+  assert.throws(() => assertRevisionValidation(corrupt));
 });
 
 test("an inherited assignment is rejected in its own unit while correction can still repair it", () => {

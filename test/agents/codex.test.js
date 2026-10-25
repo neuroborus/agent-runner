@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { access, mkdir, lstat, mkdtemp, rm, symlink } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  lstat,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -492,6 +501,27 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+test("admits exact binary source reads without granting temporary writes or starting a turn", async (t) => {
+  const directory = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-source-access-")),
+  );
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, "blob");
+  const alias = join(directory, "alias");
+  await writeFile(path, Buffer.from([0, 255, 128]));
+  await symlink(path, alias);
+  const fixture = createFixture();
+  const readable = (paths) =>
+    fixture.adapter.canReadFiles({ access: "workspace-write", paths });
+  assert.equal(await readable([path]), true);
+  assert.equal(await readable([path, join(directory, "missing")]), false);
+  assert.equal(await readable([alias]), false);
+  assert.equal(await readable([directory]), false);
+  assert.equal(await readable([]), false);
+  assert.equal(fixture.processes.length, 0);
+  assert.equal(fixture.workspaceStorages.length, 0);
+});
 
 test("reports bounded Codex observations across pre-reply and late terminal notifications", async () => {
   const entered = Promise.withResolvers();

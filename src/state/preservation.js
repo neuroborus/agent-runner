@@ -311,7 +311,15 @@ export function createPreservationStore({
     await directoryIdentity(path, ready.identity);
     await assertManifestUnchanged();
     await assertRecordUnchanged();
-    return { manifest: payload.manifest, storage };
+    return {
+      manifest: payload.manifest,
+      storage,
+      source: {
+        manifestPath,
+        manifestHash: ready.manifestHash,
+        blobDirectory: path,
+      },
+    };
   }
 
   async function capture(
@@ -446,14 +454,16 @@ export function createPreservationStore({
       git,
       signal,
     },
+    reconcileOnly = false,
   ) {
     assertRunId(operationId);
-    return withLease(lease, worktreeLease, async (session) => {
+    const restoreWithinLease = async (session) => {
       const { runDirectory, state } = session;
       const saved = await load(runDirectory, state, preservationId);
       const { manifest, storage } = await verified(saved);
       const request = { expectedSnapshot, paths, target };
       let intent = await readRecord(runDirectory, state, operationId);
+      if (intent === null && reconcileOnly) return null;
       if (intent === null) {
         if (
           expectedSnapshot?.projectPath !== state.projectPath ||
@@ -544,17 +554,35 @@ export function createPreservationStore({
         complete: true,
         result,
       });
-    });
+    };
+    return withLease(
+      lease,
+      worktreeLease,
+      restoreWithinLease,
+      reconcileOnly ? operationId : null,
+    );
   }
 
-  async function read(runId, preservationId) {
+  async function read(runId, preservationId, { includeSources = false } = {}) {
+    if (typeof includeSources !== "boolean") fail();
     const saved = await load(
       await getRunDirectory(runId),
       await loadRun(runId),
       preservationId,
     );
-    if (saved.record.ready !== null) await verified(saved);
-    return deepFreeze(structuredClone(saved.record));
+    const payload = saved.record.ready === null ? null : await verified(saved);
+    if (!includeSources) return deepFreeze(structuredClone(saved.record));
+    if (payload === null) fail();
+    return deepFreeze({
+      record: structuredClone(saved.record),
+      changes: payload.manifest.entries,
+      source: payload.source,
+    });
   }
-  return Object.freeze({ capture, restore, read });
+  return Object.freeze({
+    capture,
+    restore: (lease, request) => restore(lease, request),
+    reconcile: (lease, request) => restore(lease, request, true),
+    read,
+  });
 }

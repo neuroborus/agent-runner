@@ -310,7 +310,18 @@ export function createStopService({
     settlement = { kind: "quiescent", commit: null },
   ) {
     const current = snapshot.state;
-    const pending = stopIsPending(current);
+    const continuesDeferredBoundary =
+      stopIsPending(current) &&
+      settlement.kind === "commit" &&
+      current.stopRequest.effectiveTiming === "after-current-commit" &&
+      !["WAITING_FOR_USER", "CANCELED", "FAILED", "DONE"].includes(
+        patch.pipelineState?.workflowState,
+      ) &&
+      isDeepStrictEqual(
+        resolveCommitBoundary({ ...current, ...patch }, resolveStopBoundary),
+        current.stopRequest.targetBoundary,
+      );
+    const pending = stopIsPending(current) && !continuesDeferredBoundary;
     const canceled = current.stopRequest?.kind === "cancel_requested";
     if (
       pending &&

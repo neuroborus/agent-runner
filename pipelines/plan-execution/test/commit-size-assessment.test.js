@@ -9,6 +9,7 @@ import { normalizePipelineState } from "../src/workflow-contract.js";
 import { selectRoleSession } from "../src/mode-policy.js";
 import {
   COMMIT_SIZE_DEFAULTS,
+  assertCommitSizeAssessment,
   createCommitSizeAssessment,
   createCommitSizeBinding,
   normalizeCommitSizeDecision,
@@ -186,6 +187,47 @@ test("restart reuses pending reservations and bounds all proposals across the or
   );
 });
 
+test("authorized clarification bindings preserve historical assessments and the shared attempt limit", () => {
+  const original = binding();
+  let ledger = settle(reserve(eligible(), original), original);
+  const inputChanges = [];
+  for (const after of ["f".repeat(64), "a".repeat(64)]) {
+    const before = ledger.lineages[0].attempts.at(-1).binding.inputFingerprint;
+    inputChanges.push({ before, after });
+    const scope = binding(2701, { inputFingerprint: after });
+    const request = reserve(ledger, scope, settings, {
+      ...boundary,
+      inputChanges,
+    });
+    assert.ok(request);
+    ledger = recordCommitSizeDecision(
+      request.ledger,
+      scope,
+      {
+        ...ledger.lineages[0].attempts[0].result,
+        bindingFingerprint: request.bindingFingerprint,
+      },
+      settings,
+      inputChanges,
+    );
+  }
+  assert.equal(ledger.lineages[0].attempts.length, 3);
+  assert.deepEqual(ledger.lineages[0].attempts[0].binding, original);
+  assert.doesNotThrow(() =>
+    assertCommitSizeAssessment(ledger, settings, inputChanges),
+  );
+  assert.throws(() => assertCommitSizeAssessment(ledger, settings));
+  assert.equal(
+    reserve(
+      ledger,
+      binding(5000, { inputFingerprint: "a".repeat(64) }),
+      settings,
+      { ...boundary, inputChanges },
+    ),
+    null,
+  );
+});
+
 test("decision evidence is exact, fingerprint-bound and cannot authorize malformed replacements", () => {
   const scope = binding();
   const request = reserve(eligible(), scope);
@@ -223,7 +265,7 @@ test("decision evidence is exact, fingerprint-bound and cannot authorize malform
   );
 });
 
-test("new and migrated intermediate runs remain ineligible and resume retains resolved settings", () => {
+test("new runs are eligible, intermediate migration stays disabled and resume retains resolved settings", () => {
   const resolved = Object.fromEntries(
     Object.entries(planExecutionPipeline.settings).map(([name, definition]) => [
       name,
@@ -239,7 +281,7 @@ test("new and migrated intermediate runs remain ineligible and resume retains re
   });
   const restored = normalizePipelineState(JSON.parse(JSON.stringify(current)));
   assert.deepEqual(restored.settings, current.settings);
-  assert.equal(reserve(restored.commitSizeAssessment), null);
+  assert.equal(restored.commitSizeAssessment.eligible, true);
   const legacy = { ...current };
   delete legacy.commitSizeAssessment;
   const {

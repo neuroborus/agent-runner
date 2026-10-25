@@ -14,6 +14,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve, sep } from "node:path";
 
+import { canReadFiles } from "../file-access.js";
 import {
   createToolHome,
   nativeLauncherSource,
@@ -22,6 +23,9 @@ import {
 } from "./projection.js";
 
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
+
+const PRIVATE_TEMPORARY_ROOT = "/tmp";
+const PRIVATE_RUNTIME_ROOT = "/run";
 
 export const CLAUDE_COMMAND_LAUNCHER_TOKEN =
   "AGENT_RUNNER_CLAUDE_COMMAND_LAUNCHER_TOKEN";
@@ -33,6 +37,17 @@ export function claudeCommandLauncherSettings(path) {
 function containsPath(parent, child) {
   const path = relative(resolve(parent), resolve(child));
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
+}
+
+export function canReadClaudeFiles(paths, isolationPolicy) {
+  if (!["native", "runner-boundary"].includes(isolationPolicy)) return false;
+  return canReadFiles(paths, [
+    "/dev",
+    "/proc",
+    ...(isolationPolicy === "runner-boundary"
+      ? [PRIVATE_TEMPORARY_ROOT, PRIVATE_RUNTIME_ROOT]
+      : []),
+  ]);
 }
 
 async function resolveExecutable(binary, environment) {
@@ -89,11 +104,11 @@ function runnerBoundaryArguments({
 }) {
   const filesystemArguments = [
     "--tmpfs",
-    "/tmp",
+    PRIVATE_TEMPORARY_ROOT,
     "--dir",
     "/tmp/claude",
     "--tmpfs",
-    "/run",
+    PRIVATE_RUNTIME_ROOT,
   ];
   if (
     !containsPath("/tmp", hiddenDirectory) &&

@@ -83,7 +83,7 @@ function authority(state) {
   );
 }
 
-function phases(mode) {
+export function effectivePlanReviewPhases(mode) {
   const policy = executionPolicy({ mode });
   return [
     ...(policy.primaryConvergence ? ["CHECK_AND_FIX", "CLEAN_CONFIRM"] : []),
@@ -98,7 +98,7 @@ function clean(report) {
   );
 }
 
-function assertReport(report, fingerprint) {
+export function assertEffectivePlanReport(report, fingerprint) {
   if (
     !exact(report, ["fingerprint", "status", "preserves", "reason"]) ||
     report.fingerprint !== fingerprint ||
@@ -151,7 +151,7 @@ function outstandingFindings(state) {
 
 function consumedCorrections(state, originalStep) {
   // Scoped gate proof is retired on acceptance; the lineage still owns every
-  // consumed allowance when replacement execution is eventually activated.
+  // consumed allowance across replacement execution.
   const previous = state.effectivePlanRevisions.revisions.filter(
     (revision) => revision.originalStep === originalStep,
   );
@@ -286,7 +286,7 @@ function assertOwners(owners, parent, step, count) {
 }
 
 // This is persisted pipeline authority, separate from the frozen canonical plan.
-// Production routing remains inactive until validation and materialization land.
+// Selection still requires complete validation and recoverable materialization.
 export function assertEffectivePlanRevisions(state) {
   const ledger = state.effectivePlanRevisions;
   if (!exact(ledger, ["revisions"]) || !Array.isArray(ledger.revisions))
@@ -433,10 +433,10 @@ export function assertEffectivePlanRevisions(state) {
       !Array.isArray(revision.reports)
     )
       fail("fingerprint");
-    const expected = phases(binding.mode);
+    const expected = effectivePlanReviewPhases(binding.mode);
     if (revision.reports.length > expected.length) fail("review sequence");
     for (const [position, report] of revision.reports.entries()) {
-      assertReport(report, revision.fingerprint);
+      assertEffectivePlanReport(report, revision.fingerprint);
       if (position > 0 && !clean(revision.reports[position - 1]))
         fail("review after findings");
     }
@@ -606,7 +606,9 @@ export function effectivePlanRevisionCheckpoint(state) {
     revision.reports.some((report) => !clean(report))
   )
     return null;
-  const phase = phases(revision.binding.mode)[revision.reports.length];
+  const phase = effectivePlanReviewPhases(revision.binding.mode)[
+    revision.reports.length
+  ];
   if (!phase) return null;
   return {
     role: phase === "REVIEW" ? "reviewer" : "worker",
@@ -619,9 +621,9 @@ export function effectivePlanRevisionCheckpoint(state) {
 
 export function recordEffectivePlanReview(state, checkpoint, report, boundary) {
   const revision = assertCurrentProposal(state, boundary);
-  assertReport(report, revision.fingerprint);
+  assertEffectivePlanReport(report, revision.fingerprint);
   // A lost publication receipt reuses the exact result, never advances a gate.
-  const expected = phases(revision.binding.mode);
+  const expected = effectivePlanReviewPhases(revision.binding.mode);
   const existing = expected.findIndex(
     (phase) => checkpoint === `effective-plan:${revision.number}:${phase}`,
   );
@@ -648,12 +650,13 @@ export function acceptEffectivePlanRevision(state, boundary) {
   }
   const revision = assertCurrentProposal(state, boundary);
   if (
-    revision.reports.length !== phases(revision.binding.mode).length ||
+    revision.reports.length !==
+      effectivePlanReviewPhases(revision.binding.mode).length ||
     !revision.reports.every(clean)
   )
     fail("approval gate");
   // Preserve blockers for replacement-specific rebinding. No content gate can
-  // use this authority until validation and materialization are implemented.
+  // use this authority until validation and materialization have completed.
   return {
     ...replaceLast(state, { ...revision, accepted: true }),
     ...clearedCandidateAndTerminalGate(),
@@ -710,4 +713,4 @@ export function mapEffectivePlanStopTarget(state, { revision = 0, step }) {
   };
 }
 
-export const EFFECTIVE_PLAN_REVIEW_INSTRUCTIONS = `Review only this proposed flat effective commit plan against its frozen original scope, requirements, dependencies, checks, unresolved findings, completed provenance and later steps. Preserve exact valid subjects and independently valid intermediate states. Report CLEAN only if every preservation field is true; otherwise report FINDINGS with a concrete reason. Echo the supplied fingerprint. CHECK_AND_FIX returns plan findings, never edits project files. CLEAN_CONFIRM is a distinct read-only Worker turn; REVIEW is an independent Reviewer checkpoint. Size assessment is not approval. This review grants no implementation, materialization, finalization or commit authority.`;
+export const EFFECTIVE_PLAN_REVIEW_INSTRUCTIONS = `Do not edit files, stage, run checks, commit or ask questions. Review only this proposed flat effective commit plan against its frozen original scope, requirements, dependencies, checks, unresolved findings, completed provenance and later steps. Preserve exact valid subjects and independently valid intermediate states. Report CLEAN only if every preservation field is true; otherwise report FINDINGS with a concrete reason. Echo the supplied fingerprint. CHECK_AND_FIX returns plan findings, never edits project files. CLEAN_CONFIRM is a distinct read-only Worker turn; REVIEW is an independent Reviewer checkpoint. Size assessment is not approval. This review grants no implementation, materialization, finalization or commit authority.`;

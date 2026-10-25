@@ -63,6 +63,25 @@ const amendmentOf = (state) =>
         validationInfrastructure: state.validationInfrastructure,
       };
 
+function validationRecords(state) {
+  return [
+    ...(state.replacementExecution?.inputChanges ?? []).flatMap(
+      ({ validation }) => (validation === null ? [] : [validation]),
+    ),
+    ...state.effectiveValidation,
+  ].sort((left, right) => left.revision - right.revision);
+}
+
+function previousReceipt(state, revision, role, inputFingerprint) {
+  return validationRecords(state).findLast(
+    (record) =>
+      record[role] !== null &&
+      (record.revision < revision ||
+        (record.revision === revision &&
+          record[role].binding.inputFingerprint !== inputFingerprint)),
+  );
+}
+
 export function revisionBootstrapScope(
   state,
   role,
@@ -76,8 +95,11 @@ export function revisionBootstrapScope(
   },
 ) {
   const authority = effectivePlanAuthority(state, revision);
-  const previous = state.effectiveValidation.findLast(
-    (record) => record.revision < authority.binding.revision,
+  const previous = previousReceipt(
+    state,
+    authority.binding.revision,
+    role,
+    inputFingerprint,
   );
   const previousValidation =
     previous === undefined
@@ -105,6 +127,7 @@ export function revisionBootstrapScope(
       state,
       authority.binding.revision,
       amendment,
+      { inputFingerprint, step },
     );
     inheritedAssignments.push(
       ...amendment.requiredChecks.map(({ command }) => ({
@@ -180,7 +203,7 @@ function assertPreserved(state, previous, inventory, from, to, output = false) {
       reject();
 }
 
-function amendmentTargets(state, number, amendment) {
+function amendmentTargets(state, number, amendment, binding) {
   const revision = state.effectivePlanRevisions.revisions.find(
     (entry) => entry.number === number && entry.accepted,
   );
@@ -191,13 +214,39 @@ function amendmentTargets(state, number, amendment) {
       "confirmationFingerprint",
       "validationInfrastructure",
     ]) ||
-    amendment.step !== revision?.step ||
+    !revision ||
     typeof amendment.confirmationFingerprint !== "string" ||
     !/^[a-f0-9]{64}$/u.test(amendment.confirmationFingerprint)
   )
     fail();
   normalizePhaseSafeRequiredChecks(amendment.requiredChecks);
   normalizeValidationInfrastructure(amendment.validationInfrastructure);
+  // A receipt can be archived by a compatible clarification while its parent
+  // amendment is still active. Keep that original mapping; a newly confirmed
+  // amendment after revision preparation belongs to the current replacement.
+  const prior = validationRecords(state).filter(
+    (record) =>
+      record.worker !== null &&
+      (record.revision < number ||
+        (record.revision === number &&
+          record.worker.binding.inputFingerprint !== binding.inputFingerprint)),
+  );
+  let index = prior.length - 1;
+  while (
+    prior[index]?.revision === number &&
+    isDeepStrictEqual(prior[index].amendment, amendment)
+  )
+    index--;
+  if (prior[index]?.revision === number) {
+    if (
+      amendment.step !== binding.step ||
+      amendment.step < revision.step ||
+      amendment.step > effectivePlanAuthority(state, number).steps.length
+    )
+      fail();
+    return [amendment.step];
+  }
+  if (amendment.step !== revision.step) fail();
   return effectiveStepCorrespondence(state, revision.parent, revision.number)[
     amendment.step - 1
   ].steps;
@@ -206,7 +255,12 @@ function amendmentTargets(state, number, amendment) {
 function assertAmendment(state, record, output = false) {
   const amendment = record.amendment;
   if (amendment === null) return;
-  const targets = amendmentTargets(state, record.revision, amendment);
+  const targets = amendmentTargets(
+    state,
+    record.revision,
+    amendment,
+    (record.worker ?? record.reviewer).binding,
+  );
   if (record.worker === null) return;
   const inventory = record.worker.inventory;
   if (
@@ -255,8 +309,17 @@ function expectedSchedule(state, record) {
 
 export function assertRevisionValidation(state) {
   if (!Array.isArray(state.effectiveValidation)) fail();
+  if (
+    state.effectiveValidation.some(
+      (record, index) =>
+        record.revision <=
+        (state.effectiveValidation[index - 1]?.revision ?? 0),
+    )
+  )
+    fail();
   let previous = null;
-  for (const record of state.effectiveValidation) {
+  const records = validationRecords(state);
+  for (const [index, record] of records.entries()) {
     if (
       !exact(record, [
         "revision",
@@ -266,11 +329,19 @@ export function assertRevisionValidation(state) {
         "schedule",
       ]) ||
       !Number.isSafeInteger(record.revision) ||
-      record.revision <= (previous?.revision ?? 0) ||
+      record.revision < (previous?.revision ?? 1) ||
       (record.worker === null && record.reviewer === null)
     )
       fail();
     const authority = effectivePlanAuthority(state, record.revision);
+    const historical = {
+      ...state,
+      replacementExecution: {
+        ...state.replacementExecution,
+        inputChanges: [],
+      },
+      effectiveValidation: records.slice(0, index),
+    };
     for (const role of ["worker", "reviewer"]) {
       const receipt = record[role];
       if (receipt === null) continue;
@@ -280,14 +351,22 @@ export function assertRevisionValidation(state) {
       )
         fail();
       const binding = receipt.binding;
+      const revisionStep = state.effectivePlanRevisions.revisions.find(
+        (revision) => revision.number === record.revision,
+      ).step;
+      const rebound = state.replacementExecution?.inputChanges.some(
+        (change) =>
+          change.revision === record.revision &&
+          change.after === binding?.inputFingerprint,
+      );
       if (
-        binding?.step !==
-        state.effectivePlanRevisions.revisions.find(
-          (revision) => revision.number === record.revision,
-        ).step
+        (!rebound && binding?.step !== revisionStep) ||
+        binding?.step < revisionStep ||
+        binding?.step > state.completedCommits.length + 1 ||
+        binding?.step > authority.steps.length
       )
         fail();
-      const scope = revisionBootstrapScope(state, role, {
+      const scope = revisionBootstrapScope(historical, role, {
         ...binding,
         revision: record.revision,
         amendment: record.amendment,
@@ -322,17 +401,23 @@ export function assertRevisionValidation(state) {
       );
       if (!isDeepStrictEqual(receipt.inventory, inventoryOf(normalized)))
         fail();
+      const prior = previousReceipt(
+        historical,
+        record.revision,
+        role,
+        binding.inputFingerprint,
+      );
       assertPreserved(
         state,
-        previous === null
+        prior === undefined
           ? state[`${role}Validation`]
-          : (previous[role]?.inventory ?? null),
+          : prior[role].inventory,
         receipt.inventory,
-        previous?.revision ?? 0,
+        prior?.revision ?? 0,
         record.revision,
       );
     }
-    assertAmendment(state, record);
+    assertAmendment(historical, record);
     if (
       record.worker !== null &&
       record.reviewer !== null &&
@@ -344,7 +429,9 @@ export function assertRevisionValidation(state) {
       fail();
     if (
       !isDeepStrictEqual(record.schedule, expectedSchedule(state, record)) ||
-      (previous !== null && previous.schedule === null)
+      (previous !== null &&
+        previous.revision !== record.revision &&
+        previous.schedule === null)
     )
       fail();
     previous = record;
@@ -371,8 +458,11 @@ export function acceptRevisionValidation(state, role, scope, work) {
   )
     fail();
   const inventory = inventoryOf(assembleBootstrapInventory(scope, work));
-  const previous = state.effectiveValidation.findLast(
-    (record) => record.revision < authority.binding.revision,
+  const previous = previousReceipt(
+    state,
+    authority.binding.revision,
+    role,
+    scope.binding.inputFingerprint,
   );
   assertPreserved(
     state,

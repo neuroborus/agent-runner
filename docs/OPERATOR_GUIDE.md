@@ -46,6 +46,15 @@ See the [mode contract](product/PIPELINE_MODEL.md#review-modes) and the owning
 [execution](../pipelines/plan-execution/docs/SPEC.md), and
 [polishing](../pipelines/polishing/docs/SPEC.md) specifications.
 
+New eligible commit-plan runs can assess oversized unfinished work and accept
+reviewed replacement commits without editing frozen `plan.md`. Complete role
+inventories and capabilities precede verified external preservation and baseline
+restoration. Only the active replacement is reconstructed; each child passes all
+normal gates. Remaining saved work survives interruption and cancellation, and
+a deferred stop waits for the original logical step's last verified child.
+Legacy/intermediate runs remain disabled on resume. Size alone never fails work.
+See [preserved replacement execution](../pipelines/plan-execution/docs/SPEC.md#preserved-replacement-execution).
+
 Give a worktree one owner. Plan execution and polishing enforce a canonical
 worktree lease, including across CLI and MCP. While a run owns execution, do
 not mutate its repository, Git state, frozen inputs, configuration, local

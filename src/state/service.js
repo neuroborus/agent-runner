@@ -50,6 +50,7 @@ import {
   assertStopProgress,
   assertRunCanReleaseOwnership,
   runRetainsOwnership,
+  stopIsPending,
 } from "./stop-policy.js";
 import {
   assertRunId,
@@ -415,7 +416,7 @@ export function createRunStore({
     getRunDirectory,
     loadRun,
     onBoundary: onPreservationBoundary,
-    withLease: (lease, worktreeLease, operation) =>
+    withLease: (lease, worktreeLease, operation, recoveryId = null) =>
       runLeases.runExclusive(lease, ({ record, runDirectory }) =>
         worktreeLeases.holdCurrent(worktreeLease, async (worktree) => {
           let snapshot = await loadSnapshot(runDirectory, record.runId);
@@ -429,7 +430,10 @@ export function createRunStore({
               "Preservation requires the run's worktree lease.",
               { code: "ERR_INVALID_PRESERVATION" },
             );
-          assertRunCanAdvance(state, resolveStopBoundary);
+          // Stop recovery may settle an existing preservation intent, never
+          // create one or acquire additional workspace authority.
+          if (!(recoveryId !== null && stopIsPending(state)))
+            assertRunCanAdvance(state, resolveStopBoundary);
           if (
             state.schemaVersion !== RUN_STATE_SCHEMA_VERSION ||
             state.activeTurn !== null ||
@@ -1924,6 +1928,7 @@ export function createRunStore({
   return Object.freeze({
     capturePreservation: preservation.capture,
     restorePreservation: preservation.restore,
+    reconcilePreservation: preservation.reconcile,
     readPreservation: preservation.read,
     reservePreparation: preparation.reserve,
     recordPreparationProcess: preparation.record,

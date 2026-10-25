@@ -184,6 +184,9 @@ export function createExecutionAdapter({ bootstrapDisagreement = false } = {}) {
     calls,
     contextCalls,
     probes,
+    async canReadFiles() {
+      return true;
+    },
     async probe(options) {
       probes.push(options);
       return {

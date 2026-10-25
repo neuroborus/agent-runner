@@ -440,6 +440,10 @@ export function createRunner(options = {}) {
                     await monitor.check();
                     return adapter.probe();
                   },
+                  canReadFiles: async (request) => {
+                    await monitor.check();
+                    return adapter.canReadFiles(request);
+                  },
                   async run(request) {
                     await checkConfiguration();
                     try {
@@ -557,6 +561,55 @@ export function createRunner(options = {}) {
                 }
               },
             },
+      preservation: Object.freeze({
+        async capture(request) {
+          await monitor?.check();
+          await checkConfiguration();
+          const current = await runStore.loadRun(run.runId);
+          const saved = current.preservationRecords.some(
+            ({ id }) => id === request.preservationId,
+          )
+            ? await runStore.readPreservation(run.runId, request.preservationId)
+            : null;
+          const capture = (value) =>
+            runStore.capturePreservation(lease, {
+              ...value,
+              expectedRevision: saved?.binding.revision ?? current.revision,
+              worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+              git,
+            });
+          if (monitor === undefined) await capture(request);
+          else await monitor.invoke(capture, request);
+          return runStore.loadRun(run.runId);
+        },
+        async restore(request) {
+          await monitor?.check();
+          await checkConfiguration();
+          const restore = (value) =>
+            runStore.restorePreservation(lease, {
+              ...value,
+              worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+              git,
+            });
+          const receipt =
+            monitor === undefined
+              ? await restore(request)
+              : await monitor.invoke(restore, request);
+          return { run: await runStore.loadRun(run.runId), receipt };
+        },
+        async reconcile(request) {
+          const receipt = await runStore.reconcilePreservation(lease, {
+            ...request,
+            worktreeLease: heldWorktreeLeases.get(run.runId)?.lease,
+            git,
+          });
+          return { run: await runStore.loadRun(run.runId), receipt };
+        },
+        read: (preservationId) =>
+          runStore.readPreservation(run.runId, preservationId, {
+            includeSources: true,
+          }),
+      }),
       readInputs: ({ taskPath }) => readInputs(pipeline, taskPath),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
         try {
@@ -634,6 +687,13 @@ export function createRunner(options = {}) {
               patch,
               activity,
               configurationFailure,
+              latest.stopRequest?.effectiveTiming === "after-current-commit" &&
+                isDeepStrictEqual(
+                  pipeline.resolveStopBoundary?.(
+                    deepFreeze({ ...latest, ...patch }),
+                  ),
+                  latest.stopRequest.targetBoundary,
+                ),
             );
             settlementActivity = settlement.activity;
             return {

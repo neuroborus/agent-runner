@@ -103,3 +103,15 @@ export function acceptedValidationAmendment(state) {
       evidence.validationInfrastructureFingerprint,
   };
 }
+
+// Frozen role inventories remain historical; capability checks use the current
+// accepted revision receipts once their complete schedule is selected.
+export function validationReports(state) {
+  const record = state.effectiveValidation?.find(
+    (entry) =>
+      entry.revision === state.validationSchedule?.effectivePlan?.revision,
+  );
+  return record?.schedule
+    ? [record.worker.inventory, record.reviewer?.inventory ?? null]
+    : [state.workerValidation, state.reviewerValidation];
+}

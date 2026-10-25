@@ -50,17 +50,17 @@ and correction accounting.
 
 ## Bootstrap inventory
 
-Execution has a prepared, inactive
+New commit-plan runs use the
 [commit-size assessment contract](../../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 At reconciled boundaries its policy distinguishes an oversized atomic exception
 from a proposed cohesive split, bound to frozen scope, dependencies, inspected
 content and measurement. A proposal is neither a reviewed effective revision nor
 candidate approval. Assessment is read-only, mode-specific and bounded across
-the original-step lineage, with no budget renewal on reconstruction. Existing
-execution routing, finalization and commit gates remain unchanged while
-eligibility is disabled.
+the original-step lineage, with no budget renewal on reconstruction. Size alone never fails work or requires an override. Legacy and intermediate
+runs remain disabled on resume; new eligible runs assess before further
+convergence or review.
 
-The inactive [effective revision contract](../../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation)
+The [effective revision contract](../../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation)
 separates a size proposal from reviewed plan authority. Acceptance preserves
 original requirements, dependencies, later steps, exact checks, unresolved
 finding ownership and completed history. Lazy requires a distinct read-only
@@ -68,10 +68,9 @@ Worker confirmation; independent requires Reviewer approval; combined requires
 primary convergence before that approval. Drift or a corrected plan invalidates
 dependent evidence without renewing consumed allowances. Accepted authority is
 durable before boundaries can change; pending commit effects must reconcile
-first. Frozen plan artifacts remain unchanged and production refinement remains
-inactive.
+first. Frozen plan artifacts remain unchanged.
 
-The inactive revision-validation foundation separately binds complete
+Revision validation separately binds complete
 inventories to accepted effective revisions and exact replacement work.
 Every mode-required role rediscovers applicability read-only; unchanged
 assignments carry forward only through validated correspondence. Commands,
@@ -83,6 +82,22 @@ evidence cannot gain authority through renumbering. Migration creates no legacy
 revision proof and preserves consumed effects and allowances.
 Confirmed current-step amendments retain their commands, mapped applicability
 and infrastructure across revision acceptance and reload.
+
+After mode-specific plan acceptance and complete capability preparation, the
+runner verifies an external capture of every unfinished change before separation.
+Only the active replacement is reconstructed over its accepted baseline; each
+replacement independently passes candidate convergence, finalization, separate
+terminal confirmation and an exact authorized commit. Accepted siblings stay
+intact and future saved work survives interruption or cancellation. Refinement
+retains consumed corrections and lineage allowances. Finding-specific decisions
+apply only to the same reviewed
+payload version and replacement ownership; sibling-local ID reuse cannot transfer
+arbitration or dispute consumption. Verification-only commit
+settlement precedes new work, and the original step and its deferred stop finish
+only after every replacement verifies.
+Unchanged owned findings retain their IDs across replacements. An authorized
+clarification answer requires fresh plan approval and additive revision discovery;
+historical receipts and consumed assessment/correction allowances remain intact.
 
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control

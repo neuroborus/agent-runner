@@ -39,7 +39,13 @@ followed by the complete independent candidate review. The stable candidate
 then passes full finalization and one distinct read-only terminal confirmation
 immediately before the constrained commit.
 
-The plan defines the authorized commit boundaries. Clarification may explain a
+The plan defines the authorized commit boundaries. New eligible commit-plan
+runs may replace an oversized unfinished step with a reviewed flat sequence,
+without changing the frozen input. Mode-specific plan approval, complete
+replacement validation and verified external preservation precede separation.
+Every replacement passes all ordinary gates independently; the original step
+and its deferred stop complete only after every replacement commits. Legacy
+and intermediate runs never acquire this eligibility by resuming. Clarification may explain a
 requirement, but it cannot silently expand, reorder, or reinterpret those
 boundaries. A conflicting clarification or product decision requires a revised
 plan and a new execution run.

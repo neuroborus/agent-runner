@@ -1807,6 +1807,18 @@ async function createFixture(
       },
     },
     git: {
+      async measureChanges({ baseHead, expectedContentFingerprint }) {
+        return {
+          baseHead,
+          contentFingerprint: expectedContentFingerprint,
+          additions: 1,
+          deletions: 0,
+          changedLines: 1,
+          changedPaths: ["implementation.txt"],
+          binaryPaths: [],
+          gitlinkPaths: [],
+        };
+      },
       async inspectHead() {
         if (repository === "git") {
           const head = (

@@ -86,6 +86,7 @@ test("measures final worktree lines once across mixed staging without effects", 
     additions: 4,
     deletions: 3,
     changedLines: 7,
+    changedPaths: ["changed.txt", "deleted.txt", "new\tfile.txt"],
     binaryPaths: [],
     gitlinkPaths: [],
   });

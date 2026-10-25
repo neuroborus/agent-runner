@@ -12,8 +12,9 @@ export function validStopBoundary(value) {
     value.step > 0 &&
     Number.isSafeInteger(value.completedCommits) &&
     value.completedCommits >= 0 &&
-    typeof value.baselineHead === "string" &&
-    SHA.test(value.baselineHead)
+    (value.baselineHead === null
+      ? value.completedCommits === 0
+      : typeof value.baselineHead === "string" && SHA.test(value.baselineHead))
   );
 }
 

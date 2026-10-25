@@ -73,12 +73,13 @@ Text additions and deletions sum to `changedLines`; a NUL in either side's first
 8,000 bytes marks a binary path, reported separately in `binaryPaths` without
 invented line counts. Symlinks contribute their target text without following
 it; gitlinks are listed
-separately in `gitlinkPaths`. Content drift rejects the measurement. This
+separately in `gitlinkPaths`. The sorted `changedPaths` bind assessed scope
+without reading unrelated files. Content drift rejects the measurement. This
 capability does not stage, invoke agents or validation, assess thresholds, or
 change workflow eligibility.
 
-Unfinished-work preservation is a separate Git/state capability with no active
-refinement routing. `capturePreservation` requires run and worktree leases at a
+Unfinished-work preservation is a separate Git/state capability consumed by
+execution replacement preparation. `capturePreservation` requires run and worktree leases at a
 reconciled checkpoint. The state journal publishes an intent bound to the exact
 run, revision and inspected snapshot before storage allocation. Git's
 `captureChanges` reuses guarded source inspection and immutable baseline reads
@@ -111,6 +112,10 @@ revalidates that capture authority. Final saved-blob reads precede the last
 repository/control, ancestor and destination checks; destination content is
 inspected through its pinned parent immediately before deletion or replacement.
 Prepared and applied writes reconcile without replaying completed operations.
+`reconcilePreservation` can settle only an existing restoration intent during
+operator-stop recovery, under the same run/worktree leases and byte/control
+guards. It returns no receipt for an unstarted operation and cannot start
+capture or grant new restoration authority.
 Recovery syncs the verified surviving parent before accepting an already-applied
 write, completing durability even when interruption followed rename or unlink.
 Temporary creation has its own journaled intent and parent bindings. Before
@@ -166,11 +171,11 @@ additional preferred target renews assessment of an atomic exception. Proposal
 and assessment allowances survive reconstruction and future replacement steps;
 they grant no execution approval or effect authority. State version 29 persists
 the resolved size settings and disabled eligibility, with a default-only
-version-28 migration preserving existing progress. Production dispatch remains
-inactive pending preservation and effective revisions. See the
+version-28 migration preserving existing progress. Version 32 activates dispatch
+only for new commit-plan runs; migrations keep historical eligibility disabled. See the
 [owning contract](../pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
-Execution's private `effective-plan.js` owns the inactive reviewed-revision
+Execution's private `effective-plan.js` owns the reviewed-revision
 contract. State version 30 persists proposals, exact flat plans, original-step
 correspondence, completed-prefix provenance, complete versioned finding payloads
 and ownership, and fingerprint-bound mode gates. The version-29 migration adds
@@ -182,8 +187,8 @@ Proposal bindings retain historical additional-round grants; reload enforces
 cumulative lineage consumption, and any binding change requires fresh reports.
 Deferred targets map to logical original work. Pending commits remain
 verification-only.
-Production routing still consumes the unchanged canonical plan; replacement
-materialization is not activated. See the
+Production routing selects only accepted effective authority while preserving
+the unchanged canonical plan. See the
 [revision contract](../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation).
 
 Execution's private `revision-validation.js` binds bounded discovery, complete
@@ -200,8 +205,75 @@ Capability preparation remains root-owned, and no receipt supplies check evidenc
 or materialization authority.
 The version-30 migration adds empty receipts without inventing legacy proof,
 preserving consumed effects and allowances. Revised implementation evidence
-cannot be rebound by ordinal. Production refinement remains inactive. See the
+cannot be rebound by ordinal. See the
 [validation foundation](../pipelines/plan-execution/docs/SPEC.md#revision-bound-validation-foundation).
+
+Execution's private `replacement-execution.js` coordinates assessment, reviewed
+revision acceptance, complete role rediscovery and preservation through injected
+capabilities. Version 32 persists separation IDs, the inspected snapshot,
+capture revision and capture/restore/ready phases plus consumed lineage output
+corrections. Root `runtimeFor` supplies the held run/worktree leases to the
+state-owned preservation service; its capture binding uses the latest serialized
+revision, including capability-preparation publications. After verifying every
+saved byte, the state service supplies exact manifest/hash and content-addressed
+blob references for read-only reconstruction. Complete file bytes stay external;
+the cumulative reference context is bounded to 65,536 UTF-8 bytes. Before
+restoration, the complete first reconstruction request must also fit the existing
+32 MiB adapter limit. The Worker's provider-owned `canReadFiles` admission checks
+every exact manifest and before/after blob path against its proved command
+policy and host readability. Claude's runner-boundary masks make external
+sources under `/tmp` or `/run` unavailable; native Read is not byte-exact binary
+recovery. Missing admission support or inaccessible sources pauses as
+`environment_blocked` before restoration, retaining the candidate and capture
+for a fresh access check on resume without widening the sandbox.
+References permit neither storage writes nor unrelated
+state access and contain no native transcripts.
+
+The complete unfinished candidate is captured before any removal. Restoration
+reuses one journaled operation to restore all saved paths to their accepted
+baseline. Its receipt reconciles before generic workspace-drift handling; ready
+publication pins the clean baseline and retires completed bootstrap units while
+retaining receipts and consumed subdivision/correction totals. It also retires
+the former candidate's phase-local pending correction marker before `IMPLEMENT`.
+Each replacement
+then uses ordinary initial-implementation evidence, mode gates, finalization,
+terminal confirmation and one-shot commit settlement. Saved future work remains
+external, and earlier child commits are never overwritten by a later restore.
+Sibling replacements retain correction budgets and semantic finalization retry
+allowances within their original refinement lineage. Private
+`replacement-findings.js` preserves finding-specific consumption and decisions
+by reviewed version and ownership; sibling-local IDs cannot inherit an unrelated
+finding's arbitration, dispute counts or exact override. Active version changes
+retain the original version's decisions and pending requests separately, without
+relabeling them or renewing lineage budgets. Owned pending disputes, their counts
+and reconsideration requests stay in the ledger during reconstruction and return
+at candidate convergence. Dispositions retain their final history even when
+they remove the last active payload.
+Revision discovery
+routes capacity, product-decision and plan-revision outcomes through their owning
+workflow handlers without discarding structured details or suspended authority.
+Private `replacement-inputs.js` journals authorized clarification binding changes,
+retains the suspended content checkpoint separately from the `IMPLEMENT`
+compatibility route, preserves historical plan approval and role receipts, and requires fresh mode
+approval and additive discovery before reuse. Assessment bindings follow only
+that authorized chain without replacing history or renewing lineage allowances.
+Rediscovery preserves parent amendment correspondence and exact replacement
+targets for amendments accepted within the current revision.
+Review normalization includes owned sibling payloads when enforcing stable IDs.
+Deferred stops resolve the
+original logical work and settle only when all its children verify. Consumed
+commits reconcile before refinement. Read-only refinement violations persist
+the ordinary contamination stop before preservation or new effects.
+Input invalidation retains the historical role inventories and revision receipts
+needed to validate that stop, while retiring active selection and approvals.
+Pending separation records remain recoverable without reactivating invalid inputs.
+The version-31 migration adds empty preparation records and keeps legacy and
+intermediate runs disabled; it supplies no revision approval or preserved bytes.
+Output-exhaustion pauses validate the exact pending refinement checkpoint rather
+than treating its read-only phase as the suspended content phase. Reconstruction
+retains assessment reservations and correction accounting.
+An unchanged repair of a rejected plan preserves its report and offers an
+explicit read-only repair retry through the shared CLI/MCP pause projection.
 
 The configuration capability lives under `src/config/` behind its public
 `index.js`. Strict runner and project parsing, confined file loading, trusted
@@ -1564,9 +1636,11 @@ New stop argument identities include timing and canonicalize omitted and explici
 `immediate`. Legacy timing-less identities accept those same immediate arguments
 and retain their original receipt shape; a timing change conflicts. Legacy stop
 records normalize to immediate timing without read-side writes. New receipts
-include requested/effective timing and bounded target evidence. CLI `--timing`
-and MCP's optional `timing` field expose the same two values; omission stays
-immediate. Transport validation never refreshes an inspected revision or changes
+include requested/effective timing and bounded target evidence. Target evidence
+permits a null baseline HEAD only with no preceding completed commits, preserving
+an unborn logical step's boundary across child commits. CLI `--timing` and MCP's
+optional `timing` field expose the same two values; omission stays immediate.
+Transport validation never refreshes an inspected revision or changes
 retry arguments. MCP keeps `pendingStop` for pending requests and adds the
 state-owned bounded `projectOperatorStop` summary as `stop` for current and settled
 requests. CLI status uses the same summary; public activity derives it from each

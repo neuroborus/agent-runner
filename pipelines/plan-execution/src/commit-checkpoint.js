@@ -1,9 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 
-import { parseCommitPlan } from "@agent-runner/commit-plan";
+import { effectivePlanAuthority } from "./plan-position.js";
 import { clearedCandidateAndTerminalGate } from "./gate-evidence.js";
 import { createFinalizationRecovery } from "./workflow-contract.js";
 import { scheduledChecks } from "./validation-schedule.js";
+import { retainReplacementFindingAccounting } from "./replacement-findings.js";
 
 // The journal checkpoint, not only the current workflow label, proves that
 // this stop preceded repository, artifact, and execution ownership.
@@ -57,14 +58,27 @@ export function resolveStopBoundary(run) {
     current.resolvedSummary === null ||
     ["CLARIFY", "BOOTSTRAP"].includes(current.workflowState) ||
     current.repositoryBaseline === null ||
-    current.currentStep > parseCommitPlan(current.canonicalPlan).steps.length
+    current.currentStep > effectivePlanAuthority(current).steps.length
   )
     return null;
+  const mapping = effectivePlanAuthority(current).mapping;
+  const originalStep = mapping[current.currentStep - 1].originalStep;
+  const start = mapping.findIndex(
+    (entry) => entry.originalStep === originalStep,
+  );
+  const firstRevision = current.effectivePlanRevisions?.revisions.find(
+    (entry) => entry.accepted && entry.originalStep === originalStep,
+  );
   return {
     capability: "verified-commit-v1",
-    step: current.currentStep,
-    completedCommits: current.completedCommits.length,
-    baselineHead: current.repositoryBaseline.head,
+    step: originalStep,
+    completedCommits: start,
+    baselineHead:
+      start > 0
+        ? current.completedCommits[start - 1]
+        : firstRevision
+          ? firstRevision.binding.assessment.baseHead
+          : current.repositoryBaseline.head,
   };
 }
 
@@ -79,8 +93,13 @@ export function verifiedCommitCheckpoint({
   configurationChanged,
 }) {
   const completedCommits = [...current.completedCommits, verified.head];
-  const stepCount = parseCommitPlan(current.canonicalPlan).steps.length;
+  const stepCount = effectivePlanAuthority(current).steps.length;
   const done = current.currentStep === stepCount;
+  const mapping = effectivePlanAuthority(current).mapping;
+  const sameLineage =
+    !done &&
+    mapping[current.currentStep].originalStep ===
+      mapping[current.currentStep - 1].originalStep;
   const nextStepState = done
     ? {}
     : {
@@ -111,6 +130,17 @@ export function verifiedCommitCheckpoint({
   const pipelineState = {
     ...current,
     ...nextStepState,
+    ...(sameLineage
+      ? Object.fromEntries(
+          [
+            "correctionHistory",
+            "blockedSinceStagnation",
+            "stagnationArbitrationUsed",
+            "stagnationDirection",
+            "additionalFixRounds",
+          ].map((field) => [field, current[field]]),
+        )
+      : {}),
     workflowState: configurationChanged
       ? "WAITING_FOR_USER"
       : done
@@ -138,8 +168,10 @@ export function verifiedCommitCheckpoint({
   return {
     patch: {
       pipelineState: {
-        ...pipelineState,
-        finalizationRecovery: createFinalizationRecovery(),
+        ...retainReplacementFindingAccounting(current, pipelineState),
+        finalizationRecovery: sameLineage
+          ? { ...current.finalizationRecovery, pending: false, feedback: null }
+          : createFinalizationRecovery(),
       },
       activeTurn: null,
       hashes,
@@ -157,13 +189,14 @@ export function verifiedCommitCheckpoint({
             },
           }
         : {}),
-      counters: done
-        ? counters
-        : {
-            ...counters,
-            fixRounds: 0,
-            correctionRounds: 0,
-          },
+      counters:
+        done || sameLineage
+          ? counters
+          : {
+              ...counters,
+              fixRounds: 0,
+              correctionRounds: 0,
+            },
     },
     activity: activity(
       configurationChanged ? "runner" : "worker",

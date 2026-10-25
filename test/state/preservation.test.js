@@ -155,6 +155,13 @@ async function fixture(t, { linked = false } = {}) {
         git,
       });
     },
+    reconcile(request) {
+      return store.reconcilePreservation(lease, {
+        ...request,
+        worktreeLease,
+        git,
+      });
+    },
     async restart() {
       await worktreeLease.release();
       await lease.release();
@@ -215,6 +222,32 @@ test("preserves raw changes, deletions, modes and link targets without changing 
   assert.deepEqual(
     payload.manifest.entries.map(({ after }) => after.path).sort(),
     ["binary.dat", "first.txt", "link", "removed.txt", "script.sh"],
+  );
+  const inspected = await f.store.readPreservation(
+    f.created.state.runId,
+    f.preservationId,
+    { includeSources: true },
+  );
+  assert.deepEqual(inspected.record, record);
+  assert.deepEqual(
+    inspected.changes.map(({ after }) => after.path).sort(),
+    payload.manifest.entries.map(({ after }) => after.path).sort(),
+  );
+  const savedBinary = inspected.changes.find(
+    ({ after }) => after.path === "binary.dat",
+  );
+  assert.deepEqual(
+    await readFile(
+      join(inspected.source.blobDirectory, savedBinary.after.hash),
+    ),
+    binary,
+  );
+  assert.equal(inspected.source.manifestPath, join(savedPath, "manifest.json"));
+  assert.equal(inspected.source.manifestHash, record.ready.manifestHash);
+  assert.equal(
+    inspected.changes.find(({ after }) => after.path === "removed.txt").after
+      .kind,
+    "deleted",
   );
   const state = await f.store.loadRun(f.created.state.runId);
   assert.equal(state.preservationRecords.length, 1);
@@ -403,6 +436,65 @@ for (const baselineLink of [true, false]) {
     );
   });
 }
+
+test("stop reconciliation settles only an existing restoration intent with its exact authority", async (t) => {
+  const f = await fixture(t);
+  await f.write("first.txt", "unfinished\n");
+  await f.capture();
+  const request = {
+    preservationId: f.preservationId,
+    operationId: randomUUID(),
+    paths: ["first.txt"],
+    target: "before",
+    expectedSnapshot: await f.git.snapshot({ projectPath: f.projectPath }),
+  };
+  await assert.rejects(
+    f.retry({
+      ...request,
+      signal: AbortSignal.abort(new Error("Interrupted restoration")),
+    }),
+    /Interrupted restoration/u,
+  );
+  const current = await f.store.transitionRun(f.lease, {
+    pipelineState: { workflowState: "IMPLEMENT" },
+  });
+  await f.store.requestOperatorStop({
+    runId: current.runId,
+    kind: "cancel_requested",
+    expectedRevision: current.revision,
+    idempotencyKey: "preservation-stop",
+  });
+  const stopped = await f.store.loadRun(current.runId);
+  const unstarted = { ...request, operationId: randomUUID() };
+  assert.equal(await f.reconcile(unstarted), null);
+  assert.deepEqual(await f.store.loadRun(current.runId), stopped);
+  await assert.rejects(f.retry(unstarted), {
+    code: "ERR_STOP_RECONCILIATION_REQUIRED",
+  });
+  await assert.rejects(f.reconcile({ ...request, target: "after" }), {
+    code: "ERR_INVALID_PRESERVATION",
+  });
+  assert.equal((await f.reconcile(request)).complete, true);
+  assert.equal(
+    await readFile(join(f.projectPath, "first.txt"), "utf8"),
+    "baseline\n",
+  );
+  assert.ok((await f.read()).ready);
+  await f.store.settleCheckpoint(f.lease, (latest) => ({
+    patch: {
+      pipelineState: { ...latest.pipelineState, workflowState: "CANCELED" },
+      pause: {
+        reason: "operator_canceled",
+        resumeAction: null,
+        operatorResume: {
+          workflowState: "IMPLEMENT",
+          pause: null,
+          activeTurn: null,
+        },
+      },
+    },
+  }));
+});
 
 test("capture interruption and cancellation retain saved work across reconstruction", async (t) => {
   const f = await fixture(t);

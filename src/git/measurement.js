@@ -157,6 +157,7 @@ export async function measureChangesAtRoot(
     additions,
     deletions,
     changedLines: additions + deletions,
+    changedPaths: Object.freeze([...before.changedPaths].sort()),
     binaryPaths: Object.freeze(binaryPaths),
     gitlinkPaths: Object.freeze(gitlinkPaths),
   });

@@ -14,10 +14,14 @@ import {
   commitSizeThreshold,
   createCommitSizeAssessment,
 } from "./commit-size-assessment.js";
-import { validStepAssessment } from "./plan-position.js";
+import {
+  effectivePlanAuthority,
+  validStepAssessment,
+} from "./plan-position.js";
 import {
   assertEffectivePlanRevisions,
   createEffectivePlanRevisions,
+  effectivePlanRevisionCheckpoint,
 } from "./effective-plan.js";
 import {
   validCapabilityReports,
@@ -29,6 +33,7 @@ import {
   finalizationGatePassed,
 } from "./gate-evidence.js";
 import { executionPolicy, combinedReview } from "./mode-policy.js";
+import { replacementInputReview } from "./replacement-inputs.js";
 import {
   deriveValidationSchedule,
   scheduledChecks,
@@ -71,6 +76,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "commitSizeAssessment",
   "effectivePlanRevisions",
   "effectiveValidation",
+  "replacementExecution",
   "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
@@ -441,6 +447,13 @@ const PAUSE_RESUME_STATES = Object.freeze({
     "CLEAN_CONFIRM",
   ]),
   review_output_invalid: Object.freeze(["REVIEW"]),
+  effective_plan_output_invalid: Object.freeze([
+    "IMPLEMENT",
+    "CHECK_AND_FIX",
+    "CLEAN_CONFIRM",
+    "REVIEW",
+    "CONFIRM",
+  ]),
 });
 const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
   "schemaVersion",
@@ -3649,7 +3662,22 @@ function validateValidationSchedule(state, planSteps, validations) {
       "Scoped validation requires every active role's assignments.",
     );
   }
-  const expected = deriveValidationSchedule(validations, planSteps.length);
+  const receipt = [
+    ...(state.effectiveValidation ?? []),
+    ...(state.replacementExecution?.inputChanges ?? [])
+      .flatMap(({ validation }) => (validation === null ? [] : [validation]))
+      .reverse(),
+  ].find(
+    (entry) =>
+      entry.schedule !== null &&
+      entry.revision === state.validationSchedule?.effectivePlan?.revision,
+  );
+  const expected =
+    receipt?.schedule ??
+    deriveValidationSchedule(
+      validations,
+      parseCommitPlan(state.canonicalPlan).steps.length,
+    );
   if (
     !isDeepStrictEqual(state.validationSchedule, expected) ||
     expected.steps.some(
@@ -3667,7 +3695,16 @@ function validateValidationSchedule(state, planSteps, validations) {
   // Frozen-plan declarations remain historical evidence after revision
   // acceptance. They cannot select replacement work; its receipts are separate.
   let checks = scheduledChecks(
-    { validationSchedule: state.validationSchedule },
+    {
+      ...state,
+      effectivePlanRevisions: {
+        revisions: state.effectivePlanRevisions.revisions.filter(
+          (entry) =>
+            entry.number <=
+            (state.validationSchedule?.effectivePlan?.revision ?? 0),
+        ),
+      },
+    },
     step,
   );
   if (state.validationAmendment !== null) {
@@ -4139,7 +4176,11 @@ export function normalizePipelineState(value) {
     }
   }
   try {
-    assertCommitSizeAssessment(value.commitSizeAssessment, value.settings);
+    assertCommitSizeAssessment(
+      value.commitSizeAssessment,
+      value.settings,
+      value.replacementExecution?.inputChanges,
+    );
   } catch {
     throw workflowError("Invalid persisted commit-size assessment.");
   }
@@ -4348,6 +4389,8 @@ export function normalizePipelineState(value) {
   } catch {
     throw workflowError("Invalid persisted effective-plan revisions.");
   }
+  const frozenStepCount = planSteps?.length;
+  if (planSteps !== null) planSteps = effectivePlanAuthority(value).steps;
   const workerSummary = normalizedSummary(
     value.workerSummary,
     "Worker summary",
@@ -4359,14 +4402,14 @@ export function normalizePipelineState(value) {
   const workerValidation = normalizePersistedValidation(
     value.workerValidation,
     "Worker validation evidence",
-    planSteps?.length,
+    frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
   );
   const reviewerValidation = normalizePersistedValidation(
     value.reviewerValidation,
     "Reviewer validation evidence",
-    planSteps?.length,
+    frozenStepCount,
     value.validationScopeLegacy,
     trustedValidation.commands,
   );
@@ -4876,6 +4919,72 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution review reconsideration is invalid.");
   }
   const findingOverrides = normalizeFindingOverrides(value.findingOverrides);
+  const accounting = value.replacementExecution?.findingAccounting;
+  if (!Array.isArray(accounting))
+    throw workflowError("Invalid replacement finding accounting.");
+  for (const entry of accounting) {
+    assertExactFields(
+      entry,
+      [
+        "revision",
+        "id",
+        "fingerprint",
+        "pendingDisputes",
+        "disputeCounts",
+        "disputeHistory",
+        "findingArbitrations",
+        "sameFindingRounds",
+        "findingOverrides",
+        "reviewReconsideration",
+      ],
+      "Replacement finding accounting",
+    );
+    normalizeStringCountRecord(
+      entry.disputeCounts,
+      "Replacement dispute counts",
+    );
+    normalizeStringCountRecord(
+      entry.sameFindingRounds,
+      "Replacement finding rounds",
+    );
+    normalizePendingDisputes(entry.pendingDisputes);
+    normalizeDisputeHistory(entry.disputeHistory);
+    normalizeFindingArbitrations(entry.findingArbitrations);
+    normalizeFindingOverrides(entry.findingOverrides);
+    if (
+      [entry.disputeCounts, entry.sameFindingRounds].some((record) =>
+        Object.keys(record).some((id) => id !== entry.id),
+      ) ||
+      [
+        entry.pendingDisputes,
+        entry.disputeHistory,
+        entry.findingArbitrations,
+        entry.findingOverrides,
+      ].some((records) =>
+        records.some(({ findingId }) => findingId !== entry.id),
+      ) ||
+      !Array.isArray(entry.reviewReconsideration) ||
+      entry.reviewReconsideration.length > 1 ||
+      entry.reviewReconsideration.some((id) => id !== entry.id) ||
+      (entry.disputeCounts[entry.id] ?? 0) >
+        value.settings.maxDisputesPerFinding ||
+      (!policy.independentReview &&
+        [
+          entry.pendingDisputes,
+          entry.disputeCounts,
+          entry.disputeHistory,
+          entry.findingArbitrations,
+          entry.findingOverrides,
+          entry.reviewReconsideration,
+        ].some((records) => Object.keys(records).length > 0)) ||
+      entry.disputeHistory.some(
+        (record, index, records) =>
+          record.attempt > (entry.disputeCounts[entry.id] ?? 0) ||
+          (index > 0 && record.attempt <= records[index - 1].attempt),
+      )
+    )
+      throw workflowError("Invalid versioned replacement finding decisions.");
+  }
   const pendingCommit = normalizePendingCommit(value.pendingCommit);
   const completedCommits = normalizeCompletedCommits(value.completedCommits);
   const gateState = {
@@ -5409,9 +5518,15 @@ export function createPlanExecutionState({
       planContextVersion: 1,
       stepImplementation: null,
       implementationEvidenceLegacy: false,
-      commitSizeAssessment: createCommitSizeAssessment(),
+      commitSizeAssessment: createCommitSizeAssessment({ eligible: true }),
       effectivePlanRevisions: createEffectivePlanRevisions(),
       effectiveValidation: [],
+      replacementExecution: {
+        separations: [],
+        corrections: [],
+        findingAccounting: [],
+        inputChanges: [],
+      },
       settings:
         settings === null
           ? null
@@ -5535,6 +5650,62 @@ function repositoryRelativePath(projectPath, path) {
   return pathFromProject.split(sep).join("/");
 }
 
+function matchesRefinementOutputCheckpoint(state, pause) {
+  if (
+    !state.commitSizeAssessment.eligible ||
+    state.pendingCommit !== null ||
+    ![
+      "IMPLEMENT",
+      "CHECK_AND_FIX",
+      "CLEAN_CONFIRM",
+      "REVIEW",
+      "CONFIRM",
+    ].includes(pause.resumeState)
+  )
+    return false;
+  const role = executionPolicy(state.settings).independentReview
+    ? "reviewer"
+    : "worker";
+  if (
+    pause.role === role &&
+    state.commitSizeAssessment.lineages.some(
+      (lineage) =>
+        lineage.attempts.at(-1)?.result === null &&
+        pause.checkpoint ===
+          `commit-size:read-only:commit-size:${lineage.originalStep}:${lineage.attempts.length}`,
+    )
+  )
+    return true;
+  const revision = state.effectivePlanRevisions.revisions.at(-1);
+  if (!revision) return false;
+  const inputReview = replacementInputReview(state);
+  if (
+    inputReview &&
+    pause.role === inputReview.role &&
+    pause.checkpoint === `effective-plan:read-only:${inputReview.checkpoint}`
+  )
+    return true;
+  if (!revision.accepted) {
+    const repair = revision.reports.some(({ status }) => status !== "CLEAN");
+    const request = effectivePlanRevisionCheckpoint(state);
+    const checkpoint = repair
+      ? `effective-plan:${revision.number}:repair`
+      : request?.checkpoint;
+    return (
+      pause.role === (repair ? "worker" : request?.role) &&
+      pause.checkpoint === `effective-plan:read-only:${checkpoint}`
+    );
+  }
+  return (
+    (pause.role === "worker" ||
+      (role === "reviewer" && pause.role === "reviewer")) &&
+    (pause.checkpoint === "revision-validation:read-only:bootstrap" ||
+      (state.validationMigrationPending &&
+        pause.checkpoint ===
+          "revision-validation:read-only:validation-migration"))
+  );
+}
+
 export function assertRun(run) {
   if (["operator_paused", "operator_canceled"].includes(run?.pause?.reason)) {
     const checkpoint = run.pause.operatorResume;
@@ -5578,7 +5749,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 31 ||
+    run.pipelineStateVersion !== 32 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -5832,6 +6003,7 @@ export function assertRun(run) {
           "finalization_evidence_rejected",
           "lazy_output_invalid",
           "review_output_invalid",
+          "effective_plan_output_invalid",
         ].includes(run.pause.reason)) ||
       (run.pause.reason === "finalization_cannot_pass" &&
         run.pause.code !== "ERR_FINALIZATION_MODIFIED_BEFORE_VALIDATION");
@@ -5861,6 +6033,7 @@ export function assertRun(run) {
           `${run.pause.resumeState.toLowerCase().replaceAll("_", "-")}:`,
         ) &&
           !run.pause.checkpoint.startsWith("plan-context:read-only:") &&
+          !matchesRefinementOutputCheckpoint(state, run.pause) &&
           !(
             state.validationMigrationPending &&
             !state.compatibilityCheckRequired &&
@@ -5991,7 +6164,7 @@ export function assertRun(run) {
     }
   }
   if (state.canonicalPlan !== null) {
-    const stepCount = parseCommitPlan(state.canonicalPlan).steps.length;
+    const stepCount = effectivePlanAuthority(state).steps.length;
     if (state.currentStep !== null && state.currentStep > stepCount) {
       throw workflowError("Plan-execution current step is outside the plan.");
     }

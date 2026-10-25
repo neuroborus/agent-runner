@@ -325,6 +325,10 @@ step; a pause, failure, or interruption instead settles at the reconciled
 quiescent checkpoint without extra work. Existing blockers and failure evidence
 remain available. After the final commit, pause resumes through `DONE` without
 agent work; cancellation retains completed history in `CANCELED`.
+For newly eligible execution refinement, the target is the original logical
+step: verified child commits retain the pending stop, and its last replacement
+settles the stop atomically. Accepted revisions never shift that target to
+unrelated later work.
 
 Stop requests are durable before immediate owned execution is interrupted. Activity
 reports stopping, repository reconciliation, and the resulting state, while

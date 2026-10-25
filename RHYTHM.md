@@ -7,6 +7,27 @@ remain in the owning documentation.
 
 ## 2026-10-25
 
+- **New execution runs can execute reviewed replacements without losing future work.**
+  Version 32 connects bounded assessment, flat reviewed revisions, complete
+  revision-bound inventories and external preservation. The runner captures the
+  entire unfinished candidate before restoring its accepted baseline; Worker
+  reconstructs only the selected replacement using verified saved bytes.
+  Exact provider-compatible manifest/blob read admission precedes restoration;
+  hidden sources pause with the candidate intact rather than widening command
+  access or depending on native text reads for binary recovery.
+  Every child passes separate complete gates and exact-subject commit settlement.
+  Capture/restore/ready records recover publication interruptions, consumed commits
+  settle verification-only, and sibling work retains correction allowances.
+  Authorized product answers preserve historical receipts and require renewed
+  approval/discovery without renewing lineage budgets; unchanged owned findings
+  retain their IDs across siblings.
+  Deferred stops stay bound to original logical work until all children verify.
+  Unborn baselines stay null; output exhaustion and unchanged rejected-plan
+  repairs preserve their exact read-only retry checkpoints and findings.
+  Legacy/intermediate migration remains disabled. Selection, preservation and
+  settlement form one contract: activating any part alone could expose future
+  work to the wrong gate or duplicate commit authority.
+
 - **Replacement validation has explicit revision authority.** Execution state
   version 31 stores separate complete role inventories and compact schedules for
   accepted revisions. Read-only discovery preserves additive reports and future

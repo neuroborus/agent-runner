@@ -337,11 +337,13 @@ The resolved value is persisted and reused on resume; legacy runs receive 900.
 Execution separately owns `preferredCommitLineLimit: 900` and
 `commitSizeAssessmentMultiplier: 3` under `pipelines.plan-execution`, with the
 same project precedence and persisted resolution. Both are positive safe
-integers, and their product must be a safe integer. The prepared size-assessment
-policy uses a strictly greater threshold (2,701, not 2,700, at the defaults),
-allows justified atomic exceptions, and grants no commit authority. Assessment
-dispatch and plan refinement remain inactive; new and migrated runs retain
-their existing execution boundaries. See the
+integers, and their product must be a safe integer. New commit-plan runs assess reconciled work strictly above the threshold
+(2,701, not 2,700, at the defaults). An atomic exception remains valid; a split
+requires mode-specific plan approval and complete replacement validation. The
+runner preserves all unfinished bytes externally before restoring the accepted
+baseline. Worker reconstructs only the active replacement; every replacement
+passes its own complete gates and exact-subject commit. Frozen plans stay
+unchanged, and legacy/intermediate runs remain ineligible on resume. See the
 [assessment contract](pipelines/plan-execution/docs/SPEC.md#commit-size-assessment-foundation).
 
 The stagnation window detects consecutive blocked correction rounds. In
@@ -817,7 +819,7 @@ nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 31, and polishing version 16. Their ordered migrations resolve missing
+version 32, and polishing version 16. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state
@@ -1333,10 +1335,10 @@ CLI owns the common `--clarify` lifecycle option. Each workspace owns its
 explicit JavaScript workflow. The runner provides state, events, agents, and
 Git services; pipeline workspaces own mode and workflow policy.
 
-The Git/state boundaries also provide inactive unfinished-work preservation
-primitives. They retain verified bytes outside the repository and transient
-validation storage; they do not yet activate plan refinement or add a CLI
-command. See the [architecture contract](docs/ARCHITECTURE.md#root-runner-ownership).
+The Git/state boundaries preserve unfinished work outside the repository and
+transient validation storage. Newly eligible execution runs use their verified
+capture and journaled restoration to separate reviewed replacement commits;
+saved future work survives interruption, commits and cancellation. See the [architecture contract](docs/ARCHITECTURE.md#root-runner-ownership).
 
 ## Repository Layout
 

@@ -1984,3 +1984,249 @@ test("releases a new run lease when activity delivery fails", async (t) => {
   const lease = await runStore.acquireRunLease(runId);
   await lease.release();
 });
+
+for (const stopKind of [null, "pause_requested", "cancel_requested"]) {
+  test(`replacement preparation recovers durable restoration before ${stopKind ?? "dispatching only the active replacement"}`, async (t) => {
+    const fixture = await operatorFixture(t, "plan-execution");
+    let interrupted = false;
+    let runId;
+    let measurements = 0;
+    let commits = 0;
+    let agentTurns = 0;
+    let requestedStop = false;
+    const store = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+      onPreservationBoundary({ phase }) {
+        if (
+          phase === (stopKind === null ? "restored" : "path-applied") &&
+          !interrupted
+        ) {
+          interrupted = true;
+          throw new Error("Restoration receipt interrupted");
+        }
+      },
+    });
+    const realGit = createGitService();
+    const git = {
+      ...realGit,
+      async measureChanges(request) {
+        const measured = await realGit.measureChanges(request);
+        return {
+          ...measured,
+          changedLines: measurements++ === 0 ? 2701 : measured.changedLines,
+        };
+      },
+    };
+    const plan =
+      "## Commit 1: feat(reader): add the reader\n\nAdd the reader.\n\n## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n";
+    let generation = 0;
+    function adapter() {
+      const adapterGeneration = ++generation;
+      const delegate = createExecutionAdapter();
+      let session = 0;
+      return {
+        ...delegate,
+        async run(request) {
+          agentTurns++;
+          const current = await store.loadRun(runId);
+          if (
+            !requestedStop &&
+            request.access === "workspace-write" &&
+            current.pipelineState.effectivePlanRevisions.revisions.at(-1)
+              ?.accepted
+          ) {
+            requestedStop = true;
+            await store.requestOperatorStop({
+              runId,
+              kind: "pause_requested",
+              expectedRevision: current.revision,
+              idempotencyKey: "replacement-boundary-stop",
+              timing: "after-current-commit",
+            });
+          }
+          const properties = request.schema?.properties;
+          if (properties?.bindingFingerprint || properties?.preserves) {
+            const review = properties.preserves !== undefined;
+            const data = JSON.parse(
+              (review
+                ? /Proposed authority \(data\):\n([^\n]+)/u
+                : /Assessment binding \(data\):\n([^\n]+)/u
+              ).exec(request.prompt)[1],
+            );
+            return {
+              sessionId: `refinement-${adapterGeneration}-${++session}`,
+              structured: review
+                ? {
+                    fingerprint: data.fingerprint,
+                    status: "CLEAN",
+                    reason: "Requirements and checks are preserved.",
+                    preserves: {
+                      requirements: true,
+                      dependencies: true,
+                      laterSteps: true,
+                      checks: true,
+                      findings: true,
+                    },
+                  }
+                : {
+                    bindingFingerprint: data.bindingFingerprint,
+                    decision: "SPLIT",
+                    reason: "Introduce the reader before integration.",
+                    replacementPlan: plan,
+                  },
+            };
+          }
+          if (request.access === "local-commit") commits++;
+          const result = await delegate.run(request);
+          if (request.prompt.includes("Implement the changes described")) {
+            if (
+              current.pipelineState.effectivePlanRevisions.revisions.length ===
+              0
+            )
+              await writeFile(
+                join(request.cwd, "future.js"),
+                "export const integrated = true;\n",
+              );
+            else if (current.pipelineState.currentStep === 2) {
+              assert.match(request.prompt, /Preserved unfinished work/u);
+              await writeFile(
+                join(request.cwd, "future.js"),
+                "export const integrated = true;\n",
+              );
+            }
+          }
+          return {
+            ...result,
+            sessionId:
+              request.session?.mode === "continue"
+                ? request.session.id
+                : `generation-${adapterGeneration}-${result.sessionId}`,
+          };
+        },
+      };
+    }
+    const first = runnerFor(
+      fixture,
+      { codex: adapter() },
+      { runStore: store, git },
+    );
+    ({
+      run: { runId },
+    } = await first.create({
+      pipelineId: "plan-execution",
+      projectPath: fixture.projectPath,
+      taskPath: fixture.taskPath,
+      proactiveClarification: false,
+      roleOverrides: {},
+      sourceSession: null,
+    }));
+    await assert.rejects(
+      first.resume({ runId, action: null }),
+      /Restoration receipt interrupted/u,
+    );
+    assert.equal(commits, 0);
+    const checkpoint = await store.loadRun(runId);
+    assert.equal(
+      checkpoint.pipelineState.replacementExecution.separations[0].phase,
+      "restore",
+    );
+    if (stopKind === null)
+      assert.equal(
+        (await realGit.snapshot({ projectPath: fixture.projectPath })).clean,
+        true,
+      );
+    if (stopKind !== null) {
+      requestedStop = true;
+      await store.requestOperatorStop({
+        runId,
+        kind: stopKind,
+        expectedRevision: checkpoint.revision,
+        idempotencyKey: "restoration-stop",
+      });
+    }
+    const restarted = createRunStore({
+      stateRoot: fixture.stateRoot,
+      resolveStopBoundary,
+    });
+    const resumedRunner = runnerFor(
+      fixture,
+      { codex: adapter() },
+      { runStore: restarted, git },
+    );
+    const beforeStopTurns = agentTurns;
+    const paused = (await resumedRunner.resume({ runId, action: null })).run;
+    if (stopKind !== null) {
+      const canceled = stopKind === "cancel_requested";
+      assert.equal(
+        paused.pause.reason,
+        canceled ? "operator_canceled" : "operator_paused",
+      );
+      assert.equal(
+        paused.pipelineState.workflowState,
+        canceled ? "CANCELED" : "WAITING_FOR_USER",
+      );
+      assert.equal(
+        paused.pipelineState.replacementExecution.separations[0].phase,
+        "ready",
+      );
+      assert.equal(paused.pipelineState.repositoryBaseline.clean, true);
+      assert.equal(paused.stopRequest.reconciledRevision, paused.revision);
+      assert.equal(commits, 0);
+      assert.equal(agentTurns, beforeStopTurns);
+      const preserved = await restarted.readPreservation(
+        runId,
+        paused.pipelineState.replacementExecution.separations[0].preservationId,
+      );
+      assert.ok(preserved.ready);
+      if (!canceled) {
+        const completed = (await resumedRunner.resume({ runId, action: null }))
+          .run;
+        assert.equal(
+          completed.pipelineState.workflowState,
+          "DONE",
+          JSON.stringify(completed.pause),
+        );
+        assert.equal(commits, 2);
+      }
+      return;
+    }
+    assert.equal(
+      paused.pause?.reason,
+      "operator_paused",
+      JSON.stringify(paused.pause),
+    );
+    assert.equal(paused.pipelineState.completedCommits.length, 2);
+    assert.deepEqual(paused.stopRequest.settlement, {
+      kind: "commit",
+      commit: paused.pipelineState.completedCommits[1],
+    });
+    const completed = (await resumedRunner.resume({ runId, action: null })).run;
+    assert.equal(
+      completed.pipelineState.workflowState,
+      "DONE",
+      JSON.stringify(completed.pause),
+    );
+    assert.equal(commits, 2);
+    assert.equal(completed.pipelineState.completedCommits.length, 2);
+    const separation =
+      completed.pipelineState.replacementExecution.separations[0];
+    const saved = await restarted.readPreservation(
+      runId,
+      separation.preservationId,
+      { includeSources: true },
+    );
+    assert.equal(saved.record.binding.revision, separation.captureRevision);
+    assert.equal(
+      await readFile(
+        join(
+          saved.source.blobDirectory,
+          saved.changes.find(({ after }) => after.path === "future.js").after
+            .hash,
+        ),
+        "utf8",
+      ),
+      "export const integrated = true;\n",
+    );
+  });
+}

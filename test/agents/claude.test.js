@@ -721,6 +721,38 @@ function request(overrides = {}) {
   };
 }
 
+test("rejects binary preservation sources masked by the selected command sandbox", async (t) => {
+  const stateRoot = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-preserved-source-")),
+  );
+  t.after(() => rm(stateRoot, { recursive: true, force: true }));
+  const masked = stateRoot.startsWith("/run/") || stateRoot.startsWith("/tmp/");
+  const binary = Buffer.from([0, 255, 128, 13, 10]);
+  const blob = join(
+    stateRoot,
+    createHash("sha256").update(binary).digest("hex"),
+  );
+  const manifest = join(stateRoot, "manifest.json");
+  await writeFile(blob, binary);
+  await writeFile(manifest, JSON.stringify({ blob }));
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fixture = createFixture({ nativeSandbox });
+    const paths = [manifest, blob];
+    const readable = await fixture.adapter.canReadFiles({
+      access: "workspace-write",
+      paths,
+    });
+    // The host and native root read can access the bytes; the proved fallback
+    // command mounts replace the host temporary trees with private filesystems.
+    assert.equal(readable, nativeSandbox === true || !masked);
+    assert.deepEqual(await readFile(blob), binary);
+    assert.equal(
+      fixture.calls.some(({ argumentsList }) => argumentsList.includes("-p")),
+      false,
+    );
+  }
+});
+
 test("preserves a two-mebibyte result through duplicated escaped stream envelopes", async () => {
   const structured = largeFinalizationResult('"');
   const output = JSON.stringify(structured);

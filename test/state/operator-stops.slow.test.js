@@ -19,6 +19,7 @@ import {
 } from "../../src/state/index.js";
 
 import { executeFile, largeFinalizationResult } from "../support/index.js";
+import { resolveStopBoundary } from "../../src/pipeline-registry.js";
 
 const BOOT_A = "11111111-1111-4111-8111-111111111111";
 const BOOT_B = "22222222-2222-4222-8222-222222222222";
@@ -113,6 +114,7 @@ async function fixture(
     workflowState: "IMPLEMENT",
     settings: { mode: "independent" },
   },
+  pipelineStateVersion = 1,
 ) {
   const root = await mkdtemp(join(tmpdir(), "agent-runner-stops-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -130,7 +132,7 @@ async function fixture(
   const store = createRunStore(storeOptions);
   const created = await store.createRun({
     pipelineId: "plan-execution",
-    pipelineStateVersion: 1,
+    pipelineStateVersion,
     projectPath,
     taskPath,
     roles: { worker: { backend: "codex" } },
@@ -2001,6 +2003,10 @@ test("deferred stop history rejects changed targets, timing, and settlement evid
       events[1].state.stopRequest.targetBoundary.baselineHead = "not-a-sha";
     },
     (events) => {
+      events[1].state.stopRequest.targetBoundary.baselineHead = null;
+      events[1].state.stopRequest.targetBoundary.completedCommits = 1;
+    },
+    (events) => {
       events[1].state.stopRequest.settlement = {
         kind: "quiescent",
         commit: null,
@@ -2217,5 +2223,164 @@ test("deferred intent and lost receipt recovery retain one acceptance through ow
       const next = await peer.acquireWorktreeLease(f.projectPath, OTHER_RUN);
       await next.release();
     });
+  }
+});
+
+test("legacy execution admits deferred stops and replays their historical boundaries before migration", async (t) => {
+  for (const version of [1, 29]) {
+    const pipelineState = {
+      workflowState: "IMPLEMENT",
+      settings: { mode: "independent" },
+      canonicalPlan:
+        "## Commit 1: feat(reader): add the reader\n\nAdd the reader.\n\n## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n",
+      currentStep: 2,
+      resolvedSummary: "Execute the remaining commit.",
+      repositoryBaseline: { head: "a".repeat(40) },
+      completedCommits: ["a".repeat(40)],
+    };
+    const f = await fixture(t, { resolveStopBoundary }, pipelineState, version);
+    const input = {
+      ...f.input,
+      timing: "after-current-commit",
+    };
+    const accepted = await f.store.requestOperatorStop(input);
+    assert.deepEqual(accepted.targetBoundary, {
+      capability: "verified-commit-v1",
+      step: 2,
+      completedCommits: 1,
+      baselineHead: "a".repeat(40),
+    });
+    const recovered = createRunStore(f.storeOptions);
+    const history = await recovered.loadRunHistory(f.input.runId);
+    assert.equal(history.run.pipelineStateVersion, version);
+    assert.deepEqual(
+      history.run.stopRequest.targetBoundary,
+      accepted.targetBoundary,
+    );
+    assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+    await f.store.settleCheckpoint(f.lease, (latest) => ({
+      patch: {
+        pipelineState: {
+          ...latest.pipelineState,
+          workflowState: "WAITING_FOR_USER",
+        },
+        pause: {
+          reason: "operator_paused",
+          resumeAction: null,
+          operatorResume: {
+            workflowState: "IMPLEMENT",
+            pause: null,
+            activeTurn: null,
+          },
+        },
+      },
+    }));
+  }
+});
+
+test("verified replacement settlement retains a deferred logical boundary until its final child", async (t) => {
+  for (const baselineHead of ["a".repeat(40), null]) {
+    await t.test(
+      baselineHead === null ? "unborn baseline" : "existing baseline",
+      async (t) => {
+        const target = {
+          capability: "verified-commit-v1",
+          step: 1,
+          completedCommits: 0,
+          baselineHead,
+        };
+        const canonicalPlan =
+          "## Commit 1: feat(reader): add the reader\n\nImplement the reader.\n\n## Commit 2: feat(next): add the next feature\n\nImplement the next feature.\n";
+        const plan = canonicalPlan.replace(
+          "## Commit 2: feat(next)",
+          "## Commit 2: feat(runtime): use the reader\n\nIntegrate the reader.\n\n## Commit 3: feat(next)",
+        );
+        const f = await fixture(
+          t,
+          { resolveStopBoundary },
+          {
+            workflowState: "IMPLEMENT",
+            settings: { mode: "combined" },
+            resolvedSummary: "Execute the selected replacement.",
+            canonicalPlan,
+            currentStep: 1,
+            completedCommits: [],
+            repositoryBaseline: { head: baselineHead },
+            effectivePlanRevisions: {
+              revisions: [
+                {
+                  number: 1,
+                  originalStep: 1,
+                  accepted: true,
+                  plan,
+                  mapping: [
+                    { step: 1, originalStep: 1, replacement: 1 },
+                    { step: 2, originalStep: 1, replacement: 2 },
+                    { step: 3, originalStep: 2, replacement: 1 },
+                  ],
+                  binding: { assessment: { baseHead: baselineHead } },
+                },
+              ],
+            },
+          },
+          32,
+        );
+        const input = { ...f.input, timing: "after-current-commit" };
+        const accepted = await f.store.requestOperatorStop(input);
+        assert.deepEqual(accepted.targetBoundary, target);
+        const first = await f.store.settleCheckpoint(f.lease, (latest) => ({
+          patch: {
+            pipelineState: {
+              ...latest.pipelineState,
+              currentStep: 2,
+              completedCommits: ["b".repeat(40)],
+              repositoryBaseline: { head: "b".repeat(40) },
+            },
+          },
+          settlement: { kind: "commit", commit: "b".repeat(40) },
+        }));
+        assert.equal(first.stopRequest.reconciledRevision, null);
+        assert.equal(first.stopRequest.settlement, null);
+        assert.deepEqual(first.stopRequest.targetBoundary, target);
+        const recovered = createRunStore(f.storeOptions);
+        assert.deepEqual(
+          (await recovered.loadRunHistory(f.input.runId)).run,
+          first,
+        );
+        assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+        await f.store.transitionRun(f.lease, { counters: { rounds: 1 } });
+        const second = await f.store.settleCheckpoint(f.lease, (latest) => ({
+          patch: {
+            pipelineState: {
+              ...latest.pipelineState,
+              currentStep: 3,
+              completedCommits: ["b".repeat(40), "c".repeat(40)],
+              repositoryBaseline: { head: "c".repeat(40) },
+              workflowState: "WAITING_FOR_USER",
+            },
+            pause: {
+              reason: "operator_paused",
+              resumeAction: null,
+              operatorResume: {
+                workflowState: "IMPLEMENT",
+                pause: null,
+                activeTurn: null,
+              },
+            },
+          },
+          settlement: { kind: "commit", commit: "c".repeat(40) },
+        }));
+        assert.equal(second.stopRequest.reconciledRevision, second.revision);
+        assert.deepEqual(second.stopRequest.settlement, {
+          kind: "commit",
+          commit: "c".repeat(40),
+        });
+        assert.deepEqual(
+          (await recovered.loadRunHistory(f.input.runId)).run,
+          second,
+        );
+        assert.deepEqual(await recovered.requestOperatorStop(input), accepted);
+      },
+    );
   }
 });

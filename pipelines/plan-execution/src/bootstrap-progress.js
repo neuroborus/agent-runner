@@ -1,4 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
+
+import { assertReplacementExecution } from "./replacement-execution.js";
 import {
   createBootstrapWork,
   normalizeBootstrapWork,
@@ -49,6 +51,7 @@ export function bootstrapScopeFor(
 // are checked again before reuse. Historical complete inventories need no fake units.
 export function validateBootstrapProgress(state) {
   assertRevisionValidation(state);
+  assertReplacementExecution(state);
   const progress = state.bootstrapProgress;
   if (!exact(progress, ["worker", "reviewer"]))
     throw workflowError("Invalid bootstrap progress.");
