@@ -1426,10 +1426,16 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── preservation.js
 │   │   ├── service.js
 │   │   └── validation.js
-│   └── trusted-validation/
-│       ├── execution.js
+│   ├── trusted-validation/
+│   │   ├── execution.js
+│   │   ├── index.js
+│   │   └── service.js
+│   └── workspace/
+│       ├── controls.js
 │       ├── index.js
-│       └── service.js
+│       ├── paths.js
+│       ├── service.js
+│       └── snapshot.js
 ├── packages/
 │   └── commit-plan/
 ├── pipelines/
@@ -1470,6 +1476,8 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │   │   ├── operator-stops.slow.test.js
 │   │   ├── persistence.test.js
 │   │   └── safety.test.js
+│   ├── workspace/
+│   │   └── inspection.test.js
 │   └── source-boundaries.test.js
 ├── docs/
 │   ├── product/

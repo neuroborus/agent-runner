@@ -184,7 +184,9 @@ semantics; do not predict a future provider with empty interfaces.
 Keep a cross-cutting effect in the root capability that owns its lifecycle:
 
 - state files, journals, actions, and leases belong to the state boundary;
-- snapshots, fingerprints, staging, and commit verification belong to Git;
+- Git snapshots, fingerprints, staging, and commit verification belong to Git;
+- Git-independent directory inspection, snapshots, and drift guards belong to
+  workspace;
 - confined clarification transcripts and their editor lifecycle belong to
   clarifications;
 - operator document composition and confined local publication belong to

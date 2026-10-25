@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-25
 
+- **Directory inspection has a Git-independent owner.** The workspace capability
+  binds explicit reads and confined outputs, discovers enclosing/nested Git and
+  provider controls (including Git pointer/shared metadata), and fingerprints
+  content separately from identity. Descriptor-anchored snapshots reject races,
+  escaping aliases and special files while preserving unrelated content and external
+  state separation. Read normalization grants no writes. Custom plans, audit and
+  init can consume this foundation without changing Git snapshot semantics;
+  provider permissions and workflow exposure remain separate changes.
+
 - **Refinement progress is derived, never execution authority.** Runner publishes
   a confined, run-owned `plan.progress.md` beside unchanged frozen plans after
   durable state publication. Original exact headings gain size-decision

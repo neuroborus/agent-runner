@@ -57,6 +57,74 @@ change measurement, exact source materialization, commit verification, and
 polishing handoff modules without exposing their implementation contracts to
 root consumers.
 
+The filesystem-only workspace capability lives under `src/workspace/` behind
+`createWorkspaceService` and `WorkspaceSafetyError` in its public `index.js`.
+Private `paths.js`, `controls.js` and `snapshot.js` own confinement, filesystem
+control discovery and guarded capture; `service.js` composes inspection and
+mutation guards.
+It is the directory inspection foundation for custom planning/execution, audit
+and init; those workflows are not yet exposed. Git snapshots remain Git-owned.
+`inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
+`taskPath`, and arrays of `inputPaths`, `sourcePaths`, `outputPaths`,
+`configurationPaths`, `artifactPaths` and `infrastructurePaths`. Relative paths
+resolve from the workspace. Reads require existing paths; outputs, artifacts,
+infrastructure and state may name missing destinations. Duplicate/descendant
+read declarations collapse to their declared parent without granting writes.
+Outputs must be proper workspace descendants disjoint from all protected
+declarations and control trees. State is disjoint from workspace, task,
+infrastructure, declared read trees and discovered controls. Inspection grants
+no provider access, retrieval, publication, Git effect or write authority.
+
+Filesystem discovery protects `.git`, `.codex`, `.claude`, `.agents` and
+`.claude.json`, including nested controls and enclosing repository controls for
+the workspace and declared external paths. Discovery also inspects protected
+control directories for nested Git pointers and their external metadata,
+including dependencies reached through other metadata directories.
+Bare Git layouts are recognized by `HEAD`, `objects` and `refs`; their entire
+metadata directory is protected and cannot contain the workspace.
+Bounded regular-file reads resolve Git `gitdir:` and `commondir` pointers to
+their real metadata directories without executing Git, rejecting aliases before
+normalizing pointer dot segments. Arbitrary ancestor home
+directories grant no provider-storage reads; their existing provider controls
+still exclude overlapping state storage, including resolved alias targets.
+Canonical provider-control targets overlapping the workspace are protected
+against output authority; unrelated external provider storage is not captured.
+Ancestor provider aliases resolve component by component and reject writable
+output or state dependencies, including hops erased by later dot segments.
+The state location's existing ancestors are also inspected for control overlap.
+Git and shared metadata targets inside the workspace remain protected; unrelated
+external state-ancestor metadata is traversed for nested Git pointers without
+adding read or snapshot scope. This traversal preserves state-only scope through
+pointer dependencies and terminates cycles.
+Reserved output components stay
+forbidden even before their control paths exist. Workspace roots cannot be
+inside reserved control components, including outside Git repositories. All
+declared ancestors must be real directories; aliases in declarations/ancestors,
+multiply linked regular files, undecodable names and special files fail closed.
+Snapshots hash link text without reading linked file bytes and confine
+resolution to the declared tree or explicitly bound protected trees. Real
+ancestors may connect those trees without granting reads of their other
+children, supporting `.claude/skills` links to protected `.agents/skills`.
+Unbound intermediate hops, escaping, dangling and cyclic links fail.
+Resolution dependencies participate in snapshot
+race checks. Links cannot cross writable boundaries in either direction, including
+through intermediate resolution hops.
+
+`snapshot({inspection})` rechecks pinned ancestors and control bindings and
+captures the complete workspace plus explicit external protected paths. On the
+current Linux runtime, pinned directory descriptors through `/proc/self/fd`
+anchor enumeration and regular-file reads; unavailable descriptor access fails
+closed. Handle/path metadata and directory listings are checked around reads
+and again before completing capture, including missing-path ancestor bindings.
+Workspace and protected-path identities remain pinned throughout capture.
+Results contain sorted metadata and hashes, never file bytes. Content
+fingerprints bind paths, kinds, modes, sizes and content; separate identity
+fingerprints also bind inodes and file timestamps.
+`assertUnchanged({before, after})` rejects content or identity drift; explicit
+`allowOutputs: true` permits only declared outputs and newly required parent
+directories, preserving unrelated files and all protected inputs. Filesystem
+injection supports deterministic race tests without Git or providers.
+
 `measureChanges({projectPath, baseHead, expectedContentFingerprint})` measures
 the final worktree against the caller-verified immutable step-start commit
 (or null for an unborn baseline). Existing staging-independent source inspection

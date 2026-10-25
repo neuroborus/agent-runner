@@ -59,3 +59,7 @@ export {
   TrustedValidationError,
   validateTrustedValidationSnapshot,
 } from "./trusted-validation/index.js";
+export {
+  createWorkspaceService,
+  WorkspaceSafetyError,
+} from "./workspace/index.js";

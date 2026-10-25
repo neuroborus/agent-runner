@@ -80,6 +80,16 @@ commits retain separate ownership.
 
 ## Inputs, artifacts, and state
 
+The directory-workspace inspection foundation protects unrelated content and
+explicit inputs, references, configuration, artifacts, infrastructure and
+filesystem-discovered Git/provider controls. Only declared confined outputs may
+differ under its writable-content guard; redundant read declarations never
+grant writes. It rejects escaping aliases, special files, overlapping protected outputs,
+ancestor substitution and snapshot races without requiring Git. External state
+cannot overlap workspace, task, infrastructure, declared reads or discovered controls. This capability
+does not yet expose directory workflows or grant provider permissions; see the
+[filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
+
 Task, plan, context, and clarification inputs are hashed and revalidated before
 recovery. Clarification writes occur only through a persisted one-shot editor
 or MCP authorization. Repository-local artifacts must be confined, ignored,

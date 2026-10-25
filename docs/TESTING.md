@@ -11,6 +11,22 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+The fast `test/workspace/inspection.test.js` suite owns the filesystem-only
+directory boundary: non-Git snapshots, enclosing and nested controls for the
+workspace and external reads, Git pointer/shared and bare metadata, pointer
+dependencies nested in protected controls, aliases hidden by dot segments,
+redundant reads, protected output overlap, state-control exclusion through
+workspace and unrelated state ancestors (including workspace metadata targets) and
+provider aliases without added reads, nested state-only metadata pointers and
+cycles, canonical workspace targets and writable intermediary dependencies of
+ancestor provider aliases, protected cross-control skill links, content/identity drift,
+escaping intermediate links, mutable hops across writable boundaries, hard links,
+special files, exact UTF-8 filenames, undecodable names and deterministic
+read/ancestor races.
+Temporary directories and injected filesystem effects need neither Git nor live
+providers. Workflow/provider integration remains separately owned as those
+consumers land.
+
 The fast state `preservation.test.js` suite owns unfinished-work capture and
 checked restoration through the public state/Git boundaries. Isolated
 repositories cover binary/link/mode/deletion round trips, mixed-index

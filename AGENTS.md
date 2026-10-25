@@ -228,6 +228,8 @@ All pipelines additionally require:
 | `src/state/`                      | Private storage, journals, actions, leases, preservation, validation |
 | `src/git/index.js`                | Public Git-safety capability boundary                                |
 | `src/git/`                        | Private commands, content, measurement, preservation, and effects    |
+| `src/workspace/index.js`          | Public Git-independent directory inspection and snapshot boundary    |
+| `src/workspace/`                  | Private confinement, control discovery, snapshots and drift guards   |
 | `src/guidance/index.js`           | Public operator-guidance capability boundary                         |
 | `src/guidance/`                   | Private composition, confined documents, and durable local updates   |
 | `src/trusted-validation/index.js` | Public runner-trusted validation capability boundary                 |
@@ -247,6 +249,7 @@ All pipelines additionally require:
 | `test/clarifications/`            | Clarification-service behavior tests                                 |
 | `test/config/`                    | Configuration parsing, loading, and resolution tests                 |
 | `test/git/`                       | Git-safety behavior tests                                            |
+| `test/workspace/`                 | Directory confinement, controls, snapshots and drift behavior tests  |
 | `test/guidance/`                  | Operator guidance, local-file safety, and update recovery tests      |
 | `test/integration/`               | Cross-capability workflow integration tests                          |
 | `test/mcp/`                       | MCP control-plane and issue-reporting behavior tests                 |
