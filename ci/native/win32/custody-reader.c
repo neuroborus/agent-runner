@@ -1404,7 +1404,8 @@ static SRWLOCK refusal_lock=SRWLOCK_INIT;
 static struct {
   BOOL tried,sent,creationVerified; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
   char command[64],source[64],hash[65]; WCHAR image[4096],subject[184]; FILE_ID_INFO imageId;
-  HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[65536];
+  /* Hex transport doubles raw text; reserve 1024 encoded bytes for framing. */
+  HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[32256];
 } original_refusal;
 static DWORD refusal_remaining(void) {
   ULONGLONG elapsed=GetTickCount64()-original_refusal.tick;
@@ -1417,6 +1418,21 @@ static void refusal_publish(const char *line, struct refusal_report *report) {
     else{memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;}
   }
   original_refusal.report=*report;ReleaseSRWLockExclusive(&refusal_lock);
+}
+static void refusal_transport(const char *output, DWORD used) {
+  /* sdk-api c12073e: this GENERIC_WRITE client handle permits PIPE_NOWAIT.
+   * This is a fatal-path immediate write, not asynchronous I/O or a new wait.
+   * Leave the mode in place for the following fatal frame; never retry a short
+   * write, call a guard, or adopt stderr as an authenticated channel. */
+  DWORD mode=PIPE_READMODE_BYTE|PIPE_NOWAIT,written=0;
+  if(used>32256||!SetNamedPipeHandleState(control,&mode,NULL,NULL))return;
+  char frame[65536];
+  int size=sprintf_s(frame,sizeof(frame),"\035{\"phase\":\"reader-diagnostic\",\"sequence\":%lu,\"command\":\"%s\",\"source\":\"%s\",\"line\":%lu,\"lastError\":%lu,\"hex\":\"",original_refusal.sequence,original_refusal.command,original_refusal.source,original_refusal.line,original_refusal.error);
+  if(size<=0||(DWORD)size+used*2+3>sizeof(frame))return;
+  const char digits[]="0123456789abcdef";
+  for(DWORD i=0;i<used;i++){BYTE byte=(BYTE)output[i];frame[size++]=digits[byte>>4];frame[size++]=digits[byte&15];}
+  memcpy(frame+size,"\"}\n",3);size+=3;
+  (void)WriteFile(control,frame,(DWORD)size,&written,NULL);
 }
 static const WCHAR *refusal_text(const EVT_VARIANT *value, const BYTE *buffer, DWORD used) {
   if(value->Type!=EvtVarTypeString||!value->StringVal)return NULL;
@@ -1560,7 +1576,7 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   /* The shared lock never covers query/render calls. Pin an available handle
    * through EvtCancel; its creator clears publication before normal EvtClose.
    * A pending EvtQuery has no result handle to cancel. Never invent one. */
-  char output[65536];DWORD used=0;BOOL published=TryAcquireSRWLockExclusive(&refusal_lock);
+  char output[32256];DWORD used=0;BOOL published=TryAcquireSRWLockExclusive(&refusal_lock);
   if(published){
     if(waited!=WAIT_OBJECT_0&&original_refusal.query)canceled=EvtCancel(original_refusal.query)?0:GetLastError();
     report=original_refusal.report;used=original_refusal.used;memcpy(output,original_refusal.bytes,used);ReleaseSRWLockExclusive(&refusal_lock);
@@ -1571,7 +1587,7 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
   BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published;
   int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu\n",!!report.finished,!!incomplete,report.finished&&!report.examined&&report.query[0]==0,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError);
-  if(ending>0){used+=(DWORD)ending;(void)fwrite(output,1,used,stderr);(void)fflush(stderr);}
+  if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
   SetLastError(saved);errno=savedErrno;
 }
 #endif

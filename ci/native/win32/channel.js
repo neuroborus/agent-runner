@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   nativeDiagnostic,
   nativeException,
@@ -192,10 +193,12 @@ export function windowsCustodyChannel(
     deadlineMs = WINDOWS_CUSTODY_DEADLINE_MS,
   } = {},
 ) {
-  observeNativeProcess("windows-custody-helper", child, undefined, ["stderr"]);
   let buffer = Buffer.alloc(0),
     pending,
     failure,
+    originalFailure,
+    diagnosticSeen = false,
+    diagnosticComplete = false,
     finished = false,
     outputEnded = false,
     writes = 0,
@@ -207,12 +210,26 @@ export function windowsCustodyChannel(
     });
   fault.catch(() => {});
   const wait = (value) => Promise.race([value, fault]);
+  const publish = (owner, value) => {
+    try {
+      nativeDiagnostic(owner, value);
+    } catch {
+      // Raw publication cannot interrupt guard parsing or replace its error.
+    }
+  };
+  observeNativeProcess(
+    "windows-custody-helper",
+    child,
+    AsyncLocalStorage.bind(publish),
+    ["stderr"],
+  );
   const fail = (cause) => {
-    if (cause !== undefined) nativeException("windows-custody", cause);
+    if (cause !== undefined) publish("windows-custody", { exception: cause });
     if (failure) return;
     failure = new Error("Windows custody transport unavailable", { cause });
-    if (cause?.custodyReaderFailure)
-      failure.custodyReaderFailure = cause.custodyReaderFailure;
+    if (originalFailure || cause?.custodyReaderFailure)
+      failure.custodyReaderFailure =
+        originalFailure ?? cause.custodyReaderFailure;
     cancel(timer);
     child.stdin.destroy();
     pending?.reject(failure);
@@ -231,7 +248,14 @@ export function windowsCustodyChannel(
     child.once("error", fail);
     child.once("close", (code, signal) => {
       finished = true;
-      if (pending || writes || buffer.length || code !== 0 || signal !== null)
+      if (
+        diagnosticSeen ||
+        pending ||
+        writes ||
+        buffer.length ||
+        code !== 0 ||
+        signal !== null
+      )
         fail();
       resolve({ code, signal });
     });
@@ -242,16 +266,111 @@ export function windowsCustodyChannel(
   child.stdout.on("error", fail);
   child.stdout.once("end", () => {
     outputEnded = true;
-    if (pending || writes || buffer.length) fail();
+    if (diagnosticSeen || pending || writes || buffer.length) fail();
   });
   child.stderr?.on("error", fail);
   child.stdout.on("data", (chunk) => {
-    nativeDiagnostic("win32/channel.js", { stdout: chunk });
+    publish("win32/channel.js", { stdout: chunk });
     try {
       requireWindows(
         !failure && !finished && buffer.length + chunk.length <= 262144,
       );
       buffer = Buffer.concat([buffer, chunk]);
+      // A failure-only GS frame carries collector bytes, never a reply. The
+      // scheduled reader has authenticated stdout, but no bound stderr.
+      const original = buffer.indexOf(0x1d),
+        fatal = buffer.indexOf(0x1e);
+      if (original >= 0 && (fatal < 0 || original < fatal)) {
+        requireWindows(!diagnosticComplete);
+        diagnosticSeen = true;
+        const end = buffer.indexOf(10, original);
+        if (fatal >= 0 && (end < 0 || fatal < end)) {
+          requireWindows(fatal - original <= 65536);
+          // An immediate short write may interrupt this frame. Its raw bytes
+          // were published above; resynchronize only on the actual fatal frame.
+          publish("windows-original-child", { partial: true, truncated: true });
+          diagnosticComplete = true;
+          buffer = buffer.subarray(fatal);
+        } else {
+          requireWindows(
+            (end < 0 ? buffer.length : end + 1) - original <= 65536,
+          );
+          if (end < 0) return;
+          const packet = buffer.subarray(original + 1, end);
+          buffer = buffer.subarray(end + 1);
+          diagnosticComplete = true;
+          try {
+            const value = JSON.parse(
+              new TextDecoder("utf-8", { fatal: true }).decode(packet),
+            );
+            closed(value, [
+              "phase",
+              "sequence",
+              "command",
+              "source",
+              "line",
+              "lastError",
+              "hex",
+            ]);
+            requireWindows(
+              value.phase === "reader-diagnostic" &&
+                Number.isInteger(value.sequence) &&
+                value.sequence > 0 &&
+                value.sequence <= 1048576 &&
+                value.command === "ownership-output" &&
+                typeof value.source === "string" &&
+                /^[a-z][a-z0-9-]{0,63}\.(?:c|h)$/u.test(value.source) &&
+                Number.isInteger(value.line) &&
+                value.line > 0 &&
+                value.line <= 100000 &&
+                Number.isInteger(value.lastError) &&
+                value.lastError >= 0 &&
+                value.lastError <= 0xffffffff,
+            );
+            // Retain the first native error even if payload decoding or later
+            // transport fails. Diagnostics cannot reset the admission timer.
+            originalFailure = {
+              phase: "reader-failure",
+              sequence: value.sequence,
+              command: value.command,
+              source: value.source,
+              line: value.line,
+              lastError: value.lastError,
+            };
+            requireWindows(
+              typeof value.hex === "string" &&
+                /^(?:[a-f0-9]{2}){1,32256}$/u.test(value.hex),
+            );
+            const bytes = Buffer.from(value.hex, "hex"),
+              text = bytes.toString("latin1"),
+              lines = text.split("\n");
+            const prefix = "native-windows-original-child: ";
+            requireWindows(
+              /^[\x20-\x7e\n]+$/u.test(text) &&
+                lines.pop() === "" &&
+                lines.length <= 66 &&
+                lines.at(-1)?.startsWith(prefix + "completion ") &&
+                lines.filter((line) => line.startsWith(prefix + "record "))
+                  .length <= 64 &&
+                lines
+                  .slice(0, -1)
+                  .every(
+                    (line, index) =>
+                      (index === 0 &&
+                        line.startsWith(
+                          `${prefix}context command=ownership-output sequence=${value.sequence} source=${value.source} line=${value.line} error=${value.lastError} `,
+                        )) ||
+                      line.startsWith(prefix + "record "),
+                  ),
+            );
+            publish("windows-original-child", { stderr: bytes });
+          } catch (error) {
+            // A malformed diagnostic cannot replace a following native guard.
+            // No reply may resolve work after any diagnostic frame was seen.
+            publish("windows-original-child", { exception: error });
+          }
+        }
+      }
       // A native guard can interrupt a partially emitted response. This record
       // separator is never valid JSON receipt data; diagnostics only fail work.
       const diagnostic = buffer.indexOf(0x1e);
@@ -825,11 +944,24 @@ export function windowsCustodyChannel(
             value.line > 0 &&
             value.line <= 100000,
         );
+        if (originalFailure) {
+          requireWindows(
+            ["sequence", "command", "source", "line", "lastError"].every(
+              (key) => value[key] === originalFailure[key],
+            ),
+          );
+          // Preserve the matching fatal frame's validated context.
+          originalFailure = value;
+        }
         fail(
           Object.assign(new Error("Native custody reader guard failed"), {
             custodyReaderFailure: value,
           }),
         );
+        return;
+      }
+      if (diagnosticSeen) {
+        requireWindows(buffer.length === 0);
         return;
       }
       let end;
@@ -864,7 +996,8 @@ export function windowsCustodyChannel(
     },
     receive() {
       if (failure) return Promise.reject(failure);
-      if (queue.length) return Promise.resolve(queue.shift());
+      if (queue.length && !diagnosticSeen)
+        return Promise.resolve(queue.shift());
       if (outputEnded) {
         fail();
         return Promise.reject(failure);
@@ -877,6 +1010,7 @@ export function windowsCustodyChannel(
     send(value) {
       requireWindows(
         !failure &&
+          !diagnosticSeen &&
           !finished &&
           !outputEnded &&
           typeof value === "string" &&

@@ -5986,6 +5986,30 @@ test("actual bridge relay settles original overlapped I/O and separates wait, ex
         ),
       );
   }
+  // GS diagnostic framing and the subsequent RS fatal frame are opaque bytes
+  // to the authenticated relay, including when one read coalesces both.
+  {
+    const f = fixture(),
+      input = Buffer.from(
+        '\x1d{"phase":"reader-diagnostic"}\n\x1e{"phase":"reader-failure"}\n',
+      );
+    Object.assign(f.api, {
+      CreateEventW: () => "event",
+      ReadFile(handle, bytes, size, used, operation) {
+        assert.equal(handle, "pipe");
+        assert.equal(operation.hEvent, "event");
+        input.copy(bytes, 0, 0, size);
+        used.value = Math.min(size, input.length);
+        return true;
+      },
+    });
+    const bytes = Buffer.alloc(input.length),
+      used = { value: 0 };
+    assert.equal(f.api.relay_io(false, bytes, bytes.length, used, 30000), 0);
+    assert.deepEqual(bytes, input);
+    assert.equal(used.value, input.length);
+    assert.deepEqual(f.calls, [["close", "event"]]);
+  }
   for (const fault of [
     null,
     "wait-timeout",
@@ -7221,6 +7245,28 @@ test("Windows open, guard and scheduler HRESULT diagnostics retain independent o
     },
     createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
   );
+  // Existing process observation retains its creation scope even when event
+  // dispatch runs outside it; guarding the sink must not lose those bytes.
+  const detached = withNativeDiagnostics(
+      () => transport(),
+      createNativeDiagnosticWriter((bytes) => chunks.push(bytes)),
+    ),
+    pending = detached.channel.receive().catch((error) => error),
+    completion = detached.channel.completion.catch((error) => error),
+    marker = Buffer.from(
+      "native-windows-observation: retained diagnostic scope\n",
+    );
+  try {
+    detached.child.stderr.write(marker);
+    detached.child.emit("close", 126, null);
+    assert.equal(await completion, await pending);
+    assert.ok(Buffer.concat(chunks).includes(marker));
+  } finally {
+    detached.channel.close();
+    detached.child.stdin.destroy();
+    detached.child.stdout.destroy();
+    detached.child.stderr.destroy();
+  }
   const output = Buffer.concat(chunks).toString();
   assert.ok(output.includes(open.trim()));
   assert.ok(output.includes("native-windows-guard"));
@@ -12160,6 +12206,463 @@ test("the native ownership error drain preserves launcher facts through fragment
   }
 });
 
+test("original-child diagnostics use the actual guard and immediate authenticated pipe before fatal rejection", async () => {
+  const [source, header, bridge] = await Promise.all(
+    ["custody-reader.c", "custody.h", "custody-bridge.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const body = (text, name) =>
+    new RegExp(
+      `static void ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(text)[1];
+  const project = (text) =>
+    text
+      .replace(/#ifdef NATIVE_CUSTODY_FAILURE\n([\s\S]*?)#endif/u, "$1")
+      .replaceAll("NATIVE_CUSTODY_FAILURE", "reader_failure")
+      .replace(/const char \*source[^\n]+/u, "const source=basename(file);")
+      .replace("char frame[65536];", "const frame=[];")
+      .replace(
+        'const char digits[]="0123456789abcdef";',
+        'const digits=Buffer.from("0123456789abcdef");',
+      )
+      .replace(
+        'char bytes[1024], transfer[256] = "";',
+        "const bytes=[],transfer=[];",
+      )
+      .replaceAll("frame+size", "{target:frame,offset:size}")
+      .replaceAll("sizeof(frame)", "65536")
+      .replaceAll("sizeof(bytes)", "1024")
+      .replaceAll("sizeof(transfer)", "256")
+      .replace(
+        /&(mode|written)\b/gu,
+        (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replace(/\((?:DWORD|BYTE|void)\)/gu, "")
+      .replace(/\b(?:DWORD|BYTE|int) /gu, "let ")
+      .replaceAll("\\035", "\\x1d")
+      .replaceAll("\\036", "\\x1e");
+  const script = new Script(`
+    function refusal_transport(output,used){${project(body(source, "refusal_transport"))}}
+    function reader_failure(file,line,error){${project(body(source, "reader_failure"))}}
+    function guard(ok,file,line){${project(body(header, "need_at"))}}
+    ({guard,transport:refusal_transport});`);
+  // The existing bridge relays private-pipe bytes unchanged; it neither parses
+  // diagnostics nor supplies a second wait budget for their delivery.
+  assert.match(
+    bridge,
+    /WriteFile\(GetStdHandle\(STD_OUTPUT_HANDLE\), bytes, used, &written, NULL\)/u,
+  );
+  assert.match(
+    source,
+    /CreateFileW\(argv\[5\], GENERIC_READ \| GENERIC_WRITE/u,
+  );
+  assert.match(source, /_dup2\(fd, _fileno\(stdout\)\)/u);
+  for (const fault of [
+    null,
+    "coalesced",
+    "mode",
+    "write",
+    "short-write",
+    "format",
+    "oversize",
+    "maximum",
+    "sink",
+  ]) {
+    const f = transport(),
+      frames = [],
+      events = [],
+      raw = [],
+      exited = {};
+    let error = 109,
+      modeCalls = 0,
+      native;
+    const refusal = {
+      phase: "reader-failure",
+      sequence: 46,
+      command: "ownership-output",
+      source: "custody.h",
+      line: 421,
+      lastError: 109,
+    };
+    const context =
+      "native-windows-original-child: context command=ownership-output sequence=46 source=custody.h line=421 error=109 candidate=" +
+      "a".repeat(40) +
+      " nonce=" +
+      "b".repeat(32) +
+      " pid=43 birth=90 resume-time=unavailable\n";
+    const ending =
+      "native-windows-original-child: completion finished=1 incomplete=0 empty=1\n";
+    let output = Buffer.from(context + ending);
+    if (["maximum", "oversize"].includes(fault)) {
+      const padding =
+        32256 -
+        output.length -
+        "native-windows-original-child: record \n".length;
+      output = Buffer.from(
+        context +
+          "native-windows-original-child: record " +
+          "x".repeat(padding + Number(fault === "oversize")) +
+          "\n" +
+          ending,
+      );
+    }
+    const api = {
+      Buffer,
+      control: 7,
+      NULL: null,
+      PIPE_READMODE_BYTE: 0,
+      PIPE_NOWAIT: 1,
+      reader_diagnostics_ready: true,
+      sequence: 46,
+      reader_command: "ownership-output",
+      reader_transfer: { active: false },
+      signature_trust: { active: false },
+      stderr: 2,
+      original_refusal: { tried: false },
+      basename: (file) =>
+        file.slice(Math.max(file.lastIndexOf("\\"), file.lastIndexOf("/")) + 1),
+      GetLastError: () => error,
+      SetLastError: (value) => {
+        error = value;
+      },
+      SetNamedPipeHandleState(handle, mode, count, timeout) {
+        assert.deepEqual(
+          [handle, mode.value, count, timeout],
+          [7, 1, null, null],
+        );
+        assert.equal(api.original_refusal.error, 109);
+        events.push("mode");
+        modeCalls++;
+        error = 5;
+        return fault !== "mode";
+      },
+      ownership_refusal_collect(source, line, value) {
+        if (api.original_refusal.tried) return;
+        Object.assign(api.original_refusal, {
+          tried: true,
+          sequence: 46,
+          command: "ownership-output",
+          source,
+          line,
+          error: value,
+        });
+        events.push("collect");
+        native.transport(output, output.length);
+      },
+      reader_witness_failure: () => false,
+      ownership_failure_write: () => false,
+      ownership_failure_fence(value) {
+        events.push("fence");
+        error = value;
+      },
+      reader_cold_failure: () => false,
+      reader_baseline_failure: () => false,
+      reader_scheduler_failure: () => false,
+      reader_open_failure: () => false,
+      reader_context_failure: () => false,
+      sprintf_s(target, maximum, format, ...values) {
+        if (fault === "format" && format.startsWith("\x1d")) return -1;
+        let index = 0;
+        const text = format.replace(/%(?:lu|u|s)/gu, () => {
+          const value = values[index++];
+          return Array.isArray(value)
+            ? Buffer.from(value).toString()
+            : String(value);
+        });
+        assert.equal(index, values.length);
+        assert.ok(text.length < maximum);
+        Buffer.from(text).forEach((byte, i) => {
+          target[i] = byte;
+        });
+        return text.length;
+      },
+      memcpy(out, input, size) {
+        const target = out.target ?? out,
+          offset = out.offset ?? 0;
+        Buffer.from(input)
+          .subarray(0, size)
+          .forEach((byte, i) => {
+            target[offset + i] = byte;
+          });
+      },
+      WriteFile(handle, bytes, size, used, overlapped) {
+        assert.equal(handle, 7);
+        assert.equal(overlapped, null);
+        const frame = Buffer.from(bytes).subarray(0, size),
+          diagnostic = frame[0] === 0x1d;
+        assert.ok(size <= (diagnostic ? 65536 : 1024));
+        error = 87;
+        events.push(diagnostic ? "diagnostic-write" : "fatal-write");
+        used.value =
+          diagnostic && fault === "write"
+            ? 0
+            : diagnostic && fault === "short-write"
+              ? Math.floor(size / 2)
+              : size;
+        frames.push(frame.subarray(0, used.value));
+        return used.value > 0;
+      },
+      fprintf() {
+        events.push("unavailable-stderr");
+        return -1;
+      },
+      fflush: () => -1,
+      ExitProcess(code) {
+        assert.equal(code, 126);
+        throw exited;
+      },
+    };
+    native = script.runInNewContext(api);
+    const pending = f.channel.receive().catch((cause) => cause),
+      completion = f.channel.completion.catch((cause) => cause);
+    f.child.stdin.once("close", () => events.push("disposed"));
+    try {
+      await withNativeDiagnostics(
+        async () => {
+          assert.throws(
+            () => native.guard(false, "C:\\fixture\\custody.h", 421),
+            (cause) => cause === exited,
+          );
+          const before = modeCalls;
+          native.transport(Buffer.alloc(32257), 32257);
+          assert.equal(modeCalls, before);
+          const bytes = Buffer.concat(frames);
+          f.child.stdout.write('{"sequence":46,"value":');
+          if (fault === "coalesced") f.child.stdout.write(bytes);
+          else
+            for (let at = 0; at < bytes.length; at += 37)
+              f.child.stdout.write(bytes.subarray(at, at + 37));
+          const first = await pending;
+          assert.deepEqual(first.custodyReaderFailure, refusal);
+          f.child.stdout.end();
+          f.child.emit("close", 126, null);
+          assert.equal(await completion, first);
+          await assert.rejects(f.channel.receive(), (cause) => cause === first);
+          assert.throws(() => f.channel.send("next\n"));
+          const attempted = events.indexOf("diagnostic-write");
+          assert.equal(
+            attempted >= 0,
+            !["mode", "format", "oversize"].includes(fault),
+          );
+          if (attempted >= 0) assert.ok(attempted < events.indexOf("fence"));
+          assert.equal(modeCalls, fault === "oversize" ? 0 : 1);
+          if (
+            ![
+              "mode",
+              "format",
+              "oversize",
+              "write",
+              "short-write",
+              "sink",
+            ].includes(fault)
+          )
+            assert.deepEqual(Buffer.concat(raw), output);
+          else assert.equal(raw.length, 0);
+        },
+        (owner, value) => {
+          if (fault === "sink") throw new Error("Diagnostic sink unavailable");
+          if (owner === "windows-original-child" && value.stderr) {
+            assert.equal(f.child.stdin.destroyed, false);
+            events.push("published");
+            raw.push(value.stderr);
+          }
+        },
+      );
+    } finally {
+      f.channel.close();
+      f.child.stdin.destroy();
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
+    }
+  }
+});
+
+test("original-child diagnostic framing cannot resolve replies or replace the first reader failure", async () => {
+  const failure = {
+    phase: "reader-failure",
+    sequence: 46,
+    command: "ownership-output",
+    source: "custody.h",
+    line: 421,
+    lastError: 109,
+  };
+  const context =
+    "native-windows-original-child: context command=ownership-output sequence=46 source=custody.h line=421 error=109 candidate=" +
+    "a".repeat(40) +
+    "\n";
+  const completion =
+    "native-windows-original-child: completion finished=1 incomplete=0 empty=1\n";
+  const packet = {
+    ...failure,
+    phase: "reader-diagnostic",
+    hex: Buffer.from(context + completion).toString("hex"),
+  };
+  const encoded = (value) => Buffer.from("\x1d" + JSON.stringify(value) + "\n");
+  for (const fault of [
+    null,
+    "wrong-command",
+    "extra-field",
+    "invalid-json",
+    "invalid-utf8",
+    "bad-hex",
+    "binary",
+    "missing-completion",
+    "extra-context",
+    "record-limit",
+    "duplicate",
+    "receipt",
+    "queued",
+    "end",
+    "error",
+    "timeout",
+    "later-error",
+    "fatal-context",
+    "sink-child-error",
+    "sink-stderr",
+    "sink-close",
+  ]) {
+    let f;
+    const raw = [];
+    let value = { ...packet },
+      bytes;
+    const fatalFailure =
+      fault === "fatal-context"
+        ? {
+            ...failure,
+            open: {
+              operation: "CreateFileW",
+              pathUnits: 1,
+              pathUtf16: "0043",
+              directory: false,
+              apiFailure: true,
+              attributes: null,
+              tag: null,
+            },
+          }
+        : failure;
+    if (fault === "wrong-command") value.command = "open";
+    if (fault === "extra-field") value.receipt = true;
+    if (fault === "bad-hex") value.hex = "zz";
+    if (fault === "binary")
+      value.hex = Buffer.from(context + "\0" + completion).toString("hex");
+    if (fault === "missing-completion")
+      value.hex = Buffer.from(context).toString("hex");
+    if (fault === "extra-context")
+      value.hex = Buffer.from(context + context + completion).toString("hex");
+    if (fault === "record-limit")
+      value.hex = Buffer.from(
+        context +
+          "native-windows-original-child: record x\n".repeat(65) +
+          completion,
+      ).toString("hex");
+    bytes =
+      fault === "invalid-json"
+        ? Buffer.from("\x1d{bad}\n")
+        : fault === "invalid-utf8"
+          ? Buffer.from([0x1d, 0xff, 10])
+          : encoded(value);
+    try {
+      await withNativeDiagnostics(
+        async () => {
+          f = transport();
+          if (fault === "queued") f.child.stdout.write('{"earlier":true}\n');
+          let pending;
+          if (fault !== "queued")
+            pending = f.channel.receive().catch((error) => error);
+          const closed = f.channel.completion.catch((error) => error);
+          f.child.stdout.write('{"sequence":46,"value":');
+          f.child.stdout.write(bytes);
+          if (fault === "queued")
+            pending = f.channel.receive().catch((error) => error);
+          assert.equal(f.child.stdin.destroyed, false);
+          assert.throws(() => f.channel.send("next\n"));
+          if (fault === "duplicate") f.child.stdout.write(encoded(packet));
+          if (fault === "receipt")
+            f.child.stdout.write('{"sequence":46,"value":{"accepted":true}}\n');
+          else if (fault === "end") f.child.stdout.end();
+          else if (fault === "error")
+            f.child.stdout.emit(
+              "error",
+              new Error("Diagnostic transport failed"),
+            );
+          else if (fault === "timeout") f.expire();
+          else if (fault === "sink-child-error")
+            f.child.emit("error", new Error("Diagnostic process failed"));
+          else if (fault === "sink-stderr") {
+            f.child.stderr.write("Unavailable diagnostic sink\n");
+            f.child.stderr.emit("error", new Error("Diagnostic stderr failed"));
+          } else if (fault === "sink-close") f.child.emit("close", 126, null);
+          else
+            f.child.stdout.write(
+              "\x1e" +
+                JSON.stringify(
+                  fault === "later-error"
+                    ? { ...failure, lastError: 5 }
+                    : fatalFailure,
+                ) +
+                "\n",
+            );
+          const first = await pending;
+          assert.ok(first instanceof Error, fault);
+          assert.deepEqual(first.custodyReaderFailure, fatalFailure, fault);
+          f.child.emit("close", 126, null);
+          assert.equal(await closed, first);
+          const published = [
+            null,
+            "duplicate",
+            "receipt",
+            "queued",
+            "end",
+            "error",
+            "timeout",
+            "later-error",
+            "fatal-context",
+          ].includes(fault);
+          assert.equal(raw.length, published ? 1 : 0, fault);
+        },
+        (owner, value) => {
+          if (fault?.startsWith("sink-"))
+            throw new Error("Diagnostic sink unavailable");
+          if (owner === "windows-original-child" && value.stderr)
+            raw.push(value.stderr);
+        },
+      );
+    } finally {
+      f.channel.close();
+      f.child.stdin.destroy();
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
+    }
+  }
+  for (const fragment of [false, true]) {
+    const f = transport(),
+      pending = f.channel.receive().catch((error) => error),
+      closed = f.channel.completion.catch((error) => error),
+      bytes = Buffer.concat([
+        Buffer.from("\x1d" + "x".repeat(65536)),
+        Buffer.from("\x1e" + JSON.stringify(failure) + "\n"),
+      ]);
+    try {
+      if (fragment) {
+        f.child.stdout.write(bytes.subarray(0, 65535));
+        f.child.stdout.write(bytes.subarray(65535));
+      } else f.child.stdout.write(bytes);
+      const error = await pending;
+      assert.ok(error instanceof Error);
+      assert.equal(error.custodyReaderFailure, undefined);
+      f.child.emit("close", 126, null);
+      assert.equal(await closed, error);
+    } finally {
+      f.channel.close();
+      f.child.stdin.destroy();
+      f.child.stdout.destroy();
+      f.child.stderr.destroy();
+    }
+  }
+});
+
 test("original-child refusal collection owns bounded partial publication and cancellation until the fatal reader exits", async () => {
   const source = await readFile(
     new URL("custody-reader.c", import.meta.url),
@@ -12207,7 +12710,7 @@ test("original-child refusal collection owns bounded partial publication and can
         "char image[16385],subject[737],identity[33],context[20000];",
         "const image={},subject={},identity={},context={};",
       )
-      .replace("char output[65536];", "const output={};")
+      .replace("char output[32256];", "const output={};")
       .replace(
         "strcpy_s(original_refusal.command,64,reader_command);",
         "original_refusal.command=reader_command;",
@@ -12226,12 +12729,12 @@ test("original-child refusal collection owns bounded partial publication and can
       )
       .replaceAll("output+used", "{target:output,offset:used}")
       .replaceAll("identity+i*2", "{target:identity,offset:i*2}")
-      .replaceAll("sizeof(original_refusal.bytes)", "65536")
+      .replaceAll("sizeof(original_refusal.bytes)", "32256")
       .replaceAll(
         /sizeof\((output|image|subject|identity|context|enabled)\)/gu,
         (_, name) =>
           ({
-            output: 65536,
+            output: 32256,
             image: 16385,
             subject: 737,
             identity: 33,
@@ -12565,8 +13068,8 @@ test("original-child refusal collection owns bounded partial publication and can
         lastError = 7;
         return fault !== "thread-close";
       },
-      fwrite(value, _unit, size) {
-        assert.ok(size <= 65536);
+      refusal_transport(value, size) {
+        assert.ok(size <= 32256);
         assert.equal(text(value).length, size);
         writes.push(text(value));
         api.errno = 22;
@@ -12590,7 +13093,7 @@ test("original-child refusal collection owns bounded partial publication and can
       continue;
     }
     const output = writes.join("");
-    assert.ok(output.length <= 65536, fault);
+    assert.ok(output.length <= 32256, fault);
     assert.match(
       output,
       /command=ownership-output sequence=46 source=custody.h line=421 error=109/u,

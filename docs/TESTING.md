@@ -2615,13 +2615,30 @@ active-count-one refusal retains an opaque synthetic 1024-of-2391-byte prefix.
 This coverage remains in the same harness and supplies no native PASS.
 The same custody fixture executes the original-child refusal collector's worker,
 bounded publisher and terminal wait with injected clocks/Event Log/thread APIs.
-It covers one release-based deadline, shared 64-record/64-KiB caps, synchronized
-partial publication, thread-affine normal closure, available-handle cancellation,
-pending-query lifetime and separate projection/closure failures. Actual typed
-event projection rejects foreign/stale identities, unsupported schemas, malformed
-fields and successful-access records while retaining original refusal errors.
+It covers one release-based deadline, shared 64-record/64-KiB encoded-frame caps,
+synchronized partial publication, thread-affine normal closure, available-handle
+cancellation, pending-query lifetime and separate projection/closure failures.
+Actual typed event projection rejects foreign/stale identities, unsupported
+schemas, malformed fields and successful-access records while retaining original
+refusal errors.
 No logging-provider execution PID can supply payload identity; Application
 corroboration cannot establish the denied operation.
+The same fixtures execute the actual fatal guard, reader failure dispatcher and
+failure-only pipe writer with unavailable scheduled-reader stderr. Mode selection,
+formatting failure, failed/short writes, maximum encoded size and an over-limit
+input cannot recurse into a guard or replace the original refusal. The existing
+bridge's actual read body relays GS/RS bytes unchanged. The real JavaScript
+consumer covers fragmented/coalesced delivery, oversized interrupted diagnostics,
+closed headers, malformed JSON/UTF-8/hex, binary text, missing completion, extra
+contexts, record limits and duplicate frames. Collector data publishes before
+disposal and never resolves a reply; EOF, timeout, process/stream sink errors,
+later errors and attempted receipts retain the original failure and validated
+fatal context. Existing stderr and process observations retain their creation
+diagnostic scope across event dispatch.
+Raw text is limited to 32256 bytes so hex encoding plus framing stays within
+64 KiB. Tests use injected APIs and clocks, add no harness or slow-tier command,
+and establish neither actual collector execution nor a matching-host startup
+diagnosis, native success or retirement.
 The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
 WFP keyword values and exact DROP rejection predicates. Those in
 `test/native-windows-command.test.js`

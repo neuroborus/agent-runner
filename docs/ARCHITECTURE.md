@@ -1351,6 +1351,15 @@ the bridge checks zero task instances and unchanged task definition/security
 before owned removal, followed by independent removal verification. Missing
 observations retain possible effects. Injected tests prove protocol wiring;
 Windows SDK compilation and fresh protected native proof remain external.
+For the ordinary original-child refusal, a separate bounded GS diagnostic frame
+uses that authenticated pipe because scheduled-reader stderr is not bound. The
+consumer publishes collector bytes before the existing RS fatal frame rejects
+work; neither frame can resolve a reply or prove retirement. The fatal path uses
+one immediate nonblocking write attempt, with no new wait budget. Encoded framing
+counts toward the existing 64-KiB collector limit; the release-based deadline,
+examined-record cap and original error remain independent of delivery failures.
+Primary contracts, build attribution and hosted-proof limits belong to the
+native owner.
 The indexed `createWindowsCustodyVerifier` reuses a separately approved, admitted
 repository reader through its private bounded verification lane. It holds the
 target's process/token, transferred Job and immutable source/image identities;

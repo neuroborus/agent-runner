@@ -157,7 +157,9 @@ corroborate; unsupported Application/CodeIntegrity schemas remain unjoined.
 Optional channels are inspected only when already enabled; no audit policy,
 channel or SACL is enabled. No source is assumed to contain the denied operation.
 All queries share one non-resetting 30-second release-based deadline, 64 examined
-records and 64 KiB of encoded stderr including context/completion framing.
+records and a 64-KiB encoded diagnostic frame including context/completion and
+transport framing. Raw collector text is capped at 32256 bytes, reserving room
+for hex encoding and the closed transport header.
 Query/enumeration/render/normal closure stay on their creating thread. Expiry
 requests cancellation only of an available query handle, publishes synchronized
 partial data and continues the original fatal path without waiting for a stuck
@@ -168,6 +170,46 @@ reader exit proves independent retirement. The original `0xc0000022` exit and
 later error 109 retain their existing framing; absent or corroborating records
 leave the denied operation unestablished. Further repairs require fresh joined
 matching-host evidence and a reviewed plan.
+
+The collector now publishes through the existing authenticated reader/bridge
+pipe. Scheduled reader setup binds stdout to that pipe but establishes no stderr
+binding. A single GS (`0x1d`) `reader-diagnostic` frame carries the latched
+sequence/command/source/line/error and hex-encoded collector text; the subsequent
+RS (`0x1e`) fatal frame keeps its existing schema and limits. The consumer
+publishes the original context/record/completion bytes through the raw diagnostic
+sink before rejecting work. Diagnostic frames never resolve replies or supply
+receipts. Fragmented or coalesced delivery remains bounded; an interrupted frame
+resynchronizes only on an actual fatal frame, with its encoded prefix retained
+in raw output. Malformed, duplicated or misplaced diagnostics cannot admit work.
+The first valid diagnostic header retains the original guard error through
+decoding, sink failure, EOF, cancellation or a later transport error. Bridge exit
+and independent retirement remain separate observations.
+
+On this fatal path only, the reader selects `PIPE_READMODE_BYTE | PIPE_NOWAIT`
+on its existing client handle. The primary
+[`SetNamedPipeHandleState` contract](https://github.com/MicrosoftDocs/sdk-api/blob/c12073e417d5780fe796278ada21b90cef1b0568/sdk-api-src/content/namedpipeapi/nf-namedpipeapi-setnamedpipehandlestate.md)
+permits this with the handle's existing `GENERIC_WRITE` access and specifies
+immediate returns for writes. This is one immediate attempt, not asynchronous
+I/O: no retry, polling, added wait budget or extra transport thread is introduced.
+The following fatal write retains that failure-only mode. Mode, formatting or
+write failure does not invoke a guard or replace the original error; missing
+delivery still does not establish whether the collector callback ran. No
+successful reader or payload inherits this change.
+
+Build attribution follows the retained source/image/build/ABI and stable held
+identity joins, rather than the source macro alone. The ordinary hosted compiler
+vector derives from `build.js`, retaining `/DNATIVE_CI_EXPERIMENT=1` and the forced
+`experiment.h` input while omitting the sealed compiler's dependency-output pair.
+`windowsExperimentBuildInventory` compares retained vectors and inputs; independent
+helper reads validate exact image hashes and the durable `.nexp` purpose marker.
+The scheduled reader's pinned image and authenticated peer identity remain
+mandatory. These joins do not prove collector execution or identify the denied
+operation. Microsoft's
+[`CreateProcessAsUserW` contract](https://github.com/MicrosoftDocs/sdk-api/blob/c12073e417d5780fe796278ada21b90cef1b0568/sdk-api-src/content/processthreadsapi/nf-processthreadsapi-createprocessasuserw.md)
+explicitly allows termination during initialization after creation succeeds.
+The observed exit alone therefore supports no speculative startup, DLL, object
+or policy correction. Matching-host compilation, original attempts and independent
+retirement remain required.
 
 SDK `Windows.h`, the private access-payload dependency graph and installed Git
 selected by `windowsExperimentGitRuntime` remain distinct inputs. Initial and

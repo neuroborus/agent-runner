@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-25 — Deliver original-child diagnostics through authenticated custody
+
+The ordinary Windows reader carries its bounded refusal collector through the
+existing authenticated pipe, separating diagnostic data from replies and the fatal
+frame. Failure-only immediate writes add no wait budget; encoded framing shares
+the existing byte cap. Original guard errors survive collection, decoding and
+publication failures, while process exit and independent retirement stay distinct.
+The change repairs the source-visible stderr delivery gap without claiming that
+the earlier collector ran or identifying a denied startup operation.
+
 ## 2026-10-25 — Prevent Darwin bootstrap acquisition at child creation
 
 The ordinary experimental launcher and fault custodian now guard their existing
