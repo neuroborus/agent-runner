@@ -3812,8 +3812,31 @@ native error and unknown byte count. Optional inspection restores last-error,
 and marker read/nonce failures remain primary across separate close failures.
 The native owner caches the actual dynamically queried subject SID and its
 availability alongside the operating logon, effective policy and held SACLs.
+The original target and marker opens now also bracket their unchanged access,
+sharing, disposition and flags with effective-token observations and native
+operation times. `TOKEN_QUERY` reads prefer the current thread and fall back to
+the process token only for `ERROR_NO_TOKEN`; source 1 is thread, 2 is process,
+and 0 is unavailable. Fixed buffers retain TokenId/ModifiedId, SID/logon, token
+type, applicable impersonation level, integrity, AppContainer state, restricted
+state and restricting-SID count, with separate query/size and owned-close results.
+TokenId/ModifiedId continuity compares the before/after observations of that
+effective context. A pipe-impersonation token can have different IDs from its
+primary token. Relate the PID/birth, object slot, held file ID and time interval
+to the cached N/F context and held-object SACL/effective-policy observations;
+compare only available equivalent SID/logon, integrity and restriction attributes,
+never primary-versus-impersonation IDs or primary-token impersonation levels.
+No new policy query, payload privilege, I/O replay or acceptance predicate is added.
+Diagnostic failures retain unavailable values and the original open result/error;
+each successfully acquired token receives one checked close attempt. Optional
+rows share the existing bounded diagnostic sink and cannot become audit receipts.
 These facts describe attempted generation; successful I/O and policy bits do not
 establish an emitted or delivered event.
+The existing successful I/O, sampled policy 3 and SACL flags 192/mask 3 coexist
+with zero selected delivery. Unrelated 4688/4674 records and projection error 13
+in the broad interval establish neither a producer correction nor selector
+correctness. If equivalent open-time and N/F attributes remain consistent without
+a joined 4663, kernel audit generation remains unestablished for the next original
+hosted inspection.
 
 Post-refusal inspection labels the original subscription's open notification/
 bookmark state, subscribe status, notifications, drain calls, returned records,

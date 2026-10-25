@@ -1427,6 +1427,17 @@ coverage succeeds; Windows TCP denial, observed Darwin cancellation/owner-loss
 escapes with uncertain cleanup and absent full-system reviewed inputs/source
 closure remain unresolved.
 These portable checks add no slow-tier requirement or native success claim.
+Actual command-open bodies also protect query-only thread/process token selection,
+`ERROR_NO_TOKEN`-only fallback, before/after TokenId/ModifiedId continuity and
+unchanged target/marker open parameters. Failed token reads with written outputs
+and zero last-error values, and successful short reads, remain unavailable.
+Failed optional diagnostics and single owned-close attempts preserve
+the original I/O result/error. Primary and pipe-impersonation token IDs may differ
+while equivalent SID/logon, integrity and restriction attributes agree. These
+facts join the existing N/F context and held SACL/effective-policy observations;
+they cannot supply a receipt or settle the missing kernel-generation cause.
+The existing command-case fixtures retain target-then-marker order, first-error
+precedence and all successful/denied controls. No additional test command is added.
 Narrow source checks protect the native token/API binding and early cleanup
 ownership. See the [native owner](../ci/native/README.md) for Microsoft's inclusion
 versus Administrators exclusion distinction. These portable regressions establish

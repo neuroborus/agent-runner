@@ -962,6 +962,61 @@ static void command_probe_output(PROCESS_INFORMATION p,const char *event) {
   command_pump(&command_output,"probe-output");command_pump(&command_error,"probe-stderr");DWORD code;need(GetExitCodeProcess(p.hProcess,&code));printf("{\"event\":\"%s\",\"exitCode\":%lu}\n",event,code);
   if(command_output)need(CloseHandle(command_output));if(command_error)need(CloseHandle(command_error));command_output=command_error=NULL;
 }
+/* Only successful TOKEN_QUERY acquisitions own a close. No failed getter output
+ * or unavailable/short observation supplies a security-context value. */
+struct command_open_context {
+  unsigned source; BOOL statsRead; TOKEN_STATISTICS stats; char sid[184];
+  LONGLONG status[9],integrity,container,restricted,restricting;
+};
+static BOOL command_context_query(HANDLE token,TOKEN_INFORMATION_CLASS kind,void *bytes,DWORD capacity,DWORD minimum,LONGLONG *status) {
+  DWORD used=0;BOOL read=GetTokenInformation(token,kind,bytes,capacity,&used);
+  *status=read?ERROR_SUCCESS:GetLastError();if(!read)return FALSE;
+  if(used<minimum||used>capacity){*status=ERROR_INVALID_DATA;return FALSE;}
+  return TRUE;
+}
+static void command_context_capture(struct command_open_context *value) {
+  DWORD saved=GetLastError();int savedErrno=errno;HANDLE token=NULL;
+  memset(value,0,sizeof(*value));for(unsigned i=0;i<9;i++)value->status[i]=-1;
+  value->integrity=value->container=value->restricted=value->restricting=-1;
+  BOOL opened=OpenThreadToken(GetCurrentThread(),TOKEN_QUERY,TRUE,&token);
+  value->status[0]=opened?ERROR_SUCCESS:GetLastError();
+  if(opened)value->source=1;
+  else if(value->status[0]==ERROR_NO_TOKEN){
+    token=NULL;opened=OpenProcessToken(GetCurrentProcess(),TOKEN_QUERY,&token);
+    value->status[1]=opened?ERROR_SUCCESS:GetLastError();if(opened)value->source=2;
+  }
+  if(!opened)goto complete;
+  value->statsRead=command_context_query(token,TokenStatistics,&value->stats,sizeof(value->stats),sizeof(value->stats),&value->status[2]);
+  union {TOKEN_USER user;BYTE bytes[sizeof(TOKEN_USER)+SECURITY_MAX_SID_SIZE];} subject={0};
+  if(command_context_query(token,TokenUser,&subject,sizeof(subject),sizeof(TOKEN_USER),&value->status[3]))value->status[3]=command_gate_sid(subject.user.User.Sid,value->sid);
+  union {TOKEN_MANDATORY_LABEL label;BYTE bytes[sizeof(TOKEN_MANDATORY_LABEL)+SECURITY_MAX_SID_SIZE];} integrity={0};
+  if(command_context_query(token,TokenIntegrityLevel,&integrity,sizeof(integrity),sizeof(TOKEN_MANDATORY_LABEL),&value->status[4])){
+    PSID sid=integrity.label.Label.Sid;
+    if(IsValidSid(sid)&&*GetSidSubAuthorityCount(sid))value->integrity=*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);
+    else value->status[4]=ERROR_INVALID_SID;
+  }
+  DWORD container=0;if(command_context_query(token,TokenIsAppContainer,&container,sizeof(container),sizeof(container),&value->status[5]))value->container=container;
+  SetLastError(ERROR_SUCCESS);BOOL restricted=IsTokenRestricted(token);value->status[6]=restricted?ERROR_SUCCESS:GetLastError();
+  if(!value->status[6])value->restricted=!!restricted;
+  union {TOKEN_GROUPS groups;BYTE bytes[4096];} restricting={0};
+  if(command_context_query(token,TokenRestrictedSids,&restricting,sizeof(restricting),(DWORD)offsetof(TOKEN_GROUPS,Groups),&value->status[7])){if(restricting.groups.GroupCount<=32)value->restricting=restricting.groups.GroupCount;else value->status[7]=ERROR_INSUFFICIENT_BUFFER;}
+  BOOL closed=CloseHandle(token);value->status[8]=closed?ERROR_SUCCESS:GetLastError();
+  if(!closed)cleanup_error("command-token-close","win32",(DWORD)value->status[8]);
+complete:
+  SetLastError(saved);errno=savedErrno;
+}
+static void command_context_write(const char *phase,unsigned object,const struct command_open_context *value) {
+  char token[18]="unavailable",modified[18]="unavailable",logon[18]="unavailable";
+  if(value->statsRead){
+    snprintf(token,sizeof(token),"%08lx:%08lx",(DWORD)value->stats.TokenId.HighPart,value->stats.TokenId.LowPart);
+    snprintf(modified,sizeof(modified),"%08lx:%08lx",(DWORD)value->stats.ModifiedId.HighPart,value->stats.ModifiedId.LowPart);
+    snprintf(logon,sizeof(logon),"%08lx:%08lx",(DWORD)value->stats.AuthenticationId.HighPart,value->stats.AuthenticationId.LowPart);
+  }
+  diagnostic_write(stderr,&command_operating_bytes,&command_operating_incomplete,"native-windows-command: io-context pid=%lu object=%u phase=%s source=%u token=%s modified=%s logon=%s type=%lld level=%lld sid=%s integrity=%lld container=%lld restricted=%lld restricting=%lld status=%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
+    GetCurrentProcessId(),object,phase,value->source,token,modified,logon,value->statsRead?(LONGLONG)value->stats.TokenType:-1,
+    value->statsRead&&value->stats.TokenType==TokenImpersonation?(LONGLONG)value->stats.ImpersonationLevel:-1,value->sid[0]?value->sid:"unavailable",
+    value->integrity,value->container,value->restricted,value->restricting,value->status[0],value->status[1],value->status[2],value->status[3],value->status[4],value->status[5],value->status[6],value->status[7],value->status[8]);
+}
 /* Original I/O results only, with query-only birth/held-file joins. These
  * bounded stderr facts neither create an audit receipt nor change a guard. */
 static void command_case_io(BOOL ok,const char *operation,unsigned object,DWORD count,HANDLE file) {
@@ -977,6 +1032,26 @@ static void command_case_io(BOOL ok,const char *operation,unsigned object,DWORD 
   else fputs("unavailable",stderr);
   fputc('\n',stderr);fflush(stderr);SetLastError(saved);
 }
+/* Bracket each original open, never replay it. TokenId/ModifiedId establish
+ * continuity only within this effective context; pipe impersonation creates a
+ * distinct token. N/F comparisons use SID/logon, integrity and restrictions. */
+static HANDLE command_case_open(const WCHAR *path,DWORD access,unsigned object) {
+  DWORD saved=GetLastError();int savedErrno=errno;
+  struct command_open_context before,after;command_context_capture(&before);
+  FILETIME from={0},to={0};GetSystemTimePreciseAsFileTime(&from);
+  SetLastError(saved);errno=savedErrno;
+  HANDLE file=CreateFileW(path,access,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+  DWORD error=GetLastError();int operationErrno=errno;GetSystemTimePreciseAsFileTime(&to);
+  command_context_capture(&after);
+  SetLastError(error);command_case_io(file!=INVALID_HANDLE_VALUE,"open",object,0,file);
+  command_context_write("before",object,&before);command_context_write("after",object,&after);
+  int continuity=-1;if(before.statsRead&&after.statsRead)continuity=!memcmp(&before.stats.TokenId,&after.stats.TokenId,sizeof(LUID))&&!memcmp(&before.stats.ModifiedId,&after.stats.ModifiedId,sizeof(LUID));
+  diagnostic_write(stderr,&command_operating_bytes,&command_operating_incomplete,"native-windows-command: io-open pid=%lu object=%u from=%llu to=%llu access=%lu share=%lu disposition=%lu flags=%lu security-null=1 template-null=1 ok=%u error=%lu continuity=%d\n",
+    GetCurrentProcessId(),object,((ULONGLONG)from.dwHighDateTime<<32)|from.dwLowDateTime,((ULONGLONG)to.dwHighDateTime<<32)|to.dwLowDateTime,
+    access,(DWORD)(FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE),(DWORD)OPEN_EXISTING,(DWORD)FILE_FLAG_OPEN_REPARSE_POINT, file!=INVALID_HANDLE_VALUE,file==INVALID_HANDLE_VALUE?error:ERROR_SUCCESS,continuity);
+  if(command_operating_incomplete)fputs("native-windows-command: operating-incomplete\n",stderr);
+  fflush(stderr);SetLastError(error);errno=operationErrno;return file;
+}
 static void command_case(int argc,WCHAR **argv) {
   invariant(argc==8,"command-case-arguments");invariant(wcslen(argv[5])==32,"command-case-nonce");
   /* Track the context of each nonce write, not the token captured at pipe open.
@@ -991,16 +1066,15 @@ static void command_case(int argc,WCHAR **argv) {
     if(authority){remember(operation,"invariant",0);close_handle(authority,"process-close");failure(126);}
     if(error!=ERROR_ACCESS_DENIED){remember(operation,"win32",error);failure(126);}
   }
-  BOOL inspect=!wcscmp(argv[4],L"inspect");HANDLE target=CreateFileW(argv[3],inspect?GENERIC_READ:GENERIC_WRITE,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+  BOOL inspect=!wcscmp(argv[4],L"inspect");HANDLE target=command_case_open(argv[3],inspect?GENERIC_READ:GENERIC_WRITE,0);
   DWORD targetError=GetLastError();
-  command_case_io(target!=INVALID_HANDLE_VALUE,"open",0,0,target);
   if(inspect){char bytes[33]={0};SetLastError(targetError);win32_check(target!=INVALID_HANDLE_VALUE,"command-case-target-open");
     BOOL read=ReadFile(target,bytes,32,&count,NULL);command_case_io(read,"read",0,count,INVALID_HANDLE_VALUE);win32_check(read,"command-case-target-read");invariant(count==32,"command-case-target-read-size");invariant(!memcmp(bytes,nonceBytes,32),"command-case-target-nonce");printf("%s",bytes);}
   else if(target!=INVALID_HANDLE_VALUE){BOOL written=WriteFile(target,nonceBytes,32,&count,NULL);command_case_io(written,"write",0,count,INVALID_HANDLE_VALUE);win32_check(written,"command-case-target-write");invariant(count==32,"command-case-target-write-size");
     written=WriteFile(target,"-edited",7,&count,NULL);command_case_io(written,"edit",0,count,INVALID_HANDLE_VALUE);win32_check(written,"command-case-edit-write");invariant(count==7,"command-case-edit-size");BOOL changed=SetEndOfFile(target);command_case_io(changed,"truncate",0,0,INVALID_HANDLE_VALUE);win32_check(changed,"command-case-target-truncate");changed=FlushFileBuffers(target);command_case_io(changed,"flush",0,0,INVALID_HANDLE_VALUE);win32_check(changed,"command-case-target-flush");printf("attempt:written");}
   else {SetLastError(targetError);win32_check(targetError==ERROR_ACCESS_DENIED,"command-case-target-open");printf("attempt:denied");}
   if(target!=INVALID_HANDLE_VALUE){BOOL closed=CloseHandle(target);command_case_io(closed,"close",0,0,INVALID_HANDLE_VALUE);win32_check(closed,"command-case-target-close");}invariant(!fflush(stdout),"command-case-output");
-  HANDLE marker=CreateFileW(argv[6],GENERIC_READ,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,NULL);char bytes[32];command_case_io(marker!=INVALID_HANDLE_VALUE,"open",1,0,marker);win32_check(marker!=INVALID_HANDLE_VALUE,"command-case-marker-open");
+  HANDLE marker=command_case_open(argv[6],GENERIC_READ,1);char bytes[32];win32_check(marker!=INVALID_HANDLE_VALUE,"command-case-marker-open");
   BOOL read=ReadFile(marker,bytes,32,&count,NULL);DWORD markerError=read?ERROR_SUCCESS:GetLastError();
   command_case_io(read,"read",1,count,INVALID_HANDLE_VALUE);
   if(!read)remember("command-case-marker-read","win32",markerError);

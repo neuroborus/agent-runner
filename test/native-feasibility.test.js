@@ -15760,3 +15760,417 @@ test("actual shared workspace settles acquired subsets and retains resources and
     if (subset === "refused") assert.ok(f.order.includes("workspace-cancel"));
   }
 });
+
+test("Windows original file opens retain bounded effective-context facts without changing I/O", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = (name) => {
+    const match = new RegExp(
+      `static (?:void|BOOL|HANDLE) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source);
+    assert.ok(match, name);
+    return match[1];
+  };
+  // Preserve the actual queries, branches, closure and call order. Only C
+  // storage, output pointers and the cleanup label need a portable projection.
+  const project = (text) =>
+    text
+      .replaceAll("->", ".")
+      .replaceAll("*status", "status.value")
+      .replace(
+        "memset(value,0,sizeof(*value));",
+        "Object.assign(value,{stats:{},sid:{text:''},status:[],source:0,statsRead:false});",
+      )
+      .replace(
+        "if(!opened)goto complete;",
+        "if(!opened){SetLastError(saved);errno=savedErrno;return;}",
+      )
+      .replace("complete:", "")
+      .replace(
+        /union \{[^\n]+\} (subject|integrity|restricting)=\{0\};/gu,
+        (_match, name) =>
+          `const ${name}=${{ subject: "{user:{User:{}}}", integrity: "{label:{Label:{}}}", restricting: "{groups:{}}" }[name]};`,
+      )
+      .replace(
+        "struct command_open_context before,after;",
+        "const before={},after={};",
+      )
+      .replace(
+        "FILETIME from={0},to={0};",
+        "const from={dwHighDateTime:0,dwLowDateTime:0},to={dwHighDateTime:0,dwLowDateTime:0};",
+      )
+      .replace(
+        'char token[18]="unavailable",modified[18]="unavailable",logon[18]="unavailable";',
+        "const token={text:'unavailable'},modified={text:'unavailable'},logon={text:'unavailable'};",
+      )
+      .replaceAll("*GetSidSubAuthority", "GetSidSubAuthority")
+      .replaceAll(".sid[0]", ".sid.text")
+      .replaceAll("offsetof(TOKEN_GROUPS,Groups)", "8")
+      .replace(
+        /sizeof\((value.stats|subject|TOKEN_USER|integrity|TOKEN_MANDATORY_LABEL|container|restricting|LUID|token|modified|logon)\)/gu,
+        (_match, name) =>
+          ({
+            "value.stats": 56,
+            subject: 88,
+            TOKEN_USER: 16,
+            integrity: 88,
+            TOKEN_MANDATORY_LABEL: 16,
+            container: 4,
+            restricting: 4096,
+            LUID: 8,
+            token: 18,
+            modified: 18,
+            logon: 18,
+          })[name],
+      )
+      .replace(/(?<!&)&value.stats\b/gu, "value.stats")
+      .replace(
+        /(?<!&)&value.status\[(\d+)\]/gu,
+        "{get value(){return value.status[$1]},set value(v){value.status[$1]=v}}",
+      )
+      .replace(
+        /(?<!&)&(before|after|from|to|subject|integrity|restricting)\b/gu,
+        "$1",
+      )
+      .replace(
+        /(?<!&)&(token|used|container)\b/gu,
+        (_match, name) =>
+          `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replace(
+        /&command_operating_(bytes|incomplete)/gu,
+        '"command_operating_$1"',
+      )
+      .replace(/\((?:DWORD|LONGLONG|ULONGLONG)\)/gu, "")
+      .replace(/\b(?:DWORD|BOOL|HANDLE|PSID|unsigned|int) /gu, "let ");
+  const program = new Script(
+    [
+      ["command_context_query", "token,kind,bytes,capacity,minimum,status"],
+      ["command_context_capture", "value"],
+      ["command_context_write", "phase,object,value"],
+      ["command_case_open", "path,access,object"],
+    ]
+      .map(
+        ([name, args]) => `function ${name}(${args}){${project(body(name))}}`,
+      )
+      .join("\n") +
+      "\n({open:command_case_open,capture:command_context_capture});",
+  );
+  const contexts = new Map();
+  for (const fault of [
+    null,
+    "thread",
+    "thread-denied",
+    "process-denied",
+    "stats",
+    "stats-zero-error",
+    "stats-short",
+    "subject",
+    "integrity",
+    "container",
+    "restricted",
+    "restricting",
+    "close",
+    "open",
+    "modified",
+    "changed-token",
+    "output",
+  ]) {
+    let lastError = 17,
+      sequence = 0,
+      clock = 200,
+      opens = 0;
+    const owned = new Set(),
+      closed = [],
+      cleanup = [],
+      rows = [],
+      calls = [];
+    const luid = (LowPart) => ({ HighPart: 0, LowPart });
+    const api = {
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      ERROR_NO_TOKEN: 1008,
+      ERROR_INVALID_DATA: 13,
+      ERROR_INVALID_SID: 1337,
+      ERROR_INSUFFICIENT_BUFFER: 122,
+      TOKEN_QUERY: 8,
+      TokenStatistics: 10,
+      TokenUser: 1,
+      TokenIntegrityLevel: 25,
+      TokenIsAppContainer: 29,
+      TokenRestrictedSids: 11,
+      TokenImpersonation: 2,
+      INVALID_HANDLE_VALUE: -1,
+      FILE_SHARE_READ: 1,
+      FILE_SHARE_WRITE: 2,
+      FILE_SHARE_DELETE: 4,
+      OPEN_EXISTING: 3,
+      FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+      stderr: {},
+      errno: 19,
+      command_operating_bytes: 0,
+      command_operating_incomplete: false,
+      GetLastError: () => lastError,
+      SetLastError: (value) => {
+        lastError = value;
+      },
+      GetCurrentThread: () => 42,
+      GetCurrentProcess: () => 41,
+      GetCurrentProcessId: () => 43,
+      OpenThreadToken(thread, access, asSelf, out) {
+        assert.deepEqual([thread, access, asSelf], [42, 8, true]);
+        calls.push("thread");
+        out.value = 999;
+        lastError = fault === "thread-denied" ? 5 : 1008;
+        if (fault !== "thread") return false;
+        out.value = ++sequence;
+        owned.add(out.value);
+        return true;
+      },
+      OpenProcessToken(process, access, out) {
+        assert.deepEqual([process, access], [41, 8]);
+        calls.push("process");
+        out.value = 999;
+        lastError = 5;
+        if (fault === "process-denied") return false;
+        out.value = ++sequence;
+        owned.add(out.value);
+        return true;
+      },
+      GetTokenInformation(token, kind, value, size, used) {
+        assert.ok(owned.has(token));
+        used.value = size;
+        lastError = 5;
+        const query = {
+          10: "stats",
+          1: "subject",
+          25: "integrity",
+          29: "container",
+          11: "restricting",
+        }[kind];
+        calls.push(query);
+        if (kind === 10) {
+          Object.assign(value, {
+            TokenId: luid(
+              fault === "thread"
+                ? 22
+                : fault === "changed-token" && opens
+                  ? 2
+                  : 1,
+            ),
+            ModifiedId: luid(fault === "modified" && opens ? 4 : 3),
+            AuthenticationId: luid(7),
+            TokenType: fault === "thread" ? 2 : 1,
+            ImpersonationLevel: 2,
+          });
+          if (fault === "stats-short") used.value = 0;
+        }
+        if (kind === 1) value.user.User.Sid = "S-1-5-21-1";
+        if (kind === 25) value.label.Label.Sid = "integrity";
+        if (kind === 29) value.value = 0;
+        if (kind === 11) value.groups.GroupCount = 2;
+        if (fault === "stats-zero-error" && kind === 10) {
+          lastError = 0;
+          return false;
+        }
+        return fault !== query;
+      },
+      command_gate_sid(sid, text) {
+        assert.equal(sid, "S-1-5-21-1");
+        text.text = sid;
+        return 0;
+      },
+      IsValidSid: () => true,
+      GetSidSubAuthorityCount: () => 1,
+      GetSidSubAuthority: () => 8192,
+      IsTokenRestricted(token) {
+        assert.ok(owned.has(token));
+        lastError = fault === "restricted" ? 5 : 0;
+        return false;
+      },
+      CloseHandle(token) {
+        assert.ok(owned.delete(token));
+        closed.push(token);
+        calls.push("close");
+        lastError = 6;
+        return fault !== "close";
+      },
+      cleanup_error: (...value) => cleanup.push(value),
+      GetSystemTimePreciseAsFileTime(time) {
+        time.dwLowDateTime = clock++;
+        lastError = 88;
+      },
+      CreateFileW(path, access, share, security, disposition, flags, template) {
+        assert.equal(lastError, 17);
+        assert.equal(api.errno, 19);
+        calls.push("open");
+        assert.deepEqual(
+          [access, share, security, disposition, flags, template],
+          [
+            path === "target" ? 0x40000000 : 0x80000000,
+            7,
+            null,
+            3,
+            0x200000,
+            null,
+          ],
+        );
+        opens++;
+        lastError = fault === "open" ? 5 : 123;
+        api.errno = 37;
+        return fault === "open" ? -1 : path;
+      },
+      command_case_io(ok, operation, object, count, file) {
+        assert.deepEqual([ok, operation, count], [fault !== "open", "open", 0]);
+        assert.equal(lastError, fault === "open" ? 5 : 123);
+        assert.equal(
+          file,
+          fault === "open" ? -1 : object ? "marker" : "target",
+        );
+        lastError = 91;
+      },
+      snprintf(out, _size, format, ...values) {
+        assert.equal(format, "%08lx:%08lx");
+        out.text = values
+          .map((value) => value.toString(16).padStart(8, "0"))
+          .join(":");
+      },
+      diagnostic_write(stream, _used, _incomplete, format, ...args) {
+        assert.equal(stream, api.stderr);
+        rows.push({ format, args: args.map((value) => value?.text ?? value) });
+        lastError = 92;
+        api.errno = 99;
+        if (fault === "output") api.command_operating_incomplete = true;
+      },
+      fputs: () => {},
+      fflush: () => {},
+      memcmp: (a, b) =>
+        Number(a.HighPart !== b.HighPart || a.LowPart !== b.LowPart),
+    };
+    const native = program.runInNewContext(api);
+    for (const [object, name, access] of [
+      [0, "target", 0x40000000],
+      [1, "marker", 0x80000000],
+    ]) {
+      lastError = 17;
+      api.errno = 19;
+      assert.equal(
+        native.open(name, access, object),
+        fault === "open" ? -1 : name,
+        fault,
+      );
+      assert.equal(lastError, fault === "open" ? 5 : 123, fault);
+      assert.equal(api.errno, 37);
+    }
+    assert.equal(opens, 2);
+    assert.equal(owned.size, 0);
+    assert.equal(
+      closed.length,
+      ["thread-denied", "process-denied"].includes(fault) ? 0 : 4,
+    );
+    assert.equal(
+      calls.filter((call) => call === "process").length,
+      ["thread", "thread-denied"].includes(fault) ? 0 : 4,
+    );
+    assert.deepEqual(
+      cleanup,
+      fault === "close"
+        ? Array.from({ length: 4 }, () => ["command-token-close", "win32", 6])
+        : [],
+    );
+    for (const row of rows.filter((row) =>
+      row.format.startsWith("native-windows-command: io-open"),
+    )) {
+      assert.equal(row.args[8], fault !== "open");
+      assert.equal(row.args[9], fault === "open" ? 5 : 0);
+      assert.equal(
+        row.args[10],
+        [
+          "stats",
+          "stats-zero-error",
+          "stats-short",
+          "thread-denied",
+          "process-denied",
+        ].includes(fault)
+          ? -1
+          : ["modified", "changed-token"].includes(fault) && row.args[1] === 0
+            ? false
+            : true,
+      );
+      assert.ok(row.args[2] < row.args[3]);
+    }
+    const facts = rows
+      .filter((row) =>
+        row.format.startsWith("native-windows-command: io-context"),
+      )
+      .map((row) => row.args);
+    assert.equal(facts.length, 4);
+    assert.deepEqual(
+      facts.map((row) => [row[1], row[2]]),
+      [
+        [0, "before"],
+        [0, "after"],
+        [1, "before"],
+        [1, "after"],
+      ],
+    );
+    assert.ok(
+      facts.every(
+        (row) =>
+          row[3] ===
+          (fault === "thread"
+            ? 1
+            : ["thread-denied", "process-denied"].includes(fault)
+              ? 0
+              : 2),
+      ),
+    );
+    if (fault === "stats" || fault === "stats-short")
+      assert.ok(facts.every((row) => row[16] === (fault === "stats" ? 5 : 13)));
+    if (fault === "stats-zero-error")
+      assert.ok(facts.every((row) => row[16] === 0));
+    if (fault === "close") assert.ok(facts.every((row) => row[22] === 6));
+    if (
+      [
+        "stats",
+        "stats-zero-error",
+        "stats-short",
+        "thread-denied",
+        "process-denied",
+      ].includes(fault)
+    )
+      assert.ok(
+        facts.every(
+          (row) => row[4] === "unavailable" && row[7] === -1 && row[8] === -1,
+        ),
+      );
+    if (fault === "subject")
+      assert.ok(facts.every((row) => row[9] === "unavailable"));
+    for (const [unavailable, index] of [
+      ["integrity", 10],
+      ["container", 11],
+      ["restricted", 12],
+      ["restricting", 13],
+    ])
+      if (fault === unavailable)
+        assert.ok(facts.every((row) => row[index] === -1));
+    if (fault === null || fault === "thread") contexts.set(fault, facts[0]);
+  }
+  const primary = contexts.get(null),
+    impersonation = contexts.get("thread");
+  assert.notEqual(primary[4], impersonation[4]);
+  assert.deepEqual(
+    primary.slice(6, 7).concat(primary.slice(9, 14)),
+    impersonation.slice(6, 7).concat(impersonation.slice(9, 14)),
+    "Only equivalent attributes join original opens to N/F; impersonation token IDs and levels are separate facts",
+  );
+  assert.deepEqual(
+    [primary[7], primary[8], impersonation[7], impersonation[8]],
+    [1, -1, 2, 2],
+  );
+});

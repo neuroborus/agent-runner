@@ -2539,14 +2539,24 @@ test("native command opens respect held deletion custody without allowing replac
   assert.ok(held);
   assert.match(held[1], /\bDELETE\b/u);
   assert.doesNotMatch(held[2], /\bFILE_SHARE_DELETE\b/u);
-  for (const argument of [3, 6]) {
-    const opened = new RegExp(
-      `CreateFileW\\(argv\\[${argument}\\],([^,]+),([^,]+),`,
+  const wrapper =
+    /static HANDLE command_case_open\(const WCHAR \*path,DWORD access,unsigned object\) \{([\s\S]*?)\n\}/u.exec(
+      source,
+    )?.[1];
+  assert.ok(wrapper);
+  const opened = /CreateFileW\(path,access,([^,]+),/u.exec(wrapper);
+  assert.ok(opened);
+  assert.match(opened[1], /\bFILE_SHARE_DELETE\b/u);
+  for (const [argument, object] of [
+    [3, 0],
+    [6, 1],
+  ]) {
+    const call = new RegExp(
+      `command_case_open\\(argv\\[${argument}\\],([^,]+),${object}\\)`,
       "u",
     ).exec(source);
-    assert.ok(opened);
-    assert.match(opened[2], /\bFILE_SHARE_DELETE\b/u);
-    assert.doesNotMatch(opened[1], /\bDELETE\b/u);
+    assert.ok(call);
+    assert.doesNotMatch(call[1], /\bDELETE\b/u);
   }
 });
 
@@ -5128,6 +5138,20 @@ test("actual command-case guards attribute native calls and control invariants w
         "FILETIME sampled={0};",
         "const sampled={dwHighDateTime:0,dwLowDateTime:0};",
       )
+      .replace(
+        "struct command_open_context before,after;",
+        "const before={},after={};",
+      )
+      .replace(
+        "FILETIME from={0},to={0};",
+        "const from={dwHighDateTime:0,dwLowDateTime:0},to={dwHighDateTime:0,dwLowDateTime:0};",
+      )
+      .replaceAll("sizeof(LUID)", "8")
+      .replace(/(?<!&)&(before|after|from|to)\b/gu, "$1")
+      .replace(
+        /&command_operating_(bytes|incomplete)/gu,
+        '"command_operating_$1"',
+      )
       .replaceAll("sizeof(id)", "24")
       .replace(/&(born|exited|kernel|user|id|sampled)\b/gu, "$1")
       .replace(/\bL(?=")/gu, "")
@@ -5138,6 +5162,7 @@ test("actual command-case guards attribute native calls and control invariants w
     function win32_check(ok,operation){${project(body(helper, "win32_check"))}}
     function close_handle(handle,operation){${project(body(helper, "close_handle"))}}
     function command_case_io(ok,operation,object,count,file){${project(body(source, "command_case_io"))}}
+    function command_case_open(path,access,object){${project(body(source, "command_case_open"))}}
     (function(argc,argv){${project(body(source, "command_case"))}})`);
   const cases = [
     ["arguments", "edit", "invariant"],
@@ -5240,6 +5265,14 @@ test("actual command-case guards attribute native calls and control invariants w
       ERROR_SUCCESS: 0,
       FileIdInfo: 18,
       stderr: {},
+      command_context_capture: (value) => {
+        value.statsRead = false;
+      },
+      command_context_write: () => {},
+      command_operating_incomplete: false,
+      command_operating_bytes: 0,
+      diagnostic_write: () => {},
+      errno: 0,
       GetCurrentProcess: () => "self",
       GetCurrentProcessId: () => 43,
       GetSystemTimePreciseAsFileTime: (time) => {
