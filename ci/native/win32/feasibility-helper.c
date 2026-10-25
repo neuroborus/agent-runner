@@ -1218,6 +1218,13 @@ static void wfp_collection_observe(DWORD status, const FWP_VALUE0 *collection) {
   if (keywords) FwpmFreeMemory0((void **)&keywords);
   SetLastError(saved);
 }
+/* FWPM_NET_EVENT_CLASSIFY_DROP2.msFwpDirection uses packet encodings,
+ * distinct from the FWP_DIRECTION enum used by the receipt contract. */
+enum wfp_packet_direction {
+  WFP_PACKET_INBOUND = 0x3900,
+  WFP_PACKET_OUTBOUND = 0x3901,
+  WFP_PACKET_FORWARD = 0x3902
+};
 struct wfp_match { UINT64 filterId; UINT16 layerId; GUID filterKey, layerKey, providerKey, calloutKey, calloutProviderKey; UINT32 direction, actionType, flags; ULONGLONG time; };
 static void wfp_key(FILE *output, const GUID *key) { for (unsigned i = 0; i < sizeof(*key); i++) fprintf(output, "%02x", ((const BYTE *)key)[i]); }
 /* A classify DROP can name a terminating callout rather than a literal BLOCK.
@@ -1898,7 +1905,7 @@ static BOOL wfp_fact(const FWPM_NET_EVENT2 *event, struct wfp_event_fact *value)
     if (!drop) value->valid = FALSE;
     else {
       value->filter = drop->filterId; value->layer = drop->layerId; value->direction = drop->msFwpDirection; value->loopback = drop->isLoopback;
-      if (!drop->filterId || !drop->layerId || (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) || (drop->isLoopback != TRUE && drop->isLoopback != FALSE)) value->valid = FALSE;
+      if (!drop->filterId || !drop->layerId || (drop->msFwpDirection != WFP_PACKET_INBOUND && drop->msFwpDirection != WFP_PACKET_OUTBOUND && drop->msFwpDirection != WFP_PACKET_FORWARD) || (drop->isLoopback != TRUE && drop->isLoopback != FALSE)) value->valid = FALSE;
     }
   }
   if (value->app.closed < 0 || value->user.closed < 0 || value->package.closed < 0) wfpCleanupFailed = TRUE;
@@ -2102,7 +2109,7 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
         if (!drop->filterId) { predicate = "drop-filter"; reason = "fields"; goto closed; }
         if (!drop->layerId) { predicate = "drop-layer"; reason = "fields"; goto closed; }
         if (drop->isLoopback != TRUE) { predicate = "drop-loopback"; reason = "fields"; goto closed; }
-        if (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) { predicate = "drop-direction"; reason = "fields"; goto closed; }
+        if (drop->msFwpDirection != WFP_PACKET_INBOUND && drop->msFwpDirection != WFP_PACKET_OUTBOUND && drop->msFwpDirection != WFP_PACKET_FORWARD) { predicate = "drop-direction"; reason = "fields"; goto closed; }
         if (drop->vSwitchId.size) { predicate = "drop-vswitch"; reason = "fields"; goto closed; }
         api = "FwpmFilterGetById0"; status = FwpmFilterGetById0(engine, drop->filterId, &filter); if (status) { reason = "lookup"; goto closed; }
         api = "FwpmLayerGetById0"; status = FwpmLayerGetById0(engine, drop->layerId, &layer); if (status) { reason = "lookup"; goto closed; }
@@ -2111,7 +2118,8 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
         if (!filter || !layer || filter->filterId != drop->filterId || layer->layerId != drop->layerId ||
             memcmp(&filter->layerKey, &layer->layerKey, sizeof(GUID))) { reason = "fields"; goto closed; }
         predicate = "layer-direction";
-        if (socketBound && (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND || memcmp(&layer->layerKey, &FWPM_LAYER_ALE_AUTH_CONNECT_V4, sizeof(GUID)))) {
+        if (drop->msFwpDirection == WFP_PACKET_FORWARD ||
+            (socketBound && (drop->msFwpDirection != WFP_PACKET_OUTBOUND || memcmp(&layer->layerKey, &FWPM_LAYER_ALE_AUTH_CONNECT_V4, sizeof(GUID))))) {
           rejected[4]++;
           FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer); continue;
         }
@@ -2123,7 +2131,10 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
         } else if (filter->action.type != FWP_ACTION_BLOCK) { reason = "fields"; goto closed; }
         if (GetTickCount64() >= deadline) { reason = "exhausted"; goto closed; }
         if (matched == 8) { reason = "exhausted"; goto closed; }
-        matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, providerKey, calloutKey, calloutProviderKey, drop->msFwpDirection, filter->action.type, h->flags, time};
+        /* Only this receipt projection uses FWP_DIRECTION. Diagnostics retain
+         * the raw packet value; forwarding events never enter a match. */
+        UINT32 receiptDirection = drop->msFwpDirection == WFP_PACKET_OUTBOUND ? FWP_DIRECTION_OUTBOUND : FWP_DIRECTION_INBOUND;
+        matches[matched++] = (struct wfp_match){drop->filterId, drop->layerId, filter->filterKey, layer->layerKey, providerKey, calloutKey, calloutProviderKey, receiptDirection, filter->action.type, h->flags, time};
         predicate = "matched";
         FwpmFreeMemory0((void **)&filter); FwpmFreeMemory0((void **)&layer);
       }

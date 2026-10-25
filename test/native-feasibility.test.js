@@ -8549,6 +8549,9 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
   );
+  const packetDirections = /enum wfp_packet_direction \{([\s\S]*?)\};/u.exec(
+    source,
+  )[1];
   const start = source.indexOf(
     "  ULONGLONG deadline =",
     source.indexOf("static void wfp_snapshot"),
@@ -8636,8 +8639,8 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       .replace(/&(?=[a-zA-Z_])/gu, "")
       .replace(/\b(?:UINT32|ULONGLONG|unsigned|DWORD)\b/gu, "let");
   const split = body.indexOf("  if (filter)");
-  const script =
-    new Script(`function wfp_availability(engine,selected,appId,deadline,remaining,value){${availabilityBody}}
+  const script = new Script(`const ${packetDirections};
+    function wfp_availability(engine,selected,appId,deadline,remaining,value){${availabilityBody}}
     function collect(){${body.slice(0, split)}}
     collect(); ${body.slice(split)}`);
   for (const fault of [
@@ -8676,6 +8679,16 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     "appid-fields",
     "drop-loopback",
     "drop-direction",
+    "enum-outbound",
+    "enum-inbound",
+    "enum-max",
+    "packet-inbound",
+    "packet-forward",
+    "diagnostic-inbound",
+    "diagnostic-forward",
+    "reversed-endpoints",
+    "server-inbound",
+    "connect-layer",
     "drop-vswitch",
     "header-flags",
   ]) {
@@ -8703,7 +8716,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         filterId: 7,
         layerId: 48,
         isLoopback: true,
-        msFwpDirection: 0,
+        msFwpDirection: 0x3901,
         vSwitchId: { size: 0 },
       },
     };
@@ -8729,11 +8742,17 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       complete: false,
       matched: 0,
       matches: [],
-      socketBound: fault !== "socket-unbound",
-      tupleBound: false,
+      socketBound: ![
+        "socket-unbound",
+        "diagnostic-inbound",
+        "diagnostic-forward",
+      ].includes(fault),
+      tupleBound: ["diagnostic-inbound", "diagnostic-forward"].includes(fault),
       tuple: {
         localAddress: 0x7f000001,
         localPort: 45678,
+        remoteAddress: 0x7f000001,
+        remotePort: 32100,
         started: 1100,
         ended: 2000,
       },
@@ -8893,7 +8912,10 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
           return fault === "availability-read" ? 5 : 0;
         }
         assert.equal(handle, snapshots);
-        const rows = snapshots === 1 ? [] : [structuredClone(event)];
+        const rows =
+          snapshots === 1 && !context.tupleBound
+            ? []
+            : [structuredClone(event)];
         if (fault === "unrelated" && snapshots === 1) {
           rows.push(structuredClone(event));
           rows[0].header.remotePort++;
@@ -8906,7 +8928,29 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
           rows.length = 0;
           rows.push(...Array(Math.min(63, limit)).fill({ type: 1 }));
         }
-        if (snapshots > 1) {
+        if (snapshots > 1 || context.tupleBound) {
+          const direction = {
+            "enum-outbound": 0,
+            "enum-inbound": 1,
+            "enum-max": 2,
+            "packet-inbound": 0x3900,
+            "packet-forward": 0x3902,
+            "diagnostic-inbound": 0x3900,
+            "diagnostic-forward": 0x3902,
+            "server-inbound": 0x3900,
+          }[fault];
+          if (direction !== undefined)
+            rows[0].classifyDrop.msFwpDirection = direction;
+          if (["reversed-endpoints", "server-inbound"].includes(fault)) {
+            [rows[0].header.localPort, rows[0].header.remotePort] = [
+              rows[0].header.remotePort,
+              rows[0].header.localPort,
+            ];
+          }
+          if (fault === "server-inbound") {
+            rows[0].header.appId.data = "other";
+            rows[0].header.packageSid = "other";
+          }
           if (fault === "principal-app") rows[0].header.appId.data = "other";
           if (fault === "principal-user") rows[0].header.userId = "other";
           if (fault === "principal-package")
@@ -8927,7 +8971,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         assert.deepEqual([engine, id], [11, 7]);
         context[slot] = {
           filterId: 7,
-          layerKey: "connect",
+          layerKey: fault === "connect-layer" ? "accept" : "connect",
           filterKey: "filter",
           action: { type: 0x1001 },
         };
@@ -8935,7 +8979,10 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       },
       FwpmLayerGetById0(engine, id, slot) {
         assert.deepEqual([engine, id], [11, 48]);
-        context[slot] = { layerId: 48, layerKey: "connect" };
+        context[slot] = {
+          layerId: 48,
+          layerKey: fault === "connect-layer" ? "accept" : "connect",
+        };
         if (fault === "late") tick = 5000;
         return fault === "layer" ? 5 : 0;
       },
@@ -8979,6 +9026,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       Boolean(context.observed),
       [
         null,
+        "diagnostic-inbound",
         "unrelated",
         "availability-create",
         "availability-read",
@@ -9029,6 +9077,44 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         0,
         "An invariant must not invent an API error",
       );
+    }
+    if (["enum-outbound", "enum-inbound", "enum-max"].includes(fault)) {
+      assert.equal(context.predicate, "drop-direction");
+      assert.equal(context.reason, "fields");
+      assert.equal(context.status, 0);
+    }
+    if (
+      [
+        "packet-inbound",
+        "packet-forward",
+        "diagnostic-forward",
+        "connect-layer",
+      ].includes(fault)
+    ) {
+      assert.ok(context.rejected[4] > 0, fault);
+      assert.equal(context.matched, 0, fault);
+      assert.equal(context.status, 0, fault);
+    }
+    if (["reversed-endpoints", "server-inbound"].includes(fault)) {
+      assert.ok(context.rejected[1] > 0, fault);
+      assert.equal(context.matched, 0, fault);
+    }
+    if (context.observed) {
+      assert.equal(context.matches.length, 1, fault);
+      assert.equal(
+        context.matches[0].direction,
+        fault === "diagnostic-inbound" ? 1 : 0,
+        "Only receipt output uses the separate direction enum",
+      );
+      assert.equal(
+        context.direction,
+        fault === "diagnostic-inbound" ? 0x3900 : 0x3901,
+        "Diagnostics retain the raw packet direction",
+      );
+    }
+    if (fault === "diagnostic-inbound") {
+      assert.equal(context.socketBound, false);
+      assert.equal(context.tupleBound, true);
     }
     if (fault === "layer") assert.equal(context.api, "FwpmLayerGetById0");
     if (fault === "provider") assert.equal(context.api, "wfp_filter");
@@ -9255,6 +9341,9 @@ test("WFP candidate facts validate unions and retain typed values without attrib
     new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
     "utf8",
   );
+  const packetDirections = /enum wfp_packet_direction \{([\s\S]*?)\};/u.exec(
+    source,
+  )[1];
   const body = /static BOOL wfp_fact\([^\n]+\) \{([\s\S]*?)\n\}/u
     .exec(source)[1]
     .replace(
@@ -9279,7 +9368,9 @@ test("WFP candidate facts validate unions and retain typed values without attrib
     .replace(/&(?=[a-zA-Z_])/gu, "")
     .replaceAll("->", ".")
     .replace(/\bunsigned\b/gu, "let");
-  const program = new Script(`(event,value)=>{${body}}`);
+  const program = new Script(
+    `const ${packetDirections}; (event,value)=>{${body}}`,
+  );
   for (const fault of [
     null,
     "non-drop",
@@ -9289,6 +9380,11 @@ test("WFP candidate facts validate unions and retain typed values without attrib
     "bad-user",
     "missing-union",
     "bad-direction",
+    "packet-inbound",
+    "packet-forward",
+    "enum-outbound",
+    "enum-inbound",
+    "enum-max",
     "v6",
     "missing-version",
     "hash-close",
@@ -9314,7 +9410,7 @@ test("WFP candidate facts validate unions and retain typed values without attrib
       classifyDrop: {
         filterId: 7,
         layerId: 48,
-        msFwpDirection: 0,
+        msFwpDirection: 0x3901,
         isLoopback: 1,
       },
     };
@@ -9334,7 +9430,15 @@ test("WFP candidate facts validate unions and retain typed values without attrib
     if (fault === "bad-app") event.header.appId.size = 8193;
     if (fault === "bad-user") event.header.userId = null;
     if (fault === "missing-union") event.classifyDrop = null;
-    if (fault === "bad-direction") event.classifyDrop.msFwpDirection = 3;
+    const direction = {
+      "packet-inbound": 0x3900,
+      "packet-forward": 0x3902,
+      "enum-outbound": 0,
+      "enum-inbound": 1,
+      "enum-max": 2,
+      "bad-direction": 0x3903,
+    }[fault];
+    if (direction !== undefined) event.classifyDrop.msFwpDirection = direction;
     if (fault === "missing-version") event.header.flags &= ~1;
     if (fault === "v6") {
       event.header.ipVersion = 1;
@@ -9348,8 +9452,6 @@ test("WFP candidate facts validate unions and retain typed values without attrib
       MAXDWORD: 0xffffffff,
       FWP_IP_VERSION_V4: 0,
       FWP_IP_VERSION_V6: 1,
-      FWP_DIRECTION_OUTBOUND: 0,
-      FWP_DIRECTION_INBOUND: 1,
       FWPM_NET_EVENT_TYPE_MAX: 16,
       FWPM_NET_EVENT_TYPE_CLASSIFY_DROP: 2,
       SECURITY_MAX_SID_SIZE: 68,
@@ -9403,6 +9505,9 @@ test("WFP candidate facts validate unions and retain typed values without attrib
         "bad-user",
         "missing-union",
         "bad-direction",
+        "enum-outbound",
+        "enum-inbound",
+        "enum-max",
         "missing-version",
       ].includes(fault),
       fault,
@@ -9442,6 +9547,7 @@ test("WFP candidate facts validate unions and retain typed values without attrib
     if (!["non-drop", "missing-union"].includes(fault)) {
       assert.equal(value.filter, 7);
       assert.equal(value.layer, 48);
+      assert.equal(value.direction, event.classifyDrop.msFwpDirection);
     }
     assert.equal(api.wfpCleanupFailed, fault === "hash-close");
   }

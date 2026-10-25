@@ -97,8 +97,10 @@ returned size. It cannot replace the deadline with a late denial receipt. The
 existing interval-only WFP enumeration additionally projects typed facts for at
 most eight candidates: event type/time and header flags, normalized IPv4/IPv6
 addresses and ports, and the type-checked DROP union's filter, layer, direction
-and loopback value. Its existing AppId, user/package and endpoint comparisons
-remain diagnostic. Complete AppId and SID byte sizes/SHA-256 digests plus at most
+and loopback value. Diagnostic facts retain the documented raw inbound,
+outbound and forwarding packet directions without supplying a match. Its
+existing AppId, user/package and endpoint comparisons remain diagnostic.
+Complete AppId and SID byte sizes/SHA-256 digests plus at most
 64 encoded bytes distinguish actual representations from comparison results.
 Expected values join the held image identity/hash, original PID/birth, requested
 endpoint, socket tuple and attempt interval. Absent flags, invalid blobs/SIDs,
@@ -1592,8 +1594,16 @@ process/Job/package/token/image checks precede acquisition of local observer
 resources; the retained prepared engine also closes when AppId lookup fails.
 Actual SDK flags, IPv4/TCP tuple, AppId, user and package SIDs, outbound
 `ALE_AUTH_CONNECT_V4`, filter/layer identities and native action must all
-match. A literal BLOCK must resolve its actual provider. A terminating-callout
-DROP must additionally resolve that exact callout, its applicable layer and
+match. The [packet direction field](https://github.com/MicrosoftDocs/sdk-api/blob/c12073e417d5780fe796278ada21b90cef1b0568/sdk-api-src/content/fwpmtypes/ns-fwpmtypes-fwpm_net_event_classify_drop2.md)
+uses inbound `0x3900`, outbound `0x3901` and forwarding `0x3902`, separately
+from the [FWP_DIRECTION enum](https://github.com/MicrosoftDocs/sdk-api/blob/c12073e417d5780fe796278ada21b90cef1b0568/sdk-api-src/content/fwptypes/ne-fwptypes-fwp_direction.md).
+Enum values `0/1/2` are invalid packet inputs. Forwarding supplies no match;
+original-client denial requires raw outbound direction at the connect layer.
+Only matched inbound/outbound events are explicitly projected to the existing
+receipt directions `1/0`; raw diagnostic values remain unchanged. Inbound events,
+reversed server-side endpoints and foreign AppId/package events cannot supply
+original-client attribution. A literal BLOCK must resolve its actual provider.
+A terminating-callout DROP must additionally resolve that exact callout, its applicable layer and
 independently resolved provider. The callout and filter may have different
 providers; each returned provider key must match its native reference.
 Provider/callout lookup failures, missing providers, identity mismatches and

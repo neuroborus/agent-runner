@@ -807,6 +807,14 @@ shared 256-record scan limit, API/lookup/deadline failures and intermediate/fina
 snapshot, engine and token closure failures. Injected clocks drive delivery
 without real sleeps. Snapshot refresh preserves the exact query and existing
 five-second bound while the original socket and token remain held.
+Both actual-source WFP fixtures execute the source's packet-direction constants.
+They cover raw outbound `0x3901`, inbound `0x3900` and forwarding `0x3902`,
+reject enum `0/1/2` as packet inputs, and retain all three raw diagnostic facts.
+The snapshot fixture separately checks the explicit projection to existing
+receipt directions, accepts inbound only for the diagnostic tuple, and rejects
+inbound/forwarding client attribution, reversed endpoints, foreign AppId/package
+events and a different resolved layer. These cases retain existing enum/engine/
+token closure assertions and add no validation command or native acceptance.
 The same actual-body fixture also executes the one-page interval-only comparison
 under that shared deadline and scan budget. Same/foreign AppIds, full pages,
 query failures, expired socket binding, separate enum-close failure and principal-specific rejections
