@@ -11,6 +11,11 @@
 static void reader_failure(const char *file, unsigned line, DWORD error);
 static BOOL ownership_failure_write(const char *source, unsigned line, DWORD error);
 static void ownership_failure_fence(DWORD error);
+#ifdef NATIVE_CI_EXPERIMENT
+static void ownership_refusal_collect(const char *source, unsigned line, DWORD error);
+#else
+#define ownership_refusal_collect(source,line,error) ((void)0)
+#endif
 #define NATIVE_CUSTODY_FAILURE reader_failure
 #include "custody.h"
 #include "account.h"
@@ -347,6 +352,7 @@ static BOOL reader_cold_failure(const char *source, unsigned line, DWORD error) 
 static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
+  ownership_refusal_collect(source,line,error);
   if(reader_witness_failure(source,line,error)) { ownership_failure_fence(error); return; }
   if(ownership_failure_write(source,line,error)) { ownership_failure_fence(error); return; }
   ownership_failure_fence(error);
@@ -1389,6 +1395,186 @@ static struct held_file ownership_policy_file, ownership_sentinel;
 static PSECURITY_DESCRIPTOR ownership_before[6], ownership_installed[6];
 static char ownership_baseline[6][65];
 static BOOL ownership_policy_restored, ownership_policy_possible;
+#ifdef NATIVE_CI_EXPERIMENT
+/* This one-shot state and its unfinished thread remain owned by the fatal
+ * reader until need_at calls ExitProcess. Never free, detach, or close a live
+ * thread's resources. ExitProcess is not independent process-retirement proof. */
+struct refusal_report { unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget; };
+static SRWLOCK refusal_lock=SRWLOCK_INIT;
+static struct {
+  BOOL tried,sent,creationVerified; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
+  char command[64],source[64],hash[65]; WCHAR image[4096],subject[184]; FILE_ID_INFO imageId;
+  HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[65536];
+} original_refusal;
+static DWORD refusal_remaining(void) {
+  ULONGLONG elapsed=GetTickCount64()-original_refusal.tick;
+  return elapsed<30000?(DWORD)(30000-elapsed):0;
+}
+static void refusal_publish(const char *line, struct refusal_report *report) {
+  AcquireSRWLockExclusive(&refusal_lock);
+  if(line){size_t size=strlen(line);
+    if(size>sizeof(original_refusal.bytes)-1025-original_refusal.used)report->truncated=TRUE;
+    else{memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;}
+  }
+  original_refusal.report=*report;ReleaseSRWLockExclusive(&refusal_lock);
+}
+static const WCHAR *refusal_text(const EVT_VARIANT *value, const BYTE *buffer, DWORD used) {
+  if(value->Type!=EvtVarTypeString||!value->StringVal)return NULL;
+  uintptr_t start=(uintptr_t)value->StringVal,first=(uintptr_t)buffer,last=first+used;
+  if(start<first||start>=last||(start-first)%sizeof(WCHAR))return NULL;
+  size_t limit=(last-start)/sizeof(WCHAR);
+  return wcsnlen_s(value->StringVal,limit)<limit?value->StringVal:NULL;
+}
+static BOOL refusal_number(const EVT_VARIANT *value, const BYTE *buffer, DWORD used, ULONGLONG *number) {
+  switch(value->Type){
+    case EvtVarTypeByte:*number=value->ByteVal;return TRUE;
+    case EvtVarTypeUInt16:*number=value->UInt16Val;return TRUE;
+    case EvtVarTypeUInt32:case EvtVarTypeHexInt32:*number=value->UInt32Val;return TRUE;
+    case EvtVarTypeUInt64:case EvtVarTypeHexInt64:*number=value->UInt64Val;return TRUE;
+    case EvtVarTypeFileTime:*number=value->FileTimeVal;return TRUE;
+  }
+  const WCHAR *text=refusal_text(value,buffer,used);
+  if(!text||!text[0]||wcslen(text)>20||text[0]==L'-'||text[0]==L'+'||iswspace(text[0]))return FALSE;
+  WCHAR *end;errno=0;ULONGLONG parsed=_wcstoui64(text,&end,0);if(errno||*end)return FALSE;*number=parsed;return TRUE;
+}
+static BOOL refusal_hex(const WCHAR *text, char *bytes, size_t capacity) {
+  bytes[0]=0;if(!text)return TRUE;size_t size=wcslen(text);
+  if(size>(capacity-1)/4)return FALSE;
+  for(size_t i=0;i<size;i++)sprintf_s(bytes+i*4,capacity-i*4,"%04x",(unsigned)text[i]);
+  return TRUE;
+}
+static BOOL refusal_event_time(const EVT_VARIANT *value, const BYTE *buffer, DWORD used, ULONGLONG *ticks) {
+  if(value->Type==EvtVarTypeFileTime){*ticks=value->FileTimeVal;return TRUE;}
+  const WCHAR *text=refusal_text(value,buffer,used);if(!text)return FALSE;
+  size_t length=wcslen(text);if(length<20||length>28||length==21||text[4]!=L'-'||text[7]!=L'-'||text[10]!=L'T'||text[13]!=L':'||text[16]!=L':'||(length!=20&&text[19]!=L'.')||text[length-1]!=L'Z')return FALSE;
+  unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};
+  for(unsigned i=0;i<6;i++)for(unsigned j=0;j<(i?2:4);j++){WCHAR c=text[starts[i]+j];if(c<L'0'||c>L'9')return FALSE;parts[i]=parts[i]*10+c-L'0';}
+  DWORD fraction=0;for(size_t i=20;i<length-1;i++){if(text[i]<L'0'||text[i]>L'9')return FALSE;fraction=fraction*10+text[i]-L'0';}
+  for(size_t i=length==20?0:length-21;i<7;i++)fraction*=10;
+  SYSTEMTIME time={0};time.wYear=(WORD)parts[0];time.wMonth=(WORD)parts[1];time.wDay=(WORD)parts[2];time.wHour=(WORD)parts[3];time.wMinute=(WORD)parts[4];time.wSecond=(WORD)parts[5];FILETIME parsed;
+  if(!SystemTimeToFileTime(&time,&parsed))return FALSE;*ticks=(((ULONGLONG)parsed.dwHighDateTime<<32)|parsed.dwLowDateTime)+fraction;return TRUE;
+}
+static BOOL refusal_time(ULONGLONG ticks, WCHAR text[32]) {
+  FILETIME time={(DWORD)ticks,(DWORD)(ticks>>32)};SYSTEMTIME value;
+  return FileTimeToSystemTime(&time,&value)&&swprintf_s(text,32,L"%04u-%02u-%02uT%02u:%02u:%02u.%07lluZ",value.wYear,value.wMonth,value.wDay,value.wHour,value.wMinute,value.wSecond,ticks%10000000)>0;
+}
+/* Only payload EventData is requested. System/Execution/@ProcessID describes
+ * the logging provider and is deliberately absent from this projection. */
+static void refusal_record(EVT_HANDLE context, EVT_HANDLE event, unsigned channel, struct refusal_report *report) {
+  union { EVT_VARIANT alignment; BYTE bytes[32768]; } buffer;DWORD used=0,count=0;
+  if(!EvtRender(context,event,EvtRenderEventValues,sizeof(buffer.bytes),buffer.bytes,&used,&count)){
+    report->renderError=GetLastError();if(report->renderError==ERROR_INSUFFICIENT_BUFFER)report->truncated=TRUE;else report->malformed++;return;
+  }
+  if(count!=15||used<15*sizeof(EVT_VARIANT)||used>sizeof(buffer.bytes)){report->malformed++;return;}
+  EVT_VARIANT *v=(void *)buffer.bytes;ULONGLONG id=0,version=0,time=0,keywords=0,pid=0,logon=0,mask=0;
+  const unsigned strings[]={0,6,9,10,12,13};
+  for(unsigned i=0;i<6;i++)if(v[strings[i]].Type!=EvtVarTypeNull&&!refusal_text(&v[strings[i]],buffer.bytes,used)){report->malformed++;return;}
+  const WCHAR *provider=refusal_text(&v[0],buffer.bytes,used),*image=refusal_text(&v[6],buffer.bytes,used);
+  const WCHAR *subject=refusal_text(&v[7],buffer.bytes,used),*type=refusal_text(&v[9],buffer.bytes,used),*object=refusal_text(&v[10],buffer.bytes,used);
+  if(v[7].Type!=EvtVarTypeNull&&v[7].Type!=EvtVarTypeSid&&!subject){report->malformed++;return;}
+  const WCHAR *reason=refusal_text(&v[12],buffer.bytes,used);if(!reason)reason=refusal_text(&v[13],buffer.bytes,used);
+  WCHAR subjectText[184]={0};LPWSTR converted=NULL;
+  if(v[7].Type==EvtVarTypeSid){
+    uintptr_t first=(uintptr_t)buffer.bytes,start=(uintptr_t)v[7].SidVal,last=first+used;
+    if(start<first||start>last||last-start<8||GetSidLengthRequired(((SID *)v[7].SidVal)->SubAuthorityCount)>last-start||!IsValidSid(v[7].SidVal)){report->malformed++;return;}
+    if(ConvertSidToStringSidW(v[7].SidVal,&converted)){
+      if(wcslen(converted)<184){wcscpy_s(subjectText,184,converted);subject=subjectText;}else report->truncated=TRUE;
+      if(LocalFree(converted)&&!report->closeError)report->closeError=GetLastError();
+    }else report->malformed++;
+  }
+  if(!provider||!refusal_number(&v[1],buffer.bytes,used,&id)||!refusal_number(&v[2],buffer.bytes,used,&version)||
+    !refusal_event_time(&v[3],buffer.bytes,used,&time)||!refusal_number(&v[4],buffer.bytes,used,&keywords)){report->malformed++;return;}
+  BOOL payload=refusal_number(&v[5],buffer.bytes,used,&pid),hasLogon=refusal_number(&v[8],buffer.bytes,used,&logon),hasMask=refusal_number(&v[11],buffer.bytes,used,&mask);
+  if((!payload&&v[5].Type!=EvtVarTypeNull)||(!hasLogon&&v[8].Type!=EvtVarTypeNull)||(!hasMask&&v[11].Type!=EvtVarTypeNull)){report->malformed++;return;}
+  BOOL interval=time>=original_refusal.from&&time<=original_refusal.to&&time>=original_refusal.birth;
+  BOOL identity=payload&&pid==original_refusal.pid&&image&&!_wcsicmp(image,original_refusal.image);
+  BOOL principal=subject&&original_refusal.subject[0]&&!wcscmp(subject,original_refusal.subject);
+  BOOL security=!channel&&!wcscmp(provider,L"Microsoft-Windows-Security-Auditing")&&id==4656&&version<=1&&(keywords&4503599627370496ULL)&&!(keywords&9007199254740992ULL);
+  /* Known Application Error payload schema; other Application/CodeIntegrity
+   * layouts remain explicitly unjoined, even if their execution PID matches. */
+  ULONGLONG birth=0;BOOL application=channel==1&&!wcscmp(provider,L"Application Error")&&id==1000&&!version&&refusal_number(&v[14],buffer.bytes,used,&birth)&&birth==original_refusal.birth;
+  BOOL joined=interval&&identity&&((security&&principal)||application);
+  char p[1025],im[16385],sub[737],ty[1025],obj[16385],why[16385],line[57344];
+  if(!refusal_hex(provider,p,sizeof(p))||!refusal_hex(image,im,sizeof(im))||!refusal_hex(subject,sub,sizeof(sub))||!refusal_hex(type,ty,sizeof(ty))||!refusal_hex(object,obj,sizeof(obj))||!refusal_hex(reason,why,sizeof(why))){report->truncated=TRUE;return;}
+  int size=sprintf_s(line,sizeof(line),"native-windows-original-child: record channel=%u provider-utf16=%s event=%llu version=%llu time=%llu keywords=%llu pid-available=%u pid=%llu image-utf16=%s subject-utf16=%s logon-available=%u logon=%llu object-type-utf16=%s object-utf16=%s mask-available=%u mask=%llu reason-utf16=%s interval=%u identity=%u principal=%u schema=%u joined=%u corroboration=%u\n",channel,p,id,version,time,keywords,!!payload,pid,im,sub,!!hasLogon,logon,ty,obj,!!hasMask,mask,why,!!interval,!!identity,!!principal,!!(security||application),!!joined,!!(joined&&application));
+  if(size>0){report->records++;report->joined+=!!joined;refusal_publish(line,report);}else report->truncated=TRUE;
+}
+static DWORD WINAPI refusal_worker(void *unused) {
+  struct refusal_report report=original_refusal.report;
+  const WCHAR *channels[]={L"Security",L"Application",L"Microsoft-Windows-CodeIntegrity/Operational"};
+  WCHAR from[32],to[32];
+  if(!refusal_time(original_refusal.from,from)||!refusal_time(original_refusal.to,to)){report.malformed++;goto finished;}
+  for(unsigned channel=0;channel<3;channel++){
+    if(!refusal_remaining()||report.examined==64){report.overBudget=TRUE;break;}
+    if(channel){
+      EVT_HANDLE config=EvtOpenChannelConfig(NULL,channels[channel],0);DWORD error=config?ERROR_SUCCESS:GetLastError();EVT_VARIANT enabled={0};DWORD used=0;
+      BOOL read=config&&EvtGetChannelConfigProperty(config,EvtChannelConfigEnabled,0,sizeof(enabled),&enabled,&used);
+      if(config&&!read)error=GetLastError();
+      if(config&&!EvtClose(config)&&!report.closeError)report.closeError=GetLastError();
+      if(!read||used!=sizeof(enabled)||enabled.Type!=EvtVarTypeBoolean||!enabled.BooleanVal){report.query[channel]=error?error:ERROR_NOT_SUPPORTED;refusal_publish(NULL,&report);continue;}
+    }
+    const WCHAR *paths[]={L"Event/System/Provider/@Name",L"Event/System/EventID",L"Event/System/Version",L"Event/System/TimeCreated/@SystemTime",L"Event/System/Keywords",L"Event/EventData/Data[@Name='ProcessId']",channel==1?L"Event/EventData/Data[@Name='AppPath']":L"Event/EventData/Data[@Name='ProcessName']",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/EventData/Data[@Name='ObjectType']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='AccessMask']",L"Event/EventData/Data[@Name='AccessReason']",L"Event/EventData/Data[@Name='AccessList']",L"Event/EventData/Data[@Name='ProcessCreationTime']"};
+    EVT_HANDLE context=EvtCreateRenderContext(15,paths,EvtRenderContextValues),query=NULL;WCHAR expression[1024];
+    if(!context){report.query[channel]=GetLastError();refusal_publish(NULL,&report);continue;}
+    int size=swprintf_s(expression,1024,L"*[System[TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]%ls]]",from,to,channel?L"":L" and Provider[@Name=\"Microsoft-Windows-Security-Auditing\"] and EventID=4656 and band(Keywords,4503599627370496)");
+    BOOL attempted=size>0&&refusal_remaining();if(attempted)query=EvtQuery(NULL,channels[channel],expression,EvtQueryChannelPath|EvtQueryReverseDirection);
+    DWORD queryError=query?ERROR_SUCCESS:GetLastError();
+    report.query[channel]=query?ERROR_SUCCESS:attempted?queryError:size<=0?ERROR_INVALID_DATA:ERROR_TIMEOUT;
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.query=query;ReleaseSRWLockExclusive(&refusal_lock);refusal_publish(NULL,&report);
+    while(query&&refusal_remaining()&&report.examined<64){
+      EVT_HANDLE event=NULL;DWORD count=0;BOOL next=EvtNext(query,1,&event,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+      if(!next||count!=1||!event){if(error!=ERROR_NO_MORE_ITEMS)report.query[channel]=error?error:ERROR_INVALID_DATA;if(event&&!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();break;}
+      report.examined++;refusal_publish(NULL,&report);
+      if(refusal_remaining())refusal_record(context,event,channel,&report);else report.overBudget=TRUE;
+      if(!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+    }
+    if(!refusal_remaining()||report.examined==64)report.overBudget=TRUE;
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.query=NULL;ReleaseSRWLockExclusive(&refusal_lock);
+    if(query&&!EvtClose(query)&&!report.closeError)report.closeError=GetLastError();
+    if(!EvtClose(context)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+  }
+finished:
+  report.finished=TRUE;refusal_publish(NULL,&report);return 0;
+}
+static void ownership_refusal_collect(const char *source, unsigned line, DWORD error) {
+  if(original_refusal.tried||strcmp(reader_command,"ownership-output")||!ownership_released||!ownership_count)return;
+  int savedErrno=errno;DWORD saved=GetLastError();original_refusal.tried=TRUE;
+  /* Latch the refusal before diagnostics or custody/host disposal can run. */
+  original_refusal.sequence=sequence;original_refusal.line=line;original_refusal.error=error;
+  strcpy_s(original_refusal.command,64,reader_command);strncpy_s(original_refusal.source,64,source,_TRUNCATE);
+  original_refusal.creationVerified=ownership_creation_verified;
+  FILETIME time;GetSystemTimePreciseAsFileTime(&time);original_refusal.to=((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;
+  wcscpy_s(original_refusal.image,4096,entries[6].path);wcscpy_s(original_refusal.subject,184,case_record.accountSid);
+  original_refusal.imageId=entries[6].file.id;strcpy_s(original_refusal.hash,65,entries[6].pin);
+  struct refusal_report report={0};for(unsigned i=0;i<3;i++)report.query[i]=-1;
+  char image[16385],subject[737],identity[33],context[20000];
+  for(unsigned i=0;i<16;i++)sprintf_s(identity+i*2,sizeof(identity)-i*2,"%02x",original_refusal.imageId.FileId.Identifier[i]);
+  BOOL encoded=refusal_hex(original_refusal.image,image,sizeof(image))&&refusal_hex(original_refusal.subject,subject,sizeof(subject));
+  int size=encoded?sprintf_s(context,sizeof(context),"native-windows-original-child: context command=%s sequence=%lu source=%s line=%lu error=%lu candidate=%s nonce=%s pid=%lu birth=%llu image-utf16=%s image-volume=%llu image-id=%s image-sha256=%s subject-utf16=%s release=%llu refusal=%llu dispatch-succeeded=%u creation-verified=%u resume-time=unavailable\n",original_refusal.command,original_refusal.sequence,original_refusal.source,original_refusal.line,error,candidate,nonce,original_refusal.pid,original_refusal.birth,image,original_refusal.imageId.VolumeSerialNumber,identity,original_refusal.hash,subject,original_refusal.from,original_refusal.to,!!original_refusal.sent,!!original_refusal.creationVerified):-1;
+  if(size>0)refusal_publish(context,&report);else{report.truncated=TRUE;refusal_publish(NULL,&report);}
+  DWORD createError=0,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1,threadClose=-1;
+  if(refusal_remaining()&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
+    original_refusal.thread=CreateThread(NULL,0,refusal_worker,NULL,0,NULL);
+    if(original_refusal.thread){waited=WaitForSingleObject(original_refusal.thread,refusal_remaining());if(waited==WAIT_FAILED)waitError=GetLastError();}else createError=GetLastError();
+  }else{report.overBudget=!refusal_remaining();createError=report.overBudget?ERROR_TIMEOUT:ERROR_INVALID_DATA;refusal_publish(NULL,&report);}
+  /* The shared lock never covers query/render calls. Pin an available handle
+   * through EvtCancel; its creator clears publication before normal EvtClose.
+   * A pending EvtQuery has no result handle to cancel. Never invent one. */
+  char output[65536];DWORD used=0;BOOL published=TryAcquireSRWLockExclusive(&refusal_lock);
+  if(published){
+    if(waited!=WAIT_OBJECT_0&&original_refusal.query)canceled=EvtCancel(original_refusal.query)?0:GetLastError();
+    report=original_refusal.report;used=original_refusal.used;memcpy(output,original_refusal.bytes,used);ReleaseSRWLockExclusive(&refusal_lock);
+  }
+  if(!published&&size>0){used=(DWORD)size;memcpy(output,context,used);}
+  if(waited==WAIT_OBJECT_0&&original_refusal.thread){threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();if(!threadClose)original_refusal.thread=NULL;}
+  BOOL unavailable=report.query[0]>0||report.query[1]>0||report.query[2]>0;
+  BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
+  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published;
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu\n",!!report.finished,!!incomplete,report.finished&&!report.examined&&report.query[0]==0,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError);
+  if(ending>0){used+=(DWORD)ending;(void)fwrite(output,1,used,stderr);(void)fflush(stderr);}
+  SetLastError(saved);errno=savedErrno;
+}
+#endif
 static void ownership_failure_fence(DWORD error) {
   if (!ownership_launcher.hProcess && !ownership_owner.hProcess) return;
   /* Acquisition can fail while a creator is still suspended, before control
@@ -1656,6 +1842,9 @@ static void ownership_retain(DWORD pid, ULONGLONG birth) {
     (((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime) == birth && OpenProcessToken(process, TOKEN_QUERY | TOKEN_DUPLICATE, &token));
   wchar_t *sid = token_sid(token); need(!wcscmp(sid, case_record.accountSid) && process_session(process) == 0); LocalFree(sid);
   BOOL belongs; need(case_job && IsProcessInJob(process, case_job, &belongs) && belongs);
+#ifdef NATIVE_CI_EXPERIMENT
+  if(!ownership_count){original_refusal.pid=pid;original_refusal.birth=birth;}
+#endif
   ownership_processes[ownership_count] = process; ownership_tokens[ownership_count++] = token;
 }
 static void ownership_job_pin(HANDLE job, char hash[65]) {
@@ -1963,11 +2152,18 @@ static void ownership_send(const char *value) {
   else if (bytes[0] == 'R') { need(size == 2 && ownership_stage == 5 && ownership_creation_verified && ownership_policy_installed &&
     ownership_owner.hProcess && WaitForSingleObject(ownership_owner.hProcess, 0) == WAIT_TIMEOUT); ownership_stage = 6; }
   else need(ownership_stage == 6 && (access_mode || (size == 2 && (bytes[0] == 'G' || bytes[0] == 'E' || bytes[0] == 'A' || bytes[0] == 'Q'))));
+#ifdef NATIVE_CI_EXPERIMENT
+  if(size==2&&bytes[0]=='R'){FILETIME time;original_refusal.tick=GetTickCount64();GetSystemTimePreciseAsFileTime(&time);original_refusal.from=((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;}
+#endif
   need(WriteFile(ownership_control, bytes, (DWORD)size/2, &used, NULL) && used == size/2); if (size == 2 && bytes[0] == 'G' && ownership_spoofed) {
     char pid[32]; int count = sprintf_s(pid, sizeof(pid), "%lu\n", GetCurrentProcessId()); need(count > 0 && WriteFile(ownership_control, pid, count, &used, NULL) && used == (DWORD)count);
   }
   if (size == 2 && bytes[0] == 'E') need(ownership_count && WaitForSingleObject(ownership_processes[0], 30000) == WAIT_OBJECT_0);
-  if (size == 2 && bytes[0] == 'R') { need(ownership_creation_verified); ownership_released = TRUE; }
+  if (size == 2 && bytes[0] == 'R') { need(ownership_creation_verified); ownership_released = TRUE;
+#ifdef NATIVE_CI_EXPERIMENT
+    original_refusal.sent=TRUE;
+#endif
+  }
 }
 
 /* A separate sealed System custodian holds the domain and creator objects.

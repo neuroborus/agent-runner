@@ -91,6 +91,13 @@ select readiness, `SO_ERROR` result size, installed event-collection options and
 keyword type/value, query interval/AppId size, rejection counts and the last WFP
 API/predicate. These lines stay outside the strict tuple/snapshot carriers.
 WFP collection remains read-only; no event option is enabled or filter installed.
+After a latched TCP deadline, one `SO_ERROR` sample from the original held socket
+retains the active connect/send/receive phase, last select result, query error and
+returned size. It cannot replace the deadline with a late denial receipt. The
+existing interval-only WFP enumeration additionally compares field-validated
+AppId, user/package SID and endpoints for at most eight candidates, marking
+unavailable comparisons and truncation. It shares the existing scan/transaction
+budgets and adds no enumeration, lookup or retry.
 The rejection counters distinguish non-DROP/unbound events, endpoint, interval,
 principal and layer/direction mismatches; malformed DROP fields name their exact
 predicate. Provider/callout lookups name their exact failed API and join;
@@ -116,6 +123,51 @@ I/O completion establish neither event absence nor delivery. The live subscripti
 bookmark, deadlines, policy, SACLs and acceptance predicates are unchanged. The hosted diagnostic
 checkpoint must establish actual attribution before dependent repairs; unresolved
 attribution requires a reviewed diagnostic follow-up.
+
+At the original command's pre-I/O checkpoint, the finite gate ACE projector also
+samples the held target/marker SACLs once. Counts, types, flags, masks, subject
+matches and read/descriptor-close outcomes join the cached operating
+PID/birth/logon, effective policy and N/F identity/hash bindings. Dynamic token
+observations are cached before impersonation reversal. Effective policy for that
+retained token and held SACLs are queried afterward with broker authority; writing
+the cached token performs no query and preserves its JSON output.
+Cached N observations retain their original subject/logon/policy and
+SACL hashes even if later F diagnostics differ. Successful broker stderr stays
+silent; cached ACE data is published and flushed after the original fatal
+diagnosis, before the existing post-refusal Event Log queries.
+The existing raw publication remains intact. Valid observation lines following
+a strict native refusal have their own 4 KiB capture bound; malformed, partial,
+oversized or standalone metadata cannot replace the original 4 KiB failure
+carrier or admit success. Settlement labels publish already-obtained broker,
+capture closure, independent-domain and restoration outcomes without replaying effects.
+Diagnostic sink failures cannot bypass retirement checks or change their outcome.
+
+The ordinary Windows experiment reader collects one bounded diagnostic for the
+original `ownership-output` refusal before closing original process/image
+custody or disposing the host. It preserves command/sequence/source/line/error,
+candidate/nonce, original PID/creation FILETIME, held image identity/hash and the
+existing creation/release observations. The timestamp immediately before the
+existing R send and its successful dispatch do not establish exact resume time.
+One diagnostic thread queries already-produced Security 4656 Audit Failure
+records in that release-to-refusal interval. Typed payload PID/image and available
+principal/logon fields accompany provider/schema, time, object type/name,
+access mask/reason and outcome keywords; the logging provider's execution PID
+is never substituted. Known Application Error payload identity/birth can only
+corroborate; unsupported Application/CodeIntegrity schemas remain unjoined.
+Optional channels are inspected only when already enabled; no audit policy,
+channel or SACL is enabled. No source is assumed to contain the denied operation.
+All queries share one non-resetting 30-second release-based deadline, 64 examined
+records and 64 KiB of encoded stderr including context/completion framing.
+Query/enumeration/render/normal closure stay on their creating thread. Expiry
+requests cancellation only of an available query handle, publishes synchronized
+partial data and continues the original fatal path without waiting for a stuck
+query. Fatal-reader-owned static state/unfinished thread custody survives until
+process exit. Empty, inaccessible, malformed, unavailable, over-budget, truncated
+and closure/cancellation uncertainty remain distinct. Neither cancellation nor
+reader exit proves independent retirement. The original `0xc0000022` exit and
+later error 109 retain their existing framing; absent or corroborating records
+leave the denied operation unestablished. Further repairs require fresh joined
+matching-host evidence and a reviewed plan.
 
 SDK `Windows.h`, the private access-payload dependency graph and installed Git
 selected by `windowsExperimentGitRuntime` remain distinct inputs. Initial and

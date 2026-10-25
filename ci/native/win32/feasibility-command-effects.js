@@ -45,6 +45,11 @@ const execute = diagnosticCommand(
 const need = (v) => {
   if (!v) throw new Error("Incomplete Windows command custody");
 };
+function commandOperatingDiagnostic(bytes) {
+  return /^native-windows-command: operating-(?:sacl phase=N pid=[0-9]{1,10} birth=[0-9]{1,20} logon=[0-9]{1,20} policy=-?[0-9]{1,20} identity=[a-f0-9]{16}:[a-f0-9]{32} hash=[a-f0-9]{64} count=-?[0-9]{1,20} truncated=[01] status=-?[0-9]{1,20},-?[0-9]{1,20},-?[0-9]{1,20} close=-?[0-9]{1,20}|ace object=[0-3] index=[0-7] status=-?[0-9]{1,20} type=-?[0-9]{1,20} flags=-?[0-9]{1,20} mask=-?[0-9]{1,20} subject-match=(?:-1|[01]))\r?\n$/u.test(
+    bytes.toString("utf8"),
+  );
+}
 const regular = async (file) => {
   const st = await lstat(file);
   need(
@@ -1567,6 +1572,8 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           pending.set("ready", { resolve, reject }),
         );
         let brokerStderr = Buffer.alloc(0),
+          brokerStderrPending = Buffer.alloc(0),
+          operatingBytes = 0,
           brokerStderrInvalid = false;
         closed = new Promise((resolve) => {
           broker.once("error", fail);
@@ -1574,8 +1581,21 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             resolve({ code, signal: killed });
             rpc.end();
             errorOutput.end();
+            if (brokerStderrPending.length && !brokerStderrInvalid) {
+              if (brokerStderr.length + brokerStderrPending.length <= 4096)
+                brokerStderr = Buffer.concat([
+                  brokerStderr,
+                  brokerStderrPending,
+                ]);
+              else {
+                brokerStderrInvalid = true;
+                brokerStderr = Buffer.alloc(0);
+              }
+            }
             const incomplete =
-              brokerStderrInvalid || !broker.stderr.readableEnded;
+              brokerStderrInvalid ||
+              brokerStderrPending.length > 0 ||
+              !broker.stderr.readableEnded;
             const diagnosis = incomplete
               ? null
               : windowsFeasibilityDiagnostics(brokerStderr);
@@ -1658,12 +1678,39 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             brokerDiagnosticPhase = phase;
           }
           if (!brokerStderrInvalid) {
-            if (brokerStderr.length + v.length <= 4096)
-              brokerStderr = Buffer.concat([brokerStderr, v]);
-            else {
-              brokerStderrInvalid = true;
-              brokerStderr = Buffer.alloc(0);
+            for (let at = 0; at < v.length;) {
+              const newline = v.indexOf(10, at),
+                end = newline < 0 ? v.length : newline + 1;
+              if (brokerStderrPending.length + end - at > 4096) {
+                brokerStderrInvalid = true;
+                break;
+              }
+              brokerStderrPending = Buffer.concat([
+                brokerStderrPending,
+                v.subarray(at, end),
+              ]);
+              at = end;
+              if (newline < 0) break;
+              // These cached observations follow the original fatal diagnosis.
+              // Raw publication above is unchanged; neither carrier gains proof.
+              if (
+                commandOperatingDiagnostic(brokerStderrPending) &&
+                windowsFeasibilityDiagnostics(brokerStderr)?.failure &&
+                operatingBytes + brokerStderrPending.length <= 4096
+              )
+                operatingBytes += brokerStderrPending.length;
+              else if (brokerStderr.length + brokerStderrPending.length <= 4096)
+                brokerStderr = Buffer.concat([
+                  brokerStderr,
+                  brokerStderrPending,
+                ]);
+              else {
+                brokerStderrInvalid = true;
+                break;
+              }
+              brokerStderrPending = Buffer.alloc(0);
             }
+            if (brokerStderrInvalid) brokerStderr = Buffer.alloc(0);
           }
           bytes += v.length;
           if (bytes > 33554432)
@@ -2093,6 +2140,15 @@ export function createWindowsCommandEffects(dispatch, inputs) {
     },
     observe: (value, spec, signal) => observation(spec, signal),
     async retire(value, signal) {
+      const settlementDiagnostic = (facts) => {
+        try {
+          nativeDiagnostic("windows-command:settlement", {
+            stderr: JSON.stringify(facts),
+          });
+        } catch {
+          // Diagnostic output cannot bypass retirement or replace its outcome.
+        }
+      };
       if (!failed) phase = "command-close";
       retiring = true;
       cleanupDeadline = performance.now() + 30000;
@@ -2154,6 +2210,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           // Even a broken broker pipe cannot replace the early native custody.
           try {
             const stopped = await call("D");
+            settlementDiagnostic({
+              phase: "broker",
+              empty: stopped.empty ?? null,
+              admissionsClosed: stopped.admissionsClosed ?? null,
+            });
             if (setupVerified) {
               need(/^[1-9][0-9]{0,19}$/u.test(stopped.auditFrom));
               value.auditRetirement = stopped.auditFrom;
@@ -2166,6 +2227,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             fail(error);
           }
           const domain = await cleanupReader.inspect();
+          settlementDiagnostic({
+            phase: "independent-domain-verification",
+            empty: domain.empty,
+            admissionsClosed: domain.admissionsClosed,
+            emergency: domain.emergency ?? null,
+          });
           need(domain.empty === true && domain.admissionsClosed === true);
           emergency ||= domain.emergency === true;
           if (domain.emergency)
@@ -2196,6 +2263,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
           }
           const completion = await closed;
           await reading;
+          settlementDiagnostic({
+            phase: "capture-close",
+            code: completion.code,
+            signal: completion.signal,
+            captureRetired: stopped?.captureRetired ?? null,
+          });
           if (failure) throw failure;
           need(completion.code === 0 && !completion.signal);
           capture = setupVerified ? decoder.finish() : { admitted: false };
@@ -2304,6 +2377,11 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               let failure;
               try {
                 const actual = await restorationReader.finish(signal);
+                settlementDiagnostic({
+                  phase: "restoration",
+                  independent: actual.independent,
+                  restored: actual.restored,
+                });
                 need(actual.independent === true && actual.restored === true);
               } catch (error) {
                 failure = error;
@@ -2350,6 +2428,12 @@ export function createWindowsCommandEffects(dispatch, inputs) {
             );
             failure ??= error;
           }
+          settlementDiagnostic({
+            phase: "restoration-settlement",
+            restored: restored?.restored ?? null,
+            fixturesRemoved: restored?.fixturesRemoved ?? null,
+            readerRetired: reader?.retired ?? null,
+          });
           fixturesRetired =
             restored?.restored === true &&
             restored?.fixturesRemoved === true &&

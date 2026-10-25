@@ -7,6 +7,7 @@ import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { Script } from "node:vm";
 import { win32 as windowsPath } from "node:path";
+import { createNativeDiagnosticWriter } from "../ci/native/diagnostics.js";
 import {
   runWindowsFeasibilityCommand,
   windowsCommandEnvironment,
@@ -1502,7 +1503,7 @@ test("native command auditing queries the dynamic operating context, reverts and
   );
   const body = (name) =>
     new RegExp(
-      `static void ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|struct command_token_observation) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const effective = body("command_effective")
@@ -1513,6 +1514,8 @@ test("native command auditing queries the dynamic operating context, reverts and
     .replaceAll("&command_category", "command_category")
     .replace("&policy", "value=>policy=value");
   const auditing = body("command_case_auditing")
+    .replace("struct command_token_observation operating=", "const operating=")
+    .replace("&operating", "operating")
     .replaceAll("&command_preflight_owned.token", "tokenSlot")
     .replace("TOKEN_USER *subject", "const subject")
     .replace("TOKEN_STATISTICS *stats", "const stats")
@@ -1589,6 +1592,11 @@ test("native command auditing queries the dynamic operating context, reverts and
         sacls: [{}, {}],
         rejected: Array(4).fill(0),
       },
+      command_operating_sacls(indices) {
+        assert.equal(context.command_preflight_owned.impersonating, false);
+        assert.deepEqual(Array.from(indices), [2, 3]);
+        calls.push("ace-projection");
+      },
       command_action: 2,
       command_files: [11, 12, 13, 14],
       command_ids: ["inspect", "edit", "outside", "marker"],
@@ -1632,9 +1640,16 @@ test("native command auditing queries the dynamic operating context, reverts and
         if (fault === "revert") throw new Error("command-revert");
         return true;
       },
-      command_token_read(token) {
+      command_token_observe(token) {
         assert.equal(token, 19);
-        output += JSON.stringify({ authenticationId: "00000000:00000001" });
+        assert.equal(context.command_preflight_owned.impersonating, true);
+        calls.push("operating-token");
+        return { authenticationId: "00000000:00000001" };
+      },
+      command_token_write(value) {
+        assert.equal(context.command_preflight_owned.impersonating, false);
+        calls.push("token-output");
+        output += JSON.stringify(value);
       },
       AuditComputeEffectivePolicyByToken(token, category, count, out) {
         assert.deepEqual([token, category, count], [19, "file-system", 1]);
@@ -1734,13 +1749,16 @@ test("native command auditing queries the dynamic operating context, reverts and
       assert.deepEqual(calls, [
         "impersonate",
         "token",
+        "operating-token",
         "revert",
         "effective",
+        "token-output",
         "close",
         "id:13",
         "sacl:13",
         "id:14",
         "sacl:14",
+        "ace-projection",
       ]);
     }
     if (!["impersonate", "open"].includes(fault)) {
@@ -1774,6 +1792,123 @@ test("native command auditing queries the dynamic operating context, reverts and
     );
   }
   const observation = body("command_case_observe");
+  const projectToken = (text) =>
+    text
+      .replace("DWORD *container=", "const container=")
+      .replaceAll("*container", "container.value")
+      .replace("TOKEN_GROUPS *restricted=", "const restricted=")
+      .replace("TOKEN_STATISTICS *stats=", "const stats=")
+      .replace(
+        "struct command_token_observation value={0}; BYTE bytes[4096]={0};",
+        "const value={hash:{}},bytes=Buffer.alloc(4096);",
+      )
+      .replace(
+        "struct command_token_observation value=command_token_observe(token);",
+        "const value=command_token_observe(token);",
+      )
+      .replaceAll("->", ".")
+      .replace(
+        "value.authentication=stats.AuthenticationId",
+        "value.authentication={...stats.AuthenticationId}",
+      )
+      .replaceAll("bytes+used", "bytes.subarray(used)")
+      .replaceAll("&attributes", "attributeBytes(attributes)")
+      .replaceAll("&value", "value")
+      .replaceAll("sizeof(bytes)", "4096")
+      .replaceAll("(DWORD)", "")
+      .replace(/\b(?:DWORD|unsigned|PSID) /gu, "let ");
+  const tokenProgram = new Script(
+    [
+      ["command_token_observe", "token"],
+      ["command_token_write", "value"],
+      ["command_token_read", "token"],
+    ]
+      .map(
+        ([name, args]) =>
+          `function ${name}(${args}){${projectToken(body(name))}}`,
+      )
+      .join("\n") +
+      "\n({observe:command_token_observe,write:command_token_write,read:command_token_read})",
+  );
+  for (const cached of [false, true]) {
+    let output = "",
+      queries = 0,
+      queryAllowed = true;
+    const sid = Buffer.alloc(16, 1),
+      container = { value: 0 },
+      restricted = { GroupCount: 1, Groups: [{ Sid: sid, Attributes: 4 }] },
+      stats = { AuthenticationId: { HighPart: 1, LowPart: 2 } },
+      freed = [];
+    const attributeBytes = (value) => {
+      const bytes = Buffer.alloc(4);
+      bytes.writeUInt32LE(value);
+      return bytes;
+    };
+    const run = tokenProgram.runInNewContext({
+      Buffer,
+      TokenIsAppContainer: 1,
+      TokenRestrictedSids: 2,
+      TokenStatistics: 3,
+      need: assert.ok,
+      attributeBytes,
+      info(token, kind) {
+        assert.equal(token, 19);
+        assert.equal(queryAllowed, true);
+        queries++;
+        return [null, container, restricted, stats][kind];
+      },
+      IsValidSid: () => true,
+      GetLengthSid: (value) => value.length,
+      memcpy: (target, source, size) => source.copy(target, 0, 0, size),
+      command_sum: (bytes, size, out) => {
+        out.text = sha(bytes.subarray(0, size));
+      },
+      IsTokenRestricted(token) {
+        assert.equal(token, 19);
+        assert.equal(queryAllowed, true);
+        queries++;
+        return true;
+      },
+      command_integrity(token) {
+        assert.equal(token, 19);
+        assert.equal(queryAllowed, true);
+        queries++;
+        return 8192;
+      },
+      free(value) {
+        freed.push(value);
+        if (value === stats) stats.AuthenticationId.LowPart = 0;
+      },
+      printf(format, ...args) {
+        let i = 0;
+        output += format.replace(/%(?:08lx|lu|s)/gu, (match) => {
+          const value = args[i++];
+          return match === "%08lx"
+            ? value.toString(16).padStart(8, "0")
+            : String(value?.text ?? value);
+        });
+      },
+    });
+    if (cached) {
+      const value = run.observe(19);
+      assert.equal(output, "");
+      queryAllowed = false;
+      run.write(value);
+    } else run.read(19);
+    assert.equal(queries, 5);
+    assert.deepEqual(freed, [container, restricted, stats]);
+    assert.equal(
+      output,
+      JSON.stringify({
+        appContainer: false,
+        restricted: true,
+        restrictingSids: 1,
+        restrictedSidsSha256: sha(Buffer.concat([attributeBytes(4), sid])),
+        integrity: 8192,
+        authenticationId: "00000001:00000002",
+      }),
+    );
+  }
   assert.ok(observation.includes("command_case_auditing()"));
   for (const [operation, domain, value] of [
     ["command-client-impersonate", "win32", 5],
@@ -1951,6 +2086,7 @@ test("terminal capture requires a separate post-domain broker event and complete
           closed: Promise.resolve({ code: 0, signal: null }),
           reading: Promise.resolve(),
           nativeException: assert.fail,
+          settlementDiagnostic: () => {},
           fail: assert.fail,
         });
     if (fault) await assert.rejects(verify, fault);
@@ -5387,6 +5523,7 @@ async function brokerCloseBoundary({ control = false, read = false } = {}) {
     start >= 0 && end > start && failureStart >= 0 && failureEnd > failureStart,
   );
   const boundary = new Script(`(() => {
+    ${source.slice(source.indexOf("function commandOperatingDiagnostic"), source.indexOf("\nconst regular"))}
     let closed, failed, brokerDiagnosticFirst, brokerDiagnosticPhase, retiring = false, retirementFailure, bytes = 0, reading = Promise.resolve();
     let phase = ${JSON.stringify(control ? "permitted-control" : "broker-setup")}, failurePhase, probeOutput = "",
       controlStderr = ${control ? "Buffer.alloc(0)" : "null"}, controlStderrInvalid = false,
@@ -5505,6 +5642,60 @@ test("actual broker pre-ready closure retains fragmented refusal and separate cl
     else assert.match(result.cleanup.cause.detail, /remains incomplete/u);
     assert.deepEqual(run.requests, []);
     assert.deepEqual(run.calls, ["prepare"]);
+  }
+});
+
+test("cached SACL diagnostics preserve silent success, strict refusal errors and bounded raw publication", async () => {
+  const open = await brokerCloseBoundary();
+  const refusal =
+    "native-windows: operation=command-marker-barrier domain=invariant value=0\n";
+  const metadata =
+    `native-windows-command: operating-sacl phase=N pid=43 birth=90 logon=7 policy=3 identity=${"a".repeat(16)}:${"b".repeat(32)} hash=${PIN} count=1 truncated=0 status=0,0,0 close=0\n` +
+    "native-windows-command: operating-ace object=2 index=0 status=0 type=2 flags=192 mask=3 subject-match=1\n";
+  for (const fault of [
+    null,
+    "malformed",
+    "truncated",
+    "overflow",
+    "orphan",
+    "success",
+  ]) {
+    const f = open(),
+      bytes = Buffer.from(
+        fault === "success"
+          ? ""
+          : fault === "orphan"
+            ? metadata
+            : refusal +
+              (fault === "malformed"
+                ? metadata.replace("subject-match=1", "subject-match=2")
+                : fault === "truncated"
+                  ? metadata.slice(0, -1)
+                  : fault === "overflow"
+                    ? metadata.repeat(20)
+                    : metadata),
+      );
+    for (let at = 0; at < bytes.length; at += 7)
+      f.broker.stderr.write(bytes.subarray(at, at + 7));
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit(
+      "close",
+      ["success", "orphan"].includes(fault) ? 0 : 126,
+      null,
+    );
+    const error = await f.outcome;
+    assert.deepEqual(Buffer.concat(f.raw), bytes);
+    if (fault === "success") {
+      assert.equal(f.failure(), undefined);
+      continue;
+    }
+    assert.equal(error.nativeDiagnosticInvalid, fault !== null, fault);
+    if (!fault) {
+      assert.equal(error.stderr.toString(), refusal);
+      assert.match(error.feasibilityCause.detail, /command-marker-barrier/u);
+    } else assert.equal(f.failure(), error);
   }
 });
 
@@ -6142,6 +6333,19 @@ test("failure collection uses the original cleanup deadline and retains the firs
 });
 
 test("original gate audit queries retain installed ACEs and effective subject facts without admitting delivery", async () => {
+  const effectsSource = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const isObservation = new Script(
+    effectsSource.slice(
+      effectsSource.indexOf("function commandOperatingDiagnostic"),
+      effectsSource.indexOf("\nconst regular"),
+    ) + "\ncommandOperatingDiagnostic",
+  ).runInNewContext();
   const capture = commandCaptureFixture(await commandCaptureProgram());
   capture.api.command_observe_failure();
   const delivery =
@@ -6156,7 +6360,7 @@ test("original gate audit queries retain installed ACEs and effective subject fa
   );
   const body = (name) =>
     new RegExp(
-      `static (?:void|DWORD) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|DWORD|struct command_gate_observation) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   // Project C storage and output pointers; execute the query and writer bodies.
@@ -6170,6 +6374,15 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         "struct command_gate_observation value={0};",
         "const value={entries:Array.from({length:8},()=>({sid:{text:''}})),sid:{text:''},status:[]};",
       )
+      .replace(
+        "struct command_gate_observation value=command_sacl_projection(command_files[3]);",
+        "const value=command_sacl_projection(command_files[3]);",
+      )
+      .replace(
+        "struct command_gate_observation value=command_sacl_projection(command_files[indices[i]]);",
+        "const value=command_sacl_projection(command_files[indices[i]]);",
+      )
+      .replace("LONGLONG status[9];", "const status=[];")
       .replace("ACL_SIZE_INFORMATION size={0};", "const size={};")
       .replace("TOKEN_STATISTICS stats={0};", "const stats={};")
       .replace(
@@ -6190,6 +6403,10 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       .replace(
         "const struct command_gate_observation *value=&command_gate_observed;",
         "const value=command_gate_observed;",
+      )
+      .replace(
+        "const struct command_gate_observation *value=&command_operating_observed.values[i];",
+        "const value=command_operating_observed.values[i];",
       )
       .replace("ACE_HEADER *ace=NULL", "let ace=NULL")
       .replace(
@@ -6217,15 +6434,18 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       .replaceAll(".sid[0]", ".sid.text")
       .replace(/\((?:DWORD|unsigned)\)/gu, "")
       .replace(
-        /\b(?:DWORD|BOOL|PSECURITY_DESCRIPTOR|PACL|HANDLE|AUDIT_POLICY_INFORMATION|LPSTR|size_t|unsigned)\s+\*?/gu,
+        /\b(?:DWORD|BOOL|PSECURITY_DESCRIPTOR|PACL|HANDLE|AUDIT_POLICY_INFORMATION|LPSTR|size_t|unsigned|int)\s+\*?/gu,
         "let ",
       );
   const program =
     new Script(`function command_gate_sid(sid,text){${project(body("command_gate_sid"))}}
+    function command_sacl_projection(file){${project(body("command_sacl_projection"))}}
+    function command_operating_sacls(indices){${project(body("command_operating_sacls"))}}
+    function command_operating_sacls_write(output){${project(body("command_operating_sacls_write"))}}
     function query(api,originalError){${project(body("command_gate_audit"))}}
     function command_gate_audit_write(output){${project(body("command_gate_audit_write"))}}
     function fail(){${project(body("command_observe_failure"))}}
-    ({query,write:command_gate_audit_write,fail})`);
+    ({query,write:command_gate_audit_write,fail,sample:command_operating_sacls,writeOperating:command_operating_sacls_write})`);
   for (const fault of [
     null,
     "sacl",
@@ -6243,10 +6463,13 @@ test("original gate audit queries retain installed ACEs and effective subject fa
     "policy-mismatch",
     "close",
     "truncated",
+    "descriptor-close",
   ]) {
     let lastError = 5,
       output = "",
-      queries = 0;
+      queries = 0,
+      sampling = false,
+      flushed = 0;
     const remembered = [],
       closed = [],
       freed = [],
@@ -6267,11 +6490,33 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       TokenStatistics: 10,
       TokenImpersonation: 2,
       command_files: [0, 1, 2, 3],
+      command_case_pid: 43,
+      command_case_birth: 90,
+      command_case_logon: 7,
+      command_ids: [
+        "a",
+        "b",
+        "a".repeat(16) + ":" + "b".repeat(32),
+        "c".repeat(16) + ":" + "d".repeat(32),
+      ],
+      errno: 9,
       command_prerequisite_cleanup_failed: false,
       command_category: "file-system",
       command_gate_observed: { observed: false },
+      command_operating_observed: {
+        observed: false,
+        subject: {},
+        indices: [],
+        hashes: [{}, {}],
+        values: [],
+      },
       command_delivery_observe: () => {},
-      command_delivery: { rejected: Array(4).fill(0) },
+      command_delivery: {
+        rejected: Array(4).fill(0),
+        subject: "S-1-5-21-1",
+        sacls: [PIN, PIN],
+        policy: 3,
+      },
       command_observed: {
         active: true,
         pid: 43,
@@ -6295,8 +6540,9 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       GetSecurityInfo(file, kind, mask, owner, group, dacl, sacl, out) {
         assert.deepEqual(
           [file, kind, mask, owner, group, dacl, sacl],
-          [3, 1, 8, null, null, null, null],
+          [sampling ? file : 3, 1, 8, null, null, null, null],
         );
+        assert.ok([2, 3].includes(file));
         queries++;
         lastError = 5;
         if (fault === "sacl") return 5;
@@ -6341,6 +6587,11 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         return true;
       },
       OpenThreadToken(thread, access, self, out) {
+        assert.equal(
+          sampling,
+          false,
+          "held SACL sampling cannot replay the operating token query after reversal",
+        );
         assert.deepEqual([thread, access, self], [42, 8, true]);
         lastError = 1008;
         if (fault === "token") return false;
@@ -6392,6 +6643,9 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       LocalFree: (value) => {
         freed.push(value);
         lastError = 91;
+        return fault === "descriptor-close" && value === "descriptor"
+          ? value
+          : null;
       },
       AuditFree: (value) => {
         freed.push(value);
@@ -6400,9 +6654,13 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       cleanup_error: (...cause) => cleanup.push(cause),
       remember: (...cause) => remembered.push(cause),
       strlen: (value) => value.length,
+      strcmp: (a, b) => Number((a?.text ?? a) !== (b?.text ?? b)),
       memcpy: (target, value) => {
-        if (Array.isArray(target)) target.push(...value);
-        else target.text = typeof value === "string" ? value : value.text;
+        if (Array.isArray(target)) target.splice(0, target.length, ...value);
+        else {
+          target.text = typeof value === "string" ? value : value.text;
+          target[0] = target.text[0];
+        }
       },
       fprintf(stream, format, ...args) {
         let i = 0;
@@ -6410,7 +6668,11 @@ test("original gate audit queries retain installed ACEs and effective subject fa
           const value = args[i++];
           return match.endsWith("x")
             ? value.toString(16).padStart(8, "0")
-            : String(value?.text ?? value);
+            : String(
+                typeof value === "boolean"
+                  ? Number(value)
+                  : (value?.text ?? value),
+              );
         });
         lastError = 90;
       },
@@ -6420,7 +6682,9 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       fputc: (char) => {
         output += char;
       },
-      fflush: () => {},
+      fflush: () => {
+        flushed = output.length;
+      },
     };
     const run = program.runInNewContext(api);
     run.write(api.stderr);
@@ -6510,6 +6774,62 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         windowsFeasibilityDiagnostics(observation + refusal).failure,
         { operation: "command-gate-read", domain: "win32", value: 5 },
       );
+    output = "";
+    sampling = true;
+    lastError = 5;
+    api.errno = 9;
+    run.sample([2, 3]);
+    assert.equal(queries, 3);
+    assert.equal(lastError, 5);
+    assert.equal(api.errno, 9);
+    assert.equal(
+      output,
+      "",
+      "successful sampling preserves silent broker stderr",
+    );
+    run.sample([2, 3]);
+    assert.equal(queries, 3);
+    api.command_delivery.subject = "S-1-5-21-2";
+    api.command_delivery.policy = 0;
+    api.command_case_logon = 8;
+    run.writeOperating(api.stderr);
+    assert.equal(output.split("operating-sacl phase=N").length - 1, 2);
+    assert.ok(
+      output.includes(
+        `pid=43 birth=90 logon=7 policy=3 identity=${api.command_ids[2]} hash=${PIN}`,
+      ),
+    );
+    assert.ok(Buffer.byteLength(output) < 4096);
+    for (const line of output.trimEnd().split("\n"))
+      assert.equal(isObservation(Buffer.from(line + "\n")), true);
+    if (fault === "descriptor-close") assert.match(output, /close=91/u);
+    if (!fault) assert.equal(output.split("subject-match=1").length - 1, 2);
+    if (fault === "unsupported") assert.match(output, /subject-match=-1/u);
+    const first = output;
+    run.sample([2, 3]);
+    assert.equal(output, first);
+    assert.equal(queries, 3);
+    const blocked = {};
+    output = "";
+    flushed = 0;
+    api.command_observed.audit[0] = 5;
+    for (const name of "subscription_flags subscription_query capture_wait capture_wait_error next_error scanned scanned_bytes records bytes action target_seen marker_seen case_finished setup_verified control control_completed control_verified closing retirement_seen".split(
+      " ",
+    ))
+      api["command_" + name] = 0;
+    api.command_delivery_observe = () => {
+      assert.match(output, /operating-sacl phase=N/u);
+      assert.equal(
+        flushed,
+        output.length,
+        "cached observations flush before post-refusal queries",
+      );
+      throw blocked;
+    };
+    assert.throws(
+      () => run.fail(),
+      (error) => error === blocked,
+    );
   }
 });
 
@@ -6791,6 +7111,7 @@ test("actual admission releases the checked child before a complete Job census w
       command_delivery_observe: () => {},
       command_delivery: { rejected: Array(4).fill(0) },
       command_gate_audit_write: () => {},
+      command_operating_sacls_write: () => {},
       admission: { hProcess: 41, hThread: 42, dwProcessId: 43, dwThreadId: 44 },
       command_processes: [41],
       command_threads: [42],
@@ -7416,6 +7737,7 @@ function commandCaptureFixture(
     },
     command_gate_observed: { observed: false },
     command_delivery_observe: () => {},
+    command_operating_sacls_write: () => {},
     command_delivery: { rejected: Array(4).fill(0) },
     command_subscription_query: { text: "" },
     command_subscription_flags: 0,
@@ -8412,7 +8734,7 @@ async function commandAuditInstallProgram() {
     ),
     body = source.slice(
       source.indexOf("static void command_audit_install(void) {"),
-      source.indexOf("static void command_token_read("),
+      source.indexOf("struct command_token_observation {"),
     ),
     script = new Script(
       "var command_install_from={}, command_install_to={}, command_install_error;" +
@@ -9401,6 +9723,7 @@ test("a failed restoration writer settles both early readers without replacing t
       retirementFailure: undefined,
       fixturesRetired: false,
       nativeException: () => {},
+      settlementDiagnostic: () => {},
       need: assert.ok,
       cleanupReader: {
         async finish(_signal, verify) {
@@ -9559,6 +9882,7 @@ test("actual rejected-setup retirement restores originals without rethrowing the
     "restoration-barrier",
     "reader-barrier",
     "abandon",
+    "diagnostic",
   ]) {
     const primary = Object.assign(new Error("broker setup authority absent"), {
         feasibilityCause: {
@@ -9573,6 +9897,12 @@ test("actual rejected-setup retirement restores originals without rethrowing the
         },
       }),
       calls = [],
+      diagnostics = [],
+      logged = [],
+      log = createNativeDiagnosticWriter((bytes) => {
+        if (fault === "diagnostic") throw new Error("Diagnostic sink closed");
+        logged.push(bytes);
+      }),
       file = { identity: "held", sha256: PIN, daclSha256: PIN },
       value = { original: { files: [file, file, file, file] } },
       context = {
@@ -9594,6 +9924,11 @@ test("actual rejected-setup retirement restores originals without rethrowing the
         need: assert.ok,
         digest: sha,
         nativeException: () => {},
+        nativeDiagnostic: (owner, value) => {
+          assert.equal(owner, "windows-command:settlement");
+          diagnostics.push(JSON.parse(value.stderr));
+          log(owner, value);
+        },
         settleWindowsCommandCustody,
         windowsCommandCleanupSnapshot,
         closed: Promise.resolve({ code: 0, signal: null }),
@@ -9674,14 +10009,33 @@ test("actual rejected-setup retirement restores originals without rethrowing the
     assert.deepEqual(result.cause, primary.feasibilityCause);
     assert.equal(
       result.cleanup.status,
-      fault ? "UNCERTAIN" : "PASS",
+      fault && fault !== "diagnostic" ? "UNCERTAIN" : "PASS",
       JSON.stringify(result.cleanup),
     );
-    if (fault)
+    if (fault && fault !== "diagnostic")
       assert.deepEqual(result.cleanup.cause, cleanup.feasibilityCleanup);
     else {
       assert.equal(result.cleanup.independent, true);
       assert.equal(result.cleanup.emergency, false);
+      assert.deepEqual(
+        diagnostics.map((value) => value.phase),
+        [
+          "broker",
+          "independent-domain-verification",
+          "capture-close",
+          "restoration",
+          "restoration-settlement",
+        ],
+      );
+      assert.equal(diagnostics[2].code, 0);
+      assert.equal(diagnostics[4].fixturesRemoved, true);
+      for (const value of diagnostics)
+        if (fault !== "diagnostic")
+          assert.ok(
+            Buffer.concat(logged)
+              .toString()
+              .includes(`"phase":"${value.phase}"`),
+          );
     }
     assert.deepEqual(f.requests, []);
     assert.equal(

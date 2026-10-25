@@ -2671,6 +2671,7 @@ test("actual witness completion preserves original child and parent refusals bef
       ownership_owner: { hProcess: "owner" },
       reader_witness: { active: false, child: Buffer.alloc(1024) },
       reader_diagnostics_ready: true,
+      ownership_refusal_collect: () => {},
       reader_command: outsideControl
         ? "ownership-outside-control"
         : "ownership-witness",
@@ -3393,6 +3394,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       f.child.stdout.write('{"sequence":2,"value":');
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
+        ownership_refusal_collect: () => {},
         signature_trust: { active: false },
         reader_witness_failure: () => false,
         ownership_failure_write: () => false,
@@ -4532,6 +4534,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_transfer: context,
           reader_command: command,
           reader_diagnostics_ready: true,
+          ownership_refusal_collect: () => {},
           signature_trust: { active: false },
           reader_witness_failure: () => false,
           ownership_failure_write: () => false,
@@ -6475,6 +6478,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
         Object.assign(api, {
           capturedError: refusalError,
           reader_diagnostics_ready: true,
+          ownership_refusal_collect: () => {},
           signature_trust: { active: false },
           strrchr,
           reader_witness_failure: () => false,
@@ -6549,6 +6553,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
   const fallback = [];
   dispatch.runInNewContext({
     reader_diagnostics_ready: true,
+    ownership_refusal_collect: () => {},
     signature_trust: { active: false },
     strrchr,
     reader_open_failure() {
@@ -12151,6 +12156,843 @@ test("the native ownership error drain preserves launcher facts through fragment
       f.child.stdin.destroy();
       f.child.stdout.destroy();
       f.child.stderr.destroy();
+    }
+  }
+});
+
+test("original-child refusal collection owns bounded partial publication and cancellation until the fatal reader exits", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|DWORD(?: WINAPI)?) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source)[1];
+  const project = (text) =>
+    text
+      .replace(
+        "struct refusal_report report=original_refusal.report;",
+        "let report=structuredClone(original_refusal.report);",
+      )
+      .replace("struct refusal_report report={0};", "let report=freshReport();")
+      .replaceAll(
+        "report=original_refusal.report;",
+        "report=structuredClone(original_refusal.report);",
+      )
+      .replace(
+        "goto finished;",
+        "report.finished=true;refusal_publish(null,report);return 0;",
+      )
+      .replace(
+        "original_refusal.report=*report;",
+        "original_refusal.report=structuredClone(report);",
+      )
+      .replaceAll("report->", "report.")
+      .replace(/(?<!&)&report\b/gu, "report")
+      .replace(
+        /const WCHAR \*(channels|paths)\[\]=\{([^;]+)\};/gu,
+        "const $1=[$2];",
+      )
+      .replace("WCHAR from[32],to[32];", "const from={},to={};")
+      .replace("WCHAR expression[1024];", "const expression={};")
+      .replace("EVT_VARIANT enabled={0};", "const enabled={};")
+      .replace("FILETIME time;", "const time={};")
+      .replace(
+        "((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime",
+        "time.ticks",
+      )
+      .replace(
+        "char image[16385],subject[737],identity[33],context[20000];",
+        "const image={},subject={},identity={},context={};",
+      )
+      .replace("char output[65536];", "const output={};")
+      .replace(
+        "strcpy_s(original_refusal.command,64,reader_command);",
+        "original_refusal.command=reader_command;",
+      )
+      .replace(
+        "strncpy_s(original_refusal.source,64,source,_TRUNCATE);",
+        "original_refusal.source=source.slice(0,63);",
+      )
+      .replace(
+        "strcpy_s(original_refusal.hash,65,entries[6].pin);",
+        "original_refusal.hash=entries[6].pin;",
+      )
+      .replaceAll(
+        "original_refusal.bytes+original_refusal.used",
+        "{target:original_refusal.bytes,offset:original_refusal.used}",
+      )
+      .replaceAll("output+used", "{target:output,offset:used}")
+      .replaceAll("identity+i*2", "{target:identity,offset:i*2}")
+      .replaceAll("sizeof(original_refusal.bytes)", "65536")
+      .replaceAll(
+        /sizeof\((output|image|subject|identity|context|enabled)\)/gu,
+        (_, name) =>
+          ({
+            output: 65536,
+            image: 16385,
+            subject: 737,
+            identity: 33,
+            context: 20000,
+            enabled: 16,
+          })[name],
+      )
+      .replace(
+        /(?<!&)&(used|count|event)\b/gu,
+        (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replace(/(?<!&)&(refusal_lock|enabled|time)\b/gu, "$1")
+      .replaceAll('L"', '"')
+      .replace(/\((?:DWORD|ULONGLONG|void)\)/gu, "")
+      .replace(
+        /\b(?:const )?(?:EVT_HANDLE|DWORD|BOOL|LONGLONG|ULONGLONG|unsigned|size_t|int) /gu,
+        "let ",
+      );
+  const program = new Script(
+    [
+      ["refusal_remaining", ""],
+      ["refusal_publish", "line,report"],
+      ["refusal_worker", "unused"],
+      ["ownership_refusal_collect", "source,line,error"],
+    ]
+      .map(
+        ([name, args]) => `function ${name}(${args}){${project(body(name))}}`,
+      )
+      .join("\n") + "\n({collect:ownership_refusal_collect})",
+  );
+  for (const fault of [
+    null,
+    "empty",
+    "denied",
+    "disabled",
+    "malformed",
+    "event-close",
+    "query-close",
+    "context-close",
+    "channel-close",
+    "thread-close",
+    "create",
+    "query-pending",
+    "wait",
+    "next-pending",
+    "cancel",
+    "deadline",
+    "record-cap",
+    "byte-cap",
+    "publication",
+    "write",
+    "other-command",
+    "unreleased",
+    "already-expired",
+  ]) {
+    let tick = fault === "already-expired" ? 30001 : 0,
+      lastError = 109,
+      worker = false,
+      locked = false,
+      entry;
+    const calls = [],
+      writes = [],
+      closed = new Set(),
+      blocked = {};
+    let serial = 0;
+    const text = (v) => (typeof v === "object" ? (v?.text ?? "") : String(v));
+    const freshReport = () => ({
+      examined: 0,
+      records: 0,
+      joined: 0,
+      malformed: 0,
+      renderError: 0,
+      closeError: 0,
+      query: [-1, -1, -1],
+      finished: false,
+      truncated: false,
+      overBudget: false,
+    });
+    const handle = (kind) => ({ kind, serial: serial++, next: 0 });
+    const api = {
+      structuredClone,
+      freshReport,
+      errno: 9,
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      ERROR_ACCESS_DENIED: 5,
+      ERROR_NOT_SUPPORTED: 50,
+      ERROR_INVALID_DATA: 13,
+      ERROR_TIMEOUT: 1460,
+      ERROR_NO_MORE_ITEMS: 259,
+      WAIT_FAILED: 4294967295,
+      WAIT_TIMEOUT: 258,
+      WAIT_OBJECT_0: 0,
+      EvtChannelConfigEnabled: 0,
+      EvtVarTypeBoolean: 13,
+      EvtQueryChannelPath: 1,
+      EvtQueryReverseDirection: 512,
+      EvtRenderContextValues: 0,
+      original_refusal: {
+        tried: false,
+        sent: true,
+        pid: 43,
+        birth: 90,
+        tick: 0,
+        from: 100,
+        to: 0,
+        image: {},
+        subject: {},
+        imageId: {},
+        bytes: { text: "" },
+        used: 0,
+        query: null,
+        thread: null,
+        report: freshReport(),
+      },
+      ownership_released: fault !== "unreleased",
+      ownership_count: 1,
+      ownership_creation_verified: true,
+      reader_command:
+        fault === "other-command" ? "ownership-control" : "ownership-output",
+      sequence: 46,
+      candidate: "a".repeat(40),
+      nonce: "b".repeat(32),
+      case_record: { accountSid: "S-1-5-21-7" },
+      entries: Array.from({ length: 7 }, () => ({
+        path: "C:\\fixture\\payload.exe",
+        pin: "c".repeat(64),
+        file: {
+          id: {
+            VolumeSerialNumber: 7,
+            FileId: { Identifier: Array(16).fill(2) },
+          },
+        },
+      })),
+      refusal_lock: {},
+      stderr: {},
+      GetLastError: () => lastError,
+      SetLastError: (v) => {
+        lastError = v;
+      },
+      GetTickCount64: () => tick,
+      GetSystemTimePreciseAsFileTime: (out) => {
+        out.ticks = 200;
+      },
+      strcmp: (a, b) => Number(a !== b),
+      strlen: (v) => text(v).length,
+      AcquireSRWLockExclusive: () => {
+        assert.equal(locked, false);
+        locked = true;
+      },
+      ReleaseSRWLockExclusive: () => {
+        assert.equal(locked, true);
+        locked = false;
+      },
+      TryAcquireSRWLockExclusive: () => {
+        if (fault === "publication") return false;
+        assert.equal(locked, false);
+        locked = true;
+        return true;
+      },
+      wcscpy_s: (out, _size, v) => {
+        out.text = text(v);
+      },
+      refusal_hex: (v, out) => {
+        out.text = Array.from(text(v), (c) =>
+          c.charCodeAt(0).toString(16).padStart(4, "0"),
+        ).join("");
+        return true;
+      },
+      refusal_time: (v, out) => {
+        out.text = String(v);
+        return true;
+      },
+      memcpy: (out, input, size) => {
+        const target = out.target ?? out,
+          offset = out.offset ?? 0;
+        target.text =
+          text(target).slice(0, offset) + text(input).slice(0, size);
+      },
+      sprintf_s(out, _size, format, ...values) {
+        let index = 0;
+        const rendered = format.replace(
+          /%(?:02x|llu|lld|lu|ls|[sud])/gu,
+          (match) => {
+            const v = values[index++];
+            return match === "%02x"
+              ? v.toString(16).padStart(2, "0")
+              : match.endsWith("s")
+                ? text(v)
+                : String(Number(v));
+          },
+        );
+        assert.equal(index, values.length);
+        api.memcpy(out, rendered, rendered.length);
+        return rendered.length;
+      },
+      swprintf_s(out, _size, format, ...values) {
+        out.text = format.replace(/%ls/gu, () => text(values.shift()));
+        return out.text.length;
+      },
+      CreateThread(_sa, _size, callback) {
+        calls.push("thread-create");
+        entry = callback;
+        if (fault === "create") {
+          lastError = 5;
+          return null;
+        }
+        return 400;
+      },
+      WaitForSingleObject(thread, remaining) {
+        assert.deepEqual([thread, remaining], [400, 30000]);
+        if (fault === "wait") {
+          lastError = 6;
+          return 4294967295;
+        }
+        worker = true;
+        try {
+          entry(null);
+        } catch (error) {
+          assert.equal(error, blocked);
+          tick = 30001;
+          return 258;
+        } finally {
+          worker = false;
+        }
+        return 0;
+      },
+      EvtOpenChannelConfig() {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        return handle("channel");
+      },
+      EvtGetChannelConfigProperty(
+        _handle,
+        _property,
+        _flags,
+        _size,
+        out,
+        used,
+      ) {
+        out.Type = 13;
+        out.BooleanVal = fault !== "disabled";
+        used.value = 16;
+        return true;
+      },
+      EvtCreateRenderContext(count, paths) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.equal(count, 15);
+        assert.equal(paths.length, 15);
+        assert.equal(
+          paths.some((p) => p.includes("Execution")),
+          false,
+        );
+        return handle("context");
+      },
+      EvtQuery(_session, channel, query) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.ok(query.text.includes('"100"') && query.text.includes('"200"'));
+        calls.push(`query:${channel}`);
+        if (fault === "query-pending") throw blocked;
+        if (fault === "denied") {
+          lastError = 5;
+          return null;
+        }
+        return handle("query");
+      },
+      EvtNext(query, count, out, timeout, _flags, returned) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.deepEqual([count, timeout], [1, 0]);
+        calls.push("next");
+        if (["next-pending", "cancel"].includes(fault)) throw blocked;
+        if (
+          fault === "empty" ||
+          (!["record-cap", "byte-cap"].includes(fault) && query.next++ === 2)
+        ) {
+          lastError = 259;
+          return false;
+        }
+        returned.value = 1;
+        out.value = handle("event");
+        if (fault === "deadline") tick = 30001;
+        return true;
+      },
+      refusal_record(context, event, channel, report) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        calls.push("render");
+        if (fault === "malformed") {
+          report.malformed++;
+          return;
+        }
+        report.records++;
+        report.joined += channel === 0;
+        api.refusal_publish(
+          "native-windows-original-child: record " +
+            "x".repeat(fault === "byte-cap" ? 5000 : 5) +
+            "\n",
+          report,
+        );
+      },
+      EvtClose(value) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.equal(closed.has(value), false);
+        calls.push(`close:${value.kind}`);
+        if (fault === value.kind + "-close") {
+          lastError = 7;
+          return false;
+        }
+        closed.add(value);
+        return true;
+      },
+      EvtCancel(query) {
+        assert.equal(worker, false);
+        assert.equal(locked, true);
+        assert.equal(query, api.original_refusal.query);
+        assert.equal(closed.has(query), false);
+        calls.push("cancel");
+        lastError = 8;
+        return fault !== "cancel";
+      },
+      CloseHandle(thread) {
+        assert.equal(worker, false);
+        assert.equal(thread, 400);
+        calls.push("thread-close");
+        lastError = 7;
+        return fault !== "thread-close";
+      },
+      fwrite(value, _unit, size) {
+        assert.ok(size <= 65536);
+        assert.equal(text(value).length, size);
+        writes.push(text(value));
+        api.errno = 22;
+        lastError = 87;
+        return fault === "write" ? 0 : size;
+      },
+      fflush: () => -1,
+    };
+    const run = program.runInNewContext(api);
+    const publisher = new Script(
+      `(line,report)=>{${project(body("refusal_publish"))}}`,
+    ).runInNewContext(api);
+    api.refusal_publish = publisher;
+    run.collect("custody.h", 421, 109);
+    assert.equal(lastError, 109, fault);
+    assert.equal(api.errno, 9, fault);
+    assert.equal(locked, false, fault);
+    if (["other-command", "unreleased"].includes(fault)) {
+      assert.deepEqual(calls, []);
+      assert.deepEqual(writes, []);
+      continue;
+    }
+    const output = writes.join("");
+    assert.ok(output.length <= 65536, fault);
+    assert.match(
+      output,
+      /command=ownership-output sequence=46 source=custody.h line=421 error=109/u,
+    );
+    assert.match(output, /resume-time=unavailable/u);
+    assert.ok(api.original_refusal.report.examined <= 64);
+    if (["next-pending", "cancel", "query-pending", "wait"].includes(fault)) {
+      assert.equal(api.original_refusal.thread, 400);
+      assert.equal(calls.includes("thread-close"), false);
+      assert.match(output, /incomplete=1/u);
+      assert.match(output, /closure-uncertain=1/u);
+      assert.equal(
+        calls.includes("cancel"),
+        !["query-pending", "wait"].includes(fault),
+      );
+    } else if (fault !== "create" && fault !== "already-expired")
+      assert.equal(calls.filter((v) => v === "thread-close").length, 1);
+    if (fault === "record-cap")
+      assert.equal(api.original_refusal.report.examined, 64);
+    if (fault === "byte-cap") assert.match(output, /truncated=1/u);
+    if (fault === "empty") assert.match(output, /empty=1/u);
+    if (fault === "denied") assert.match(output, /inaccessible=1/u);
+    if (fault === "wait") assert.match(output, /wait-error=6/u);
+    if (fault?.endsWith("-close"))
+      assert.match(
+        output,
+        /closure-uncertain=1/u,
+        `${fault}: ${calls.join(",")}`,
+      );
+    const before = calls.length;
+    run.collect("other.c", 1, 5);
+    assert.equal(calls.length, before);
+    assert.equal(writes.length, 1);
+  }
+  const failure = body("reader_failure");
+  assert.ok(
+    failure.indexOf("ownership_refusal_collect") <
+      failure.indexOf("reader_witness_failure"),
+  );
+});
+
+test("original-child typed events join only supported payload identity, time and failed-access schema", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = (name) => {
+    const at = source.indexOf(`${name}(`),
+      start = source.indexOf("{", at);
+    return source.slice(start + 1, source.indexOf("\n}", start));
+  };
+  // Replace storage, pointer addresses and integer representation, keeping the
+  // native projection, type checks and joins as the executed source bodies.
+  const project = (text) =>
+    text
+      .replace(
+        "union { EVT_VARIANT alignment; BYTE bytes[32768]; } buffer;DWORD used=0,count=0;",
+        "const buffer={bytes:{address:1000}};let used=0,count=0;",
+      )
+      .replace(
+        "EVT_VARIANT *v=(void *)buffer.bytes;",
+        "const v=buffer.bytes.variants;",
+      )
+      .replace(
+        "const unsigned strings[]={0,6,9,10,12,13};",
+        "const strings=[0,6,9,10,12,13];",
+      )
+      .replace(
+        "WCHAR subjectText[184]={0};LPWSTR converted=NULL;",
+        "const subjectText={};let converted=null;",
+      )
+      .replace(
+        "uintptr_t start=(uintptr_t)value->StringVal,first=(uintptr_t)buffer,last=first+used;",
+        "let start=value.StringVal.address,first=buffer.address,last=first+used;",
+      )
+      .replace(
+        "uintptr_t first=(uintptr_t)buffer.bytes,start=(uintptr_t)v[7].SidVal,last=first+used;",
+        "let first=buffer.bytes.address,start=v[7].SidVal.address,last=first+used;",
+      )
+      .replace(
+        "((SID *)v[7].SidVal)->SubAuthorityCount",
+        "v[7].SidVal.SubAuthorityCount",
+      )
+      .replace(
+        "char p[1025],im[16385],sub[737],ty[1025],obj[16385],why[16385],line[57344];",
+        "const p={},im={},sub={},ty={},obj={},why={},line={};",
+      )
+      .replace(
+        "unsigned parts[6]={0},starts[6]={0,5,8,11,14,17};",
+        "const parts=Array(6).fill(0),starts=[0,5,8,11,14,17];",
+      )
+      .replace(
+        "WCHAR c=text[starts[i]+j];",
+        "let c=text.charCodeAt(starts[i]+j);",
+      )
+      .replaceAll("c<L'0'||c>L'9'", "c<48||c>57")
+      .replaceAll("c-L'0'", "c-48")
+      .replaceAll("text[i]-L'0'", "Number(text[i])")
+      .replace("SYSTEMTIME time={0};", "const time={};")
+      .replace("FILETIME parsed;", "const parsed={};")
+      .replace(
+        "(((ULONGLONG)parsed.dwHighDateTime<<32)|parsed.dwLowDateTime)",
+        "parsed.ticks",
+      )
+      .replace("WCHAR *end;", "const end={value:''};")
+      .replace("bytes[0]=0;", "bytes.text='';")
+      .replace("bytes+i*4", "{target:bytes,offset:i*4}")
+      .replace("(unsigned)text[i]", "unit(text,i)")
+      .replaceAll("*end", "end.value")
+      .replace(
+        "keywords&4503599627370496ULL",
+        "BigInt(keywords)&4503599627370496n",
+      )
+      .replace(
+        "keywords&9007199254740992ULL",
+        "BigInt(keywords)&9007199254740992n",
+      )
+      .replaceAll("&v[strings[i]]", "v[strings[i]]")
+      .replace(/&v\[(\d+)\]/gu, "v[$1]")
+      .replaceAll("&time,&parsed", "time,&parsed")
+      .replace(
+        /(?<!&)&(used|count|id|version|time|keywords|pid|logon|mask|birth|converted)\b/gu,
+        (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+      )
+      .replace(/(?<!&)&(end|parsed)\b/gu, "$1")
+      .replace(
+        /sizeof\((buffer.bytes|EVT_VARIANT|WCHAR|p|im|sub|ty|obj|why|line)\)/gu,
+        (_, name) =>
+          ({
+            "buffer.bytes": 32768,
+            EVT_VARIANT: 16,
+            WCHAR: 2,
+            p: 1025,
+            im: 16385,
+            sub: 737,
+            ty: 1025,
+            obj: 16385,
+            why: 16385,
+            line: 57344,
+          })[name],
+      )
+      .replaceAll("value->", "value.")
+      .replaceAll("report->", "report.")
+      .replaceAll(",*", ",")
+      .replaceAll("*number", "number.value")
+      .replaceAll("*ticks", "ticks.value")
+      .replace(/\((?:WORD|ULONGLONG)\)/gu, "")
+      .replaceAll("L'", "'")
+      .replaceAll('L"', '"')
+      .replace(/\bconst WCHAR \*/gu, "let ")
+      .replace(/\b(?:DWORD|ULONGLONG|BOOL|unsigned|size_t|int) /gu, "let ");
+  const program = new Script(
+    [
+      ["refusal_text", "value,buffer,used"],
+      ["refusal_number", "value,buffer,used,number"],
+      ["refusal_event_time", "value,buffer,used,ticks"],
+      ["refusal_hex", "text,bytes,capacity"],
+      ["refusal_record", "context,event,channel,report"],
+    ]
+      .map(
+        ([name, args]) => `function ${name}(${args}){${project(body(name))}}`,
+      )
+      .join("\n") + "\nrefusal_record(context,event,channel,report)",
+  );
+  const text = (value) => value?.text ?? String(value ?? "");
+  for (const fault of [
+    null,
+    "numeric",
+    "sid",
+    "sid-close",
+    "sid-bounds",
+    "render",
+    "oversized",
+    "count",
+    "pointer",
+    "unterminated",
+    "array",
+    "pid",
+    "missing-pid",
+    "image",
+    "principal",
+    "missing-principal",
+    "logon",
+    "mask",
+    "stale",
+    "future",
+    "birth",
+    "success",
+    "provider",
+    "version",
+    "application",
+    "application-birth",
+    "application-pid",
+    "application-future",
+    "code-integrity",
+    "long-name",
+    "iso",
+  ]) {
+    const string = (value, address = 1400) =>
+      Object.assign(new String(value), { address });
+    const str = (value) => ({ Type: 1, StringVal: string(value) }),
+      num = (value) => str(String(value));
+    const v = [
+      str("Microsoft-Windows-Security-Auditing"),
+      num(4656),
+      num(1),
+      { Type: 17, FileTimeVal: 150 },
+      num(4503599627370496),
+      str("0x2b"),
+      str("C:\\fixture\\payload.exe"),
+      str("S-1-5-21-7"),
+      str("0x7"),
+      str("File"),
+      str("C:\\fixture\\target"),
+      str("0x2"),
+      str("%%reason"),
+      str("%%access"),
+      num(90),
+    ];
+    if (fault === "numeric") v[5] = { Type: 10, UInt64Val: 43 };
+    if (fault?.startsWith("sid"))
+      v[7] = {
+        Type: 19,
+        SidVal: {
+          address: fault === "sid-bounds" ? 33760 : 1600,
+          SubAuthorityCount: 4,
+        },
+      };
+    if (fault === "pointer") v[6].StringVal.address = 999;
+    if (fault === "unterminated") v[6].StringVal = string("x".repeat(20000));
+    if (fault === "array") v[6].Type = 129;
+    if (fault === "pid") v[5] = num(44);
+    if (fault === "missing-pid") v[5] = { Type: 0 };
+    if (fault === "image") v[6] = str("C:\\other.exe");
+    if (fault === "principal") v[7] = str("S-1-5-21-8");
+    if (fault === "missing-principal") v[7] = { Type: 0 };
+    if (fault === "logon") v[8] = str("7x");
+    if (fault === "mask") v[11] = str("-1");
+    if (fault === "stale") v[3].FileTimeVal = 99;
+    if (fault === "future") v[3].FileTimeVal = 201;
+    if (fault === "birth") v[3].FileTimeVal = 80;
+    if (fault === "success") v[4] = num(9007199254740992);
+    if (fault === "provider") v[0] = str("Other provider");
+    if (fault === "version") v[2] = num(2);
+    if (fault?.startsWith("application")) {
+      v[0] = str("Application Error");
+      v[1] = num(1000);
+      v[2] = num(0);
+      v[14] = num(fault === "application-birth" ? 91 : 90);
+      if (fault === "application-pid") v[5] = num(44);
+      if (fault === "application-future") v[3].FileTimeVal = 201;
+    }
+    if (fault === "long-name") v[10] = str("x".repeat(4097));
+    if (fault === "iso") v[3] = str("2026-01-02T03:04:05.0000050Z");
+    const report = {
+        examined: 1,
+        records: 0,
+        joined: 0,
+        malformed: 0,
+        renderError: 0,
+        closeError: 0,
+        truncated: false,
+      },
+      lines = [];
+    const api = {
+      context: 11,
+      event: 12,
+      channel: fault?.startsWith("application")
+        ? 1
+        : fault === "code-integrity"
+          ? 2
+          : 0,
+      report,
+      BigInt,
+      errno: 0,
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_INSUFFICIENT_BUFFER: 122,
+      EvtRenderEventValues: 0,
+      ...Object.fromEntries(
+        [
+          "Null",
+          "String",
+          "Byte",
+          "UInt16",
+          "UInt32",
+          "UInt64",
+          "FileTime",
+          "HexInt32",
+          "HexInt64",
+          "Sid",
+        ].map((name, i) => [
+          "EvtVarType" + name,
+          [0, 1, 4, 6, 8, 10, 17, 20, 21, 19][i],
+        ]),
+      ),
+      original_refusal: {
+        from: 100,
+        to: 200,
+        birth: 90,
+        pid: 43,
+        image: "C:\\fixture\\payload.exe",
+        subject: "S-1-5-21-7",
+      },
+      EvtRender(_context, _event, _mode, size, buffer, used, count) {
+        assert.equal(size, 32768);
+        buffer.variants = v;
+        used.value = 32768;
+        count.value = fault === "count" ? 14 : 15;
+        return !["render", "oversized"].includes(fault);
+      },
+      GetLastError: () => (fault === "oversized" ? 122 : 91),
+      wcsnlen_s: (value, limit) => Math.min(value.length, limit),
+      wcslen: (value) => text(value).length,
+      iswspace: (value) => /\s/u.test(value),
+      _wcstoui64(value, end) {
+        const input = text(value),
+          parsed = /^(?:0x[0-9a-f]+|[0-9]+)$/iu.test(input)
+            ? Number(input)
+            : NaN;
+        end.value = Number.isNaN(parsed) ? "x" : "";
+        return parsed;
+      },
+      SystemTimeToFileTime(time, out) {
+        assert.deepEqual(structuredClone(time), {
+          wYear: 2026,
+          wMonth: 1,
+          wDay: 2,
+          wHour: 3,
+          wMinute: 4,
+          wSecond: 5,
+        });
+        out.ticks = 100;
+        return true;
+      },
+      GetSidLengthRequired: () => 24,
+      IsValidSid: () => true,
+      ConvertSidToStringSidW(_sid, out) {
+        out.value = "S-1-5-21-7";
+        return true;
+      },
+      wcscpy_s: (out, _size, value) => {
+        out.text = text(value);
+        out[0] = out.text[0];
+      },
+      LocalFree: () => (fault === "sid-close" ? 1 : 0),
+      wcscmp: (a, b) => Number(text(a) !== text(b)),
+      _wcsicmp: (a, b) =>
+        Number(text(a).toLowerCase() !== text(b).toLowerCase()),
+      unit: (value, i) => text(value).charCodeAt(i),
+      sprintf_s(out, _size, format, ...values) {
+        let at = 0;
+        const rendered = format.replace(/%(?:04x|llu|[us])/gu, (match) => {
+          const value = values[at++];
+          return match === "%04x"
+            ? value.toString(16).padStart(4, "0")
+            : match === "%s"
+              ? text(value)
+              : String(Number(value));
+        });
+        assert.equal(at, values.length);
+        const target = out.target ?? out;
+        target.text = text(target).slice(0, out.offset ?? 0) + rendered;
+        return rendered.length;
+      },
+      refusal_publish: (line) => lines.push(text(line)),
+    };
+    program.runInNewContext(api);
+    const malformed = [
+      "sid-bounds",
+      "render",
+      "count",
+      "pointer",
+      "unterminated",
+      "array",
+      "logon",
+      "mask",
+    ].includes(fault);
+    assert.equal(report.malformed > 0, malformed, fault);
+    assert.equal(
+      Boolean(report.truncated),
+      ["oversized", "long-name"].includes(fault),
+      fault,
+    );
+    const joined = [
+      null,
+      "numeric",
+      "sid",
+      "sid-close",
+      "application",
+      "iso",
+    ].includes(fault);
+    assert.equal(report.joined, Number(joined), fault);
+    if (fault === "sid-close") assert.equal(report.closeError, 91);
+    if (lines.length) {
+      assert.match(lines[0], /pid-available=\d pid=\d/u);
+      assert.match(lines[0], new RegExp(`joined=${Number(joined)} `, "u"));
+      assert.match(
+        lines[0],
+        new RegExp(`corroboration=${Number(fault === "application")}\\n$`, "u"),
+      );
     }
   }
 });

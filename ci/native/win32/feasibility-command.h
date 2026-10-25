@@ -74,12 +74,14 @@ static struct command_gate_observation {
   struct { LONGLONG status,type,flags,mask;char sid[184]; } entries[8];
   unsigned count;char sid[184];TOKEN_STATISTICS stats;DWORD policyBits,error;const char *api;
 } command_gate_observed;
+static struct { BOOL observed; DWORD pid; ULONGLONG birth,logon; LONGLONG policy; unsigned indices[2]; char subject[184],hashes[2][65]; struct command_gate_observation values[2]; } command_operating_observed;
 static struct {
   BOOL operating; LONGLONG policy, policyError, level;
   char sacls[2][65]; unsigned rejected[4];
   char subject[184]; LONGLONG subjectError;
 } command_delivery = {FALSE, -1, -1, -1, {{0}}, {0}, {0}, -1};
 static void command_gate_audit_write(FILE *output);
+static void command_operating_sacls_write(FILE *output);
 static void command_delivery_observe(void);
 static void command_pump(HANDLE *pipe,const char *event);
 static void command_observe_failure(void) {
@@ -102,6 +104,7 @@ static void command_observe_failure(void) {
     fflush(stderr);
   }
   if(command_gate_observed.observed){fputs("native-windows-command: gate-audit=",stderr);command_gate_audit_write(stderr);fputc('\n',stderr);fflush(stderr);}
+  command_operating_sacls_write(stderr);
   if(command_observed.audit[0]>=5)command_delivery_observe();
   ReleaseSRWLockExclusive(&diagnosticOutputLock); SetLastError(saved);
 }
@@ -443,12 +446,19 @@ static void command_audit_install(void) {
   SetLastError(command_install_error);win32_check(installed,"command-policy-install");
   for(unsigned i=0;i<4;i++)status_check(SetSecurityInfo(command_files[i],SE_FILE_OBJECT,SACL_SECURITY_INFORMATION,NULL,NULL,NULL,command_sacls[i]),"command-sacl-install");
 }
-static void command_token_read(HANDLE token) {
+struct command_token_observation { BOOL restricted; DWORD count,integrity; LUID authentication; char hash[65]; };
+static struct command_token_observation command_token_observe(HANDLE token) {
   DWORD *container=info(token,TokenIsAppContainer); TOKEN_GROUPS *restricted=info(token,TokenRestrictedSids); TOKEN_STATISTICS *stats=info(token,TokenStatistics);
-  need(restricted->GroupCount<=32 && !*container); char hash[65]; BYTE bytes[4096]={0}; unsigned used=0;
+  need(restricted->GroupCount<=32 && !*container); struct command_token_observation value={0}; BYTE bytes[4096]={0}; unsigned used=0;
   for(unsigned i=0;i<restricted->GroupCount;i++){PSID sid=restricted->Groups[i].Sid;need(IsValidSid(sid) && used+GetLengthSid(sid)+4<=sizeof(bytes));DWORD attributes=restricted->Groups[i].Attributes;memcpy(bytes+used,&attributes,4);used+=4;memcpy(bytes+used,sid,GetLengthSid(sid));used+=GetLengthSid(sid);}
-  command_sum(bytes,used,hash); printf("{\"appContainer\":false,\"restricted\":%s,\"restrictingSids\":%lu,\"restrictedSidsSha256\":\"%s\",\"integrity\":%lu,\"authenticationId\":\"%08lx:%08lx\"}",IsTokenRestricted(token)?"true":"false",restricted->GroupCount,hash,command_integrity(token),(DWORD)stats->AuthenticationId.HighPart,stats->AuthenticationId.LowPart);
-  free(container);free(restricted);free(stats);
+  command_sum(bytes,used,value.hash);value.restricted=IsTokenRestricted(token);value.count=restricted->GroupCount;value.integrity=command_integrity(token);value.authentication=stats->AuthenticationId;
+  free(container);free(restricted);free(stats);return value;
+}
+static void command_token_write(const struct command_token_observation *value) {
+  printf("{\"appContainer\":false,\"restricted\":%s,\"restrictingSids\":%lu,\"restrictedSidsSha256\":\"%s\",\"integrity\":%lu,\"authenticationId\":\"%08lx:%08lx\"}",value->restricted?"true":"false",value->count,value->hash,value->integrity,(DWORD)value->authentication.HighPart,value->authentication.LowPart);
+}
+static void command_token_read(HANDLE token) {
+  struct command_token_observation value=command_token_observe(token);command_token_write(&value);
 }
 static void command_token(HANDLE process) { HANDLE token;need(OpenProcessToken(process,TOKEN_QUERY,&token));command_token_read(token);need(CloseHandle(token)); }
 static void command_broker_token_read(HANDLE token) {
@@ -710,13 +720,12 @@ static DWORD command_gate_sid(PSID sid, char text[184]) {
   if(converted){size_t length=strlen(encoded);if(length<184)memcpy(text,encoded,length+1);else error=ERROR_INSUFFICIENT_BUFFER;}
   if(encoded)LocalFree(encoded);return error;
 }
-static void command_gate_audit(const char *api, DWORD originalError) {
-  if(command_gate_observed.observed)return;
+static struct command_gate_observation command_sacl_projection(HANDLE file) {
   DWORD saved=GetLastError();
   LONGLONG status[9]={-1,-1,-1,-1,-1,-1,-1,-1,-1}, total=-1;
   struct command_gate_observation value={0};unsigned count=0;
   PSECURITY_DESCRIPTOR sd=NULL;PACL sacl=NULL;BOOL present=FALSE,def=FALSE;
-  status[0]=GetSecurityInfo(command_files[3],SE_FILE_OBJECT,SACL_SECURITY_INFORMATION,NULL,NULL,NULL,NULL,&sd);
+  status[0]=GetSecurityInfo(file,SE_FILE_OBJECT,SACL_SECURITY_INFORMATION,NULL,NULL,NULL,NULL,&sd);
   if(!status[0]){
     BOOL read=GetSecurityDescriptorSacl(sd,&present,&sacl,&def);status[1]=read?ERROR_SUCCESS:GetLastError();
     if(read){total=0;if(present&&sacl){ACL_SIZE_INFORMATION size={0};
@@ -735,7 +744,16 @@ static void command_gate_audit(const char *api, DWORD originalError) {
       }else total=-1;
     }}
   }
-  if(sd)LocalFree(sd);
+  if(sd)status[8]=LocalFree(sd)?GetLastError():ERROR_SUCCESS;
+  value.present=present;value.total=total;value.count=count;memcpy(value.status,status,sizeof(status));
+  SetLastError(saved);return value;
+}
+
+static void command_gate_audit(const char *api, DWORD originalError) {
+  if(command_gate_observed.observed)return;
+  DWORD saved=GetLastError();
+  struct command_gate_observation value=command_sacl_projection(command_files[3]);
+  LONGLONG status[9];memcpy(status,value.status,sizeof(status));status[8]=-1;
   HANDLE token=NULL;DWORD used=0;TOKEN_STATISTICS stats={0};BOOL statsRead=FALSE;
   union {TOKEN_USER user;BYTE bytes[sizeof(TOKEN_USER)+SECURITY_MAX_SID_SIZE];} subject={0};char sid[184]={0};
   DWORD policyBits=0;BOOL policyRead=FALSE;AUDIT_POLICY_INFORMATION *policy=NULL;
@@ -750,7 +768,7 @@ static void command_gate_audit(const char *api, DWORD originalError) {
     BOOL closed=CloseHandle(token);DWORD error=closed?ERROR_SUCCESS:GetLastError();status[8]=error;
     if(!closed){command_prerequisite_cleanup_failed=TRUE;remember("command-token-close","win32",error);cleanup_error("command-token-close","win32",error);}
   }
-  value.observed=TRUE;value.present=present;value.total=total;value.count=count;
+  value.observed=TRUE;
   memcpy(value.status,status,sizeof(status));memcpy(value.sid,sid,sizeof(sid));
   value.stats=stats;value.statsRead=statsRead;value.policyBits=policyBits;value.policyRead=policyRead;
   value.api=api;value.error=originalError;command_gate_observed=value;SetLastError(saved);
@@ -943,6 +961,31 @@ static BOOL command_gate_wait(BOOL connect, char bytes[32]) {
     if(waited==WAIT_OBJECT_0)command_control_exit(child);}
   need(read.ok);memcpy(bytes,read.bytes,32);return TRUE;
 }
+static void command_operating_sacls(const unsigned indices[2]) {
+  int savedErrno=errno;DWORD saved=GetLastError();
+  if(!command_operating_observed.observed){
+    command_operating_observed.observed=TRUE;
+    command_operating_observed.pid=command_case_pid;command_operating_observed.birth=command_case_birth;command_operating_observed.logon=command_case_logon;command_operating_observed.policy=command_delivery.policy;
+    memcpy(command_operating_observed.subject,command_delivery.subject,184);
+    for(unsigned i=0;i<2;i++){
+      command_operating_observed.values[i]=command_sacl_projection(command_files[indices[i]]);command_operating_observed.indices[i]=indices[i];
+      memcpy(command_operating_observed.hashes[i],command_delivery.sacls[i],65);
+    }
+  }
+  SetLastError(saved);errno=savedErrno;
+}
+/* Publish cached pre-I/O observations only after the original fatal diagnosis.
+ * A successful broker must retain its silent stderr contract. */
+static void command_operating_sacls_write(FILE *output) {
+  if(!command_operating_observed.observed)return;
+  int savedErrno=errno;DWORD saved=GetLastError();
+  for(unsigned i=0;i<2;i++){
+    const struct command_gate_observation *value=&command_operating_observed.values[i];unsigned index=command_operating_observed.indices[i];
+    fprintf(output,"native-windows-command: operating-sacl phase=N pid=%lu birth=%llu logon=%llu policy=%lld identity=%s hash=%s count=%lld truncated=%u status=%lld,%lld,%lld close=%lld\n",command_operating_observed.pid,command_operating_observed.birth,command_operating_observed.logon,command_operating_observed.policy,command_ids[index],command_operating_observed.hashes[i],value->total,value->total>8,value->status[0],value->status[1],value->status[2],value->status[8]);
+    for(unsigned j=0;j<value->count;j++)fprintf(output,"native-windows-command: operating-ace object=%u index=%u status=%lld type=%lld flags=%lld mask=%lld subject-match=%d\n",index,j,value->entries[j].status,value->entries[j].type,value->entries[j].flags,value->entries[j].mask,value->entries[j].status==0&&value->entries[j].sid[0]&&command_operating_observed.subject[0]?!strcmp(value->entries[j].sid,command_operating_observed.subject):-1);
+  }
+  fflush(output);SetLastError(saved);errno=savedErrno;
+}
 /* The last nonce write carries the operating thread's dynamic security context.
  * Query that context, then revert before privileged held-SACL reads. A parked
  * process token alone cannot describe a thread's file-access authority. */
@@ -957,18 +1000,21 @@ static void command_case_auditing(void) {
   matched=matched&&logon&&(!command_case_logon||command_case_logon==logon);command_case_logon=logon;
   command_delivery.level=stats->ImpersonationLevel;
   free(subject);free(stats);invariant(matched,"command-client-context");
+  struct command_token_observation operating=command_token_observe(command_preflight_owned.token);
+  /* Policy computation keeps the broker caller and retained operating token. */
   if(!command_revert())failure(126);
   fputs("{\"effective\":",stdout);command_delivery.operating=TRUE;command_effective(command_preflight_owned.token);command_delivery.operating=FALSE;
-  printf(",\"operating\":{\"userSid\":\"%ls\",\"level\":%u,\"token\":",userText,(unsigned)SecurityImpersonation);command_token_read(command_preflight_owned.token);putchar('}');
+  printf(",\"operating\":{\"userSid\":\"%ls\",\"level\":%u,\"token\":",userText,(unsigned)SecurityImpersonation);command_token_write(&operating);putchar('}');
   if(!release_handle(&command_preflight_owned.token,"command-token-close"))failure(126);
   fputs(",\"files\":[",stdout);
   unsigned indices[2]={command_action,3};
   for(unsigned i=0;i<2;i++){char id[50],hash[65];unsigned index=indices[i];fileid(command_files[index],id);invariant(!strcmp(id,command_ids[index]),"command-file-identity");command_sacl_read(command_files[index],hash);memcpy(command_delivery.sacls[i],hash,65);printf("%s{\"identity\":\"%s\",\"saclSha256\":\"%s\"}",i?",":"",id,hash);}
+  command_operating_sacls(indices);
   fputs("]}",stdout);
 }
 static void command_case_observe(BOOL after) {
   invariant(after?(command_client&&command_case_from&&!command_case_finished):!command_client,"command-coverage-state");
-  if(!after){memset(&command_delivery,0,sizeof(command_delivery));command_delivery.policy=command_delivery.policyError=command_delivery.level=command_delivery.subjectError=-1;}
+  if(!after){memset(&command_operating_observed,0,sizeof(command_operating_observed));memset(&command_delivery,0,sizeof(command_delivery));command_delivery.policy=command_delivery.policyError=command_delivery.level=command_delivery.subjectError=-1;}
   char bytes[32],expected[33];if(!command_gate_wait(!after,bytes))return;need(WideCharToMultiByte(CP_UTF8,WC_ERR_INVALID_CHARS,nonce,-1,expected,33,NULL,NULL)==33&&!memcmp(bytes,expected,32));
   if(!after){DWORD pid;need(GetNamedPipeClientProcessId(command_gate,&pid));command_case_pid=pid;command_case_from=command_case_logon=command_target_record=command_target_time=0;command_target_seen=command_marker_seen=command_case_finished=FALSE;command_client=OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION|SYNCHRONIZE,FALSE,pid);need(command_client);command_case_birth=creation(command_client);BOOL member;need(IsProcessInJob(command_client,ownedJob,&member)&&member);command_image_read(command_client,command_helper_hash,FALSE);}
   printf("{\"event\":\"%s\",\"ioCompleted\":%s,\"identity\":",after?"F":"N",after?"true":"false");identity(command_client);printf(",\"token\":");command_token(command_client);printf(",\"imageSha256\":\"%s\",\"object\":",command_helper_hash);command_snapshot(command_action);printf(",\"gate\":");command_snapshot(3);fputs(",\"auditing\":",stdout);command_case_auditing();puts("}");

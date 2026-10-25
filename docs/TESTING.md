@@ -2593,6 +2593,15 @@ Successful original child exit plus fresh complete zero accounting establishes
 settlement; best-effort notifications only wake reinspection. The concrete
 active-count-one refusal retains an opaque synthetic 1024-of-2391-byte prefix.
 This coverage remains in the same harness and supplies no native PASS.
+The same custody fixture executes the original-child refusal collector's worker,
+bounded publisher and terminal wait with injected clocks/Event Log/thread APIs.
+It covers one release-based deadline, shared 64-record/64-KiB caps, synchronized
+partial publication, thread-affine normal closure, available-handle cancellation,
+pending-query lifetime and separate projection/closure failures. Actual typed
+event projection rejects foreign/stale identities, unsupported schemas, malformed
+fields and successful-access records while retaining original refusal errors.
+No logging-provider execution PID can supply payload identity; Application
+corroboration cannot establish the denied operation.
 The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
 WFP keyword values and exact DROP rejection predicates. Those in
 `test/native-windows-command.test.js`
@@ -2610,6 +2619,27 @@ including unavailable interfaces and wrong types. Dynamic subject diagnostics
 retain the actual queried SID even when the original admission guard rejects it.
 No diagnostic count, successful I/O or readable interface replaces missing events
 or independent retirement; these injected cases add no tier or Windows API proof.
+The existing TCP/WFP fixture additionally protects one late `SO_ERROR` sample
+without deadline replacement, active phase/select and query size/error reporting,
+eight field-validated interval candidate comparisons and explicit truncation
+without new enumeration or relaxed denial receipts. Command actual-body fixtures
+require dynamic token queries before reversal and once-only broker-authority
+target/marker ACE projection afterward, including failed reads/descriptor closure
+and subject comparisons. Effective policy retains its original broker caller and
+operating-token handle. Actual token observation/writer bodies retain freed-buffer
+values and emit identical cached/direct JSON without post-reversal token queries.
+Cached N context survives later F changes; sampling is
+silent on success and only the original fatal path publishes cached ACE data.
+Publication flushes before post-refusal queries can stall it; a TCP deadline
+before another select retains the last completed select result.
+Fragmented transport fixtures distinguish separately bounded observation lines
+after a strict refusal from malformed, orphaned, incomplete or excessive metadata,
+preserving every raw byte and the original failure carrier. Settlement fixtures
+retain ordering, primary errors and incomplete-cleanup rejection while verifying
+that already-obtained outcome labels reach the actual diagnostic writer and a
+throwing sink cannot bypass retirement or change its outcome. Successful
+protocol output remains unchanged. These portable cases use no native tools or
+timing waits and add no slow-tier or validation-command assignment.
 Existing notification/drain ordering, missing-event
 and uncertain-retirement refusals remain required. These tiny injected cases add
 no validation tier and execute no Windows tool on a foreign host.

@@ -1810,7 +1810,9 @@ static BOOL wfp_transfer(SOCKET *socket, ULONGLONG end, struct diagnosis *proble
 /* One read-only comparison removes only the AppId selection. It shares the
  * original interval, engine, deadline and 256-event budget; no row is evidence
  * of denial. A full page is explicitly incomplete, never absence. */
-struct wfp_availability { BOOL attempted, read, complete; DWORD createStatus, readStatus, closeStatus; UINT32 count, interval, appIdSet, appId, drop; };
+struct wfp_availability { BOOL attempted, read, complete, truncated; DWORD createStatus, readStatus, closeStatus; UINT32 count, interval, appIdSet, appId, drop, candidates;
+  struct { LONG app, user, package, endpoint; DWORD flags; } comparisons[8]; struct wfp_tuple tuple;
+};
 static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE0 *selected, const FWP_BYTE_BLOB *appId, ULONGLONG deadline, UINT32 remaining, struct wfp_availability *value) {
   DWORD saved = GetLastError(); HANDLE enumeration = NULL; FWPM_NET_EVENT2 **events = NULL; UINT32 scanned = 0;
   FWPM_NET_EVENT_ENUM_TEMPLATE0 query = *selected; query.numFilterConditions = 0; query.filterCondition = NULL;
@@ -1837,10 +1839,20 @@ static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE
       value->interval++;
       if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) value->drop++;
       if (h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
-        if (!wfp_blob(&h->appId)) { value->complete = FALSE; continue; }
-        value->appIdSet++;
-        if (h->appId.size == appId->size && !memcmp(h->appId.data, appId->data, appId->size)) value->appId++;
+        if (!wfp_blob(&h->appId)) { value->complete = FALSE; }
+        else {
+          value->appIdSet++;
+          if (h->appId.size == appId->size && !memcmp(h->appId.data, appId->data, appId->size)) value->appId++;
+        }
       }
+      if(value->candidates==8){value->truncated=TRUE;continue;}
+      unsigned at=value->candidates++;value->comparisons[at].app=value->comparisons[at].user=value->comparisons[at].package=value->comparisons[at].endpoint=-1;
+      value->comparisons[at].flags=h->flags;
+      if((h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && wfp_blob(&h->appId))value->comparisons[at].app=h->appId.size==appId->size && !memcmp(h->appId.data,appId->data,appId->size);
+      if((h->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) && h->userId && IsValidSid(h->userId) && GetLengthSid(h->userId)<=SECURITY_MAX_SID_SIZE)value->comparisons[at].user=EqualSid(h->userId,userSid);
+      if((h->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) && h->packageSid && IsValidSid(h->packageSid) && GetLengthSid(h->packageSid)<=SECURITY_MAX_SID_SIZE)value->comparisons[at].package=EqualSid(h->packageSid,appSid);
+      DWORD fields=FWPM_NET_EVENT_FLAG_IP_VERSION_SET|FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET|FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET|FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET|FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET|FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET;
+      if((h->flags & fields)==fields)value->comparisons[at].endpoint=h->ipVersion==FWP_IP_VERSION_V4 && h->ipProtocol==IPPROTO_TCP && h->localAddrV4==value->tuple.localAddress && h->remoteAddrV4==value->tuple.remoteAddress && h->localPort==value->tuple.localPort && h->remotePort==value->tuple.remotePort;
     }
   } while (FALSE);
   if (events) FwpmFreeMemory0((void **)&events);
@@ -1868,6 +1880,7 @@ static void wfp_snapshot(const BYTE *line, DWORD size) {
   const char *api = "binding", *predicate = "binding";
   unsigned rejected[5] = {0}, principalRejected[3] = {0}, refreshed = 0;
   struct wfp_availability availability = {0};
+  availability.tuple=tuple;
   UINT32 scanned = 0;
   DWORD flags = 0, direction = 0, action = 0, queryBytes = 0; UINT64 filterId = 0; UINT16 layerId = 0;
   const char *reason = "binding"; FILETIME born, exited, kernel, user;
@@ -2029,6 +2042,8 @@ closed:
   fprintf(stderr, "native-windows-socket-input: caller=wfp_snapshot selection=interval-only attempted=%u read=%u complete=%u create-status=%lu read-status=%lu close-status=%lu count=%u interval=%u app-id-fields=%u app-id=%u drop=%u scanned=%u principal-rejected=%u,%u,%u\n",
     !!availability.attempted, !!availability.read, !!availability.complete, availability.createStatus, availability.readStatus, availability.closeStatus,
     availability.count, availability.interval, availability.appIdSet, availability.appId, availability.drop, scanned, principalRejected[0], principalRejected[1], principalRejected[2]);
+  for(unsigned i=0;i<availability.candidates;i++)fprintf(stderr,"native-windows-socket-input: caller=wfp_availability candidate=%u flags=%lu app=%ld user=%ld package=%ld endpoint=%ld\n",i,availability.comparisons[i].flags,availability.comparisons[i].app,availability.comparisons[i].user,availability.comparisons[i].package,availability.comparisons[i].endpoint);
+  fprintf(stderr,"native-windows-socket-input: caller=wfp_availability truncated=%u\n",!!availability.truncated);
   for (unsigned output = 0; output < (wfpPreparedAt ? 2u : 1u); output++) {
     FILE *stream = output ? stdout : stderr;
     if (output) {
@@ -2099,6 +2114,13 @@ static void tcp_observe(const char *api, const char *phase, DWORD value) {
 static void tcp_detail(const char *api, DWORD value) {
   fprintf(stderr, "native-windows-socket-input: caller=tcp_connection api=%s value=%lu\n", api, value); fflush(stderr);
 }
+static struct { const char *phase; int selected; } tcp_progress;
+static void tcp_deadline_observe(SOCKET socket) {
+  int saved=WSAGetLastError(),savedErrno=errno,completed=0,size=sizeof(completed);
+  int result=getsockopt(socket,SOL_SOCKET,SO_ERROR,(char *)&completed,&size),error=result==SOCKET_ERROR?WSAGetLastError():0;
+  fprintf(stderr,"native-windows-socket-input: caller=tcp_deadline phase=%s select=%d query=%d size=%d so-error=%lld\n",tcp_progress.phase,tcp_progress.selected,error,size,result!=SOCKET_ERROR&&size==sizeof(completed)?(LONGLONG)completed:-1);
+  fflush(stderr);WSASetLastError(saved);errno=savedErrno;
+}
 static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis *problem, BOOL *observed) {
   fd_set ready, exceptional; FD_ZERO(&ready); FD_ZERO(&exceptional); FD_SET(socket, &ready); FD_SET(socket, &exceptional);
   if (!*observed) tcp_observe("select", "enter", 0);
@@ -2108,6 +2130,7 @@ static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis
   TIMEVAL wait = {(long)(remaining / 1000), (long)((remaining % 1000) * 1000)};
   int result = select(0, writing ? NULL : &ready, writing ? &ready : NULL, &exceptional, &wait);
   int error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+  tcp_progress.selected=result;
   if (result == SOCKET_ERROR) *problem = (struct diagnosis){"tcp-select", "win32", (DWORD)error};
   if (!*observed && result > 0) tcp_detail("select-readiness", (FD_ISSET(socket, &ready) ? 1 : 0) | (FD_ISSET(socket, &exceptional) ? 2 : 0));
   if (!*observed) { tcp_observe("select", result == SOCKET_ERROR ? "failed" : "complete", (DWORD)(result == SOCKET_ERROR ? error : result)); *observed = TRUE; }
@@ -2118,6 +2141,7 @@ static int tcp_wait(SOCKET socket, BOOL writing, ULONGLONG end, struct diagnosis
   return flags;
 }
 static int tcp_connection(const WCHAR *address, const char *text) {
+  tcp_progress.phase="setup";tcp_progress.selected=-2;
   struct sockaddr_in endpoint = {0}; endpoint.sin_family = AF_INET; endpoint.sin_port = htons((u_short)number(address)); endpoint.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
   ULONGLONG end = GetTickCount64() + 5000;
   ULONGLONG started = wfp_now(); BOOL attempted = FALSE;
@@ -2155,6 +2179,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   if (!wfp_transfer(&socket, end, &problem, &transferred)) goto done;
   if (GetTickCount64() >= end) { problem = (struct diagnosis){"tcp-deadline", "invariant", 0}; goto done; }
   tcp_observe("connect", "enter", 0);
+  tcp_progress.phase="connect";
   started = wfp_now(); attempted = TRUE;
   int connected = connect(socket, (struct sockaddr *)&endpoint, sizeof(endpoint));
   int connectError = connected == SOCKET_ERROR ? WSAGetLastError() : 0;
@@ -2175,6 +2200,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   }
   tcp_observe("connect", "complete", 0); tcp_observe("transaction", "enter", 0); char reply[32];
   for (unsigned receive = 0; receive < 2; receive++) {
+    tcp_progress.phase=receive?"receive":"send";
     int at = 0; BOOL entered = FALSE;
     while (at < 32) {
       int ready = tcp_wait(socket, !receive, end, &problem, &selected); if (!ready) goto done;
@@ -2193,6 +2219,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   if (GetTickCount64() >= end) problem = (struct diagnosis){"tcp-deadline", "invariant", 0};
   else if (memcmp(reply, text, 32)) problem = (struct diagnosis){"tcp-nonce", "invariant", 0};
 done:
+  if(problem.operation&&!strcmp(problem.operation,"tcp-deadline"))tcp_deadline_observe(socket);
   if (problem.operation) {
     if (!nativeReceipt) remember(problem.operation, problem.domain, problem.value);
     tcp_observe("transaction", "failed", problem.value);

@@ -6315,8 +6315,22 @@ test("TCP setup, completion and observer failures retain native causes and close
       "TIMEVAL wait = {(long)(remaining / 1000), (long)((remaining % 1000) * 1000)};",
       "const wait = {seconds:Math.trunc(remaining / 1000), micros:(remaining % 1000) * 1000};",
     );
+  const deadline = /static void tcp_deadline_observe[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "int saved=WSAGetLastError(),savedErrno=errno,completed=0,size=sizeof(completed);",
+      "let saved=WSAGetLastError(),savedErrno=errno;const completed={value:0},size={value:4};",
+    )
+    .replace("(char *)&completed", "completed")
+    .replace("&size", "size")
+    .replaceAll("sizeof(completed)", "4")
+    .replaceAll("size==", "size.value==")
+    .replace("error,size,", "error,size.value,")
+    .replace("(LONGLONG)completed", "completed.value")
+    .replace(/\bint /gu, "let ");
   const exercise =
-    new Script(`function tcp_wait(socket, writing, end, problem, observed) {${wait}}
+    new Script(`function tcp_deadline_observe(socket){${deadline}}
+    function tcp_wait(socket, writing, end, problem, observed) {${wait}}
     function prepare() {${setup} return true;} function connect_once() {${connection}}
     function close() {${cleanup}}
     if (prepare()) connect_once(); result = close();`);
@@ -6326,10 +6340,12 @@ test("TCP setup, completion and observer failures retain native causes and close
     closeError = 0,
     transferError = 0,
     expireAfterTransfer = false,
+    expireAfterSend = false,
     acknowledged = true,
     connectError = 0,
     completedError = 0,
     completionError = 0,
+    completionSize = 4,
     selectResult = 1,
     selectError = 0,
     readiness = "ready",
@@ -6347,6 +6363,9 @@ test("TCP setup, completion and observer failures retain native causes and close
       readiness: "both",
     },
     { connectError: 10035, selectResult: 0 },
+    { connectError: 10035, selectResult: 0, completedError: 10013 },
+    { connectError: 10035, selectResult: 0, completionError: 10038 },
+    { connectError: 10035, selectResult: 0, completionSize: 3 },
     { connectError: 10035, selectResult: -1, selectError: 10038 },
     { connectError: 10035, readiness: "exception" },
     { connectError: 10035, readiness: "none" },
@@ -6358,6 +6377,7 @@ test("TCP setup, completion and observer failures retain native causes and close
     { transferError: 10022 },
     { transferError: 10022, closeError: 10038 },
     { expireAfterTransfer: true },
+    { expireAfterSend: true },
     { acknowledged: false },
     { acknowledged: false, connectError: 10013 },
     { acknowledged: false, connectError: 10035, completedError: 10013 },
@@ -6372,6 +6392,17 @@ test("TCP setup, completion and observer failures retain native causes and close
     const observations = [],
       details = [];
     const api = {
+      tcp_progress: { phase: "setup", selected: -2 },
+      errno: 9,
+      stderr: {},
+      strcmp: (a, b) => Number(a !== b),
+      fprintf(_stream, _format, ...values) {
+        details.push(["deadline", ...values]);
+      },
+      fflush: () => {},
+      WSASetLastError: (value) => {
+        actualError = value;
+      },
       socket: 17,
       started: 1,
       end: 5000,
@@ -6400,7 +6431,10 @@ test("TCP setup, completion and observer failures retain native causes and close
       htonl: (value) => value,
       htons: (value) => value,
       GetTickCount64: () =>
-        expireAfterTransfer && api.transferred ? 5000 : now,
+        (expireAfterTransfer && api.transferred) ||
+        (expireAfterSend && sent.length)
+          ? 5000
+          : now,
       WSAGetLastError: () => actualError,
       wfp_now: () => 1100,
       tcp_socket_observe: (socket, error) => {
@@ -6452,6 +6486,8 @@ test("TCP setup, completion and observer failures retain native causes and close
           [17, 0xffff, 0x1007, 4],
         );
         completed.value = completedError;
+        size.value = completionSize;
+        if (selectResult === 0) api.errno = 22;
         actualError = completionError;
         return completionError ? -1 : 0;
       },
@@ -6521,6 +6557,7 @@ test("TCP setup, completion and observer failures retain native causes and close
     const inconsistentReady = readiness !== "ready" && !completedError;
     if (
       unattempted ||
+      expireAfterSend ||
       !acknowledged ||
       closeError ||
       completionError ||
@@ -6572,7 +6609,7 @@ test("TCP setup, completion and observer failures retain native causes and close
                     : 0),
         ),
       );
-    if (completedError)
+    if (completedError && selectResult > 0)
       assert.ok(
         observations.some(
           ([api, phase, value]) =>
@@ -6581,6 +6618,27 @@ test("TCP setup, completion and observer failures retain native causes and close
             value === completedError,
         ),
       );
+    const deadlines = details.filter(([name]) => name === "deadline");
+    assert.equal(
+      deadlines.length,
+      api.problem.operation === "tcp-deadline" ? 1 : 0,
+    );
+    if (deadlines.length) {
+      assert.equal(
+        deadlines[0].at(-1),
+        !completionError && completionSize === 4 ? completedError : -1,
+      );
+      assert.equal(deadlines[0].at(-2), completionSize);
+      assert.equal(api.errno, 9);
+      if (expireAfterSend) {
+        assert.equal(deadlines[0][1], "send");
+        assert.equal(
+          deadlines[0][2],
+          1,
+          "a deadline before another select retains the last actual result",
+        );
+      }
+    }
     if (connectError === 10013)
       assert.ok(
         observations.some(
@@ -6593,7 +6651,7 @@ test("TCP setup, completion and observer failures retain native causes and close
     );
     if (bindError)
       assert.deepEqual(failures[0], ["tcp-bind", "win32", bindError]);
-    else if (now >= 5000 || expireAfterTransfer)
+    else if (now >= 5000 || expireAfterTransfer || expireAfterSend)
       assert.deepEqual(failures[0], ["tcp-deadline", "invariant", 0]);
     else if (transferError)
       assert.deepEqual(failures[0], [
@@ -6601,7 +6659,7 @@ test("TCP setup, completion and observer failures retain native causes and close
         "win32",
         transferError,
       ]);
-    else if (completionError)
+    else if (completionError && selectResult > 0)
       assert.deepEqual(failures[0], [
         "tcp-completion",
         "win32",
@@ -7702,6 +7760,8 @@ test("child-owned TCP keeps its original socket through self-import controls and
       },
       tcp_detail: () => {},
       tcp_observe: (api, phase) => events.push(`observe:${api}:${phase}`),
+      strcmp: (a, b) => Number(a !== b),
+      tcp_deadline_observe: () => {},
       wfp_tuple: () => events.push("tuple"),
       closesocket(socket) {
         events.push(`close:${socket}`);
@@ -8574,7 +8634,7 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       .replaceAll("(unsigned)", "")
       .replaceAll("->", ".")
       .replace(/&(?=[a-zA-Z_])/gu, "")
-      .replace(/\b(?:UINT32|ULONGLONG)\b/gu, "let");
+      .replace(/\b(?:UINT32|ULONGLONG|unsigned|DWORD)\b/gu, "let");
   const split = body.indexOf("  if (filter)");
   const script =
     new Script(`function wfp_availability(engine,selected,appId,deadline,remaining,value){${availabilityBody}}
@@ -8585,6 +8645,9 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     "empty",
     "available-other-app",
     "available-same-app",
+    "available-flags",
+    "available-principal",
+    "available-endpoint",
     "socket-unbound",
     "availability-create",
     "availability-read",
@@ -8692,6 +8755,14 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         appIdSet: 0,
         appId: 0,
         drop: 0,
+        candidates: 0,
+        comparisons: Array.from({ length: 8 }, () => ({})),
+        tuple: {
+          localAddress: 0x7f000001,
+          remoteAddress: 0x7f000001,
+          localPort: 45678,
+          remotePort: 32100,
+        },
       },
       scanned: 0,
       principalRejected: [0, 0, 0],
@@ -8751,6 +8822,9 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
           "empty",
           "available-other-app",
           "available-same-app",
+          "available-flags",
+          "available-principal",
+          "available-endpoint",
           "availability-full",
         ].includes(fault)
           ? 5000
@@ -8782,12 +8856,19 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         if (handle === -1) {
           const row = structuredClone(event);
           if (fault === "available-other-app") row.header.appId.data = "other";
+          if (fault === "available-flags") row.header.flags = 0;
+          if (fault === "available-principal")
+            row.header.userId = row.header.packageSid = "other";
+          if (fault === "available-endpoint") row.header.remotePort++;
           context[slot] =
             fault === "availability-full"
               ? Array(limit).fill(row)
               : [
                     "available-other-app",
                     "available-same-app",
+                    "available-flags",
+                    "available-principal",
+                    "available-endpoint",
                     "socket-unbound",
                   ].includes(fault)
                 ? [row]
@@ -8958,11 +9039,40 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
     assert.ok(context.scanned <= 256);
     if (fault?.startsWith("available-") || fault === "socket-unbound") {
       assert.equal(context.availability.interval, 1);
+      assert.equal(context.availability.candidates, 1);
+      const comparison = context.availability.comparisons[0];
+      assert.equal(
+        Number(comparison.endpoint),
+        fault === "available-flags"
+          ? -1
+          : Number(fault !== "available-endpoint"),
+      );
+      assert.equal(
+        Number(comparison.user),
+        fault === "available-flags"
+          ? -1
+          : Number(fault !== "available-principal"),
+      );
+      assert.equal(
+        Number(comparison.package),
+        fault === "available-flags"
+          ? -1
+          : Number(fault !== "available-principal"),
+      );
+      assert.equal(
+        Number(comparison.app),
+        fault === "available-flags"
+          ? -1
+          : Number(fault !== "available-other-app"),
+      );
       assert.equal(context.availability.drop, 1);
-      assert.equal(context.availability.appIdSet, 1);
+      assert.equal(
+        context.availability.appIdSet,
+        fault === "available-flags" ? 0 : 1,
+      );
       assert.equal(
         context.availability.appId,
-        fault !== "available-other-app" ? 1 : 0,
+        ["available-other-app", "available-flags"].includes(fault) ? 0 : 1,
       );
       assert.equal(
         context.matched,
@@ -8982,6 +9092,13 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
       assert.equal(context.availability.complete, false);
     if (fault === "availability-count")
       assert.equal(context.availability.count, 65);
+    if (fault === "availability-full") {
+      assert.equal(context.availability.count, 64);
+      assert.equal(context.availability.interval, 64);
+      assert.equal(context.availability.appIdSet, 64);
+      assert.equal(context.availability.candidates, 8);
+      assert.equal(context.availability.truncated, true);
+    }
     if (fault === "availability-appid-fields")
       assert.equal(context.availability.appIdSet, 0);
     if (fault === "availability-create")
@@ -10280,6 +10397,8 @@ test("socket export refusals retain distinct self/destination evidence and bound
         emit(f.transfer);
       },
       observerReady: () => emit(f.prepared),
+      strcmp: (a, b) => Number(a !== b),
+      tcp_deadline_observe: () => {},
       tcp_detail: () => {},
       tcp_observe: (api, phase, value) =>
         write(
