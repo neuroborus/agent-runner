@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdarg.h>
 #include <errno.h>
 #include <wchar.h>
 #include <fcntl.h>
@@ -414,6 +415,46 @@ static void hashbytes(const void *bytes, DWORD size, char out[65]) {
   nt_check(BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, size, sum, sizeof(sum)), "hash-final");
   for (unsigned i = 0; i < 32; i++) snprintf(out + 2*i, 3, "%02x", sum[i]);
   nt_check(BCryptCloseAlgorithmProvider(algorithm, 0), "hash-provider-close");
+}
+/* Failure-only observations must not enter the fatal guards. Hash the complete
+ * bounded value, encode only its first 64 bytes, and retain independent closure. */
+struct diagnostic_blob { DWORD size, encoded; NTSTATUS status, closed; char hash[65], hex[129]; };
+static void diagnostic_blob_read(const BYTE *bytes, DWORD size, struct diagnostic_blob *value) {
+  DWORD saved = GetLastError(); int savedErrno = errno;
+  memset(value, 0, sizeof(*value)); value->size = size;
+  strcpy_s(value->hash, sizeof(value->hash), "-"); strcpy_s(value->hex, sizeof(value->hex), "-");
+  value->status = (NTSTATUS)0xc000000d;
+  if (bytes && size <= 8192) {
+    BCRYPT_ALG_HANDLE algorithm = NULL; BYTE sum[32];
+    value->encoded = size < 64 ? size : 64;
+    for (DWORD i = 0; i < value->encoded; i++) snprintf(value->hex + 2*i, 3, "%02x", bytes[i]);
+    value->status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, NULL, 0);
+    /* A failed open's output grants no ownership, even if non-null. */
+    BOOL acquired = value->status >= 0 && algorithm != NULL;
+    if (value->status >= 0 && !algorithm) value->status = (NTSTATUS)0xc0000008;
+    if (acquired) value->status = BCryptHash(algorithm, NULL, 0, (PUCHAR)bytes, size, sum, sizeof(sum));
+    if (value->status >= 0) for (unsigned i = 0; i < 32; i++) snprintf(value->hash + 2*i, 3, "%02x", sum[i]);
+    if (acquired) value->closed = BCryptCloseAlgorithmProvider(algorithm, 0);
+    if (value->closed < 0) cleanup_error("hash-provider-close", "ntstatus", (DWORD)value->closed);
+  }
+  SetLastError(saved); errno = savedErrno;
+}
+/* Reserve framing for a caller-owned incomplete marker within the same 4 KiB.
+ * A failed optional write cannot recurse into failure() or consume its carrier. */
+static void diagnostic_write(FILE *output, DWORD *used, BOOL *incomplete, const char *format, ...) {
+  if (*incomplete) return;
+  DWORD saved = GetLastError(); int savedErrno = errno; char line[2048]; va_list args;
+  va_start(args, format); int size = vsnprintf(line, sizeof(line), format, args); va_end(args);
+  if (size <= 0 || size >= (int)sizeof(line)) *incomplete = TRUE;
+  else {
+    /* These streams retain Windows CRT text mode. Charge translated CRLF bytes
+     * as well as the complete formatted row, before publishing any prefix. */
+    DWORD encoded = (DWORD)size;
+    for (int i = 0; i < size; i++) if (line[i] == '\n') encoded++;
+    if (encoded > 4096 - 128 - *used) *incomplete = TRUE;
+    else { *used += encoded; if (fwrite(line, 1, size, output) != (size_t)size) *incomplete = TRUE; }
+  }
+  SetLastError(saved); errno = savedErrno;
 }
 /* Confined trusted checks own their immutable expected image before validation. */
 static HANDLE expected_executable(const WCHAR *path) {
@@ -1810,8 +1851,62 @@ static BOOL wfp_transfer(SOCKET *socket, ULONGLONG end, struct diagnosis *proble
 /* One read-only comparison removes only the AppId selection. It shares the
  * original interval, engine, deadline and 256-event budget; no row is evidence
  * of denial. A full page is explicitly incomplete, never absence. */
+struct wfp_event_fact {
+  UINT32 type, flags; ULONGLONG time, filter; UINT16 layer, localPort, remotePort;
+  LONG drop, loopback; DWORD direction, version, protocol; BOOL valid;
+  char local[33], remote[33]; struct diagnostic_blob app, user, package;
+};
+static BOOL wfp_fact(const FWPM_NET_EVENT2 *event, struct wfp_event_fact *value) {
+  memset(value, 0, sizeof(*value)); value->drop = -1;
+  strcpy_s(value->local, sizeof(value->local), "-"); strcpy_s(value->remote, sizeof(value->remote), "-");
+  diagnostic_blob_read(NULL, 0, &value->app); diagnostic_blob_read(NULL, 0, &value->user); diagnostic_blob_read(NULL, 0, &value->package);
+  if (!event || (unsigned)event->type >= FWPM_NET_EVENT_TYPE_MAX) return FALSE;
+  const FWPM_NET_EVENT_HEADER2 *h = &event->header;
+  value->valid = TRUE; value->type = event->type; value->flags = h->flags; value->time = wfp_time(h->timeStamp);
+  value->version = h->flags & FWPM_NET_EVENT_FLAG_IP_VERSION_SET ? h->ipVersion : MAXDWORD;
+  value->protocol = h->flags & FWPM_NET_EVENT_FLAG_IP_PROTOCOL_SET ? h->ipProtocol : MAXDWORD;
+  if (h->flags & FWPM_NET_EVENT_FLAG_LOCAL_PORT_SET) value->localPort = h->localPort;
+  if (h->flags & FWPM_NET_EVENT_FLAG_REMOTE_PORT_SET) value->remotePort = h->remotePort;
+  if (h->flags & (FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET | FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET)) {
+    if (value->version != FWP_IP_VERSION_V4 && value->version != FWP_IP_VERSION_V6) value->valid = FALSE;
+    else {
+      if (h->flags & FWPM_NET_EVENT_FLAG_LOCAL_ADDR_SET) {
+        if (value->version == FWP_IP_VERSION_V4) snprintf(value->local, sizeof(value->local), "%08x", h->localAddrV4);
+        else for (unsigned i = 0; i < 16; i++) snprintf(value->local + 2*i, 3, "%02x", h->localAddrV6.byteArray16[i]);
+      }
+      if (h->flags & FWPM_NET_EVENT_FLAG_REMOTE_ADDR_SET) {
+        if (value->version == FWP_IP_VERSION_V4) snprintf(value->remote, sizeof(value->remote), "%08x", h->remoteAddrV4);
+        else for (unsigned i = 0; i < 16; i++) snprintf(value->remote + 2*i, 3, "%02x", h->remoteAddrV6.byteArray16[i]);
+      }
+    }
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) {
+    diagnostic_blob_read(h->appId.data, h->appId.size, &value->app);
+    if (!wfp_blob(&h->appId)) value->valid = FALSE;
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) {
+    if (h->userId && IsValidSid(h->userId) && GetLengthSid(h->userId) <= SECURITY_MAX_SID_SIZE) diagnostic_blob_read(h->userId, GetLengthSid(h->userId), &value->user);
+    else value->valid = FALSE;
+  }
+  if (h->flags & FWPM_NET_EVENT_FLAG_PACKAGE_ID_SET) {
+    if (h->packageSid && IsValidSid(h->packageSid) && GetLengthSid(h->packageSid) <= SECURITY_MAX_SID_SIZE) diagnostic_blob_read(h->packageSid, GetLengthSid(h->packageSid), &value->package);
+    else value->valid = FALSE;
+  }
+  if (event->type == FWPM_NET_EVENT_TYPE_CLASSIFY_DROP) {
+    const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop = event->classifyDrop;
+    value->drop = drop != NULL;
+    if (!drop) value->valid = FALSE;
+    else {
+      value->filter = drop->filterId; value->layer = drop->layerId; value->direction = drop->msFwpDirection; value->loopback = drop->isLoopback;
+      if (!drop->filterId || !drop->layerId || (drop->msFwpDirection != FWP_DIRECTION_OUTBOUND && drop->msFwpDirection != FWP_DIRECTION_INBOUND) || (drop->isLoopback != TRUE && drop->isLoopback != FALSE)) value->valid = FALSE;
+    }
+  }
+  if (value->app.closed < 0 || value->user.closed < 0 || value->package.closed < 0) wfpCleanupFailed = TRUE;
+  return value->valid;
+}
 struct wfp_availability { BOOL attempted, read, complete, truncated; DWORD createStatus, readStatus, closeStatus; UINT32 count, interval, appIdSet, appId, drop, candidates;
   struct { LONG app, user, package, endpoint; DWORD flags; } comparisons[8]; struct wfp_tuple tuple;
+  struct wfp_event_fact facts[8]; struct diagnostic_blob expected[3];
 };
 static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE0 *selected, const FWP_BYTE_BLOB *appId, ULONGLONG deadline, UINT32 remaining, struct wfp_availability *value) {
   DWORD saved = GetLastError(); HANDLE enumeration = NULL; FWPM_NET_EVENT2 **events = NULL; UINT32 scanned = 0;
@@ -1819,6 +1914,11 @@ static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE
   do {
     if (!remaining || GetTickCount64() >= deadline) break;
     value->attempted = TRUE;
+    diagnostic_blob_read(appId->data, appId->size, &value->expected[0]);
+    diagnostic_blob_read(userSid, GetLengthSid(userSid), &value->expected[1]);
+    diagnostic_blob_read(appSid, GetLengthSid(appSid), &value->expected[2]);
+    for (unsigned i = 0; i < 3; i++) if (value->expected[i].closed < 0) wfpCleanupFailed = TRUE;
+    if (GetTickCount64() >= deadline) break;
     value->createStatus = FwpmNetEventCreateEnumHandle0(engine, &query, &enumeration);
     if (value->createStatus || !enumeration || GetTickCount64() >= deadline) break;
     UINT32 limit = remaining > 64 ? 64 : remaining, count = 0;
@@ -1847,6 +1947,8 @@ static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE
       }
       if(value->candidates==8){value->truncated=TRUE;continue;}
       unsigned at=value->candidates++;value->comparisons[at].app=value->comparisons[at].user=value->comparisons[at].package=value->comparisons[at].endpoint=-1;
+      if (!wfp_fact(event, &value->facts[at])) value->complete = FALSE;
+      if (GetTickCount64() >= deadline) { value->complete = FALSE; break; }
       value->comparisons[at].flags=h->flags;
       if((h->flags & FWPM_NET_EVENT_FLAG_APP_ID_SET) && wfp_blob(&h->appId))value->comparisons[at].app=h->appId.size==appId->size && !memcmp(h->appId.data,appId->data,appId->size);
       if((h->flags & FWPM_NET_EVENT_FLAG_USER_ID_SET) && h->userId && IsValidSid(h->userId) && GetLengthSid(h->userId)<=SECURITY_MAX_SID_SIZE)value->comparisons[at].user=EqualSid(h->userId,userSid);
@@ -1862,6 +1964,31 @@ static UINT32 wfp_availability(HANDLE engine, const FWPM_NET_EVENT_ENUM_TEMPLATE
     remember("observer-enum-close", "win32", value->closeStatus); cleanup_error("observer-enum-close", "win32", value->closeStatus);
   }
   SetLastError(saved); return scanned;
+}
+static void wfp_facts_write(const struct wfp_availability *value) {
+  if (!value->attempted) return;
+  DWORD used = 0; BOOL incomplete = value->truncated || !value->complete;
+  /* A scan can be incomplete while its captured rows still deserve projection. */
+  BOOL exhausted = FALSE;
+  diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact binding pid=%lu birth=%llu image-id=%s image-hash=%s started=%llu ended=%llu requested=2130706433:%u local=%lu:%u remote=%lu:%u\n",
+    value->tuple.pid, value->tuple.birth, wfpImageId, wfpImageHash, value->tuple.started, value->tuple.ended,
+    wfpRemotePort, value->tuple.localAddress, value->tuple.localPort, value->tuple.remoteAddress, value->tuple.remotePort);
+  for (unsigned i = 0; i < 3; i++) {
+    const struct diagnostic_blob *blob = &value->expected[i];
+    diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact expected=%u bytes=%lu encoded=%lu status=%ld close=%ld hash=%s hex=%s\n", i, blob->size, blob->encoded, blob->status, blob->closed, blob->hash, blob->hex);
+  }
+  for (unsigned i = 0; i < value->candidates; i++) {
+    const struct wfp_event_fact *row = &value->facts[i];
+    diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact candidate=%u valid=%u type=%u time=%llu flags=%u version=%lu protocol=%lu local=%s:%u remote=%s:%u drop=%ld filter=%llu layer=%u direction=%lu loopback=%ld app=%ld user=%ld package=%ld endpoint=%ld\n",
+      i, !!row->valid, row->type, row->time, row->flags, row->version, row->protocol, row->local, row->localPort, row->remote, row->remotePort,
+      row->drop, row->filter, row->layer, row->direction, row->loopback, value->comparisons[i].app, value->comparisons[i].user, value->comparisons[i].package, value->comparisons[i].endpoint);
+    const struct diagnostic_blob *blobs[] = {&row->app, &row->user, &row->package};
+    for (unsigned j = 0; j < 3; j++) {
+      const struct diagnostic_blob *blob = blobs[j];
+      diagnostic_write(stderr, &used, &exhausted, "native-windows-socket-input: caller=wfp_fact candidate=%u field=%u bytes=%lu encoded=%lu status=%ld close=%ld hash=%s hex=%s\n", i, j, blob->size, blob->encoded, blob->status, blob->closed, blob->hash, blob->hex);
+    }
+  }
+  if (incomplete || exhausted) fputs("native-windows-socket-input: caller=wfp_fact incomplete\n", stderr);
 }
 static void wfp_snapshot(const BYTE *line, DWORD size) {
   const char *prefix = WFP_PREFIX " tuple="; DWORD offset = (DWORD)strlen(prefix);
@@ -2029,7 +2156,7 @@ closed:
   if (enumClose || engineClose || !tokenClose) wfpCleanupFailed = TRUE;
   if (enumClose) { remember("observer-enum-close", "win32", enumClose); cleanup_error("observer-enum-close", "win32", enumClose); }
   if (engineClose) { remember("observer-engine-close", "win32", engineClose); cleanup_error("observer-engine-close", "win32", engineClose); }
-  BOOL observed = complete && matched && !status && !enumClose && !engineClose && tokenClose && !availability.closeStatus;
+  BOOL observed = complete && matched && !status && !enumClose && !engineClose && tokenClose && !availability.closeStatus && !wfpCleanupFailed;
   /* Publish settlement readiness before the frame, after the census and its
    * cleanup attempts. U permits closure even for an unproved result, never
    * denial admission; retain the actual completion and separate uncertainty. */
@@ -2042,7 +2169,7 @@ closed:
   fprintf(stderr, "native-windows-socket-input: caller=wfp_snapshot selection=interval-only attempted=%u read=%u complete=%u create-status=%lu read-status=%lu close-status=%lu count=%u interval=%u app-id-fields=%u app-id=%u drop=%u scanned=%u principal-rejected=%u,%u,%u\n",
     !!availability.attempted, !!availability.read, !!availability.complete, availability.createStatus, availability.readStatus, availability.closeStatus,
     availability.count, availability.interval, availability.appIdSet, availability.appId, availability.drop, scanned, principalRejected[0], principalRejected[1], principalRejected[2]);
-  for(unsigned i=0;i<availability.candidates;i++)fprintf(stderr,"native-windows-socket-input: caller=wfp_availability candidate=%u flags=%lu app=%ld user=%ld package=%ld endpoint=%ld\n",i,availability.comparisons[i].flags,availability.comparisons[i].app,availability.comparisons[i].user,availability.comparisons[i].package,availability.comparisons[i].endpoint);
+  wfp_facts_write(&availability);
   fprintf(stderr,"native-windows-socket-input: caller=wfp_availability truncated=%u\n",!!availability.truncated);
   for (unsigned output = 0; output < (wfpPreparedAt ? 2u : 1u); output++) {
     FILE *stream = output ? stdout : stderr;

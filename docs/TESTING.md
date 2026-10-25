@@ -2639,6 +2639,13 @@ Raw text is limited to 32256 bytes so hex encoding plus framing stays within
 64 KiB. Tests use injected APIs and clocks, add no harness or slow-tier command,
 and establish neither actual collector execution nor a matching-host startup
 diagnosis, native success or retirement.
+Additional Windows actual-body regressions retain complete bounded AppId byte
+sizes/digests and encoded prefixes, typed event/time/endpoint facts, IPv6 arms,
+missing identity fields and type-checked DROP data. Wrong unions, malformed
+blobs/SIDs and hash-provider closure failures remain explicit and cannot add a
+denial match. The shared diagnostic hash fixture covers full-value hashing,
+empty values, input bounds, failed acquisition/hash/closure and original error
+preservation without fatal recursion or a native tool.
 The ordinary fast fixtures in `test/native-feasibility.test.js` cover 32/64-bit
 WFP keyword values and exact DROP rejection predicates. Those in
 `test/native-windows-command.test.js`
@@ -2646,6 +2653,16 @@ preserve successful operating-token/policy/SACL observations
 and exercise bounded post-refusal query selection, empty/error/saturated batches,
 typed and textual PID/logon/time projection, case-insensitive held-name joins,
 foreign/stale event exclusion and independent event/query/context closure.
+The retained inspection fixture now projects all twelve typed fields and tests
+provider/event/keyword/subject/object-type exclusion bits independently of
+correlation. Missing fields, array types, invalid numeric ranges, short render
+buffers, wrong property counts, future records and original-deadline exhaustion
+remain incomplete. Typed SID values preserve binary sizes/digests and exact held
+subject comparison. Separate actual bodies protect render-buffer string/SID bounds
+and both precise original FILETIME query endpoints; no recent-time fallback is
+permitted. The second query omits every live selector except the interval while
+the first retains its existing non-keyword predicates. Existing live capture,
+bookmark and target-then-marker acceptance are untouched.
 Inspection never drains the live subscription or supplies native acceptance.
 The same command-case fixture retains actual target/marker open, I/O and close
 facts, held file IDs and completion-time samples while preserving original API
@@ -2677,6 +2694,15 @@ that already-obtained outcome labels reach the actual diagnostic writer and a
 throwing sink cannot bypass retirement or change its outcome. Successful
 protocol output remains unchanged. These portable cases use no native tools or
 timing waits and add no slow-tier or validation-command assignment.
+New audit transport rows exercise fragmented and coalesced delivery through the
+same operating allowance as cached SACLs, including an explicit incomplete marker
+and overflow that preserves both the strict failure and independent cleanup.
+The actual bounded writer rejects encoded-line/aggregate exhaustion before
+publication, charges CRT CRLF expansion, reserves marker framing and preserves
+errors on short writes.
+These fixtures remain in ordinary fast discovery; the selected explicit native
+harness already imports its native suites. No duplicate focused command or
+unrelated slow tier is added, and portable results establish no hosted acceptance.
 Existing notification/drain ordering, missing-event
 and uncertain-retirement refusals remain required. These tiny injected cases add
 no validation tier and execute no Windows tool on a foreign host.

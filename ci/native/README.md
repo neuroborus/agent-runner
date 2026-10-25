@@ -94,10 +94,17 @@ WFP collection remains read-only; no event option is enabled or filter installed
 After a latched TCP deadline, one `SO_ERROR` sample from the original held socket
 retains the active connect/send/receive phase, last select result, query error and
 returned size. It cannot replace the deadline with a late denial receipt. The
-existing interval-only WFP enumeration additionally compares field-validated
-AppId, user/package SID and endpoints for at most eight candidates, marking
-unavailable comparisons and truncation. It shares the existing scan/transaction
-budgets and adds no enumeration, lookup or retry.
+existing interval-only WFP enumeration additionally projects typed facts for at
+most eight candidates: event type/time and header flags, normalized IPv4/IPv6
+addresses and ports, and the type-checked DROP union's filter, layer, direction
+and loopback value. Its existing AppId, user/package and endpoint comparisons
+remain diagnostic. Complete AppId and SID byte sizes/SHA-256 digests plus at most
+64 encoded bytes distinguish actual representations from comparison results.
+Expected values join the held image identity/hash, original PID/birth, requested
+endpoint, socket tuple and attempt interval. Absent flags, invalid blobs/SIDs,
+wrong unions and unavailable hashes remain explicit. This shares the existing
+scan/transaction budgets and adds no enumeration, filter/layer lookup or retry.
+Zero event keywords do not imply disabled outbound-unicast collection.
 The rejection counters distinguish non-DROP/unbound events, endpoint, interval,
 principal and layer/direction mismatches; malformed DROP fields name their exact
 predicate. Provider/callout lookups name their exact failed API and join;
@@ -110,12 +117,27 @@ unread values remain unavailable. Readiness, drain and projection counters retai
 their existing meanings; `audit[0]=5` is a control phase, not a delivery cause.
 The four projection counters record state/subject refusal, numeric or lifetime
 binding refusal, a target predicate miss, and a marker/order predicate miss.
-One post-refusal inspection issues two read-only Security queries over the same
-subject and recent interval, with and without the existing keyword selection.
-Each uses one zero-timeout batch of at most 16 events. A four-field projection
-with a fixed 32 KiB buffer joins the original PID, operating logon and birth/release
-window before comparing the held target/marker names case-insensitively outside
-XPath. Earlier broker reads and other processes cannot count as case events.
+One post-refusal inspection retains two read-only Security queries, each with
+one zero-timeout batch of at most 16 events. Both endpoints come from the
+original case's release FILETIME and one immediate failure-time sample, retaining
+100 ns precision; unavailable bounds never fall back to a recent-time query.
+The first query retains provider, event-class, subject and object-type selection
+without keywords. Its former keyworded comparison now selects only that interval.
+The live subscription and its loss selections are unchanged.
+A typed twelve-field projection uses the existing fixed 32 KiB buffer for
+process ID, object name, operating logon, timestamp, provider, event ID, keywords,
+record ID, subject SID, object type, access mask and process name. Strings must
+terminate within the returned buffer; typed SIDs must fit it before native SID
+validation or comparison. Full UTF-16 byte sizes/digests (excluding the terminator),
+or the complete binary value for a typed SID, and at most 64 encoded bytes retain
+each value with its original variant type. Presence/type
+bits distinguish missing or malformed fields from valid zero values.
+Correlation compares PID/logon/birth and both interval endpoints, then held
+target/marker names case-insensitively outside XPath. An exclusion mask describes
+the original provider (1), event-ID/keyword (2), subject (4) and object-type (8)
+predicates; `-1` means a needed field is unavailable. These comparisons establish
+neither the acceptance sequence nor a producer cause. Earlier broker reads,
+foreign processes/logons and out-of-interval rows remain unrelated.
 Unavailable or malformed projection remains distinct from zero matches. Every
 acquired event/query/render-context handle is closed, with the original error
 preserved separately from closure errors. Counts, saturation, empty queries and
@@ -135,10 +157,19 @@ Cached N observations retain their original subject/logon/policy and
 SACL hashes even if later F diagnostics differ. Successful broker stderr stays
 silent; cached ACE data is published and flushed after the original fatal
 diagnosis, before the existing post-refusal Event Log queries.
-The existing raw publication remains intact. Valid observation lines following
-a strict native refusal have their own 4 KiB capture bound; malformed, partial,
-oversized or standalone metadata cannot replace the original 4 KiB failure
-carrier or admit success. Settlement labels publish already-obtained broker,
+The existing raw publication remains intact. SACL and new `operating-audit` /
+`operating-audit-value` rows share one 4 KiB observation allowance after a complete
+strict native refusal. A narrow grammar recognizes only those bounded rows and
+`operating-incomplete`; it never exempts fatal or cleanup records. Native writers
+bound encoded rows, CRT CRLF expansion and framing before publication, reserving an incomplete marker
+inside the allowance. Valid optional-output exhaustion retains the original
+failure and cleanup carrier. Partial, malformed or standalone metadata cannot
+admit success. WFP fact text separately uses the same bounded publication helper
+and its own incomplete marker, outside the unchanged strict 4 KiB WFP snapshot.
+Hash failures do not enter fatal reporting; acquired hash providers close once
+and closure failures remain separate cleanup evidence. No observation starts a
+wait, retries, resets a deadline, enables a channel or changes host policy.
+Settlement labels publish already-obtained broker,
 capture closure, independent-domain and restoration outcomes without replaying effects.
 Diagnostic sink failures cannot bypass retirement checks or change their outcome.
 

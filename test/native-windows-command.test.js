@@ -5691,11 +5691,172 @@ test("cached SACL diagnostics preserve silent success, strict refusal errors and
       assert.equal(f.failure(), undefined);
       continue;
     }
-    assert.equal(error.nativeDiagnosticInvalid, fault !== null, fault);
-    if (!fault) {
+    assert.equal(
+      error.nativeDiagnosticInvalid,
+      ![null, "overflow"].includes(fault),
+      fault,
+    );
+    if (!fault || fault === "overflow") {
       assert.equal(error.stderr.toString(), refusal);
       assert.match(error.feasibilityCause.detail, /command-marker-barrier/u);
+      assert.equal(error.operatingObservationIncomplete, fault === "overflow");
     } else assert.equal(f.failure(), error);
+  }
+});
+
+test("audit rows share the operating allowance without exhausting the original failure or cleanup carrier", async () => {
+  const open = await brokerCloseBoundary();
+  const refusal =
+    "native-windows: operation=command-marker-barrier domain=invariant value=0\n";
+  const cleanup =
+    "native-windows-cleanup: operation=command-metadata-close domain=win32 value=6\n";
+  const sacl = `native-windows-command: operating-sacl phase=N pid=43 birth=90 logon=7 policy=3 identity=${"a".repeat(16)}:${"b".repeat(32)} hash=${PIN} count=0 truncated=0 status=0,0,0 close=0\n`;
+  const header =
+    "native-windows-command: operating-audit index=0 types=8,1,21,17,1,6,10,10,1,1,20,1 valid=4095 pid=43 logon=7 time=100 id=4663 keywords=9232379236109516800 record=12 mask=1 target=1 marker=0 excluded=1\n";
+  const audit =
+    header +
+    Array.from(
+      { length: 5 },
+      (_, field) =>
+        `native-windows-command: operating-audit-value index=0 field=${field} bytes=128 encoded=64 status=0 close=0 hash=${PIN} hex=${"61".repeat(64)}\n`,
+    ).join("");
+  for (const invalid of ["win32 value=6", "ntstatus value=0"])
+    assert.equal(
+      windowsFeasibilityDiagnostics(
+        refusal +
+          `native-windows-cleanup: operation=hash-provider-close domain=${invalid}\n`,
+      ),
+      null,
+    );
+  for (const fault of [
+    null,
+    "coalesced",
+    "overflow",
+    "orphan",
+    "malformed",
+    "partial",
+    "hash-close",
+  ]) {
+    const f = open();
+    const closure =
+      fault === "hash-close"
+        ? "native-windows-cleanup: operation=hash-provider-close domain=ntstatus value=3221225485\n"
+        : cleanup;
+    const observation =
+      fault === "overflow"
+        ? sacl +
+          audit.repeat(4) +
+          "native-windows-command: operating-incomplete\n"
+        : sacl + audit;
+    const text =
+      fault === "orphan"
+        ? observation
+        : refusal +
+          (fault === "malformed"
+            ? observation.replace("field=4", "field=5")
+            : observation) +
+          closure;
+    const bytes = Buffer.from(
+      fault === "partial" ? refusal + observation.slice(0, -1) : text,
+    );
+    for (
+      let at = 0;
+      at < bytes.length;
+      at += fault === "coalesced" ? bytes.length : 13
+    )
+      f.broker.stderr.write(
+        bytes.subarray(at, at + (fault === "coalesced" ? bytes.length : 13)),
+      );
+    const ended = once(f.broker.stderr, "end");
+    f.broker.stderr.end();
+    await ended;
+    f.broker.emit("close", 126, null);
+    const error = await f.outcome;
+    assert.deepEqual(Buffer.concat(f.raw), bytes);
+    assert.equal(
+      error.nativeDiagnosticInvalid,
+      ["orphan", "malformed", "partial"].includes(fault),
+    );
+    if ([null, "coalesced", "overflow", "hash-close"].includes(fault)) {
+      assert.equal(error.stderr.toString(), refusal + closure);
+      assert.match(error.feasibilityCause.detail, /command-marker-barrier/u);
+      assert.ok(
+        error.feasibilityCleanup.detail.includes(
+          fault === "hash-close"
+            ? "hash-provider-close"
+            : "command-metadata-close",
+        ),
+      );
+      assert.equal(error.operatingObservationIncomplete, fault === "overflow");
+    }
+  }
+});
+
+test("native optional publication bounds encoded framing before writing and preserves error state", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void diagnostic_write\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("char line[2048]; va_list args;", "const line={};let args;")
+    .replace("va_start(args, format)", "args=values")
+    .replace("va_end(args)", "")
+    .replaceAll("sizeof(line)", "2048")
+    .replaceAll("line[i]", "line.text[i]")
+    .replaceAll("*used", "used.value")
+    .replaceAll("*incomplete", "incomplete.value")
+    .replace(/\((?:DWORD|size_t|int)\)/gu, "")
+    .replace(/\b(?:DWORD|int)\b/gu, "let");
+  const program = new Script(
+    `(output,used,incomplete,format,...values)=>{${body}}`,
+  );
+  for (const fault of [null, "oversized", "write"]) {
+    const used = { value: 0 },
+      incomplete = { value: false },
+      writes = [];
+    const api = {
+      TRUE: true,
+      errno: 7,
+      GetLastError: () => 91,
+      SetLastError: (v) => assert.equal(v, 91),
+      vsnprintf(line, maximum, format, args) {
+        assert.equal(maximum, 2048);
+        let i = 0;
+        line.text = format.replace(/%s/gu, () => args[i++]);
+        return Buffer.byteLength(line.text);
+      },
+      fwrite(line, size, count, stream) {
+        assert.equal(stream, "stderr");
+        assert.equal(size, 1);
+        assert.equal(count, Buffer.byteLength(line.text));
+        writes.push(line.text.replaceAll("\n", "\r\n"));
+        api.errno = 9;
+        return fault === "write" ? 0 : count;
+      },
+    };
+    const write = program.runInNewContext(api);
+    const row =
+      fault === "oversized"
+        ? "x".repeat(2048)
+        : `native-windows-command: operating-audit-value index=0 field=0 bytes=128 encoded=64 status=0 close=0 hash=${PIN} hex=${"61".repeat(64)}\n`;
+    for (let i = 0; i < 32; i++) write("stderr", used, incomplete, "%s", row);
+    assert.equal(incomplete.value, true);
+    assert.equal(api.errno, 7);
+    assert.ok(
+      used.value +
+        Buffer.byteLength("native-windows-command: operating-incomplete\n") <=
+        4096,
+    );
+    assert.equal(
+      writes.length,
+      fault === "oversized"
+        ? 0
+        : fault === "write"
+          ? 1
+          : Math.floor((4096 - 128) / (row.length + 1)),
+    );
+    assert.equal(Buffer.byteLength(writes.join("")), used.value);
   }
 });
 
@@ -6432,6 +6593,10 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       )
       .replaceAll("->", ".")
       .replaceAll(".sid[0]", ".sid.text")
+      .replaceAll(
+        /&command_operating_(bytes|incomplete)/gu,
+        '"command_operating_$1"',
+      )
       .replace(/\((?:DWORD|unsigned)\)/gu, "")
       .replace(
         /\b(?:DWORD|BOOL|PSECURITY_DESCRIPTOR|PACL|HANDLE|AUDIT_POLICY_INFORMATION|LPSTR|size_t|unsigned|int)\s+\*?/gu,
@@ -6510,6 +6675,10 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         hashes: [{}, {}],
         values: [],
       },
+      command_operating_incomplete: false,
+      command_inspection_incomplete: false,
+      diagnostic_write: (stream, _used, _incomplete, format, ...args) =>
+        api.fprintf(stream, format, ...args),
       command_delivery_observe: () => {},
       command_delivery: {
         rejected: Array(4).fill(0),
@@ -7112,6 +7281,8 @@ test("actual admission releases the checked child before a complete Job census w
       command_delivery: { rejected: Array(4).fill(0) },
       command_gate_audit_write: () => {},
       command_operating_sacls_write: () => {},
+      command_operating_incomplete: false,
+      command_inspection_incomplete: false,
       admission: { hProcess: 41, hThread: 42, dwProcessId: 43, dwThreadId: 44 },
       command_processes: [41],
       command_threads: [42],
@@ -7738,6 +7909,8 @@ function commandCaptureFixture(
     command_gate_observed: { observed: false },
     command_delivery_observe: () => {},
     command_operating_sacls_write: () => {},
+    command_operating_incomplete: false,
+    command_inspection_incomplete: false,
     command_delivery: { rejected: Array(4).fill(0) },
     command_subscription_query: { text: "" },
     command_subscription_flags: 0,
@@ -8852,11 +9025,164 @@ test("native audit installation records intent first and preserves exact setter 
   }
 });
 
+test("post-refusal projection confines text and retains both exact original interval endpoints", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const text =
+    /static const WCHAR \*command_delivery_text\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replaceAll("(ULONG_PTR)", "")
+      .replaceAll("sizeof(WCHAR)", "2")
+      .replaceAll("->", ".")
+      .replace(/\b(?:ULONG_PTR|size_t)\b/gu, "let");
+  const textProgram = new Script(`(value,bytes,size)=>{${text}}`);
+  for (const [pointer, type, length, accepted] of [
+    [120, 1, 2, true],
+    [99, 1, 2, false],
+    [132, 1, 2, false],
+    [121, 1, 2, false],
+    [130, 1, 1, false],
+    [120, 129, 2, false],
+    [0, 1, 2, false],
+  ]) {
+    const read = textProgram.runInNewContext({
+      NULL: null,
+      EvtVarTypeString: 1,
+      wcsnlen_s: (value, capacity) => {
+        assert.equal(value, pointer);
+        return Math.min(length, capacity);
+      },
+    });
+    assert.equal(
+      read({ Type: type, StringVal: pointer }, 100, 32),
+      accepted ? pointer : null,
+    );
+  }
+  const sid = /static PSID command_delivery_sid\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "const SID *sid=(const SID *)value->SidVal;",
+      "const sid=sidAt(value.SidVal);",
+    )
+    .replaceAll("(ULONG_PTR)", "")
+    .replaceAll("sizeof(DWORD)", "4")
+    .replaceAll("->", ".")
+    .replace(/\b(?:ULONG_PTR|DWORD)\b/gu, "let");
+  const sidProgram = new Script(`(value,bytes,size)=>{${sid}}`);
+  for (const [pointer, type, count, valid, accepted] of [
+    [496, 19, 2, true, true],
+    [508, 19, 0, true, false],
+    [498, 19, 2, true, false],
+    [496, 147, 2, true, false],
+    [496, 19, 255, true, false],
+    [99, 19, 2, true, false],
+    [416, 19, 2, false, false],
+  ]) {
+    const read = sidProgram.runInNewContext({
+      NULL: null,
+      EvtVarTypeSid: 19,
+      SECURITY_MAX_SID_SIZE: 68,
+      sidAt: () => ({ SubAuthorityCount: count }),
+      GetSidLengthRequired: (n) => 8 + 4 * n,
+      IsValidSid: () => valid,
+    });
+    assert.equal(
+      read({ Type: type, SidVal: pointer }, 100, 412),
+      accepted ? pointer : null,
+    );
+  }
+  const interval =
+    /static BOOL command_delivery_interval\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace(
+        "FILETIME to,from={(DWORD)command_case_from,(DWORD)(command_case_from>>32)};SYSTEMTIME first,last;",
+        "const to={},from={dwLowDateTime:Number(command_case_from&0xffffffffn),dwHighDateTime:Number(command_case_from>>32n)},first={},last={};",
+      )
+      .replaceAll("*until", "until.value")
+      .replace(
+        "((ULONGLONG)to.dwHighDateTime<<32)|to.dwLowDateTime",
+        "((BigInt(to.dwHighDateTime)<<32n)|BigInt(to.dwLowDateTime))",
+      )
+      .replace(
+        "(DWORD)(command_case_from%10000000)",
+        "Number(command_case_from%10000000n)",
+      )
+      .replace("(DWORD)(until.value%10000000)", "Number(until.value%10000000n)")
+      .replace(/&(?=(?:to|from|first|last)\b)/gu, "")
+      .replaceAll(/\bL(?=")/gu, "");
+  const program = new Script(`(interval,until)=>{${interval}}`);
+  for (const fault of [null, "missing", "birth", "clock", "conversion"]) {
+    const from = fault === "missing" ? 0n : 133000000001234567n,
+      to = fault === "clock" ? from - 1n : 133000000009876543n,
+      output = {},
+      until = { value: 0 };
+    const api = {
+      FALSE: false,
+      BigInt,
+      command_case_from: from,
+      command_case_birth: fault === "birth" ? from + 1n : from - 1n,
+      GetSystemTimePreciseAsFileTime(value) {
+        Object.assign(value, {
+          dwLowDateTime: Number(to & 0xffffffffn),
+          dwHighDateTime: Number(to >> 32n),
+        });
+      },
+      FileTimeToSystemTime(value, result) {
+        assert.ok(
+          [from, to].includes(
+            (BigInt(value.dwHighDateTime) << 32n) | BigInt(value.dwLowDateTime),
+          ),
+        );
+        Object.assign(result, {
+          wYear: 2026,
+          wMonth: 1,
+          wDay: 2,
+          wHour: 3,
+          wMinute: 4,
+          wSecond: 5,
+        });
+        return fault !== "conversion";
+      },
+      swprintf_s(value, size, format, ...args) {
+        assert.equal(size, 256);
+        let i = 0;
+        value.text = format.replace(/%0([0-9]+)l?u/gu, (_, width) =>
+          String(args[i++]).padStart(Number(width), "0"),
+        );
+        return value.text.length;
+      },
+    };
+    assert.equal(program.runInNewContext(api)(output, until), fault === null);
+    assert.equal(until.value, to);
+    if (!fault)
+      assert.equal(
+        output.text,
+        "TimeCreated[@SystemTime>='2026-01-02T03:04:05.1234567Z' and @SystemTime<='2026-01-02T03:04:05.9876543Z']",
+      );
+    else assert.equal(output.text, undefined);
+  }
+});
+
 test("post-refusal audit inspection joins the original case without draining the subscription", async () => {
   const source = await readFile(
     new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
     "utf8",
   );
+  const effectsSource = await readFile(
+    new URL(
+      "../ci/native/win32/feasibility-command-effects.js",
+      import.meta.url,
+    ),
+    "utf8",
+  );
+  const isObservation = new Script(
+    effectsSource.slice(
+      effectsSource.indexOf("function commandOperatingDiagnostic"),
+      effectsSource.indexOf("\nconst regular"),
+    ) + "\ncommandOperatingDiagnostic",
+  ).runInNewContext();
   const body = (name) =>
     new RegExp(
       `static (?:void|BOOL|int) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
@@ -8878,9 +9204,46 @@ test("post-refusal audit inspection joins the original case without draining the
     .replaceAll("sizeof(buffer.bytes)", "32768")
     .replaceAll("sizeof(EVT_VARIANT)", "16")
     .replace(/\*(operation|error)=([^;]+);/gu, "$1($2);")
-    .replace(/&(values\[[02]\])/gu, "$1")
+    .replace(/&(values\[(?:[012]|i)\])/gu, "$1")
     .replace(/,&(pid|logon|used|count)/gu, ",value=>$1=value")
-    .replace(/\b(?:DWORD|BOOL)\b/gu, "let");
+    .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let");
+  const fact = body("command_delivery_fact")
+    .replace(
+      "ULONGLONG numbers[12]={0};DWORD valid=0;const WCHAR *strings[12]={0};char types[144]={0};unsigned offset=0;",
+      'const numbers=Array(12).fill(0),strings=Array(12).fill(null);let valid=0,types="";',
+    )
+    .replace(
+      "const BYTE *data[12]={0};DWORD lengths[12]={0};",
+      "const data=Array(12).fill(null),lengths=Array(12).fill(0);",
+    )
+    .replace("PSID sid=", "const sid=")
+    .replace(
+      'offset+=(unsigned)snprintf(types+offset,sizeof(types)-offset,"%s%lu",i?",":"",values[i].Type);',
+      'types+=(i?",":"")+values[i].Type;',
+    )
+    .replace("EVT_VARIANT value=values[i];", "const value={...values[i]};")
+    .replace(
+      "const unsigned fields[]={4,8,9,1,11};",
+      "const fields=[4,8,9,1,11];",
+    )
+    .replace("struct diagnostic_blob blob;", "const blob={};")
+    .replaceAll("(const BYTE *)", "")
+    .replaceAll("(DWORD)", "")
+    .replaceAll("sizeof(WCHAR)", "2")
+    .replace(/\b([0-9]+)u\b/gu, "$1")
+    .replaceAll("0x0020000000000000ULL", "0x0020000000000000n")
+    .replaceAll("0x0010000000000000ULL", "0x0010000000000000n")
+    .replaceAll(/\bL(?=")/gu, "")
+    .replaceAll(
+      /&command_operating_(bytes|incomplete)/gu,
+      '"command_operating_$1"',
+    )
+    .replace(/(?<!&)&values\[i\]/gu, "values[i]")
+    .replace(/(?<!&)&value\b/gu, "value")
+    .replaceAll("&numbers[i]", "v=>numbers[i]=v")
+    .replaceAll("&blob", "blob")
+    .replace(/\*(operation|error)=([^;]+);/gu, "$1($2);")
+    .replace(/\b(?:unsigned|DWORD|BOOL|LONG|int)\b/gu, "let");
   const availability = body("command_delivery_interface")
     .replace("EVT_HANDLE handles[3]={0};", "const handles=Array(3).fill(null);")
     .replace(
@@ -8902,11 +9265,18 @@ test("post-refusal audit inspection joins the original case without draining the
     .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let");
   const inspection = body("command_delivery_observe")
     .replace(
+      "ULONGLONG until=0;WCHAR interval[256];BOOL bounded=",
+      "let until=0;const interval={};let bounded=",
+    )
+    .replace(
+      "command_delivery_interval(interval,&until)",
+      "command_delivery_interval(interval,value=>until=value)",
+    )
+    .replace(
       "WCHAR query[2048]; EVT_HANDLE events[16]={0};",
       "const query={};const events=Array(16).fill(null);",
     )
     .replace(/const WCHAR \*paths\[\]=\{([^}]+)\};/u, "const paths=[$1];")
-    .replace("const WCHAR *keywords", "const keywords")
     .replaceAll("const char *", "let ")
     .replaceAll(", *", ", ")
     .replaceAll(/\bL(?=")/gu, "")
@@ -8914,7 +9284,8 @@ test("post-refusal audit inspection joins the original case without draining the
     .replace(/,&(count|readOperation|readError)/gu, ",value=>$1=value");
   const program =
     new Script(`function command_delivery_number(value,number){${number}}
-    function command_delivery_match(context,event,operation,error){${match}}
+    function command_delivery_fact(values,bytes,size,index,until,operation,error){${fact}}
+    function command_delivery_match(context,event,operation,error,wide,index,until){${match}}
     function command_delivery_interface(){${availability}}
     ()=>{${inspection}}`);
   for (const fault of [
@@ -8941,12 +9312,33 @@ test("post-refusal audit inspection joins the original case without draining the
     "log",
     "log-info",
     "interface-close",
+    "other-provider",
+    "other-id",
+    "other-keywords",
+    "other-subject",
+    "other-object-type",
+    "missing-field",
+    "future",
+    "deadline",
+    "render-deadline",
+    "render-count",
+    "render-size",
+    "missing-provider",
+    "missing-record",
+    "numeric-range",
+    "array-field",
+    "sid",
+    "other-sid",
+    "bad-sid",
+    "failure-event",
+    "projection-deadline",
   ]) {
     const calls = [],
       closed = [],
       cleanup = [],
       queries = [],
-      frames = [];
+      frames = [],
+      optional = [];
     let lastError = 91,
       selected = 0;
     const api = {
@@ -8956,11 +9348,22 @@ test("post-refusal audit inspection joins the original case without draining the
       ERROR_SUCCESS: 0,
       ERROR_INSUFFICIENT_BUFFER: 122,
       ERROR_INVALID_DATA: 13,
+      ERROR_TIMEOUT: 1460,
+      MAXDWORD: 0xffffffff,
       EvtQueryChannelPath: 1,
       EvtQueryReverseDirection: 0x200,
       EvtRenderContextValues: 0,
       EvtRenderEventValues: 0,
       EvtVarTypeUInt32: 8,
+      EvtVarTypeByte: 4,
+      EvtVarTypeUInt16: 6,
+      EvtVarTypeHexInt32: 20,
+      EvtVarTypeUInt64: 10,
+      EvtVarTypeHexInt64: 21,
+      EvtVarTypeFileTime: 17,
+      EvtVarTypeString: 1,
+      EvtVarTypeSid: 19,
+      EvtVarTypeNull: 0,
       EvtVarTypeBoolean: 13,
       EvtChannelConfigEnabled: 0,
       EvtOpenChannelPath: 1,
@@ -9006,10 +9409,6 @@ test("post-refusal audit inspection joins the original case without draining the
         used(16);
         return fault !== "log-info";
       },
-      EvtVarTypeUInt64: 10,
-      EvtVarTypeHexInt64: 21,
-      EvtVarTypeString: 1,
-      EvtVarTypeFileTime: 17,
       stderr: {},
       command_case_pid: 43,
       command_case_birth: 50,
@@ -9017,6 +9416,49 @@ test("post-refusal audit inspection joins the original case without draining the
       command_case_from: 90,
       command_action: 2,
       command_paths: ["inspect", "edit", "outside", "marker"],
+      command_started: 0,
+      command_cleanup_started: 0,
+      command_closing: false,
+      command_operating_bytes: 0,
+      command_operating_incomplete: false,
+      command_inspection_incomplete: false,
+      command_delivery_interval(interval, until) {
+        interval.text = "TimeCreated[@SystemTime>='90' and @SystemTime<='110']";
+        until(110);
+        return true;
+      },
+      GetTickCount64: () =>
+        fault === "deadline" ||
+        (fault === "render-deadline" && calls.includes("next")) ||
+        (fault === "projection-deadline" && optional.length)
+          ? 120000
+          : 0,
+      command_delivery_text: (value) =>
+        value.Type === 1 ? value.StringVal : null,
+      userSid: Buffer.from("synthetic-subject"),
+      command_delivery_sid: (value) =>
+        value.Type === 19 ? value.SidVal : null,
+      GetLengthSid: (value) => value.length,
+      EqualSid: (a, b) => a.equals(b),
+      diagnostic_blob_read(text, size, blob) {
+        const bytes =
+          typeof text === "string" ? Buffer.from(text, "utf16le") : text;
+        Object.assign(blob, {
+          size,
+          encoded: Math.min(size, 64),
+          status: bytes === null ? -1 : 0,
+          closed: 0,
+          hash: bytes === null ? "-" : sha(bytes),
+          hex:
+            bytes === null || !size
+              ? "-"
+              : bytes.subarray(0, 64).toString("hex"),
+        });
+      },
+      diagnostic_write: (_stream, _used, _incomplete, format, ...args) =>
+        optional.push([format, ...args]),
+      wcscmp: (a, b) => (a === b ? 0 : 1),
+      wcslen: (text) => text.length,
       userText: identity.userSid,
       command_delivery: {
         subject: identity.userSid,
@@ -9040,8 +9482,8 @@ test("post-refusal audit inspection joins the original case without draining the
         lastError = value;
       },
       EvtCreateRenderContext(count, paths, flags) {
-        assert.equal(count, 4);
-        assert.equal(paths.length, 4);
+        assert.equal(count, 12);
+        assert.equal(paths.length, 12);
         assert.equal(flags, 0);
         assert.ok(paths[0].includes("ProcessId"));
         assert.ok(paths[2].includes("SubjectLogonId"));
@@ -9051,7 +9493,10 @@ test("post-refusal audit inspection joins the original case without draining the
       swprintf_s(query, maximum, format, ...args) {
         assert.equal(maximum, 2048);
         let i = 0;
-        query.text = format.replace(/%ls/gu, () => args[i++]);
+        query.text = format.replace(/%ls/gu, () => {
+          const value = args[i++];
+          return value?.text ?? value;
+        });
         queries.push(query.text);
         return query.text.length;
       },
@@ -9066,7 +9511,9 @@ test("post-refusal audit inspection joins the original case without draining the
           "Case-insensitive held names are joined after projection",
         );
         assert.ok(
-          query.text.includes("TimeCreated[timediff(@SystemTime)<=150000]"),
+          query.text.includes(
+            "TimeCreated[@SystemTime>='90' and @SystemTime<='110']",
+          ),
         );
         return fault === "query" ? null : `query:${selected}`;
       },
@@ -9108,10 +9555,73 @@ test("post-refusal audit inspection joins the original case without draining the
             : { Type: 21, UInt64Val: fault === "other-logon" ? 8 : 7 },
           fault === "text"
             ? { Type: 1, StringVal: "100" }
-            : { Type: 17, FileTimeVal: fault === "stale" ? 89 : 100 },
+            : {
+                Type: 17,
+                FileTimeVal:
+                  fault === "stale" ? 89 : fault === "future" ? 111 : 100,
+              },
+          {
+            Type:
+              fault === "missing-provider"
+                ? 0
+                : fault === "array-field"
+                  ? 129
+                  : 1,
+            StringVal:
+              fault === "other-provider"
+                ? "Synthetic-Provider"
+                : "Microsoft-Windows-Security-Auditing",
+          },
+          {
+            Type: 6,
+            UInt16Val:
+              fault === "other-id"
+                ? 5000
+                : fault === "failure-event"
+                  ? 4656
+                  : 4663,
+          },
+          {
+            Type: 10,
+            UInt64Val:
+              fault === "other-keywords"
+                ? 0n
+                : fault === "failure-event"
+                  ? 0x8010000000000000n
+                  : 0x8020000000000000n,
+          },
+          { Type: 10, UInt64Val: fault === "missing-record" ? 0 : 12 },
+          {
+            Type: ["sid", "other-sid", "bad-sid"].includes(fault) ? 19 : 1,
+            StringVal:
+              fault === "other-subject" ? "S-1-5-21-99" : identity.userSid,
+            SidVal:
+              fault === "bad-sid"
+                ? null
+                : Buffer.from(
+                    fault === "other-sid"
+                      ? "other-subject"
+                      : "synthetic-subject",
+                  ),
+          },
+          {
+            Type: 1,
+            StringVal: fault === "other-object-type" ? "Key" : "File",
+          },
+          {
+            Type:
+              fault === "missing-field"
+                ? 0
+                : fault === "numeric-range"
+                  ? 10
+                  : 20,
+            UInt32Val: 1,
+            UInt64Val: 4294967296n,
+          },
+          { Type: 1, StringVal: "C:\\fixture\\actor.exe" },
         );
-        used(128);
-        count(4);
+        used(fault === "render-size" ? 191 : 512);
+        count(fault === "render-count" ? 11 : 12);
         return true;
       },
       EvtClose(handle) {
@@ -9141,11 +9651,22 @@ test("post-refusal audit inspection joins the original case without draining the
     program.runInNewContext(api)();
     assert.equal(queries.length, 2);
     assert.equal(queries[0].includes("band(Keywords"), false);
-    assert.equal(queries[1].includes("band(Keywords"), true);
+    for (const predicate of [
+      "Provider[",
+      "EventID=",
+      "SubjectUserSid",
+      "ObjectType",
+      "band(Keywords",
+    ])
+      assert.equal(queries[1].includes(predicate), false);
     assert.equal(lastError, 91);
     assert.equal(
       calls.filter((call) => call === "next").length,
-      fault === "query" ? 0 : 2,
+      ["query", "deadline", "render-deadline"].includes(fault)
+        ? fault === "render-deadline"
+          ? 1
+          : 0
+        : 2,
     );
     assert.equal(frames.length, 6);
     assert.deepEqual(frames[4], [true, true, true, 0, 1, 2, 3, 4, 5]);
@@ -9185,16 +9706,25 @@ test("post-refusal audit inspection joins the original case without draining the
     }
     assert.equal(frames[1][0], 0);
     assert.equal(frames[2][0], 1);
-    assert.equal(frames[1][1], fault === "query" ? "EvtQuery" : "EvtNext");
+    assert.equal(
+      frames[1][1],
+      fault === "query"
+        ? "EvtQuery"
+        : fault === "deadline"
+          ? "deadline"
+          : "EvtNext",
+    );
     assert.equal(
       frames[1][2],
-      fault === "query"
-        ? 5
-        : fault === "empty"
-          ? 259
-          : fault === "next"
-            ? 50
-            : 0,
+      fault === "deadline"
+        ? 1460
+        : fault === "query"
+          ? 5
+          : fault === "empty"
+            ? 259
+            : fault === "next"
+              ? 50
+              : 0,
     );
     assert.equal(frames[1][4], fault === "saturated");
     assert.equal(
@@ -9204,7 +9734,11 @@ test("post-refusal audit inspection joins the original case without draining the
     assert.equal(frames[3][0], fault === "context-close" ? 6 : 0);
     assert.equal(
       closed.filter((handle) => handle.startsWith("query:")).length,
-      fault === "query" ? 0 : 2,
+      ["query", "deadline"].includes(fault)
+        ? 0
+        : fault === "render-deadline"
+          ? 1
+          : 2,
     );
     assert.equal(
       closed.filter((handle) => handle === "context").length,
@@ -9221,13 +9755,15 @@ test("post-refusal audit inspection joins the original case without draining the
     );
     assert.equal(
       frames[1][10],
-      fault === "context"
-        ? 5
-        : fault === "render"
-          ? 50
-          : fault === "event-fields"
-            ? 13
-            : 0,
+      fault === "render-deadline"
+        ? 1460
+        : fault === "context"
+          ? 5
+          : fault === "render"
+            ? 50
+            : ["event-fields", "render-count", "render-size"].includes(fault)
+              ? 13
+              : 0,
     );
     const matches = ![
       "query",
@@ -9238,6 +9774,11 @@ test("post-refusal audit inspection joins the original case without draining the
       "other-pid",
       "other-logon",
       "stale",
+      "future",
+      "deadline",
+      "render-deadline",
+      "render-count",
+      "render-size",
     ].includes(fault);
     assert.equal(frames[1][7], fault === "context" ? -1 : matches ? 1 : 0);
     assert.equal(
@@ -9245,6 +9786,74 @@ test("post-refusal audit inspection joins the original case without draining the
       fault === "context" ? -1 : matches ? (fault === "saturated" ? 15 : 1) : 0,
     );
     assert.deepEqual(api.command_delivery.rejected, [1, 2, 3, 4]);
+    const row = optional.find(([format]) =>
+      format.includes("operating-audit index="),
+    );
+    for (const [format, ...args] of optional) {
+      let at = 0;
+      const line = format.replace(/%(?:ll|l)?[usdx]/gu, () => {
+        const value = args[at++];
+        return String(typeof value === "boolean" ? Number(value) : value);
+      });
+      assert.equal(isObservation(Buffer.from(line)), true, line);
+    }
+    if (
+      [
+        "other-provider",
+        "other-id",
+        "other-keywords",
+        "other-subject",
+        "other-object-type",
+        "other-sid",
+      ].includes(fault)
+    ) {
+      const expected = {
+        "other-provider": 1,
+        "other-id": 2,
+        "other-keywords": 2,
+        "other-subject": 4,
+        "other-object-type": 8,
+        "other-sid": 4,
+      }[fault];
+      assert.equal(row.at(-1), expected);
+      assert.equal(
+        row.at(-3),
+        true,
+        "Correlated diagnostics cannot supply native acceptance",
+      );
+    }
+    if (
+      [
+        "missing-field",
+        "missing-provider",
+        "missing-record",
+        "numeric-range",
+        "array-field",
+        "bad-sid",
+      ].includes(fault)
+    ) {
+      assert.equal(frames[2][10], 13);
+      assert.equal(api.command_inspection_incomplete, true);
+      const field =
+        fault === "missing-provider" || fault === "array-field"
+          ? 4
+          : fault === "missing-record"
+            ? 7
+            : fault === "bad-sid"
+              ? 8
+              : 10;
+      assert.equal(row[3] & (1 << field), 0);
+    }
+    if (fault === "failure-event") assert.equal(row.at(-1), 0);
+    if (fault === "projection-deadline") {
+      assert.equal(frames[2][10], 1460);
+      assert.equal(api.command_inspection_incomplete, true);
+      assert.equal(
+        optional.filter(([format]) => format.includes("operating-audit index="))
+          .length,
+        1,
+      );
+    }
   }
 });
 

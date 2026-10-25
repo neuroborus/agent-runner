@@ -8757,6 +8757,8 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         drop: 0,
         candidates: 0,
         comparisons: Array.from({ length: 8 }, () => ({})),
+        facts: Array.from({ length: 8 }, () => ({})),
+        expected: Array.from({ length: 3 }, () => ({})),
         tuple: {
           localAddress: 0x7f000001,
           remoteAddress: 0x7f000001,
@@ -8804,6 +8806,13 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         ]),
       ),
       SECURITY_MAX_SID_SIZE: 68,
+      diagnostic_blob_read(data, size, value) {
+        Object.assign(value, { size, closed: 0 });
+      },
+      wfp_fact(row, value) {
+        value.type = row.type;
+        return true;
+      },
       GetTickCount64: () => tick,
       socket_destination_binding: () => order.push("child-binding"),
       socket_target_binding: () => order.push("owner-binding"),
@@ -9118,6 +9127,323 @@ test("WFP drains delayed snapshots before socket release and preserves partial c
         ] > 0,
         true,
       );
+  }
+});
+
+test("diagnostic blob capture hashes complete bounded values without fatal recursion or leaked ownership", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void diagnostic_blob_read\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "memset(value, 0, sizeof(*value))",
+      "Object.assign(value,{size:0,encoded:0,status:0,closed:0,hash:'',hex:''})",
+    )
+    .replace(
+      /strcpy_s\(value->(hash|hex), sizeof\(value->\1\), "-"\)/gu,
+      'value->$1="-"',
+    )
+    .replace(
+      "BCRYPT_ALG_HANDLE algorithm = NULL; BYTE sum[32];",
+      "let algorithm=null;const sum=Buffer.alloc(32);",
+    )
+    .replace("(NTSTATUS)0xc000000d", "(0xc000000d-2**32)")
+    .replace("(NTSTATUS)0xc0000008", "(0xc0000008-2**32)")
+    .replace("(DWORD)value->closed", "(value->closed>>>0)")
+    .replace("&algorithm", "v=>algorithm=v")
+    .replace("(PUCHAR)", "")
+    .replace("sizeof(sum)", "32")
+    .replace(
+      /snprintf\(value->(hex|hash) \+ 2\*i, 3, "%02x", (bytes|sum)\[i\]\)/gu,
+      'value->$1=(i?value->$1:"")+$2[i].toString(16).padStart(2,"0")',
+    )
+    .replaceAll("->", ".")
+    .replace(/\b(?:DWORD|BOOL|int|unsigned)\b/gu, "let");
+  const program = new Script(`(bytes,size,value)=>{${body}}`);
+  for (const fault of [
+    null,
+    "open",
+    "open-handle",
+    "empty-handle",
+    "hash",
+    "close",
+    "empty",
+    "oversized",
+    "missing",
+  ]) {
+    const calls = [],
+      cleanup = [],
+      value = {};
+    const bytes =
+      fault === "missing"
+        ? null
+        : Buffer.alloc(
+            fault === "empty" ? 0 : fault === "oversized" ? 8193 : 8192,
+            0x61,
+          );
+    const api = {
+      Buffer,
+      NULL: null,
+      BCRYPT_SHA256_ALGORITHM: "sha256",
+      errno: 7,
+      GetLastError: () => 91,
+      SetLastError: (value) => assert.equal(value, 91),
+      BCryptOpenAlgorithmProvider(out, kind, provider, flags) {
+        calls.push("open");
+        assert.deepEqual([kind, provider, flags], ["sha256", null, 0]);
+        if (fault === "open-handle") out("unowned");
+        if (["open", "open-handle"].includes(fault)) return -1;
+        if (fault !== "empty-handle") out("algorithm");
+        return 0;
+      },
+      BCryptHash(algorithm, key, keySize, data, size, sum, output) {
+        calls.push("hash");
+        assert.deepEqual(
+          [algorithm, key, keySize, output],
+          ["algorithm", null, 0, 32],
+        );
+        if (fault === "hash") return -2;
+        createHash("sha256").update(data.subarray(0, size)).digest().copy(sum);
+        return 0;
+      },
+      BCryptCloseAlgorithmProvider(algorithm, flags) {
+        calls.push("close");
+        assert.deepEqual([algorithm, flags], ["algorithm", 0]);
+        api.errno = 9;
+        return fault === "close" ? -3 : 0;
+      },
+      cleanup_error: (...cause) => cleanup.push(cause),
+    };
+    program.runInNewContext(api)(bytes, bytes?.length ?? 2, value);
+    assert.equal(api.errno, 7);
+    assert.equal(value.size, bytes?.length ?? 2);
+    assert.ok(value.encoded <= 64);
+    assert.equal(
+      calls.filter((x) => x === "close").length,
+      ["open", "open-handle", "empty-handle", "oversized", "missing"].includes(
+        fault,
+      )
+        ? 0
+        : 1,
+    );
+    if (["open-handle", "empty-handle"].includes(fault))
+      assert.deepEqual(calls, ["open"]);
+    if (fault === "empty-handle")
+      assert.equal(value.status, 0xc0000008 - 2 ** 32);
+    assert.deepEqual(
+      cleanup,
+      fault === "close"
+        ? [["hash-provider-close", "ntstatus", 0xfffffffd]]
+        : [],
+    );
+    if ([null, "close", "empty"].includes(fault))
+      assert.equal(
+        value.hash,
+        createHash("sha256").update(bytes).digest("hex"),
+      );
+    else assert.equal(value.hash, "-");
+    if (bytes?.length && fault !== "oversized")
+      assert.equal(value.hex, bytes.subarray(0, 64).toString("hex"));
+    if (["oversized", "missing"].includes(fault)) assert.deepEqual(calls, []);
+  }
+});
+
+test("WFP candidate facts validate unions and retain typed values without attributing unrelated events", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static BOOL wfp_fact\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "memset(value, 0, sizeof(*value))",
+      "Object.assign(value,{app:{},user:{},package:{},valid:false,filter:0,layer:0,direction:0,localPort:0,remotePort:0})",
+    )
+    .replace(
+      /strcpy_s\(value->(local|remote), sizeof\(value->\1\), "-"\)/gu,
+      'value->$1="-"',
+    )
+    .replace(
+      /snprintf\(value->(local|remote), sizeof\(value->\1\), "%08x", h->([a-zA-Z0-9]+)\)/gu,
+      'value->$1=h->$2.toString(16).padStart(8,"0")',
+    )
+    .replace(
+      /snprintf\(value->(local|remote) \+ 2\*i, 3, "%02x", h->([a-zA-Z0-9]+).byteArray16\[i\]\)/gu,
+      'value->$1=(i?value->$1:"")+h->$2.byteArray16[i].toString(16).padStart(2,"0")',
+    )
+    .replace("const FWPM_NET_EVENT_HEADER2 *h", "const h")
+    .replace("const FWPM_NET_EVENT_CLASSIFY_DROP2 *drop", "const drop")
+    .replaceAll("(unsigned)", "")
+    .replace(/&(?=[a-zA-Z_])/gu, "")
+    .replaceAll("->", ".")
+    .replace(/\bunsigned\b/gu, "let");
+  const program = new Script(`(event,value)=>{${body}}`);
+  for (const fault of [
+    null,
+    "non-drop",
+    "missing-app",
+    "long-app",
+    "bad-app",
+    "bad-user",
+    "missing-union",
+    "bad-direction",
+    "v6",
+    "missing-version",
+    "hash-close",
+  ]) {
+    const app = Buffer.from("C:\\fixture\\actor.exe\0", "utf16le"),
+      sid = Buffer.alloc(12, 1),
+      value = {};
+    const event = {
+      type: 2,
+      header: {
+        flags: 0x57f,
+        ipVersion: 0,
+        ipProtocol: 6,
+        timeStamp: 1500,
+        localAddrV4: 0x7f000001,
+        remoteAddrV4: 0x7f000002,
+        localPort: 45678,
+        remotePort: 32100,
+        appId: { size: app.length, data: app },
+        userId: sid,
+        packageSid: sid,
+      },
+      classifyDrop: {
+        filterId: 7,
+        layerId: 48,
+        msFwpDirection: 0,
+        isLoopback: 1,
+      },
+    };
+    if (fault === "non-drop") {
+      event.type = 1;
+      Object.defineProperty(event, "classifyDrop", {
+        get() {
+          throw new Error("Wrong event union");
+        },
+      });
+    }
+    if (fault === "missing-app") event.header.flags &= ~64;
+    if (fault === "long-app") {
+      event.header.appId.data = Buffer.alloc(8192);
+      event.header.appId.size = 8192;
+    }
+    if (fault === "bad-app") event.header.appId.size = 8193;
+    if (fault === "bad-user") event.header.userId = null;
+    if (fault === "missing-union") event.classifyDrop = null;
+    if (fault === "bad-direction") event.classifyDrop.msFwpDirection = 3;
+    if (fault === "missing-version") event.header.flags &= ~1;
+    if (fault === "v6") {
+      event.header.ipVersion = 1;
+      event.header.localAddrV6 = { byteArray16: Array(16).fill(0x12) };
+      event.header.remoteAddrV6 = { byteArray16: Array(16).fill(0x34) };
+    }
+    const api = {
+      TRUE: true,
+      FALSE: false,
+      NULL: null,
+      MAXDWORD: 0xffffffff,
+      FWP_IP_VERSION_V4: 0,
+      FWP_IP_VERSION_V6: 1,
+      FWP_DIRECTION_OUTBOUND: 0,
+      FWP_DIRECTION_INBOUND: 1,
+      FWPM_NET_EVENT_TYPE_MAX: 16,
+      FWPM_NET_EVENT_TYPE_CLASSIFY_DROP: 2,
+      SECURITY_MAX_SID_SIZE: 68,
+      wfpCleanupFailed: false,
+      ...Object.fromEntries(
+        [
+          "IP_VERSION",
+          "IP_PROTOCOL",
+          "LOCAL_ADDR",
+          "REMOTE_ADDR",
+          "LOCAL_PORT",
+          "REMOTE_PORT",
+          "APP_ID",
+          "USER_ID",
+          "PACKAGE_ID",
+        ].map((x, i) => [
+          "FWPM_NET_EVENT_FLAG_" + x + "_SET",
+          [1, 2, 4, 8, 16, 32, 64, 256, 1024][i],
+        ]),
+      ),
+      wfp_time: (x) => x,
+      IsValidSid: (x) => x?.length === 12,
+      GetLengthSid: (x) => x.length,
+      wfp_blob: (x) =>
+        Boolean(
+          x?.data &&
+          x.size >= 2 &&
+          x.size <= 8192 &&
+          x.size % 2 === 0 &&
+          !x.data[x.size - 1] &&
+          !x.data[x.size - 2],
+        ),
+      diagnostic_blob_read(data, size, blob) {
+        Object.assign(blob, {
+          size,
+          encoded: data ? Math.min(size, 64) : 0,
+          hash:
+            data && size <= 8192
+              ? createHash("sha256")
+                  .update(data.subarray(0, size))
+                  .digest("hex")
+              : "-",
+          closed: fault === "hash-close" && data ? -1 : 0,
+        });
+      },
+    };
+    assert.equal(
+      program.runInNewContext(api)(event, value),
+      ![
+        "bad-app",
+        "bad-user",
+        "missing-union",
+        "bad-direction",
+        "missing-version",
+      ].includes(fault),
+      fault,
+    );
+    assert.equal(value.time, 1500);
+    assert.equal(value.type, event.type);
+    assert.equal(
+      Number(value.drop),
+      fault === "non-drop" ? -1 : Number(fault !== "missing-union"),
+    );
+    assert.equal(
+      value.local,
+      fault === "missing-version"
+        ? "-"
+        : fault === "v6"
+          ? "12".repeat(16)
+          : "7f000001",
+    );
+    assert.equal(
+      value.remote,
+      fault === "missing-version"
+        ? "-"
+        : fault === "v6"
+          ? "34".repeat(16)
+          : "7f000002",
+    );
+    assert.equal(value.localPort, 45678);
+    assert.equal(value.remotePort, 32100);
+    if (fault === "missing-app") assert.equal(value.app.size, 0);
+    if (fault === "long-app") {
+      assert.equal(value.app.encoded, 64);
+      assert.equal(
+        value.app.hash,
+        createHash("sha256").update(event.header.appId.data).digest("hex"),
+      );
+    }
+    if (!["non-drop", "missing-union"].includes(fault)) {
+      assert.equal(value.filter, 7);
+      assert.equal(value.layer, 48);
+    }
+    assert.equal(api.wfpCleanupFailed, fault === "hash-close");
   }
 });
 
@@ -11538,9 +11864,14 @@ test("actual WFP source is read-only, bounded, type-safe and closes every SDK al
   );
   assert.match(observer, /FWPM_NET_EVENT2 \*\*events/u);
   assert.match(observer, /const FWPM_NET_EVENT_HEADER2 \*h = &event->header/u);
+  const snapshot = observer.slice(
+    observer.indexOf("static void wfp_snapshot("),
+  );
+  // The diagnostic projector has its own executed wrong-union regression above.
+  // Retain this source guard for the independent denial-admission path.
   assert.ok(
-    observer.indexOf("event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP") <
-      observer.indexOf("event->classifyDrop"),
+    snapshot.indexOf("event->type != FWPM_NET_EVENT_TYPE_CLASSIFY_DROP") <
+      snapshot.indexOf("event->classifyDrop"),
   );
   for (const field of [
     "IP_VERSION",

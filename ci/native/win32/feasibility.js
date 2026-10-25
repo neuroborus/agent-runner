@@ -496,6 +496,7 @@ const GIT_HELPER_DOMAINS = Object.freeze({
       .map((operation) => [operation, ["win32", "invariant"]]),
   ),
   "command-com-initialize": ["hresult"],
+  "hash-provider-close": ["ntstatus"],
   ...Object.fromEntries(
     [
       "command-hash-open",
@@ -765,6 +766,7 @@ export function windowsFeasibilityDiagnostics(output) {
         "command-revert",
         "command-hash-close",
         "command-algorithm-close",
+        "hash-provider-close",
         "command-environment-close",
         "command-protect-free",
         "command-case-marker-close",

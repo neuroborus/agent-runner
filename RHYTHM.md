@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-25 — Capture host facts without promoting diagnostic comparisons
+
+Windows feasibility retains bounded typed WFP identity/event/endpoint/DROP facts
+from its existing interval enumeration. The separate audit inspection replaces
+its keyworded comparison with an original-case-interval query, projecting typed
+values before correlation and reporting which live predicates would exclude a
+row. Complete-value digests and bounded encodings expose representation differences
+without changing collection, policy, live delivery or acceptance. Audit rows and
+cached SACLs share one failure-only allowance with reserved incomplete framing;
+optional exhaustion cannot erase the strict failure or separate cleanup carrier.
+Absent or incomplete observations leave the producer cause unestablished and
+grant no native PASS or retirement authority.
+
 ## 2026-10-25 — Deliver original-child diagnostics through authenticated custody
 
 The ordinary Windows reader carries its bounded refusal collector through the

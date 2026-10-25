@@ -46,7 +46,7 @@ const need = (v) => {
   if (!v) throw new Error("Incomplete Windows command custody");
 };
 function commandOperatingDiagnostic(bytes) {
-  return /^native-windows-command: operating-(?:sacl phase=N pid=[0-9]{1,10} birth=[0-9]{1,20} logon=[0-9]{1,20} policy=-?[0-9]{1,20} identity=[a-f0-9]{16}:[a-f0-9]{32} hash=[a-f0-9]{64} count=-?[0-9]{1,20} truncated=[01] status=-?[0-9]{1,20},-?[0-9]{1,20},-?[0-9]{1,20} close=-?[0-9]{1,20}|ace object=[0-3] index=[0-7] status=-?[0-9]{1,20} type=-?[0-9]{1,20} flags=-?[0-9]{1,20} mask=-?[0-9]{1,20} subject-match=(?:-1|[01]))\r?\n$/u.test(
+  return /^native-windows-command: operating-(?:sacl phase=N pid=[0-9]{1,10} birth=[0-9]{1,20} logon=[0-9]{1,20} policy=-?[0-9]{1,20} identity=[a-f0-9]{16}:[a-f0-9]{32} hash=[a-f0-9]{64} count=-?[0-9]{1,20} truncated=[01] status=-?[0-9]{1,20},-?[0-9]{1,20},-?[0-9]{1,20} close=-?[0-9]{1,20}|ace object=[0-3] index=[0-7] status=-?[0-9]{1,20} type=-?[0-9]{1,20} flags=-?[0-9]{1,20} mask=-?[0-9]{1,20} subject-match=(?:-1|[01])|audit index=(?:[0-9]|1[0-5]) types=(?:[0-9]{1,10},){11}[0-9]{1,10} valid=[0-9]{1,4} pid=[0-9]{1,20} logon=[0-9]{1,20} time=[0-9]{1,20} id=[0-9]{1,20} keywords=[0-9]{1,20} record=[0-9]{1,20} mask=[0-9]{1,20} target=[01] marker=[01] excluded=(?:-1|[0-9]|1[0-5])|audit-value index=(?:[0-9]|1[0-5]) field=[0-4] bytes=[0-9]{1,4} encoded=[0-9]{1,2} status=-?[0-9]{1,10} close=-?[0-9]{1,10} hash=(?:[a-f0-9]{64}|-) hex=(?:(?:[a-f0-9]{2}){1,64}|-)|incomplete)\r?\n$/u.test(
     bytes.toString("utf8"),
   );
 }
@@ -1574,6 +1574,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
         let brokerStderr = Buffer.alloc(0),
           brokerStderrPending = Buffer.alloc(0),
           operatingBytes = 0,
+          operatingIncomplete = false,
           brokerStderrInvalid = false;
         closed = new Promise((resolve) => {
           broker.once("error", fail);
@@ -1613,6 +1614,7 @@ export function createWindowsCommandEffects(dispatch, inputs) {
                 stderr: brokerStderr,
                 nativeDiagnosticInvalid:
                   incomplete || (brokerStderr.length > 0 && !diagnosis),
+                operatingObservationIncomplete: operatingIncomplete,
               },
             );
             const origin = brokerOriginal
@@ -1695,11 +1697,22 @@ export function createWindowsCommandEffects(dispatch, inputs) {
               // Raw publication above is unchanged; neither carrier gains proof.
               if (
                 commandOperatingDiagnostic(brokerStderrPending) &&
-                windowsFeasibilityDiagnostics(brokerStderr)?.failure &&
-                operatingBytes + brokerStderrPending.length <= 4096
+                windowsFeasibilityDiagnostics(brokerStderr)?.failure
+              ) {
+                // The optional allowance is shared by SACL and audit rows.
+                // Exhaustion cannot spill into or erase a complete refusal.
+                if (operatingBytes + brokerStderrPending.length <= 4096)
+                  operatingBytes += brokerStderrPending.length;
+                else operatingIncomplete = true;
+                if (
+                  brokerStderrPending.toString("ascii").trimEnd() ===
+                  "native-windows-command: operating-incomplete"
+                )
+                  operatingIncomplete = true;
+              } else if (
+                brokerStderr.length + brokerStderrPending.length <=
+                4096
               )
-                operatingBytes += brokerStderrPending.length;
-              else if (brokerStderr.length + brokerStderrPending.length <= 4096)
                 brokerStderr = Buffer.concat([
                   brokerStderr,
                   brokerStderrPending,
