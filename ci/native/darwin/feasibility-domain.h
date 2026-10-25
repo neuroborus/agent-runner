@@ -107,14 +107,14 @@ static pid_t domain_fault_fork(void) {
   struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &domain_child, domain_fault_bind);
   if (outcome.child == 0 && domain_port_owner != getpid()) alarm(20);
   /* remember/remember_cleanup borrow these pointers until failure finishes. */
-  char operations[8][80];
+  char operations[DOMAIN_FORK_ISSUES][80];
   for (unsigned i = 0; i < outcome.count; i++) {
     struct domain_bootstrap_issue issue = outcome.issues[i];
     snprintf(operations[i], sizeof(operations[i]), "fault-%s", issue.operation);
     remember(operations[i], issue.kind, issue.value);
     if (issue.cleanup) remember_cleanup(operations[i], issue.kind, issue.value);
   }
-  if (outcome.count) failure(126);
+  if (outcome.count) { domain_fork_diagnostic("fault"); failure(126); }
   return outcome.child;
 }
 static bool domain_stream(const unsigned char *bytes, ssize_t size, const char *stream) {
@@ -348,6 +348,7 @@ static void domain_access_release(task_t self, mach_port_t access, mach_port_typ
  * They grant no authority and never replace that predicate's original refusal. */
 static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_type, mach_port_t bootstrap, int bootstrap_query, long long bootstrap_refs, int bootstrap_release) {
   int saved = errno, query, object_query = -1, send_query = -1;
+  domain_fork_diagnostic("fault");
   long long send_refs = domain_send_refs(name, &send_query);
   mach_port_type_t current = MACH_PORT_TYPE_NONE; natural_t kind = 0; mach_vm_address_t object = 0;
   query = mach_port_type(mach_task_self(), name, &current);

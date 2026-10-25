@@ -89,6 +89,7 @@ static pid_t launch_bootstrap_fork(void) {
   struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &launch_child, launch_replies_begin);
   if (outcome.count) {
     (void)signal(SIGPIPE, SIG_IGN);
+    domain_fork_diagnostic("launcher");
     for (unsigned i = 0; i < outcome.count; i++) if (outcome.issues[i].cleanup) {
       struct domain_bootstrap_issue issue = outcome.issues[i];
       fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s domain=%s result=%d\n", issue.operation, issue.kind, issue.value);
@@ -331,6 +332,7 @@ mach_cleanup: {
       int saved = errno, send_query = -1;
       long long send_refs = domain_send_refs(refused_name, &send_query);
       (void)signal(SIGPIPE, SIG_IGN);
+      domain_fork_diagnostic("launcher");
       fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
         getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
       fflush(stderr); errno = saved;

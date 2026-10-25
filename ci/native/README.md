@@ -9005,20 +9005,42 @@ original workflows and independent retirement are still required; portable
 fixtures establish none of those native successes. Other TCP/audit/fault-port
 causes and complete native acceptance remain open.
 
-Ordinary experimental launcher and fault custody now prevent bootstrap acquisition
-at their existing single-threaded fork boundary. The guard acquires one explicit
-getter copy of the parent slot, borrows the exported `bootstrap_port` value without
-releasing it, clears both slot and exported value and verifies the null slot before
-fork. The child receives a fresh IPC space, binds its reply producer bookkeeping
-before its first Mach readback and independently requires a null slot and exported
-value before continuing. It never releases the parent's getter name, even if that
-integer aliases a newly acquired child name. The parent restores its exact exported
-value and slot after successful or failed fork and after preparation failure, reads
-the restored slot independently and releases each successful getter copy once,
-including aliases. `COPY_SEND` restoration does not consume the saved userspace copy.
-The created child is retained before any restoration refusal; first failures and
-independent release/restoration failures remain separate. No failed getter output
-is adopted and no release is retried. Reviewed and provider launch paths are unchanged.
+Ordinary experimental launcher and fault custody fence bootstrap and registered
+slots at their existing single-threaded fork boundary. The guard completely
+captures the parent's registered slots with `mach_ports_lookup` before mutation,
+then clears and independently verifies them before the final thread check and
+fork. This prevents their inheritance before libSystem's runtime callbacks;
+later child sanitation alone cannot provide that fence. The bootstrap getter,
+borrowed exported `bootstrap_port` value and null-slot/cache checks remain intact.
+The child receives a fresh IPC space, binds its reply producer bookkeeping before
+its first Mach readback and independently requires empty registered slots and a
+null bootstrap slot/exported value before continuing. It never adopts the parent's
+getter names or array, even if a fresh child getter returns the same integers.
+The parent restores the exact registered count, order and null entries and its
+exact bootstrap slot/exported value after successful or failed fork and preparation
+failure, then independently reads back each restored set. Each successful getter
+reference, including aliases, and each owned returned array receives one release
+attempt. Failed getter outputs supply no ownership; setter `COPY_SEND` does not
+consume saved userspace copies. The direct child is retained before restoration
+can refuse. Primary and independent release/restoration failures use bounded
+diagnostic storage with explicit overflow, without retrying releases. Reviewed
+and provider launch paths are unchanged.
+The exact emitted guard-operation names remain in the bounded feasibility
+diagnostic catalog, preserving original and independent cleanup causes without
+accepting arbitrary operation prefixes or granting receipt authority.
+
+At that same original pre-fork boundary, a separate task-exception getter observes
+the original masks, handlers, behaviors and flavors. Nonnull handlers are permitted;
+the observation never clears or replays exception slots. Only its getter-owned
+copies are released. Query failure remains an unavailable observation, while a
+failed owned release remains an independent cleanup refusal. Fixed bounded cached
+tuples, getter result and per-copy release results accompany existing fork/census
+refusal diagnostics with parent/reporter identity, without another query. The
+public getter omits privilege/MAC state rewritten by the setter, so these tuples
+do not authorize an exception-specific correction or exact restoration. Whether
+the matching host's original slots are nonnull remains the missing fact. Existing
+child exception sanitation and the strict terminal census remain authoritative;
+neither snapshot identifies or authorizes releasing the unknown SEND right.
 
 The ownership account follows pinned Apple XNU
 [`task.defs`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/task.defs)
@@ -9034,6 +9056,18 @@ for fork/exec task creation from the current task. Tagged
 defines the exported value but does not account for its runtime bootstrap producer;
 [`Libsystem initialization`](https://github.com/apple-oss-distributions/Libsystem/blob/8d7f9f7460f00a49ea1a79e86076d73fe1d36940/init.c)
 orders Mach initialization before private XPC initialization and the child hooks.
+In particular, pinned XNU
+[`ipc_tt.c:265–287`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/ipc_tt.c#L265-L287)
+inherits registered, exception and bootstrap slots separately, while pinned
+[`Libsystem init.c:509–542`](https://github.com/apple-oss-distributions/Libsystem/blob/8d7f9f7460f00a49ea1a79e86076d73fe1d36940/init.c#L509-L542)
+runs runtime child callbacks before user handlers. The cached public
+[`mach_ports` wrappers](https://github.com/apple-oss-distributions/xnu/blob/f6217f891ac0bb64f3d375211650a4c1ff8ca1ea/libsyscall/mach/task.c#L65-L124)
+return separately owned getter rights and VM storage; they do not establish the
+hosted library's exact implementation. The pinned exception
+[`setter`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/ipc_tt.c#L4411-L4502)
+updates privilege and MAC labels, while the
+[`getter`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/kern/ipc_tt.c#L4924-L5027)
+only returns grouped public tuples and copies.
 These sources do not establish ownership of the two previously observed residual
 SEND references. Unproved parent references remain untouched; no private cache reset or
 post-hoc count-based release is performed. Initial fault-custodian reexec remains

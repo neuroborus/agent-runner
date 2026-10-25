@@ -19,7 +19,7 @@ import {
   withNativeDiagnostics,
 } from "../diagnostics.js";
 
-test("Darwin experimental launcher retains the fork child before bootstrap restoration refusal", async () => {
+test("Darwin experimental launcher retains the fork child through registered and bootstrap restoration refusal", async () => {
   const source = await readFile(new URL("launcher.c", import.meta.url), "utf8");
   const body =
     /static pid_t launch_bootstrap_fork\(void\) \{([\s\S]*?)\n\}/u.exec(
@@ -59,6 +59,51 @@ test("Darwin experimental launcher retains the fork child before bootstrap resto
       ],
     ],
     [
+      57,
+      [
+        {
+          operation: "registered-restore",
+          kind: "mach",
+          value: 5,
+          cleanup: true,
+        },
+        {
+          operation: "registered-copy-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+        {
+          operation: "registered-array-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+      ],
+    ],
+    [
+      -1,
+      [
+        {
+          operation: "registered-capture",
+          kind: "mach",
+          value: 5,
+          cleanup: false,
+        },
+      ],
+    ],
+    [
+      0,
+      [
+        {
+          operation: "registered-child-empty",
+          kind: "invariant",
+          value: 0,
+          cleanup: false,
+        },
+      ],
+    ],
+    [
       -1,
       [
         { operation: "fork", kind: "errno", value: 11, cleanup: false },
@@ -94,6 +139,7 @@ test("Darwin experimental launcher retains the fork child before bootstrap resto
     ],
   ]) {
     const diagnostics = [],
+      inheritance = [],
       refusals = [],
       refused = new Error("Native refusal");
     const api = {
@@ -115,6 +161,10 @@ test("Darwin experimental launcher retains the fork child before bootstrap resto
         api.ignoredPipe = true;
       },
       launch_replies_begin() {},
+      domain_fork_diagnostic(owner) {
+        assert.equal(api.ignoredPipe, true);
+        inheritance.push(owner);
+      },
       domain_bootstrap_fork(outcome, retained, bind) {
         assert.equal(bind, api.launch_replies_begin);
         Object.assign(outcome, { child, issues, count: issues.length });
@@ -139,6 +189,7 @@ test("Darwin experimental launcher retains the fork child before bootstrap resto
     const run = script.runInNewContext(api);
     if (issues.length) assert.throws(run, (error) => error === refused);
     else assert.equal(run(), child);
+    assert.deepEqual(inheritance, issues.length ? ["launcher"] : []);
     assert.deepEqual(
       diagnostics,
       issues
@@ -4598,6 +4649,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(api.errno, error);
         assert.equal(pipeIgnored, false);
       },
+      domain_fork_diagnostic: (owner) => assert.equal(owner, "launcher"),
       inspect(pid) {
         assert.equal(pid, 41);
         return {

@@ -14398,14 +14398,17 @@ test("Darwin partial prerequisites require explicit child settlement independent
   }
 });
 
-test("Darwin prerequisite backstop and unexpected child exits cannot pass cleanup", async () => {
-  for (const [operation, value, emergency] of [
+test("Darwin prerequisite backstop, child exits and fork cleanup failures cannot pass cleanup", async () => {
+  for (const [operation, value, emergency, domain = "invariant"] of [
     ["prerequisite-backstop", 14, true],
     ["prerequisite-child-status", 9, false],
+    ["fault-registered-copy-release", 15, false, "mach"],
+    ["fault-registered-array-release", 15, false, "mach"],
+    ["fault-exception-copy-release", 15, false, "mach"],
   ]) {
     const injected = darwinPreparationEffects({
       failure: darwinPrerequisiteFailure({
-        stderr: `native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=unsettled\nnative-darwin-cleanup: operation=${operation} domain=invariant value=${value} effects=none settlement=unsettled\n`,
+        stderr: `native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=unsettled\nnative-darwin-cleanup: operation=${operation} domain=${domain} value=${value} effects=none settlement=unsettled\n`,
       }),
     });
     await assert.rejects(
@@ -14585,6 +14588,8 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
     ["fault-runtime-reply-port", "invariant", 0],
     ["fault-thread-port", "invariant", 0],
     ["fault-bootstrap-release", "mach", 15],
+    ["fault-exception-count", "invariant", 0],
+    ["fault-fork-issues-truncated", "invariant", 0],
     ["fault-access-kind", "mach", 15],
     ["fault-access-service", "mach", 15],
     ["fault-access-authority", "invariant", 0],
@@ -14629,6 +14634,8 @@ test("Darwin native diagnostics retain bounded operation and error domains witho
   for (const stderr of [
     metadata,
     "native-darwin: operation=foreign-operation domain=mach value=5 effects=none settlement=settled\n",
+    "native-darwin: operation=fault-registered-foreign domain=mach value=5 effects=none settlement=settled\n",
+    "native-darwin: operation=fault-exception-foreign domain=mach value=5 effects=none settlement=settled\n",
     "native-darwin: operation=task-audit domain=errno value=2147483648 effects=none settlement=settled\n",
     "native-darwin: operation=task-audit domain=mach value=5 effects=none settlement=settled /private/fixture\n",
     "x".repeat(65536) +

@@ -12,7 +12,7 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
-test("Darwin bootstrap fork prevents inherited acquisitions and settles only getter copies", async () => {
+test("Darwin fork fences registered and bootstrap slots and settles only getter copies", async () => {
   const [header, domain] = await Promise.all(
     ["custody.h", "feasibility-domain.h"].map((name) =>
       readFile(new URL(name, SOURCE), "utf8"),
@@ -20,6 +20,11 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
   );
   const parameters = {
     domain_bootstrap_check: "out, ok, operation, kind, value, cleanup",
+    domain_registered_capture: "out, snapshot, operation, cleanup",
+    domain_registered_release: "out, snapshot",
+    domain_registered_read: "out, expected, count, empty, operation, cleanup",
+    domain_exception_observe: "out",
+    domain_fork_diagnostic: "owner",
     domain_bootstrap_read: "out, expected, operation, cleanup",
     domain_bootstrap_fork: "out, retained, bind",
     domain_fault_bind: "",
@@ -38,6 +43,29 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         "(struct domain_bootstrap_issue){operation, kind, value, cleanup}",
         "{operation, kind, value, cleanup}",
       )
+      .replace(
+        '(struct domain_bootstrap_issue){"fork-issues-truncated", "invariant", 0, true}',
+        '{operation:"fork-issues-truncated",kind:"invariant",value:0,cleanup:true}',
+      )
+      .replace(
+        /struct domain_registered_ports (observed|registered) = \{0\};/gu,
+        "let $1 = {ports:null,count:0,owned:false};",
+      )
+      .replaceAll("&domain_fork_exceptions", "domain_fork_exceptions")
+      .replaceAll("sizeof(domain_fork_exceptions)", "0")
+      .replaceAll("&registered", "registered")
+      .replaceAll("sizeof(*snapshot.ports)", "4")
+      .replaceAll(/\((?:vm_address_t|vm_size_t)\)/gu, "")
+      .replace(
+        /(?:exception_mask_t|mach_port_t|exception_behavior_t|thread_state_flavor_t) (\w+)\[EXC_TYPES_COUNT\]/gu,
+        "let $1 = []",
+      )
+      .replaceAll(
+        /&snapshot\.(ports|count)/gu,
+        (_match, field) =>
+          `{get value(){return snapshot.${field}},set value(v){snapshot.${field}=v}}`,
+      )
+      .replaceAll("&count", "{get value(){return count},set value(v){count=v}}")
       .replace("extern mach_port_t bootstrap_port;", "")
       .replace("sizeof(*out)", "0")
       .replace("struct proc_taskinfo threads;", "let threads = {};")
@@ -46,8 +74,8 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
       .replace("struct domain_bootstrap_fork outcome;", "let outcome = {};")
       .replace("struct domain_bootstrap_issue issue", "let issue")
       .replace(
-        "char operations[8][80];",
-        "const operations = Array.from({length: 8}, () => []);",
+        "char operations[DOMAIN_FORK_ISSUES][80];",
+        "const operations = Array.from({length: DOMAIN_FORK_ISSUES}, () => []);",
       )
       .replace("sizeof(operations[i])", "80")
       .replaceAll("&outcome", "outcome")
@@ -64,7 +92,10 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         "mach_port_t cached = bootstrap_port;",
         "let cached = bootstrap_port;",
       )
-      .replace(/\b(?:kern_return_t|bool|unsigned|int) /gu, "let ")
+      .replace(
+        /\b(?:kern_return_t|mach_msg_type_number_t|bool|unsigned|int) /gu,
+        "let ",
+      )
       .replace(/\b(observed|saved) ==/gu, "$1.value ==")
       .replace(
         /MACH_PORT_VALID\((observed|saved)\)/gu,
@@ -83,7 +114,9 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         "domain_bootstrap_read(out, saved.value,",
       )}}`;
   });
-  const script = new Script(`${functions.join("\n")} domain_fault_fork;`);
+  const script = new Script(
+    `${functions.join("\n")} Object.assign(domain_fault_fork, {check:domain_bootstrap_check,diagnostic:domain_fork_diagnostic});`,
+  );
   const cases = [
     [{}, []],
     [{ slot: 0 }, []],
@@ -152,6 +185,104 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
     [{ fork: 0, changeCache: true }, [["bootstrap-cache", "invariant", 0]]],
     [{ fork: 0, childReadCache: true }, [["bootstrap-cache", "invariant", 0]]],
     [{ restoreCache: true }, [["bootstrap-cache", "invariant", 0]]],
+    [{ registered: [21, 0, 21] }, []],
+    [{ registered: [0, 22, 21] }, []],
+    [{ registered: [0xffffffff, 0, 21] }, []],
+    [{ registered: [10, 0, 10], fork: 0 }, []],
+    [{ registered: [21, 0, 21], fork: -1 }, [["fork", "errno", 11]]],
+    [{ registeredCapture: 5 }, [["registered-capture", "mach", 5]]],
+    [
+      { registeredCapture: 5, release: true },
+      [
+        ["registered-capture", "mach", 5],
+        ["bootstrap-copy-release", "mach", 15],
+      ],
+    ],
+    [{ registeredClear: 5 }, [["registered-clear", "mach", 5]]],
+    [
+      { clear: 5, registeredRestore: 15 },
+      [
+        ["bootstrap-clear", "mach", 5],
+        ["registered-restore", "mach", 15],
+      ],
+    ],
+    [
+      { registered: [21, 0, 21], registeredClear: 5 },
+      [["registered-clear", "mach", 5]],
+    ],
+    [
+      { registered: [21, 0, 21], threads: 2 },
+      [["bootstrap-threads", "invariant", 0]],
+    ],
+    [{ registeredEmptyQuery: 5 }, [["registered-empty", "mach", 5]]],
+    [{ emptyRegistered: [0, 22, 0] }, [["registered-empty", "invariant", 0]]],
+    [
+      { registered: [21, 0, 21], registeredRestore: 5 },
+      [
+        ["registered-restore", "mach", 5],
+        ["registered-match", "invariant", 0],
+      ],
+    ],
+    [{ registeredMatchQuery: 5 }, [["registered-match", "mach", 5]]],
+    [
+      { registered: [21, 0, 22], matchRegistered: [22, 0, 21] },
+      [["registered-match", "invariant", 0]],
+    ],
+    [
+      { registered: [21, 0, 22], matchRegistered: [21, 22] },
+      [["registered-match", "invariant", 0]],
+    ],
+    [{ arrayRelease: "empty" }, [["registered-array-release", "mach", 15]]],
+    [
+      { registered: [21, 0, 21], arrayRelease: "capture" },
+      [["registered-array-release", "mach", 15]],
+    ],
+    [
+      { registered: [21, 0, 21], registeredRelease: true },
+      Array.from({ length: 4 }, () => ["registered-copy-release", "mach", 15]),
+    ],
+    [
+      { fork: -1, registeredRestore: 5, restore: 5, arrayRelease: "match" },
+      [
+        ["fork", "errno", 11],
+        ["registered-restore", "mach", 5],
+        ["registered-array-release", "mach", 15],
+        ["bootstrap-restore", "mach", 5],
+        ["bootstrap-match", "invariant", 0],
+      ],
+    ],
+    [
+      { fork: 0, childRegistered: [10, 0, 10] },
+      [["registered-child-empty", "invariant", 0]],
+    ],
+    [
+      { fork: 0, registeredChildQuery: 5 },
+      [["registered-child-empty", "mach", 5]],
+    ],
+    [{ exceptionQuery: 5 }, []],
+    [
+      {
+        exceptions: [{ mask: 2, handler: 0xffffffff, behavior: 1, flavor: 0 }],
+      },
+      [],
+    ],
+    [
+      {
+        exceptions: [
+          { mask: 2, handler: 10, behavior: 1, flavor: 4 },
+          { mask: 4, handler: 10, behavior: 3, flavor: 5 },
+          { mask: 8, handler: 0, behavior: 1, flavor: 0 },
+        ],
+      },
+      [],
+    ],
+    [
+      {
+        exceptions: [{ mask: 2, handler: 23, behavior: 1, flavor: 4 }],
+        exceptionRelease: true,
+      },
+      [["exception-copy-release", "mach", 15]],
+    ],
   ];
   for (const [options, expected] of cases) {
     const label = JSON.stringify(options),
@@ -159,13 +290,24 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
       acquired = [],
       released = [],
       remembered = [],
-      cleanup = [];
+      cleanup = [],
+      arrays = [],
+      freed = [],
+      diagnostics = [];
     let pid = 41,
       slot = options.slot ?? 10,
       gets = 0,
       sets = 0,
       forked = false,
       outcome;
+    let registered = [...(options.registered ?? [0, 0, 0])],
+      registeredGets = 0,
+      registeredSets = 0,
+      registeredRestoring = false;
+    const exceptionTuples = options.exceptions ?? [
+      { mask: 0xffff, handler: 0, behavior: 1, flavor: 0 },
+    ];
+    const exceptionSnapshot = structuredClone(exceptionTuples);
     const cached = options.cached ?? slot;
     const refused = new Error("Native refusal");
     const api = {
@@ -181,6 +323,11 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         },
       },
       errno: 0,
+      NULL: null,
+      DOMAIN_FORK_ISSUES: 64,
+      EXC_TYPES_COUNT: 14,
+      EXC_MASK_ALL: 0xffff,
+      domain_fork_exceptions: {},
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
       TASK_BOOTSTRAP_PORT: 4,
@@ -189,6 +336,21 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
       getpid: () => pid,
       mach_task_self: () => 1,
       memset(target) {
+        if (target === api.domain_fork_exceptions) {
+          Object.assign(target, {
+            active: false,
+            complete: false,
+            parent: 0,
+            result: 0,
+            count: 0,
+            masks: [],
+            handlers: [],
+            behaviors: [],
+            flavors: [],
+            releases: [],
+          });
+          return;
+        }
         outcome = target;
         Object.assign(target, { child: 0, count: 0, issues: [] });
       },
@@ -217,6 +379,7 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         assert.equal(argument, 0);
         assert.equal(size, 64);
         assert.equal(slot, 0);
+        assert.ok(registered.every((name) => name === 0));
         threads.pti_threadnum = options.threads ?? 1;
         if (options.preCache) api.bootstrap_port = 77;
         api.errno = 9;
@@ -267,17 +430,119 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
           label,
         );
         released.push(name);
-        return options.release ? 15 : 0;
+        return options.release ||
+          (options.registeredRelease && name === 21) ||
+          (options.exceptionRelease && name === 23)
+          ? 15
+          : 0;
+      },
+      mach_ports_lookup(self, ports, count) {
+        assert.equal(self, 1);
+        const phase =
+          ++registeredGets === 1
+            ? "capture"
+            : pid === 42
+              ? "child"
+              : registeredRestoring
+                ? "match"
+                : "empty";
+        const status =
+          options[
+            {
+              capture: "registeredCapture",
+              empty: "registeredEmptyQuery",
+              match: "registeredMatchQuery",
+              child: "registeredChildQuery",
+            }[phase]
+          ] ?? 0;
+        const value = [...(options[phase + "Registered"] ?? registered)];
+        ports.value = status ? [666] : value;
+        count.value = ports.value.length;
+        calls.push(["registered-get", phase, ...ports.value]);
+        if (pid === 42) assert.ok(calls.includes("bind"));
+        if (!status) {
+          arrays.push({ value, phase });
+          for (const name of value)
+            if (api.MACH_PORT_VALID(name)) acquired.push(name);
+        }
+        return status;
+      },
+      mach_ports_register(self, ports, count) {
+        assert.equal(self, 1);
+        registeredSets++;
+        const restore = ports !== null;
+        registeredRestoring = restore;
+        calls.push(["registered-set", ports, count]);
+        if (restore) {
+          assert.equal(pid, 41);
+          assert.equal(
+            api.domain_child,
+            outcome.child > 0 ? outcome.child : -1,
+          );
+          assert.deepEqual(ports, options.registered ?? [0, 0, 0]);
+          assert.equal(count, ports.length);
+        } else assert.deepEqual([ports, count], [null, 0]);
+        const result =
+          options[restore ? "registeredRestore" : "registeredClear"] ?? 0;
+        if (!result) registered = restore ? [...ports] : [0, 0, 0];
+        return result;
+      },
+      vm_deallocate(self, array, bytes) {
+        assert.equal(self, 1);
+        const owned = arrays.find((entry) => entry.value === array);
+        assert.ok(
+          owned,
+          "Only getter-owned arrays in this namespace can be released",
+        );
+        assert.equal(freed.includes(array), false);
+        assert.equal(bytes, array.length * 4);
+        freed.push(array);
+        calls.push(["array-release", owned.phase]);
+        return options.arrayRelease === owned.phase ? 15 : 0;
+      },
+      task_get_exception_ports(
+        self,
+        mask,
+        masks,
+        count,
+        handlers,
+        behaviors,
+        flavors,
+      ) {
+        assert.deepEqual([self, mask, count.value], [1, 0xffff, 14]);
+        assert.equal(sets, 0);
+        assert.equal(registeredSets, 0);
+        for (const [i, tuple] of exceptionTuples.entries()) {
+          masks[i] = tuple.mask;
+          handlers[i] = options.exceptionQuery ? 666 : tuple.handler;
+          behaviors[i] = tuple.behavior;
+          flavors[i] = tuple.flavor;
+          if (!options.exceptionQuery && api.MACH_PORT_VALID(tuple.handler))
+            acquired.push(tuple.handler);
+        }
+        count.value = exceptionTuples.length;
+        calls.push("exceptions");
+        return options.exceptionQuery ?? 0;
+      },
+      task_set_exception_ports() {
+        assert.fail(
+          "The pre-fork observation cannot rewrite exception privilege/MAC state",
+        );
       },
       fork() {
         assert.equal(slot, 0, label);
         assert.equal(api.bootstrap_port, 0, label);
+        assert.ok(
+          registered.every((name) => name === 0),
+          "Slots are fenced before runtime callbacks",
+        );
         forked = true;
         api.errno = 11;
         if (options.fork === 0) {
           pid = 42;
           slot = options.childSlot ?? 0;
-          acquired.length = 0;
+          registered = options.childRegistered ?? [0, 0, 0];
+          acquired.length = released.length = arrays.length = freed.length = 0;
         }
         if (options.changeCache) api.bootstrap_port = 77;
         return options.fork ?? 57;
@@ -292,6 +557,11 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
       },
       remember_cleanup(operation, kind, value) {
         cleanup.push([operation, kind, value]);
+      },
+      stderr: 2,
+      fprintf(_stream, format, ...values) {
+        diagnostics.push({ format, values });
+        api.errno = 99;
       },
       failure() {
         assert.equal(api.domain_child, outcome.child > 0 ? outcome.child : -1);
@@ -342,18 +612,122 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         !options.emptyQuery &&
         !options.empty &&
         !options.preCache &&
+        !options.registeredCapture &&
+        !options.registeredClear &&
+        !options.registeredEmptyQuery &&
+        !options.emptyRegistered &&
+        options.arrayRelease !== "empty" &&
+        !options.exceptionRelease &&
         (options.threads ?? 1) === 1 &&
         (options.threadRead ?? 64) === 64,
       label,
     );
     assert.deepEqual([...released].sort(), [...acquired].sort(), label);
+    assert.equal(freed.length, arrays.length, label);
+    assert.deepEqual(
+      exceptionTuples,
+      exceptionSnapshot,
+      "Exception observation never mutates the slots",
+    );
+    if (!options.capture) {
+      assert.equal(
+        api.domain_fork_exceptions.result,
+        options.exceptionQuery ?? 0,
+      );
+      assert.equal(api.domain_fork_exceptions.parent, 41);
+      assert.equal(
+        api.domain_fork_exceptions.complete,
+        !options.exceptionQuery,
+      );
+      if (!options.exceptionQuery) {
+        for (const [i, tuple] of exceptionTuples.entries()) {
+          assert.deepEqual(
+            [
+              api.domain_fork_exceptions.masks[i],
+              api.domain_fork_exceptions.handlers[i],
+              api.domain_fork_exceptions.behaviors[i],
+              api.domain_fork_exceptions.flavors[i],
+            ],
+            Object.values(tuple),
+          );
+          assert.equal(
+            api.domain_fork_exceptions.releases[i],
+            api.MACH_PORT_VALID(tuple.handler)
+              ? options.exceptionRelease
+                ? 15
+                : 0
+              : -1,
+          );
+        }
+      } else assert.equal(api.domain_fork_exceptions.count, 0);
+    }
+    if (diagnostics.length) {
+      assert.ok(expected.length);
+      assert.ok(
+        diagnostics[0].format.startsWith("native-darwin-fork-inheritance:"),
+      );
+      assert.equal(diagnostics.length, 1 + api.domain_fork_exceptions.count);
+    }
+    if (api.domain_fork_exceptions.active) {
+      const before = [
+        calls.length,
+        acquired.length,
+        released.length,
+        freed.length,
+        api.errno,
+      ];
+      const offset = diagnostics.length;
+      run.diagnostic("fault");
+      assert.deepEqual(
+        [
+          calls.length,
+          acquired.length,
+          released.length,
+          freed.length,
+          api.errno,
+        ],
+        before,
+        "Cached diagnostics add no query, ownership or errno change",
+      );
+      assert.deepEqual(diagnostics[offset].values, [
+        "fault",
+        pid,
+        41,
+        options.exceptionQuery ?? 0,
+        options.exceptionQuery ? 0 : exceptionTuples.length,
+        !options.exceptionQuery,
+      ]);
+      for (const [i, tuple] of exceptionTuples.entries())
+        if (!options.exceptionQuery)
+          assert.deepEqual(diagnostics[offset + i + 1].values, [
+            "fault",
+            41,
+            i,
+            tuple.mask,
+            tuple.handler,
+            tuple.behavior,
+            tuple.flavor,
+            api.domain_fork_exceptions.releases[i],
+          ]);
+    }
+    const bounded = { count: 0, issues: [] };
+    for (let i = 0; i < 70; i++)
+      run.check(bounded, false, "synthetic-failure", "mach", i, i > 0);
+    assert.equal(bounded.count, 64);
+    assert.equal(bounded.issues.length, 64);
+    assert.equal(bounded.issues[0].value, 0);
+    assert.equal(bounded.issues.at(-1).operation, "fork-issues-truncated");
     if (pid === 41) {
       assert.equal(
         api.bootstrap_port,
         options.restoreCache ? 77 : cached,
         label,
       );
-      if (!options.capture) {
+      if (
+        !options.capture &&
+        !options.registeredCapture &&
+        !options.exceptionRelease
+      ) {
         assert.deepEqual(
           calls.filter((call) => Array.isArray(call) && call[0] === "set"),
           [
@@ -373,7 +747,12 @@ test("Darwin bootstrap fork prevents inherited acquisitions and settles only get
         label,
       );
       // Even an aliased child getter never authorizes the parent's snapshot.
-      assert.equal(released.length, options.childSlot ? 1 : 0, label);
+      assert.equal(
+        released.length,
+        (options.childSlot ? 1 : 0) +
+          (options.childRegistered?.filter(api.MACH_PORT_VALID).length ?? 0),
+        label,
+      );
     }
   }
 });
@@ -6325,6 +6704,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           calls.push(["census-diagnostic"]);
       },
       domain_access_diagnostic: (...facts) => lifecycle.push(facts),
+      domain_fork_diagnostic: (owner) => assert.equal(owner, "fault"),
       fflush() {},
     };
     const launch = script.runInNewContext(context);

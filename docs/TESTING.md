@@ -401,19 +401,32 @@ status. Counted aliases and copied parent bookkeeping cannot change admission or
 cleanup ownership. Failed queries with written outputs, zero/full-width counts,
 failed releases and failed diagnostics preserve unavailable values, the original
 refusal and errno. No query adds a release or supplies endpoint identity.
-The fast Darwin build fixture also executes the shared bootstrap fork guard and
+The fast Darwin build fixture also executes the shared registered/bootstrap fork guard and
 the fault owner's refusal path. Injected getters/setters protect verified null
-inheritance, the final single-thread check, exact parent slot/exported-value
+inheritance before runtime callbacks, the final single-thread check, exact parent slot/exported-value
 restoration after successful or failed fork and preparation failure, and one
 release attempt per successful getter copy including aliases. Failed getter
 outputs own nothing; aliased child names never authorize releasing a parent's
 snapshot. Child producer binding precedes its first Mach readback. Missing or
 nonnull readbacks, changed caches, restoration failures and failed releases keep
 the first refusal and independent cleanup causes.
+Registered-slot cases preserve order, nulls, getter aliases and exact counts through
+successful/failed forks and preparation refusals. They independently fail capture,
+clear, parent/child readback, per-reference release and array release, and reject
+reordered or shortened restoration without adopting failed getter outputs or
+parent names in the child. Nonnull exception tuples with aliased handlers retain
+their masks/behaviors/flavors without any setter; failed queries remain unavailable
+and owned release failures retain cleanup causes. Cached diagnostic bodies add no
+query, reference or errno change, and issue overflow preserves the first refusal
+within fixed storage. These observations cannot identify an unknown SEND right or
+prove private-runtime creation closure.
+The emitted guard-operation names also pass through the actual finite feasibility
+diagnostic parser. Owned fork-copy/array cleanup failures remain uncertain, while
+unknown registered/exception operation names remain unrecognized.
 The fault wrapper retains each diagnostic name until failure emission and arms
 the existing child timeout on pre-binding refusal without resetting a bound child.
 The launcher custody fixture executes its actual wrapper, retaining the direct
-child before restoration can
+child before registered or bootstrap restoration can
 fail and protecting diagnostics from SIGPIPE without replacing the original
 error. Initial custodian reexec and existing final-exec/census fixtures remain
 required. These regressions use the existing fast/native-harness discovery,
