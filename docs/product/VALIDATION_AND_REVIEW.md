@@ -71,6 +71,19 @@ durable before boundaries can change; pending commit effects must reconcile
 first. Frozen plan artifacts remain unchanged and production refinement remains
 inactive.
 
+The inactive revision-validation foundation separately binds complete
+inventories to accepted effective revisions and exact replacement work.
+Every mode-required role rediscovers applicability read-only; unchanged
+assignments carry forward only through validated correspondence. Commands,
+reports, later coverage and Reviewer-only requirements remain additive, including
+requirements introduced during earlier revision discovery. A complete
+Worker-first schedule requires every active role and does not substitute for
+capability preparation or check execution. Stale schedules and implementation
+evidence cannot gain authority through renumbering. Migration creates no legacy
+revision proof and preserves consumed effects and allowances.
+Confirmed current-step amendments retain their commands, mapped applicability
+and infrastructure across revision acceptance and reload.
+
 Before writable work, plan execution and polishing establish the complete
 staging-independent validation inventory and the repository files that control
 it. Independent and combined modes combine separately accepted Worker and Reviewer

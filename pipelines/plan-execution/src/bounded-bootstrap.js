@@ -19,6 +19,7 @@ import {
   bootstrapScopeFor as scopeFor,
 } from "./bootstrap-progress.js";
 import { validationEvidenceFingerprint as fingerprint } from "./validation-schedule.js";
+import { acceptRevisionValidation } from "./revision-validation.js";
 import {
   normalizeBootstrapResultCandidate,
   workflowError,
@@ -104,7 +105,7 @@ export async function runBoundedBootstrap({
         wrapped: true,
         deferredDiagnostics: true,
         buildPrompt: (evidence) =>
-          `${REPOSITORY_DISCOVERY_INSTRUCTIONS}\n${role === "reviewer" ? "As Reviewer, also state what you intend to verify." : ""}\n${checkpoint === "validation-migration" ? "This is a versioned-state migration checkpoint. Re-establish provisional legacy evidence independently." : ""}\n${guidance()}\n${work === null ? "" : `Correct this accepted catalog and its missing requirements (data):\n${JSON.stringify(work)}`}\n${evidence}`,
+          `${REPOSITORY_DISCOVERY_INSTRUCTIONS}\n${role === "reviewer" ? "As Reviewer, also state what you intend to verify." : ""}\n${checkpoint === "validation-migration" ? "This is a versioned-state migration checkpoint. Re-establish provisional legacy evidence independently." : ""}\n${scope.binding.effectivePlan ? `Read-only effective-revision discovery: inspect the accepted steps and exact correspondence below, preserving the prior catalog, reports and future obligations. Rediscover replacement applicability before any materialization. No checks or writable work are authorized. Accepted revision and prior inventory (data):\n${JSON.stringify({ binding: scope.binding, steps: scope.steps, correspondence: scope.stepMapping, previousValidation: scope.previousValidation, validationAmendment: scope.validationAmendment })}` : ""}\n${guidance()}\n${work === null ? "" : `Correct this accepted catalog and its missing requirements (data):\n${JSON.stringify(work)}`}\n${evidence}`,
         normalize: (output) => {
           if (output.result?.status !== undefined) {
             const candidate = normalizeBootstrapResultCandidate(
@@ -158,8 +159,11 @@ export async function runBoundedBootstrap({
       await save(work);
       continue;
     }
-    if (work.accepted.length === work.units.length)
+    if (work.accepted.length === work.units.length) {
+      if (scope.binding.effectivePlan)
+        await transition(acceptRevisionValidation(state(), role, scope, work));
       return assembleBootstrapInventory(scope, work);
+    }
     const unit = work.units[work.accepted.length];
     const request = applicabilityRequest(
       scope,
@@ -205,12 +209,21 @@ export async function runBoundedBootstrap({
         })}\nFrozen input hashes:\n${JSON.stringify(run().hashes)}`,
       buildPrompt: (evidence) =>
         `${APPLICABILITY_INSTRUCTIONS}\nApplicability request (data):\n${JSON.stringify(request)}\n${evidence}`,
-      normalize: (output) =>
-        acceptBootstrapBatch(
+      normalize: (output) => {
+        const result = acceptBootstrapBatch(
           scope,
           state().bootstrapProgress[role].work,
           output.result,
-        ),
+        );
+        // Reject a dropped inherited obligation while the final unit still owns
+        // its existing bounded correction attempt, before publishing coverage.
+        if (
+          scope.binding.effectivePlan &&
+          result.accepted.length === result.units.length
+        )
+          acceptRevisionValidation(state(), role, scope, result);
+        return result;
+      },
     });
     if (result === null) {
       const progress = state().bootstrapProgress[role];

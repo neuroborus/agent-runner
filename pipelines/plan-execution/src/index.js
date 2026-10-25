@@ -1424,11 +1424,34 @@ export function migratePlanExecutionStateV29(run) {
   });
 }
 
+export function migratePlanExecutionStateV30(run) {
+  const current = run.pipelineState;
+  const revised = current.effectivePlanRevisions.revisions.some(
+    (entry) => entry.accepted,
+  );
+  return Object.freeze({
+    ...current,
+    // Historical inventories and consumed effects remain readable; they cannot
+    // acquire effective-revision applicability or implementation proof.
+    effectiveValidation: [],
+    ...(revised
+      ? {
+          stepImplementation: null,
+          bootstrapProgress: Object.fromEntries(
+            Object.entries(current.bootstrapProgress).map(
+              ([role, progress]) => [role, { ...progress, work: null }],
+            ),
+          ),
+        }
+      : {}),
+  });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 30,
+  stateVersion: 31,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1464,6 +1487,7 @@ export const planExecutionPipeline = Object.freeze({
     27: migratePlanExecutionStateV27,
     28: migratePlanExecutionStateV28,
     29: migratePlanExecutionStateV29,
+    30: migratePlanExecutionStateV30,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,

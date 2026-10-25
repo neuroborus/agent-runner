@@ -1,4 +1,93 @@
+import { createHash } from "node:crypto";
 import { parseCommitPlan } from "@agent-runner/commit-plan";
+
+const fingerprint = (text) => createHash("sha256").update(text).digest("hex");
+
+// Selection consumes accepted authority only. Proposals and display labels
+// cannot change the plan used by bootstrap or implementation evidence.
+export function effectivePlanAuthority(state, number) {
+  const revisions = state.effectivePlanRevisions?.revisions ?? [];
+  const revision =
+    number === undefined
+      ? revisions.findLast((entry) => entry.accepted)
+      : revisions.find((entry) => entry.number === number && entry.accepted);
+  if (number !== undefined && number !== 0 && !revision)
+    throw new Error("Unknown accepted effective revision.");
+  const plan = revision?.plan ?? state.canonicalPlan;
+  const steps = parseCommitPlan(plan).steps;
+  return {
+    plan,
+    steps,
+    mapping:
+      revision?.mapping ??
+      steps.map(({ number: step }) => ({
+        step,
+        originalStep: step,
+        replacement: 1,
+      })),
+    binding: {
+      revision: revision?.number ?? 0,
+      revisionFingerprint: revision?.fingerprint ?? fingerprint(plan),
+      planFingerprint: fingerprint(plan),
+    },
+  };
+}
+
+export function effectiveStepPosition(state, step, revision) {
+  const authority = effectivePlanAuthority(state, revision);
+  const entry = authority.steps[step - 1];
+  if (!entry) throw new Error("Unknown effective plan step.");
+  return {
+    ...authority.binding,
+    ...authority.mapping[step - 1],
+    subject: entry.subject,
+    stepFingerprint: fingerprint(JSON.stringify(entry)),
+  };
+}
+
+// Follow each accepted splice, rather than matching replacement ordinals that
+// may themselves shift after another split. Unchanged bodies and subjects are
+// checked before any assignment can be carried forward.
+export function effectiveStepCorrespondence(state, from, to) {
+  const source = effectivePlanAuthority(state, from);
+  const target = effectivePlanAuthority(state, to);
+  if (from > to)
+    throw new Error("Effective correspondence cannot go backward.");
+  let rows = source.steps.map(({ number }) => ({
+    step: number,
+    steps: [number],
+    affected: false,
+  }));
+  for (const revision of state.effectivePlanRevisions.revisions) {
+    if (!revision.accepted || revision.number <= from || revision.number > to)
+      continue;
+    const count = parseCommitPlan(revision.replacementPlan).steps.length;
+    rows = rows.map((row) => ({
+      ...row,
+      affected: row.affected || row.steps.includes(revision.step),
+      steps: row.steps.flatMap((step) =>
+        step < revision.step
+          ? [step]
+          : step > revision.step
+            ? [step + count - 1]
+            : Array.from({ length: count }, (_, index) => step + index),
+      ),
+    }));
+  }
+  for (const row of rows) {
+    if (row.affected) continue;
+    const before = source.steps[row.step - 1];
+    const after = target.steps[row.steps[0] - 1];
+    if (
+      before.subject !== after?.subject ||
+      before.body !== after.body ||
+      source.mapping[row.step - 1].originalStep !==
+        target.mapping[row.steps[0] - 1].originalStep
+    )
+      throw new Error("Invalid effective step correspondence.");
+  }
+  return rows;
+}
 
 const DISPOSITIONS = [
   "CURRENT",
@@ -48,15 +137,25 @@ export function validStepAssessment(value) {
 }
 
 export function selectedPlanPosition(state) {
-  const steps = parseCommitPlan(state.canonicalPlan).steps;
+  const { steps, binding } = effectivePlanAuthority(state);
   const step = state.completedCommits.length + 1;
   return {
     step,
     subject: steps[step - 1]?.subject ?? null,
+    ...(binding.revision === 0 || !steps[step - 1]
+      ? {}
+      : {
+          ...effectiveStepPosition(state, step),
+        }),
     completed: state.completedCommits.map((head, index) => ({
       step: index + 1,
       subject: steps[index].subject,
       head,
+      ...(binding.revision === 0
+        ? {}
+        : {
+            ...effectiveStepPosition(state, index + 1),
+          }),
     })),
   };
 }

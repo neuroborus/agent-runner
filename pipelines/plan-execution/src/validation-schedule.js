@@ -1,8 +1,14 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { effectivePlanAuthority } from "./plan-position.js";
 
 // Role assignments remain immutable. An accepted amendment overlays only the
-// selected step; advancement always selects the next original inventory.
-export function deriveValidationSchedule(validations, stepCount) {
+// selected step; revision schedules retain their accepted authority.
+export function deriveValidationSchedule(
+  validations,
+  stepCount,
+  planBinding = null,
+) {
   const commands = new Map();
   for (const validation of validations.filter(Boolean)) {
     for (const { command, steps } of validation.requiredChecks) {
@@ -11,6 +17,7 @@ export function deriveValidationSchedule(validations, stepCount) {
     }
   }
   return {
+    ...(planBinding === null ? {} : { effectivePlan: planBinding }),
     commands: [...commands.keys()],
     steps: Array.from({ length: stepCount }, (_, index) => ({
       step: index + 1,
@@ -23,6 +30,21 @@ export function deriveValidationSchedule(validations, stepCount) {
 
 export function scheduledChecks(state, step = state.currentStep) {
   const schedule = state.validationSchedule;
+  if (
+    !schedule?.effectivePlan &&
+    state.effectivePlanRevisions?.revisions.some(
+      (revision) => revision.accepted,
+    )
+  )
+    return null;
+  if (
+    schedule?.effectivePlan &&
+    !isDeepStrictEqual(
+      schedule.effectivePlan,
+      effectivePlanAuthority(state).binding,
+    )
+  )
+    return null;
   const entry = schedule?.steps.find((entry) => entry.step === step);
   return entry
     ? entry.commandIndexes.map((commandIndex, checkIndex) => ({

@@ -817,7 +817,7 @@ nullable durable recovery allowance. Legacy runs use 30 minutes without
 configuration reload. Version 15 adds frozen availability policy and nullable retry episodes, with
 default-only legacy migration that preserves saved workflow and session evidence.
 The mode-aware pipeline versions are plan-authoring version 5, plan-execution
-version 30, and polishing version 16. Their ordered migrations resolve missing
+version 31, and polishing version 16. Their ordered migrations resolve missing
 legacy modes to `independent` and preserve explicitly saved modes without
 moving terminal workflows or replaying role turns,
 commits, or handoffs. Complete write-ahead events precede atomic state

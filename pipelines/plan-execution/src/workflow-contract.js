@@ -70,6 +70,7 @@ const PIPELINE_STATE_FIELDS = new Set([
   "settings",
   "commitSizeAssessment",
   "effectivePlanRevisions",
+  "effectiveValidation",
   "finalizationGuidance",
   "repositoryBaseline",
   "backendVersions",
@@ -3663,7 +3664,12 @@ function validateValidationSchedule(state, planSteps, validations) {
     );
   }
   const step = state.currentStep ?? state.completedCommits.length;
-  let checks = scheduledChecks(state, step);
+  // Frozen-plan declarations remain historical evidence after revision
+  // acceptance. They cannot select replacement work; its receipts are separate.
+  let checks = scheduledChecks(
+    { validationSchedule: state.validationSchedule },
+    step,
+  );
   if (state.validationAmendment !== null) {
     const amendment = state.validationAmendment;
     assertExactFields(
@@ -4098,6 +4104,7 @@ export function normalizePipelineState(value) {
     throw workflowError("Plan-execution artifact root is invalid.");
   }
   if (
+    !Array.isArray(value.effectiveValidation) ||
     typeof value.implementationEvidenceLegacy !== "boolean" ||
     (value.stepImplementation !== null &&
       (!validImplementationEvidence(value.stepImplementation, value) ||
@@ -5404,6 +5411,7 @@ export function createPlanExecutionState({
       implementationEvidenceLegacy: false,
       commitSizeAssessment: createCommitSizeAssessment(),
       effectivePlanRevisions: createEffectivePlanRevisions(),
+      effectiveValidation: [],
       settings:
         settings === null
           ? null
@@ -5570,7 +5578,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 30 ||
+    run.pipelineStateVersion !== 31 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||

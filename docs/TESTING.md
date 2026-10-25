@@ -44,6 +44,17 @@ migration adds empty authority without inferring approval or touching pending
 effects; the durable legacy-migration and runner-orchestration suites own
 persisted migration composition. Production refinement remains inactive.
 
+The fast execution `revision-validation.test.js` suite owns accepted-revision
+and exact-replacement bindings, mode-required complete role inventories,
+additive commands/reports and future applicability, unchanged correspondence,
+stale schedules and implementation evidence, interrupted bounded units and
+version-30 migration without fabricated proof. It also covers confirmed amendment
+command/infrastructure omissions on acceptance and reload, and rejects inherited
+assignment omissions while their owning unit can still be corrected. Pure policy
+and controlled bootstrap effects keep these cases deterministic. Durable legacy migrations,
+effect recovery and Runner orchestration remain separate slow-tier obligations;
+focused source tests do not establish their acceptance.
+
 The test launcher uses a private temporary directory on executable runtime tmpfs
 when available, otherwise the system temporary directory. This removes physical
 disk latency from disposable fixtures without mocking filesystem operations or

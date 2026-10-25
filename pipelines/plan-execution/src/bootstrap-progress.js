@@ -1,11 +1,12 @@
 import { isDeepStrictEqual } from "node:util";
 import {
-  createBootstrapScope,
   createBootstrapWork,
   normalizeBootstrapWork,
 } from "./bootstrap-units.js";
-import { selectedPlanPosition } from "./plan-position.js";
-import { validationEvidenceFingerprint as fingerprint } from "./validation-schedule.js";
+import {
+  assertRevisionValidation,
+  revisionBootstrapScope,
+} from "./revision-validation.js";
 import {
   workflowError,
   assertRun,
@@ -38,20 +39,16 @@ export function bootstrapScopeFor(
   inputFingerprint,
   infrastructureFingerprint,
 ) {
-  return createBootstrapScope({
-    canonicalPlan: state.canonicalPlan,
-    role,
+  return revisionBootstrapScope(state, role, {
     inputFingerprint,
-    repositoryFingerprint: fingerprint(state.repositoryBaseline),
     infrastructureFingerprint,
-    position: selectedPlanPosition(state),
-    trustedCommands: state.trustedValidation.commands,
   });
 }
 
 // Saved proof is checked structurally on every load; live input and file bindings
 // are checked again before reuse. Historical complete inventories need no fake units.
 export function validateBootstrapProgress(state) {
+  assertRevisionValidation(state);
   const progress = state.bootstrapProgress;
   if (!exact(progress, ["worker", "reviewer"]))
     throw workflowError("Invalid bootstrap progress.");

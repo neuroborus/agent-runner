@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { effectiveStepPosition } from "./plan-position.js";
 
 // Recovery proof belongs to the validated journal, never an agent's summary.
 const recovered = new WeakMap();
@@ -6,15 +7,23 @@ const HASH = /^[a-f0-9]{64}$/u;
 const HEAD = /^[a-f0-9]{40}(?:[a-f0-9]{24})?$/u;
 
 export function validImplementationEvidence(value, state) {
+  const revised = state.effectivePlanRevisions?.revisions.some(
+    (entry) => entry.accepted,
+  );
   return (
     value !== null &&
     typeof value === "object" &&
-    Object.keys(value).length === 4 &&
+    Object.keys(value).length === (revised ? 5 : 4) &&
     ["step", "head", "contentFingerprint", "accepted"].every((key) =>
       Object.hasOwn(value, key),
     ) &&
     Array.isArray(state.completedCommits) &&
     value.step === state.completedCommits.length + 1 &&
+    (!revised ||
+      isDeepStrictEqual(
+        value.planPosition,
+        effectiveStepPosition(state, value.step),
+      )) &&
     value.head === state.repositoryBaseline?.head &&
     (value.head === null || HEAD.test(value.head)) &&
     typeof value.contentFingerprint === "string" &&
@@ -29,6 +38,14 @@ export function implementationEvidence(state) {
     head: state.repositoryBaseline.head,
     contentFingerprint: state.repositoryBaseline.contentFingerprint,
     accepted: false,
+    ...(state.effectivePlanRevisions?.revisions.some((entry) => entry.accepted)
+      ? {
+          planPosition: effectiveStepPosition(
+            state,
+            state.completedCommits.length + 1,
+          ),
+        }
+      : {}),
   };
 }
 
@@ -70,6 +87,13 @@ export async function prepareImplementationRecovery(run, history, migrate) {
         return;
       if (!isDeepStrictEqual(state.completedCommits, target.completedCommits))
         continue;
+      if (
+        !isDeepStrictEqual(
+          state.effectivePlanRevisions,
+          target.effectivePlanRevisions,
+        )
+      )
+        return;
       if (
         state.canonicalPlan !== null &&
         state.canonicalPlan !== target.canonicalPlan

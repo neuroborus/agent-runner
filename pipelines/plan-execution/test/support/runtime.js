@@ -1757,7 +1757,7 @@ async function createFixture(
     revision: 1,
     runId,
     pipelineId: "plan-execution",
-    pipelineStateVersion: 30,
+    pipelineStateVersion: planExecutionPipeline.stateVersion,
     projectPath,
     taskPath,
     roles: Object.fromEntries(
@@ -2170,7 +2170,7 @@ async function createFixture(
   ) {
     currentRun = {
       ...currentRun,
-      pipelineStateVersion: 30,
+      pipelineStateVersion: planExecutionPipeline.stateVersion,
       pipelineState,
       pause,
       revision: currentRun.revision + 1,

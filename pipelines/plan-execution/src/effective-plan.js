@@ -124,6 +124,7 @@ function validationFingerprint(state) {
     state.trustedValidation,
     state.validationInfrastructure,
     state.validationInfrastructureFingerprint,
+    state.effectiveValidation,
   ]);
 }
 
@@ -677,6 +678,12 @@ export function acceptEffectivePlanRevision(state, boundary) {
     pendingFinalizationCorrection: null,
     finalizationRecovery: { ...state.finalizationRecovery, pending: false },
     stepImplementation: null,
+    bootstrapProgress: Object.fromEntries(
+      Object.entries(state.bootstrapProgress).map(([role, progress]) => [
+        role,
+        { ...progress, work: null },
+      ]),
+    ),
   };
 }
 

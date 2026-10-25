@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-10-25
 
+- **Replacement validation has explicit revision authority.** Execution state
+  version 31 stores separate complete role inventories and compact schedules for
+  accepted revisions. Read-only discovery preserves additive reports and future
+  coverage through validated splice correspondence; every active role must
+  finish before a Worker-first schedule is available. Exact replacement bindings
+  prevent stale applicability or implementation proof from becoming valid by
+  renumbering. Migration invents no legacy proof and preserves consumed effects,
+  correction and subdivision allowances. Production refinement remains inactive
+  until recoverable materialization lands. Persisted bindings, additive
+  rediscovery and interrupted-unit recovery form one contract: publishing only
+  part would permit stale applicability to select replacement work.
+
 - **Reviewed revisions have separate durable authority.** Execution state version
   30 adds flat effective plans with explicit original-step correspondence,
   immutable completed provenance and versioned finding ownership. Mode-specific

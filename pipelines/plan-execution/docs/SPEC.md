@@ -2475,6 +2475,58 @@ approvals, findings, budgets and pending effects. Historical assessments never
 become fabricated revision approval. Validation rebinding and replacement
 execution remain separate inactive foundations.
 
+### Revision-bound validation foundation
+
+`revision-validation.js` composes the existing bounded bootstrap with accepted
+effective authority. Pipeline state version 31 adds `effectiveValidation`, an
+ordered set of revision-specific role receipts and nullable merged schedules.
+Frozen-plan inventories remain unchanged. Production refinement and replacement
+materialization remain inactive; these records grant no writable or commit
+authority.
+
+Each role independently rediscovers the complete catalog and applicability
+read-only. Scope and unit IDs bind accepted revision number and fingerprint,
+effective plan hash, exact selected replacement and step hash, prior inventory,
+frozen inputs, repository, infrastructure and trusted commands. Requests include
+the accepted flat steps and original/replacement correspondence. Proposed plans
+cannot select work. Interrupted units retain their exact bindings; stale work
+is retired without renewing correction or subdivision allowances. Acceptance of
+a new plan retires pending units while preserving their consumed ledgers.
+
+Rebinding preserves each role's ordered command catalog, infrastructure,
+capability reports and blockers additively. Correspondence follows every accepted
+splice, checking unchanged subject/body and origin before carrying assignments
+forward. Every prior assignment survives on its unchanged step or at least one
+descendant of a split step. Replacement applicability is rediscovered, never
+copied by ordinal. New checks can supplement that minimum. Later-step coverage,
+Reviewer-only obligations and requirements added by earlier revision discovery
+survive further splits. Revision receipts retain the confirmed current-step
+amendment, including its infrastructure and confirmation fingerprint. Scope and
+unit bindings include that complete amendment; its commands, mapped applicability
+and infrastructure must survive in the replacement Worker's inventory on
+acceptance and reload, even after the active amendment clears. Discovery rejects
+omitted amendment commands or infrastructure. Applicability rejects a dropped
+assignment as soon as its last possible descendant has been inspected, leaving
+the responsible unit unaccepted under the existing role correction allowance.
+
+Only complete bounded coverage can publish a role receipt. Lazy requires Worker;
+independent and combined require both separately accepted roles. The compact
+schedule remains absent until all required roles finish, keeps Worker-first
+union order, and binds the accepted revision. Capability preparation must still
+consume every role's complete reports before materialization; a ready schedule
+is not capability readiness or validation evidence. Selected trusted identities,
+vectors and capabilities remain frozen, and checks execute only in FINALIZE.
+Old schedules cannot select checks under newer authority. Revised implementation
+evidence and selected plan context name the exact accepted replacement; an old
+step ordinal or approval cannot become valid by renumbering.
+
+The compatible version-30 migration initializes no revision-validation receipts.
+It retains frozen-plan inventories, trusted authority, historical gates, consumed
+effects and accounting. If accepted revisions exist, unbound pending units and
+implementation evidence are retired, retaining subdivision totals. It never
+fabricates applicability, approval, or legacy refinement eligibility. Pending
+commits still settle by verification before discovery or new effects.
+
 ### 13.2 Candidate convergence and finalization
 
 Semantic candidate convergence precedes the terminal gate. In independent
@@ -3926,7 +3978,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 30, preserving
+74. every supported legacy version migrates through state version 31, preserving
     its saved mode and defaulting missing modes to `independent`, without
     fabricating effective-revision approval, reviving terminal runs or replaying
     completed or pending commit effects; unfinished work freezes guidance and repeats

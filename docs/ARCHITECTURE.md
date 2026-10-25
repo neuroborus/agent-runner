@@ -182,9 +182,26 @@ Proposal bindings retain historical additional-round grants; reload enforces
 cumulative lineage consumption, and any binding change requires fresh reports.
 Deferred targets map to logical original work. Pending commits remain
 verification-only.
-Production routing still consumes the unchanged canonical plan; validation
-rebinding and replacement materialization are not activated. See the
+Production routing still consumes the unchanged canonical plan; replacement
+materialization is not activated. See the
 [revision contract](../pipelines/plan-execution/docs/SPEC.md#reviewed-effective-revision-foundation).
+
+Execution's private `revision-validation.js` binds bounded discovery, complete
+role inventories and compact schedules to accepted revision authority and exact
+replacement positions. The public persisted validator composes this contract
+with bootstrap progress. State version 31 retains separate additive revision
+receipts without rewriting frozen-plan inventories. Validated splice
+correspondence preserves unchanged assignments and future obligations; affected
+applicability requires fresh read-only discovery from every active role. Only
+complete roles produce the Worker-first schedule. Receipts bind confirmed
+amendment commands, mapped applicability and infrastructure, enforcing them on
+acceptance and reload independently of the active amendment's lifetime.
+Capability preparation remains root-owned, and no receipt supplies check evidence
+or materialization authority.
+The version-30 migration adds empty receipts without inventing legacy proof,
+preserving consumed effects and allowances. Revised implementation evidence
+cannot be rebound by ordinal. Production refinement remains inactive. See the
+[validation foundation](../pipelines/plan-execution/docs/SPEC.md#revision-bound-validation-foundation).
 
 The configuration capability lives under `src/config/` behind its public
 `index.js`. Strict runner and project parsing, confined file loading, trusted

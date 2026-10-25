@@ -59,6 +59,11 @@ export function createBootstrapScope({
   repositoryFingerprint,
   infrastructureFingerprint,
   position,
+  planBinding = null,
+  stepMapping = null,
+  previousValidation = null,
+  validationAmendment = null,
+  inheritedAssignments = null,
   trustedCommands = [],
 }) {
   assert(
@@ -92,6 +97,49 @@ export function createBootstrapScope({
     "stepAssessment",
     "runner-selected-position",
   );
+  if (planBinding !== null) {
+    assert(
+      exact(planBinding, [
+        "revision",
+        "revisionFingerprint",
+        "planFingerprint",
+        "step",
+        "originalStep",
+        "replacement",
+        "subject",
+        "stepFingerprint",
+      ]) &&
+        Number.isSafeInteger(planBinding.revision) &&
+        planBinding.revision > 0 &&
+        ["revisionFingerprint", "planFingerprint", "stepFingerprint"].every(
+          (field) =>
+            typeof planBinding[field] === "string" &&
+            /^[a-f0-9]{64}$/u.test(planBinding[field]),
+        ) &&
+        planBinding.planFingerprint === sha256(canonicalPlan) &&
+        planBinding.step === position.step &&
+        planBinding.subject === position.subject &&
+        Array.isArray(stepMapping) &&
+        stepMapping.length === plan.steps.length &&
+        stepMapping.every(
+          (entry, index) =>
+            exact(entry, ["step", "originalStep", "replacement"]) &&
+            entry.step === index + 1 &&
+            [entry.originalStep, entry.replacement].every(
+              (value) => Number.isSafeInteger(value) && value > 0,
+            ),
+        ) &&
+        stepMapping[position.step - 1].originalStep ===
+          planBinding.originalStep &&
+        stepMapping[position.step - 1].replacement ===
+          planBinding.replacement &&
+        planBinding.stepFingerprint ===
+          sha256(JSON.stringify(plan.steps[position.step - 1])),
+      "effectivePlan",
+      "accepted-revision-and-exact-replacement",
+    );
+  } else
+    assert(stepMapping === null, "effectivePlan", "mapping-requires-authority");
   return finish({
     binding: {
       version: VERSION,
@@ -103,8 +151,19 @@ export function createBootstrapScope({
       trustedFingerprint: fingerprint(trustedCommands),
       step: position.step,
       subject: position.subject,
+      ...(planBinding === null ? {} : { effectivePlan: planBinding }),
+      ...(planBinding === null
+        ? {}
+        : { amendmentFingerprint: fingerprint(validationAmendment) }),
+      ...(previousValidation === null
+        ? {}
+        : { validationFingerprint: fingerprint(previousValidation) }),
     },
     steps: plan.steps,
+    ...(stepMapping === null ? {} : { stepMapping }),
+    ...(previousValidation === null ? {} : { previousValidation }),
+    ...(planBinding === null ? {} : { validationAmendment }),
+    ...(inheritedAssignments === null ? {} : { inheritedAssignments }),
     trustedCommands,
   });
 }
@@ -129,6 +188,41 @@ export function normalizeRepositoryDiscovery(
   )(payload.requiredChecks, INVALID, {
     maxItems: MAX_BOOTSTRAP_ITEMS,
   });
+  if (scope.previousValidation !== undefined) {
+    const previous = scope.previousValidation;
+    assert(
+      previous.requiredChecks.every(
+        ({ command }, index) => requiredChecks[index]?.command === command,
+      ) &&
+        [
+          "validationInfrastructure",
+          "capabilityRequirements",
+          "environmentBlockers",
+        ].every(
+          (field) =>
+            Array.isArray(previous[field]) &&
+            Array.isArray(payload[field]) &&
+            previous[field].every((item) =>
+              payload[field].some((next) => isDeepStrictEqual(item, next)),
+            ),
+        ),
+      "discovery",
+      "preserve-prior-revision-requirements",
+    );
+  }
+  if (scope.binding.role === "worker" && scope.validationAmendment != null) {
+    const amendment = scope.validationAmendment;
+    assert(
+      amendment.requiredChecks.every(({ command }) =>
+        requiredChecks.some((check) => check.command === command),
+      ) &&
+        amendment.validationInfrastructure.every((path) =>
+          payload.validationInfrastructure.includes(path),
+        ),
+      "discovery",
+      "preserve-confirmed-amendment-requirements",
+    );
+  }
   assert(
     validCapabilityReports(payload, requiredChecks, scope.trustedCommands),
     "capabilityRequirements",
@@ -189,6 +283,18 @@ export function applicabilityRequest(scope, discovery, start, end) {
     catalogFingerprint,
     discovery,
     steps: scope.steps.slice(start - 1, end),
+    ...(scope.stepMapping === undefined
+      ? {}
+      : {
+          correspondence: scope.stepMapping.slice(start - 1, end),
+        }),
+    ...(scope.inheritedAssignments === undefined
+      ? {}
+      : {
+          inheritedAssignments: scope.inheritedAssignments.filter(({ steps }) =>
+            steps.some((step) => step >= start && step <= end),
+          ),
+        }),
   };
 }
 
@@ -392,6 +498,23 @@ function normalizeBatch(payload, scope, work, unit) {
       "assignments",
       "complete-unit-coverage",
     );
+    // Once the last descendant is inspected, an omitted inherited assignment
+    // must fail here, while this unit can still repair it under its allowance.
+    for (const { command, steps } of scope.inheritedAssignments ?? []) {
+      if (steps.at(-1) > unit.end) continue;
+      const checkId = checks.find((check) => check.command === command)?.id;
+      assert(
+        [...work.accepted, payload].some((batch) =>
+          batch.assignments.some(
+            (assignment) =>
+              assignment.checkId === checkId &&
+              assignment.steps.some((step) => steps.includes(step)),
+          ),
+        ),
+        "assignments",
+        "preserve-prior-revision-applicability",
+      );
+    }
   }
   return finish(payload);
 }
