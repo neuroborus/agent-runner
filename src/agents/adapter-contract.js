@@ -28,12 +28,21 @@ const REQUEST_FIELDS = Object.freeze([
   "onFreshSession",
   "onResource",
   "storageForbiddenPaths",
+  "workspacePolicy",
 ]);
 const EXECUTION_FIELDS = Object.freeze([
   "contextSize",
   "effort",
   "model",
   "profile",
+]);
+const WORKSPACE_POLICY_PATHS = Object.freeze([
+  "inputPaths",
+  "sourcePaths",
+  "outputPaths",
+  "configurationPaths",
+  "artifactPaths",
+  "infrastructurePaths",
 ]);
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
@@ -107,6 +116,7 @@ const CAPABILITY_FIELDS = Object.freeze([
   "nativeSessionContinuation",
   "nativeSessionFork",
   "policyReceipt",
+  "declaredWorkspace",
 ]);
 const POLICY_RECEIPT_FIELDS = Object.freeze([
   "schemaVersion",
@@ -465,6 +475,7 @@ export function createAdapterContract({
   AdapterError,
   backendName,
   failureClasses = [],
+  declaredWorkspace = false,
 }) {
   const errorPrefix = backendName.toUpperCase();
 
@@ -692,6 +703,81 @@ export function createAdapterContract({
     });
   }
 
+  function normalizeWorkspacePolicy(value, access, cwd) {
+    if (value === undefined) return undefined;
+    const fields = [
+      "kind",
+      "workspacePath",
+      "stateRoot",
+      "taskPath",
+      ...WORKSPACE_POLICY_PATHS,
+    ];
+    if (
+      !isRecord(value) ||
+      !hasExactFields(value, fields, ["kind", "workspacePath", "stateRoot"]) ||
+      value.kind !== "directory" ||
+      !["read-only", "workspace-write"].includes(access)
+    )
+      throw optionsError("Declared workspace policy is invalid.");
+    function path(entry) {
+      assertString(entry, "Declared workspace path");
+      if (
+        !isAbsolute(entry) ||
+        resolve(entry) !== entry ||
+        isFilesystemRoot(entry)
+      )
+        throw optionsError(
+          "Declared workspace paths must be canonical absolute paths.",
+        );
+      return entry;
+    }
+    const result = {
+      kind: "directory",
+      workspacePath: path(value.workspacePath),
+      stateRoot: path(value.stateRoot),
+    };
+    if (cwd !== undefined && cwd !== result.workspacePath)
+      throw optionsError(
+        "Declared workspace must match the request directory.",
+      );
+    if (value.taskPath !== undefined) result.taskPath = path(value.taskPath);
+    for (const name of WORKSPACE_POLICY_PATHS) {
+      const entries = value[name] === undefined ? [] : value[name];
+      if (!Array.isArray(entries) || entries.length > 256)
+        throw optionsError("Declared workspace paths are invalid.");
+      result[name] = [...new Set(Array.from(entries, path))].sort();
+    }
+    if (!declaredWorkspace)
+      throw optionsError(
+        "Declared directory workspaces are unsupported by this adapter.",
+      );
+    return deepFreeze(result);
+  }
+
+  function normalizeProbeOptions(value = {}) {
+    assertFields(
+      value,
+      [...EXECUTION_FIELDS, "access", "workspacePolicy"],
+      `${backendName} probe`,
+    );
+    if (value.access !== undefined && !ACCESS_MODES.has(value.access))
+      throw optionsError("Probe access is invalid.");
+    return Object.freeze({
+      ...normalizeExecutionOptions(
+        Object.fromEntries(EXECUTION_FIELDS.map((name) => [name, value[name]])),
+      ),
+      ...(value.access === undefined ? {} : { access: value.access }),
+      ...(value.workspacePolicy === undefined
+        ? {}
+        : {
+            workspacePolicy: normalizeWorkspacePolicy(
+              value.workspacePolicy,
+              value.access,
+            ),
+          }),
+    });
+  }
+
   function normalizeRequest(value) {
     assertFields(value, REQUEST_FIELDS, `${backendName} request`);
     if (
@@ -751,6 +837,15 @@ export function createAdapterContract({
             ),
       schema: normalizeSchema(value.schema),
       session: normalizeSession(value.session),
+      ...(value.workspacePolicy === undefined
+        ? {}
+        : {
+            workspacePolicy: normalizeWorkspacePolicy(
+              value.workspacePolicy,
+              value.access,
+              value.cwd,
+            ),
+          }),
       ...(value.signal === undefined ? {} : { signal: value.signal }),
       ...(value.onProcess === undefined ? {} : { onProcess: value.onProcess }),
       ...(value.onFreshSession === undefined
@@ -808,6 +903,7 @@ export function createAdapterContract({
       ),
     failure: (value) => normalizeFailureRecord(value, supportedFailureClasses),
     normalizeExecutionOptions,
+    normalizeProbeOptions,
     normalizeRequest,
   });
 }

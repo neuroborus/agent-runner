@@ -389,6 +389,7 @@ const {
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
+  normalizeProbeOptions,
 } = claudeContract;
 
 function validateExecutionOptions(options) {
@@ -1365,7 +1366,7 @@ export function createClaudeAdapter(options = {}) {
   }
 
   function probe(value) {
-    const options = normalizeExecutionOptions(value);
+    const options = validateExecutionOptions(normalizeProbeOptions(value));
     if (customClientAttribution) {
       return Promise.reject(
         new ClaudeAdapterError(
@@ -1898,8 +1899,8 @@ export function createClaudeAdapter(options = {}) {
   return Object.freeze({
     id: CLAUDE_BACKEND_ID,
     probe,
-    async canReadFiles({ access, paths }) {
-      await probe();
+    async canReadFiles({ access, paths, workspacePolicy }) {
+      await probe({ access, workspacePolicy });
       return canReadClaudeFiles(paths, isolationPolicies?.[access]);
     },
     run,

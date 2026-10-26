@@ -26,6 +26,18 @@ write blocking, native session behavior, and constrained local commit when the
 pipeline needs it. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
+The adapter boundary supports explicitly declared ordinary-directory access in
+Codex 0.164.0 or newer. Read-only analysis and confined output access have
+separate capability receipts and require no Git repository or local-commit
+readiness. Inputs, references, configuration, artifacts, infrastructure and
+discovered controls stay read-only; only declared outputs may change. Native
+permission paths containing glob metacharacters are rejected to preserve literal
+declarations. The policy survives continuation and reconstruction with existing
+command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
+declaration before provider work. This foundation does not yet expose directory
+pipelines. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+owns its exact fields and native mapping.
+
 Adapter execution options and turn requests also accept the portable effort
 values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
 the model identifier; identifiers containing whitespace, including combined

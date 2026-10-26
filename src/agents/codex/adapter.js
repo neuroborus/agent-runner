@@ -1,4 +1,5 @@
 import { execFile as executeFileCallback, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -31,6 +32,13 @@ import {
 } from "./local-commit.js";
 import { assertCodexSchema } from "./schema.js";
 import {
+  assertDirectoryConfiguration,
+  assertDirectorySelection,
+  directoryPermissionArguments,
+  directoryPolicyError,
+  prepareDirectoryPolicy,
+} from "./directory-policy.js";
+import {
   assertCodexWorkspaceStorage,
   createCodexWorkspaceStorage,
 } from "./workspace-storage.js";
@@ -39,6 +47,7 @@ export const CODEX_BACKEND_ID = "codex";
 
 const executeFile = promisify(executeFileCallback);
 const MINIMUM_CODEX_VERSION = Object.freeze([0, 147, 0]);
+const MINIMUM_DIRECTORY_CODEX_VERSION = Object.freeze([0, 164, 0]);
 const MAX_MCP_SERVERS = 256;
 const MCP_DISCOVERY_TIMEOUT_MS = 30_000;
 const MCP_SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]+$/u;
@@ -47,6 +56,7 @@ const CODEX_PROFILE_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9_-]{0,255}$/u;
 const DECIMAL_CONTEXT_SIZE_PATTERN = /^[1-9][0-9]*$/u;
 const MAX_CONTEXT_SIZE = 9_223_372_036_854_775_807n;
 const CAPABILITY_DIAGNOSTICS = Object.freeze({
+  declaredWorkspace: "capability_declared_workspace",
   autonomousWrite: "capability_autonomous_write",
   gitMetadataWriteBlocked: "capability_git_metadata_write_blocked",
   localCommit: "capability_local_commit",
@@ -116,6 +126,7 @@ const CODEX_DIAGNOSTIC_CLASSES = new Set([
   "isolation_network",
   "isolation_notification",
   "isolation_shell_environment",
+  "isolation_workspace_policy",
   "operation_dynamic_tool",
   "operation_hosted_tool",
   "operation_lifecycle_hook",
@@ -429,6 +440,7 @@ const codexContract = createAdapterContract({
   AdapterError: CodexAdapterError,
   backendName: "Codex",
   failureClasses: CODEX_FAILURE_CLASSES,
+  declaredWorkspace: true,
 });
 buildCodexFailure = codexContract.failure;
 
@@ -437,6 +449,7 @@ const {
   effortError,
   normalizeExecutionOptions: normalizeContractExecutionOptions,
   normalizeRequest: normalizeContractRequest,
+  normalizeProbeOptions,
 } = codexContract;
 
 function validateExecutionOptions(options) {
@@ -706,7 +719,12 @@ function threadOptions(request) {
     approvalPolicy: "never",
     approvalsReviewer: "user",
     cwd: request.cwd,
-    sandbox: threadSandboxFor(request),
+    ...(request.directoryPermissions === undefined
+      ? { sandbox: threadSandboxFor(request) }
+      : {
+          config: request.directoryPermissions,
+          permissions: request.directoryPermissions.default_permissions,
+        }),
   };
   if (request.model !== undefined) {
     options.model = request.model;
@@ -749,7 +767,9 @@ function turnOptions(request, threadId, prompt, workspaceStorage) {
     cwd: request.cwd,
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    sandboxPolicy: sandboxFor(request, workspaceStorage),
+    ...(request.directoryPermissions === undefined
+      ? { sandboxPolicy: sandboxFor(request, workspaceStorage) }
+      : { permissions: request.directoryPermissions.default_permissions }),
   };
   if (request.model !== undefined) {
     options.model = request.model;
@@ -861,6 +881,7 @@ async function selectThread(client, request, fresh) {
       ...options,
       serviceName: "agent_runner",
     });
+    assertDirectorySelection(result, request, CodexAdapterError);
     return { id: assertThreadResponse(result), model: result.model };
   }
   if (request.session.mode === "fork") {
@@ -870,6 +891,7 @@ async function selectThread(client, request, fresh) {
         threadId: request.session.id,
         excludeTurns: true,
       });
+      assertDirectorySelection(result, request, CodexAdapterError);
       const threadId = assertThreadResponse(result);
       if (
         threadId === request.session.id ||
@@ -883,9 +905,11 @@ async function selectThread(client, request, fresh) {
     } catch (cause) {
       if (
         cause instanceof CodexAdapterError &&
-        (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(
-          cause.code,
-        ) ||
+        ([
+          "ERR_CODEX_PROTOCOL",
+          "ERR_UNSUPPORTED_EFFORT",
+          "ERR_CODEX_ISOLATION",
+        ].includes(cause.code) ||
           isAuthenticationRequiredError(cause))
       ) {
         throw cause;
@@ -902,6 +926,7 @@ async function selectThread(client, request, fresh) {
       threadId: request.session.id,
       excludeTurns: true,
     });
+    assertDirectorySelection(result, request, CodexAdapterError);
     const threadId = assertThreadResponse(result);
     if (threadId !== request.session.id) {
       throw new CodexAdapterError("Codex resumed an unexpected thread.", {
@@ -912,7 +937,11 @@ async function selectThread(client, request, fresh) {
   } catch (cause) {
     if (
       cause instanceof CodexAdapterError &&
-      (["ERR_CODEX_PROTOCOL", "ERR_UNSUPPORTED_EFFORT"].includes(cause.code) ||
+      ([
+        "ERR_CODEX_PROTOCOL",
+        "ERR_UNSUPPORTED_EFFORT",
+        "ERR_CODEX_ISOLATION",
+      ].includes(cause.code) ||
         isAuthenticationRequiredError(cause))
     ) {
       throw cause;
@@ -1481,6 +1510,15 @@ function auditItems(items, request) {
       );
     }
     if (
+      request.directoryBoundary !== undefined &&
+      item.type === "fileChange" &&
+      (!Array.isArray(item.changes) ||
+        item.changes.some(
+          (change) => !request.directoryBoundary.allowsChange(change),
+        ))
+    )
+      throw directoryPolicyError(CodexAdapterError);
+    if (
       item.type === "agentMessage" &&
       item.memoryCitation !== undefined &&
       item.memoryCitation !== null
@@ -1623,8 +1661,9 @@ export function createCodexAdapter(options = {}) {
   const processEnvironment = isolateGitEnvironment(env);
   const commandEnvironment = isolateCommandEnvironment(processEnvironment);
   let probePromise;
+  let accessProbePromise;
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(includeCommit = true) {
     let versionResult;
     let helpResult;
     try {
@@ -1654,6 +1693,7 @@ export function createCodexAdapter(options = {}) {
         help.includes(flag),
       );
     const localCommit =
+      includeCommit &&
       supported &&
       (await probeCodexLocalCommit({
         codexBinary,
@@ -1675,16 +1715,54 @@ export function createCodexAdapter(options = {}) {
   }
 
   function probe(value) {
-    const options = normalizeExecutionOptions(value);
-    probePromise ??= inspectCapabilities();
-    if (options.effort !== undefined) {
-      return probePromise.then((capabilities) => {
-        // The supported App Server baseline includes the turn effort control.
-        if (!capabilities.structuredOutput) throw effortError();
-        return capabilities;
-      });
-    }
-    return probePromise;
+    return probeCapabilities(
+      validateExecutionOptions(normalizeProbeOptions(value)),
+    );
+  }
+
+  async function probeCapabilities(options) {
+    const capabilities = await (options.access !== undefined &&
+    options.access !== "local-commit"
+      ? (accessProbePromise ??= inspectCapabilities(false))
+      : (probePromise ??= inspectCapabilities()));
+    if (options.effort !== undefined && !capabilities.structuredOutput)
+      throw effortError();
+    if (options.workspacePolicy === undefined) return capabilities;
+    const boundary = await prepareDirectoryPolicy(
+      { ...options, cwd: options.workspacePolicy.workspacePath },
+      CodexAdapterError,
+    );
+    return directoryCapabilities(capabilities, options.access, boundary);
+  }
+
+  function directoryCapabilities(capabilities, access, boundary) {
+    const supported =
+      capabilities.structuredOutput &&
+      versionAtLeast(
+        parseVersion(`codex-cli ${capabilities.version}`),
+        MINIMUM_DIRECTORY_CODEX_VERSION,
+      );
+    return deepFreeze({
+      ...capabilities,
+      declaredWorkspace: supported,
+      readOnly: supported && access === "read-only",
+      workspaceWrite: supported && access === "workspace-write",
+      autonomousWrite: supported && access === "workspace-write",
+      gitMetadataWriteBlocked: supported,
+      localCommit: false,
+      policyReceipt: {
+        schemaVersion: 1,
+        fingerprint: createHash("sha256")
+          .update(
+            JSON.stringify({
+              version: capabilities.version,
+              policy: boundary.fingerprint,
+            }),
+          )
+          .digest("hex"),
+        supportedAccess: supported ? [access] : [],
+      },
+    });
   }
 
   function workspaceStorageFailure() {
@@ -1783,6 +1861,9 @@ export function createCodexAdapter(options = {}) {
           : argument,
       ),
     );
+    argumentsList.push(
+      ...directoryPermissionArguments(request.directoryPermissions),
+    );
     for (const name of mcpServerNames) {
       argumentsList.push("-c", `mcp_servers.${name}.enabled=false`);
     }
@@ -1793,8 +1874,23 @@ export function createCodexAdapter(options = {}) {
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe(executionOptionsFor(request));
+    const base = await probe({
+      ...executionOptionsFor(request),
+      ...(request.workspacePolicy === undefined
+        ? {}
+        : { access: request.access }),
+    });
+    const capabilities =
+      request.directoryBoundary === undefined
+        ? base
+        : directoryCapabilities(
+            base,
+            request.access,
+            request.directoryBoundary,
+          );
     const required = ["remoteWriteBlocked"];
+    if (request.directoryBoundary !== undefined)
+      required.push("declaredWorkspace");
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
     }
@@ -1871,12 +1967,24 @@ export function createCodexAdapter(options = {}) {
 
   async function runAttempt(
     request,
-    { fresh = false, recovery = false, attempt } = {},
+    { fresh = false, recovery = false, attempt, settlement } = {},
   ) {
+    settlement.directoryVerified = false;
     request.signal?.throwIfAborted();
     const workspaceStorage = await prepareWorkspaceStorage(request);
+    let processRetired = true;
+    let attemptFailed = false;
     try {
-      const launch = await appServerLaunch(request, workspaceStorage);
+      await request.directoryBoundary?.verify();
+      const attemptRequest =
+        request.directoryBoundary === undefined
+          ? request
+          : Object.freeze({
+              ...request,
+              directoryPermissions:
+                request.directoryBoundary.permissions(workspaceStorage),
+            });
+      const launch = await appServerLaunch(attemptRequest, workspaceStorage);
       let child;
       try {
         request.signal?.throwIfAborted();
@@ -1896,6 +2004,7 @@ export function createCodexAdapter(options = {}) {
                 ownershipMode: "native-sandbox-provider",
               }),
         });
+        processRetired = false;
       } catch (cause) {
         throw processError("Cannot start Codex app-server.", cause);
       }
@@ -1931,7 +2040,10 @@ export function createCodexAdapter(options = {}) {
               title: normalizedClientAttribution.title,
               version: packageMetadata.version,
             },
-            capabilities: null,
+            capabilities:
+              request.directoryBoundary === undefined
+                ? null
+                : { experimentalApi: true },
           });
           client.notify("initialized", {});
           const configuration = await client.request("config/read", {
@@ -1942,9 +2054,18 @@ export function createCodexAdapter(options = {}) {
             launch.mcpServerNames,
             workspaceStorage?.shellEnvironment ?? EMPTY_SHELL_ENVIRONMENT,
           );
+          assertDirectoryConfiguration(
+            configuration.config,
+            attemptRequest.directoryPermissions,
+            CodexAdapterError,
+          );
           if (request.model !== undefined)
             await validateModel(client, request.model, request.effort);
-          const selectedThread = await selectThread(client, request, fresh);
+          const selectedThread = await selectThread(
+            client,
+            attemptRequest,
+            fresh,
+          );
           const threadId = selectedThread.id;
           if (request.model === undefined && request.effort !== undefined) {
             const model =
@@ -1963,7 +2084,7 @@ export function createCodexAdapter(options = {}) {
           }
           const turn = await runTurn(
             client,
-            request,
+            attemptRequest,
             threadId,
             turnPrompt(request, recovery),
             turnPrompt(request, "compact"),
@@ -1990,6 +2111,7 @@ export function createCodexAdapter(options = {}) {
         } finally {
           await ownedCompletion;
           if (client.exited && child.ownedContainmentRetained !== true) {
+            processRetired = true;
             try {
               progress.retire();
             } catch {
@@ -2013,16 +2135,35 @@ export function createCodexAdapter(options = {}) {
         }
       }
       return result;
+    } catch (cause) {
+      attemptFailed = true;
+      throw cause;
     } finally {
       await cleanupWorkspaceStorage(workspaceStorage);
+      if (request.directoryBoundary !== undefined) {
+        if (processRetired) {
+          await request.directoryBoundary.verify();
+          settlement.directoryVerified = true;
+        } else if (!attemptFailed)
+          throw directoryPolicyError(CodexAdapterError);
+      }
     }
   }
 
   async function run(value) {
-    const request = normalizeRequest(value);
+    const normalized = normalizeRequest(value);
+    const directoryBoundary = await prepareDirectoryPolicy(
+      normalized,
+      CodexAdapterError,
+    );
+    const request =
+      directoryBoundary === undefined
+        ? normalized
+        : Object.freeze({ ...normalized, directoryBoundary });
     let attempt = 0;
+    const settlement = { directoryVerified: false };
     const observedAttempt = (options = {}) =>
-      runAttempt(request, { ...options, attempt: ++attempt });
+      runAttempt(request, { ...options, attempt: ++attempt, settlement });
     try {
       assertCodexSchema(outputSchemaFor(request), CodexAdapterError);
       await assertCapabilities(request);
@@ -2080,6 +2221,7 @@ export function createCodexAdapter(options = {}) {
         cause instanceof CodexAdapterError &&
         cause.recoverable &&
         cause.availabilityReason === undefined &&
+        (directoryBoundary === undefined || settlement.directoryVerified) &&
         request.session?.mode !== "fork"
       ) {
         if ((await request.onFreshSession?.()) === false) throw cause;
@@ -2101,8 +2243,8 @@ export function createCodexAdapter(options = {}) {
   return Object.freeze({
     id: CODEX_BACKEND_ID,
     probe,
-    async canReadFiles({ access, paths }) {
-      const capabilities = await probe();
+    async canReadFiles({ access, paths, workspacePolicy }) {
+      const capabilities = await probe({ access, workspacePolicy });
       const capability = {
         "read-only": "readOnly",
         "workspace-write": "workspaceWrite",

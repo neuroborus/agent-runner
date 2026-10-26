@@ -604,6 +604,46 @@ test("ancestor provider aliases exclude canonical state overlap without granting
   service.assertUnchanged({ before, after });
 });
 
+test("ancestor provider alias resolution tolerates unrelated sibling creation but rejects directory replacement", async (t) => {
+  for (const replace of [false, true]) {
+    await t.test(replace ? "replacement" : "sibling creation", async (t) => {
+      const f = await fixture(t);
+      const provider = join(f.root, "provider-storage");
+      await fs.mkdir(provider);
+      await fs.symlink(provider, join(f.root, ".codex"));
+      let mutate = true;
+      const service = createWorkspaceService({
+        fileSystem: {
+          ...fs,
+          async lstat(path, options) {
+            const stat = await fs.lstat(path, options);
+            if (mutate && path === provider) {
+              mutate = false;
+              if (replace) {
+                await fs.rename(provider, `${provider}-previous`);
+                await fs.mkdir(provider);
+              } else await fs.mkdir(join(f.root, "unrelated"));
+            }
+            return stat;
+          },
+        },
+      });
+      const inspected = service.inspect({
+        workspacePath: f.workspacePath,
+        stateRoot: f.stateRoot,
+      });
+      if (replace)
+        await assert.rejects(inspected, unsafe("ERR_WORKSPACE_SNAPSHOT_RACE"));
+      else {
+        const inspection = await inspected;
+        assert.deepEqual(inspection.readPaths, [f.workspacePath]);
+        assert.ok(!inspection.controlPaths.includes(provider));
+      }
+      assert.equal(mutate, false);
+    });
+  }
+});
+
 test("ancestor provider aliases protect canonical workspace targets from output authority", async (t) => {
   const f = await fixture(t);
   const storage = join(f.workspacePath, "storage");

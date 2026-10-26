@@ -91,6 +91,10 @@ Canonical provider-control targets overlapping the workspace are protected
 against output authority; unrelated external provider storage is not captured.
 Ancestor provider aliases resolve component by component and reject writable
 output or state dependencies, including hops erased by later dot segments.
+Routing directories remain pinned by identity and mode, while links and files
+retain full metadata checks. Unrelated sibling creation outside inspected trees
+does not invalidate alias resolution; inspected trees retain their complete
+listing and metadata race checks.
 The state location's existing ancestors are also inspected for control overlap.
 Git and shared metadata targets inside the workspace remain protected; unrelated
 external state-ancestor metadata is traversed for nested Git pointers without
@@ -392,6 +396,8 @@ The Codex provider lives under `src/agents/codex/` behind its provider
 `index.js`. The root agent boundary imports only that index; the adapter, App
 Server transport, local-commit executor, and workspace storage remain private
 siblings that own Codex processes, protocols, flags, parsing, and sessions.
+`directory-policy.js` composes the public workspace inspection/snapshot service
+with Codex named permissions; it never duplicates filesystem control discovery.
 The private Codex `schema.js` validates the effective response schema before
 any provider activity in `run`, including local-commit readiness. Its recursive
 keyword allowlist and structural checks supplement the shared JSON,
@@ -2515,6 +2521,50 @@ explicit ordered runtime migration under the execution lease.
 
 ## Agent Context Recovery
 
+The strict provider-neutral turn contract also accepts an optional
+`workspacePolicy` with `kind: "directory"`, canonical absolute `workspacePath`
+and `stateRoot`, optional `taskPath`, and the workspace service's six path arrays:
+`inputPaths`, `sourcePaths`, `outputPaths`, `configurationPaths`, `artifactPaths`
+and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
+`cwd`. Unknown fields, relative paths and directory `local-commit` requests are
+invalid. Execution-option validation remains separate: `probe` additionally
+accepts `access` and this policy, requiring explicit read-only or workspace-write
+access for directory proofs. Unsupported adapters reject it before provider work;
+Claude directory enforcement remains unavailable.
+
+Codex directory access requires stable CLI 0.164.0 or newer. Its access-specific
+probe inspects bindings and snapshot safety without Git, an artificial repository,
+or a local-commit executor probe. Frozen policy receipts bind the version,
+access, declared paths and immutable input/control bindings; authorized output
+and state creation do not change a receipt. `declaredWorkspace`
+distinguishes this proof from legacy repository capabilities. Directory analysis
+advertises read-only access; directory output advertises workspace-write access.
+Neither advertises commit authority. Legacy requests and full capability probes
+retain their existing behavior.
+
+Each directory attempt installs an adapter-owned named permission profile at
+App Server launch. Directory initialization negotiates `experimentalApi`, and
+thread start/fork/resume and every turn explicitly select that profile through
+the public `permissions` field. Selection must return its exact active profile,
+without inheritance, and the requested working directory before a turn starts.
+The profile retains Codex's host read baseline, reserves workspace roots
+read-only, grants writes only to
+declared outputs and the existing owner-only private command storage, and pins
+inputs, sources, configuration, task, artifacts, infrastructure and discovered
+controls read-only. Network remains denied. Effective configuration must match
+before thread selection. Native permission paths containing glob metacharacters
+(`*`, `?`, `[`, `]`, `{`, `}` or `\`) are rejected before capability approval or
+launch, preserving literal declarations instead of granting pattern-based access.
+Directory requests omit legacy thread/turn sandbox
+overrides so those cannot widen the profile; reconstruction rebinds it to the
+new private allocation. The same output-only snapshot guard runs before each
+attempt and after process retirement and storage cleanup, including failures,
+before retry or acceptance. Uncertain process retirement retains the original
+failure and blocks reconstruction; successful post-retirement verification is
+required before requesting a fresh session. Reported file edits
+and move destinations must also lie inside declared outputs. These adapter permissions expose no directory
+workflow, publication or Git effect; pipeline lifecycle integration is separate.
+
 Backend sessions are disposable execution context, not durable workflow state.
 Adapter capability probes inspect the installed CLI and enforceable local
 isolation only. They do not apply a selected native profile and do not claim
@@ -2840,7 +2890,7 @@ proved sandbox, which denies workspace and Git-metadata writes, closes command
 network and Unix-socket access, and forbids unsandboxed fallback.
 Workspace-write turns retain their separate `auto` permission policy,
 background classifier, broader content tools, and existing command denials
-while denying Git-directory writes and `git add`. Codex workspace-write
+while denying Git-directory writes and `git add`. Codex repository workspace-write
 isolation likewise exposes safe content
 writes without Git-metadata writes. Codex protects project-root `.agents` as
 provider metadata by default, so a workspace-write turn adds it as an explicit

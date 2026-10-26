@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-26
+
+- **Codex directory authority is explicit and access-specific.** The shared
+  adapter contract accepts bound directory declarations, and unsupported adapters
+  reject them. Codex uses a named native permission profile instead of legacy
+  workspace-wide sandbox overrides, granting only declared outputs plus private
+  command storage. Filesystem-owned guards preserve protected reads and controls
+  around every attempt and reconstruction. Frozen receipts need neither Git nor
+  commit readiness; repository commit behavior remains separate. This establishes
+  the provider boundary before directory workflows become available.
+
 ## 2026-10-25
 
 - **Directory inspection has a Git-independent owner.** The workspace capability

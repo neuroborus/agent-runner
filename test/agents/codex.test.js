@@ -5,7 +5,9 @@ import {
   mkdir,
   lstat,
   mkdtemp,
+  readFile,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -14,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
+import { createWorkspaceService } from "../../src/workspace/index.js";
 
 import { largeFinalizationResult } from "../support/index.js";
 import packageMetadata from "../../package.json" with { type: "json" };
@@ -34,6 +37,8 @@ import {
   OUTPUT_EXHAUSTED_DISPOSITION,
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
+  createCapabilityProof,
+  createClaudeAdapter,
 } from "../../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
@@ -215,6 +220,7 @@ function createFixture({
   closeError = false,
   closeOutputError = false,
   env,
+  directoryPermissions,
   executeHandle,
   handle,
   help = HELP,
@@ -223,6 +229,7 @@ function createFixture({
   spawnError = false,
   storageCleanupError = false,
   storagePreparationError = false,
+  unresponsiveFirstProcess = false,
   onClose,
   version = "0.147.0",
 } = {}) {
@@ -291,6 +298,7 @@ function createFixture({
 
   const spawnProcess = (file, argumentsList, options) => {
     const processIndex = processes.length;
+    const unresponsive = unresponsiveFirstProcess && processIndex === 0;
     const workspaceStorage = pendingWorkspaceStorage;
     pendingWorkspaceStorage = undefined;
     if (spawnError) {
@@ -322,6 +330,16 @@ function createFixture({
     }
 
     function defaultResponse(message) {
+      const directorySelection =
+        directoryPermissions === undefined
+          ? {}
+          : {
+              activePermissionProfile: {
+                id: "agent_runner_directory",
+                extends: null,
+              },
+              cwd: options.cwd,
+            };
       switch (message.method) {
         case "initialize":
           return { result: {} };
@@ -331,6 +349,7 @@ function createFixture({
           const config = isolatedConfiguration(
             workspaceStorage?.shellEnvironment,
           );
+          Object.assign(config, directoryPermissions?.(workspaceStorage));
           return {
             result: {
               config,
@@ -338,12 +357,23 @@ function createFixture({
           };
         }
         case "thread/start":
-          return { result: { thread: { id: `thread-${processIndex}` } } };
+          return {
+            result: {
+              ...directorySelection,
+              thread: { id: `thread-${processIndex}` },
+            },
+          };
         case "thread/resume":
-          return { result: { thread: { id: message.params.threadId } } };
+          return {
+            result: {
+              ...directorySelection,
+              thread: { id: message.params.threadId },
+            },
+          };
         case "thread/fork":
           return {
             result: {
+              ...directorySelection,
               thread: {
                 id: `child-${processIndex}`,
                 forkedFromId: message.params.threadId,
@@ -432,7 +462,7 @@ function createFixture({
       final(callback) {
         onClose?.(send, (source) => stdout.write(source));
         callback();
-        if (!retainedOwnedContainment) close();
+        if (!retainedOwnedContainment && !unresponsive) close();
       },
     });
     if (closeError) {
@@ -444,8 +474,8 @@ function createFixture({
     child.stderr = stderr;
     child.kill = () => {
       killCalls += 1;
-      close();
-      return true;
+      if (!unresponsive) close();
+      return !unresponsive;
     };
     if (ownedCompletionFailure !== undefined) {
       const completionState = {
@@ -467,6 +497,7 @@ function createFixture({
       child.ownedCompletionState = completionState;
     }
     processes.push({
+      close,
       send,
       file,
       argumentsList,
@@ -2178,6 +2209,598 @@ test("limits workspace writes to the requested repository", async () => {
     ),
   );
   assert.equal((await fixture.adapter.probe()).gitMetadataWriteBlocked, true);
+});
+
+async function directoryWorkspace(
+  t,
+  { outputName = "results", sourceName = "reference.md" } = {},
+) {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "agent-runner-directory-")),
+  );
+  t.after(() => rm(root, { force: true, recursive: true }));
+  const cwd = join(root, "workspace");
+  const output = join(cwd, outputName);
+  const source = join(root, sourceName);
+  const input = join(cwd, "input.md");
+  const configuration = join(root, "configuration.json");
+  const control = join(cwd, ".codex");
+  await mkdir(output, { recursive: true });
+  await mkdir(control);
+  await writeFile(source, "Reference\n");
+  await writeFile(input, "Input\n");
+  await writeFile(configuration, "{}\n");
+  const workspacePolicy = {
+    kind: "directory",
+    workspacePath: cwd,
+    stateRoot: join(root, "state"),
+    inputPaths: [input],
+    sourcePaths: [source],
+    outputPaths: [output],
+    configurationPaths: [configuration],
+    taskPath: join(root, "task"),
+    artifactPaths: [join(root, "artifacts")],
+    infrastructurePaths: [join(root, "infrastructure")],
+  };
+  await mkdir(workspacePolicy.taskPath);
+  const { kind: _kind, ...declarations } = workspacePolicy;
+  const inspection = await createWorkspaceService().inspect(declarations);
+  function permissions(access, storage) {
+    return {
+      default_permissions: "agent_runner_directory",
+      permissions: {
+        agent_runner_directory: {
+          filesystem: {
+            ":root": "read",
+            ":workspace_roots": { ".": "read" },
+            ...(access === "workspace-write" ? { [output]: "write" } : {}),
+            ...(storage ? { [storage.rootPath]: "write" } : {}),
+            ...Object.fromEntries(
+              inspection.protectedPaths.map((path) => [path, "read"]),
+            ),
+          },
+          network: { enabled: false },
+        },
+      },
+    };
+  }
+  return {
+    cwd,
+    output,
+    input,
+    source,
+    configuration,
+    control,
+    workspacePolicy,
+    permissions,
+  };
+}
+
+test("rejects pattern-bearing directory permission paths before native access", async (t) => {
+  for (const options of [
+    { sourceName: "reference[1].md", access: "read-only" },
+    { outputName: join("results", "**"), access: "workspace-write" },
+  ]) {
+    await t.test(options.sourceName ?? options.outputName, async (t) => {
+      const directory = await directoryWorkspace(t, options);
+      const sibling = join(directory.cwd, "results", "sibling.md");
+      await mkdir(join(directory.cwd, "results"), { recursive: true });
+      await writeFile(sibling, "Protected sibling\n");
+      const fixture = createFixture({
+        version: "0.164.0",
+        directoryPermissions: (storage) =>
+          directory.permissions(options.access, storage),
+        async handle({ message }) {
+          if (message.method === "turn/start")
+            await writeFile(sibling, "Unauthorized change\n");
+        },
+      });
+      const rejected = hasDiagnostic(
+        "ERR_CODEX_ISOLATION",
+        "isolation_workspace_policy",
+      );
+      await assert.rejects(
+        fixture.adapter.probe({
+          access: options.access,
+          workspacePolicy: directory.workspacePolicy,
+        }),
+        rejected,
+      );
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            access: options.access,
+            workspacePolicy: directory.workspacePolicy,
+          }),
+        ),
+        rejected,
+      );
+      assert.equal(fixture.processes.length, 0);
+      assert.equal(fixture.workspaceStorages.length, 0);
+      assert.equal(await readFile(sibling, "utf8"), "Protected sibling\n");
+    });
+  }
+});
+
+test("proves declared directory access without Git, commit readiness, or writable preparation", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture({
+    version: "0.164.0",
+    executeHandle({ argumentsList, file }) {
+      assert.notEqual(file, "git");
+      assert.notEqual(argumentsList[0], "sandbox");
+    },
+  });
+  const receipts = [];
+  for (const access of ["read-only", "workspace-write"]) {
+    const capabilities = await fixture.adapter.probe({
+      access,
+      workspacePolicy: directory.workspacePolicy,
+    });
+    assert.equal(capabilities.declaredWorkspace, true);
+    assert.equal(capabilities.localCommit, false);
+    const required = access === "read-only" ? "readOnly" : "workspaceWrite";
+    const proof = createCapabilityProof(
+      capabilities,
+      [required, "declaredWorkspace"],
+      capabilities.policyReceipt,
+    );
+    assert.deepEqual(proof.policyReceipt.supportedAccess, [access]);
+    assert.ok(Object.isFrozen(proof.policyReceipt));
+    assert.ok(Object.isFrozen(proof.policyReceipt.supportedAccess));
+    receipts.push(proof.policyReceipt.fingerprint);
+  }
+  assert.notEqual(receipts[0], receipts[1]);
+  assert.equal(
+    await fixture.adapter.canReadFiles({
+      access: "read-only",
+      paths: [directory.source],
+      workspacePolicy: directory.workspacePolicy,
+    }),
+    true,
+  );
+  assert.deepEqual(
+    fixture.executeCalls.map(({ argumentsList }) => argumentsList),
+    [["--version"], ["app-server", "--help"]],
+  );
+  assert.equal(fixture.workspaceStorages.length, 0);
+  assert.equal(fixture.processes.length, 0);
+  const old = createFixture();
+  await assert.rejects(
+    old.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+      }),
+    ),
+    hasDiagnostic(
+      "ERR_UNSUPPORTED_CODEX_CAPABILITY",
+      "capability_declared_workspace",
+    ),
+  );
+  assert.equal(old.processes.length, 0);
+});
+
+test("preserves directory policy receipts across authorized output and state creation", async (t) => {
+  const directory = await directoryWorkspace(t);
+  await rm(directory.output, { recursive: true });
+  const fixture = createFixture({ version: "0.164.0" });
+  const options = {
+    access: "workspace-write",
+    workspacePolicy: directory.workspacePolicy,
+  };
+  const before = await fixture.adapter.probe(options);
+  await mkdir(directory.output);
+  await writeFile(join(directory.output, "report.md"), "Accepted result\n");
+  await mkdir(directory.workspacePolicy.stateRoot);
+  const after = await fixture.adapter.probe(options);
+  assert.deepEqual(after.policyReceipt, before.policyReceipt);
+
+  const replacement = join(directory.cwd, "replacement.md");
+  await writeFile(replacement, "Replaced input\n");
+  await rename(replacement, directory.input);
+  const replaced = await fixture.adapter.probe(options);
+  assert.notEqual(
+    replaced.policyReceipt.fingerprint,
+    before.policyReceipt.fingerprint,
+  );
+});
+
+test("uses exact directory output permissions across reconstruction and retires each attempt", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const observations = [];
+  const fixture = createFixture({
+    version: "0.164.0",
+    directoryPermissions: (storage) =>
+      directory.permissions("workspace-write", storage),
+    async handle({ message }) {
+      if (message.method === "thread/resume") {
+        directory.workspacePolicy.outputPaths.push(directory.cwd);
+        return { error: { code: -32000, message: "unavailable" } };
+      }
+      if (message.method === "turn/start") {
+        await writeFile(
+          join(directory.output, "report.md"),
+          "Accepted result\n",
+        );
+        return {
+          result: { turn: { id: "directory-turn" } },
+          notification: completedTurn(
+            message.params.threadId,
+            "directory-turn",
+            "done",
+            [
+              {
+                type: "fileChange",
+                status: "completed",
+                changes: [
+                  {
+                    path: "results/report.md",
+                    kind: { type: "add" },
+                    diff: "",
+                  },
+                ],
+              },
+            ],
+          ),
+        };
+      }
+    },
+  });
+  const result = await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      workspacePolicy: directory.workspacePolicy,
+      access: "workspace-write",
+      session: { mode: "continue", id: "previous-thread" },
+      onObservation: (value) => observations.push(value),
+    }),
+  );
+  assert.equal(result.sessionId, "thread-1");
+  assert.equal(fixture.processes.length, 2);
+  for (const [index, process] of fixture.processes.entries()) {
+    const expected = directory.permissions(
+      "workspace-write",
+      fixture.workspaceStorages[index],
+    );
+    const selection = process.messages.find(({ method }) =>
+      method.startsWith("thread/"),
+    ).params;
+    assert.deepEqual(selection.config, expected);
+    assert.equal(selection.sandbox, undefined);
+    assert.equal(selection.permissions, "agent_runner_directory");
+    assert.deepEqual(
+      process.messages.find(({ method }) => method === "initialize").params
+        .capabilities,
+      { experimentalApi: true },
+    );
+    assert.ok(
+      process.argumentsList.includes(
+        'default_permissions="agent_runner_directory"',
+      ),
+    );
+    const native = process.argumentsList.find((arg) =>
+      arg.startsWith("permissions.agent_runner_directory="),
+    );
+    assert.ok(native.includes(`${JSON.stringify(directory.output)}="write"`));
+    assert.ok(native.includes(`${JSON.stringify(directory.control)}="read"`));
+    assert.ok(!native.includes(`${JSON.stringify(directory.cwd)}="write"`));
+    assert.equal(fixture.workspaceStorages[index].cleanupCalls, 1);
+  }
+  assert.equal(
+    fixture.processes[1].messages.find(({ method }) => method === "turn/start")
+      .params.sandboxPolicy,
+    undefined,
+  );
+  assert.equal(
+    fixture.processes[1].messages.find(({ method }) => method === "turn/start")
+      .params.permissions,
+    "agent_runner_directory",
+  );
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0].attempt, 2);
+  assert.equal(observations.at(-1).outcome, "completed");
+  assert.ok(
+    !fixture.executeCalls.some(
+      ({ file, argumentsList }) =>
+        file === "git" || argumentsList[0] === "sandbox",
+    ),
+  );
+});
+
+test("preserves a recoverable directory failure without reconstruction when retirement is uncertain", async (t) => {
+  const directory = await directoryWorkspace(t);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let resolveClosing;
+  const closing = new Promise((resolve) => {
+    resolveClosing = resolve;
+  });
+  let freshSessions = 0;
+  const fixture = createFixture({
+    version: "0.164.0",
+    directoryPermissions: () => directory.permissions("read-only"),
+    unresponsiveFirstProcess: true,
+    onClose: resolveClosing,
+    handle({ message, processIndex }) {
+      if (message.method !== "turn/start" || processIndex !== 0) return;
+      return {
+        result: { turn: { id: "failed" } },
+        notification: failedTurn(message.params.threadId, "failed", {
+          codexErrorInfo: "other",
+        }),
+      };
+    },
+  });
+  t.after(() => fixture.processes.forEach(({ close }) => close()));
+  const outcome = assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        onFreshSession() {
+          freshSessions += 1;
+        },
+      }),
+    ),
+    (error) => {
+      assert.ok(hasDiagnostic("ERR_CODEX_TURN_FAILED", "turn_other")(error));
+      assert.equal(error.recoverable, true);
+      assert.equal(error.failure.retry, "transient");
+      return true;
+    },
+  );
+  await closing;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    t.mock.timers.tick(1_000);
+    await Promise.resolve();
+  }
+  await outcome;
+  assert.equal(fixture.processes[0].killCalls(), 2);
+  assert.equal(fixture.processes.length, 1);
+  assert.equal(freshSessions, 0);
+});
+
+test("rejects protected directory mutations and reported writes outside declared outputs", async (t) => {
+  for (const target of [
+    "source",
+    "input",
+    "configuration",
+    "control",
+    "read-only-output",
+    "reported-move",
+  ]) {
+    await t.test(target, async (t) => {
+      const directory = await directoryWorkspace(t);
+      const access =
+        target === "read-only-output" ? "read-only" : "workspace-write";
+      const fixture = createFixture({
+        version: "0.164.0",
+        directoryPermissions: (storage) =>
+          directory.permissions(access, storage),
+        async handle({ message }) {
+          if (message.method !== "turn/start") return;
+          const path =
+            target === "control"
+              ? join(directory.control, "changed")
+              : target === "read-only-output"
+                ? join(directory.output, "changed")
+                : directory[target];
+          if (target !== "reported-move")
+            await writeFile(path, "Unauthorized change\n");
+          return {
+            result: { turn: { id: "mutation" } },
+            notification: completedTurn(
+              message.params.threadId,
+              "mutation",
+              "done",
+              target === "reported-move"
+                ? [
+                    {
+                      type: "fileChange",
+                      status: "completed",
+                      changes: [
+                        {
+                          path: "results/report.md",
+                          kind: { type: "update", move_path: directory.source },
+                          diff: "",
+                        },
+                      ],
+                    },
+                  ]
+                : [],
+            ),
+          };
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            workspacePolicy: directory.workspacePolicy,
+            access,
+          }),
+        ),
+        hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+      );
+      assert.equal(fixture.processes.length, 1);
+      if (access === "workspace-write")
+        assert.equal(fixture.workspaceStorages[0].cleanupCalls, 1);
+      else assert.equal(fixture.workspaceStorages.length, 0);
+    });
+  }
+});
+
+test("fails closed on directory permission substitution before thread selection", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture({
+    version: "0.164.0",
+    directoryPermissions() {
+      const expected = directory.permissions("read-only");
+      expected.permissions.agent_runner_directory.filesystem[directory.cwd] =
+        "write";
+      return expected;
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+      }),
+    ),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.ok(
+    !fixture.processes[0].messages.some(
+      ({ method }) => method.startsWith("thread/") || method === "turn/start",
+    ),
+  );
+});
+
+test("reasserts directory analysis permissions on fresh, continued and forked sessions", async (t) => {
+  const directory = await directoryWorkspace(t);
+  for (const mode of [undefined, "continue", "fork"]) {
+    const fixture = createFixture({
+      version: "0.164.0",
+      directoryPermissions: () => directory.permissions("read-only"),
+    });
+    await fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        ...(mode ? { session: { mode, id: "source-thread" } } : {}),
+      }),
+    );
+    const messages = fixture.processes[0].messages;
+    const selection = messages.find(({ method }) =>
+      method.startsWith("thread/"),
+    );
+    assert.equal(
+      selection.method,
+      mode === "fork"
+        ? "thread/fork"
+        : mode === "continue"
+          ? "thread/resume"
+          : "thread/start",
+    );
+    assert.equal(selection.params.permissions, "agent_runner_directory");
+    assert.equal(
+      messages.find(({ method }) => method === "turn/start").params.permissions,
+      "agent_runner_directory",
+    );
+    assert.equal(fixture.workspaceStorages.length, 0);
+  }
+  const wrong = createFixture({
+    version: "0.164.0",
+    directoryPermissions: () => directory.permissions("read-only"),
+    handle({ message }) {
+      if (message.method === "thread/resume")
+        return {
+          result: {
+            thread: { id: "source-thread" },
+            cwd: directory.cwd,
+            activePermissionProfile: { id: ":workspace" },
+          },
+        };
+    },
+  });
+  await assert.rejects(
+    wrong.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        session: { mode: "continue", id: "source-thread" },
+      }),
+    ),
+    hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+  );
+  assert.equal(wrong.processes.length, 1);
+  assert.ok(
+    !wrong.processes[0].messages.some(({ method }) => method === "turn/start"),
+  );
+});
+
+test("validates directory declarations and rejects unsupported adapters before activity", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture({ version: "0.164.0" });
+  for (const policy of [
+    { ...directory.workspacePolicy, extra: true },
+    { ...directory.workspacePolicy, kind: "unknown" },
+    { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+    { ...directory.workspacePolicy, outputPaths: null },
+    {
+      ...directory.workspacePolicy,
+      workspacePath: join(directory.cwd, "other"),
+    },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ cwd: directory.cwd, workspacePolicy: policy }),
+      ),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  assert.throws(
+    () => fixture.adapter.probe({ workspacePolicy: directory.workspacePolicy }),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        access: "local-commit",
+        authorizationId: "unused",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): create commit",
+        },
+      }),
+    ),
+    hasCode("ERR_INVALID_CODEX_OPTIONS"),
+  );
+  assert.equal(fixture.executeCalls.length, 0);
+  for (const policy of [
+    { ...directory.workspacePolicy, outputPaths: [directory.input] },
+    { ...directory.workspacePolicy, outputPaths: [directory.source] },
+    { ...directory.workspacePolicy, stateRoot: directory.output },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ cwd: directory.cwd, workspacePolicy: policy }),
+      ),
+      hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
+    );
+  const claude = createClaudeAdapter({
+    execute() {
+      throw new Error("Provider must not be inspected");
+    },
+  });
+  await assert.rejects(
+    claude.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+      }),
+    ),
+    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
+  );
+  assert.throws(
+    () =>
+      claude.probe({
+        access: "read-only",
+        workspacePolicy: directory.workspacePolicy,
+      }),
+    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
+  );
+  await assert.rejects(
+    claude.canReadFiles({
+      access: "read-only",
+      paths: [directory.source],
+      workspacePolicy: directory.workspacePolicy,
+    }),
+    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
+  );
 });
 
 test("adds only a real project .agents directory to writable roots", async (t) => {

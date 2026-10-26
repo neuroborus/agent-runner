@@ -3,6 +3,7 @@ import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import {
   assertBindings,
   assertSafe,
+  identity,
   inspectPath,
   location,
   metadata,
@@ -22,6 +23,11 @@ export const CONTROL_NAMES = [
   ".agents",
   ".claude.json",
 ];
+
+// Routing directory identity is stable across unrelated sibling creation.
+function resolutionMetadata(stat) {
+  return stat.isDirectory() ? identity(stat) : observation(stat);
+}
 
 export async function discoverControls(fs, declarations) {
   const { workspacePath, stateRoot } = declarations;
@@ -62,11 +68,11 @@ export async function discoverControls(fs, declarations) {
       );
       assertSafe(
         !observed.has(current) ||
-          same(observed.get(current), observation(stat)),
+          same(observed.get(current), resolutionMetadata(stat)),
         "Ancestor provider controls changed during resolution.",
         "ERR_WORKSPACE_SNAPSHOT_RACE",
       );
-      observed.set(current, observation(stat));
+      observed.set(current, resolutionMetadata(stat));
       if (stat.isSymbolicLink()) {
         assertSafe(
           stat.nlink === 1n && ++links <= 40,
@@ -87,7 +93,7 @@ export async function discoverControls(fs, declarations) {
     for (const [dependency, before] of observed) {
       const after = await metadata(fs, dependency);
       assertSafe(
-        after && same(before, observation(after)),
+        after && same(before, resolutionMetadata(after)),
         "Ancestor provider controls changed during resolution.",
         "ERR_WORKSPACE_SNAPSHOT_RACE",
       );

@@ -20,12 +20,19 @@ workspace and unrelated state ancestors (including workspace metadata targets) a
 provider aliases without added reads, nested state-only metadata pointers and
 cycles, canonical workspace targets and writable intermediary dependencies of
 ancestor provider aliases, protected cross-control skill links, content/identity drift,
+unrelated sibling creation during alias resolution and routing-directory replacement,
 escaping intermediate links, mutable hops across writable boundaries, hard links,
 special files, exact UTF-8 filenames, undecodable names and deterministic
 read/ancestor races.
 Temporary directories and injected filesystem effects need neither Git nor live
 providers. Workflow/provider integration remains separately owned as those
-consumers land.
+consumers land. Fast `test/agents/codex.test.js` owns the public adapter's
+directory request/probe contract, access-specific receipts without Git or commit
+preparation, native output-only permissions, protected-write rejection, effective
+policy substitution, literal-path rejection for glob syntax, reconstruction,
+observations and attempt retirement. It uses ordinary temporary directories and
+model-free transport fixtures; live
+provider/platform acceptance remains separate.
 
 The fast state `preservation.test.js` suite owns unfinished-work capture and
 checked restoration through the public state/Git boundaries. Isolated

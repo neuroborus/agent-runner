@@ -69,10 +69,13 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   convergence followed by independent review.
 - Codex and Claude can be selected independently for each pipeline role.
 - Read-only agent turns include repository-mutation verification.
-- Codex writable turns expose an existing real project `.agents` directory,
+- Codex repository writable turns expose an existing real project `.agents` directory,
   while role prompts permit changing it only for an explicit task requirement
   and, during plan execution, an explicit current plan step. A symlinked
   `.agents`, `.git`, and `.codex` stay protected.
+- The adapter foundation also supports declared directory reads and output-only
+  writes in Codex 0.164.0 or newer, without Git or commit readiness. Directory
+  workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target
   repository.
