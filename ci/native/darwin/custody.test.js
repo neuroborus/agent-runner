@@ -3949,11 +3949,18 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
   );
   const body = (source, name) =>
     new RegExp(
-      `static (?:void|char|struct identity|mach_port_t|domain_special_reply_fn|long long|const char \\*)\\s*${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:bool|void|char|struct identity|mach_port_t|domain_special_reply_fn|long long|const char \\*)\\s*${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const translate = (text) =>
     text
+      .replaceAll("->", ".")
+      .replace(
+        "struct domain_bootstrap_fork exceptions = {0};",
+        "const exceptions={count:0,issues:[]};",
+      )
+      .replaceAll("&exceptions", "exceptions")
+      .replaceAll("struct domain_bootstrap_issue issue", "const issue")
       .replace(
         /#ifdef NATIVE_CI_EXPERIMENT[\s\S]*?#else\n([\s\S]*?)#endif/gu,
         "$1",
@@ -4096,11 +4103,13 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     "$1",
   );
   const functions =
+    `const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};\n` +
     [
       [reader, "case_launch_failure", "operation,result,error,revents,used"],
       [reader, "case_launch_check", "operation,result"],
       [reader, "case_line", "fd,encoded"],
       [launcher, "launch_stage", "stage,operation,result,error"],
+      [launcher, "launch_exception_readback", "out,self,thread"],
       [launcher, "launch_failure", "operation,result,error,revents,used,child"],
       [launcher, "command", "fd,milliseconds"],
       [launcher, "child_stdio", "workspace,provider"],
@@ -4138,11 +4147,116 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       launcher,
     )?.[0];
   assert.ok(start > 0 && setup && capture);
+  const protectedExceptions = new Script(`
+    const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};
+    function launch_exception_readback(out,self,thread){${translate(body(launcher, "launch_exception_readback"))}}
+    (self,thread)=>{${translate(mach.slice(sanitation, mach.indexOf("  bootstrap_port = MACH_PORT_NULL;", sanitation)))}}
+  `);
+  for (const options of [
+    {},
+    ...["task", "thread"].flatMap((owner) => [
+      { setter: owner },
+      { getter: owner },
+      { stuck: owner },
+    ]),
+    { stuck: "task", release: 15 },
+  ]) {
+    const slots = { task: 64 | 128, thread: 64 | 128 },
+      cleanup = [];
+    let read = false;
+    const set = (owner, target, mask, handler, behavior, flavor) => {
+      assert.deepEqual(
+        [target, handler, behavior, flavor],
+        [owner === "task" ? 1 : 2, 0, 1, 0],
+      );
+      if (options.setter === owner) return 5;
+      if (options.stuck !== owner) slots[owner] &= ~mask;
+      return 0;
+    };
+    const run = protectedExceptions.runInNewContext({
+      NULL: null,
+      EXC_MASK_ALL: 63,
+      EXC_MASK_CRASH: 64,
+      EXC_MASK_CORPSE_NOTIFY: 128,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      EXCEPTION_DEFAULT: 1,
+      THREAD_STATE_NONE: 0,
+      TASK_BOOTSTRAP_PORT: 3,
+      TASK_DEBUG_CONTROL_PORT: 4,
+      TASK_RESOURCE_NOTIFY_PORT: 5,
+      SIGPIPE: 13,
+      SIG_IGN: 1,
+      stderr: 2,
+      signal() {},
+      fflush() {},
+      task_set_special_port: () => 0,
+      mach_ports_register: () => 0,
+      task_set_exception_ports: (...args) => set("task", ...args),
+      thread_set_exception_ports: (...args) => set("thread", ...args),
+      need(ok) {
+        if (!ok) throw new Error("setter");
+      },
+      // Bind the protected branch to the same independently tested readback.
+      domain_exception_readback(out, self, thread) {
+        assert.deepEqual([self, thread], [1, 2]);
+        assert.equal(read, false);
+        read = true;
+        for (const owner of ["task", "thread"]) {
+          if (options.getter === owner || slots[owner])
+            out.issues.push({
+              operation: `${owner}-exception-read`,
+              kind: options.getter === owner ? "mach" : "invariant",
+              value: options.getter === owner ? 5 : 0,
+              cleanup: false,
+            });
+        }
+        if (options.release)
+          out.issues.push({
+            operation: "exception-copy-release",
+            kind: "mach",
+            value: options.release,
+            cleanup: true,
+          });
+        out.count = out.issues.length;
+        return out.count === 0;
+      },
+      fprintf(_stream, _format, ...values) {
+        cleanup.push(values);
+      },
+      launch_failure(operation, result) {
+        throw Object.assign(new Error(operation), { result });
+      },
+    });
+    if (options.setter) assert.throws(() => run(1, 2), /setter/u);
+    else if (options.getter || options.stuck)
+      assert.throws(() => run(1, 2), {
+        message: `${options.getter ?? options.stuck}-exception-read`,
+        result: options.getter ? 5 : 0,
+      });
+    else run(1, 2);
+    assert.equal(read, !options.setter);
+    assert.deepEqual(
+      cleanup,
+      options.release ? [["exception-copy-release", "mach", 15]] : [],
+    );
+  }
   const SEND = 0x10000,
     RECEIVE = 0x20000,
     ONCE = 0x40000,
     DEAD = 0x100000;
   const machCases = [
+    ...["task", "thread"].flatMap((owner) => [
+      [{ [`${owner}ExceptionSet`]: 5 }, `${owner}_set_exception_ports`, 5, 33],
+      [{ [`${owner}ExceptionGet`]: 5 }, `${owner}-exception-read`, 5, 0],
+      [{ [`${owner}ExceptionStuck`]: true }, `${owner}-exception-read`, 0, 0],
+    ]),
+    [
+      { taskExceptionGet: 5, exceptionRelease: 15 },
+      "task-exception-read",
+      5,
+      0,
+    ],
     ...["reply", "census", "cleanup"].map((fatal) => [
       { fatal },
       "parked-read",
@@ -4527,6 +4641,9 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       launch_diagnostic: -1,
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
+      EXC_MASK_ALL: 63,
+      EXC_MASK_CRASH: 64,
+      EXC_MASK_CORPSE_NOTIFY: 128,
       TASK_HOST_PORT: 1,
       TASK_ACCESS_PORT: 2,
       mach_task_self() {
@@ -4613,17 +4730,18 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           assert.equal(action.sa_handler, 1);
           assert.equal(action.sa_mask.value, "empty");
           Object.assign(previous, {
-            sa_handler: 0,
+            sa_handler: pipeIgnored ? 1 : 0,
             sa_flags: 64,
             sa_mask: "original-mask",
           });
           pipeIgnored = true;
         } else {
+          assert.ok([0, 1].includes(action.sa_handler));
           assert.deepEqual(
-            [action.sa_handler, action.sa_flags, action.sa_mask],
-            [0, 64, "original-mask"],
+            [action.sa_flags, action.sa_mask],
+            [64, "original-mask"],
           );
-          pipeIgnored = false;
+          pipeIgnored = action.sa_handler === 1;
         }
         return 0;
       },
@@ -4679,9 +4797,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         if (guardPidRead) api.errno = 77;
         return reporter;
       },
-      stage_preserved(error) {
+      stage_signal_ignored: () => pipeIgnored,
+      stage_preserved(error, ignored) {
         assert.equal(api.errno, error);
-        assert.equal(pipeIgnored, false);
+        assert.equal(pipeIgnored, ignored);
       },
       domain_fork_diagnostic: (owner) => assert.equal(owner, "launcher"),
       inspect(pid) {
@@ -4894,6 +5013,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         allocation = 0,
         notifyReads = 0;
       const resourceCopies = [];
+      const exceptionSlots = { task: 64 | 128, thread: 64 | 128 };
       const bootstrap = machCase.bootstrap ?? 10;
       if (bootstrap !== 0 && bootstrap !== 0xffffffff)
         acquired.push({ kind: "bootstrap", name: bootstrap });
@@ -5007,7 +5127,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         TASK_BOOTSTRAP_PORT: 3,
         TASK_DEBUG_CONTROL_PORT: 4,
         TASK_RESOURCE_NOTIFY_PORT: 5,
-        EXC_MASK_ALL: 63,
         EXCEPTION_DEFAULT: 1,
         THREAD_STATE_NONE: 0,
         mach_thread_self() {
@@ -5133,8 +5252,42 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           machCalls.push("register");
           return 0;
         },
-        task_set_exception_ports: () => 0,
-        thread_set_exception_ports: () => 0,
+        task_set_exception_ports(self, mask, handler, behavior, flavor) {
+          assert.deepEqual([self, handler, behavior, flavor], [1, 0, 1, 0]);
+          if (!machCase.taskExceptionSet && !machCase.taskExceptionStuck)
+            exceptionSlots.task &= ~mask;
+          return machCase.taskExceptionSet ?? 0;
+        },
+        thread_set_exception_ports(thread, mask, handler, behavior, flavor) {
+          assert.deepEqual([thread, handler, behavior, flavor], [2, 0, 1, 0]);
+          if (!machCase.threadExceptionSet && !machCase.threadExceptionStuck)
+            exceptionSlots.thread &= ~mask;
+          return machCase.threadExceptionSet ?? 0;
+        },
+        // Shared actual-body coverage owns getter acquisition and settlement.
+        domain_exception_readback(out, self, thread) {
+          assert.deepEqual([self, thread], [1, 2]);
+          machCalls.push("exception-readback");
+          for (const owner of ["task", "thread"]) {
+            const got = machCase[`${owner}ExceptionGet`] ?? 0;
+            if (got || exceptionSlots[owner])
+              out.issues.push({
+                operation: `${owner}-exception-read`,
+                kind: got ? "mach" : "invariant",
+                value: got,
+                cleanup: false,
+              });
+          }
+          if (machCase.exceptionRelease)
+            out.issues.push({
+              operation: "exception-copy-release",
+              kind: "mach",
+              value: machCase.exceptionRelease,
+              cleanup: true,
+            });
+          out.count = out.issues.length;
+          return out.count === 0;
+        },
         mig_get_reply_port() {
           api.errno = 13;
           if (machCase.fatal === "reply") throw killed;
@@ -5216,7 +5369,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         functions +
           `\nfunction importConstructorRecord(){domain_runtime_replies_begin(getpid());const name=receipt_name();domain_runtime_replies[domain_runtime_reply_count++]=name;domain_runtime_reply_overflow=domain_runtime_reply_count>8;return name;}
           const entered=launch_stage;
-          launch_stage=(...args)=>{const saved=errno;entered(...args);stage_preserved(saved);};
+          launch_stage=(...args)=>{const saved=errno,ignored=stage_signal_ignored();entered(...args);stage_preserved(saved,ignored);};
           function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,importConstructorRecord,launch_need_at,descriptors,early_child_setup,experiment_child_exec,setup,capture});`,
       ),
       native = program.runInNewContext(api);
@@ -5385,6 +5538,19 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
             : [],
         );
       assert.equal(lookupReads, 2);
+      if (machCalls.includes("exception-readback")) {
+        assert.equal(
+          machCalls.filter((call) => call === "exception-readback").length,
+          1,
+        );
+        if (operation?.includes("exception-read"))
+          assert.equal(machCalls.includes("census"), false);
+        else if (!operation)
+          assert.ok(
+            machCalls.indexOf("exception-readback") <
+              machCalls.indexOf("census"),
+          );
+      }
       const accessType = machCase.type ?? SEND;
       const unowned =
         !(machCase.typeQuery ?? 0) && !(accessType & (SEND | ONCE | DEAD));
@@ -5416,13 +5582,18 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       );
       assert.deepEqual(
         cleanup.map((entry) => entry.values),
-        failed
-          .slice(Number(early))
-          .map(({ kind, status, error }) => [
-            `${kind === "names" || kind === "types" ? "mach_vm" : "mach_port"}_deallocate/${kind}`,
-            status,
-            error,
-          ]),
+        [
+          ...(machCase.exceptionRelease
+            ? [["exception-copy-release", "mach", machCase.exceptionRelease]]
+            : []),
+          ...failed
+            .slice(Number(early))
+            .map(({ kind, status, error }) => [
+              `${kind === "names" || kind === "types" ? "mach_vm" : "mach_port"}_deallocate/${kind}`,
+              status,
+              error,
+            ]),
+        ],
       );
       if (machCalls.includes("notify")) {
         assert.equal(machCalls.filter((call) => call === "notify").length, 1);

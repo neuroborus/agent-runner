@@ -458,8 +458,18 @@ static void domain_sanitize(void) {
       notify_read != KERN_SUCCESS || readback != MACH_PORT_NULL)) ||
       notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) failure(126);
   domain_mach(mach_ports_register(self, NULL, 0), "fault-registered-ports");
-  domain_mach(task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
-  domain_mach(thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
+  domain_mach(task_set_exception_ports(self, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
+  domain_mach(thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
+  struct domain_bootstrap_fork exceptions = {0};
+  bool exceptions_ok = domain_exception_readback(&exceptions, self, thread);
+  for (unsigned i = 0; i < exceptions.count; i++) {
+    struct domain_bootstrap_issue issue = exceptions.issues[i];
+    const char *operation = !strcmp(issue.operation, "task-exception-read") ? "fault-task-exception-read" :
+      !strcmp(issue.operation, "thread-exception-read") ? "fault-thread-exception-read" : "fault-exception-copy-release";
+    remember(operation, issue.kind, issue.value);
+    if (issue.cleanup) remember_cleanup(operation, issue.kind, issue.value);
+  }
+  if (!exceptions_ok) failure(126);
   /* Cache reads and producer returns are provenance; the census only checks
    * that those exact names and types survive. Never invalidate a runtime cache
    * or promote an unknown receive right by its type or IKOT_NONE observation. */

@@ -9170,7 +9170,18 @@ creates a fresh session. Clear supplemental groups, then privileged
 Install the independently reviewed profile
 while only trusted helper code runs, then clear bootstrap, registered, debug,
 resource-notify and task/thread exception rights and sanitize the remaining Mach
-names. Reviewed/protected and provider builds replace the cached MIG reply port
+names. The shared public exception mask is `EXC_MASK_ALL | EXC_MASK_CRASH |
+EXC_MASK_CORPSE_NOTIFY`; `ALL` alone omits the latter two classes. Both launcher
+branches and fault sanitation clear task and thread slots with that complete
+mask, then require both bounded getters over the same mask to return only null
+handlers before census or admission. Setter success alone is insufficient:
+XNU's per-action MAC checks can leave individual handlers installed. Failed
+getters, invalid counts and nonnull or dead handlers refuse. Every successful
+valid getter acquisition receives one release attempt, including repeated names;
+failed getter outputs grant no ownership. Independent releases and the other
+required getter still run after a refusal or failed release, preserving the first
+failure and separate cleanup failures without retrying a release.
+Reviewed/protected and provider builds replace the cached MIG reply port
 and retain the fresh local receive-only reply needed by sanitation RPCs, together
 with self task/thread rights. Those builds require the inherited
 task-access port to be null. `NATIVE_CI_EXPERIMENT` adopts the getter/type/kernel-object
@@ -9262,14 +9273,15 @@ reference, including aliases, and each owned returned array receives one release
 attempt. Failed getter outputs supply no ownership; setter `COPY_SEND` does not
 consume saved userspace copies. The direct child is retained before restoration
 can refuse. Primary and independent release/restoration failures use bounded
-diagnostic storage with explicit overflow, without retrying releases. Reviewed
-and provider launch paths are unchanged.
+diagnostic storage with explicit overflow, without retrying releases. These
+pre-fork guards remain specific to the ordinary experimental paths.
 The exact emitted guard-operation names remain in the bounded feasibility
 diagnostic catalog, preserving original and independent cleanup causes without
 accepting arbitrary operation prefixes or granting receipt authority.
 
 At that same original pre-fork boundary, a separate task-exception getter observes
-the original masks, handlers, behaviors and flavors. Nonnull handlers are permitted;
+the original masks, handlers, behaviors and flavors over the same complete public
+mask, including CRASH and CORPSE_NOTIFY. Nonnull handlers are permitted;
 the observation never clears or replays exception slots. Only its getter-owned
 copies are released. Query failure remains an unavailable observation, while a
 failed owned release remains an independent cleanup refusal. Fixed bounded cached
@@ -9280,6 +9292,9 @@ do not authorize an exception-specific correction or exact restoration. Whether
 the matching host's original slots are nonnull remains the missing fact. Existing
 child exception sanitation and the strict terminal census remain authoritative;
 neither snapshot identifies or authorizes releasing the unknown SEND right.
+This mask/readback correction does not identify SEND 1287, establish startup
+repair or supply native acceptance. Matching original hosted controls and
+independent cleanup remain required.
 
 The ownership account follows pinned Apple XNU
 [`task.defs`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/task.defs)

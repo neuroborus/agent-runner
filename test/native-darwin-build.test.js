@@ -23,6 +23,7 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
     domain_registered_capture: "out, snapshot, operation, cleanup",
     domain_registered_release: "out, snapshot",
     domain_registered_read: "out, expected, count, empty, operation, cleanup",
+    domain_exception_settle: "out, handlers, count, releases",
     domain_exception_observe: "out",
     domain_fork_diagnostic: "owner",
     domain_bootstrap_read: "out, expected, operation, cleanup",
@@ -57,8 +58,8 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
       .replaceAll("sizeof(*snapshot.ports)", "4")
       .replaceAll(/\((?:vm_address_t|vm_size_t)\)/gu, "")
       .replace(
-        /(?:exception_mask_t|mach_port_t|exception_behavior_t|thread_state_flavor_t) (\w+)\[EXC_TYPES_COUNT\]/gu,
-        "let $1 = []",
+        /(?:exception_mask_t|mach_port_t|exception_behavior_t|thread_state_flavor_t) (\w+)\[EXC_TYPES_COUNT\](?: = \{0\})?/gu,
+        "let $1 = Array(EXC_TYPES_COUNT).fill(0)",
       )
       .replaceAll(
         /&snapshot\.(ports|count)/gu,
@@ -115,7 +116,8 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
       )}}`;
   });
   const script = new Script(
-    `${functions.join("\n")} Object.assign(domain_fault_fork, {check:domain_bootstrap_check,diagnostic:domain_fork_diagnostic});`,
+    `const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(header)[1]};
+    ${functions.join("\n")} Object.assign(domain_fault_fork, {check:domain_bootstrap_check,diagnostic:domain_fork_diagnostic});`,
   );
   const cases = [
     [{}, []],
@@ -295,6 +297,25 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
     [{ exceptionQuery: 5 }, []],
     [
       {
+        exceptions: [
+          { mask: 64, handler: 23, behavior: 1, flavor: 4 },
+          { mask: 128, handler: 24, behavior: 3, flavor: 5 },
+        ],
+      },
+      [],
+    ],
+    [
+      {
+        exceptions: [
+          { mask: 64, handler: 23, behavior: 1, flavor: 4 },
+          { mask: 128, handler: 24, behavior: 3, flavor: 5 },
+        ],
+        exceptionRelease: true,
+      },
+      [["exception-copy-release", "mach", 15]],
+    ],
+    [
+      {
         exceptions: [{ mask: 2, handler: 0xffffffff, behavior: 1, flavor: 0 }],
       },
       [],
@@ -338,7 +359,7 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
       registeredSets = 0,
       registeredRestoring = false;
     const exceptionTuples = options.exceptions ?? [
-      { mask: 0xffff, handler: 0, behavior: 1, flavor: 0 },
+      { mask: 255, handler: 0, behavior: 1, flavor: 0 },
     ];
     const exceptionSnapshot = structuredClone(exceptionTuples);
     const cached = options.cached ?? slot;
@@ -359,7 +380,9 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
       NULL: null,
       DOMAIN_FORK_ISSUES: 64,
       EXC_TYPES_COUNT: 14,
-      EXC_MASK_ALL: 0xffff,
+      EXC_MASK_ALL: 63,
+      EXC_MASK_CRASH: 64,
+      EXC_MASK_CORPSE_NOTIFY: 128,
       domain_fork_exceptions: {},
       KERN_SUCCESS: 0,
       MACH_PORT_NULL: 0,
@@ -565,7 +588,7 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
         behaviors,
         flavors,
       ) {
-        assert.deepEqual([self, mask, count.value], [1, 0xffff, 14]);
+        assert.deepEqual([self, mask, count.value], [1, 255, 14]);
         assert.equal(sets, 0);
         assert.equal(registeredSets, 0);
         for (const [i, tuple] of exceptionTuples.entries()) {
@@ -709,7 +732,7 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
           assert.equal(
             api.domain_fork_exceptions.releases[i],
             api.MACH_PORT_VALID(tuple.handler)
-              ? options.exceptionRelease
+              ? options.exceptionRelease && tuple.handler === 23
                 ? 15
                 : 0
               : -1,
@@ -812,6 +835,212 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
             .filter((entry) => entry.phase === "child")
             .flatMap((entry) => entry.value.filter(api.MACH_PORT_VALID)).length,
         label,
+      );
+    }
+  }
+});
+
+test("Darwin exception readback requires every public class and settles independent getter copies", async () => {
+  const header = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const mask = /^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(header)?.[1];
+  assert.equal(
+    mask,
+    "(EXC_MASK_ALL | EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY)",
+  );
+  assert.ok(
+    header.indexOf("#define DOMAIN_EXCEPTION_MASK") <
+      header.indexOf("#ifdef NATIVE_RUNTIME_REPLIES"),
+  );
+  const parameters = {
+    domain_bootstrap_check: "out, ok, operation, kind, value, cleanup",
+    domain_exception_settle: "out, handlers, count, releases",
+    domain_exception_readback: "out, self, thread",
+  };
+  const functions = Object.entries(parameters).map(([name, args]) => {
+    const body = new RegExp(
+      `static bool ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(header)?.[1];
+    assert.ok(body, name);
+    return `function ${name}(${args}) {${body
+      .replaceAll("->", ".")
+      .replace(
+        "(struct domain_bootstrap_issue){operation, kind, value, cleanup}",
+        "{operation,kind,value,cleanup}",
+      )
+      .replace(
+        '(struct domain_bootstrap_issue){"fork-issues-truncated", "invariant", 0, true}',
+        '{operation:"fork-issues-truncated",kind:"invariant",value:0,cleanup:true}',
+      )
+      .replace(
+        /(?:exception_mask_t|mach_port_t|exception_behavior_t|thread_state_flavor_t|int) (\w+)\[EXC_TYPES_COUNT\](?: = \{0\})?/gu,
+        "let $1 = Array(EXC_TYPES_COUNT).fill(0)",
+      )
+      .replaceAll("const char *operation", "const operation")
+      .replaceAll("&count", "{get value(){return count},set value(v){count=v}}")
+      .replace(
+        /\b(?:kern_return_t|mach_msg_type_number_t|bool|unsigned) /gu,
+        "let ",
+      )}}`;
+  });
+  const script = new Script(
+    `const DOMAIN_EXCEPTION_MASK = ${mask}; ${functions.join("\n")} domain_exception_readback;`,
+  );
+  const live = [
+    { mask: 64, handler: 77 },
+    { mask: 128, handler: 78 },
+  ];
+  for (const [options, expected] of [
+    [{}, []],
+    ...["task", "thread"].flatMap((owner) => [
+      [
+        { [owner]: { get: 5, ports: live, count: 0xffffffff } },
+        [[`${owner}-exception-read`, "mach", 5]],
+      ],
+      [
+        { [owner]: { ports: live } },
+        [[`${owner}-exception-read`, "invariant", 0]],
+      ],
+      [
+        { [owner]: { ports: [{ mask: 128, handler: 0xffffffff }] } },
+        [[`${owner}-exception-read`, "invariant", 0]],
+      ],
+      ...[0, 15].map((count) => [
+        { [owner]: { count } },
+        [[`${owner}-exception-read`, "invariant", 0]],
+      ]),
+    ]),
+    [
+      {
+        task: { get: 5, ports: live },
+        thread: {
+          ports: [
+            { mask: 64, handler: 77 },
+            { mask: 128, handler: 77 },
+          ],
+          releases: [15, 20],
+        },
+      },
+      [
+        ["task-exception-read", "mach", 5],
+        ["thread-exception-read", "invariant", 0],
+        ["exception-copy-release", "mach", 15],
+        ["exception-copy-release", "mach", 20],
+      ],
+    ],
+    [
+      {
+        task: { ports: [{ mask: 64, handler: 77 }], releases: [15] },
+        thread: { ports: [{ mask: 128, handler: 77 }], releases: [20] },
+      },
+      [
+        ["task-exception-read", "invariant", 0],
+        ["exception-copy-release", "mach", 15],
+        ["thread-exception-read", "invariant", 0],
+        ["exception-copy-release", "mach", 20],
+      ],
+    ],
+    [
+      {
+        task: { ports: live, count: 15, releases: [15] },
+        thread: { get: 4, ports: live },
+      },
+      [
+        ["task-exception-read", "invariant", 0],
+        ["exception-copy-release", "mach", 15],
+        ["thread-exception-read", "mach", 4],
+      ],
+    ],
+  ]) {
+    const calls = [],
+      acquired = [],
+      attempted = [];
+    const valid = (name) => name !== 0 && name !== 0xffffffff;
+    const getter = (
+      owner,
+      target,
+      requested,
+      masks,
+      count,
+      handlers,
+      behaviors,
+      flavors,
+    ) => {
+      assert.deepEqual(
+        [target, requested, count.value],
+        [owner === "task" ? 1 : 2, 255, 14],
+      );
+      const config = options[owner] ?? {};
+      const ports = (config.ports ?? [{ mask: 255, handler: 0 }]).filter(
+        (port) => port.mask & requested,
+      );
+      for (const [i, port] of ports.entries()) {
+        masks[i] = port.mask;
+        handlers[i] = port.handler;
+        behaviors[i] = 1;
+        flavors[i] = 0;
+        if (!config.get && valid(port.handler))
+          acquired.push({
+            name: port.handler,
+            status: config.releases?.[i] ?? 0,
+          });
+      }
+      count.value = config.count ?? ports.length;
+      calls.push(owner);
+      return config.get ?? 0;
+    };
+    const api = {
+      EXC_MASK_ALL: 63,
+      EXC_MASK_CRASH: 64,
+      EXC_MASK_CORPSE_NOTIFY: 128,
+      EXC_TYPES_COUNT: 14,
+      DOMAIN_FORK_ISSUES: 64,
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      MACH_PORT_VALID: valid,
+      mach_task_self: () => 1,
+      task_get_exception_ports: (...args) => getter("task", ...args),
+      thread_get_exception_ports: (...args) => getter("thread", ...args),
+      mach_port_deallocate(self, name) {
+        assert.equal(self, 1);
+        const copy = acquired.find(
+          (entry) => entry.name === name && !attempted.includes(entry),
+        );
+        assert.ok(
+          copy,
+          "Only successful getter acquisitions may settle, once each",
+        );
+        attempted.push(copy);
+        calls.push(name);
+        return copy.status;
+      },
+    };
+    const out = { count: 0, issues: [] };
+    assert.equal(script.runInNewContext(api)(out, 1, 2), expected.length === 0);
+    assert.deepEqual(
+      out.issues.map(({ operation, kind, value }) => [operation, kind, value]),
+      expected,
+    );
+    assert.deepEqual(attempted, acquired);
+    assert.equal(calls.filter((call) => call === "task").length, 1);
+    assert.equal(calls.filter((call) => call === "thread").length, 1);
+    for (const issue of out.issues)
+      assert.equal(issue.cleanup, issue.operation === "exception-copy-release");
+  }
+  for (const operation of [
+    "fault-task-exception-read",
+    "fault-thread-exception-read",
+  ]) {
+    for (const [kind, value] of [
+      ["mach", 5],
+      ["invariant", 0],
+    ]) {
+      const cause = darwinFeasibilityCause("fault", {
+        code: 126,
+        stderr: `native-darwin: operation=${operation} domain=${kind} value=${value} effects=possible settlement=unsettled\n`,
+      });
+      assert.ok(
+        cause.detail.includes(`Native ${operation} failed (${kind}=${value}).`),
       );
     }
   }
@@ -5824,6 +6053,13 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
   // the separate fork fixture owns the null-inheritance contract.
   const translate = (body) =>
     body
+      .replace(
+        "struct domain_bootstrap_fork exceptions = {0};",
+        "const exceptions = {count:0,issues:[]};",
+      )
+      .replaceAll("&exceptions", "exceptions")
+      .replaceAll("struct domain_bootstrap_issue issue", "const issue")
+      .replaceAll("const char *operation", "const operation")
       .replaceAll("(void)", "")
       .replace("extern mach_port_t bootstrap_port;", "")
       .replace("extern char **environ;", "")
@@ -5872,6 +6108,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
         "let ",
       );
   const script = new Script(`
+    const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};
     function domain_runtime_replies_begin(owner) {${translate(repliesBegin)}}
 
     function domain_special_reply_lookup() {${translate(specialReplyLookup)}}
@@ -5897,6 +6134,32 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     DEAD = 0xffffffff;
   for (const [label, options, operation, value, cleanupValue] of [
     ["null", {}],
+    ...["task", "thread"].flatMap((owner) => [
+      [
+        `${owner} exception setter refused`,
+        { [`${owner}ExceptionSet`]: 5 },
+        `fault-${owner}-exceptions`,
+        5,
+      ],
+      [
+        `${owner} exception getter refused`,
+        { [`${owner}ExceptionGet`]: 5 },
+        `fault-${owner}-exception-read`,
+        5,
+      ],
+      [
+        `${owner} setter succeeded without clearing omitted classes`,
+        { [`${owner}ExceptionStuck`]: true },
+        `fault-${owner}-exception-read`,
+        0,
+      ],
+    ]),
+    [
+      "readback refusal retains independent release failure",
+      { taskExceptionStuck: true, exceptionRelease: 15 },
+      "fault-task-exception-read",
+      0,
+    ],
     [
       "new execution discards parent bookkeeping and borrows its own runtime cache",
       { inheritedOwner: 41, reply: 107 },
@@ -6523,6 +6786,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       releaseFailures = [],
       referenceReleases = [],
       notifyCopies = [],
+      exceptionSlots = { task: 64 | 128, thread: 64 | 128 },
       executed = {},
       originalBirth = { pid: 42 },
       domain = { uid: 90001, gid: 90002 };
@@ -6567,10 +6831,42 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       TASK_BOOTSTRAP_PORT: 3,
       TASK_DEBUG_CONTROL_PORT: 4,
       TASK_RESOURCE_NOTIFY_PORT: 5,
-      EXC_MASK_ALL: 0xffff,
+      EXC_MASK_ALL: 63,
+      EXC_MASK_CRASH: 64,
+      EXC_MASK_CORPSE_NOTIFY: 128,
       EXCEPTION_DEFAULT: 1,
       THREAD_STATE_NONE: 0,
       bootstrap_port: bootstrap,
+      strcmp: (left, right) => (left === right ? 0 : 1),
+      domain_exception_readback(out, self, thread) {
+        assert.deepEqual([self, thread], [101, 102]);
+        calls.push(["exception-readback"]);
+        for (const owner of ["task", "thread"]) {
+          const got = options[`${owner}ExceptionGet`] ?? 0;
+          if (got || exceptionSlots[owner])
+            out.issues.push({
+              operation: `${owner}-exception-read`,
+              kind: got ? "mach" : "invariant",
+              value: got,
+              cleanup: false,
+            });
+        }
+        if (options.exceptionRelease) {
+          out.issues.push({
+            operation: "exception-copy-release",
+            kind: "mach",
+            value: options.exceptionRelease,
+            cleanup: true,
+          });
+          releaseFailures.push({
+            operation: "fault-exception-copy-release",
+            kind: "mach",
+            value: options.exceptionRelease,
+          });
+        }
+        out.count = out.issues.length;
+        return out.count === 0;
+      },
       domain_port_owner: options.inheritedOwner ?? 0,
       domain_bootstrap_local: options.inheritedOwner ? 113 : 0,
       domain_host_copy: options.inheritedOwner ? 112 : 0,
@@ -6871,13 +7167,17 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       task_set_exception_ports: (...args) => {
         calls.push(["task-exceptions", ...args]);
-        return 0;
+        if (!options.taskExceptionSet && !options.taskExceptionStuck)
+          exceptionSlots.task &= ~args[1];
+        return options.taskExceptionSet ?? 0;
       },
       thread_set_exception_ports: (...args) => {
         calls.push(["thread-exceptions", ...args]);
+        if (!options.threadExceptionSet && !options.threadExceptionStuck)
+          exceptionSlots.thread &= ~args[1];
         if (options.replaceReply === "before") cachedReply = 105;
         if (options.replaceSpecial === "before") specialReply = 109;
-        return 0;
+        return options.threadExceptionSet ?? 0;
       },
       dlerror() {
         calls.push(["loader-error"]);
@@ -7074,7 +7374,12 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
           (operation.endsWith("kind") && value === 0) ||
           operation === "fault-gate-value" ||
           operation === "fault-port-count" ||
-          (operation === "fault-notify-read" && value === 0)
+          ([
+            "fault-notify-read",
+            "fault-task-exception-read",
+            "fault-thread-exception-read",
+          ].includes(operation) &&
+            value === 0)
           ? "invariant"
           : operation === "fault-payload-exec"
             ? "errno"
@@ -7094,6 +7399,22 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       label,
     );
     assert.deepEqual(cleanup, releaseFailures, label);
+    if (calls.some(([op]) => op === "exception-readback")) {
+      assert.equal(
+        calls.filter(([op]) => op === "exception-readback").length,
+        1,
+      );
+      if (operation?.includes("exception-read"))
+        assert.equal(
+          calls.some(([op]) => op === "census"),
+          false,
+        );
+      else if (!operation)
+        assert.ok(
+          calls.findIndex(([op]) => op === "exception-readback") <
+            calls.findIndex(([op]) => op === "census"),
+        );
+    }
     assert.equal(
       calls.filter(([op]) => op === "alias-probe").length,
       portDiagnostics.length,
@@ -7426,11 +7747,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       );
       assert.deepEqual(
         calls.filter(([op]) => op === "task-exceptions"),
-        [["task-exceptions", 101, 0xffff, 0, 1, 0]],
+        [["task-exceptions", 101, 255, 0, 1, 0]],
       );
       assert.deepEqual(
         calls.filter(([op]) => op === "thread-exceptions"),
-        [["thread-exceptions", 102, 0xffff, 0, 1, 0]],
+        [["thread-exceptions", 102, 255, 0, 1, 0]],
       );
       assert.deepEqual(
         calls.filter(([op]) => op === "release"),

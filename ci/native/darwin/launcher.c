@@ -151,6 +151,16 @@ static const char *launch_replies_changed(unsigned count, const mach_port_t *run
   return NULL;
 }
 #endif
+static bool launch_exception_readback(struct domain_bootstrap_fork *out, task_t self, thread_t thread) {
+  bool ok = domain_exception_readback(out, self, thread);
+  for (unsigned i = 0; i < out->count; i++) if (out->issues[i].cleanup) {
+    struct domain_bootstrap_issue issue = out->issues[i];
+    (void)signal(SIGPIPE, SIG_IGN);
+    fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s domain=%s result=%d\n", issue.operation, issue.kind, issue.value);
+    fflush(stderr);
+  }
+  return ok;
+}
 static void mach_rights(void) {
 #ifdef NATIVE_CI_EXPERIMENT
   launch_stage("mach-acquire", NULL, 0, 0);
@@ -260,10 +270,15 @@ static void mach_rights(void) {
   launch_stage("mach-exceptions", NULL, 0, 0);
   operation = "mach_ports_register"; result = mach_ports_register(self, NULL, 0); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "task_set_exception_ports"; result = task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
+  operation = "task_set_exception_ports"; result = task_set_exception_ports(self, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "thread_set_exception_ports"; result = thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
+  operation = "thread_set_exception_ports"; result = thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
   if (result != KERN_SUCCESS) goto mach_cleanup;
+  struct domain_bootstrap_fork exceptions = {0};
+  if (!launch_exception_readback(&exceptions, self, thread)) {
+    struct domain_bootstrap_issue issue = exceptions.issues[0];
+    operation = issue.operation; result = issue.value; error = 0; goto mach_cleanup;
+  }
   operation = "mig_get_reply_port/identity"; result = reply; error = errno;
   if (!MACH_PORT_VALID(reply) || reply == self || reply == thread || reply == host || (service && reply == access)) goto mach_cleanup;
   operation = "mig_get_special_reply_port/identity"; result = special;
@@ -379,8 +394,13 @@ mach_cleanup: {
        task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
        task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL) == KERN_SUCCESS &&
        mach_ports_register(self, NULL, 0) == KERN_SUCCESS &&
-       task_set_exception_ports(self, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS &&
-       thread_set_exception_ports(thread, EXC_MASK_ALL, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS);
+       task_set_exception_ports(self, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS &&
+       thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE) == KERN_SUCCESS);
+  struct domain_bootstrap_fork exceptions = {0};
+  if (!launch_exception_readback(&exceptions, self, thread)) {
+    struct domain_bootstrap_issue issue = exceptions.issues[0];
+    launch_failure(issue.operation, issue.value, 0, 0, -1, 0);
+  }
   bootstrap_port = MACH_PORT_NULL;
   /* mach_port_destroy itself uses MIG. Replace its cached receive-only reply
    * port, then retain this new local port so the sanitation RPCs can complete. */

@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-26 — Cover every public Darwin exception class
+
+Darwin exception custody uses the public ALL, CRASH and CORPSE_NOTIFY mask union
+for parent observation and every child task/thread clear. Checked bounded null
+readback now precedes census/admission because setter success can conceal skipped
+MAC actions. Parent slots remain observation-only; each successful valid getter
+copy settles once, including aliases, with independent cleanup and original
+refusals preserved. Failed getter outputs grant no ownership. This correction
+neither identifies SEND 1287 nor establishes startup repair or native acceptance;
+fresh original hosted controls and independent cleanup remain required.
+
 ## 2026-10-26 — Retain the bounded Windows traversal privilege
 
 Restricted Windows tokens retain only already-present enabled SeChangeNotify,

@@ -1,6 +1,58 @@
 /* Shared protected bytes, signatures and audit-token identity reads. */
 #ifndef NATIVE_DARWIN_CUSTODY_H
 #define NATIVE_DARWIN_CUSTODY_H
+#include <stdbool.h>
+/* EXC_MASK_ALL omits the public CRASH and CORPSE_NOTIFY classes. */
+#define DOMAIN_EXCEPTION_MASK (EXC_MASK_ALL | EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY)
+struct domain_bootstrap_issue {
+  const char *operation, *kind; int value; bool cleanup;
+};
+#define DOMAIN_FORK_ISSUES 64
+struct domain_bootstrap_fork {
+  pid_t child; unsigned count; struct domain_bootstrap_issue issues[DOMAIN_FORK_ISSUES];
+};
+static bool domain_bootstrap_check(struct domain_bootstrap_fork *out, bool ok, const char *operation, const char *kind, int value, bool cleanup) {
+  if (!ok) {
+    if (out->count < DOMAIN_FORK_ISSUES) out->issues[out->count++] = (struct domain_bootstrap_issue){operation, kind, value, cleanup};
+    else out->issues[DOMAIN_FORK_ISSUES-1] = (struct domain_bootstrap_issue){"fork-issues-truncated", "invariant", 0, true};
+  }
+  return ok;
+}
+/* One release attempt per successful getter acquisition, including aliases.
+ * Counts are untrusted; initialized bounded storage is the only cleanup input. */
+static bool domain_exception_settle(struct domain_bootstrap_fork *out, mach_port_t handlers[EXC_TYPES_COUNT], mach_msg_type_number_t count, int releases[EXC_TYPES_COUNT]) {
+  bool ok = true;
+  for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
+    releases[i] = -1;
+    if (MACH_PORT_VALID(handlers[i])) {
+      releases[i] = mach_port_deallocate(mach_task_self(), handlers[i]);
+      ok = domain_bootstrap_check(out, releases[i] == KERN_SUCCESS, "exception-copy-release", "mach", releases[i], true) && ok;
+    }
+  }
+  return ok;
+}
+/* XNU can skip individual MAC actions while a setter returns success. Both
+ * required getters must prove null slots and settle their own copies before
+ * any caller refuses or proceeds to census. Failed getter outputs own nothing. */
+static bool domain_exception_readback(struct domain_bootstrap_fork *out, task_t self, thread_t thread) {
+  bool ok = true;
+  for (unsigned which = 0; which < 2; which++) {
+    exception_mask_t masks[EXC_TYPES_COUNT] = {0}; mach_port_t handlers[EXC_TYPES_COUNT] = {0};
+    exception_behavior_t behaviors[EXC_TYPES_COUNT] = {0}; thread_state_flavor_t flavors[EXC_TYPES_COUNT] = {0};
+    mach_msg_type_number_t count = EXC_TYPES_COUNT; int releases[EXC_TYPES_COUNT];
+    const char *operation = which ? "thread-exception-read" : "task-exception-read";
+    kern_return_t got = which
+      ? thread_get_exception_ports(thread, DOMAIN_EXCEPTION_MASK, masks, &count, handlers, behaviors, flavors)
+      : task_get_exception_ports(self, DOMAIN_EXCEPTION_MASK, masks, &count, handlers, behaviors, flavors);
+    if (!domain_bootstrap_check(out, got == KERN_SUCCESS, operation, "mach", got, false)) { ok = false; continue; }
+    bool empty = count > 0 && count <= EXC_TYPES_COUNT;
+    for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++)
+      if (handlers[i] != MACH_PORT_NULL) empty = false;
+    ok = domain_bootstrap_check(out, empty, operation, "invariant", 0, false) && ok;
+    ok = domain_exception_settle(out, handlers, count, releases) && ok;
+  }
+  return ok;
+}
 /* Only the feasibility helper and experimental launcher opt into shared reply
  * provenance and pre-fork slot fencing. Sanitation and failure policy stay local. */
 #ifdef NATIVE_RUNTIME_REPLIES
@@ -85,20 +137,6 @@ static kern_return_t domain_refused_aliases(const char *owner, mach_port_t name,
  * ipc_task_init creates a fresh space and copies the parent's bootstrap slot.
  * Prevent runtime acquisition there instead of releasing unproved userspace refs.
  * The exported bootstrap value is borrowed here, never an owned acquisition. */
-struct domain_bootstrap_issue {
-  const char *operation, *kind; int value; bool cleanup;
-};
-#define DOMAIN_FORK_ISSUES 64
-struct domain_bootstrap_fork {
-  pid_t child; unsigned count; struct domain_bootstrap_issue issues[DOMAIN_FORK_ISSUES];
-};
-static bool domain_bootstrap_check(struct domain_bootstrap_fork *out, bool ok, const char *operation, const char *kind, int value, bool cleanup) {
-  if (!ok) {
-    if (out->count < DOMAIN_FORK_ISSUES) out->issues[out->count++] = (struct domain_bootstrap_issue){operation, kind, value, cleanup};
-    else out->issues[DOMAIN_FORK_ISSUES-1] = (struct domain_bootstrap_issue){"fork-issues-truncated", "invariant", 0, true};
-  }
-  return ok;
-}
 struct domain_registered_ports {
   mach_port_array_t ports; mach_msg_type_number_t count; bool owned;
 };
@@ -148,10 +186,10 @@ static struct {
 static bool domain_exception_observe(struct domain_bootstrap_fork *out) {
   memset(&domain_fork_exceptions, 0, sizeof(domain_fork_exceptions));
   domain_fork_exceptions.active = true; domain_fork_exceptions.parent = getpid();
-  exception_mask_t masks[EXC_TYPES_COUNT]; mach_port_t handlers[EXC_TYPES_COUNT];
-  exception_behavior_t behaviors[EXC_TYPES_COUNT]; thread_state_flavor_t flavors[EXC_TYPES_COUNT];
+  exception_mask_t masks[EXC_TYPES_COUNT] = {0}; mach_port_t handlers[EXC_TYPES_COUNT] = {0};
+  exception_behavior_t behaviors[EXC_TYPES_COUNT] = {0}; thread_state_flavor_t flavors[EXC_TYPES_COUNT] = {0};
   mach_msg_type_number_t count = EXC_TYPES_COUNT;
-  kern_return_t got = task_get_exception_ports(mach_task_self(), EXC_MASK_ALL, masks, &count, handlers, behaviors, flavors);
+  kern_return_t got = task_get_exception_ports(mach_task_self(), DOMAIN_EXCEPTION_MASK, masks, &count, handlers, behaviors, flavors);
   domain_fork_exceptions.result = got;
   /* Unavailable observation adds no exception-specific fork precondition. */
   if (got != KERN_SUCCESS) return true;
@@ -161,14 +199,8 @@ static bool domain_exception_observe(struct domain_bootstrap_fork *out) {
   for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
     domain_fork_exceptions.masks[i] = masks[i]; domain_fork_exceptions.handlers[i] = handlers[i];
     domain_fork_exceptions.behaviors[i] = behaviors[i]; domain_fork_exceptions.flavors[i] = flavors[i];
-    domain_fork_exceptions.releases[i] = -1;
-    if (MACH_PORT_VALID(handlers[i])) {
-      kern_return_t released = mach_port_deallocate(mach_task_self(), handlers[i]);
-      domain_fork_exceptions.releases[i] = released;
-      ok = domain_bootstrap_check(out, released == KERN_SUCCESS, "exception-copy-release", "mach", released, true) && ok;
-    }
   }
-  return ok;
+  return domain_exception_settle(out, handlers, count, domain_fork_exceptions.releases) && ok;
 }
 static void domain_fork_diagnostic(const char *owner) {
   if (!domain_fork_exceptions.active) return;
@@ -273,7 +305,6 @@ static void domain_bootstrap_fork(struct domain_bootstrap_fork *out, pid_t *reta
 #endif
 #ifndef NATIVE_AUDIT_DOMAIN_ONLY
 #include <mach-o/loader.h>
-#include <stdbool.h>
 #include <sys/acl.h>
 #include <sys/stat.h>
 #include <time.h>

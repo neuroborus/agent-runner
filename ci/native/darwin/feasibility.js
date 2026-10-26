@@ -539,6 +539,8 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-stdio",
     "fault-task-exceptions",
     "fault-thread-exceptions",
+    "fault-task-exception-read",
+    "fault-thread-exception-read",
     "fault-thread-port",
     "fault-thread-release",
     "fault-uid",
