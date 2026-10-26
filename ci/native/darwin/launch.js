@@ -74,6 +74,9 @@ async function nativeTransport(request, args, verified, onHelper) {
         CI: "true",
         GITHUB_ACTIONS: "true",
         PATH: "/nonexistent",
+        ...(request.purpose === "experiment"
+          ? { NATIVE_EVIDENCE_CANDIDATE: request.candidateSha }
+          : {}),
         ...(request.execution
           ? {
               NATIVE_PROVIDER_BYTES: String(request.execution.imageBytes),

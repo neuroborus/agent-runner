@@ -5,6 +5,19 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-26 — Collect original blocker evidence before causal repair
+
+Native refusal evidence stays bound to the original attempt. Darwin keeps the
+child refused through bounded privileged PID-selected lsmp inspection and owned
+observer settlement; snapshots grant no acquisition provenance or release right.
+Windows retains a fixed startup coverage inventory before original release and
+publishes original records, declarations and separate snapshots/probes distinctly.
+Socket native outcomes freeze before attribution/cleanup, and command evidence
+retains target/marker delivery and teardown. Existing deadlines, publication
+bounds, policy, native denial predicates and independent retirement remain intact.
+Unsupported observations remain unobserved; this stage establishes no causal fix
+or native acceptance and preserves the existing Linux controls.
+
 ## 2026-10-26 — Cover every public Darwin exception class
 
 Darwin exception custody uses the public ALL, CRASH and CORPSE_NOTIFY mask union

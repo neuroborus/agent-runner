@@ -351,6 +351,7 @@ mach_cleanup: {
       fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
         getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
       fflush(stderr); errno = saved;
+      domain_refusal_request(refused_name);
       (void)domain_refused_aliases("launcher", refused_name, refused_type, send_query, send_refs);
     }
     /* One entry per acquisition, even when local names alias. Never retry a
@@ -741,6 +742,7 @@ int main(int argc, char **argv) {
   struct proc_taskinfo task;
   need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == (int)sizeof(task) && task.pti_threadnum == 1);
 #ifdef NATIVE_CI_EXPERIMENT
+  domain_refusal_begin(30000);
   pid_t child = launch_bootstrap_fork();
 #else
   pid_t child = fork(); if (child < 0) launch_failure("fork", child, errno, 0, -1, 0);
@@ -836,7 +838,10 @@ int main(int argc, char **argv) {
   printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(first); puts(",\"creator\":{\"version\":1,\"phase\":1}}"); fflush(stdout);
   char creator[DOMAIN_CREATOR_BYTES];
   need(read(0, creator, sizeof(creator)) == sizeof(creator) && write(release[1], creator, sizeof(creator)) == sizeof(creator));
-  need(read(ready[0], &post, sizeof(post)) == sizeof(post) && post.version == 1 && post.phase == 2 &&
+  need(read(ready[0], &post, sizeof(post)) == sizeof(post));
+  if (post.version == 1 && post.phase == 3)
+    domain_refusal_inspect(release[1], post, first, getenv("NATIVE_EVIDENCE_CANDIDATE"), "launcher-census");
+  need(post.version == 1 && post.phase == 2 &&
     audit_identity_same(first, post.identity));
   char trailing; need(read(ready[0], &trailing, 1) == 0 && !close(ready[0]));
   struct identity parked = post.identity;

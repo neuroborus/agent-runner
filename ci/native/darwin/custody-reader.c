@@ -1138,7 +1138,13 @@ static void case_start(const char *mode, const char *cdhash) {
   if (!strcmp(mode, "literal") || !strcmp(mode, "storage") || !strcmp(mode, "access")) {
     argv[13] = ""; argv[14] = "space value"; argv[15] = "λ雪"; argv[16] = "'\""; argv[17] = "$(false); & | < > *";
   } else { argv[13] = nonce; argv[14] = (char *)mode; }
+#ifdef NATIVE_CI_EXPERIMENT
+  char evidence_candidate[80];
+  need(snprintf(evidence_candidate, sizeof(evidence_candidate), "NATIVE_EVIDENCE_CANDIDATE=%s", candidate) == 66);
+  char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", !strcmp(mode, "access") ? "NATIVE_ACCESS_CUSTODY=true" : "NATIVE_OWNERSHIP_CUSTODY=true", evidence_candidate, NULL};
+#else
   char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", !strcmp(mode, "access") ? "NATIVE_ACCESS_CUSTODY=true" : "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
+#endif
   case_launch_check("posix_spawn", posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment));
   case_launch_check("posix_spawn_file_actions_destroy", posix_spawn_file_actions_destroy(&actions));
   case_launch_check("posix_spawnattr_destroy", posix_spawnattr_destroy(&attributes));

@@ -13074,6 +13074,11 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
     "missing-context",
     "extra-context",
     "record-limit",
+    "coverage",
+    "coverage-duplicate",
+    "coverage-name",
+    "evidence-attribution",
+    "evidence-without-coverage",
     "readback",
     "maximum-rows",
     "token-limit",
@@ -13129,6 +13134,30 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
           "native-windows-original-child: record x\n".repeat(65) +
           completion,
       ).toString("hex");
+    if (fault?.startsWith("coverage") || fault?.startsWith("evidence-")) {
+      const names = [
+        "request-status",
+        "declared-imports",
+        "loader-dependencies",
+        "known-dll-objects",
+        "token-privileges",
+        "window-station-desktop",
+        "inherited-pipes-job",
+        "other-kernel-objects",
+        "path-ancestors",
+      ];
+      const coverage = Array.from(
+        { length: 9 },
+        (_, i) =>
+          `native-windows-original-child: coverage class=${fault === "coverage-duplicate" ? 0 : i} name=${fault === "coverage-name" ? "unknown" : names[i]} state=unsupported first-request=unobserved\n`,
+      ).join("");
+      value.hex = Buffer.from(
+        context +
+          `native-windows-original-child: evidence class=4 scope=${fault === "evidence-attribution" ? "declared-requirements" : "snapshot"} original-request=unobserved attributes=2\n` +
+          (fault === "evidence-without-coverage" ? "" : coverage) +
+          completion,
+      ).toString("hex");
+    }
     if (
       [
         "readback",
@@ -13220,6 +13249,7 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
           assert.equal(await closed, first);
           const published = [
             null,
+            "coverage",
             "readback",
             "maximum-rows",
             "duplicate",
@@ -13419,7 +13449,7 @@ test("actual retained startup readback selects only held resources and masks and
       )
       .replace(/(?<!&)&file\.id\b/gu, "file.id")
       .replace(
-        /(?<!&)&(captured\.(?:imageId|statistics)|status|metadata|imageQuery|current|object|before|after|created|exited|kernel|user|id|time|original_release\.(?:imageId|statistics)|ownership_policy_file|original_refusal\.imageId|entries\[6\]\.file\.id)\b/gu,
+        /(?<!&)&(captured\.(?:imageId|statistics)|status|metadata|imageQuery|current|object|before|after|created|exited|kernel|user|id|time|original_release(?:\.(?:imageId|statistics))?|ownership_policy_file|original_refusal\.imageId|entries\[6\]\.file\.id)\b/gu,
         "$1",
       )
       .replace(/\b(\w+)\[\]=\{([^}]+)\}/gu, "$1=[$2]")
@@ -13643,6 +13673,7 @@ test("actual retained startup readback selects only held resources and masks and
         to: 1000,
       },
       original_release: freshRelease(),
+      startup_capture: () => {},
       candidate: "a".repeat(40),
       nonce: "b".repeat(32),
       errno: 9,
@@ -14605,6 +14636,8 @@ test("original-child refusal collection owns bounded partial publication and can
     "cancel",
     "deadline",
     "record-cap",
+    "shared-record-cap",
+    "startup-close",
     "byte-cap",
     "publication",
     "write",
@@ -14646,6 +14679,7 @@ test("original-child refusal collection owns bounded partial publication and can
       readbackStarted: false,
       readbackFinished: false,
       readbackClosure: false,
+      requestStatusRecords: 0,
     });
     const handle = (kind) => ({ kind, serial: serial++, next: 0 });
     const api = {
@@ -14692,6 +14726,12 @@ test("original-child refusal collection owns bounded partial publication and can
         status: { value: 0, closureUncertain: false },
       },
       release_capture_name: () => "unstarted",
+      original_startup: {
+        examined: fault === "shared-record-cap" ? 61 : 0,
+        used: 0,
+        closure: fault === "startup-close",
+      },
+      startup_publish: (_output, _capacity, used) => used,
       ownership_released: fault !== "unreleased",
       ownership_count: 1,
       ownership_creation_verified: true,
@@ -14982,8 +15022,10 @@ test("original-child refusal collection owns bounded partial publication and can
       );
     } else if (fault !== "create" && fault !== "already-expired")
       assert.equal(calls.filter((v) => v === "thread-close").length, 1);
-    if (fault === "record-cap")
+    if (fault === "record-cap" || fault === "shared-record-cap")
       assert.equal(api.original_refusal.report.examined, 64);
+    if (fault === "shared-record-cap")
+      assert.equal(api.original_refusal.report.records, 3);
     assert.match(
       output,
       new RegExp(
@@ -15026,9 +15068,12 @@ test("original-child typed events join only supported payload identity, time and
     "utf8",
   );
   const body = (name) => {
-    const at = source.indexOf(`${name}(`),
-      start = source.indexOf("{", at);
-    return source.slice(start + 1, source.indexOf("\n}", start));
+    const match = new RegExp(
+      `^static [^\\n]+ \\*?${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "mu",
+    ).exec(source);
+    assert.ok(match, name);
+    return match[1];
   };
   // Replace storage, pointer addresses and integer representation, keeping the
   // native projection, type checks and joins as the executed source bodies.
@@ -15235,6 +15280,7 @@ test("original-child typed events join only supported payload identity, time and
     if (fault === "iso") v[3] = str("2026-01-02T03:04:05.0000050Z");
     const report = {
         examined: 1,
+        requestStatusRecords: 0,
         records: 0,
         joined: 0,
         malformed: 0,
@@ -15382,5 +15428,175 @@ test("original-child typed events join only supported payload identity, time and
         new RegExp(`corroboration=${Number(fault === "application")}\\n$`, "u"),
       );
     }
+  }
+});
+
+test("actual startup object snapshots ignore failed getter outputs and never adopt borrowed custody", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void startup_objects[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job={0};", "const job={};")
+    .replaceAll("&member", "(v)=>member=v")
+    .replaceAll("&job", "job")
+    .replaceAll("sizeof(job)", "1")
+    .replace("(LONGLONG)!!member", "Number(!!member)")
+    .replaceAll("(LONGLONG)", "")
+    .replace(/\b(?:BOOL|DWORD|LONGLONG) /gu, "let ");
+  for (const failed of [false, true]) {
+    const facts = [];
+    const api = {
+      FALSE: false,
+      TRUE: true,
+      NULL: null,
+      ERROR_SUCCESS: 0,
+      FILE_TYPE_UNKNOWN: 0,
+      JobObjectBasicAccountingInformation: 1,
+      case_job: 11,
+      ownership_output: 12,
+      original_startup: { state: Array(9).fill(0) },
+      startup_take: () => true,
+      SetLastError: () => {},
+      GetLastError: () => 5,
+      IsProcessInJob(process, job, out) {
+        assert.deepEqual([process, job], [42, 11]);
+        out(true);
+        return !failed;
+      },
+      QueryInformationJobObject(_job, _kind, out) {
+        out.ActiveProcesses = 99;
+        return !failed;
+      },
+      GetFileType(handle) {
+        assert.equal(handle, 12);
+        return failed ? 0 : 3;
+      },
+      startup_fact: (...values) => facts.push(values),
+      CloseHandle: assert.fail,
+    };
+    new Script(`(function(process){${body}})(42)`).runInNewContext(api);
+    assert.equal(facts.length, 1);
+    assert.equal(api.original_startup.state[6], failed ? 6 : 1);
+    assert.deepEqual(
+      facts[0].slice(2),
+      failed ? [-1, 5, 5, -1, -1, 5] : [1, 0, 0, 99, 3, 0],
+    );
+  }
+});
+
+test("actual startup summaries retain every class, interval and independent cleanup uncertainty", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static DWORD startup_publish[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replaceAll("report->", "report.")
+    .replaceAll("output+used", "({offset:used})")
+    .replace(/\((?:DWORD)\)/gu, "")
+    .replace(/\b(?:BOOL|unsigned|DWORD|int) /gu, "let ");
+  for (const fault of [
+    null,
+    "identity",
+    "closure",
+    "query-close",
+    "unpublished",
+    "expired",
+  ]) {
+    const lines = [];
+    const context = {
+      ERROR_NOT_SUPPORTED: 50,
+      RELEASE_USABLE: 3,
+      original_startup: {
+        bound: true,
+        pid: 42,
+        birth: 90,
+        from: 100,
+        to: 110,
+        closure: fault === "closure",
+        cleanup: fault === "closure" ? 7 : 0,
+        state: [0, 1, 2, 3, 6, 3, 1, 3, 5],
+        error: [0, 0, 0, 0, 5, 0, 0, 0, 0],
+      },
+      original_refusal: {
+        pid: 42,
+        birth: fault === "identity" ? 91 : 90,
+        from: 120,
+        to: 130,
+      },
+      original_release: { state: 3, dispatched: true, release: 120 },
+      startup_classes: Array.from({ length: 9 }, (_, i) => `fixture-${i}`),
+      startup_states: [
+        "missing",
+        "observed",
+        "empty",
+        "unsupported",
+        "expired",
+        "truncated",
+        "failed",
+      ],
+      refusal_remaining: () => (fault === "expired" ? 0 : 10),
+      snprintf(target, capacity, format, ...values) {
+        let at = 0;
+        const line = format.replace(/%(?:llu|lu|u|s)/gu, (specifier) =>
+          specifier === "%s"
+            ? String(values[at++])
+            : String(Number(values[at++])),
+        );
+        assert.ok(line.length < capacity);
+        lines.push(line);
+        return line.length;
+      },
+    };
+    const render = new Script(
+      `(function(output,capacity,used,report,published){${body}})`,
+    ).runInNewContext(context);
+    const report = {
+      query: [0, 0, 0],
+      finished: true,
+      overBudget: fault === "expired",
+      requestStatusRecords: 0,
+      malformed: 0,
+      renderError: 0,
+      closeError: fault === "query-close" ? 9 : 0,
+    };
+    const before = structuredClone(report);
+    const used = render({}, 4096, 0, report, fault !== "unpublished");
+    assert.equal(lines.length, 9);
+    assert.ok(used <= 4096 - 1024);
+    assert.ok(
+      lines.every((line) => line.endsWith("first-request=unobserved\n")),
+    );
+    assert.match(
+      lines[0],
+      fault === "expired"
+        ? /state=expired /u
+        : fault === "unpublished"
+          ? /state=missing /u
+          : /state=empty /u,
+    );
+    assert.match(lines[0], /from=120 to=130 /u);
+    assert.match(lines[1], /from=100 to=110 /u);
+    assert.ok(
+      lines.every((line) =>
+        line.includes(`bound=${Number(fault !== "identity")} `),
+      ),
+    );
+    for (const [i, line] of lines.entries())
+      assert.ok(
+        line.includes(
+          `closure-uncertain=${Number(i ? fault === "closure" : fault === "query-close" || fault === "unpublished")} `,
+        ),
+      );
+    assert.match(
+      lines[0],
+      new RegExp(`cleanup=${fault === "query-close" ? 9 : 0} `, "u"),
+    );
+    assert.match(lines[3], /state=unsupported /u);
+    if (fault === "unpublished")
+      assert.match(lines[1], /state=truncated .*published=0 /u);
+    assert.deepEqual(report, before);
   }
 });

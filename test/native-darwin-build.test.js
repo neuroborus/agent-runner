@@ -12,6 +12,230 @@ import {
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
+test("actual refused-child handoff is one-shot and acknowledgements never release payload", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const begin = /static void domain_refusal_begin[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(/\b(?:int|uint64_t) /gu, "let ");
+  const body = /static void domain_refusal_request[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      /struct domain_creator_frame frame = [^\n]+;/u,
+      "const frame={version:1,phase:3,identity:domain_refusal_identity,refused_name:name};",
+    )
+    .replace(
+      "char acknowledgement = 0; ssize_t received = -1;",
+      "let acknowledgement=0,received=-1;",
+    )
+    .replace(/struct pollfd gate = [^;]+;/u, "const gate={fd:4,events:POLLIN};")
+    .replaceAll("&frame", "frame")
+    .replaceAll("sizeof(frame)", "1")
+    .replaceAll("&gate", "gate")
+    .replaceAll("&acknowledgement", "{set value(v){acknowledgement=v}}")
+    .replace(/\b(?:int|ssize_t) /gu, "let ")
+    .replaceAll("(void)", "");
+  for (const fault of [
+    null,
+    "expired",
+    "clock",
+    "write",
+    "loss",
+    "wrong-ack",
+  ]) {
+    const events = [],
+      diagnostics = [];
+    const context = {
+      errno: 7,
+      domain_refusal_armed: true,
+      domain_refusal_sent: false,
+      UINT64_MAX: Number(0xffffffffffffffffn),
+      domain_refusal_deadline: 0,
+      domain_refusal_identity: { pid: 42 },
+      SIGPIPE: 1,
+      SIG_IGN: 2,
+      POLLIN: 1,
+      stderr: {},
+      domain_refusal_now: () => {
+        if (fault === "clock") {
+          context.errno = 22;
+          return context.UINT64_MAX;
+        }
+        return 1000;
+      },
+      domain_refusal_remaining: () =>
+        !context.domain_refusal_deadline || fault === "expired" ? 0 : 1000,
+      signal: () => {},
+      getpid: () => 42,
+      fflush: () => {},
+      fprintf: (_stream, _format, ...values) => diagnostics.push(values),
+      write(fd, frame) {
+        events.push(["request", fd, frame.phase, frame.refused_name]);
+        return fault === "write" ? -1 : 1;
+      },
+      poll(gate) {
+        events.push(["poll", gate.fd]);
+        gate.revents = 1;
+        return fault === "loss" ? 0 : 1;
+      },
+      read(fd, value) {
+        events.push(["ack", fd]);
+        value.value = fault === "wrong-ack" ? "R" : "D";
+        return 1;
+      },
+    };
+    const request =
+      new Script(`function domain_refusal_begin(lifetime){${begin}}
+      domain_refusal_begin(20000); (function(name){${body}})`).runInNewContext(
+        context,
+      );
+    request(128);
+    request(128);
+    assert.equal(context.errno, 7);
+    assert.equal(diagnostics.length, 1);
+    assert.equal(diagnostics[0][2], fault === null);
+    assert.equal(diagnostics[0][3], fault === "expired" || fault === "clock");
+    assert.equal(
+      events.filter(([operation]) => operation === "request").length,
+      fault === "expired" || fault === "clock" ? 0 : 1,
+    );
+    if (events.length) assert.deepEqual(events[0], ["request", 3, 3, 128]);
+    if (fault === null || fault === "wrong-ack")
+      assert.deepEqual(events.slice(1), [
+        ["poll", 4],
+        ["ack", 4],
+      ]);
+    assert.ok(
+      events.every(
+        ([operation, fd]) => fd === (operation === "request" ? 3 : 4),
+      ),
+    );
+  }
+});
+
+test("actual live-child reader rejects reused birth, exit and failed getters with written outputs", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const body = /static bool domain_refusal_live[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "struct proc_bsdinfo actual; siginfo_t exited = {0};",
+      "const actual={},exited={si_pid:0};",
+    )
+    .replace("pid_t pid", "const pid")
+    .replaceAll("&actual", "actual")
+    .replaceAll("&exited", "exited")
+    .replaceAll("sizeof(actual)", "1");
+  const expected = {
+    token: { val: [0, 0, 0, 0, 0, 42] },
+    bsd: { pbi_start_tvsec: 100, pbi_start_tvusec: 2 },
+  };
+  for (const fault of [null, "birth", "exited", "failed-output"]) {
+    const live = new Script(`(function(expected){${body}})`).runInNewContext({
+      PROC_PIDTBSDINFO: 1,
+      P_PID: 1,
+      WEXITED: 2,
+      WNOHANG: 4,
+      WNOWAIT: 8,
+      proc_pidinfo(pid, _kind, _arg, actual) {
+        assert.equal(pid, 42);
+        Object.assign(actual, expected.bsd);
+        if (fault === "birth") actual.pbi_start_tvusec++;
+        return fault === "failed-output" ? -1 : 1;
+      },
+      waitid(_kind, pid, exited) {
+        exited.si_pid = fault === "exited" ? pid : 0;
+        return 0;
+      },
+    });
+    assert.equal(live(expected), fault === null, fault);
+  }
+});
+
+test("actual refusal observer settles once and lost wait ownership never authorizes a signal", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const body = (name) =>
+    new RegExp(`static int ${name}[^\\n]+\\{([\\s\\S]*?)\\n\\}`, "u")
+      .exec(source)[1]
+      .replace(/\*(status|reaped|owned)\b/gu, "$1.value")
+      .replace(/\b(?:int|pid_t) /gu, "let ");
+  for (const fault of [null, "wait-lost", "kill", "expired"]) {
+    const events = [],
+      status = {},
+      reaped = { value: false },
+      owned = { value: true };
+    const context = {
+      errno: 7,
+      EINTR: 4,
+      ESRCH: 3,
+      WNOHANG: 1,
+      SIGKILL: 9,
+      domain_refusal_remaining: () => (fault === "expired" ? 0 : 1000),
+      waitpid(pid) {
+        events.push("wait");
+        if (fault === "wait-lost") return -1;
+        return pid;
+      },
+      kill(pid, signal) {
+        assert.deepEqual([pid, signal], [73, 9]);
+        events.push("kill");
+        return fault === "kill" ? -1 : 0;
+      },
+    };
+    const api =
+      new Script(`function domain_refusal_wait(observer,status,reaped,owned){${body("domain_refusal_wait")}}
+      function settle(observer,status,reaped,owned){${body("domain_refusal_settle")}}
+      ({wait:domain_refusal_wait,settle});`).runInNewContext(context);
+    if (fault === "wait-lost")
+      assert.equal(api.wait(73, status, reaped, owned), 7);
+    assert.equal(
+      api.settle(73, status, reaped, owned),
+      fault === "kill" ? 7 : 0,
+    );
+    assert.equal(reaped.value, fault !== "wait-lost" && fault !== "expired");
+    assert.deepEqual(
+      events,
+      fault === "wait-lost"
+        ? ["wait"]
+        : fault === "expired"
+          ? ["kill"]
+          : ["kill", "wait"],
+    );
+    const count = events.length;
+    api.wait(73, status, reaped, owned);
+    if (fault !== "expired") assert.equal(events.length, count);
+  }
+});
+
+test("actual refusal inspection stops on coordinator EOF without extending its wait", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const body = /static int domain_refusal_poll[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "struct pollfd streams[2] = {{output, POLLIN, 0}, {0, POLLIN, 0}};",
+      "const streams=[{fd:output,events:POLLIN},{fd:0,events:POLLIN}];",
+    )
+    .replaceAll("*channel_lost", "channel_lost.value")
+    .replace("int ready", "const ready");
+  for (const lost of [false, true]) {
+    const state = { value: false };
+    const run = new Script(
+      `(function(output,remaining,channel_lost){${body}})`,
+    ).runInNewContext({
+      POLLIN: 1,
+      poll(streams, count, remaining) {
+        assert.deepEqual(
+          [streams[0].fd, streams[1].fd, count, remaining],
+          [7, 0, 2, 91],
+        );
+        streams[0].revents = 1;
+        streams[1].revents = lost ? 16 : 0;
+        return lost ? 2 : 1;
+      },
+    });
+    assert.equal(run(7, 91, state), lost ? 0 : 1);
+    assert.equal(state.value, lost);
+  }
+});
+
 test("Darwin fork fences registered and bootstrap slots and settles only getter copies", async () => {
   const [header, domain] = await Promise.all(
     ["custody.h", "feasibility-domain.h"].map((name) =>
@@ -7307,6 +7531,7 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       domain_access_diagnostic: (...facts) => lifecycle.push(facts),
       domain_fork_diagnostic: (owner) => assert.equal(owner, "fault"),
+      domain_refusal_request: () => {},
       // The shared actual-body probe fixture owns acquisition/release semantics;
       // this caller fixture binds the original facts and separate cleanup cause.
       domain_refused_aliases(owner, name, type, query, refs) {
@@ -8932,6 +9157,7 @@ test("native creator import accepts only one closed receipt for the original chi
       .replaceAll("&frame", "frame")
       .replaceAll("sizeof(frame)", "1")
       .replaceAll("sizeof(bytes)", "512")
+      .replace("bool imported =", "const imported =")
       .replace(
         "domain_creator_import(bytes,",
         "domain_creator_import(bytes.value,",

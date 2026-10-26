@@ -1169,7 +1169,17 @@ export async function observeWindowsFeasibilityWfp(run, persist) {
   }
   run.wfpObservation = evidence;
   try {
-    await persist(`${run.caseId}-wfp`, evidence);
+    await persist(`${run.caseId}-wfp`, {
+      ...evidence,
+      originalAttempt: {
+        scope: "diagnostic-only",
+        child: run.receipt?.child ?? null,
+        inputs: run.session.originalAttemptEvidence ?? null,
+        native: run.session.tcpObservation ?? null,
+        binding: structuredClone(run.tcpAttribution ?? null),
+        attribution: evidence,
+      },
+    });
   } catch (error) {
     nativeException("windows-wfp-persistence", error);
   }
@@ -1886,6 +1896,11 @@ export function windowsFeasibilityHelperSession(
   const cwdObservation = cwdCapture(rootedLaunch);
   const tcpObservation = tcpCapture();
   const wfpObservation = wfpCapture();
+  const originalInputs = [];
+  let originalInputsBytes = 0,
+    originalInputsIncomplete = false;
+  let originalInputsInvalid = false;
+  let originalCompletion = null;
   let targetSent = false,
     tcpCommand = 0;
   let bytes = Buffer.alloc(0),
@@ -1932,6 +1947,7 @@ export function windowsFeasibilityHelperSession(
       cwdObservation: cwdObservation.snapshot(),
       tcpObservation: tcpObservation.snapshot(),
       wfpObservation: wfpObservation.snapshot(),
+      originalAttemptEvidence: originalEvidence(),
     });
     if (exit) {
       Object.assign(problem, { exitCode: exit.code, signal: exit.signal });
@@ -1939,6 +1955,19 @@ export function windowsFeasibilityHelperSession(
     }
     return problem;
   };
+  const originalEvidence = () => ({
+    scope: "diagnostic-only",
+    state: originalInputsInvalid
+      ? "failed"
+      : originalInputsIncomplete
+        ? "truncated"
+        : originalInputs.length || originalCompletion
+          ? "observed"
+          : "missing",
+    records: [...originalInputs],
+    completion: originalCompletion,
+    cleanup: cleanup ?? null,
+  });
   const endInput = () => {
     if (inputEnded) return;
     inputEnded = true;
@@ -1999,6 +2028,12 @@ export function windowsFeasibilityHelperSession(
             else if (isCwdLine(prefix)) cwdObservation.incomplete();
             else if (isTcpLine(prefix)) tcpObservation.incomplete();
             else if (isWfpLine(prefix)) wfpObservation.incomplete();
+            else if (
+              prefix
+                .toString("ascii")
+                .startsWith("native-windows-socket-input:")
+            )
+              originalInputsIncomplete = true;
             // Socket input queries are ordinary diagnostics, never carriers.
             else if (
               !prefix
@@ -2021,7 +2056,28 @@ export function windowsFeasibilityHelperSession(
         const line = diagnosticPending;
         diagnosticPending = Buffer.alloc(0);
         const text = line.toString("utf8");
-        if (text.startsWith("native-windows-socket-input:")) continue;
+        if (text.startsWith("native-windows-socket-input:")) {
+          // Reserve one record/1 KiB for the final native/settlement outcome.
+          if (!/^[\x20-\x7e]+\r?\n$/u.test(text)) originalInputsInvalid = true;
+          else if (
+            text.startsWith(
+              "native-windows-socket-input: caller=original_attempt ",
+            )
+          ) {
+            if (originalCompletion || line.length > 1024)
+              originalInputsIncomplete = true;
+            else originalCompletion = text.trimEnd();
+          } else if (
+            originalInputs.length === 63 ||
+            originalInputsBytes + line.length > 3072
+          )
+            originalInputsIncomplete = true;
+          else {
+            originalInputs.push(text.trimEnd());
+            originalInputsBytes += line.length;
+          }
+          continue;
+        }
         if (isImageLine(line)) {
           imageBinding.consume(line);
           continue;
@@ -2226,8 +2282,10 @@ export function windowsFeasibilityHelperSession(
         diagnosticPending
           .toString("ascii")
           .startsWith("native-windows-socket-input:")
-      )
+      ) {
+        originalInputsIncomplete = true;
         diagnosticPending = Buffer.alloc(0);
+      }
       wfpObservation.close();
       if (diagnosticPending.length || diagnosticParsed !== stderr.length) {
         nativeDiagnosticInvalid = true;
@@ -2271,6 +2329,9 @@ export function windowsFeasibilityHelperSession(
     },
     get tcpObservation() {
       return tcpObservation.snapshot();
+    },
+    get originalAttemptEvidence() {
+      return originalEvidence();
     },
     wfp: () => wfpObservation.wait(),
     get gitCapture() {

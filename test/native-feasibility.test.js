@@ -6328,8 +6328,12 @@ test("TCP setup, completion and observer failures retain native causes and close
     .replace("error,size,", "error,size.value,")
     .replace("(LONGLONG)completed", "completed.value")
     .replace(/\bint /gu, "let ");
+  const freeze = /static void tcp_attempt_begin[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("tcp_original=*problem;", "tcp_original={...problem};");
   const exercise =
-    new Script(`function tcp_deadline_observe(socket){${deadline}}
+    new Script(`function tcp_attempt_begin(problem,receipt){${freeze}}
+    function tcp_deadline_observe(socket){${deadline}}
     function tcp_wait(socket, writing, end, problem, observed) {${wait}}
     function prepare() {${setup} return true;} function connect_once() {${connection}}
     function close() {${cleanup}}
@@ -6393,6 +6397,20 @@ test("TCP setup, completion and observer failures retain native causes and close
       details = [];
     const api = {
       tcp_progress: { phase: "setup", selected: -2 },
+      tcp_original: null,
+      tcp_original_receipt: false,
+      tcp_attempt_observe(_socket, _started, _attempted, settlement, closed) {
+        assert.equal(closed, !closeError);
+        if (
+          !acknowledged &&
+          (connectError === 10013 || completedError === 10013)
+        ) {
+          assert.equal(api.tcp_original.value, 10013);
+          assert.equal(api.tcp_original_receipt, true);
+          assert.equal(settlement.operation, "ack-read");
+          assert.equal(settlement.value, 109);
+        }
+      },
       errno: 9,
       stderr: {},
       strcmp: (a, b) => Number(a !== b),
@@ -7762,6 +7780,8 @@ test("child-owned TCP keeps its original socket through self-import controls and
       tcp_observe: (api, phase) => events.push(`observe:${api}:${phase}`),
       strcmp: (a, b) => Number(a !== b),
       tcp_deadline_observe: () => {},
+      tcp_attempt_begin: () => {},
+      tcp_attempt_observe: () => {},
       wfp_tuple: () => events.push("tuple"),
       closesocket(socket) {
         events.push(`close:${socket}`);
@@ -10831,6 +10851,8 @@ test("socket export refusals retain distinct self/destination evidence and bound
       observerReady: () => emit(f.prepared),
       strcmp: (a, b) => Number(a !== b),
       tcp_deadline_observe: () => {},
+      tcp_attempt_begin: () => {},
+      tcp_attempt_observe: () => {},
       tcp_detail: () => {},
       tcp_observe: (api, phase, value) =>
         write(
@@ -11844,6 +11866,10 @@ test("WFP observations join exact held birth, image, package, endpoints and even
     assert.equal(observed.matches[0].filterId, "7");
     assert.equal(observed.matches[0].actionType, action);
     assert.equal(valid.saved[0][0], "read-wfp");
+    const packet = valid.saved[0][1].originalAttempt;
+    assert.deepEqual(packet.child, valid.run.receipt.child);
+    assert.equal(packet.inputs.scope, "diagnostic-only");
+    assert.equal(packet.attribution.matches[0].filterId, "7");
     valid.close(0);
   }
   for (const substitute of [
@@ -16173,4 +16199,35 @@ test("Windows original file opens retain bounded effective-context facts without
     [primary[7], primary[8], impersonation[7], impersonation[8]],
     [1, -1, 2, 2],
   );
+});
+
+test("original attempt publication reserves completion and retains native failure separately from cleanup", async () => {
+  const f = wfpFixture();
+  f.child.stderr.write(
+    "native-windows-socket-input: caller=probe unavailable=1\n".repeat(80),
+  );
+  const completion =
+    "native-windows-socket-input: caller=original_attempt native-operation=tcp-deadline native-value=0 native-error-receipt=0 socket-closed=1";
+  f.child.stderr.write(
+    completion +
+      "\n" +
+      f.tuple() +
+      f.snapshot() +
+      windowsDiagnostic("tcp-deadline", "invariant", 0) +
+      "native-windows-cleanup: operation=observer-token-close domain=win32 value=5\n",
+  );
+  f.close();
+  await assert.rejects(f.session.next(), (error) => {
+    assert.equal(error.originalAttemptEvidence.state, "truncated");
+    assert.equal(error.originalAttemptEvidence.completion, completion);
+    assert.ok(error.originalAttemptEvidence.records.length <= 63);
+    assert.equal(error.originalAttemptEvidence.cleanup.value, 5);
+    assert.equal(
+      windowsFeasibilityDiagnostics(error.stderr).failure.operation,
+      "tcp-deadline",
+    );
+    return true;
+  });
+  await observeWindowsFeasibilityWfp(f.run, f.persist);
+  assert.equal(f.saved[0][1].originalAttempt.inputs.completion, completion);
 });

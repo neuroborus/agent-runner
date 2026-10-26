@@ -1284,6 +1284,11 @@ test("native target and later marker require the parked birth, operating logon a
         !fault,
         `${action}:${control}:${fault}`,
       );
+      if (!fault)
+        assert.deepEqual(
+          [api.command_target_record, api.command_marker_record],
+          [10n, 11n],
+        );
       if (!fault && control) {
         Object.assign(api, {
           object: api.command_paths[action],
@@ -1305,6 +1310,7 @@ test("native target and later marker require the parked birth, operating logon a
         });
         program.caseProjection.runInNewContext(api);
         assert.equal(api.command_marker_seen, true);
+        assert.equal(api.command_marker_record, 13n);
       }
     }
   }
@@ -6725,6 +6731,7 @@ test("original gate audit queries retain installed ACEs and effective subject fa
         api.fprintf(stream, format, ...args),
       command_delivery_observe: () => {},
       command_delivery_freeze: () => {},
+      command_attempt_write: () => {},
       command_delivery: {
         rejected: Array(4).fill(0),
         subject: "S-1-5-21-1",
@@ -7324,6 +7331,7 @@ test("actual admission releases the checked child before a complete Job census w
       command_gate_observed: { observed: false },
       command_delivery_observe: () => {},
       command_delivery_freeze: () => {},
+      command_attempt_write: () => {},
       command_delivery: { rejected: Array(4).fill(0) },
       command_gate_audit_write: () => {},
       command_operating_sacls_write: () => {},
@@ -7787,6 +7795,11 @@ async function commandCaptureProgram() {
         /&(command_subscription|command_bookmark|command_event)\b/gu,
         'ref(globals,"$1")',
       )
+      .replace(
+        /&(command_operating_bytes|command_operating_incomplete)\b/gu,
+        'ref(globals,"$1")',
+      )
+      .replaceAll("&diagnosisLock", "diagnosisLock")
       .replace(/,&(count|length|counted)\b/gu, ",value=>$1=value");
   const progress = (text) =>
     text
@@ -7832,6 +7845,7 @@ async function commandCaptureProgram() {
       .replace("char request[2];", "const request=[];")
       .replaceAll("sizeof(request)", "2")
       .replace(/,&(available|copied|count)\b/gu, ",value=>$1=value")}}
+    function command_attempt_write(output) {${translate(body(source, "command_attempt_write"))}}
     function command_observe_failure() {${translate(body(source, "command_observe_failure")).replaceAll("&diagnosticOutputLock", "diagnosticOutputLock")}}
     function command_audit_query(query,interval) {${body(source, "command_audit_query").replace(/\bL(?=")/gu, "")}}
     ${barrier}
@@ -7957,6 +7971,7 @@ function commandCaptureFixture(
     command_delivery_freeze: () => {},
     command_operating_sacls_write: () => {},
     command_operating_incomplete: false,
+    command_operating_bytes: 0,
     command_inspection_incomplete: false,
     command_delivery: { rejected: Array(4).fill(0) },
     command_subscription_query: { text: "" },
@@ -7973,7 +7988,13 @@ function commandCaptureFixture(
     command_case_from: 90n,
     command_case_logon: 1n,
     command_target_record: 0n,
+    command_marker_record: 0n,
     command_target_time: 0n,
+    command_case_until: 0n,
+    first_failure: { operation: null },
+    diagnosisLock: {},
+    AcquireSRWLockShared: () => {},
+    ReleaseSRWLockShared: () => {},
     command_event_time: (stamp) => BigInt(stamp ?? 0),
     command_event_number: (text, out) => {
       if (typeof text !== "string" || !/^(?:0x[0-9a-f]+|[0-9]+)$/iu.test(text))
@@ -8046,6 +8067,7 @@ function commandCaptureFixture(
     },
     remember: (...cause) => {
       api.first ??= cause;
+      api.first_failure.operation ??= cause[0];
     },
     cleanup_error: (...cause) => cleanup.push(cause),
     failure: (code) => {
@@ -8140,6 +8162,9 @@ function commandCaptureFixture(
     fprintf: (_stream, text, ...args) => {
       output += format(text, args);
       lastError = 90;
+    },
+    diagnostic_write: (_stream, _used, _incomplete, text, ...args) => {
+      output += format(text, args);
     },
     fputs: (text) => (output += text),
     fflush: () => {},
@@ -8348,6 +8373,10 @@ test("the future-only pull subscription waits for service readiness after decode
     "notification",
   ]);
   assert.equal(failed.cleanup.length, 1);
+  assert.match(
+    failed.output(),
+    /delivery teardown .*closed=0 subscription=0 bookmark=0 notification=0/u,
+  );
 });
 
 test("actual subscription setup retains partial ownership and refuses failed readiness output", async () => {
@@ -8443,6 +8472,10 @@ test("actual capture waits, drains ordered batches and accepts later service not
   const refusal =
       "native-windows: operation=command-marker-barrier domain=invariant value=0\n",
     delivery = missing.output();
+  assert.match(
+    delivery,
+    /operating-attempt .*target-record=0 marker-record=0 .*generation=unproved/u,
+  );
   assert.ok(Buffer.byteLength(refusal + delivery) < 4096);
   assert.ok(
     delivery.includes(
@@ -8453,7 +8486,17 @@ test("actual capture waits, drains ordered batches and accepts later service not
     delivery,
     /scanned=0 scanned-bytes=0 selected=0 selected-bytes=0 pid=43 action=2 target-id=outside-id marker-id=marker-id target-seen=0 marker-seen=0 io-completed=1 setup=1 control=1 control-completed=1 control-verified=0 closing=0 retirement-seen=0\n/u,
   );
-  assert.deepEqual(windowsFeasibilityDiagnostics(refusal + delivery).failure, {
+  const transport = (await brokerCloseBoundary())();
+  transport.broker.stderr.write(refusal + delivery);
+  const ended = once(transport.broker.stderr, "end");
+  transport.broker.stderr.end();
+  await ended;
+  transport.broker.emit("close", 126, null);
+  const error = await transport.outcome;
+  assert.equal(error.nativeDiagnosticInvalid, false);
+  assert.equal(error.operatingObservationIncomplete, false);
+  assert.equal(Buffer.concat(transport.raw).toString(), refusal + delivery);
+  assert.deepEqual(windowsFeasibilityDiagnostics(error.stderr).failure, {
     operation: "command-marker-barrier",
     domain: "invariant",
     value: 0,

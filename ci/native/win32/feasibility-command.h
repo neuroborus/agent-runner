@@ -40,7 +40,7 @@ static ULONGLONG command_case_until, command_delivery_records[256], command_insp
 static unsigned command_delivery_record_count;
 static BOOL command_delivery_frozen, command_delivery_records_incomplete;
 static DWORD command_delivery_versions[2][4], command_delivery_version_count[2];
-static ULONGLONG command_target_record, command_target_time;
+static ULONGLONG command_target_record, command_target_time, command_marker_record;
 static ULONGLONG command_retirement_from;
 static char command_null_hash[65];
 static PACL command_sacls[4];
@@ -91,6 +91,11 @@ static void command_operating_sacls_write(FILE *output);
 static void command_delivery_observe(void);
 static void command_delivery_freeze(void);
 static void command_pump(HANDLE *pipe,const char *event);
+static void command_attempt_write(FILE *output) {
+  diagnostic_write(output,&command_operating_bytes,&command_operating_incomplete,"native-windows-command: operating-attempt pid=%lu birth=%llu from=%llu until=%llu target-record=%llu marker-record=%llu barriers=%u projection=%u,%u,%u,%u native-io-completed=%u closing=%u retirement=%u subscription=%u generation=unproved\n",
+    command_case_pid,command_case_birth,command_case_from,command_case_until,command_target_record,command_marker_record,command_barriers,
+    command_delivery.rejected[0],command_delivery.rejected[1],command_delivery.rejected[2],command_delivery.rejected[3],!!command_case_finished,!!command_closing,!!command_retirement_seen,command_subscription!=NULL);
+}
 static void command_observe_failure(void) {
   if (!command_observed.active) return;
   DWORD saved = GetLastError();
@@ -112,6 +117,7 @@ static void command_observe_failure(void) {
     fflush(stderr);
   }
   if(command_gate_observed.observed){fputs("native-windows-command: gate-audit=",stderr);command_gate_audit_write(stderr);fputc('\n',stderr);fflush(stderr);}
+  command_attempt_write(stderr);
   command_operating_sacls_write(stderr);
   if(command_observed.audit[0]>=5)command_delivery_observe();
   if(command_operating_incomplete||command_inspection_incomplete)fputs("native-windows-command: operating-incomplete\n",stderr);
@@ -134,6 +140,12 @@ static BOOL command_capture_close(void) {
   if (!command_event_close(&command_subscription)) ok = FALSE;
   if (!command_event_close(&command_bookmark)) ok = FALSE;
   if (!release_handle(&command_event, "command-event-close")) ok = FALSE;
+  AcquireSRWLockShared(&diagnosisLock);BOOL failed=first_failure.operation!=NULL;ReleaseSRWLockShared(&diagnosisLock);
+  if(failed){DWORD saved=GetLastError();
+    fprintf(stderr,"native-windows-command: delivery teardown pid=%lu birth=%llu target-record=%llu marker-record=%llu closed=%u subscription=%u bookmark=%u notification=%u\n",
+      command_case_pid,command_case_birth,command_target_record,command_marker_record,!!ok,command_subscription!=NULL,command_bookmark!=NULL,command_event!=NULL);
+    SetLastError(saved);
+  }
   return ok;
 }
 static BOOL command_revert(void) {
@@ -825,10 +837,10 @@ static void command_case_event(const WCHAR *process, const WCHAR *object, const 
   BOOL succeeded=(bits&0x0030000000000000ULL)==0x0020000000000000ULL;
   if(!_wcsicmp(object,command_paths[command_action])&&(rights&(command_action==0?1:2))&&
       (failureExpected?(id==4656&&failed):(id==4663&&succeeded))){
-    command_target_seen=TRUE;command_target_record=sequence;command_target_time=time;command_marker_seen=FALSE;
+    command_target_seen=TRUE;command_target_record=sequence;command_target_time=time;command_marker_seen=FALSE;command_marker_record=0;
   }else command_delivery.rejected[2]++;
   if(command_target_seen&&!_wcsicmp(object,command_paths[3])&&id==4663&&succeeded&&(rights&1)&&
-      sequence>command_target_record&&time>=command_target_time)command_marker_seen=TRUE;
+      sequence>command_target_record&&time>=command_target_time){command_marker_seen=TRUE;command_marker_record=sequence;}
   else command_delivery.rejected[3]++;
 }
 static BOOL command_audit_project(BYTE *bytes, DWORD length) {
@@ -1256,6 +1268,7 @@ static void command_case_auditing(void) {
   fputs("]}",stdout);
 }
 static void command_case_observe(BOOL after) {
+  if(!after)command_marker_record=0;
   invariant(after?(command_client&&command_case_from&&!command_case_finished):!command_client,"command-coverage-state");
   if(!after){memset(&command_operating_observed,0,sizeof(command_operating_observed));memset(&command_delivery,0,sizeof(command_delivery));command_delivery.policy=command_delivery.policyError=command_delivery.level=command_delivery.subjectError=-1;
     command_delivery_frozen=command_delivery_records_incomplete=FALSE;command_case_until=0;command_delivery_record_count=0;}

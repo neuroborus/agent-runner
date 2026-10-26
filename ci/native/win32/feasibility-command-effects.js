@@ -46,6 +46,12 @@ const need = (v) => {
   if (!v) throw new Error("Incomplete Windows command custody");
 };
 function commandOperatingDiagnostic(bytes) {
+  if (
+    /^native-windows-command: operating-attempt pid=[0-9]{1,10} birth=[0-9]{1,20} from=[0-9]{1,20} until=[0-9]{1,20} target-record=[0-9]{1,20} marker-record=[0-9]{1,20} barriers=[0-9]{1,10} projection=(?:[0-9]{1,10},){3}[0-9]{1,10} native-io-completed=[01] closing=[01] retirement=[01] subscription=[01] generation=unproved\r?\n$/u.test(
+      bytes.toString("utf8"),
+    )
+  )
+    return true;
   return /^native-windows-command: operating-(?:sacl phase=N pid=[0-9]{1,10} birth=[0-9]{1,20} logon=[0-9]{1,20} policy=-?[0-9]{1,20} identity=[a-f0-9]{16}:[a-f0-9]{32} hash=[a-f0-9]{64} count=-?[0-9]{1,20} truncated=[01] status=-?[0-9]{1,20},-?[0-9]{1,20},-?[0-9]{1,20} close=-?[0-9]{1,20}|ace object=[0-3] index=[0-7] status=-?[0-9]{1,20} type=-?[0-9]{1,20} flags=-?[0-9]{1,20} mask=-?[0-9]{1,20} subject-match=(?:-1|[01])|audit-binding pid=[0-9]{1,10} birth=[0-9]{1,20} from=[0-9]{1,20} until=[0-9]{1,20} image=[a-f0-9]{64} target=(?:[a-f0-9]{16}:[a-f0-9]{32}|unavailable) marker=[a-f0-9]{16}:[a-f0-9]{32} live=[0-9]{1,3} incomplete=[01]|audit index=(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7]) types=(?:[0-9]{1,10},){12}[0-9]{1,10} valid=[0-9]{1,4} pid=[0-9]{1,20} logon=[0-9]{1,20} time=[0-9]{1,20} id=[0-9]{1,20} keywords=[0-9]{1,20} record=[0-9]{1,20} mask=[0-9]{1,20} target=[01] marker=[01] excluded=(?:-1|[0-9]|1[0-5]) version=[0-9]{1,20} decoder=(?:-1|[01]) eligible=(?:-1|[01]) delivered=(?:-1|[01]) order=(?:-1|[01])|audit-value index=(?:[0-9]|[1-9][0-9]|1[01][0-9]|12[0-7]) field=[0-4] bytes=[0-9]{1,4} offset=[0-9]{1,4} encoded=[0-9]{1,2} complete=[01] hex=(?:(?:[a-f0-9]{2}){1,64}|-)|incomplete)\r?\n$/u.test(
     bytes.toString("utf8"),
   );

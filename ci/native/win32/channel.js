@@ -348,6 +348,28 @@ export function windowsCustodyChannel(
             const resources = lines.filter((line) =>
               line.startsWith(prefix + "resource "),
             );
+            const coverage = lines.filter((line) =>
+              line.startsWith(prefix + "coverage "),
+            );
+            const coverageNames = [
+              "request-status",
+              "declared-imports",
+              "loader-dependencies",
+              "known-dll-objects",
+              "token-privileges",
+              "window-station-desktop",
+              "inherited-pipes-job",
+              "other-kernel-objects",
+              "path-ancestors",
+            ];
+            const classes = coverage.map((line) =>
+              /^native-windows-original-child: coverage class=([0-8]) name=([a-z-]+) state=(missing|observed|empty|unsupported|expired|truncated|failed) /u.exec(
+                line,
+              ),
+            );
+            const evidence = lines.filter((line) =>
+              line.startsWith(prefix + "evidence "),
+            );
             const roles = resources.map(
               (line) =>
                 /^native-windows-original-child: resource role=(image|workspace|storage|case|custody|outer|policy) /u.exec(
@@ -357,13 +379,37 @@ export function windowsCustodyChannel(
             requireWindows(
               /^[\x20-\x7e\n]+$/u.test(text) &&
                 lines.pop() === "" &&
-                lines.length <= 74 &&
+                lines.length <= 83 &&
                 lines[0]?.startsWith(
                   `${prefix}context command=ownership-output sequence=${value.sequence} source=${value.source} line=${value.line} error=${value.lastError} `,
                 ) &&
                 lines.at(-1)?.startsWith(prefix + "completion ") &&
                 lines.filter((line) => line.startsWith(prefix + "record "))
-                  .length <= 64 &&
+                  .length +
+                  evidence.length <=
+                  64 &&
+                (coverage.length === 0 || coverage.length === 9) &&
+                (evidence.length === 0 || coverage.length === 9) &&
+                classes.every(
+                  (value) =>
+                    value && coverageNames[Number(value[1])] === value[2],
+                ) &&
+                new Set(classes.map((value) => value?.[1])).size ===
+                  classes.length &&
+                coverage.every((line) =>
+                  line.endsWith(" first-request=unobserved"),
+                ) &&
+                evidence.every((line) => {
+                  const fact =
+                    /^native-windows-original-child: evidence class=([12468]) scope=(snapshot|declared-requirements) original-request=unobserved /u.exec(
+                      line,
+                    );
+                  return (
+                    fact &&
+                    fact[2] ===
+                      (fact[1] === "1" ? "declared-requirements" : "snapshot")
+                  );
+                }) &&
                 lines.filter((line) => line.startsWith(prefix + "token "))
                   .length <= 1 &&
                 resources.length <= 7 &&
@@ -375,6 +421,8 @@ export function windowsCustodyChannel(
                     (line) =>
                       line.startsWith(prefix + "record ") ||
                       line.startsWith(prefix + "token ") ||
+                      line.startsWith(prefix + "coverage ") ||
+                      line.startsWith(prefix + "evidence ") ||
                       line.startsWith(prefix + "resource "),
                   ),
             );

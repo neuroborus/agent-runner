@@ -251,8 +251,8 @@ original token and seven fixed held resources: image `[6]` (read data, execute),
 workspace `[4]` (traverse, list, add file/subdirectory), storage `[3]`, case `[1]`,
 custody `[2]`, outer `[0]` (one traverse each), then the materialized policy file
 (read data). These are ten separate declared masks, not observed startup access
-requirements. No PID-based reopen, ancestor/dependency discovery, impersonation,
-permission change or additional child is involved. Original held PID/birth,
+requirements. These resource probes perform no PID-based reopen, ancestor/dependency
+discovery, impersonation or permission change. Original held PID/birth,
 process image and held image identity are rechecked. Before the original literal
 R write, the reader captures one release binding after the existing witness and
 creation guards. The same 30-second tick starts before capture; release FILETIME
@@ -294,8 +294,8 @@ and resource sampling remain post-refusal; the seven resources are not an
 atomic snapshot.
 Neither separate AccessCheck results nor FileIo fields identify the original
 requested access, first failing syscall or complete loader requirements. Window
-stations/desktops, pipes, Jobs, other kernel objects, unheld ancestors and loader
-dependencies remain unobserved.
+stations/desktops and other remote kernel namespaces remain unsupported; the
+separate pre-release snapshots below supply no first-request evidence.
 
 Readback uses only the remaining release budget, without an additional wait.
 Its entire token/hash/projection/cleanup chain is nonfatal. The worker settles
@@ -304,8 +304,9 @@ descriptors, hash resources and buffers once; borrowed custody handles stay unto
 Failed token-acquisition output parameters confer no ownership, even when
 non-null or equal to borrowed custody. Cleanup uncertainty remains separate.
 At most one token row and seven uniquely identified resource rows join the
-existing 64 event rows, for at most 74 lines including context/completion within
-the unchanged byte caps and reserved completion space. Separate readback row and
+shared 64 examined-record allowance. Nine mandatory coverage rows bring the
+maximum to 83 lines including context/completion within the unchanged byte caps
+and reserved completion space. Separate readback row and
 probe counts, unstarted/partial/complete state, unavailable observations and
 cleanup uncertainty do not change Event Log records, joins or empty-query facts.
 An unavailable synchronized publication leaves readback state unavailable.
@@ -313,6 +314,59 @@ Missing rows prove neither grants nor denials. Original error/errno precedence,
 unfinished-thread custody through fatal-reader exit and independent retirement
 remain authoritative. This diagnostic does not repair startup or Windows TCP/audit
 and adds no admission or acceptance prerequisite.
+
+Before that same original literal R, a bounded startup inventory retains facts
+that process exit can erase. It borrows the release-bound process/token/image,
+checks token statistics and live process custody around capture, and rejoins
+PID/birth, capture interval and successful release before publication. Its fixed
+classes map to documented public readers rather than inferred private layouts:
+
+| Class                  | Reader and observation limit                                                                                                                                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Request/status         | Existing typed Security 4656 query; available original requests, never complete tracing or a proven first request                                                                                                                     |
+| Declared imports       | Public [PE import/delay-import directories](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format), bounded same-file `ReOpenFile` read; declarations only                                                                  |
+| Loader dependencies    | [CreateToolhelp32Snapshot](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot), `Module32FirstW`/`Module32NextW`; available pre-release module snapshots, not a completed loader graph |
+| KnownDLL objects       | Unsupported; module names do not identify section objects                                                                                                                                                                             |
+| Token privileges       | `GetTokenInformation(TokenPrivileges)` and [LookupPrivilegeNameW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-lookupprivilegenamew); names, LUIDs and unchanged attributes of the held original token      |
+| Window station/desktop | Unsupported remote observation; never substitute the reader's current desktop                                                                                                                                                         |
+| Inherited pipes/Job    | `IsProcessInJob`, `QueryInformationJobObject` and `GetFileType` on borrowed original custody; parent pipe type and owned Job snapshot, child handle table unobserved                                                                  |
+| Other kernel objects   | Unsupported remote namespace                                                                                                                                                                                                          |
+| Path ancestors         | At most eight `CreateFileW(FILE_READ_ATTRIBUTES)`/`GetFileInformationByHandleEx` snapshots derived from the bound original image path; depth, FileId and reparse attributes, never child access requests                              |
+
+The PE copy, Toolhelp snapshot and ancestor handles are owned only on successful
+acquisition and close once. Borrowed custody never closes here. Failed readers
+publish no output-derived facts. Snapshots, declared requirements and the existing
+seven-resource/ten-probe readback remain distinct from original operations.
+An observed class means available records, not complete namespace coverage.
+Missing, observed, empty, unsupported, expired, truncated and failed states stay
+distinct; every summary preserves binding/publication and independent closure
+uncertainty. Optional rows share the 64 examined-record budget with Event Log,
+use a 4-KiB pre-release buffer and reserve 4096 raw bytes for all summaries and
+completion within the existing 32256-byte/64-KiB transport caps. The original
+30-second release tick never restarts; failure or unavailable evidence supplies
+no startup repair, permission change or native acceptance.
+
+Darwin experiment fault and launcher census refusals use a failure-only phase-3
+request on the existing creator pipe and a diagnostic `D` acknowledgement on its
+release pipe. The refused child never enters phase 2 or consumes payload `R` on
+this path. The privileged original parent checks candidate, PID/birth, refusal
+phase and child-local name, then inspects only while that same child is live.
+The stock Apple [lsmp manual/source](https://github.com/apple-oss-distributions/system_cmds/tree/408bba7453608006b89772db185defbac8fe2fd0/lsmp)
+documents `-p <pid>` selection; privileged mode still enumerates task read ports
+internally. Root-owned executable availability and reap-compatible SIGCHLD policy
+are checked under ordinary hosted-image trust; failed execution/permission,
+missing PID-selected output and changed child lifetime cannot become observation.
+Collection uses the existing remaining 20/30-second lifetime, an 8192-byte output
+cap and reserved cleanup time, without sleeps or deadline resets. Only a successful
+owned fork authorizes observer kill/wait; a lost wait never authorizes signaling.
+The observer's own alarm uses only whole seconds remaining in that same lifetime.
+The parent's output poll also watches its existing control input; coordinator
+closure stops inspection and settles the observer within the remaining budget.
+Observer status, truncation and cleanup uncertainty remain independent from the
+original refusal. Acknowledgement, expiry, malformed reply or channel loss all
+continue refusal and cleanup. Endpoint/kernel-object snapshots establish neither
+acquisition provenance nor authority to release the unknown right. Native hosted
+execution must still establish installed-interface behavior and retirement.
 
 The collector now publishes through the existing authenticated reader/bridge
 pipe. Scheduled reader setup binds stdout to that pipe but establishes no stderr
@@ -519,6 +573,19 @@ the following distinct boundaries:
   capture recipe is not an unchanged-setting subscription contract. Its
   numeric capture keywords cannot be assumed to map directly to the engine
   option, and this experiment does not run it or change collection settings.
+
+The existing original socket/WFP captures now retain one diagnostic attempt
+packet alongside WFP persistence: held process birth, tuple, token/package/user,
+image, interval and owned filter joins stay separate from native completion and
+cleanup. The native outcome freezes before acknowledgement or socket teardown
+can replace it. Bounded input rows reserve a final completion record; pending
+10035, select/deadline/SO_ERROR facts and actual completed errors retain their
+meaning. ALLOW classification and its generation remain explicitly unobserved;
+no notification source or collection setting is added. Command failure output
+similarly retains original target/marker record IDs, projection decisions,
+barriers, I/O completion and checked capture teardown, without equating Security
+subscription with generation. Native 10013 plus attributed outbound DROP and
+independent retirement remain required; timeout is never successful denial.
 
 These contracts establish a notification mechanism, but leave indispensable
 producer semantics unresolved for a useful additional original-client

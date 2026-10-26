@@ -2253,6 +2253,22 @@ static void tcp_detail(const char *api, DWORD value) {
   fprintf(stderr, "native-windows-socket-input: caller=tcp_connection api=%s value=%lu\n", api, value); fflush(stderr);
 }
 static struct { const char *phase; int selected; } tcp_progress;
+static struct diagnosis tcp_original;
+static BOOL tcp_original_receipt;
+static void tcp_attempt_begin(const struct diagnosis *problem, BOOL receipt) {
+  tcp_original=*problem;tcp_original_receipt=receipt;
+}
+/* Same original socket/interval as the tuple carrier. No subscription is added:
+ * the documented subscription contract alone cannot promise event generation. */
+static void tcp_attempt_observe(SOCKET socket, ULONGLONG started, BOOL attempted, const struct diagnosis *settlement, BOOL closed, int closeError) {
+  int saved=WSAGetLastError(),savedErrno=errno;FILETIME born={0},exited,kernel,user;
+  BOOL read=GetProcessTimes(GetCurrentProcess(),&born,&exited,&kernel,&user);DWORD error=read?0:GetLastError();
+  fprintf(stderr,"native-windows-socket-input: caller=original_attempt pid=%lu birth=%llu birth-status=%lu socket=%llu started=%llu ended=%llu attempted=%u native-operation=%s native-domain=%s native-value=%lu native-error-receipt=%u settlement-operation=%s settlement-domain=%s settlement-value=%lu socket-closed=%u close-error=%d classify-allow=unobserved generation=unproved\n",
+    GetCurrentProcessId(),read?((ULONGLONG)born.dwHighDateTime<<32)|born.dwLowDateTime:0,error,(ULONGLONG)socket,started,wfp_now(),!!attempted,
+    tcp_original.operation?tcp_original.operation:"none",tcp_original.domain?tcp_original.domain:"none",tcp_original.value,!!tcp_original_receipt,
+    settlement->operation?settlement->operation:"none",settlement->domain?settlement->domain:"none",settlement->value,!!closed,closeError);
+  fflush(stderr);WSASetLastError(saved);errno=savedErrno;
+}
 static void tcp_deadline_observe(SOCKET socket) {
   int saved=WSAGetLastError(),savedErrno=errno,completed=0,size=sizeof(completed);
   int result=getsockopt(socket,SOL_SOCKET,SO_ERROR,(char *)&completed,&size),error=result==SOCKET_ERROR?WSAGetLastError():0;
@@ -2357,6 +2373,7 @@ static int tcp_connection(const WCHAR *address, const char *text) {
   if (GetTickCount64() >= end) problem = (struct diagnosis){"tcp-deadline", "invariant", 0};
   else if (memcmp(reply, text, 32)) problem = (struct diagnosis){"tcp-nonce", "invariant", 0};
 done:
+  tcp_attempt_begin(&problem,nativeReceipt);
   if(problem.operation&&!strcmp(problem.operation,"tcp-deadline"))tcp_deadline_observe(socket);
   if (problem.operation) {
     if (!nativeReceipt) remember(problem.operation, problem.domain, problem.value);
@@ -2382,6 +2399,7 @@ done:
     remember("tcp-close", "win32", (DWORD)closeError); cleanup_error("tcp-close", "win32", (DWORD)closeError);
   }
   if (socket != INVALID_SOCKET) tcp_observe("closesocket", closed ? "complete" : "failed", (DWORD)closeError);
+  tcp_attempt_observe(socket,started,attempted,&problem,closed,closeError);
   fprintf(stderr, TCP_PREFIX " end\n"); fflush(stderr);
   if (!closed || (problem.operation && !nativeReceipt)) failure(126);
   return nativeReceipt ? (int)problem.value : 0;

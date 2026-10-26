@@ -39,6 +39,7 @@ static void release_file_closing(struct held_file *file);
 #include <wbemidl.h>
 #include <winioctl.h>
 #include <winevt.h>
+#include <stdarg.h>
 #pragma comment(lib, "wevtapi.lib")
 #pragma comment(lib, "wbemuuid.lib")
 #pragma comment(lib, "taskschd.lib")
@@ -1421,6 +1422,7 @@ static BOOL ownership_policy_restored, ownership_policy_possible;
  * reader until need_at calls ExitProcess. Never free, detach, or close a live
  * thread's resources. ExitProcess is not independent process-retirement proof. */
 struct refusal_report {
+  unsigned requestStatusRecords;
   unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget;
   unsigned readbackTokens,readbackResources,readbackProbes,readbackUnavailable;BOOL readbackStarted,readbackFinished,readbackClosure;
 };
@@ -1432,6 +1434,16 @@ static struct {
   HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[32256];
 } original_refusal;
 enum release_capture_state { RELEASE_UNSTARTED, RELEASE_UNAVAILABLE, RELEASE_INVALIDATED, RELEASE_USABLE };
+/* Fixed selected-SDK coverage, independent of the seven resources/ten probes.
+ * Unsupported remote namespaces are never replaced by this reader's desktop,
+ * window station, KnownDLL namespace or handle table. */
+static struct {
+  ULONGLONG from,to,birth; DWORD pid,used,examined,cleanup; BOOL bound,closure,published;
+  unsigned state[9]; DWORD error[9]; char bytes[4096];
+} original_startup;
+static const char *startup_classes[] = {"request-status","declared-imports","loader-dependencies","known-dll-objects",
+  "token-privileges","window-station-desktop","inherited-pipes-job","other-kernel-objects","path-ancestors"};
+static const char *startup_states[] = {"missing","observed","empty","unsupported","expired","truncated","failed"};
 /* These are borrowed, continuously retained objects, never newly owned handles.
  * Only complete pre-release capture publishes identity; dispatch seals its use. */
 static struct release_binding {
@@ -1526,7 +1538,8 @@ static BOOL ownership_literal_read(HANDLE process, HANDLE input, char *bytes, DW
 static void refusal_publish(const char *line, struct refusal_report *report) {
   AcquireSRWLockExclusive(&refusal_lock);
   if(line){size_t size=strlen(line);
-    if(size>sizeof(original_refusal.bytes)-1025-original_refusal.used)report->truncated=TRUE;
+    /* Reserve all class summaries and completion even after optional overflow. */
+    if(size>sizeof(original_refusal.bytes)-4097-original_refusal.used)report->truncated=TRUE;
     else{
       memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;
       if(!strncmp(line,"native-windows-original-child: token ",strlen("native-windows-original-child: token ")))report->readbackTokens++;
@@ -1543,6 +1556,161 @@ static BOOL release_live(HANDLE process, struct readback_status *status) {
   DWORD waited=WaitForSingleObject(process,0);
   if(waited==WAIT_FAILED)return readback_fail(status,"win32","release-wait",GetLastError());
   return waited==WAIT_TIMEOUT||readback_fail(status,"invariant","release-not-live",ERROR_INVALID_DATA);
+}
+static BOOL refusal_hex(const WCHAR *text, char *bytes, size_t capacity);
+static BOOL startup_take(unsigned kind) {
+  if(!refusal_remaining()){original_startup.state[kind]=4;return FALSE;}
+  if(original_startup.examined==64){original_startup.state[kind]=5;return FALSE;}
+  original_startup.examined++;return TRUE;
+}
+static void startup_fact(unsigned kind, const char *format, ...) {
+  char detail[640],line[768];va_list arguments;va_start(arguments,format);
+  int n=vsnprintf(detail,sizeof(detail),format,arguments);va_end(arguments);
+  int size=n>0&&n<sizeof(detail)?snprintf(line,sizeof(line),"native-windows-original-child: evidence class=%u scope=%s original-request=unobserved %s\n",kind,kind==1?"declared-requirements":"snapshot",detail):-1;
+  if(size<=0||size>=sizeof(line)||(DWORD)size>=sizeof(original_startup.bytes)-original_startup.used){original_startup.state[kind]=5;return;}
+  memcpy(original_startup.bytes+original_startup.used,line,size);original_startup.used+=(DWORD)size;original_startup.bytes[original_startup.used]=0;
+}
+/* Same public PE directory/section contracts as the existing import owner,
+ * without its fatal guards. A declaration is never an observed loader access. */
+static BOOL startup_rva(const BYTE *bytes, DWORD size, const IMAGE_NT_HEADERS64 *pe, DWORD value, DWORD length, DWORD *offset) {
+  if(value<pe->OptionalHeader.SizeOfHeaders&&length<=pe->OptionalHeader.SizeOfHeaders-value&&value<=size&&length<=size-value){*offset=value;return TRUE;}
+  const IMAGE_SECTION_HEADER *sections=IMAGE_FIRST_SECTION(pe);
+  for(unsigned i=0;i<pe->FileHeader.NumberOfSections;i++){
+    const IMAGE_SECTION_HEADER *s=sections+i;
+    if(value<s->VirtualAddress)continue;
+    ULONGLONG delta=(ULONGLONG)value-s->VirtualAddress,at=(ULONGLONG)s->PointerToRawData+delta;
+    if(delta<=s->SizeOfRawData&&length<=s->SizeOfRawData-delta&&at<=size&&length<=size-at){*offset=(DWORD)at;return TRUE;}
+  }
+  (void)bytes;return FALSE;
+}
+static void startup_imports(HANDLE image) {
+  struct readback_status status={0};BYTE *bytes=NULL;DWORD used=0;LARGE_INTEGER size;FILE_ID_INFO actual,expected;
+  HANDLE copy=ReOpenFile(image,GENERIC_READ|FILE_READ_ATTRIBUTES,FILE_SHARE_READ,FILE_FLAG_OPEN_REPARSE_POINT);
+  if(copy==INVALID_HANDLE_VALUE){original_startup.state[1]=6;original_startup.error[1]=GetLastError();return;}
+  BOOL valid=GetFileInformationByHandleEx(image,FileIdInfo,&expected,sizeof(expected))&&GetFileInformationByHandleEx(copy,FileIdInfo,&actual,sizeof(actual));
+  if(!valid){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  if(memcmp(&actual,&expected,sizeof(actual))){original_startup.state[1]=6;goto finished;}
+  if(!GetFileSizeEx(copy,&size)){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  if(size.QuadPart<(LONGLONG)sizeof(IMAGE_DOS_HEADER)){original_startup.state[1]=6;goto finished;}
+  if(size.QuadPart>1048576){original_startup.state[1]=5;goto finished;}
+  bytes=calloc(1,(size_t)size.QuadPart);
+  if(!bytes){original_startup.state[1]=6;goto finished;}
+  if(!refusal_remaining()){original_startup.state[1]=4;goto finished;}
+  if(!ReadFile(copy,bytes,(DWORD)size.QuadPart,&used,NULL)){original_startup.state[1]=6;original_startup.error[1]=GetLastError();goto finished;}
+  valid=used==size.QuadPart&&((IMAGE_DOS_HEADER *)bytes)->e_magic==IMAGE_DOS_SIGNATURE;
+  LONG offset=((IMAGE_DOS_HEADER *)bytes)->e_lfanew;
+  if(!valid||offset<0||(ULONGLONG)offset+sizeof(IMAGE_NT_HEADERS64)>used){original_startup.state[1]=6;goto finished;}
+  IMAGE_NT_HEADERS64 *pe=(void *)(bytes+offset);
+  valid=pe->Signature==IMAGE_NT_SIGNATURE&&pe->FileHeader.Machine==IMAGE_FILE_MACHINE_AMD64&&pe->OptionalHeader.Magic==IMAGE_NT_OPTIONAL_HDR64_MAGIC&&
+    pe->FileHeader.SizeOfOptionalHeader==sizeof(IMAGE_OPTIONAL_HEADER64)&&pe->FileHeader.NumberOfSections<=96&&
+    pe->OptionalHeader.NumberOfRvaAndSizes>IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT&&
+    (ULONGLONG)offset+sizeof(*pe)+(ULONGLONG)pe->FileHeader.NumberOfSections*sizeof(IMAGE_SECTION_HEADER)<=used;
+  if(!valid){original_startup.state[1]=6;goto finished;}
+  original_startup.state[1]=2;
+  for(unsigned delay=0;delay<2;delay++){
+    IMAGE_DATA_DIRECTORY table=pe->OptionalHeader.DataDirectory[delay?IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT:IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if(!table.Size&&!table.VirtualAddress)continue;
+    DWORD width=delay?32:sizeof(IMAGE_IMPORT_DESCRIPTOR),at=0;BOOL ended=FALSE;
+    if(!table.VirtualAddress||table.Size<width||!startup_rva(bytes,used,pe,table.VirtualAddress,table.Size,&at)){original_startup.state[1]=6;break;}
+    for(DWORD index=0;index<=table.Size-width;index+=width){
+      if(!startup_take(1))goto finished;
+      const DWORD *entry=(void *)(bytes+at+index);BOOL empty=TRUE;
+      for(unsigned i=0;i<width/sizeof(DWORD);i++)if(entry[i])empty=FALSE;
+      if(empty){ended=TRUE;break;}
+      DWORD name=delay?entry[1]:((const IMAGE_IMPORT_DESCRIPTOR *)entry)->Name,nameAt=0;
+      if(delay&&entry[0]!=1){original_startup.state[1]=3;goto finished;}
+      if(!name||!startup_rva(bytes,used,pe,name,1,&nameAt)){original_startup.state[1]=6;goto finished;}
+      DWORD limit=used-nameAt<256?used-nameAt:256;const BYTE *zero=memchr(bytes+nameAt,0,limit);
+      if(!zero||zero==bytes+nameAt){original_startup.state[1]=6;goto finished;}
+      for(const BYTE *p=bytes+nameAt;p<zero;p++)if(*p<33||*p>126){original_startup.state[1]=6;goto finished;}
+      original_startup.state[1]=1;startup_fact(1,"declared=1 delay=%u name=%s",delay,(const char *)bytes+nameAt);
+      if(original_startup.state[1]==5)goto finished;
+    }
+    if(!ended){original_startup.state[1]=5;break;}
+  }
+finished:
+  free(bytes);readback_close(copy,&status);
+  if(status.closureUncertain){original_startup.closure=TRUE;original_startup.cleanup=status.cleanupValue;}
+}
+static void startup_objects(HANDLE process) {
+  if(!startup_take(6))return;
+  BOOL member=FALSE;BOOL joined=case_job&&IsProcessInJob(process,case_job,&member);LONGLONG error=joined?0:case_job?(LONGLONG)GetLastError():-1;
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION job={0};BOOL sampled=case_job&&QueryInformationJobObject(case_job,JobObjectBasicAccountingInformation,&job,sizeof(job),NULL);
+  LONGLONG query=sampled?0:case_job?(LONGLONG)GetLastError():-1;SetLastError(ERROR_SUCCESS);DWORD type=ownership_output?GetFileType(ownership_output):FILE_TYPE_UNKNOWN;
+  DWORD pipeError=type==FILE_TYPE_UNKNOWN?GetLastError():0;
+  original_startup.state[6]=joined&&sampled&&ownership_output&&type!=FILE_TYPE_UNKNOWN?1:6;
+  startup_fact(6,"job-member=%lld member-status=%lld accounting-status=%lld active=%lld parent-pipe-type=%lld pipe-status=%lu child-handle-table=unobserved",joined?(LONGLONG)!!member:-1,error,query,sampled?(LONGLONG)job.ActiveProcesses:-1,ownership_output&&type!=FILE_TYPE_UNKNOWN?(LONGLONG)type:-1,pipeError);
+}
+static void startup_capture(const struct release_binding *binding) {
+  memset(&original_startup,0,sizeof(original_startup));original_startup.from=readback_now();
+  original_startup.pid=binding->pid;original_startup.birth=binding->birth;
+  original_startup.state[3]=original_startup.state[5]=original_startup.state[7]=3;
+  struct readback_status status={0};TOKEN_STATISTICS before,after;
+  BOOL first=readback_statistics(binding->token,&before,&status);
+  /* GetTokenInformation/LookupPrivilegeNameW retain names, LUIDs and all bits;
+   * no privilege is enabled and failed output buffers confer no facts. */
+  union { TOKEN_PRIVILEGES alignment; BYTE bytes[4096]; } privileges;DWORD used=0;
+  if(readback_query(binding->token,TokenPrivileges,privileges.bytes,sizeof(privileges.bytes),FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges),&used,&status)){
+    TOKEN_PRIVILEGES *p=(void *)privileges.bytes;
+    if(p->PrivilegeCount>64||p->PrivilegeCount>(used-FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges))/sizeof(LUID_AND_ATTRIBUTES))original_startup.state[4]=6;
+    else{original_startup.state[4]=p->PrivilegeCount?1:2;
+      for(DWORD i=0;i<p->PrivilegeCount&&startup_take(4);i++){
+        WCHAR name[128]={0};DWORD length=128;BOOL got=LookupPrivilegeNameW(NULL,&p->Privileges[i].Luid,name,&length);
+        if(!got){original_startup.state[4]=6;original_startup.error[4]=GetLastError();break;}
+        if(!length||length>=128||name[length]){original_startup.state[4]=6;break;}
+        BOOL valid=TRUE;for(DWORD j=0;j<length;j++)if(!((name[j]>=L'A'&&name[j]<=L'Z')||(name[j]>=L'a'&&name[j]<=L'z')||(name[j]>=L'0'&&name[j]<=L'9')))valid=FALSE;
+        if(!valid){original_startup.state[4]=6;break;}
+        startup_fact(4,"name=%ls luid=%08lx%08lx attributes=%lu",name,(DWORD)p->Privileges[i].Luid.HighPart,p->Privileges[i].Luid.LowPart,p->Privileges[i].Attributes);
+        if(original_startup.state[4]==5)break;
+      }
+    }
+  }else{original_startup.state[4]=refusal_remaining()?6:4;original_startup.error[4]=status.value;}
+  if(refusal_remaining())startup_imports(binding->image);else original_startup.state[1]=4;
+  /* Toolhelp supplies a live module snapshot, not KnownDLL section identity,
+   * loader requirements or the operation that caused startup to fail. */
+  if(startup_take(2)){
+    HANDLE snapshot=CreateToolhelp32Snapshot(TH32CS_SNAPMODULE|TH32CS_SNAPMODULE32,binding->pid);
+    if(snapshot==INVALID_HANDLE_VALUE){original_startup.state[2]=6;original_startup.error[2]=GetLastError();}
+    else{MODULEENTRY32W module={sizeof(module)};BOOL next=Module32FirstW(snapshot,&module);DWORD error=next?0:GetLastError();
+      original_startup.state[2]=next?1:error==ERROR_NO_MORE_FILES?2:6;
+      while(next){
+        if(module.th32ProcessID!=binding->pid){original_startup.state[2]=6;break;}
+        char encoded[1025];
+        if(!refusal_hex(module.szModule,encoded,sizeof(encoded))){original_startup.state[2]=5;break;}
+        startup_fact(2,"module-utf16=%s base=%llu size=%lu",encoded,(ULONGLONG)(uintptr_t)module.modBaseAddr,module.modBaseSize);
+        if(original_startup.state[2]==5||!startup_take(2))break;
+        next=Module32NextW(snapshot,&module);error=next?0:GetLastError();
+      }
+      if(!next&&error!=ERROR_NO_MORE_FILES){original_startup.state[2]=6;original_startup.error[2]=error;}
+      readback_close(snapshot,&status);
+    }
+  }
+  startup_objects(binding->process);
+  WCHAR path[4096];wcscpy_s(path,4096,binding->path);original_startup.state[8]=2;
+  for(unsigned depth=0;depth<8;depth++){
+    WCHAR *slash=wcsrchr(path,L'\\');if(!slash||slash<path+2){original_startup.state[8]=3;break;}
+    if(slash==path+2)slash[1]=0;else *slash=0;
+    if(!startup_take(8))break;
+    HANDLE file=CreateFileW(path,FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,NULL,OPEN_EXISTING,FILE_FLAG_BACKUP_SEMANTICS|FILE_FLAG_OPEN_REPARSE_POINT,NULL);
+    if(file==INVALID_HANDLE_VALUE){original_startup.state[8]=6;original_startup.error[8]=GetLastError();break;}
+    FILE_ID_INFO id;FILE_ATTRIBUTE_TAG_INFO tag;
+    BOOL got=GetFileInformationByHandleEx(file,FileIdInfo,&id,sizeof(id))&&GetFileInformationByHandleEx(file,FileAttributeTagInfo,&tag,sizeof(tag));
+    DWORD error=got?0:GetLastError();readback_close(file,&status);
+    if(!got){original_startup.state[8]=6;original_startup.error[8]=error;break;}
+    char identity[33];for(unsigned i=0;i<16;i++)snprintf(identity+2*i,3,"%02x",id.FileId.Identifier[i]);
+    /* Depth selects an ancestor of the already-bound original image path;
+     * avoid repeating that long path at every level of the bounded packet. */
+    original_startup.state[8]=1;startup_fact(8,"depth=%u volume=%llu id=%s attributes=%lu tag=%lu path-source=original-image observer-access=attributes",depth,id.VolumeSerialNumber,identity,tag.FileAttributes,tag.ReparseTag);
+    if(original_startup.state[8]==5)break;
+    if(tag.FileAttributes&FILE_ATTRIBUTE_REPARSE_POINT){original_startup.state[8]=3;break;}
+    if(slash==path+2)break;
+    if(depth==7)original_startup.state[8]=5;
+  }
+  BOOL last=readback_statistics(binding->token,&after,&status);
+  original_startup.bound=first&&last&&readback_same(&before,&after)&&readback_same(&before,&binding->statistics)&&release_live(binding->process,&status);
+  if(status.closureUncertain&&!original_startup.closure)original_startup.cleanup=status.cleanupValue;
+  original_startup.closure|=status.closureUncertain;original_startup.to=readback_now();
+  original_startup.bound=original_startup.bound&&original_startup.to>=original_startup.from;
 }
 static void release_capture(void) {
   int savedErrno=errno;DWORD saved=GetLastError();
@@ -1588,6 +1756,7 @@ finished:
   if(complete&&captured.to<captured.from){complete=FALSE;readback_fail(&status,"invariant","release-interval",ERROR_INVALID_DATA);}
   if(complete&&!status.failed&&!status.closureUncertain){captured.state=RELEASE_USABLE;captured.status=status;original_release=captured;}
   else{original_release.state=RELEASE_UNAVAILABLE;original_release.from=captured.from;original_release.to=captured.to;original_release.status=status;}
+  if(original_release.state==RELEASE_USABLE)startup_capture(&original_release);
   SetLastError(saved);errno=savedErrno;
 }
 static BOOL readback_original(DWORD *pid, ULONGLONG *birth, struct release_image_query *query, struct readback_status *status) {
@@ -1807,7 +1976,7 @@ static void refusal_record(EVT_HANDLE context, EVT_HANDLE event, unsigned channe
   char p[1025],im[16385],sub[737],ty[1025],obj[16385],why[16385],line[57344];
   if(!refusal_hex(provider,p,sizeof(p))||!refusal_hex(image,im,sizeof(im))||!refusal_hex(subject,sub,sizeof(sub))||!refusal_hex(type,ty,sizeof(ty))||!refusal_hex(object,obj,sizeof(obj))||!refusal_hex(reason,why,sizeof(why))){report->truncated=TRUE;return;}
   int size=sprintf_s(line,sizeof(line),"native-windows-original-child: record channel=%u provider-utf16=%s event=%llu version=%llu time=%llu keywords=%llu pid-available=%u pid=%llu image-utf16=%s subject-utf16=%s logon-available=%u logon=%llu object-type-utf16=%s object-utf16=%s mask-available=%u mask=%llu reason-utf16=%s interval=%u identity=%u principal=%u schema=%u joined=%u corroboration=%u\n",channel,p,id,version,time,keywords,!!payload,pid,im,sub,!!hasLogon,logon,ty,obj,!!hasMask,mask,why,!!interval,!!identity,!!principal,!!(security||application),!!joined,!!(joined&&application));
-  if(size>0){report->records++;report->joined+=!!joined;refusal_publish(line,report);}else report->truncated=TRUE;
+  if(size>0){report->records++;report->joined+=!!joined;report->requestStatusRecords+=!!(joined&&security);refusal_publish(line,report);}else report->truncated=TRUE;
 }
 static DWORD WINAPI refusal_worker(void *unused) {
   struct refusal_report report=original_refusal.report;
@@ -1847,6 +2016,29 @@ static DWORD WINAPI refusal_worker(void *unused) {
 finished:
   report.finished=TRUE;refusal_publish(NULL,&report);return 0;
 }
+/* Mandatory summaries use reserved space, even when the worker never starts.
+ * No empty query identifies a first request or supplies missing namespaces. */
+static DWORD startup_publish(char *output, DWORD capacity, DWORD used, const struct refusal_report *report, BOOL published) {
+  BOOL bound=original_startup.bound&&original_startup.pid==original_refusal.pid&&original_startup.birth==original_refusal.birth&&
+    original_release.state==RELEASE_USABLE&&original_release.dispatched&&original_startup.to<=original_release.release;
+  for(unsigned i=0;i<9;i++){
+    unsigned state=original_startup.state[i];DWORD error=original_startup.error[i];
+    BOOL complete=published&&(!i||!original_startup.used||original_startup.published);
+    if(i&&!complete&&state==1)state=5;
+    BOOL closure=i?original_startup.closure:!published||!report->finished||report->closeError;
+    DWORD cleanup=i?original_startup.cleanup:report->closeError;
+    if(!i){
+      state=!published?0:report->overBudget?(refusal_remaining()?5:4):report->truncated?5:report->query[0]<0?0:
+        report->query[0]==ERROR_NOT_SUPPORTED?3:report->query[0]||report->malformed||report->renderError?6:!report->finished?0:report->requestStatusRecords?1:2;
+      error=report->query[0]>0?(DWORD)report->query[0]:0;
+    }
+    int size=snprintf(output+used,capacity-used,"native-windows-original-child: coverage class=%u name=%s state=%s status=%lu pid=%lu birth=%llu from=%llu to=%llu bound=%u published=%u closure-uncertain=%u cleanup=%lu first-request=unobserved\n",
+      i,startup_classes[i],startup_states[state],error,i?original_startup.pid:original_refusal.pid,i?original_startup.birth:original_refusal.birth,i?original_startup.from:original_refusal.from,i?original_startup.to:original_refusal.to,!!bound,!!complete,!!closure,cleanup);
+    if(size<=0||(DWORD)size>=capacity-used)return used;
+    used+=(DWORD)size;
+  }
+  return used;
+}
 static void ownership_refusal_collect(const char *source, unsigned line, DWORD error) {
   if(original_refusal.tried||strcmp(reader_command,"ownership-output")||!ownership_released||!ownership_count)return;
   int savedErrno=errno;DWORD saved=GetLastError();original_refusal.tried=TRUE;
@@ -1864,6 +2056,10 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   int size=encoded?sprintf_s(context,sizeof(context),"native-windows-original-child: context command=%s sequence=%lu source=%s line=%lu error=%lu candidate=%s nonce=%s pid=%lu birth=%llu image-utf16=%s image-volume=%llu image-id=%s image-sha256=%s subject-utf16=%s release=%llu refusal=%llu dispatch-succeeded=%u creation-verified=%u capture=%s capture-from=%llu capture-to=%llu capture-status=%s/%lu capture-operation=%s capture-closure-uncertain=%u resume-time=unavailable\n",original_refusal.command,original_refusal.sequence,original_refusal.source,original_refusal.line,error,candidate,nonce,original_refusal.pid,original_refusal.birth,image,original_refusal.imageId.VolumeSerialNumber,identity,original_refusal.hash,subject,original_refusal.from,original_refusal.to,!!original_refusal.sent,!!original_refusal.creationVerified,release_capture_name(),original_release.from,original_release.to,original_release.status.domain?original_release.status.domain:"none",original_release.status.value,original_release.status.operation?original_release.status.operation:"none",!!original_release.status.closureUncertain):-1;
   size=ownership_literal_context(context,sizeof(context),size);
   if(size>0)refusal_publish(context,&report);else{report.truncated=TRUE;refusal_publish(NULL,&report);}
+  report.examined=original_startup.examined;
+  DWORD before=original_refusal.used;
+  if(original_startup.used)refusal_publish(original_startup.bytes,&report);else refusal_publish(NULL,&report);
+  original_startup.published=original_refusal.used-before==original_startup.used;
   DWORD createError=0,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1,threadClose=-1;
   if(refusal_remaining()&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
     original_refusal.thread=CreateThread(NULL,0,refusal_worker,NULL,0,NULL);
@@ -1881,9 +2077,10 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   if(waited==WAIT_OBJECT_0&&original_refusal.thread){threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();if(!threadClose)original_refusal.thread=NULL;}
   BOOL unavailable=report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
   BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
-  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published;
+  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published||original_startup.closure;
   const char *readbackState=!published?"unavailable":!report.readbackStarted?"unstarted":report.readbackFinished&&report.readbackTokens==1&&report.readbackResources==7&&report.readbackProbes==10&&!report.readbackUnavailable&&!report.readbackClosure&&!report.truncated?"complete":"partial";
-  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u\n",!!report.finished,!!incomplete,!incomplete&&!report.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure);
+  used=startup_publish(output,sizeof(output),used,&report,published);
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u\n",!!report.finished,!!incomplete,!incomplete&&report.examined==original_startup.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0||original_startup.closure),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure);
   if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
   SetLastError(saved);errno=savedErrno;
 }

@@ -358,6 +358,7 @@ static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_typ
     name, census_type, query, current, object_query, kind, (unsigned long long)object,
     getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
   fflush(stderr); errno = saved;
+  domain_refusal_request(name);
   kern_return_t probe_release = domain_refused_aliases("fault", name, census_type, send_query, send_refs);
   if (probe_release != KERN_SUCCESS) remember_cleanup("fault-port-probe-release", "mach", probe_release);
   errno = saved;
@@ -781,6 +782,7 @@ static void domain_start(int argc, char **argv) {
   domain_access_observe("custodian-fork");
   struct proc_taskinfo threads;
   invariant(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &threads, sizeof(threads)) == sizeof(threads) && threads.pti_threadnum == 1, "fault-fork-threads");
+  domain_refusal_begin(20000);
   pid_t child = domain_fault_fork();
   if (!child) {
     domain_access_observe("child-fork");
@@ -832,6 +834,10 @@ static void domain_start(int argc, char **argv) {
   memcpy(domain_record.creator_receipt, receipt, sizeof(receipt)); domain_store(1);
   domain_io(write(release[1], receipt, sizeof(receipt)), sizeof(receipt), "fault-gate-write");
   domain_io(read(ready[0], &post, sizeof(post)), sizeof(post), "fault-final-read");
+  if (post.version == 1 && post.phase == 3) {
+    domain_refusal_inspect(release[1], post, domain_record.owner, domain_record.candidate, "fault-census");
+    remember("fault-port-authority", "invariant", 0); failure(126);
+  }
   char trailing; domain_io(read(ready[0], &trailing, 1), 0, "fault-final-drain"); domain_close(&ready[0]);
   invariant(post.version == 1 && post.phase == 2 && audit_identity_same(post.identity, domain_record.owner) &&
     audit_identity_same(domain_record.owner, fault_inspect(child)), "fault-final-binding");

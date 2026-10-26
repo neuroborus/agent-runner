@@ -28,7 +28,7 @@ test("Darwin experimental launcher retains the fork child through registered and
   assert.ok(body);
   assert.match(
     source,
-    /#ifdef NATIVE_CI_EXPERIMENT\s+pid_t child = launch_bootstrap_fork\(\);\s+#else\s+pid_t child = fork\(\);/u,
+    /#ifdef NATIVE_CI_EXPERIMENT\s+domain_refusal_begin\(30000\);\s+pid_t child = launch_bootstrap_fork\(\);\s+#else\s+pid_t child = fork\(\);/u,
   );
   const script = new Script(`function run() {${body
     .replace("struct domain_bootstrap_fork outcome;", "let outcome = {};")
@@ -5103,6 +5103,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         MACH_PORT_TYPE_DEAD_NAME: DEAD,
         MACH_PORT_RIGHT_SEND: 0,
         MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
+        domain_refusal_request(name) {
+          const original = machCalls.find(
+            (entry) => Array.isArray(entry) && entry[0] === "refusal",
+          );
+          assert.ok(original);
+          assert.equal(name, original[2]);
+          machCalls.push(["refusal-request", name]);
+        },
         // Shared actual-body coverage owns the probe effects; bind this call
         // to the first original refusal before any independent array cleanup.
         domain_refused_aliases(owner, name, type, query, refs) {
@@ -5111,6 +5119,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           );
           assert.equal(owner, "launcher");
           assert.ok(original);
+          assert.deepEqual(machCalls.at(-1), ["refusal-request", name]);
           assert.deepEqual(
             [name, type, query, refs],
             [original[2], original[3], original[9], original[10]],
@@ -5457,6 +5466,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         ]);
       const portFacts = machCalls.filter(
         (entry) => Array.isArray(entry) && entry[0] === "refusal",
+      );
+      assert.equal(
+        machCalls.filter(
+          (entry) => Array.isArray(entry) && entry[0] === "refusal-request",
+        ).length,
+        portFacts.length,
       );
       assert.equal(
         machCalls.filter(
