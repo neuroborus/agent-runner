@@ -10,7 +10,10 @@ import {
 } from "./experiment-policy.js";
 import { providerEnvironmentBlock } from "../providers/index.js";
 import { isWindows2025Image } from "../index.js";
-import { buildWindowsPolicy } from "./policy.js";
+import {
+  buildWindowsPolicy,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 import {
   closed,
   dense,
@@ -615,10 +618,23 @@ export async function admitWindowsLaunch(
     );
     const { nativeEventSha256: priorEvent, ...priorAuthority } = authority;
     const { nativeEventSha256: freshEvent, ...freshAuthority } = fresh;
+    // Compare the complete held state, allowing only informational privilege
+    // metadata to vary. Preserve both original observations and their raw bits.
+    const [priorState, freshState] = [priorAuthority, freshAuthority].map(
+      (value) => {
+        const state = structuredClone(value);
+        for (const token of [
+          state.token,
+          state.policy.installation.effective.token,
+        ])
+          token.privileges = assertWindowsTraversalPrivileges(token.privileges);
+        return state;
+      },
+    );
     requireWindows(
       hash(priorEvent) &&
         hash(freshEvent) &&
-        JSON.stringify(freshAuthority) === JSON.stringify(priorAuthority),
+        JSON.stringify(freshState) === JSON.stringify(priorState),
     );
     if (policyBinding) {
       const freshPolicy = verifyNativePolicy(

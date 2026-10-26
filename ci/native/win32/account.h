@@ -97,25 +97,55 @@ static HANDLE account(const wchar_t *name, const wchar_t *custody, wchar_t **use
   wchar_t *actual = token_sid(token); need(!wcscmp(actual, *userSid)); LocalFree(actual); need(SetHandleInformation(token, HANDLE_FLAG_INHERIT, 0));
   return token;
 }
+/* Read the actual token independently; the lookup supplies no numeric-LUID
+ * assumption and USED_FOR_ACCESS never changes its authority. */
+static DWORD change_notify_privilege(HANDLE token) {
+  TOKEN_PRIVILEGES *privileges = token_info(token, TokenPrivileges); LUID notify;
+  need(LookupPrivilegeValueW(NULL, SE_CHANGE_NOTIFY_NAME, &notify));
+  BOOL valid = privileges->PrivilegeCount == 1;
+  DWORD attributes = valid ? privileges->Privileges[0].Attributes : 0;
+  valid = valid && !memcmp(&privileges->Privileges[0].Luid, &notify, sizeof(LUID)) &&
+    (attributes & SE_PRIVILEGE_ENABLED) &&
+    !(attributes & ~(SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_USED_FOR_ACCESS));
+  free(privileges); if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid); return attributes;
+}
 static HANDLE restrict_token(HANDLE base, PSID capability) {
   TOKEN_GROUPS *groups = token_info(base, TokenGroups); TOKEN_PRIVILEGES *privileges = token_info(base, TokenPrivileges);
-  need(groups->GroupCount <= 128 && privileges->PrivilegeCount <= 64);
+  BOOL valid = groups->GroupCount <= 128 && privileges->PrivilegeCount <= 64;
+  if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  LUID notify; need(LookupPrivilegeValueW(NULL, SE_CHANGE_NOTIFY_NAME, &notify));
+  LUID_AND_ATTRIBUTES deleted[64]; DWORD deleteCount = 0, found = 0, retained = 0;
+  for (DWORD i = 0; i < privileges->PrivilegeCount; i++) {
+    if (!memcmp(&privileges->Privileges[i].Luid, &notify, sizeof(LUID))) {
+      found++; retained = privileges->Privileges[i].Attributes;
+    } else deleted[deleteCount++] = privileges->Privileges[i];
+  }
+  valid = found == 1 && (retained & SE_PRIVILEGE_ENABLED) &&
+    !(retained & ~(SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_USED_FOR_ACCESS));
+  if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
   SID_AND_ATTRIBUTES disabled[128]; DWORD count = 0;
   for (DWORD i = 0; i < groups->GroupCount; i++)
     if (!(groups->Groups[i].Attributes & (SE_GROUP_INTEGRITY | SE_GROUP_USE_FOR_DENY_ONLY))) disabled[count++] = groups->Groups[i];
   SID_AND_ATTRIBUTES restricting = { capability, 0 }; HANDLE token;
-  /* Delete every privilege explicitly, including SeChangeNotifyPrivilege.
-   * Never use WRITE_RESTRICTED (or its read-access escape) here. */
-  need(CreateRestrictedToken(base, 0, count, disabled, privileges->PrivilegeCount, privileges->Privileges, 1, &restricting, &token));
+  /* Retain only the already-enabled traversal privilege. Never add authority
+   * or use WRITE_RESTRICTED (or its read-access escape) here. */
+  need(CreateRestrictedToken(base, 0, count, disabled, deleteCount, deleted, 1, &restricting, &token));
   free(groups); free(privileges);
   PSID low; need(ConvertStringSidToSidW(L"S-1-16-4096", &low));
   TOKEN_MANDATORY_LABEL integrity = { { low, SE_GROUP_INTEGRITY } };
   need(SetTokenInformation(token, TokenIntegrityLevel, &integrity, sizeof(integrity) + GetLengthSid(low))); LocalFree(low);
   DWORD off = 0; need(SetTokenInformation(token, TokenVirtualizationEnabled, &off, sizeof(off)));
-  TOKEN_PRIVILEGES *after = token_info(token, TokenPrivileges); DWORD *session = token_info(token, TokenSessionId);
+  DWORD after = change_notify_privilege(token); DWORD *session = token_info(token, TokenSessionId);
   TOKEN_GROUPS *restricted = token_info(token, TokenRestrictedSids);
-  need(IsTokenRestricted(token) && after->PrivilegeCount == 0 && *session == 0 && restricted->GroupCount == 1 && EqualSid(restricted->Groups[0].Sid, capability));
-  free(after); free(session); free(restricted); need(SetHandleInformation(token, HANDLE_FLAG_INHERIT, 0));
+  groups = token_info(token, TokenGroups);
+  valid = IsTokenRestricted(token) && (after & ~SE_PRIVILEGE_USED_FOR_ACCESS) == (retained & ~SE_PRIVILEGE_USED_FOR_ACCESS) &&
+    *session == 0 && restricted->GroupCount == 1 && EqualSid(restricted->Groups[0].Sid, capability) && groups->GroupCount <= 128;
+  if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  for (DWORD i = 0; i < groups->GroupCount; i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) {
+    valid = (groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) && !(groups->Groups[i].Attributes & SE_GROUP_ENABLED);
+    if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  }
+  free(groups); free(session); free(restricted); need(SetHandleInformation(token, HANDLE_FLAG_INHERIT, 0));
   return token;
 }
 

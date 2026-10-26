@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
 import {
   buildWindowsPolicy,
+  assertWindowsPolicyToken,
   assertWindowsPolicyInstallation,
   configureWindowsPolicy,
   assertWindowsAccessObservation,
@@ -167,6 +168,38 @@ test("Windows admission rejects incomplete filters, unknown token semantics and 
     const changed = structuredClone(installation);
     mutate(changed);
     assert.throws(() => assertWindowsPolicyInstallation(changed, input));
+  }
+});
+
+test("Windows policy requires the exact typed enabled traversal privilege and preserves raw metadata", () => {
+  const { input, installation } = fixture();
+  const token = installation.effective.token;
+  for (const attributes of [2, 3, 0x80000002, 0x80000003]) {
+    const value = structuredClone(token);
+    value.privileges[0].attributes = attributes;
+    assertWindowsPolicyToken(value, input);
+    assert.equal(value.privileges[0].attributes, attributes);
+  }
+  const valid = token.privileges[0];
+  for (const privileges of [
+    [],
+    ["SeChangeNotifyPrivilege"],
+    [valid.luid],
+    [valid, valid],
+    [valid, { ...valid, name: "SeDebugPrivilege" }],
+    [{ ...valid, name: "SeDebugPrivilege" }],
+    [{ ...valid, luid: "invalid" }],
+    [{ ...valid, luid: 41 }],
+    [{ ...valid, luid: "0".repeat(16) }],
+    [{ luid: valid.luid, attributes: 3 }],
+    [{ ...valid, allowed: true }],
+    ...[0, 1, 4, 6, 8, -1, 0x100000002, 2.5, "3"].map((attributes) => [
+      { ...valid, attributes },
+    ]),
+  ]) {
+    assert.throws(() =>
+      assertWindowsPolicyToken({ ...token, privileges }, input),
+    );
   }
 });
 

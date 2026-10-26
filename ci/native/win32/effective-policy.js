@@ -19,7 +19,11 @@ import {
 } from "./protocol.js";
 import { decode } from "./custody-protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
-import { buildWindowsPolicy, assertWindowsPolicyToken } from "./policy.js";
+import {
+  buildWindowsPolicy,
+  assertWindowsPolicyToken,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 import {
   assertWindowsPolicySnapshot,
   windowsEffectiveRights,
@@ -116,7 +120,12 @@ export async function readWindowsEffectivePolicy(
       subject.identity.pid !== verifier.pid,
   );
   assertWindowsPolicyToken(token, plan.value);
-  requireWindows(token.tokenId === subject.tokenId);
+  requireWindows(
+    token.tokenId === subject.tokenId &&
+      token.authenticationId === subject.authenticationId &&
+      observationDigest(assertWindowsTraversalPrivileges(token.privileges)) ===
+        observationDigest(assertWindowsTraversalPrivileges(subject.privileges)),
+  );
   const actual = [],
     objects = [];
   let file = 0;
@@ -379,13 +388,34 @@ export async function readWindowsEffectivePolicy(
         actual.filter((item) => item.object)[index],
       ),
     );
+  const freshRegistry = await reader.registry(transfer.subject),
+    freshToken = await reader.effectiveToken(transfer.subject),
+    freshSubject = await reader.process(transfer.subject);
   requireWindows(
     equal(
-      await reader.registry(transfer.subject),
+      freshRegistry,
       actual.find((item) => item.nameHex),
     ) &&
-      equal(await reader.effectiveToken(transfer.subject), token) &&
-      equal(await reader.process(transfer.subject), subject),
+      equal(
+        {
+          ...freshToken,
+          privileges: assertWindowsTraversalPrivileges(freshToken.privileges),
+        },
+        {
+          ...token,
+          privileges: assertWindowsTraversalPrivileges(token.privileges),
+        },
+      ) &&
+      equal(
+        {
+          ...freshSubject,
+          privileges: assertWindowsTraversalPrivileges(freshSubject.privileges),
+        },
+        {
+          ...subject,
+          privileges: assertWindowsTraversalPrivileges(subject.privileges),
+        },
+      ),
   );
   for (const [index, descriptor] of (installed
     ? plan.manifest.filters

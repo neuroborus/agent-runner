@@ -591,9 +591,13 @@ export function processObservation(value) {
   }
   for (const id of dense(value.restricting, 128)) sid(id);
   for (const privilege of dense(value.privileges, 128)) {
-    closed(privilege, ["luid", "attributes"]);
+    closed(privilege, ["luid", "name", "attributes"]);
     requireWindows(
-      /^[a-f0-9]{16}$/u.test(privilege.luid) &&
+      typeof privilege.luid === "string" &&
+        /^[a-f0-9]{16}$/u.test(privilege.luid) &&
+        typeof privilege.name === "string" &&
+        privilege.name.length < 128 &&
+        /^Se[A-Za-z0-9]+Privilege$/u.test(privilege.name) &&
         integer(privilege.attributes, 0xffffffff),
     );
   }

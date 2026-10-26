@@ -26,6 +26,7 @@ import {
 import { observationDigest } from "../index.js";
 import { createPrerequisiteTransport } from "../prerequisite-transport.js";
 import { windowsPolicyFixture } from "./policy.fixture.js";
+import { windowsOwnershipParameters } from "./case-effects.js";
 import { compilerTrustFixture } from "./compiler-trust.fixture.js";
 import {
   createNativeDiagnosticWriter,
@@ -1683,6 +1684,394 @@ test("Windows build controller admission rejects stale policy, extra flags and m
     );
     assert.ok(!f.events.some((event) => event.startsWith("helper-release ")));
     assert.equal((await reader.close()).status, "RETAINED");
+  }
+});
+
+test("actual restricted-token construction deletes every other privilege and independent peer/Git guards require exact traversal authority", async () => {
+  const [account, reader] = await Promise.all(
+    ["account.h", "custody-reader.c"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const body = (source, name) => {
+    const match = new RegExp(
+      `static [^\\n]+ ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source);
+    assert.ok(match, name);
+    return match[1];
+  };
+  // Representation-only projection of the actual native construction/guards.
+  const project = (value) =>
+    value
+      .replaceAll("->", ".")
+      .replace(/\bLUID notify\b/gu, "LUID notify = {}")
+      .replace("LUID_AND_ATTRIBUTES deleted[64]", "var deleted=[]")
+      .replace("SID_AND_ATTRIBUTES disabled[128]", "var disabled=[]")
+      .replace("{ capability, 0 }", "{ Sid: capability, Attributes: 0 }")
+      .replace(
+        "{ { low, SE_GROUP_INTEGRITY } }",
+        "{ Label: { Sid: low, Attributes: SE_GROUP_INTEGRITY } }",
+      )
+      .replace(/sizeof\([^)]*\)/gu, "1")
+      .replace(
+        /\b(?:TOKEN_PRIVILEGES|TOKEN_GROUPS|TOKEN_MANDATORY_LABEL|SID_AND_ATTRIBUTES|DWORD|BOOL|HANDLE|LUID|PSID) \*?/gu,
+        "var ",
+      )
+      .replaceAll("*session", "session.value")
+      .replace(
+        /(?<!&)&(privileges\.Privileges\[[^\]]+\]\.Luid|notify|restricting|integrity|off)\b/gu,
+        "$1",
+      )
+      .replace(/(?<!&)&(token|low)\b/gu, "ref(()=>$1,v=>$1=v)")
+      .replace(/\bL"/gu, '"');
+  const peerBody = body(reader, "verify_access_peer_policy"),
+    peer = peerBody.slice(
+      peerBody.indexOf("  TOKEN_GROUPS *groups="),
+      peerBody.indexOf("  BOOL belongs;"),
+    ),
+    gitBody = body(reader, "git_creator_token"),
+    gitStart = gitBody.indexOf("    change_notify_privilege(token);"),
+    git = gitBody.slice(gitStart, gitBody.indexOf("\n  }", gitStart));
+  assert.ok(peer && gitStart > 0 && git);
+  const program = new Script(`
+    function change_notify_privilege(token){${project(body(account, "change_notify_privilege"))}}
+    function construct(base,capability){${project(body(account, "restrict_token"))}}
+    function peer(token,kind){var view={kind};${project(peer)}}
+    function git(token){${project(git)}}
+    ({construct,peer,git,guard:change_notify_privilege});
+  `);
+  const notify = { HighPart: 23, LowPart: 41 },
+    entry = (Attributes = 3, Luid = notify) => ({
+      Luid: { ...Luid },
+      Attributes,
+    });
+  const fixture = (options = {}) => {
+    const base = options.base ?? [
+        entry(),
+        entry(2, { HighPart: 9, LowPart: 7 }),
+      ],
+      after = options.after ?? [
+        entry(base.find((p) => p.Luid.HighPart === 23)?.Attributes & 3),
+      ],
+      ordinary = { Sid: "ordinary", Attributes: 4 },
+      integrity = { Sid: "integrity", Attributes: 0x20 },
+      deny = { Sid: "deny", Attributes: 0x10 },
+      calls = [];
+    let error = 0,
+      lookups = 0;
+    const api = {
+      NULL: null,
+      FALSE: false,
+      SE_CHANGE_NOTIFY_NAME: "SeChangeNotifyPrivilege",
+      SE_PRIVILEGE_ENABLED: 2,
+      SE_PRIVILEGE_ENABLED_BY_DEFAULT: 1,
+      SE_PRIVILEGE_USED_FOR_ACCESS: 0x80000000,
+      SE_GROUP_ENABLED: 4,
+      SE_GROUP_INTEGRITY: 0x20,
+      SE_GROUP_USE_FOR_DENY_ONLY: 0x10,
+      TokenPrivileges: 1,
+      TokenGroups: 2,
+      TokenRestrictedSids: 3,
+      TokenSessionId: 4,
+      TokenIntegrityLevel: 5,
+      TokenVirtualizationEnabled: 6,
+      HANDLE_FLAG_INHERIT: 1,
+      ERROR_INVALID_DATA: 13,
+      ref: (get, set) => ({
+        get value() {
+          return get();
+        },
+        set value(value) {
+          set(value);
+        },
+      }),
+      token_info(token, kind) {
+        calls.push([token, kind]);
+        if (kind === 1) {
+          const Privileges = token === "base" ? base : after;
+          return structuredClone({
+            PrivilegeCount:
+              token === "base"
+                ? (options.baseCount ?? Privileges.length)
+                : Privileges.length,
+            Privileges,
+          });
+        }
+        if (kind === 2) {
+          const Groups =
+            token === "base"
+              ? [ordinary, integrity, deny]
+              : (options.groups ?? [
+                  { ...ordinary, Attributes: 0x10 },
+                  integrity,
+                  deny,
+                ]);
+          return structuredClone({ GroupCount: Groups.length, Groups });
+        }
+        if (kind === 3) {
+          const Groups = (options.restricting ?? ["private"]).map((Sid) => ({
+            Sid,
+          }));
+          return { GroupCount: Groups.length, Groups };
+        }
+        assert.equal(kind, 4);
+        return { value: 0 };
+      },
+      LookupPrivilegeValueW(_, name, out) {
+        assert.equal(name, "SeChangeNotifyPrivilege");
+        if (++lookups === options.lookupFailure) {
+          error = 5;
+          return false;
+        }
+        Object.assign(out, notify);
+        return true;
+      },
+      CreateRestrictedToken(
+        token,
+        flags,
+        disabledCount,
+        disabled,
+        deletedCount,
+        deleted,
+        restrictedCount,
+        restricting,
+        out,
+      ) {
+        assert.equal(token, "base");
+        assert.equal(flags, 0);
+        assert.equal(disabledCount, 1);
+        assert.deepEqual(structuredClone(disabled[0]), ordinary);
+        assert.deepEqual(
+          structuredClone(Array.from(deleted).slice(0, deletedCount)),
+          base.filter((p) => p.Luid.HighPart !== 23 || p.Luid.LowPart !== 41),
+        );
+        assert.equal(restrictedCount, 1);
+        assert.equal(restricting.Sid, "private");
+        calls.push(["create"]);
+        out.value = "restricted";
+        return true;
+      },
+      ConvertStringSidToSidW(_, out) {
+        out.value = "low";
+        return true;
+      },
+      SetTokenInformation: () => true,
+      GetLengthSid: () => 1,
+      IsTokenRestricted: () => true,
+      EqualSid: (a, b) => a === b,
+      SetHandleInformation: () => true,
+      SetLastError: (value) => {
+        error = value;
+      },
+      need: (value) => {
+        if (!value) throw Object.assign(new Error("native refusal"), { error });
+      },
+      memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+      free: () => {},
+      LocalFree: () => {},
+    };
+    return { native: program.runInNewContext(api), calls };
+  };
+  for (const attributes of [2, 3, 0x80000002, 0x80000003]) {
+    const f = fixture({
+      base: [
+        entry(2, { HighPart: 9, LowPart: 7 }),
+        entry(attributes),
+        entry(0, { HighPart: 4, LowPart: 5 }),
+      ],
+    });
+    assert.equal(f.native.construct("base", "private"), "restricted");
+    f.native.peer("restricted", 0);
+    f.native.git("restricted");
+    assert.ok(
+      f.calls.filter(([token, kind]) => token === "restricted" && kind === 1)
+        .length >= 3,
+    );
+  }
+  for (const options of [
+    { base: [] },
+    { base: [entry(0)] },
+    { base: [entry(1)] },
+    { base: [entry(6)] },
+    { base: [entry(10)] },
+    { base: [entry(), entry()] },
+    { base: [entry(2, { HighPart: 9, LowPart: 7 })] },
+    { baseCount: 65 },
+    { lookupFailure: 1 },
+    { lookupFailure: 2 },
+    { after: [] },
+    { after: [entry(), entry()] },
+    { after: [entry(0)] },
+    { after: [entry(2)] },
+    { after: [entry(3, { HighPart: 9, LowPart: 7 })] },
+    { groups: [{ Sid: "ordinary", Attributes: 4 }] },
+    { groups: [{ Sid: "ordinary", Attributes: 0 }] },
+    { restricting: [] },
+    { restricting: ["foreign"] },
+    { restricting: ["private", "foreign"] },
+  ]) {
+    const f = fixture(options);
+    assert.throws(
+      () => f.native.construct("base", "private"),
+      (cause) => cause.error === (options.lookupFailure ? 5 : 13),
+    );
+  }
+  for (const after of [
+    [],
+    [entry(0)],
+    [entry(6)],
+    [entry(10)],
+    [entry(), entry()],
+    [entry(3, { HighPart: 9, LowPart: 7 })],
+  ]) {
+    const f = fixture({ after });
+    assert.throws(() => f.native.peer("restricted", 0));
+    assert.throws(() => f.native.git("restricted"));
+  }
+  fixture({ after: [] }).native.peer("restricted", 1); // Separate other-account policy is unchanged.
+});
+
+test("actual privilege emission is typed and unfiltered in both held readers and refuses malformed native names", async () => {
+  const [reader, effective] = await Promise.all(
+    ["custody-reader.c", "effective-reader.h"].map((name) =>
+      readFile(new URL(name, import.meta.url), "utf8"),
+    ),
+  );
+  const body = /static void emit_privilege\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    reader,
+  )?.[1];
+  assert.ok(body);
+  const project = (value) =>
+    value
+      .replaceAll("->", ".")
+      .replace("wchar_t name[128] = {0}", "var name=Array(128).fill(0)")
+      .replaceAll("name + length - 9", "name.slice(length-9)")
+      .replace(/\b(?:DWORD|BOOL|unsigned) /gu, "var ")
+      .replaceAll("&value.Luid", "value.Luid")
+      .replaceAll("&length", "ref(()=>length,v=>length=v)")
+      .replace(/L'([^'])'/gu, (_, c) => String(c.charCodeAt(0)))
+      .replace(/\bL"/gu, '"')
+      .replaceAll("&privileges.Privileges[i]", "privileges.Privileges[i]");
+  for (const source of [reader, effective]) {
+    const loop = source
+      .split("\n")
+      .find(
+        (line) =>
+          line.includes("for (unsigned i") && line.includes("emit_privilege("),
+      );
+    assert.ok(loop);
+    for (const fault of [
+      null,
+      "api",
+      "empty",
+      "truncated",
+      "length",
+      "unterminated",
+      "invalid",
+      "noncanonical",
+    ]) {
+      let output = "",
+        error = 0;
+      const text = (value) =>
+        typeof value === "string"
+          ? value
+          : String.fromCharCode(
+              ...value.slice(
+                0,
+                value.indexOf(0) < 0 ? value.length : value.indexOf(0),
+              ),
+            );
+      const entries = [
+        { Luid: { HighPart: 23, LowPart: 41 }, Attributes: 0x80000003 },
+        { Luid: { HighPart: 5, LowPart: 7 }, Attributes: 0x40000000 },
+      ];
+      const api = {
+        NULL: null,
+        ERROR_INVALID_DATA: 13,
+        privileges: { PrivilegeCount: 2, Privileges: entries },
+        ref: (get, set) => ({
+          get value() {
+            return get();
+          },
+          set value(v) {
+            set(v);
+          },
+        }),
+        LookupPrivilegeNameW(_, luid, name, length) {
+          assert.equal(length.value, 128);
+          if (fault === "api") {
+            error = 1313;
+            return false;
+          }
+          const value =
+            fault === "empty"
+              ? ""
+              : fault === "invalid"
+                ? 'SeBad"Privilege'
+                : fault === "noncanonical"
+                  ? "OtherPrivilege"
+                  : luid.HighPart === 23
+                    ? "SeChangeNotifyPrivilege"
+                    : "SeDebugPrivilege";
+          for (let i = 0; i < value.length; i++) name[i] = value.charCodeAt(i);
+          name[value.length] = fault === "unterminated" ? 88 : 0;
+          length.value =
+            fault === "truncated"
+              ? 128
+              : value.length + Number(fault === "length");
+          return true;
+        },
+        wcslen: (value) => text(value).length,
+        wcsncmp: (a, b, n) => Number(text(a).slice(0, n) !== b.slice(0, n)),
+        wcscmp: (a, b) => Number(text(a) !== b),
+        SetLastError: (value) => {
+          error = value;
+        },
+        need: (value) => {
+          if (!value)
+            throw Object.assign(new Error("native refusal"), { error });
+        },
+        putchar: (value) => {
+          output += value;
+        },
+        printf(format, ...values) {
+          let i = 0;
+          output += format.replace(/%08lx|%ls|%lu/gu, (kind) => {
+            const value = values[i++];
+            return kind === "%08lx"
+              ? value.toString(16).padStart(8, "0")
+              : kind === "%ls"
+                ? text(value)
+                : String(value);
+          });
+        },
+      };
+      const program = new Script(
+        `function emit_privilege(value){${project(body)}}\n${project(loop)}`,
+      );
+      if (fault)
+        assert.throws(
+          () => program.runInNewContext(api),
+          (cause) => cause.error === (fault === "api" ? 1313 : 13),
+        );
+      else
+        assert.deepEqual(
+          JSON.parse("[" + (program.runInNewContext(api), output) + "]"),
+          [
+            {
+              luid: "0000001700000029",
+              name: "SeChangeNotifyPrivilege",
+              attributes: 0x80000003,
+            },
+            {
+              luid: "0000000500000007",
+              name: "SeDebugPrivilege",
+              attributes: 0x40000000,
+            },
+          ],
+        );
+    }
   }
 });
 
@@ -3984,6 +4373,27 @@ test("Windows owned policy borrows acquired handles across install, inspection a
       readFile(new URL(name, import.meta.url), "utf8"),
     ),
   );
+  const nativeMasks = /static DWORD ownership_masks\[6\] = \{([^}]+)\}/u.exec(
+    reader,
+  );
+  assert.ok(nativeMasks);
+  const masks = Array.from(
+    new Script(`[${nativeMasks[1]}]`).runInNewContext({}),
+  );
+  assert.deepEqual(masks, [0, 0, 0x120020, 0x12019f | 0x20, 0, 0x1200a9]);
+  const observed = {
+    accountSid: "S-1-5-21-1-2-3-1001",
+    restrictingSid: "S-1-5-21-4-5-6-1002",
+    objects: masks.map((_, i) => ({ object: { identity: id(i + 1) } })),
+  };
+  assert.deepEqual(
+    windowsOwnershipParameters(observed).objects.map(({ mask }) => mask),
+    masks,
+  );
+  assert.deepEqual(
+    windowsOwnershipParameters(observed, true).objects.map(({ mask }) => mask),
+    masks.map((mask, i) => (i === 3 ? 0x1200a9 : mask)),
+  );
   const project = (source, name, args) => {
     const body = new RegExp(
       `static [^\\n]+ ${name}\\([^)]*\\) \\{([\\s\\S]*?)\\n\\}`,
@@ -4072,7 +4482,6 @@ test("Windows owned policy borrows acquired handles across install, inspection a
       sacl: index === 4 ? acl("baseline-label") : null,
     }));
     const baseline = current.map(copy);
-    const masks = [0, 0, 0x120020, 0x12019f, 0, 0x1200a9];
     const own = (value) => {
       allocations.add(value);
       return value;

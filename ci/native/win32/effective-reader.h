@@ -467,7 +467,7 @@ static void effective_token_handle(HANDLE token) {
   printf("],\"enabledGroups\":["); unsigned emitted = 0;
   for (unsigned i = 0; i < groups->GroupCount; i++) if (groups->Groups[i].Attributes & SE_GROUP_ENABLED) { if (emitted++) putchar(','); emit_sid(groups->Groups[i].Sid); }
   printf("],\"privileges\":[");
-  for (unsigned i = 0; i < privileges->PrivilegeCount; i++) printf("%s\"%08lx%08lx\"", i ? "," : "", privileges->Privileges[i].Luid.HighPart, privileges->Privileges[i].Luid.LowPart);
+  for (unsigned i = 0; i < privileges->PrivilegeCount; i++) { if (i) putchar(','); emit_privilege(&privileges->Privileges[i]); }
   printf("],\"integritySid\":"); emit_sid(level->Label.Sid);
   printf(",\"sessionId\":%lu,\"tokenId\":\"%08lx%08lx\",\"authenticationId\":\"%08lx%08lx\",\"primary\":%s,\"virtualized\":%s,\"writeRestricted\":%s}",
     *session, before->TokenId.HighPart, before->TokenId.LowPart, before->AuthenticationId.HighPart, before->AuthenticationId.LowPart,

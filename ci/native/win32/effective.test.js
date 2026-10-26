@@ -1290,6 +1290,51 @@ test("Windows effective composition joins independently approved bindings to act
   );
   assert.ok(reads > f.objects.length);
 });
+test("Windows effective reads corroborate traversal LUID and authority while retaining informational metadata", async () => {
+  for (const damage of [
+    null,
+    "luid",
+    "authority",
+    "missing",
+    "authentication",
+  ]) {
+    const f = effectiveFixture(),
+      process = f.reader.process,
+      effectiveToken = f.reader.effectiveToken;
+    let tokenReads = 0;
+    f.reader.effectiveToken = async (...args) => {
+      const value = await effectiveToken(...args);
+      if (++tokenReads > 1) value.privileges[0].attributes = 0x80000003;
+      return value;
+    };
+    f.reader.process = async (...args) => {
+      const value = await process(...args);
+      value.privileges[0].attributes = 0x80000003;
+      if (damage === "luid") value.privileges[0].luid = "1".repeat(16);
+      if (damage === "authority") value.privileges[0].attributes = 2;
+      if (damage === "missing") value.privileges = [];
+      if (damage === "authentication") value.authenticationId = "f".repeat(16);
+      return value;
+    };
+    const owner = createWindowsEffectiveReaders(
+      f.reader,
+      f.context,
+      f.verifier,
+      f.options,
+    );
+    const read = () =>
+      owner.policySnapshot(f.input, {
+        subject: 0,
+        objects: f.objects.map((_, index) => index),
+      });
+    if (damage) await assert.rejects(read);
+    else {
+      await read();
+      assert.equal(f.token.privileges[0].attributes, 3);
+    }
+  }
+});
+
 test("Windows expected manifests cannot manufacture token authority, native access, MIC, object identities or coverage", async () => {
   for (const change of [
     (f) => {

@@ -31,7 +31,11 @@ import {
   jobObservation,
 } from "./custody-protocol.js";
 import { inspectWindowsExperimentPe } from "./experiment-image.js";
-import { buildWindowsPolicy, normalizeWindowsPolicy } from "./policy.js";
+import {
+  buildWindowsPolicy,
+  normalizeWindowsPolicy,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 import {
   windowsAccessArguments,
   windowsOwnershipArguments,
@@ -96,12 +100,14 @@ function tokenRead(value, accountSid, restrictingSid) {
       Array.isArray(token.enabledGroups) &&
       Array.isArray(token.privileges) &&
       !token.enabledGroups.length &&
-      !token.privileges.length &&
       [token.tokenId, token.authenticationId].every(
         (id) => typeof id === "string" && /^[a-f0-9]{16}$/u.test(id),
       ),
   );
-  return token;
+  return {
+    ...token,
+    privileges: assertWindowsTraversalPrivileges(token.privileges),
+  };
 }
 
 /** Private fixed-recipe provisioning. Native setup acknowledgements are joined
@@ -784,11 +790,19 @@ export function createWindowsCaseProvisioning(state, options) {
           actual.restrictingSid === current.account.restrictingSid &&
           actual.accountSid !== actual.restrictingSid,
       );
-      tokenRead(actual.token, actual.accountSid, actual.restrictingSid);
+      const actualToken = tokenRead(
+        actual.token,
+        actual.accountSid,
+        actual.restrictingSid,
+      );
       observationObject(native, ["token", "job", "endpoints"]);
-      tokenRead(native.token, actual.accountSid, actual.restrictingSid);
+      const nativeToken = tokenRead(
+        native.token,
+        actual.accountSid,
+        actual.restrictingSid,
+      );
       requireObservation(
-        same(native.token, actual.token) &&
+        same(nativeToken, actualToken) &&
           same(native.endpoints, setup.endpoints),
       );
       const job = jobObservation(native.job);

@@ -367,6 +367,31 @@ export function buildWindowsPolicy(input) {
   return { value, manifest, bytes, policySha256, compositionSha256 };
 }
 
+/** Exact native traversal exception. Return only authority for corroboration;
+ * callers keep the original observations, including USED_FOR_ACCESS metadata. */
+export function assertWindowsTraversalPrivileges(value) {
+  const privileges = dense(value, 64);
+  requireWindows(privileges.length === 1);
+  const privilege = privileges[0];
+  closed(privilege, ["luid", "name", "attributes"]);
+  requireWindows(
+    typeof privilege.luid === "string" &&
+      /^[a-f0-9]{16}$/u.test(privilege.luid) &&
+      privilege.luid !== "0".repeat(16) &&
+      privilege.name === "SeChangeNotifyPrivilege" &&
+      Number.isInteger(privilege.attributes) &&
+      privilege.attributes >= 0 &&
+      privilege.attributes <= 0xffffffff &&
+      (privilege.attributes & 2) === 2 &&
+      (privilege.attributes & ~0x80000003) === 0,
+  );
+  return {
+    luid: privilege.luid,
+    name: privilege.name,
+    attributes: privilege.attributes & 3,
+  };
+}
+
 export function assertWindowsPolicyToken(token, input) {
   const { request, accountSid } = normalizeWindowsPolicy(input);
   closed(token, [
@@ -382,11 +407,11 @@ export function assertWindowsPolicyToken(token, input) {
     "virtualized",
     "writeRestricted",
   ]);
+  assertWindowsTraversalPrivileges(token.privileges);
   requireWindows(
     token.userSid === accountSid &&
       JSON.stringify(dense(token.restrictedSids, 8)) ===
         JSON.stringify([request.restrictingSid]) &&
-      dense(token.privileges, 64).length === 0 &&
       dense(token.enabledGroups, 128).length === 0 &&
       token.integritySid === "S-1-16-4096" &&
       token.sessionId === 0 &&

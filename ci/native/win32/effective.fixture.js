@@ -248,6 +248,10 @@ export function effectiveFixture() {
       tokenId: legacy.installation.effective.token.tokenId,
       independent: true,
       retired: false,
+      authenticationId: legacy.installation.effective.token.authenticationId,
+      privileges: structuredClone(
+        legacy.installation.effective.token.privileges,
+      ),
     }),
     effectiveToken: async () =>
       structuredClone(legacy.installation.effective.token),

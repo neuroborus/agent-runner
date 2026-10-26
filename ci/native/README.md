@@ -10081,9 +10081,9 @@ acceptance or measured explanation of the earlier grouped cwd refusal.
 The inspected Codex revision in `WINDOWS_CREATION_PRECEDENT` supplies only the
 source precedent for installing `PROC_THREAD_ATTRIBUTE_JOB_LIST` and
 `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` before `CreateProcessAsUserW`. This helper
-does not reuse its complete helper composition, optional admission paths,
-write-only restriction or retained `SeChangeNotifyPrivilege`. The release-v1
-audit and all four unresolved findings remain unchanged, including the Windows
+does not reuse its complete helper composition, optional admission paths or
+write-only restriction. Its traversal exception below is independently checked.
+The release-v1 audit and all four unresolved findings remain unchanged, including the Windows
 admission/recovery finding.
 
 The native launcher holds no-follow canonical custody, storage, policy and
@@ -10097,11 +10097,35 @@ never enter arguments, environment, control frames, JS receipts or logs. Failed
 account creation, collisions or partial setup retain the possible-effect ledger
 and reservations rather than deleting an unverified account.
 
-`CreateRestrictedToken` explicitly deletes every privilege and disables ordinary
-groups. The sole dedicated restricting SID checks both read and write access;
-`WRITE_RESTRICTED` is never used. Native and independent reads require a primary
-session-0 low-integrity token without privileges, enabled ordinary groups or
-virtualization. The workspace starts with a private DACL, and protected external
+`CreateRestrictedToken` uses flags zero, explicitly deletes every privilege except
+the already-present enabled `SeChangeNotifyPrivilege`, and disables ordinary
+groups. Checked native lookups bind the retained LUID and canonical name; only
+enabled and optional enabled-by-default authority attributes are allowed.
+Used-for-access is retained as raw informational metadata, never extra authority.
+Missing, duplicate, disabled, removed, additional or malformed privileges refuse
+admission. Unfiltered effective-token and custody observations carry closed
+`{luid, name, attributes}` records, corroborated across separately held reads.
+The former zero-privilege predicates in token construction, policy admission,
+provisioning, member/access coverage, same-account peer verification and independent
+retirement now require this exact exception. Git creator inspection similarly
+replaces its no-enabled-privilege assertion; System and other-account peer policy
+remain unchanged. Neither a count nor a producer claim proves the exception.
+
+This declared isolation delta bypasses ancestor traversal checks; it grants
+neither directory enumeration nor final-object read/write access. The ordinary
+private workspace mask adds only `FILE_TRAVERSE` (`0x12019f` to `0x1201bf`), for
+both account and restricting ACEs. Extraction remains `0x1200a9`; all other masks,
+System-only ancestors, private policy/custody confidentiality and restoration stay
+required. Separate AccessCheck probes remain separate observations: the original
+first syscall and startup remedy are unproven. Darwin's unknown SEND right and the
+separate Windows TCP/audit causes remain open pending actual native evidence.
+
+The sole dedicated restricting SID checks both read and write access;
+`WRITE_RESTRICTED` is never used, and paired native read-access probes still reject
+its escape. Native and independent reads require a primary session-0 low-integrity
+token with deny-only ordinary groups, exactly that privilege and no virtualization.
+MIC, Jobs, desktop, handle and delegation controls remain mandatory.
+The workspace starts with a private DACL, and protected external
 policy installs only reviewed account/restricting-SID grants. A private low-label,
 non-visible window station and desktop replace the interactive host desktop.
 The protected Job has no breakaway/silent-breakaway flags, all UI restrictions,

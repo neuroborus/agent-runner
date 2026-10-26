@@ -18,7 +18,10 @@ import {
   windowsObserverConfiguration,
   assertWindowsObserverEvent,
 } from "./observer.js";
-import { buildWindowsPolicy } from "./policy.js";
+import {
+  buildWindowsPolicy,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 import { assertWindowsWfpFilterRead } from "./wfp-reader.js";
 
 const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -66,6 +69,11 @@ export async function bindWindowsAuditEvent(
       token.userSid === value.domain.accountSid &&
       equal(token.restrictedSids, [value.domain.restrictingSid]) &&
       token.tokenId === before.tokenId &&
+      token.authenticationId === before.authenticationId &&
+      equal(
+        assertWindowsTraversalPrivileges(token.privileges),
+        assertWindowsTraversalPrivileges(before.privileges),
+      ) &&
       job.independent === true &&
       job.members.some((identity) =>
         sameWindowsIdentity(identity, before.identity),
@@ -113,11 +121,30 @@ export async function bindWindowsAuditEvent(
     });
   }
   const after = await reader.process(transfer.subject),
-    again = await reader.inspectJob(transfer.job);
+    again = await reader.inspectJob(transfer.job),
+    tokenAfter = await reader.effectiveToken(transfer.subject);
   requireWindows(
-    equal(before, after) &&
+    equal(
+      {
+        ...before,
+        privileges: assertWindowsTraversalPrivileges(before.privileges),
+      },
+      {
+        ...after,
+        privileges: assertWindowsTraversalPrivileges(after.privileges),
+      },
+    ) &&
       equal(job, again) &&
-      equal(token, await reader.effectiveToken(transfer.subject)),
+      equal(
+        {
+          ...token,
+          privileges: assertWindowsTraversalPrivileges(token.privileges),
+        },
+        {
+          ...tokenAfter,
+          privileges: assertWindowsTraversalPrivileges(tokenAfter.privileges),
+        },
+      ),
   );
   if (nativeFilter)
     requireWindows(

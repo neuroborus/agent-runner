@@ -12,7 +12,10 @@ import {
   systemIdentity,
 } from "./protocol.js";
 import { normalizeWindowsFileIdentity } from "./files-protocol.js";
-import { buildWindowsPolicy } from "./policy.js";
+import {
+  buildWindowsPolicy,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 import {
   expectedAces,
   normalizeWindowsSecurityRead,
@@ -788,7 +791,15 @@ export function createWindowsCustodyVerifier(
             observed.authenticationId === member.token.authenticationId &&
             observed.integritySid === member.token.integritySid &&
             same(observed.restricting, member.token.restrictedSids) &&
-            observed.privileges.length === 0,
+            observed.groups.every(
+              ({ attributes }) =>
+                (attributes & 0x20) !== 0 ||
+                ((attributes & 0x10) !== 0 && (attributes & 4) === 0),
+            ) &&
+            same(
+              assertWindowsTraversalPrivileges(observed.privileges),
+              assertWindowsTraversalPrivileges(member.token.privileges),
+            ),
         );
       }
       return {

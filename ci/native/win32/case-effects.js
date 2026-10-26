@@ -19,6 +19,7 @@ import {
 import { WINDOWS_OWNERSHIP_CASES } from "./ownership.js";
 import { assessWindowsDomain } from "./recovery.js";
 import { retireWindowsOwnership } from "./retirement.js";
+import { assertWindowsTraversalPrivileges } from "./policy.js";
 
 export const windowsAccessArguments = (request) => ["suite", request.nonce];
 
@@ -55,7 +56,7 @@ export function windowsOwnershipParameters(actual, extraction = false) {
     restrictingSid: actual.restrictingSid,
     objects: actual.objects.map(({ object }, i) => ({
       identitySha256: observationDigest(object.identity),
-      mask: [0, 0, 0x120020, extraction ? 0x1200a9 : 0x12019f, 0, 0x1200a9][i],
+      mask: [0, 0, 0x120020, extraction ? 0x1200a9 : 0x1201bf, 0, 0x1200a9][i],
     })),
     processLimit: 32,
     network: "deny-all",
@@ -153,7 +154,20 @@ export function createWindowsCaseEffects(state, current, save) {
         result.restrictingSid === parameters.restrictingSid &&
         result.contextSha256 === observationDigest(binding.context),
     );
-    requireObservation(same(result.accountToken, provisioned.native.token));
+    const traversal = assertWindowsTraversalPrivileges(
+      result.accountToken.privileges,
+    );
+    requireObservation(
+      same(
+        { ...result.accountToken, privileges: traversal },
+        {
+          ...provisioned.native.token,
+          privileges: assertWindowsTraversalPrivileges(
+            provisioned.native.token.privileges,
+          ),
+        },
+      ),
+    );
     if (admitted) {
       const helpers = admitted.helpers.filter(({ role }) =>
         ["launcher", "custodian"].includes(role),
@@ -196,7 +210,10 @@ export function createWindowsCaseEffects(state, current, save) {
           result.job.uiRestrictions === 255,
       );
     requireObservation(result.tokens.length === members.length);
-    for (const token of result.tokens)
+    for (const token of result.tokens) {
+      requireObservation(
+        same(assertWindowsTraversalPrivileges(token.privileges), traversal),
+      );
       requireObservation(
         token.userSid === parameters.accountSid &&
           token.primary === true &&
@@ -205,9 +222,9 @@ export function createWindowsCaseEffects(state, current, save) {
           token.virtualized === false &&
           token.writeRestricted === false &&
           same(token.restrictedSids, [parameters.restrictingSid]) &&
-          token.enabledGroups.length === 0 &&
-          token.privileges.length === 0,
+          token.enabledGroups.length === 0,
       );
+    }
     return result;
   };
   const unchanged = async () => {

@@ -14,6 +14,7 @@
 #include <stdbool.h>
 #include <wchar.h>
 #include <stdlib.h>
+#include <string.h>
 #include <fcntl.h>
 #include <io.h>
 #pragma comment(lib, "advapi32.lib")
@@ -68,12 +69,24 @@ static void principal(HANDLE process, PSID expected) {
   if (accountSid && EqualSid(expected, accountSid)) {
     TOKEN_GROUPS *restricted = token_info(token, TokenRestrictedSids);
     TOKEN_PRIVILEGES *privileges = token_info(token, TokenPrivileges);
+    TOKEN_GROUPS *groups = token_info(token, TokenGroups); LUID notify;
+    need(LookupPrivilegeValueW(NULL, SE_CHANGE_NOTIFY_NAME, &notify));
+    BOOL valid = privileges->PrivilegeCount == 1;
+    DWORD attributes = valid ? privileges->Privileges[0].Attributes : 0;
+    valid = valid && !memcmp(&privileges->Privileges[0].Luid, &notify, sizeof(LUID)) &&
+      (attributes & SE_PRIVILEGE_ENABLED) &&
+      !(attributes & ~(SE_PRIVILEGE_ENABLED | SE_PRIVILEGE_ENABLED_BY_DEFAULT | SE_PRIVILEGE_USED_FOR_ACCESS)) && groups->GroupCount <= 128;
+    if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+    for (DWORD i = 0; i < groups->GroupCount; i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) {
+      valid = (groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) && !(groups->Groups[i].Attributes & SE_GROUP_ENABLED);
+      if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+    }
     TOKEN_MANDATORY_LABEL *label = token_info(token, TokenIntegrityLevel);
     BYTE low[SECURITY_MAX_SID_SIZE]; DWORD size = sizeof(low);
     need(CreateWellKnownSid(WinLowLabelSid, NULL, low, &size) && IsTokenRestricted(token) &&
       restricted->GroupCount == 1 && EqualSid(restricted->Groups[0].Sid, restrictingSid) &&
-      privileges->PrivilegeCount == 0 && EqualSid(label->Label.Sid, low));
-    free(restricted); free(privileges); free(label);
+      EqualSid(label->Label.Sid, low));
+    free(restricted); free(privileges); free(groups); free(label);
   }
   free(user); free(session); CloseHandle(token);
 }

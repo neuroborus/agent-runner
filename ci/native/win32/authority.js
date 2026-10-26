@@ -11,7 +11,11 @@ import {
   windowsAccountName,
 } from "./protocol.js";
 import { assertWindowsPolicyInstallation } from "./policy-effects.js";
-import { normalizeWindowsPolicy, assertWindowsPolicyToken } from "./policy.js";
+import {
+  normalizeWindowsPolicy,
+  assertWindowsPolicyToken,
+  assertWindowsTraversalPrivileges,
+} from "./policy.js";
 
 const DENIED_LOGONS = Object.freeze([
   "interactive",
@@ -236,6 +240,18 @@ export function assertWindowsAuthority(value, request, record) {
   );
   assertWindowsPolicy(value.policy, request, record);
   assertWindowsPolicyToken(value.token, value.policy.manifest);
+  const installedToken = value.policy.installation.effective.token;
+  // Installation can inspect the setup token before the child receives its
+  // primary token. Their logon and authority must agree, not their object IDs.
+  requireWindows(
+    value.token.authenticationId === installedToken.authenticationId &&
+      JSON.stringify(
+        assertWindowsTraversalPrivileges(value.token.privileges),
+      ) ===
+        JSON.stringify(
+          assertWindowsTraversalPrivileges(installedToken.privileges),
+        ),
+  );
   const installedImage = value.policy.installation.effective.objects.find(
     (entry) =>
       entry.descriptor.path.toLowerCase() ===

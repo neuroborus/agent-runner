@@ -688,7 +688,7 @@ export async function prepareWindowsExperimentCases(
         restrictingSid: { binding: "restricting" },
         objects: Array.from({ length: 6 }, (_, i) => ({
           identitySha256: { binding: "object." + i },
-          mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i],
+          mask: [0, 0, 0x120020, 0x1201bf, 0, 0x1200a9][i],
         })),
       };
       for (let i = 0; i < 6; i++)

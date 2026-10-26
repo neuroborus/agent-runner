@@ -289,6 +289,16 @@ test("Windows audit attribution requires unchanged held creation/token/Job/file 
     job: 0,
     object: { before: file, after: file, index: 3 },
   };
+  // Native informational metadata may differ between otherwise identical reads.
+  for (const method of ["process", "effectiveToken"]) {
+    const read = f.reader[method];
+    let reads = 0;
+    f.reader[method] = async (...args) => {
+      const actual = await read(...args);
+      if (++reads % 2 === 0) actual.privileges[0].attributes = 0x80000003;
+      return actual;
+    };
+  }
   assert.equal(
     (
       await bindWindowsAuditEvent(
@@ -302,6 +312,23 @@ test("Windows audit attribution requires unchanged held creation/token/Job/file 
     ).held,
     true,
   );
+  const processRead = f.reader.process;
+  f.reader.process = async (...args) => {
+    const actual = await processRead(...args);
+    actual.privileges[0].luid = "f".repeat(16);
+    return actual;
+  };
+  await assert.rejects(
+    bindWindowsAuditEvent(
+      f.reader,
+      witness,
+      value,
+      value.bindings[2],
+      transfer,
+      observation.barriers,
+    ),
+  );
+  f.reader.process = processRead;
   for (const change of [
     () => {
       transfer.object.after = { ...file, identity: fileId(5) };

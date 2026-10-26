@@ -462,6 +462,19 @@ static unsigned retain_process(DWORD pid) {
   for (unsigned i = 0; i < process_count; i++) need(GetProcessId(processes[i]) != pid);
   processes[process_count] = process; tokens[process_count] = token; sessions[process_count] = process_session(process); return process_count++;
 }
+/* Preserve every actual entry, including raw informational attribute bits. */
+static void emit_privilege(LUID_AND_ATTRIBUTES *value) {
+  wchar_t name[128] = {0}; DWORD length = 128;
+  need(LookupPrivilegeNameW(NULL, &value->Luid, name, &length));
+  BOOL valid = length >= 12 && length < 128 && !name[length] && wcslen(name) == length &&
+    !wcsncmp(name, L"Se", 2) && !wcscmp(name + length - 9, L"Privilege");
+  if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  for (DWORD i = 0; i < length; i++) {
+    valid = (name[i] >= L'A' && name[i] <= L'Z') || (name[i] >= L'a' && name[i] <= L'z') || (name[i] >= L'0' && name[i] <= L'9');
+    if (!valid) SetLastError(ERROR_INVALID_DATA); need(valid);
+  }
+  printf("{\"luid\":\"%08lx%08lx\",\"name\":\"%ls\",\"attributes\":%lu}", value->Luid.HighPart, value->Luid.LowPart, name, value->Attributes);
+}
 static void process_read(unsigned index) {
   need(index < process_count); HANDLE process = processes[index], token = tokens[index]; char dacl[65];
   TOKEN_STATISTICS *before = token_info(token, TokenStatistics); TOKEN_GROUPS *groups = token_info(token, TokenGroups), *restricting = token_info(token, TokenRestrictedSids);
@@ -480,7 +493,7 @@ static void process_read(unsigned index) {
   printf("],\"restricting\":[");
   for (unsigned i = 0; i < restricting->GroupCount; i++) { need(ConvertSidToStringSidW(restricting->Groups[i].Sid, &sid)); printf("%s\"%ls\"", i ? "," : "", sid); LocalFree(sid); }
   printf("],\"privileges\":[");
-  for (unsigned i = 0; i < privileges->PrivilegeCount; i++) printf("%s{\"luid\":\"%08lx%08lx\",\"attributes\":%lu}", i ? "," : "", privileges->Privileges[i].Luid.HighPart, privileges->Privileges[i].Luid.LowPart, privileges->Privileges[i].Attributes);
+  for (unsigned i = 0; i < privileges->PrivilegeCount; i++) { if (i) putchar(','); emit_privilege(&privileges->Privileges[i]); }
   TOKEN_STATISTICS *after = token_info(token, TokenStatistics); need(!memcmp(&before->ModifiedId, &after->ModifiedId, sizeof(LUID)));
   printf("],\"retired\":%s}", WaitForSingleObject(process, 0) == WAIT_OBJECT_0 ? "true" : "false");
   free(before); free(after); free(groups); free(restricting); free(privileges); free(level);
@@ -1912,7 +1925,7 @@ static BOOL ownership_failure_write(const char *source, unsigned line, DWORD err
   WriteFile(GetStdHandle(STD_ERROR_HANDLE),bytes,total,&used,NULL); SetLastError(error); return TRUE;
 }
 static BOOL package_mode;
-static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x12019f, 0, 0x1200a9};
+static DWORD ownership_masks[6] = {0, 0, 0x120020, 0x1201bf, 0, 0x1200a9};
 static GUID ownership_provider, ownership_layer, ownership_filters[4];
 static UINT64 ownership_filter_ids[4];
 static char ownership_last_job_pin[65];
@@ -3344,7 +3357,12 @@ static void verify_access_peer_policy(unsigned sourceSlot,unsigned custody,unsig
   LocalFree(sid); need(QueryFullProcessImageNameW(process,0,actual,&length) && !_wcsicmp(actual,expected)); struct held_file file=hold_shared(actual,FALSE,FALSE,GENERIC_READ,FALSE); pin(&file,entries[6].pin); char sig[65]; signature(&file,entries[6].signature,sig); close_file(&file);
   TOKEN_GROUPS *groups=token_info(token,TokenGroups); TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); LUID notify; need(LookupPrivilegeValueW(NULL,SE_CHANGE_NOTIFY_NAME,&notify));
   for (DWORD i=0;i<groups->GroupCount;i++) need(!(groups->Groups[i].Attributes & SE_GROUP_ENABLED) || (groups->Groups[i].Attributes & SE_GROUP_INTEGRITY));
-  need(privileges->PrivilegeCount<=(view.kind ? 1U : 0U)); for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); free(groups); free(privileges);
+  if (view.kind) { need(privileges->PrivilegeCount<=1); for (DWORD i=0;i<privileges->PrivilegeCount;i++) need(!memcmp(&privileges->Privileges[i].Luid,&notify,sizeof(LUID))); }
+  else {
+    change_notify_privilege(token);
+    for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) need(groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY);
+  }
+  free(groups); free(privileges);
   BOOL belongs; need(IsProcessInJob(process,job,&belongs) && belongs); JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits; JOBOBJECT_BASIC_UI_RESTRICTIONS ui;
   need(QueryInformationJobObject(job,JobObjectExtendedLimitInformation,&limits,sizeof(limits),NULL) && limits.BasicLimitInformation.LimitFlags==0x2008 && limits.BasicLimitInformation.ActiveProcessLimit==(view.kind ? 1U : 32U) && QueryInformationJobObject(job,JobObjectBasicUIRestrictions,&ui,sizeof(ui),NULL) && ui.UIRestrictionsClass==255);
   HANDLE threads=CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD,0); need(threads!=INVALID_HANDLE_VALUE); THREADENTRY32 thread={sizeof(thread)}; unsigned found=0; need(Thread32First(threads,&thread));
@@ -4579,7 +4597,10 @@ static void git_creator_token(HANDLE token,BOOL system) {
   } else {
     TOKEN_MANDATORY_LABEL *label=token_info(token,TokenIntegrityLevel); DWORD rid=*GetSidSubAuthority(label->Label.Sid,*GetSidSubAuthorityCount(label->Label.Sid)-1);
     need(rid==SECURITY_MANDATORY_LOW_RID); free(label);
-    TOKEN_PRIVILEGES *privileges=token_info(token,TokenPrivileges); for(unsigned i=0;i<privileges->PrivilegeCount;i++) need(!(privileges->Privileges[i].Attributes & SE_PRIVILEGE_ENABLED)); free(privileges);
+    change_notify_privilege(token);
+    TOKEN_GROUPS *groups=token_info(token,TokenGroups); need(groups->GroupCount<=128);
+    for (DWORD i=0;i<groups->GroupCount;i++) if (!(groups->Groups[i].Attributes & SE_GROUP_INTEGRITY)) need((groups->Groups[i].Attributes & SE_GROUP_USE_FOR_DENY_ONLY) && !(groups->Groups[i].Attributes & SE_GROUP_ENABLED));
+    free(groups);
   }
   free(creation);
 }

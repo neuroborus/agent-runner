@@ -178,11 +178,17 @@ function fixture(runtimePath) {
     token: {
       userSid: ACCOUNT,
       restrictedSids: [request.restrictingSid],
-      privileges: [],
+      privileges: [
+        {
+          luid: "0000001700000029",
+          name: "SeChangeNotifyPrivilege",
+          attributes: 3,
+        },
+      ],
       enabledGroups: [],
       integritySid: "S-1-16-4096",
       sessionId: 0,
-      tokenId: "1".padStart(16, "0"),
+      tokenId: "3".padStart(16, "0"),
       authenticationId: "2".padStart(16, "0"),
       primary: true,
       virtualized: false,
@@ -650,13 +656,20 @@ test("Windows policy, held authority and protected receipts precede suspended pa
   };
   f.effects.verifyAuthority = async () => {
     f.calls.push("verify-authority");
-    return {
+    const value = {
       ...structuredClone(f.authority),
       nativeEventSha256: (++observations === 1 ? "a" : "e").repeat(64),
     };
+    if (observations === 2) value.token.privileges[0].attributes = 0x80000003;
+    return value;
   };
   const result = await f.run();
   assert.equal(result.record.status, "ADMITTED");
+  assert.notEqual(
+    f.authority.token.tokenId,
+    f.authority.policy.installation.effective.token.tokenId,
+  );
+  assert.equal(result.record.authority.token.privileges[0].attributes, 3);
   assert.equal(result.record.reservation, "RETAINED");
   assert.deepEqual(
     result.record.helpers.map(({ role }) => role),
@@ -710,6 +723,12 @@ test("Windows authority mismatches retain exclusions and never release", async (
       f.authority.token.privileges = ["SeChangeNotifyPrivilege"];
     },
     (f) => {
+      f.authority.token.privileges[0].luid = "f".repeat(16);
+    },
+    (f) => {
+      f.authority.token.privileges[0].attributes = 2;
+    },
+    (f) => {
       f.authority.token.writeRestricted = true;
     },
     (f) => {
@@ -753,14 +772,20 @@ test("Windows authority mismatches retain exclusions and never release", async (
     assert.ok(!f.calls.includes("release"));
     assert.ok(f.calls.includes("close"));
   }
-  const fresh = fixture();
-  let observations = 0;
-  fresh.effects.verifyAuthority = async () => ({
-    ...structuredClone(fresh.authority),
-    threadSuspendCount: ++observations === 1 ? 1 : 0,
-  });
-  assert.equal((await fresh.run()).record.status, "FAIL");
-  assert.ok(!fresh.calls.includes("release"));
+  for (const drift of ["suspension", "token-id"]) {
+    const fresh = fixture();
+    let observations = 0;
+    fresh.effects.verifyAuthority = async () => {
+      const value = structuredClone(fresh.authority);
+      if (++observations === 2) {
+        if (drift === "suspension") value.threadSuspendCount = 0;
+        else value.token.tokenId = "f".repeat(16);
+      }
+      return value;
+    };
+    assert.equal((await fresh.run()).record.status, "FAIL");
+    assert.ok(!fresh.calls.includes("release"));
+  }
 });
 
 test("Windows incomplete policy or unbound setup helpers prevent creation acknowledgement", async () => {

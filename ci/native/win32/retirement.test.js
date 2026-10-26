@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { Script } from "node:vm";
 import {
   normalizeWindowsLaunch,
   windowsLaunchDigest,
@@ -11,6 +13,148 @@ import {
   runWindowsOwnershipCase,
   WINDOWS_OWNERSHIP_CASES,
 } from "./index.js";
+
+test("actual independent retirement principal requires traversal identity, attributes and deny-only groups", async () => {
+  const source = await readFile(
+    new URL("retirement.c", import.meta.url),
+    "utf8",
+  );
+  const body = /static void principal\([^\n]+\) \{([\s\S]*?)\n\}/u.exec(
+    source,
+  )?.[1];
+  assert.ok(body);
+  const projected = body
+    .replaceAll("->", ".")
+    .replace("LUID notify", "LUID notify = {}")
+    .replace("BYTE low[SECURITY_MAX_SID_SIZE]", "var low={}")
+    .replace(/sizeof\([^)]*\)/gu, "1")
+    .replace(
+      /\b(?:HANDLE|TOKEN_USER|TOKEN_GROUPS|TOKEN_PRIVILEGES|TOKEN_MANDATORY_LABEL|DWORD|BOOL|LUID) \*?/gu,
+      "var ",
+    )
+    .replaceAll("*session", "session.value")
+    .replace(/(?<!&)&(notify|size|privileges\.Privileges\[0\]\.Luid)\b/gu, "$1")
+    .replaceAll("&token", "ref(()=>token,v=>token=v)");
+  const program = new Script(`(process,expected)=>{${projected}}`);
+  const notify = { HighPart: 23, LowPart: 41 };
+  const run = (options = {}, expected = "account") => {
+    const Privileges = options.privileges ?? [{ Luid: notify, Attributes: 3 }],
+      Groups = options.groups ?? [{ Sid: "ordinary", Attributes: 0x10 }];
+    let error = 0,
+      lookups = 0,
+      closed = 0;
+    const api = {
+      accountSid: "account",
+      restrictingSid: "private",
+      TOKEN_QUERY: 8,
+      TokenUser: 0,
+      TokenSessionId: 1,
+      TokenRestrictedSids: 2,
+      TokenPrivileges: 3,
+      TokenGroups: 4,
+      TokenIntegrityLevel: 5,
+      WinLowLabelSid: 1,
+      NULL: null,
+      SE_CHANGE_NOTIFY_NAME: "SeChangeNotifyPrivilege",
+      ERROR_INVALID_DATA: 13,
+      SE_PRIVILEGE_ENABLED: 2,
+      SE_PRIVILEGE_ENABLED_BY_DEFAULT: 1,
+      SE_PRIVILEGE_USED_FOR_ACCESS: 0x80000000,
+      SE_GROUP_INTEGRITY: 0x20,
+      SE_GROUP_USE_FOR_DENY_ONLY: 0x10,
+      SE_GROUP_ENABLED: 4,
+      ref: (get, set) => ({
+        get value() {
+          return get();
+        },
+        set value(v) {
+          set(v);
+        },
+      }),
+      OpenProcessToken(_, access, out) {
+        assert.equal(access, 8);
+        out.value = "token";
+        return true;
+      },
+      token_info(token, kind) {
+        assert.equal(token, "token");
+        if (kind === 0) return { User: { Sid: options.user ?? expected } };
+        if (kind === 1) return { value: options.session ?? 0 };
+        if (kind === 2) {
+          const Groups = (options.restricting ?? ["private"]).map((Sid) => ({
+            Sid,
+          }));
+          return { GroupCount: Groups.length, Groups };
+        }
+        if (kind === 3)
+          return { PrivilegeCount: Privileges.length, Privileges };
+        if (kind === 4)
+          return { GroupCount: options.groupCount ?? Groups.length, Groups };
+        assert.equal(kind, 5);
+        return { Label: { Sid: options.integrity ?? "low" } };
+      },
+      LookupPrivilegeValueW(_, name, out) {
+        lookups++;
+        assert.equal(name, "SeChangeNotifyPrivilege");
+        if (options.lookupFailure) {
+          error = 1313;
+          return false;
+        }
+        Object.assign(out, notify);
+        return true;
+      },
+      CreateWellKnownSid(_, domain, low) {
+        assert.equal(domain, null);
+        low.value = "low";
+        return true;
+      },
+      IsTokenRestricted: () => true,
+      EqualSid: (a, b) => (a?.value ?? a) === (b?.value ?? b),
+      memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+      SetLastError: (value) => {
+        error = value;
+      },
+      need: (value) => {
+        if (!value)
+          throw Object.assign(new Error("retirement refusal"), { error });
+      },
+      free: () => {},
+      CloseHandle: () => {
+        closed++;
+        return true;
+      },
+    };
+    program.runInNewContext(api)("process", expected);
+    assert.equal(closed, 1);
+    assert.equal(lookups, Number(expected === "account"));
+  };
+  for (const Attributes of [2, 3, 0x80000002, 0x80000003])
+    run({ privileges: [{ Luid: notify, Attributes }] });
+  const valid = { Luid: notify, Attributes: 3 };
+  for (const options of [
+    { privileges: [] },
+    { privileges: [valid, valid] },
+    { privileges: [{ ...valid, Luid: { HighPart: 0, LowPart: 41 } }] },
+    ...[0, 1, 4, 6, 10].map((Attributes) => ({
+      privileges: [{ ...valid, Attributes }],
+    })),
+    { groups: [{ Sid: "ordinary", Attributes: 4 }] },
+    { groups: [{ Sid: "ordinary", Attributes: 0 }] },
+    { groupCount: 129 },
+    { restricting: [] },
+    { restricting: ["foreign"] },
+    { restricting: ["private", "foreign"] },
+    { user: "foreign" },
+    { session: 1 },
+    { integrity: "medium" },
+  ])
+    assert.throws(() => run(options));
+  assert.throws(
+    () => run({ lookupFailure: true, privileges: [] }),
+    (cause) => cause.error === 1313,
+  );
+  run({ privileges: [] }, "system"); // The separate System policy never invokes the exception guard.
+});
 
 const HASH = "a".repeat(64),
   ACCOUNT = "S-1-5-21-1-2-3-1001";

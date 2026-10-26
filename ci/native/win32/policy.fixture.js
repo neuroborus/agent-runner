@@ -47,7 +47,13 @@ export function windowsPolicyFixture(
   const token = {
     userSid: accountSid,
     restrictedSids: [request.restrictingSid],
-    privileges: [],
+    privileges: [
+      {
+        luid: "0000001700000029",
+        name: "SeChangeNotifyPrivilege",
+        attributes: 3,
+      },
+    ],
     enabledGroups: [],
     integritySid: "S-1-16-4096",
     sessionId: 0,

@@ -5,6 +5,21 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-26 — Retain the bounded Windows traversal privilege
+
+Restricted Windows tokens retain only already-present enabled SeChangeNotify,
+with checked native identity/attributes and unfiltered typed observations joined
+across independent admission, creator and retirement reads. All other privileges
+are explicitly deleted. This replaces zero-privilege and no-enabled-privilege
+assertions with one exact exception; informational used-for-access metadata
+supplies no authority. Ordinary workspace account/restricting ACEs add only
+FILE_TRAVERSE, preserving extraction overrides and restoration. Ancestor traversal
+bypass grants neither enumeration nor final-object read/write access. Dual SID
+checks, MIC, private data, Jobs, desktop, handles and delegation controls remain
+required. Separate probes establish no first syscall or startup remedy; fresh
+native controls and independent cleanup remain necessary. Darwin SEND and Windows
+TCP/audit causes stay open.
+
 ## 2026-10-26 — Separate original audit selection from Security visibility
 
 Windows command failure inspection freezes the original interval, enumerates

@@ -92,7 +92,7 @@ export function installAccessNativeFixture(f, input) {
         authenticationId: token().authenticationId,
         integritySid: "S-1-16-4096",
         restricting: sid === account().accountSid ? token().restrictedSids : [],
-        privileges: [],
+        privileges: structuredClone(token().privileges),
       });
       return identity;
     },

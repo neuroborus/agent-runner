@@ -2556,12 +2556,19 @@ function rawPreparation({ experiment = false, environment } = {}) {
         objects[0].object.identity = "f".repeat(16) + ":" + "e".repeat(32);
       if (f.caseDamage === "wrong-context")
         account.contextSha256 = "d".repeat(64);
+      const token = structuredClone(account.token);
+      if (f.caseDamage === "privilege-luid")
+        token.privileges[0].luid = "f".repeat(16);
+      if (f.caseDamage === "privilege-authority")
+        token.privileges[0].attributes = 2;
+      if (f.caseDamage === "privilege-name")
+        token.privileges[0].name = "SeDebugPrivilege";
       return {
         accountSid: account.accountSid,
         restrictingSid: account.restrictingSid,
         contextSha256: account.contextSha256,
         recordSha256: hash,
-        token: account.token,
+        token,
         objects,
       };
     }
@@ -3248,7 +3255,7 @@ function rawPreparation({ experiment = false, environment } = {}) {
             0x120020,
             declaration.context.executionId === "package.git-for-windows"
               ? 0x1200a9
-              : 0x12019f,
+              : 0x1201bf,
             0,
             0x1200a9,
           ][i],
@@ -3526,7 +3533,13 @@ function rawPreparation({ experiment = false, environment } = {}) {
             const token = {
               userSid: accountSid,
               restrictedSids: [restrictingSid],
-              privileges: [],
+              privileges: [
+                {
+                  luid: "0000001700000029",
+                  name: "SeChangeNotifyPrivilege",
+                  attributes: 3,
+                },
+              ],
               enabledGroups: [],
               integritySid: "S-1-16-4096",
               sessionId: 0,
@@ -8370,7 +8383,7 @@ function provisionCase(f, id = "ownership.literal", ownership = false) {
         objects: Array.from({ length: 6 }, (_, i) => ({
           identitySha256: { binding: "object." + i },
           ...(ownership
-            ? { mask: [0, 0, 0x120020, 0x12019f, 0, 0x1200a9][i] }
+            ? { mask: [0, 0, 0x120020, 0x1201bf, 0, 0x1200a9][i] }
             : {}),
         })),
       },
@@ -8486,6 +8499,9 @@ test("Windows fixed provisioning rejects undeclared identities, extra principals
     "extra-endpoint",
     "extra-token-grant",
     "malformed-token-type",
+    "privilege-luid",
+    "privilege-authority",
+    "privilege-name",
   ]) {
     const f = rawPreparation(),
       { recipe, binding } = provisionCase(f);
@@ -8767,7 +8783,7 @@ test("Windows launch observation reads its admitted primary through the bound in
   };
   for (let i = 0; i < 2; i++) {
     f.actors.get(helper.pid).privileges = [
-      { luid: "5".repeat(16), attributes: i },
+      { luid: "5".repeat(16), name: "SeDebugPrivilege", attributes: i },
     ];
     const start = f.rawCommands.length;
     assert.equal(
@@ -8802,7 +8818,7 @@ test("Windows launch observation reads its admitted primary through the bound in
       [verifier],
     );
     assert.deepEqual(observations.at(-1).privileges, [
-      { luid: "5".repeat(16), attributes: i },
+      { luid: "5".repeat(16), name: "SeDebugPrivilege", attributes: i },
     ]);
   }
 });

@@ -1761,7 +1761,16 @@ parked peers replace missing high-level owner callbacks. Security/BFE events mus
 join held actors, objects and full socket tuples; fixture status and timeouts
 cannot prove denial. Two independently verified directory handles with only
 traversal/attribute/synchronization rights bind root-relative file probes after
-admission; System-only ancestors and the privilege-free token stay protected.
+admission; System-only ancestor ACLs stay protected. The restricted token retains
+only already-present enabled SeChangeNotify, independently bound by native LUID,
+canonical name and allowed attributes across construction, held observations,
+admission and retirement. Its ancestor traversal bypass grants neither enumeration
+nor final-object read/write access. Ordinary workspace ACEs add only FILE_TRAVERSE;
+extraction and other masks, dual account/restricting-SID checks, MIC, private data,
+Jobs, desktop, handles and delegation controls remain required. This revises the
+former zero-privilege and Git no-enabled-privilege assertions without establishing
+an original startup remedy. Separate probes do not identify the first syscall;
+Darwin SEND and Windows TCP/audit causes remain open.
 Protected partial-setup records retain the original cause.
 Payload/peer/helper retirement precedes observer drain, unchanged per-user audit
 and owned policy restoration, then account/custodian/task closure. Uncertain
