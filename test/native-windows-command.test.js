@@ -5745,13 +5745,13 @@ test("audit rows share the operating allowance without exhausting the original f
     "native-windows-cleanup: operation=command-metadata-close domain=win32 value=6\n";
   const sacl = `native-windows-command: operating-sacl phase=N pid=43 birth=90 logon=7 policy=3 identity=${"a".repeat(16)}:${"b".repeat(32)} hash=${PIN} count=0 truncated=0 status=0,0,0 close=0\n`;
   const header =
-    "native-windows-command: operating-audit index=0 types=8,1,21,17,1,6,10,10,1,1,20,1 valid=4095 pid=43 logon=7 time=100 id=4663 keywords=9232379236109516800 record=12 mask=1 target=1 marker=0 excluded=1\n";
+    "native-windows-command: operating-audit index=0 types=8,1,21,17,1,6,10,10,1,1,20,1,4 valid=8191 pid=43 logon=7 time=100 id=4663 keywords=9232379236109516800 record=12 mask=1 target=1 marker=0 excluded=1 version=0 decoder=0 eligible=0 delivered=0 order=-1\n";
   const audit =
     header +
     Array.from(
       { length: 5 },
       (_, field) =>
-        `native-windows-command: operating-audit-value index=0 field=${field} bytes=128 encoded=64 status=0 close=0 hash=${PIN} hex=${"61".repeat(64)}\n`,
+        `native-windows-command: operating-audit-value index=0 field=${field} bytes=128 offset=0 encoded=64 complete=0 hex=${"61".repeat(64)}\n`,
     ).join("");
   for (const invalid of ["win32 value=6", "ntstatus value=0"])
     assert.equal(
@@ -5872,7 +5872,7 @@ test("native optional publication bounds encoded framing before writing and pres
     const row =
       fault === "oversized"
         ? "x".repeat(2048)
-        : `native-windows-command: operating-audit-value index=0 field=0 bytes=128 encoded=64 status=0 close=0 hash=${PIN} hex=${"61".repeat(64)}\n`;
+        : `native-windows-command: operating-audit-value index=0 field=0 bytes=128 offset=0 encoded=64 complete=0 hex=${"61".repeat(64)}\n`;
     for (let i = 0; i < 32; i++) write("stderr", used, incomplete, "%s", row);
     assert.equal(incomplete.value, true);
     assert.equal(api.errno, 7);
@@ -6713,6 +6713,7 @@ test("original gate audit queries retain installed ACEs and effective subject fa
       diagnostic_write: (stream, _used, _incomplete, format, ...args) =>
         api.fprintf(stream, format, ...args),
       command_delivery_observe: () => {},
+      command_delivery_freeze: () => {},
       command_delivery: {
         rejected: Array(4).fill(0),
         subject: "S-1-5-21-1",
@@ -7311,6 +7312,7 @@ test("actual admission releases the checked child before a complete Job census w
       command_observed: observed,
       command_gate_observed: { observed: false },
       command_delivery_observe: () => {},
+      command_delivery_freeze: () => {},
       command_delivery: { rejected: Array(4).fill(0) },
       command_gate_audit_write: () => {},
       command_operating_sacls_write: () => {},
@@ -7941,6 +7943,7 @@ function commandCaptureFixture(
     },
     command_gate_observed: { observed: false },
     command_delivery_observe: () => {},
+    command_delivery_freeze: () => {},
     command_operating_sacls_write: () => {},
     command_operating_incomplete: false,
     command_inspection_incomplete: false,
@@ -9130,8 +9133,8 @@ test("post-refusal projection confines text and retains both exact original inte
     /static BOOL command_delivery_interval\([^\n]+\) \{([\s\S]*?)\n\}/u
       .exec(source)[1]
       .replace(
-        "FILETIME to,from={(DWORD)command_case_from,(DWORD)(command_case_from>>32)};SYSTEMTIME first,last;",
-        "const to={},from={dwLowDateTime:Number(command_case_from&0xffffffffn),dwHighDateTime:Number(command_case_from>>32n)},first={},last={};",
+        "FILETIME to={(DWORD)command_case_until,(DWORD)(command_case_until>>32)},from={(DWORD)command_case_from,(DWORD)(command_case_from>>32)};SYSTEMTIME first,last;",
+        "const to={dwLowDateTime:Number(command_case_until&0xffffffffn),dwHighDateTime:Number(command_case_until>>32n)},from={dwLowDateTime:Number(command_case_from&0xffffffffn),dwHighDateTime:Number(command_case_from>>32n)},first={},last={};",
       )
       .replaceAll("*until", "until.value")
       .replace(
@@ -9146,6 +9149,31 @@ test("post-refusal projection confines text and retains both exact original inte
       .replace(/&(?=(?:to|from|first|last)\b)/gu, "")
       .replaceAll(/\bL(?=")/gu, "");
   const program = new Script(`(interval,until)=>{${interval}}`);
+  const freeze =
+    /static void command_delivery_freeze\([^\n]+\) \{([\s\S]*?)\n\}/u
+      .exec(source)[1]
+      .replace("FILETIME to;", "const to={};")
+      .replace(
+        "((ULONGLONG)to.dwHighDateTime<<32)|to.dwLowDateTime",
+        "(BigInt(to.dwHighDateTime)<<32n)|BigInt(to.dwLowDateTime)",
+      )
+      .replace("&to", "to");
+  let samples = 0;
+  const frozen = {
+    TRUE: true,
+    command_delivery_frozen: false,
+    command_case_from: 90n,
+    command_case_until: 0n,
+    GetSystemTimePreciseAsFileTime(to) {
+      samples++;
+      Object.assign(to, { dwHighDateTime: 1, dwLowDateTime: samples });
+    },
+  };
+  const freezeOnce = new Script(`()=>{${freeze}}`).runInNewContext(frozen);
+  freezeOnce();
+  freezeOnce();
+  assert.equal(samples, 1);
+  assert.equal(frozen.command_case_until, 4294967297n);
   for (const fault of [null, "missing", "birth", "clock", "conversion"]) {
     const from = fault === "missing" ? 0n : 133000000001234567n,
       to = fault === "clock" ? from - 1n : 133000000009876543n,
@@ -9155,13 +9183,8 @@ test("post-refusal projection confines text and retains both exact original inte
       FALSE: false,
       BigInt,
       command_case_from: from,
+      command_case_until: to,
       command_case_birth: fault === "birth" ? from + 1n : from - 1n,
-      GetSystemTimePreciseAsFileTime(value) {
-        Object.assign(value, {
-          dwLowDateTime: Number(to & 0xffffffffn),
-          dwHighDateTime: Number(to >> 32n),
-        });
-      },
       FileTimeToSystemTime(value, result) {
         assert.ok(
           [from, to].includes(
@@ -9196,6 +9219,48 @@ test("post-refusal projection confines text and retains both exact original inte
       );
     else assert.equal(output.text, undefined);
   }
+});
+
+test("original live Security record IDs remain bounded and freeze with the failure boundary", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/feasibility-command.h", import.meta.url),
+    "utf8",
+  );
+  const body = /static void command_delivery_record\([^\n]+\) \{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("ULONGLONG record=0;", "let record=0;")
+    .replace("&record", "value=>record=value");
+  const state = {
+    TRUE: true,
+    command_case_from: 1,
+    command_delivery_frozen: false,
+    command_delivery_record_count: 0,
+    command_delivery_records_incomplete: false,
+    command_delivery_records: Array(256).fill(0),
+    command_event_number(text, out) {
+      if (text === null) return false;
+      out(BigInt(text));
+      return true;
+    },
+  };
+  const retain = new Script(`text=>{${body}}`).runInNewContext(state);
+  retain("9007199254740993");
+  assert.equal(state.command_delivery_records[0], 9007199254740993n);
+  for (let i = 1; i < 256; i++) retain(String(i));
+  retain("257");
+  assert.equal(state.command_delivery_record_count, 256);
+  assert.equal(state.command_delivery_records_incomplete, true);
+  state.command_delivery_records_incomplete = false;
+  state.command_delivery_frozen = true;
+  retain(null);
+  assert.equal(state.command_delivery_record_count, 256);
+  assert.equal(state.command_delivery_records_incomplete, false);
+  state.command_delivery_frozen = false;
+  state.command_delivery_record_count = 0;
+  retain("0");
+  retain(null);
+  assert.equal(state.command_delivery_record_count, 0);
+  assert.equal(state.command_delivery_records_incomplete, true);
 });
 
 test("post-refusal audit inspection joins the original case without draining the subscription", async () => {
@@ -9242,12 +9307,12 @@ test("post-refusal audit inspection joins the original case without draining the
     .replace(/\b(?:DWORD|BOOL|unsigned)\b/gu, "let");
   const fact = body("command_delivery_fact")
     .replace(
-      "ULONGLONG numbers[12]={0};DWORD valid=0;const WCHAR *strings[12]={0};char types[144]={0};unsigned offset=0;",
-      'const numbers=Array(12).fill(0),strings=Array(12).fill(null);let valid=0,types="";',
+      "ULONGLONG numbers[13]={0};DWORD valid=0;const WCHAR *strings[13]={0};char types[156]={0};unsigned offset=0;",
+      'const numbers=Array(13).fill(0),strings=Array(13).fill(null);let valid=0,types="";',
     )
     .replace(
-      "const BYTE *data[12]={0};DWORD lengths[12]={0};",
-      "const data=Array(12).fill(null),lengths=Array(12).fill(0);",
+      "const BYTE *data[13]={0};DWORD lengths[13]={0};",
+      "const data=Array(13).fill(null),lengths=Array(13).fill(0);",
     )
     .replace("PSID sid=", "const sid=")
     .replace(
@@ -9259,13 +9324,18 @@ test("post-refusal audit inspection joins the original case without draining the
       "const unsigned fields[]={4,8,9,1,11};",
       "const fields=[4,8,9,1,11];",
     )
-    .replace("struct diagnostic_blob blob;", "const blob={};")
+    .replace('char hex[129]="-";', 'let hex="-";')
+    .replace(
+      'for(DWORD j=0;j<encoded;j++)snprintf(hex+2*j,3,"%02x",data[fields[i]][at+j]);',
+      'hex=encoded?byteSlice(data[fields[i]],at,encoded):"-";',
+    )
     .replaceAll("(const BYTE *)", "")
     .replaceAll("(DWORD)", "")
     .replaceAll("sizeof(WCHAR)", "2")
     .replace(/\b([0-9]+)u\b/gu, "$1")
     .replaceAll("0x0020000000000000ULL", "0x0020000000000000n")
     .replaceAll("0x0010000000000000ULL", "0x0010000000000000n")
+    .replaceAll("0x0030000000000000ULL", "0x0030000000000000n")
     .replaceAll(/\bL(?=")/gu, "")
     .replaceAll(
       /&command_operating_(bytes|incomplete)/gu,
@@ -9274,9 +9344,69 @@ test("post-refusal audit inspection joins the original case without draining the
     .replace(/(?<!&)&values\[i\]/gu, "values[i]")
     .replace(/(?<!&)&value\b/gu, "value")
     .replaceAll("&numbers[i]", "v=>numbers[i]=v")
-    .replaceAll("&blob", "blob")
     .replace(/\*(operation|error)=([^;]+);/gu, "$1($2);")
-    .replace(/\b(?:unsigned|DWORD|BOOL|LONG|int)\b/gu, "let");
+    .replace(/\b(?:unsigned|DWORD|BOOL|LONG|ULONGLONG|int)\b/gu, "let");
+  const log = body("command_delivery_log")
+    .replace("EVT_VARIANT value={0};", "const value={};")
+    .replace(/\*(oldest|records)=([^;]+);/gu, "$1($2);")
+    .replace(/\*(oldest|records)/gu, "$1()")
+    .replaceAll("sizeof(value)", "16")
+    .replace(/&(value|used)\b/gu, (_, name) =>
+      name === "used" ? "v=>used=v" : name,
+    )
+    .replaceAll(/\bL(?=")/gu, "")
+    .replace(/\b(?:EVT_HANDLE|DWORD|BOOL|unsigned)\b/gu, "let");
+  {
+    let expired = false,
+      reads = 0,
+      closes = 0,
+      diagnostic;
+    const api = {
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      ERROR_SUCCESS: 0,
+      ERROR_TIMEOUT: 1460,
+      EvtOpenChannelPath: 1,
+      EvtLogOldestRecordNumber: 3,
+      EvtLogNumberOfLogRecords: 2,
+      stderr: {},
+      command_delivery_expired: () => expired,
+      EvtOpenLog: () => "log",
+      EvtGetLogInfo() {
+        reads++;
+        expired = true;
+        return false;
+      },
+      GetLastError: () => 0,
+      EvtClose() {
+        closes++;
+        return true;
+      },
+      fprintf(_stream, _format, ...args) {
+        diagnostic = args;
+      },
+      cleanup_error: () =>
+        assert.fail("Successful closure cannot report a cleanup failure"),
+    };
+    const sample = new Script(`(oldest,records)=>{${log}}`).runInNewContext(
+      api,
+    );
+    assert.equal(
+      sample(
+        () => 0,
+        () => 0,
+      ),
+      false,
+    );
+    assert.equal(reads, 1, "Expiry prevents the second property read");
+    assert.equal(closes, 1, "Expiry still closes the acquired log");
+    assert.equal(
+      diagnostic[0],
+      0,
+      "Expiry cannot replace the original read failure with a timeout",
+    );
+  }
   const availability = body("command_delivery_interface")
     .replace("EVT_HANDLE handles[3]={0};", "const handles=Array(3).fill(null);")
     .replace(
@@ -9305,21 +9435,32 @@ test("post-refusal audit inspection joins the original case without draining the
       "command_delivery_interval(interval,&until)",
       "command_delivery_interval(interval,value=>until=value)",
     )
-    .replace(
-      "WCHAR query[2048]; EVT_HANDLE events[16]={0};",
-      "const query={};const events=Array(16).fill(null);",
-    )
+    .replace("WCHAR query[2048];", "const query={};")
+    .replace("EVT_HANDLE events[16]={0};", "const events=Array(16).fill(null);")
     .replace(/const WCHAR \*paths\[\]=\{([^}]+)\};/u, "const paths=[$1];")
     .replaceAll("const char *", "let ")
     .replaceAll(", *", ", ")
     .replaceAll(/\bL(?=")/gu, "")
-    .replace(/\b(?:DWORD|EVT_HANDLE|BOOL|LONGLONG|int|unsigned)\b/gu, "let")
-    .replace(/,&(count|readOperation|readError)/gu, ",value=>$1=value");
+    .replace(
+      /\b(?:DWORD|EVT_HANDLE|BOOL|LONGLONG|ULONGLONG|int|unsigned)\b/gu,
+      "let",
+    )
+    .replaceAll(
+      /&command_operating_(bytes|incomplete)/gu,
+      '"command_operating_$1"',
+    )
+    .replace(/,&(count|readOperation|readError)/gu, ",value=>$1=value")
+    .replace(
+      /(?<!&)&(oldest|records|afterOldest|afterRecords)\b/gu,
+      "value=>value===undefined?$1:($1=value)",
+    );
   const program =
     new Script(`function command_delivery_number(value,number){${number}}
     function command_delivery_fact(values,bytes,size,index,until,operation,error){${fact}}
     function command_delivery_match(context,event,operation,error,wide,index,until){${match}}
     function command_delivery_interface(){${availability}}
+    function command_delivery_log(oldest,records){${log}}
+    function command_delivery_expired(){${body("command_delivery_expired")}}
     ()=>{${inspection}}`);
   for (const fault of [
     null,
@@ -9365,15 +9506,36 @@ test("post-refusal audit inspection joins the original case without draining the
     "bad-sid",
     "failure-event",
     "projection-deadline",
+    "unrelated-first",
+    "short-batches",
+    "undelivered",
+    "log-rollover",
+    "log-clear",
+    "loss",
+    "version",
+    "version-unavailable",
+    "output-bound",
+    "partial-next",
+    "long-field",
+    "partial-cleanup",
+    "render-zero",
+    "close-zero",
+    "log-first-zero",
+    "both-keywords",
+    "marker-first",
   ]) {
     const calls = [],
       closed = [],
       cleanup = [],
       queries = [],
       frames = [],
-      optional = [];
+      optional = [],
+      continuity = [],
+      batches = [0, 0];
     let lastError = 91,
-      selected = 0;
+      selected = 0,
+      logReads = 0,
+      visibility;
     const api = {
       NULL: null,
       TRUE: true,
@@ -9382,9 +9544,10 @@ test("post-refusal audit inspection joins the original case without draining the
       ERROR_INSUFFICIENT_BUFFER: 122,
       ERROR_INVALID_DATA: 13,
       ERROR_TIMEOUT: 1460,
+      ERROR_NO_MORE_ITEMS: 259,
       MAXDWORD: 0xffffffff,
       EvtQueryChannelPath: 1,
-      EvtQueryReverseDirection: 0x200,
+      EvtQueryForwardDirection: 0x100,
       EvtRenderContextValues: 0,
       EvtRenderEventValues: 0,
       EvtVarTypeUInt32: 8,
@@ -9422,6 +9585,7 @@ test("post-refusal audit inspection joins the original case without draining the
       EvtOpenLog(session, channel, flags) {
         assert.deepEqual([session, channel, flags], [null, "Security", 1]);
         lastError = 5;
+        logReads++;
         return fault === "log" ? null : "log";
       },
       EvtGetChannelConfigProperty(handle, kind, flags, size, value, used) {
@@ -9438,7 +9602,21 @@ test("post-refusal audit inspection joins the original case without draining the
         assert.deepEqual([handle, size], ["log", 16]);
         assert.ok([2, 3].includes(kind));
         lastError = 5;
-        Object.assign(value, { Type: 10, UInt64Val: kind === 2 ? 2 : 10 });
+        if (fault === "log-first-zero" && logReads < 3) {
+          lastError = kind === 3 ? 0 : 6;
+          return false;
+        }
+        Object.assign(value, {
+          Type: 10,
+          UInt64Val:
+            kind === 2
+              ? fault === "log-clear" && logReads === 2
+                ? 1
+                : 2
+              : fault === "log-rollover" && logReads === 2
+                ? 11
+                : 10,
+        });
         used(16);
         return fault !== "log-info";
       },
@@ -9446,6 +9624,8 @@ test("post-refusal audit inspection joins the original case without draining the
       command_case_pid: 43,
       command_case_birth: 50,
       command_case_logon: 7,
+      command_case_permit: fault !== "failure-event",
+      command_client: "client",
       command_case_from: 90,
       command_action: 2,
       command_paths: ["inspect", "edit", "outside", "marker"],
@@ -9455,6 +9635,16 @@ test("post-refusal audit inspection joins the original case without draining the
       command_operating_bytes: 0,
       command_operating_incomplete: false,
       command_inspection_incomplete: false,
+      command_helper_hash: PIN,
+      command_ids: Array(4).fill("a".repeat(16) + ":" + "b".repeat(32)),
+      command_delivery_versions: [[0], [0]],
+      command_delivery_version_count:
+        fault === "version-unavailable" ? [0, 0] : [1, 1],
+      command_delivery_records: fault === "undelivered" ? [] : [12],
+      command_delivery_record_count: fault === "undelivered" ? 0 : 1,
+      command_delivery_records_incomplete: false,
+      command_inspection_target_record: 0,
+      command_inspection_target_time: 0,
       command_delivery_interval(interval, until) {
         interval.text = "TimeCreated[@SystemTime>='90' and @SystemTime<='110']";
         until(110);
@@ -9463,7 +9653,10 @@ test("post-refusal audit inspection joins the original case without draining the
       GetTickCount64: () =>
         fault === "deadline" ||
         (fault === "render-deadline" && calls.includes("next")) ||
-        (fault === "projection-deadline" && optional.length)
+        (fault === "projection-deadline" &&
+          optional.some(([format]) =>
+            format.includes("operating-audit index="),
+          ))
           ? 120000
           : 0,
       command_delivery_text: (value) =>
@@ -9473,23 +9666,18 @@ test("post-refusal audit inspection joins the original case without draining the
         value.Type === 19 ? value.SidVal : null,
       GetLengthSid: (value) => value.length,
       EqualSid: (a, b) => a.equals(b),
-      diagnostic_blob_read(text, size, blob) {
-        const bytes =
-          typeof text === "string" ? Buffer.from(text, "utf16le") : text;
-        Object.assign(blob, {
-          size,
-          encoded: Math.min(size, 64),
-          status: bytes === null ? -1 : 0,
-          closed: 0,
-          hash: bytes === null ? "-" : sha(bytes),
-          hex:
-            bytes === null || !size
-              ? "-"
-              : bytes.subarray(0, 64).toString("hex"),
-        });
+      diagnostic_write: (_stream, _used, _incomplete, format, ...args) => {
+        optional.push([format, ...args]);
+        if (fault === "output-bound" && format.includes("audit-value"))
+          api.command_operating_incomplete = true;
       },
-      diagnostic_write: (_stream, _used, _incomplete, format, ...args) =>
-        optional.push([format, ...args]),
+      byteSlice(value, at, length) {
+        return (
+          typeof value === "string" ? Buffer.from(value, "utf16le") : value
+        )
+          .subarray(at, at + length)
+          .toString("hex");
+      },
       wcscmp: (a, b) => (a === b ? 0 : 1),
       wcslen: (text) => text.length,
       userText: identity.userSid,
@@ -9515,8 +9703,8 @@ test("post-refusal audit inspection joins the original case without draining the
         lastError = value;
       },
       EvtCreateRenderContext(count, paths, flags) {
-        assert.equal(count, 12);
-        assert.equal(paths.length, 12);
+        assert.equal(count, 13);
+        assert.equal(paths.length, 13);
         assert.equal(flags, 0);
         assert.ok(paths[0].includes("ProcessId"));
         assert.ok(paths[2].includes("SubjectLogonId"));
@@ -9534,7 +9722,7 @@ test("post-refusal audit inspection joins the original case without draining the
         return query.text.length;
       },
       EvtQuery(session, channel, query, flags) {
-        assert.deepEqual([session, channel, flags], [null, "Security", 0x201]);
+        assert.deepEqual([session, channel, flags], [null, "Security", 0x101]);
         selected = queries.length - 1;
         calls.push("query");
         lastError = 5;
@@ -9556,17 +9744,39 @@ test("post-refusal audit inspection joins the original case without draining the
           [`query:${selected}`, 16, 0, 0],
         );
         calls.push("next");
+        const batch = batches[selected]++;
+        if (
+          batch &&
+          fault !== "saturated" &&
+          !(fault === "short-batches" && batch === 1) &&
+          !(fault === "unrelated-first" && selected && batch === 1)
+        ) {
+          count(0);
+          lastError = 259;
+          return false;
+        }
         lastError = fault === "empty" ? 259 : 50;
         const size =
           fault === "saturated"
             ? 16
             : fault === "empty" || fault === "next"
               ? 0
-              : selected
-                ? 1
-                : 2;
+              : ["undelivered", "marker-first"].includes(fault)
+                ? 2
+                : selected
+                  ? 1
+                  : 2;
         count(size);
-        for (let i = 0; i < size; i++) events[i] = `event:${selected}:${i}`;
+        for (let i = 0; i < size; i++)
+          events[i] = `event:${selected}:${batch}:${i}`;
+        if (fault === "unrelated-first" && selected && batch === 0)
+          events[0] = "unrelated";
+        if (fault === "short-batches" && batch === 1)
+          events[0] = "later-marker";
+        if (["partial-next", "partial-cleanup"].includes(fault)) {
+          lastError = 50;
+          return false;
+        }
         return !["empty", "next"].includes(fault);
       },
       EvtRender(context, event, flags, maximum, bytes, used, count) {
@@ -9574,7 +9784,20 @@ test("post-refusal audit inspection joins the original case without draining the
         calls.push("render");
         lastError = 50;
         if (fault === "render") return false;
-        const object = event.endsWith(":0") ? "outside" : "marker";
+        if (fault === "render-zero") {
+          lastError = event.endsWith(":0") ? 0 : 50;
+          return false;
+        }
+        const object =
+          fault === "marker-first" && selected
+            ? event.endsWith(":0")
+              ? "marker"
+              : "outside"
+            : event === "later-marker"
+              ? "marker"
+              : event.endsWith(":0")
+                ? "outside"
+                : "marker";
         bytes.push(
           fault === "text"
             ? { Type: 1, StringVal: "0x2b" }
@@ -9619,11 +9842,23 @@ test("post-refusal audit inspection joins the original case without draining the
             UInt64Val:
               fault === "other-keywords"
                 ? 0n
-                : fault === "failure-event"
-                  ? 0x8010000000000000n
-                  : 0x8020000000000000n,
+                : fault === "both-keywords"
+                  ? 0x8030000000000000n
+                  : fault === "failure-event"
+                    ? 0x8010000000000000n
+                    : 0x8020000000000000n,
           },
-          { Type: 10, UInt64Val: fault === "missing-record" ? 0 : 12 },
+          {
+            Type: 10,
+            UInt64Val:
+              fault === "missing-record"
+                ? 0
+                : object === "marker"
+                  ? fault === "marker-first"
+                    ? 11
+                    : 13
+                  : 12,
+          },
           {
             Type: ["sid", "other-sid", "bad-sid"].includes(fault) ? 19 : 1,
             StringVal:
@@ -9648,18 +9883,46 @@ test("post-refusal audit inspection joins the original case without draining the
                 : fault === "numeric-range"
                   ? 10
                   : 20,
-            UInt32Val: 1,
+            UInt32Val: object === "marker" ? 1 : 2,
             UInt64Val: 4294967296n,
           },
-          { Type: 1, StringVal: "C:\\fixture\\actor.exe" },
+          {
+            Type: 1,
+            StringVal:
+              fault === "long-field"
+                ? "C:\\fixture\\" + "actor-λ".repeat(12) + ".exe"
+                : "C:\\fixture\\actor.exe",
+          },
+          { Type: 4, ByteVal: fault === "version" ? 9 : 0 },
         );
-        used(fault === "render-size" ? 191 : 512);
-        count(fault === "render-count" ? 11 : 12);
+        if (event === "unrelated") {
+          for (const index of [0, 1, 2, 8, 9, 10, 11])
+            bytes[index] = { Type: 0 };
+          bytes[5] = { Type: 6, UInt16Val: 4688 };
+        }
+        if (fault === "loss") bytes[5] = { Type: 6, UInt16Val: 1102 };
+        used(fault === "render-size" ? 191 : 1024);
+        count(fault === "render-count" ? 12 : 13);
         return true;
       },
       EvtClose(handle) {
         closed.push(handle);
         lastError = 6;
+        if (
+          fault === "close-zero" &&
+          (handle.startsWith("event:") || handle.startsWith("query:"))
+        ) {
+          lastError =
+            handle.startsWith("event:") && handle.endsWith(":0") ? 0 : 6;
+          return false;
+        }
+        if (
+          fault === "partial-cleanup" &&
+          (handle === "context" ||
+            handle.startsWith("event:") ||
+            handle.startsWith("query:"))
+        )
+          return false;
         return (
           !(
             fault === "event-close" &&
@@ -9676,7 +9939,9 @@ test("post-refusal audit inspection joins the original case without draining the
       },
       cleanup_error: (...cause) => cleanup.push(cause),
       fprintf: (_stream, _format, ...args) => {
-        frames.push(args);
+        if (_format.includes("delivery continuity")) continuity.push(args);
+        else if (_format.includes("delivery visibility")) visibility = args;
+        else frames.push(args);
         lastError = 92;
       },
       fflush: () => {},
@@ -9693,15 +9958,30 @@ test("post-refusal audit inspection joins the original case without draining the
     ])
       assert.equal(queries[1].includes(predicate), false);
     assert.equal(lastError, 91);
-    assert.equal(
-      calls.filter((call) => call === "next").length,
-      ["query", "deadline", "render-deadline"].includes(fault)
-        ? fault === "render-deadline"
-          ? 1
-          : 0
-        : 2,
-    );
+    if (
+      [
+        null,
+        "empty",
+        "query",
+        "deadline",
+        "render-deadline",
+        "short-batches",
+        "saturated",
+      ].includes(fault)
+    )
+      assert.equal(
+        calls.filter((call) => call === "next").length,
+        {
+          empty: 2,
+          query: 0,
+          deadline: 0,
+          "render-deadline": 1,
+          "short-batches": 6,
+          saturated: 16,
+        }[fault] ?? 4,
+      );
     assert.equal(frames.length, 6);
+    assert.equal(continuity.length, 2);
     assert.deepEqual(frames[4], [true, true, true, 0, 1, 2, 3, 4, 5]);
     assert.equal(frames[5][0], fault === "channel" ? 5 : 0);
     assert.equal(frames[5][1], fault === "publisher" ? 5 : 0);
@@ -9731,11 +10011,19 @@ test("post-refusal audit inspection joins the original case without draining the
     for (const handle of ["channel", "publisher", "log"])
       assert.equal(
         closed.filter((value) => value === handle).length,
-        fault === handle ? 0 : 1,
+        fault === handle
+          ? 0
+          : handle === "log"
+            ? fault === "deadline"
+              ? 1
+              : ["render-deadline", "projection-deadline"].includes(fault)
+                ? 2
+                : 3
+            : 1,
       );
     if (fault === "interface-close") {
       assert.deepEqual(frames[5].slice(9, 12), [6, 6, 6]);
-      assert.equal(cleanup.length, 3);
+      assert.equal(cleanup.length, 5);
     }
     assert.equal(frames[1][0], 0);
     assert.equal(frames[2][0], 1);
@@ -9753,18 +10041,19 @@ test("post-refusal audit inspection joins the original case without draining the
         ? 1460
         : fault === "query"
           ? 5
-          : fault === "empty"
-            ? 259
-            : fault === "next"
-              ? 50
-              : 0,
+          : ["next", "partial-next", "partial-cleanup"].includes(fault)
+            ? 50
+            : 0,
     );
     assert.equal(frames[1][4], fault === "saturated");
     assert.equal(
       frames[1][5],
-      ["event-close", "query-close"].includes(fault) ? 6 : 0,
+      ["event-close", "query-close", "partial-cleanup"].includes(fault) ? 6 : 0,
     );
-    assert.equal(frames[3][0], fault === "context-close" ? 6 : 0);
+    assert.equal(
+      frames[3][0],
+      ["context-close", "partial-cleanup"].includes(fault) ? 6 : 0,
+    );
     assert.equal(
       closed.filter((handle) => handle.startsWith("query:")).length,
       ["query", "deadline"].includes(fault)
@@ -9775,7 +10064,7 @@ test("post-refusal audit inspection joins the original case without draining the
     );
     assert.equal(
       closed.filter((handle) => handle === "context").length,
-      fault === "context" ? 0 : 1,
+      ["context", "deadline"].includes(fault) ? 0 : 1,
     );
     assert.equal(
       cleanup.length > 0,
@@ -9784,11 +10073,13 @@ test("post-refusal audit inspection joins the original case without draining the
         "query-close",
         "context-close",
         "interface-close",
+        "partial-cleanup",
+        "close-zero",
       ].includes(fault),
     );
     assert.equal(
       frames[1][10],
-      fault === "render-deadline"
+      ["render-deadline", "deadline"].includes(fault)
         ? 1460
         : fault === "context"
           ? 5
@@ -9812,11 +10103,31 @@ test("post-refusal audit inspection joins the original case without draining the
       "render-deadline",
       "render-count",
       "render-size",
+      "partial-next",
+      "partial-cleanup",
+      "render-zero",
     ].includes(fault);
-    assert.equal(frames[1][7], fault === "context" ? -1 : matches ? 1 : 0);
+    assert.equal(
+      frames[1][7],
+      ["context", "deadline"].includes(fault)
+        ? -1
+        : matches
+          ? fault === "saturated"
+            ? 8
+            : 1
+          : 0,
+    );
     assert.equal(
       frames[1][8],
-      fault === "context" ? -1 : matches ? (fault === "saturated" ? 15 : 1) : 0,
+      ["context", "deadline"].includes(fault)
+        ? -1
+        : matches
+          ? fault === "saturated"
+            ? 120
+            : fault === "short-batches"
+              ? 3
+              : 1
+          : 0,
     );
     assert.deepEqual(api.command_delivery.rejected, [1, 2, 3, 4]);
     const row = optional.find(([format]) =>
@@ -9848,9 +10159,9 @@ test("post-refusal audit inspection joins the original case without draining the
         "other-object-type": 8,
         "other-sid": 4,
       }[fault];
-      assert.equal(row.at(-1), expected);
+      assert.equal(row[13], expected);
       assert.equal(
-        row.at(-3),
+        row[11],
         true,
         "Correlated diagnostics cannot supply native acceptance",
       );
@@ -9877,7 +10188,7 @@ test("post-refusal audit inspection joins the original case without draining the
               : 10;
       assert.equal(row[3] & (1 << field), 0);
     }
-    if (fault === "failure-event") assert.equal(row.at(-1), 0);
+    if (fault === "failure-event") assert.equal(row[13], 0);
     if (fault === "projection-deadline") {
       assert.equal(frames[2][10], 1460);
       assert.equal(api.command_inspection_incomplete, true);
@@ -9887,6 +10198,131 @@ test("post-refusal audit inspection joins the original case without draining the
         1,
       );
     }
+    if (
+      fault === null ||
+      fault === "empty" ||
+      fault === "short-batches" ||
+      fault === "unrelated-first" ||
+      fault === "undelivered"
+    ) {
+      assert.equal(
+        frames[1][11],
+        true,
+        "Only ERROR_NO_MORE_ITEMS proves enumeration exhaustion",
+      );
+      assert.deepEqual(visibility, [true, true]);
+    }
+    if (
+      [
+        "log-rollover",
+        "log-clear",
+        "log-first-zero",
+        "loss",
+        "next",
+        "partial-next",
+        "partial-cleanup",
+        "render-zero",
+        "close-zero",
+        "saturated",
+        "output-bound",
+      ].includes(fault)
+    ) {
+      assert.equal(visibility[0], false);
+      assert.equal(api.command_inspection_incomplete, true);
+    }
+    if (fault === "unrelated-first") {
+      assert.equal(
+        row[1],
+        1,
+        "The unrelated 4688 record precedes the retained candidate",
+      );
+      assert.equal(
+        optional.filter(([format]) => format.includes("operating-audit index="))
+          .length,
+        1,
+      );
+    }
+    if (fault === "undelivered") {
+      const rows = optional.filter(([format]) =>
+        format.includes("operating-audit index="),
+      );
+      assert.equal(rows.length, 2);
+      assert.equal(rows[0][16], true);
+      assert.equal(rows[0][17], 0);
+      assert.equal(rows[1][16], 1);
+      assert.equal(rows[1][18], true);
+    }
+    if (fault === "other-logon") {
+      assert.equal(
+        row[11],
+        true,
+        "Retain original object candidates before logon selection",
+      );
+      assert.equal(row[16], false);
+    }
+    if (fault === "version") {
+      assert.equal(row[14], 9);
+      assert.equal(row[15], false);
+    }
+    if (fault === "both-keywords") {
+      assert.equal(row[13], 0);
+      assert.equal(row[15], false);
+      assert.equal(row[16], false);
+    }
+    if (fault === "marker-first") {
+      assert.equal(row[12], true);
+      assert.equal(row[18], 0);
+    }
+    if (fault === "version-unavailable") {
+      assert.equal(row[15], -1);
+      assert.equal(visibility[0], false);
+    }
+    if (fault === "long-field") {
+      const chunks = optional.filter(
+        ([format, , field]) => format.includes("audit-value") && field === 4,
+      );
+      assert.ok(chunks.length > 1);
+      assert.equal(chunks[0][6], false);
+      assert.equal(chunks.at(-1)[6], true);
+      assert.equal(
+        Buffer.from(chunks.map((chunk) => chunk[7]).join(""), "hex").toString(
+          "utf16le",
+        ),
+        "C:\\fixture\\" + "actor-λ".repeat(12) + ".exe",
+      );
+    }
+    if (fault === "partial-cleanup") {
+      assert.equal(
+        frames[1][2],
+        50,
+        "Enumeration failure survives independent cleanup failures",
+      );
+      assert.equal(cleanup.length, 6);
+      assert.equal(
+        closed.filter((handle) => handle.startsWith("event:")).length,
+        3,
+      );
+    }
+    if (fault === "render-zero")
+      assert.equal(
+        frames[1][10],
+        0,
+        "A later render failure cannot replace the first zero error code",
+      );
+    if (fault === "close-zero") {
+      assert.equal(
+        frames[1][5],
+        0,
+        "Later closures cannot replace the first zero error code",
+      );
+      assert.equal(frames[1][6], "event");
+    }
+    if (fault === "log-first-zero")
+      assert.equal(
+        continuity[0][0],
+        0,
+        "The later log-property failure cannot replace the first zero error code",
+      );
   }
 });
 

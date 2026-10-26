@@ -1248,6 +1248,19 @@ wrong-principal/logon/PID/mask, loss, window and cleanup regressions remain the
 delivery and retirement proof. Zero records still fail. Portable coverage proves
 no native delivery or hosted failure causality and adds no slow-tier assignment.
 
+Post-refusal actual-body regressions freeze the original failure boundary and
+retain bounded 64-bit live record IDs. The interval-only query passes unrelated
+4688 records before original candidates, preserves subject/logon/selector
+mismatches, and distinguishes eligible-but-undelivered records from unsupported
+versions. Short successful batches continue to documented enumeration exhaustion;
+empty exhausted searches remain visibility evidence only. Fixed scan/output and
+lifetime bounds, loss/clear/rollover, malformed fields, zero-error first causes
+and partial enumeration retain incomplete outcomes. Complete field chunks
+preserve UTF-16 data beyond a prefix, with explicit completion flags. Original
+errors survive independently attempted event, query, context and log closures;
+live subscription and restoration refusals remain unchanged. These cases execute
+no Windows tool and add no validation command or native acceptance claim.
+
 The actual future-only subscription startup creates a nonsignaled manual-reset
 event and waits for service readiness. The capture fixture distinguishes idle,
 notified, enumerating and exhausted subscription states; a forced initial signal

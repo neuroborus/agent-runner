@@ -119,34 +119,57 @@ unread values remain unavailable. Readiness, drain and projection counters retai
 their existing meanings; `audit[0]=5` is a control phase, not a delivery cause.
 The four projection counters record state/subject refusal, numeric or lifetime
 binding refusal, a target predicate miss, and a marker/order predicate miss.
-One post-refusal inspection retains two read-only Security queries, each with
-one zero-timeout batch of at most 16 events. Both endpoints come from the
-original case's release FILETIME and one immediate failure-time sample, retaining
-100 ns precision; unavailable bounds never fall back to a recent-time query.
+One post-refusal inspection retains two read-only Security queries. The failure
+owner freezes the original upper FILETIME once before publishing diagnostics;
+both queries retain that boundary and the original release FILETIME at 100 ns
+precision, with no recent-time fallback. Each query reads forward in batches of
+at most 16 under a 128-record cap, for at most 256 scanned records total, the
+existing 32 KiB render buffer, remaining lifetime and shared 4 KiB operating
+allowance. Only
+[`EvtNext` returning `ERROR_NO_MORE_ITEMS`](https://learn.microsoft.com/en-us/windows/win32/api/winevt/nf-winevt-evtnext)
+establishes enumeration exhaustion; a short successful batch continues.
 The first query retains provider, event-class, subject and object-type selection
-without keywords. Its former keyworded comparison now selects only that interval.
-The live subscription and its loss selections are unchanged.
-A typed twelve-field projection uses the existing fixed 32 KiB buffer for
+without keywords. The second selects only the original interval, independently
+of those predicates. The live subscription and its loss selections are unchanged.
+The typed thirteen-field projection retains
 process ID, object name, operating logon, timestamp, provider, event ID, keywords,
-record ID, subject SID, object type, access mask and process name. Strings must
+record ID, subject SID, object type, access mask, process name and version. Strings must
 terminate within the returned buffer; typed SIDs must fit it before native SID
-validation or comparison. Full UTF-16 byte sizes/digests (excluding the terminator),
-or the complete binary value for a typed SID, and at most 64 encoded bytes retain
-each value with its original variant type. Presence/type
-bits distinguish missing or malformed fields from valid zero values.
-Correlation compares PID/logon/birth and both interval endpoints, then held
+validation or comparison. Unrelated records are classified before file fields
+are required or retained-output space is spent; absent ObjectName/access fields
+on unrelated 4688 records are legitimate. Original-process/object candidates
+are retained before applying the subject or logon predicates being investigated.
+Presence/type bits distinguish missing or malformed fields from valid zero values.
+Provider, subject, object type/name and process name use full bounded chunks,
+with byte size, offset and a final-complete flag; strings retain UTF-16 bytes
+without their terminator and typed SIDs retain binary bytes. A prefix or digest
+cannot replace a complete field. Output exhaustion leaves the shared incomplete
+marker and prevents a completed search claim.
+
+The candidate binding joins held process birth/image hash and target/marker file
+IDs. A separate 256-ID cache retains actual live-capture Security record IDs
+until the frozen boundary; overflow or an invalid ID leaves an absent-ID
+comparison unknown. Correlation compares PID/birth and both interval endpoints, then held
 target/marker names case-insensitively outside XPath. An exclusion mask describes
 the original provider (1), event-ID/keyword (2), subject (4) and object-type (8)
-predicates; `-1` means a needed field is unavailable. These comparisons establish
-neither the acceptance sequence nor a producer cause. Earlier broker reads,
-foreign processes/logons and out-of-interval rows remain unrelated.
+predicates; `-1` means a needed field is unavailable. Separate fields retain
+published-version/decoder eligibility, native target/marker eligibility,
+presence in live capture and the unchanged target-before-marker record/time
+ordering predicate. Different logons and subjects remain concrete candidate
+exclusions. These diagnostic comparisons never advance the live acceptance state.
 Unavailable or malformed projection remains distinct from zero matches. Every
 acquired event/query/render-context handle is closed, with the original error
-preserved separately from closure errors. Counts, saturation, empty queries and
-I/O completion establish neither event absence nor delivery. The live subscription,
-bookmark, deadlines, policy, SACLs and acceptance predicates are unchanged. The hosted diagnostic
-checkpoint must establish actual attribution before dependent repairs; unresolved
-attribution requires a reviewed diagnostic follow-up.
+preserved separately from closure errors. Query/render errors, loss/clear events,
+changed oldest-record or shrinking-count log samples, scan/output limits and
+expiry leave visibility incomplete. Positive eligible records establish that
+those records reached Security; qualifying IDs missing from live capture were
+not delivered there by the frozen boundary. An exhausted empty search establishes
+only that no matching record was visible through that boundary. Event Log reads
+cannot prove that the kernel never generated an unpublished, delayed or lost
+record, or infer administrator suppression, policy activation, token refresh or
+a notification defect. The live subscription, bookmark, original I/O, deadlines,
+policy, SACLs, restoration and acceptance predicates remain unchanged. Native
+delivery and independent cleanup still require matching hosted execution.
 
 At the original command's pre-I/O checkpoint, the finite gate ACE projector also
 samples the held target/marker SACLs once. Counts, types, flags, masks, subject

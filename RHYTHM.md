@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-26 — Separate original audit selection from Security visibility
+
+Windows command failure inspection freezes the original interval, enumerates
+bounded batches to explicit exhaustion and retains original candidates before
+subject/logon selection. Actual live record IDs, complete bounded field chunks,
+published event versions and unchanged eligibility/order predicates distinguish
+concrete exclusions from records visible in Security but absent from live capture.
+Loss, rollover, failed reads/closures and resource limits preserve incomplete
+evidence. An exhausted query establishes visibility through its boundary, not
+whether the kernel generated an unpublished record. Original I/O, acceptance,
+audit setup and independent restoration remain unchanged.
+
 ## 2026-10-25 — Capture host facts without promoting diagnostic comparisons
 
 Windows feasibility retains bounded typed WFP identity/event/endpoint/DROP facts
