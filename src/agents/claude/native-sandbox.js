@@ -48,7 +48,7 @@ import { readFileSync, writeFileSync, writeSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { join } from "node:path";
 
-const [access, gitDirectory, outsideDirectory, socketPath, providerPid] =
+const [access, gitDirectory, outsideDirectory, socketPath, directoryMode, providerPid] =
   process.argv.slice(1);
 const writable = access === "workspace-write";
 const denied = new Set(["EACCES", "ENOENT", "EPERM", "EROFS"]);
@@ -84,28 +84,34 @@ try {
 } catch ({ code }) {
   if (!denied.has(code)) process.exit(19);
 }
-run(
-  "/bin/sh",
-  [
-    "-c",
-    "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
-  ],
-  true,
-);
-if (!writable) {
-  run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
-  run("git", ["branch", "sandbox-command-probe"], false);
+if (directoryMode === "directory") {
+  if (readFileSync("inspection.txt", "utf8") !== "inspection\n") process.exit(30);
+  if (readFileSync(join(outsideDirectory, "reference.md"), "utf8") !== "reference\n") process.exit(31);
+  write("out/result.txt", writable);
+} else {
   run(
-    "git",
-    ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
-    false,
+    "/bin/sh",
+    [
+      "-c",
+      "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
+    ],
+    true,
   );
+  if (!writable) {
+    run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
+    run("git", ["branch", "sandbox-command-probe"], false);
+    run(
+      "git",
+      ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
+      false,
+    );
+  }
 }
 if (process.env.HOME === process.cwd()) process.exit(28);
 if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);
 write(join(process.env.HOME, "home-probe"), false);
 write(join(process.env.TMPDIR, "temporary-probe"), true);
-write("workspace-probe", writable);
+write("workspace-probe", writable && directoryMode !== "directory");
 write(join(gitDirectory, "git-probe"), false);
 write(join(outsideDirectory, "outside-probe"), false);
 
@@ -142,6 +148,7 @@ const [
   outsideDirectory,
   socketPath,
   abstractSocketName,
+  directoryMode,
   providerPid,
 ] = process.argv.slice(1);
 const writable = access === "workspace-write";
@@ -182,32 +189,40 @@ try {
 } catch ({ code }) {
   if (!denied.has(code)) process.exit(19);
 }
-run(
-  "/bin/sh",
-  [
-    "-c",
-    "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
-  ],
-  true,
-);
-if (!writable) {
-  run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
-  run("git", ["branch", "sandbox-command-probe"], false);
+if (directoryMode === "directory") {
+  if (readFileSync("inspection.txt", "utf8") !== "inspection\n") process.exit(30);
+  if (readFileSync(join(outsideDirectory, "reference.md"), "utf8") !== "reference\n") process.exit(31);
+  write("out/result.txt", writable);
+} else {
   run(
-    "git",
-    ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
-    false,
+    "/bin/sh",
+    [
+      "-c",
+      "git log -1 --format=%H >/dev/null && git cat-file -e 'HEAD^{commit}' && git branch -a >/dev/null && ls >/dev/null",
+    ],
+    true,
   );
+  if (!writable) {
+    run("/bin/sh", ["-c", ": > workspace-command-probe"], false);
+    run("git", ["branch", "sandbox-command-probe"], false);
+    run(
+      "git",
+      ["push", outsideDirectory, "HEAD:refs/heads/sandbox-command-probe"],
+      false,
+    );
+  }
 }
 if (process.env.HOME === process.cwd()) process.exit(28);
 if (readFileSync(join(process.env.HOME, ".bashrc"), "utf8") !== "") process.exit(29);
 write(join(process.env.HOME, "home-probe"), false);
 write(join(process.env.TMPDIR, "temporary-probe"), true);
-write("workspace-probe", writable);
+write("workspace-probe", writable && directoryMode !== "directory");
 if (writable && !statSync(".claude").isDirectory()) process.exit(23);
 write(".claude/mask-probe", false);
 write(join(gitDirectory, "git-probe"), false);
-write(join(outsideDirectory, "outside-probe"), false);
+// A file mount's parent under private /tmp can be writable namespace-local scratch.
+write(join(outsideDirectory, directoryMode === "directory" ? "reference.md" : "outside-probe"), false);
+write("/agent-runner-claude-probe", false);
 write("/tmp/agent-runner-claude-probe", true);
 write("/run/agent-runner-claude-probe", true);
 
@@ -259,6 +274,7 @@ function nativeArguments({
   gitDirectory,
   outsideDirectory,
   workspaceDirectory,
+  directoryMode = "git",
 }) {
   const argumentsList = [
     "--new-session",
@@ -312,6 +328,7 @@ function nativeArguments({
     gitDirectory,
     outsideDirectory,
     "/run/agent-runner-claude-probe.sock",
+    directoryMode,
   );
   return argumentsList;
 }
@@ -325,6 +342,7 @@ function fallbackProbeArguments({
   outsideDirectory,
   socketPath,
   workspaceDirectory,
+  directoryMode = "git",
 }) {
   const argumentsList = ["--new-session", "--die-with-parent"];
   for (const name of new Set([
@@ -370,6 +388,7 @@ function fallbackProbeArguments({
       outsideDirectory,
       socketPath,
       abstractSocketName,
+      directoryMode,
       String(process.pid),
     ]
       .map(shellArgument)
@@ -495,6 +514,7 @@ async function probePolicy({
   env,
   execute,
   weaker,
+  directoryAccess,
 }) {
   let basePath;
   let commandLauncher;
@@ -505,7 +525,10 @@ async function probePolicy({
     // including when the test runner supplies a nested private temporary root.
     basePath = await mkdtemp(join(tmpdir(), "ar-c-"));
     const workspaceDirectory = join(basePath, "w");
-    const gitDirectory = join(workspaceDirectory, ".git");
+    const gitDirectory = join(
+      workspaceDirectory,
+      directoryAccess === undefined ? ".git" : "control",
+    );
     const outsideDirectory = join(basePath, "outside");
     const emptyMaskDirectory = join(basePath, "claude-empty-probe");
     await mkdir(workspaceDirectory);
@@ -517,12 +540,33 @@ async function probePolicy({
         join(workspaceDirectory, ".claude"),
       ].map((path) => mkdir(path, { mode: 0o700 })),
     );
-    await initializeProbeRepositories({
-      env,
-      execute,
-      outsideDirectory,
-      workspaceDirectory,
-    });
+    let directoryPolicy;
+    if (directoryAccess === undefined) {
+      await initializeProbeRepositories({
+        env,
+        execute,
+        outsideDirectory,
+        workspaceDirectory,
+      });
+    } else {
+      const outputPath = join(workspaceDirectory, "out");
+      await mkdir(outputPath);
+      await writeFile(
+        join(workspaceDirectory, "inspection.txt"),
+        "inspection\n",
+      );
+      const referencePath = join(outsideDirectory, "reference.md");
+      await writeFile(referencePath, "reference\n");
+      directoryPolicy = {
+        writablePaths: access === "workspace-write" ? [outputPath] : [],
+        protectedPaths: [
+          gitDirectory,
+          join(workspaceDirectory, ".claude"),
+          referencePath,
+        ],
+      };
+    }
+    const directoryMode = directoryAccess === undefined ? "git" : "directory";
     let file;
     let argumentsList;
     if (weaker) {
@@ -541,7 +585,8 @@ async function probePolicy({
         bubblewrapBinary,
         cwd: workspaceDirectory,
         environment: env,
-        gitDirectories: [gitDirectory],
+        gitDirectories: directoryPolicy?.protectedPaths ?? [gitDirectory],
+        directoryPolicy,
         unsetEnvironmentNames: [
           ...credentialEnvironmentNames,
           PROBE_CREDENTIAL,
@@ -557,6 +602,7 @@ async function probePolicy({
         outsideDirectory,
         socketPath,
         workspaceDirectory,
+        directoryMode,
       });
     } else {
       commandLauncher = await createClaudeCommandLauncher({
@@ -565,7 +611,8 @@ async function probePolicy({
         bubblewrapBinary,
         cwd: workspaceDirectory,
         environment: env,
-        gitDirectories: [gitDirectory],
+        gitDirectories: directoryPolicy?.protectedPaths ?? [gitDirectory],
+        directoryPolicy,
         isolationPolicy: "native",
         unsetEnvironmentNames: credentialEnvironmentNames,
       });
@@ -576,6 +623,7 @@ async function probePolicy({
         gitDirectory,
         outsideDirectory,
         workspaceDirectory,
+        directoryMode,
       });
       const providerCommand = [
         process.execPath,
@@ -646,9 +694,13 @@ async function probePolicy({
 }
 
 export async function probeClaudeIsolationPolicies(options) {
-  const selected = {};
+  const selected = Object.fromEntries(
+    ACCESS_MODES.map((access) => [access, "unavailable"]),
+  );
   let managedSettingsAvailable;
-  for (const access of ACCESS_MODES) {
+  for (const access of options.directoryAccess === undefined
+    ? ACCESS_MODES
+    : [options.directoryAccess]) {
     const native = await probePolicy({ ...options, access, weaker: false });
     if (native.available) {
       managedSettingsAvailable ??= await probeManagedSettings(options);

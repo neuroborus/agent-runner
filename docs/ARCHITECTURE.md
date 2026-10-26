@@ -2529,8 +2529,7 @@ and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
 `cwd`. Unknown fields, relative paths and directory `local-commit` requests are
 invalid. Execution-option validation remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
-access for directory proofs. Unsupported adapters reject it before provider work;
-Claude directory enforcement remains unavailable.
+access for directory proofs. Unsupported adapters reject it before provider work.
 
 Codex directory access requires stable CLI 0.164.0 or newer. Its access-specific
 probe inspects bindings and snapshot safety without Git, an artificial repository,
@@ -2564,6 +2563,44 @@ failure and blocks reconstruction; successful post-retirement verification is
 required before requesting a fresh session. Reported file edits
 and move destinations must also lie inside declared outputs. These adapter permissions expose no directory
 workflow, publication or Git effect; pipeline lifecycle integration is separate.
+
+Claude directory access uses the existing stable CLI baseline and Linux isolation
+requirements. Separate cached probes for each directory access mode use ordinary
+directories, read-only controls and confined output roots; they never run Git,
+initialize a repository or probe local-commit readiness. Repository proofs keep
+their own policy selection. Immutable directory receipts bind the installed
+version, isolation/tool policy, requested access and filesystem-owned declarations
+and immutable bindings. Authorized output changes do not change those receipts.
+Only the requested access is advertised, with no local-commit capability.
+Restricted-host directory probes check write denial on the mounted reference file
+and a separate host-root path; a reference's parent under private `/tmp` may be
+writable namespace-local scratch.
+
+Directory turns replace Git metadata preparation with workspace-service inspection
+of all declared reads and discovered filesystem controls. Claude's mount
+preparation stays read-only with no configured writable paths. Both authenticated
+launchers keep the workspace read-only and bind only declared existing output
+roots writable. Missing output roots fail closed rather than being materialized
+or widening access to their parents; new descendants can be created inside an
+existing output directory. Mount identities come from a fresh filesystem-owned
+snapshot after storage allocation. Both launchers recheck canonical paths,
+device/inode identity, ordinary file types and single-link files before admission.
+Controls and external reads receive exact read-only mounts, including references
+otherwise hidden by private temporary/runtime filesystems.
+Incidental host write mounts are discarded. Provider-native Edit/Write are omitted
+for directory requests: only sandboxed Bash can write, with the existing tool,
+credential, network, socket, seccomp and no-fallback restrictions. Provider
+authentication/connectivity and session storage remain separate.
+
+Private turn storage excludes the declared state and protected trees in addition
+to workspace/task exclusions. Missing exclusion suffixes resolve through their
+nearest existing directory without creating declared paths. The workspace's
+output-only snapshot guard runs before each attempt and after process retirement
+and storage cleanup, including
+failed attempts before compaction or fresh reconstruction. Uncertain retirement
+retains its ownership failure and cannot authorize replay. Continuation, forks
+and reconstructed sessions reinstall the same policy without manufacturing Git
+or commit authority. This adapter capability does not expose directory workflows.
 
 Backend sessions are disposable execution context, not durable workflow state.
 Adapter capability probes inspect the installed CLI and enforceable local
@@ -2797,10 +2834,10 @@ fallback never invokes Claude's seccomp helper or creates a nested user
 namespace.
 
 The direct fallback probe supplies representative effective Claude arguments
-to that same validator and execution path. Native and fallback child probes use
-a disposable committed repository to require compound repository inspection
-and, for read-only access, reject workspace, Git, and local remote-ref
-mutations. They also check access-specific workspace writes, outside-write
+to that same validator and execution path. For repository access, native and
+fallback child probes use a disposable committed repository to require compound
+repository inspection and, for read-only access, reject workspace, Git, and local
+remote-ref mutations. They also check access-specific workspace writes, outside-write
 denial, private temporary storage, IP isolation, inability to reach live host
 abstract and pathname Unix sockets, credential and `ARGV0` removal, and host
 provider-proc secrecy. The selected fallback sets

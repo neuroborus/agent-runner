@@ -32,7 +32,14 @@ preparation, native output-only permissions, protected-write rejection, effectiv
 policy substitution, literal-path rejection for glob syntax, reconstruction,
 observations and attempt retirement. It uses ordinary temporary directories and
 model-free transport fixtures; live
-provider/platform acceptance remains separate.
+provider/platform acceptance remains separate. Fast `test/agents/claude.test.js`
+also owns Git-free directory proofs, access-specific immutable receipts, native
+and fallback output-only command projection, protected external read mounts,
+execution of the fallback probe payload against its emitted mount topology,
+rejected write mounts, output substitution during allocation and admission,
+missing nested artifact/state exclusions, post-failure mutation guards,
+reconstruction and unsupported isolation. Controlled launchers preserve deterministic coverage;
+the operator-owned post-install Claude acceptance below remains separate.
 
 The fast state `preservation.test.js` suite owns unfinished-work capture and
 checked restoration through the public state/Git boundaries. Isolated

@@ -39,15 +39,32 @@ function containsPath(parent, child) {
   return path === "" || (path !== ".." && !path.startsWith(`..${sep}`));
 }
 
-export function canReadClaudeFiles(paths, isolationPolicy) {
+export async function canReadClaudeFiles(
+  paths,
+  isolationPolicy,
+  readMounts = [],
+) {
   if (!["native", "runner-boundary"].includes(isolationPolicy)) return false;
-  return canReadFiles(paths, [
-    "/dev",
-    "/proc",
-    ...(isolationPolicy === "runner-boundary"
-      ? [PRIVATE_TEMPORARY_ROOT, PRIVATE_RUNTIME_ROOT]
-      : []),
-  ]);
+  if (!Array.isArray(paths) || paths.length === 0) return false;
+  for (const path of paths) {
+    if (
+      !(await canReadFiles(
+        [path],
+        [
+          "/dev",
+          "/proc",
+          ...(isolationPolicy === "runner-boundary" &&
+          !readMounts.some(
+            (root) => typeof path === "string" && containsPath(root, path),
+          )
+            ? [PRIVATE_TEMPORARY_ROOT, PRIVATE_RUNTIME_ROOT]
+            : []),
+        ],
+      ))
+    )
+      return false;
+  }
+  return true;
 }
 
 async function resolveExecutable(binary, environment) {
@@ -101,6 +118,7 @@ function runnerBoundaryArguments({
   cwd,
   gitDirectories,
   hiddenDirectory,
+  directoryPolicy,
 }) {
   const filesystemArguments = [
     "--tmpfs",
@@ -118,13 +136,26 @@ function runnerBoundaryArguments({
     filesystemArguments.push("--tmpfs", hiddenDirectory);
   }
   filesystemArguments.push(
-    access === "workspace-write" ? "--bind" : "--ro-bind",
+    access === "workspace-write" && directoryPolicy === undefined
+      ? "--bind"
+      : "--ro-bind",
     cwd,
     cwd,
+    ...(directoryPolicy?.writablePaths ?? []).flatMap((path) => [
+      "--bind",
+      path,
+      path,
+    ]),
   );
   const finalArguments = ["--as-pid-1", "--cap-drop", "ALL", "--proc", "/proc"];
   for (const gitDirectory of new Set(gitDirectories)) {
-    finalArguments.push("--ro-bind", gitDirectory, gitDirectory);
+    // Directory bindings precede Claude's descendant masks so those masks
+    // remain effective. Repository Git mounts retain their established order.
+    (directoryPolicy === undefined ? finalArguments : filesystemArguments).push(
+      "--ro-bind",
+      gitDirectory,
+      gitDirectory,
+    );
   }
   return { filesystemArguments, finalArguments };
 }
@@ -146,6 +177,7 @@ function launcherSource({
   token,
   home,
   unsetEnvironmentNames,
+  directoryPolicy,
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
@@ -180,6 +212,7 @@ const {
 const tokenName = ${JSON.stringify(CLAUDE_COMMAND_LAUNCHER_TOKEN)};
 if (process.env[tokenName] !== ${JSON.stringify(token)}) process.exit(125);
 const access = ${JSON.stringify(access)};
+const directoryPolicy = ${JSON.stringify(directoryPolicy ?? null)};
 const cwd = ${JSON.stringify(cwd)};
 const canonicalCwd = ${JSON.stringify(canonicalCwd)};
 const canonicalGitDirectories = ${JSON.stringify(canonicalGitDirectories)};
@@ -197,7 +230,7 @@ const protectedEnvironmentNames = new Set(${JSON.stringify([
     CLAUDE_COMMAND_LAUNCHER_TOKEN,
     ...unsetEnvironmentNames,
   ])});
-${projectionSource({ access, cwd, home, injectHome: false })}
+${projectionSource({ access, cwd, home, injectHome: false, directoryPolicy, claudeWritablePaths })}
 let sourceArguments;
 try { sourceArguments = projectArguments(process.argv.slice(2)); } catch { process.exit(125); }
 const validatedArguments = [];
@@ -423,7 +456,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
   if (!validPath(source) || !validPath(destination)) fail();
   const runnerWorkspaceMount =
     operation ===
-      (access === "workspace-write" ? "--bind" : "--ro-bind") &&
+      (access === "workspace-write" && directoryPolicy === null ? "--bind" : "--ro-bind") &&
     source === cwd &&
     destination === cwd;
   const runnerGitMount =
@@ -445,6 +478,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
       if (access !== "workspace-write" || source !== destination) fail();
       if (
         !containsPath(canonicalCwd, canonicalDestination) ||
+        (directoryPolicy !== null && !directoryPolicy.writablePaths.some((path) => containsPath(path, canonicalDestination))) ||
         canonicalGitDirectories.some((path) =>
           containsPath(path, canonicalDestination),
         ) ||
@@ -478,7 +512,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
           : JSON.stringify([maskKind, destination]);
       if (withinGit) {
         if (source !== destination && !safeMask) fail();
-        continue;
+        if (directoryPolicy === null || source === destination) continue;
       }
       if (withinWorkspace) {
         const overlapsPrivateMask = [...privateWorkspaceMasks.keys()].some(
@@ -490,7 +524,7 @@ while (["--bind", "--ro-bind", "--tmpfs"].includes(sourceArguments[index])) {
           canonicalDestination,
         );
         if (
-          access !== "workspace-write" ||
+          (access !== "workspace-write" && directoryPolicy === null) ||
           canonicalDestination === canonicalCwd ||
           (source !== destination && !safeMask) ||
           (emptyMask && pathKind(destination) === "file") ||
@@ -613,6 +647,7 @@ export async function createClaudeCommandLauncher({
   environment,
   gitDirectories,
   unsetEnvironmentNames,
+  directoryPolicy,
 }) {
   let launcherDirectory;
   let launcherIdentity;
@@ -640,6 +675,40 @@ export async function createClaudeCommandLauncher({
     const canonicalGitDirectories = await Promise.all(
       [...new Set(gitDirectories)].map((path) => realpath(path)),
     );
+    // Real turns carry bindings from the workspace snapshot. Disposable probes
+    // use the same ordinary-file and canonical-path admission rules below.
+    if (
+      directoryPolicy !== undefined &&
+      directoryPolicy.bindings === undefined
+    ) {
+      const bindings = await Promise.all(
+        [
+          ...new Set([
+            cwd,
+            ...directoryPolicy.writablePaths,
+            ...directoryPolicy.protectedPaths,
+          ]),
+        ].map(async (path) => {
+          const metadata = await lstat(path, { bigint: true });
+          const canonical = await realpath(path);
+          if (
+            canonical !== path ||
+            !(
+              metadata.isDirectory() ||
+              (metadata.isFile() && metadata.nlink === 1n)
+            )
+          )
+            throw new Error("Claude directory mount is unsafe.");
+          return {
+            path,
+            realpath: canonical,
+            dev: String(metadata.dev),
+            ino: String(metadata.ino),
+          };
+        }),
+      );
+      directoryPolicy = { ...directoryPolicy, bindings };
+    }
     const claudeWritablePaths =
       await claudeIncidentalWritablePaths(environment);
     const protectedRoots = [canonicalCwd, ...canonicalGitDirectories];
@@ -673,6 +742,7 @@ export async function createClaudeCommandLauncher({
       cwd,
       gitDirectories,
       hiddenDirectory: directory ?? launcherDirectory,
+      directoryPolicy,
     });
     await Promise.all([
       writeFile(
@@ -686,6 +756,8 @@ export async function createClaudeCommandLauncher({
               token,
               unsetEnvironmentNames,
               access,
+              directoryPolicy,
+              claudeWritablePaths,
             })
           : launcherSource({
               access,
@@ -704,6 +776,7 @@ export async function createClaudeCommandLauncher({
               token,
               home,
               unsetEnvironmentNames,
+              directoryPolicy,
             }),
         { mode: 0o500 },
       ),

@@ -63,13 +63,32 @@ export function toolHomeArguments(home) {
 // Claude prepares mounts against a read-only project. Replace only that exact
 // preparation reservation with the runner's requested access; preserve all
 // existing descendant masks and reject any absent project mount target.
-export function projectionSource({ access, cwd, home, injectHome = true }) {
+export function projectionSource({
+  access,
+  cwd,
+  home,
+  injectHome = true,
+  directoryPolicy,
+  claudeWritablePaths = [],
+}) {
   return `
 function projectArguments(args) {
   const fs = require("node:fs");
   const path = require("node:path");
   const cwd = ${JSON.stringify(cwd)};
   const writable = ${JSON.stringify(access === "workspace-write")};
+  const directory = ${JSON.stringify(directoryPolicy ?? null)};
+  const incidentalWrites = ${JSON.stringify(claudeWritablePaths)};
+  const contains = (parent, child) => {
+    const name = path.relative(parent, child);
+    return name === "" || (!path.isAbsolute(name) && name !== ".." && !name.startsWith(".." + path.sep));
+  };
+  if (directory !== null) {
+    for (const binding of directory.bindings) {
+      const current = fs.lstatSync(binding.path, { bigint: true });
+      if (!(current.isDirectory() || (current.isFile() && current.nlink === 1n)) || fs.realpathSync(binding.path) !== binding.realpath || String(current.dev) !== binding.dev || String(current.ino) !== binding.ino) throw new Error("directory mount changed");
+    }
+  }
   let workspaceGranted = false;
   let preparationReserved = false;
   const projected = [];
@@ -84,6 +103,7 @@ function projectArguments(args) {
     const operation = args[i++];
     if (operation === "--") {
       if (writable && (!workspaceGranted || !preparationReserved)) throw new Error("missing workspace preparation proof");
+      if (directory !== null && ${JSON.stringify(injectHome)} && !preparationReserved) throw new Error("missing directory preparation proof");
       if (${JSON.stringify(injectHome)}) projected.push(...${JSON.stringify(toolHomeArguments(home))});
       projected.push("--", ...args.slice(i));
       return projected;
@@ -97,10 +117,26 @@ function projectArguments(args) {
       if (values.some((value) => !path.isAbsolute(value) || path.resolve(value) !== value)) throw new Error("invalid mount path");
       if (values[0] === cwd && values[1] === cwd) {
         if (operation === "--bind") workspaceGranted = true;
-        if (operation === "--ro-bind" && writable) {
+        if (operation === "--ro-bind" && (writable || directory !== null)) {
           preparationReserved = true;
+          if (directory === null) continue;
+        }
+        if (directory !== null) {
+          if (!${JSON.stringify(injectHome)}) continue;
+          projected.push("--ro-bind", cwd, cwd);
+          if (operation === "--ro-bind") projected.push(
+            ...directory.writablePaths.flatMap((name) => ["--bind", name, name]),
+            ...directory.protectedPaths.flatMap((name) => ["--ro-bind", name, name]),
+          );
           continue;
         }
+      }
+      if (directory !== null && operation === "--bind" && !(
+        !${JSON.stringify(injectHome)} && values[0] === "/proc" && values[1] === "/proc"
+      )) {
+        if (values[0] === values[1] && incidentalWrites.includes(values[1])) continue;
+        const destination = fs.realpathSync(values[1]);
+        if (values[0] !== values[1] || !directory.writablePaths.some((name) => contains(name, destination)) || directory.protectedPaths.some((name) => contains(name, destination))) throw new Error("undeclared write mount");
       }
       destination = values[1];
     } else if (["--dir", "--tmpfs", "--dev", "--proc"].includes(operation)) {
@@ -130,11 +166,13 @@ export function nativeLauncherSource({
   token,
   unsetEnvironmentNames,
   access,
+  directoryPolicy,
+  claudeWritablePaths,
 }) {
   return `#!${process.execPath}
 const { spawnSync } = require("node:child_process");
 if (process.env[${JSON.stringify(tokenName)}] !== ${JSON.stringify(token)}) process.exit(125);
-${projectionSource({ access, cwd, home })}
+${projectionSource({ access, cwd, home, directoryPolicy, claudeWritablePaths })}
 try {
   const args = projectArguments(process.argv.slice(2));
   const env = { ...process.env };

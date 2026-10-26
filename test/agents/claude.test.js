@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import {
   access,
   chmod,
+  link,
   mkdir,
   mkdtemp,
   readdir,
@@ -17,9 +18,17 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, dirname, isAbsolute, join, parse } from "node:path";
+import {
+  delimiter,
+  dirname,
+  isAbsolute,
+  join,
+  parse,
+  resolve,
+} from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { runInNewContext } from "node:vm";
 import { createGitService } from "../../src/git/index.js";
 import { largeFinalizationResult } from "../support/index.js";
 
@@ -79,6 +88,7 @@ const STRICT_SCHEMA = Object.freeze({
   additionalProperties: false,
 });
 
+const READ_ONLY_TOOLS = "Bash,Read,Glob,Grep";
 const COMMON_DENY_POLICY = [
   "Agent",
   "Task",
@@ -720,6 +730,792 @@ function request(overrides = {}) {
     ...overrides,
   };
 }
+
+async function directoryWorkspace(t) {
+  const root = await realpath(
+    await mkdtemp(join(tmpdir(), "claude-directory-")),
+  );
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const cwd = join(root, "workspace");
+  const output = join(cwd, "out");
+  const input = join(cwd, "input.md");
+  const source = join(root, "source.md");
+  const control = join(cwd, ".claude");
+  await mkdir(cwd);
+  await mkdir(output);
+  await mkdir(control);
+  await writeFile(input, "Input.\n");
+  await writeFile(source, "Reference.\n");
+  await writeFile(join(control, "settings.json"), "{}\n");
+  return {
+    root,
+    cwd,
+    output,
+    input,
+    source,
+    control,
+    workspacePolicy: {
+      kind: "directory",
+      workspacePath: cwd,
+      stateRoot: join(root, "state"),
+      inputPaths: [input],
+      sourcePaths: [source],
+      outputPaths: [output],
+    },
+  };
+}
+
+function directoryCommandArguments(directory, access, native) {
+  return [
+    "--new-session",
+    "--die-with-parent",
+    "--unsetenv",
+    "ANTHROPIC_API_KEY",
+    "--unshare-net",
+    "--ro-bind",
+    "/",
+    "/",
+    ...(access === "workspace-write"
+      ? ["--bind", directory.cwd, directory.cwd]
+      : []),
+    "--ro-bind",
+    directory.cwd,
+    directory.cwd,
+    "--ro-bind",
+    directory.input,
+    directory.input,
+    "--ro-bind",
+    directory.source,
+    directory.source,
+    "--ro-bind",
+    "/dev/null",
+    join(directory.control, "settings.json"),
+    "--dev",
+    "/dev",
+    "--unshare-pid",
+    "--unshare-user",
+    ...(native
+      ? ["--proc", "/proc", "--cap-drop", "ALL"]
+      : ["--bind", "/proc", "/proc"]),
+    "--",
+    "/bin/sh",
+    "-c",
+    "opaque model command",
+  ];
+}
+
+test("proves directory access without Git or commit preparation and binds each receipt", async (t) => {
+  const directory = await directoryWorkspace(t);
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fake = await createFakeBubblewrap(t);
+    const fixture = createFixture({
+      nativeSandbox,
+      executeFallbackLauncher: true,
+      env: {
+        ...process.env,
+        AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+        PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+      },
+    });
+    const receipts = [];
+    for (const access of ["read-only", "workspace-write"]) {
+      const options = { access, workspacePolicy: directory.workspacePolicy };
+      const capabilities = await fixture.adapter.probe(options);
+      assert.equal(capabilities.declaredWorkspace, true);
+      assert.equal(capabilities.localCommit, false);
+      assert.equal(capabilities.readOnly, access === "read-only");
+      assert.equal(capabilities.workspaceWrite, access === "workspace-write");
+      assert.deepEqual(capabilities.policyReceipt.supportedAccess, [access]);
+      assert.ok(Object.isFrozen(capabilities.policyReceipt));
+      receipts.push(capabilities.policyReceipt.fingerprint);
+      await writeFile(join(directory.output, "result.md"), "Output.\n");
+      assert.deepEqual(
+        (await fixture.adapter.probe(options)).policyReceipt,
+        capabilities.policyReceipt,
+      );
+      assert.equal(
+        await fixture.adapter.canReadFiles({
+          ...options,
+          paths: [directory.input, directory.source],
+        }),
+        true,
+      );
+    }
+    assert.notEqual(receipts[0], receipts[1]);
+    assert.equal(
+      fixture.calls.some(({ file }) => file === "git"),
+      false,
+    );
+    assert.equal(localCommitSandboxCalls(fixture).length, 0);
+    assert.equal(turnCalls(fixture).length, 0);
+    // A later repository probe must still perform its independent Git proof.
+    assert.equal((await fixture.adapter.probe()).localCommit, true);
+    assert.ok(fixture.calls.some(isProbeRepositorySetup));
+  }
+});
+
+test("executes the fallback directory probe with a file reference inside private temporary storage", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fake = await createFakeBubblewrap(t);
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    executeFallbackLauncher: true,
+    env: {
+      ...process.env,
+      AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+      PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+    },
+  });
+  for (const access of ["read-only", "workspace-write"]) {
+    assert.equal(
+      (
+        await fixture.adapter.probe({
+          access,
+          workspacePolicy: directory.workspacePolicy,
+        })
+      ).declaredWorkspace,
+      true,
+    );
+  }
+  const invocations = (await readFile(fake.logPath, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  assert.equal(invocations.length, 2);
+  for (const invocation of invocations) {
+    // Replay under private /tmp even when the host test harness uses another
+    // temporary root. These paths exist only in the filesystem simulation.
+    const basePath = dirname(option(invocation, "--chdir"));
+    const args = invocation.map((value) =>
+      value.replaceAll(basePath, "/tmp/claude-probe"),
+    );
+    const payload = args.at(-1);
+    const words = [...payload.matchAll(/'((?:[^']|'\\'')*)'/gu)].map(
+      ([, value]) => value.replaceAll("'\\''", "'"),
+    );
+    assert.equal(
+      `${shellArgument(words[0])} --input-type=module -e ${words.slice(1).map(shellArgument).join(" ")}`,
+      payload,
+    );
+    const [, script, , , outside] = words;
+    const reference = join(outside, "reference.md");
+    const cwd = option(args, "--chdir");
+    const environment = {};
+    const mounts = [];
+    for (let index = 0; index < args.indexOf("--"); index += 1) {
+      const operation = args[index];
+      if (["--ro-bind", "--bind"].includes(operation)) {
+        mounts.push({
+          path: args[index + 2],
+          writable: operation === "--bind",
+        });
+        index += 2;
+      } else if (["--tmpfs", "--remount-ro"].includes(operation)) {
+        mounts.push({
+          path: args[index + 1],
+          writable: operation === "--tmpfs",
+        });
+        index += 1;
+      } else if (operation === "--setenv") {
+        environment[args[index + 1]] = args[index + 2];
+        index += 2;
+      }
+    }
+    const mountAt = (path) =>
+      mounts.findLast(
+        (mount) =>
+          path === mount.path ||
+          path.startsWith(mount.path === "/" ? "/" : `${mount.path}/`),
+      );
+    assert.deepEqual(mountAt(reference), { path: reference, writable: false });
+    assert.deepEqual(mountAt(join(outside, "outside-probe")), {
+      path: "/tmp",
+      writable: true,
+    });
+    // Execute the emitted payload with filesystem effects derived from its
+    // actual mounts. No host namespace, network or filesystem writes are used.
+    for (const leak of [undefined, reference, "/agent-runner-claude-probe"]) {
+      const exit = {};
+      let exitCode;
+      let output = "";
+      const writes = new Set();
+      assert.throws(
+        () =>
+          runInNewContext(
+            script.replace(/^import .+ from "node:[^"]+";\n/gmu, ""),
+            {
+              join,
+              process: {
+                argv: [words[0], ...words.slice(2)],
+                cwd: () => cwd,
+                env: environment,
+                exit(code) {
+                  exitCode ??= code;
+                  throw exit;
+                },
+              },
+              readFileSync(path) {
+                path = resolve(cwd, path);
+                if (path.startsWith("/proc/")) throw { code: "EACCES" };
+                if (path === reference) return "reference\n";
+                if (path === join(cwd, "inspection.txt")) return "inspection\n";
+                assert.equal(path, join(environment.HOME, ".bashrc"));
+                return "";
+              },
+              writeFileSync(path) {
+                path = resolve(cwd, path);
+                writes.add(path);
+                if (path !== leak && !mountAt(path)?.writable)
+                  throw { code: "EROFS" };
+              },
+              statSync: () => ({
+                isDirectory: () => true,
+                isSocket: () => true,
+              }),
+              writeSync: (fd, value) => {
+                assert.equal(fd, 1);
+                output += value;
+              },
+              createConnection: () => ({
+                once(event, listener) {
+                  if (event === "error") listener({ code: "EPERM" });
+                },
+              }),
+            },
+          ),
+        (error) => error === exit,
+      );
+      assert.equal(exitCode, leak === undefined ? 0 : 10);
+      if (leak === undefined) {
+        assert.equal(output, "agent-runner-claude-isolation-ok");
+        assert.ok(writes.has(reference));
+        assert.ok(writes.has("/agent-runner-claude-probe"));
+      }
+    }
+  }
+});
+
+test("projects native and fallback directory commands onto declared outputs only", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const metadata = join(directory.root, "metadata");
+  const shared = join(directory.root, "shared");
+  const pointer = join(directory.cwd, "nested", ".git");
+  await mkdir(dirname(pointer));
+  await mkdir(metadata);
+  await mkdir(shared);
+  await writeFile(pointer, `gitdir: ${metadata}\n`);
+  await writeFile(join(metadata, "commondir"), `${shared}\n`);
+  await writeFile(join(shared, "config"), "Control.\n");
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    const fake = await createFakeBubblewrap(t);
+    const native = nativeSandbox === true;
+    for (const access of ["read-only", "workspace-write"]) {
+      let launcherError;
+      const fixture = createFixture({
+        nativeSandbox,
+        env: {
+          ...process.env,
+          ANTHROPIC_API_KEY: "provider-token",
+          AGENT_RUNNER_FAKE_BWRAP_NATIVE: native ? "1" : "0",
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+        },
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          try {
+            assert.equal(call.options.env.ANTHROPIC_API_KEY, "provider-token");
+            assert.equal(
+              option(call.argumentsList, "--tools"),
+              READ_ONLY_TOOLS,
+            );
+            const settings = JSON.parse(
+              option(call.argumentsList, "--settings"),
+            );
+            assert.deepEqual(settings.sandbox.filesystem.allowWrite, []);
+            assert.ok(
+              settings.sandbox.filesystem.denyWrite.includes(directory.source),
+            );
+            const args = directoryCommandArguments(directory, access, native);
+            const runLauncher = (argumentsList) =>
+              executeFile(call.commandLauncherPath, argumentsList, {
+                env: call.options.env,
+                encoding: "utf8",
+                timeout: 10_000,
+              });
+            await runLauncher(args);
+            for (const forbidden of [
+              directory.input,
+              directory.source,
+              directory.control,
+              metadata,
+              directory.root,
+            ]) {
+              const forged = [...args];
+              forged.splice(
+                forged.indexOf("--dev"),
+                0,
+                "--bind",
+                forbidden,
+                forbidden,
+              );
+              await assert.rejects(runLauncher(forged), { code: 125 });
+            }
+            if (access === "workspace-write") {
+              const held = join(directory.root, "original-output");
+              await rename(directory.output, held);
+              await mkdir(directory.output);
+              await assert.rejects(runLauncher(args), { code: 125 });
+              await rm(held, { recursive: true });
+              await writeFile(
+                join(directory.output, "result.md"),
+                "Written.\n",
+              );
+            }
+          } catch (cause) {
+            launcherError = cause;
+            throw cause;
+          }
+        },
+      });
+      await fixture.adapter
+        .run(
+          request({
+            cwd: directory.cwd,
+            access,
+            workspacePolicy: directory.workspacePolicy,
+          }),
+        )
+        .catch((cause) => {
+          throw launcherError ?? cause;
+        });
+      const turn = turnCalls(fixture)[0];
+      await assert.rejects(stat(turn.commandLauncherPath), { code: "ENOENT" });
+      assert.equal(
+        fixture.calls.some(({ file }) => file === "git"),
+        false,
+      );
+    }
+    const boundaries = (await readFile(fake.logPath, "utf8"))
+      .trim()
+      .split("\n")
+      .map(JSON.parse);
+    assert.equal(boundaries.length, 2);
+    for (const [index, args] of boundaries.entries()) {
+      const writes = args.flatMap((arg, i) =>
+        arg === "--bind" ? [args.slice(i + 1, i + 3)] : [],
+      );
+      assert.deepEqual(
+        writes,
+        index === 0 ? [] : [[directory.output, directory.output]],
+      );
+      assert.ok(
+        includesSequence(args, ["--ro-bind", directory.cwd, directory.cwd]),
+      );
+      assert.ok(
+        includesSequence(args, [
+          "--ro-bind",
+          directory.control,
+          directory.control,
+        ]),
+      );
+      assert.ok(
+        includesSequence(args, [
+          "--ro-bind",
+          directory.source,
+          directory.source,
+        ]),
+      );
+      for (const control of [pointer, metadata, shared])
+        assert.ok(includesSequence(args, ["--ro-bind", control, control]));
+      const maskTarget = join(directory.control, "settings.json");
+      assert.ok(includesSequence(args, ["--ro-bind", "/dev/null", maskTarget]));
+      assert.ok(args.lastIndexOf(directory.control) < args.indexOf(maskTarget));
+      assert.ok(includesSequence(args, ["--setenv", "HOME"]));
+      if (!native) {
+        assert.ok(includesSequence(args, ["--seccomp", "3"]));
+        assert.ok(includesSequence(args, ["--unshare-net"]));
+      }
+    }
+  }
+});
+
+test("rejects unsafe directory outputs during storage allocation and launcher admission", async (t) => {
+  for (const nativeSandbox of [true, "nested-denied"]) {
+    for (const stage of ["allocation", "admission"]) {
+      const directory = await directoryWorkspace(t);
+      const output = join(directory.output, "result.md");
+      const external = join(directory.root, "external.md");
+      await writeFile(output, "Output.\n");
+      await writeFile(external, "External.\n");
+      const fake = await createFakeBubblewrap(t);
+      let substituted = false;
+      let launcherRejected = false;
+      const fixture = createFixture({
+        nativeSandbox,
+        env: {
+          ...process.env,
+          AGENT_RUNNER_FAKE_BWRAP_NATIVE: nativeSandbox === true ? "1" : "0",
+          AGENT_RUNNER_FAKE_BWRAP_LOG: fake.logPath,
+          PATH: `${fake.directory}${delimiter}${process.env.PATH ?? ""}`,
+        },
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          if (stage === "admission") {
+            // Keep the captured inode; only its link count changes.
+            await link(output, join(directory.root, "output-alias.md"));
+            substituted = true;
+          }
+          try {
+            await executeFile(
+              call.commandLauncherPath,
+              directoryCommandArguments(
+                directory,
+                "workspace-write",
+                nativeSandbox === true,
+              ),
+              { env: call.options.env, timeout: 10_000 },
+            );
+          } catch (cause) {
+            assert.equal(cause.code, 125);
+            launcherRejected = true;
+          }
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            access: "workspace-write",
+            workspacePolicy: {
+              ...directory.workspacePolicy,
+              outputPaths: [output],
+            },
+            async onResource(resource) {
+              if (stage !== "allocation" || resource?.phase !== "allocated")
+                return;
+              await rm(output);
+              await link(external, output);
+              substituted = true;
+            },
+          }),
+        ),
+        hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+      );
+      assert.equal(substituted, true);
+      if (stage === "allocation") assert.equal(turnCalls(fixture).length, 0);
+      else assert.equal(launcherRejected, true);
+      await assert.rejects(readFile(fake.logPath), { code: "ENOENT" });
+      assert.equal(await readFile(external, "utf8"), "External.\n");
+    }
+  }
+});
+
+test("accepts missing nested directory artifact and state exclusions without creating them", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const artifact = join(directory.cwd, "generated", "artifacts");
+  const stateRoot = join(directory.root, "private", "state", "runs");
+  const fixture = createFixture();
+  for (const access of ["read-only", "workspace-write"]) {
+    const workspacePolicy = {
+      ...directory.workspacePolicy,
+      artifactPaths: [artifact],
+      stateRoot,
+    };
+    assert.equal(
+      (await fixture.adapter.probe({ access, workspacePolicy }))
+        .declaredWorkspace,
+      true,
+    );
+    await fixture.adapter.run(
+      request({ cwd: directory.cwd, access, workspacePolicy }),
+    );
+    for (const missing of [
+      join(directory.cwd, "generated"),
+      dirname(dirname(stateRoot)),
+    ])
+      await assert.rejects(stat(missing), { code: "ENOENT" });
+  }
+  const reservedState = join(
+    await realpath(tmpdir()),
+    `agent-runner-claude-${process.getuid()}`,
+    "absent-exclusion",
+    "state",
+  );
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: {
+          ...directory.workspacePolicy,
+          stateRoot: reservedState,
+        },
+      }),
+    ),
+    { code: "ERR_AGENT_ENVIRONMENT_PREPARATION" },
+  );
+  await assert.rejects(stat(dirname(reservedState)), { code: "ENOENT" });
+  assert.equal(turnCalls(fixture).length, 2);
+});
+
+test("rejects directory drift after failed attempts before reconstruction", async (t) => {
+  for (const target of ["input", "source", "control", "output"]) {
+    const directory = await directoryWorkspace(t);
+    let fresh = 0;
+    const observations = [];
+    const fixture = createFixture({
+      async handle({ call }) {
+        if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+          return;
+        const path =
+          target === "control"
+            ? join(directory.control, "settings.json")
+            : target === "output"
+              ? join(directory.output, "result.md")
+              : directory[target];
+        await writeFile(path, "Unexpected change.\n");
+        throw processFailure(
+          undefined,
+          `No conversation found with session ID: ${SOURCE_SESSION}`,
+        );
+      },
+    });
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          cwd: directory.cwd,
+          access: target === "output" ? "read-only" : "workspace-write",
+          workspacePolicy: directory.workspacePolicy,
+          session: { mode: "continue", id: SOURCE_SESSION },
+          recoveryPrompt: "Complete durable context.",
+          onFreshSession() {
+            fresh += 1;
+          },
+          onObservation(value) {
+            observations.push(value);
+          },
+        }),
+      ),
+      hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+    );
+    assert.equal(turnCalls(fixture).length, 1);
+    assert.equal(fresh, 0);
+    assert.equal(observations.length, 1);
+    assert.equal(observations[0].outcome, "incomplete");
+    await assert.rejects(stat(turnCalls(fixture)[0].commandLauncherPath), {
+      code: "ENOENT",
+    });
+  }
+});
+
+test("retains directory storage and forbids reconstruction without process retirement", async (t) => {
+  let resource;
+  let directory;
+  // The process is entirely injected; retire its storage before the workspace.
+  t.after(async () => {
+    if (resource)
+      await recoverClaudeStorage({
+        resource,
+        storageForbiddenPaths: [directory.cwd],
+      });
+  });
+  directory = await directoryWorkspace(t);
+  let fresh = 0;
+  const fixture = createFixture({
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      await call.options.onProcess(4242, {});
+      throw processFailure(
+        undefined,
+        `No conversation found with session ID: ${SOURCE_SESSION}`,
+      );
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        access: "workspace-write",
+        workspacePolicy: directory.workspacePolicy,
+        session: { mode: "continue", id: SOURCE_SESSION },
+        recoveryPrompt: "Complete durable context.",
+        onProcess: async () => {},
+        onResource(value) {
+          resource = value;
+        },
+        onFreshSession() {
+          fresh += 1;
+        },
+      }),
+    ),
+    hasCode("ERR_CLAUDE_CONTINUATION_SESSION_UNAVAILABLE"),
+  );
+  assert.equal(fresh, 0);
+  assert.equal(turnCalls(fixture).length, 1);
+  assert.equal(resource.phase, "allocated");
+  assert.ok((await stat(turnCalls(fixture)[0].commandLauncherPath)).isFile());
+});
+
+test("reconstructs directory output turns under the same policy without Git", async (t) => {
+  const directory = await directoryWorkspace(t);
+  let fresh = 0;
+  let attempts = 0;
+  const fixture = createFixture({
+    nativeSandbox: "nested-denied",
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (++attempts === 1) {
+        await writeFile(join(directory.output, "partial.md"), "Preserved.\n");
+        throw processFailure(
+          undefined,
+          `No conversation found with session ID: ${SOURCE_SESSION}`,
+        );
+      }
+    },
+  });
+  await fixture.adapter.run(
+    request({
+      cwd: directory.cwd,
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+      session: { mode: "continue", id: SOURCE_SESSION },
+      recoveryPrompt: "Complete durable context.",
+      onFreshSession() {
+        fresh += 1;
+      },
+    }),
+  );
+  const turns = turnCalls(fixture);
+  assert.equal(fresh, 1);
+  assert.equal(turns.length, 2);
+  assert.equal(option(turns[1].argumentsList, "--resume"), undefined);
+  assert.equal(option(turns[1].argumentsList, "--tools"), READ_ONLY_TOOLS);
+  assert.notEqual(turns[0].commandLauncherPath, turns[1].commandLauncherPath);
+  assert.equal(
+    await readFile(join(directory.output, "partial.md"), "utf8"),
+    "Preserved.\n",
+  );
+  assert.equal(
+    fixture.calls.some(({ file }) => file === "git"),
+    false,
+  );
+});
+
+test("retains an unretired directory compaction attempt without requesting reconstruction", async (t) => {
+  let resource;
+  let retainedResource;
+  let directory;
+  t.after(async () => {
+    if (retainedResource)
+      await recoverClaudeStorage({
+        resource: retainedResource,
+        storageForbiddenPaths: [directory.cwd],
+      });
+  });
+  directory = await directoryWorkspace(t);
+  let attempts = 0;
+  let fresh = 0;
+  const fixture = createFixture({
+    async handle({ call }) {
+      if (call.file !== "claude" || !call.argumentsList.includes("-p")) return;
+      if (++attempts === 2) {
+        await call.options.onProcess(4242, {});
+        retainedResource = resource;
+      }
+      throw processFailure(undefined, "context window full");
+    },
+  });
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        workspacePolicy: directory.workspacePolicy,
+        session: { mode: "continue", id: SOURCE_SESSION },
+        recoveryPrompt: "Complete durable context.",
+        onProcess: async () => {},
+        onResource(value) {
+          resource = value;
+        },
+        onFreshSession() {
+          fresh += 1;
+        },
+      }),
+    ),
+    hasCode("ERR_CLAUDE_CONTEXT_EXHAUSTED"),
+  );
+  assert.equal(fresh, 0);
+  assert.equal(turnCalls(fixture).length, 2);
+  assert.equal(resource, retainedResource);
+  assert.ok((await stat(turnCalls(fixture)[1].commandLauncherPath)).isFile());
+});
+
+test("fails closed on invalid directory declarations and unsupported isolation", async (t) => {
+  const directory = await directoryWorkspace(t);
+  const fixture = createFixture();
+  for (const policy of [
+    { ...directory.workspacePolicy, extra: true },
+    { ...directory.workspacePolicy, sourcePaths: ["relative.md"] },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({ cwd: directory.cwd, workspacePolicy: policy }),
+      ),
+      hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+    );
+  await assert.rejects(
+    fixture.adapter.run(
+      request({
+        cwd: directory.cwd,
+        access: "local-commit",
+        workspacePolicy: directory.workspacePolicy,
+        authorizationId: "unused",
+        commit: {
+          expectedHead: EXPECTED_HEAD,
+          message: "feat(test): reject directory commit",
+        },
+      }),
+    ),
+    hasCode("ERR_INVALID_CLAUDE_OPTIONS"),
+  );
+  for (const policy of [
+    { ...directory.workspacePolicy, outputPaths: [directory.input] },
+    { ...directory.workspacePolicy, stateRoot: directory.output },
+    {
+      ...directory.workspacePolicy,
+      outputPaths: [join(directory.cwd, "absent")],
+    },
+  ])
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          cwd: directory.cwd,
+          access: "workspace-write",
+          workspacePolicy: policy,
+        }),
+      ),
+      hasDiagnostic("ERR_CLAUDE_ISOLATION", "isolation_workspace_policy"),
+    );
+  assert.equal(fixture.calls.length, 0);
+  for (const options of [
+    { nativeSandbox: false },
+    { nativeSandbox: "nested-denied", architecture: "unsupported" },
+  ]) {
+    const unsupported = createFixture(options);
+    const probe = {
+      access: "workspace-write",
+      workspacePolicy: directory.workspacePolicy,
+    };
+    const capabilities = await unsupported.adapter.probe(probe);
+    assert.equal(capabilities.declaredWorkspace, false);
+    assert.deepEqual(capabilities.policyReceipt.supportedAccess, []);
+    await assert.rejects(
+      unsupported.adapter.run(request({ ...probe, cwd: directory.cwd })),
+      hasCode("ERR_UNSUPPORTED_CLAUDE_CAPABILITY"),
+    );
+    assert.equal(turnCalls(unsupported).length, 0);
+  }
+});
 
 test("rejects binary preservation sources masked by the selected command sandbox", async (t) => {
   const stateRoot = await realpath(

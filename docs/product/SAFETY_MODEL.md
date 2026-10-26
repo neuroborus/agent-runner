@@ -87,9 +87,10 @@ differ under its writable-content guard; redundant read declarations never
 grant writes. It rejects escaping aliases, special files, overlapping protected outputs,
 ancestor substitution and snapshot races without requiring Git. External state
 cannot overlap workspace, task, infrastructure, declared reads or discovered controls. This capability
-does not itself grant provider permissions. Codex separately enforces declared
-directory outputs with a native permission profile and checks protected content
-after every attempt, including failed attempts before reconstruction. Directory
+does not itself grant provider permissions. Codex enforces declared directory
+outputs with a native permission profile; Claude uses authenticated command
+mounts and omits native editing tools for directory turns. Both check protected
+content after every retired attempt, including failures before reconstruction. Directory
 access cannot request a Git commit, and unsupported providers fail closed.
 Directory workflows remain unexposed; see the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).

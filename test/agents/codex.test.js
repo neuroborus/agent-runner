@@ -38,7 +38,6 @@ import {
   STRUCTURED_OUTPUT_FAILURE_CLASS,
   normalizeAdapterFailure,
   createCapabilityProof,
-  createClaudeAdapter,
 } from "../../src/agents/index.js";
 
 const PROJECT_PATH = process.cwd();
@@ -2721,7 +2720,7 @@ test("reasserts directory analysis permissions on fresh, continued and forked se
   );
 });
 
-test("validates directory declarations and rejects unsupported adapters before activity", async (t) => {
+test("validates directory declarations before activity", async (t) => {
   const directory = await directoryWorkspace(t);
   const fixture = createFixture({ version: "0.164.0" });
   for (const policy of [
@@ -2771,36 +2770,6 @@ test("validates directory declarations and rejects unsupported adapters before a
       ),
       hasDiagnostic("ERR_CODEX_ISOLATION", "isolation_workspace_policy"),
     );
-  const claude = createClaudeAdapter({
-    execute() {
-      throw new Error("Provider must not be inspected");
-    },
-  });
-  await assert.rejects(
-    claude.run(
-      request({
-        cwd: directory.cwd,
-        workspacePolicy: directory.workspacePolicy,
-      }),
-    ),
-    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
-  );
-  assert.throws(
-    () =>
-      claude.probe({
-        access: "read-only",
-        workspacePolicy: directory.workspacePolicy,
-      }),
-    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
-  );
-  await assert.rejects(
-    claude.canReadFiles({
-      access: "read-only",
-      paths: [directory.source],
-      workspacePolicy: directory.workspacePolicy,
-    }),
-    { code: "ERR_INVALID_CLAUDE_OPTIONS" },
-  );
 });
 
 test("adds only a real project .agents directory to writable roots", async (t) => {

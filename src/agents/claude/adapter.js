@@ -33,6 +33,10 @@ import { probeClaudeIsolationPolicies } from "./native-sandbox.js";
 import { createClaudeSeccompFilter } from "./seccomp-filter.js";
 import { createClaudeStream } from "./stream.js";
 import { createClaudeObservations } from "./observations.js";
+import {
+  directoryPolicyError,
+  prepareDirectoryPolicy,
+} from "./directory-policy.js";
 
 export const CLAUDE_BACKEND_ID = "claude";
 
@@ -45,6 +49,7 @@ const MAX_PROCESS_OUTPUT_BYTES = 64 * 1024 * 1024;
 const MAX_DIAGNOSTIC_INPUT_LENGTH = 4_096;
 const CLAUDE_DIAGNOSTIC_CLASSES = new Set([
   EFFORT_DIAGNOSTIC_CLASS,
+  "isolation_workspace_policy",
   "authentication_unavailable",
   "backend_unavailable",
   "capability_unavailable",
@@ -381,6 +386,7 @@ const claudeContract = createAdapterContract({
   AdapterError: ClaudeAdapterError,
   backendName: "Claude",
   failureClasses: CLAUDE_FAILURE_CLASSES,
+  declaredWorkspace: true,
 });
 buildClaudeFailure = claudeContract.failure;
 
@@ -564,16 +570,20 @@ function outputSchemaFor(request) {
 }
 
 function accessConfigurationFor(request) {
+  if (request.workspacePolicy !== undefined)
+    return { ...READ_ONLY_ACCESS, deny: WORKSPACE_DENY_POLICY };
   return request.access === "workspace-write"
     ? WORKSPACE_ACCESS
     : READ_ONLY_ACCESS;
 }
 
-function policyIdentity(isolationPolicies, architecture) {
+function policyIdentity(isolationPolicies, architecture, directory = false) {
   return Object.fromEntries(
     Object.entries(isolationPolicies).map(([access, isolationPolicy]) => {
-      const configuration =
-        access === "workspace-write" ? WORKSPACE_ACCESS : READ_ONLY_ACCESS;
+      const configuration = accessConfigurationFor({
+        access,
+        ...(directory ? { workspacePolicy: {} } : {}),
+      });
       return [
         access,
         {
@@ -720,7 +730,12 @@ function commandArguments(
       isolationPolicy,
     ),
     "--append-system-prompt",
-    SYSTEM_INSTRUCTIONS,
+    request.workspacePolicy === undefined
+      ? SYSTEM_INSTRUCTIONS
+      : "Follow the workspace instructions and declared directory policy. " +
+        "Only declared outputs may change, using sandboxed Bash. Inputs, sources, " +
+        "configuration, infrastructure, artifacts and controls are read-only. " +
+        "Never stage, commit, mutate Git state, perform remote writes or request permission approval.",
     "--permission-mode",
     accessConfiguration.permissionMode,
     "--tools",
@@ -1233,10 +1248,12 @@ export function createClaudeAdapter(options = {}) {
       .sort(),
   );
   let probePromise;
+  const directoryProbePromises = new Map();
+  const directoryIsolationPolicies = new Map();
   let isolationPolicies;
   let supportedEfforts = new Set();
 
-  async function inspectCapabilities() {
+  async function inspectCapabilities(directoryAccess) {
     let versionResult;
     let helpResult;
     let socatAvailable = false;
@@ -1302,21 +1319,25 @@ export function createClaudeAdapter(options = {}) {
         ...(createSocketServer === undefined ? {} : { createSocketServer }),
         env: commandEnvironment,
         execute,
+        ...(directoryAccess === undefined ? {} : { directoryAccess }),
       });
-      localCommitExecutorAvailable = await probeClaudeLocalCommit({
-        bubblewrapBinary: BUBBLEWRAP_BINARY,
-        env: commandEnvironment,
-        execute,
-      });
+      if (directoryAccess === undefined)
+        localCommitExecutorAvailable = await probeClaudeLocalCommit({
+          bubblewrapBinary: BUBBLEWRAP_BINARY,
+          env: commandEnvironment,
+          execute,
+        });
     }
-    isolationPolicies = Object.freeze({
+    const resolvedPolicies = Object.freeze({
       ...selectedPolicies,
       "local-commit": localCommitExecutorAvailable
         ? selectedPolicies["local-commit"]
         : "unavailable",
     });
+    if (directoryAccess === undefined) isolationPolicies = resolvedPolicies;
+    else directoryIsolationPolicies.set(directoryAccess, resolvedPolicies);
     const supportedAccess = Object.freeze(
-      Object.entries(isolationPolicies)
+      Object.entries(resolvedPolicies)
         .filter(([, policy]) => policy !== "unavailable")
         .map(([access]) => access),
     );
@@ -1325,27 +1346,31 @@ export function createClaudeAdapter(options = {}) {
       fingerprint: createHash("sha256")
         .update(
           JSON.stringify({
-            accessPolicies: policyIdentity(isolationPolicies, architecture),
-            contract: Object.values(isolationPolicies).includes(
+            accessPolicies: policyIdentity(
+              resolvedPolicies,
+              architecture,
+              directoryAccess !== undefined,
+            ),
+            contract: Object.values(resolvedPolicies).includes(
               "runner-boundary",
             )
               ? "claude-command-boundary-v8"
               : "claude-isolation-v2",
-            policies: isolationPolicies,
+            policies: resolvedPolicies,
             version: version.text,
           }),
         )
         .digest("hex"),
       supportedAccess,
     });
-    const readOnlyAvailable = isolationPolicies["read-only"] !== "unavailable";
+    const readOnlyAvailable = resolvedPolicies["read-only"] !== "unavailable";
     const readOnlyPolicyAvailable =
       READ_ONLY_ACCESS.permissionMode === "auto" &&
       READ_ONLY_ACCESS.autoAllowBashIfSandboxed &&
       READ_ONLY_ACCESS.tools === READ_ONLY_TOOLS &&
       READ_ONLY_ACCESS.deny === COMMON_DENY_POLICY;
     const workspaceWriteAvailable =
-      isolationPolicies["workspace-write"] !== "unavailable";
+      resolvedPolicies["workspace-write"] !== "unavailable";
     const remoteWriteBlocked = supportedAccess.length > 0;
     return Object.freeze({
       version: version.text,
@@ -1355,7 +1380,7 @@ export function createClaudeAdapter(options = {}) {
       gitMetadataWriteBlocked: workspaceWriteAvailable,
       workspaceWrite: workspaceWriteAvailable,
       localCommit:
-        isolationPolicies["local-commit"] !== "unavailable" &&
+        resolvedPolicies["local-commit"] !== "unavailable" &&
         localCommitExecutorAvailable &&
         readOnlyPolicyAvailable,
       remoteWriteBlocked,
@@ -1375,20 +1400,67 @@ export function createClaudeAdapter(options = {}) {
         ),
       );
     }
-    probePromise ??= inspectCapabilities();
-    if (options.effort !== undefined) {
-      return probePromise.then((capabilities) => {
+    return (async () => {
+      const boundary = await prepareDirectoryPolicy(
+        { ...options, cwd: options.workspacePolicy?.workspacePath },
+        ClaudeAdapterError,
+      );
+      let capabilities;
+      if (boundary === undefined) {
+        capabilities = await (probePromise ??= inspectCapabilities());
+      } else {
+        if (!directoryProbePromises.has(options.access))
+          directoryProbePromises.set(
+            options.access,
+            inspectCapabilities(options.access),
+          );
+        capabilities = await directoryProbePromises.get(options.access);
+        const supported = capabilities.policyReceipt.supportedAccess.includes(
+          options.access,
+        );
+        capabilities = deepFreeze({
+          ...capabilities,
+          declaredWorkspace: supported,
+          readOnly: supported && options.access === "read-only",
+          workspaceWrite: supported && options.access === "workspace-write",
+          autonomousWrite: supported && options.access === "workspace-write",
+          gitMetadataWriteBlocked: supported,
+          localCommit: false,
+          policyReceipt: {
+            schemaVersion: 1,
+            fingerprint: createHash("sha256")
+              .update(
+                JSON.stringify({
+                  policy: capabilities.policyReceipt.fingerprint,
+                  directory: boundary.fingerprint,
+                }),
+              )
+              .digest("hex"),
+            supportedAccess: supported ? [options.access] : [],
+          },
+        });
+      }
+      if (options.effort !== undefined) {
         if (!supportedEfforts.has(nativeEffort(options.effort)))
           throw effortError();
-        return capabilities;
-      });
-    }
-    return probePromise;
+      }
+      return capabilities;
+    })();
   }
 
   async function assertCapabilities(request) {
-    const capabilities = await probe(executionOptionsFor(request));
+    const capabilities = await probe({
+      ...executionOptionsFor(request),
+      ...(request.workspacePolicy === undefined
+        ? {}
+        : {
+            access: request.access,
+            workspacePolicy: request.workspacePolicy,
+          }),
+    });
     const required = ["remoteWriteBlocked"];
+    if (request.workspacePolicy !== undefined)
+      required.push("declaredWorkspace");
     if (outputSchemaFor(request) !== undefined) {
       required.push("structuredOutput");
     }
@@ -1495,11 +1567,18 @@ export function createClaudeAdapter(options = {}) {
     ]);
   }
 
-  async function runAttempt(request, { recovery, session, attempt } = {}) {
+  async function runAttempt(
+    request,
+    { recovery, session, attempt, settlement } = {},
+  ) {
     request.signal?.throwIfAborted();
-    const gitDirectories = await gitMetadataDirectories(request);
+    await request.directoryBoundary?.verify();
+    const gitDirectories =
+      request.directoryBoundary?.mounts.protectedPaths ??
+      (await gitMetadataDirectories(request));
     const selectedSession = session === undefined ? request.session : session;
-    const isolationPolicy = isolationPolicies?.[request.access];
+    const isolationPolicy =
+      request.isolationPolicy ?? isolationPolicies?.[request.access];
     const baseEnvironment = executionEnvironment(processEnvironment, request);
     const storage = await allocateClaudeStorage(request);
     const observations = createClaudeObservations(
@@ -1530,6 +1609,7 @@ export function createClaudeAdapter(options = {}) {
           directory: storage.directory,
           environment: baseEnvironment,
           gitDirectories,
+          directoryPolicy: await request.directoryBoundary?.bindMounts(),
           isolationPolicy,
           unsetEnvironmentNames: credentialEnvironmentNames,
         });
@@ -1682,33 +1762,50 @@ export function createClaudeAdapter(options = {}) {
       primaryError = cause;
       throw cause;
     } finally {
-      // An unretired process may still use its storage. Recovery owns cleanup
-      // under the execution lease after proving that every descendant retired.
-      if (processRetired) {
-        try {
-          await storage.remove();
-        } catch (cause) {
-          if (
-            primaryError?.ambiguous === true ||
-            primaryError?.failure?.retry === "terminal"
-          ) {
-            throw primaryError;
-          }
-          throw cause;
-        }
-        try {
-          stream.retire();
-        } catch (cause) {
-          throw primaryError ?? cause;
-        }
-      }
       try {
-        observations?.seal(primaryError === undefined);
-      } catch {
-        if (primaryError === undefined)
-          throw new ClaudeAdapterError("Claude observation observer failed.", {
-            code: "ERR_CLAUDE_PROTOCOL",
-          });
+        // An unretired process may still use its storage. Recovery owns cleanup
+        // under the execution lease after proving that every descendant retired.
+        if (processRetired) {
+          try {
+            await storage.remove();
+          } catch (cause) {
+            if (
+              primaryError?.ambiguous === true ||
+              primaryError?.failure?.retry === "terminal"
+            ) {
+              throw primaryError;
+            }
+            throw cause;
+          }
+          try {
+            stream.retire();
+          } catch (cause) {
+            throw primaryError ?? cause;
+          }
+          await request.directoryBoundary?.verify();
+          settlement.directoryVerified = true;
+        }
+        if (
+          !processRetired &&
+          primaryError === undefined &&
+          request.directoryBoundary !== undefined
+        )
+          throw directoryPolicyError(ClaudeAdapterError);
+      } catch (cause) {
+        primaryError ??= cause;
+        throw cause;
+      } finally {
+        try {
+          observations?.seal(primaryError === undefined);
+        } catch {
+          if (primaryError === undefined)
+            throw new ClaudeAdapterError(
+              "Claude observation observer failed.",
+              {
+                code: "ERR_CLAUDE_PROTOCOL",
+              },
+            );
+        }
       }
     }
   }
@@ -1757,10 +1854,32 @@ export function createClaudeAdapter(options = {}) {
   }
 
   async function run(value) {
-    const request = normalizeRequest(value);
+    const normalized = normalizeRequest(value);
+    const directoryBoundary = await prepareDirectoryPolicy(
+      normalized,
+      ClaudeAdapterError,
+    );
+    let request =
+      directoryBoundary === undefined
+        ? normalized
+        : Object.freeze({
+            ...normalized,
+            directoryBoundary,
+            storageForbiddenPaths: Object.freeze([
+              ...(normalized.storageForbiddenPaths ?? []),
+              ...directoryBoundary.forbiddenPaths,
+            ]),
+          });
     let attempt = 0;
-    const observedAttempt = (options = {}) =>
-      runAttempt(request, { ...options, attempt: ++attempt });
+    const settlement = { directoryVerified: false };
+    const observedAttempt = (options = {}) => {
+      settlement.directoryVerified = false;
+      return runAttempt(request, {
+        ...options,
+        attempt: ++attempt,
+        settlement,
+      });
+    };
     if (
       request.session !== undefined &&
       !SESSION_ID_PATTERN.test(request.session.id)
@@ -1771,6 +1890,14 @@ export function createClaudeAdapter(options = {}) {
     }
     try {
       await assertCapabilities(request);
+      // Access-specific probes share no mutable selection with another kind.
+      request = Object.freeze({
+        ...request,
+        isolationPolicy:
+          request.workspacePolicy === undefined
+            ? isolationPolicies[request.access]
+            : directoryIsolationPolicies.get(request.access)?.[request.access],
+      });
     } catch (cause) {
       if (
         request.access === "local-commit" &&
@@ -1797,6 +1924,8 @@ export function createClaudeAdapter(options = {}) {
         }
         throw cause;
       }
+      if (directoryBoundary !== undefined && !settlement.directoryVerified)
+        throw cause;
       if (!(cause instanceof ClaudeAdapterError)) {
         if (
           request.access === "local-commit" &&
@@ -1851,6 +1980,8 @@ export function createClaudeAdapter(options = {}) {
             });
           } catch (recoveryCause) {
             if (
+              (directoryBoundary !== undefined &&
+                !settlement.directoryVerified) ||
               !(recoveryCause instanceof ClaudeAdapterError) ||
               recoveryCause.code !== "ERR_CLAUDE_CONTEXT_EXHAUSTED"
             ) {
@@ -1901,7 +2032,21 @@ export function createClaudeAdapter(options = {}) {
     probe,
     async canReadFiles({ access, paths, workspacePolicy }) {
       await probe({ access, workspacePolicy });
-      return canReadClaudeFiles(paths, isolationPolicies?.[access]);
+      const policies =
+        workspacePolicy === undefined
+          ? isolationPolicies
+          : directoryIsolationPolicies.get(access);
+      const boundary = await prepareDirectoryPolicy(
+        { access, workspacePolicy },
+        ClaudeAdapterError,
+      );
+      return canReadClaudeFiles(
+        paths,
+        policies?.[access],
+        boundary === undefined
+          ? []
+          : [workspacePolicy.workspacePath, ...boundary.mounts.protectedPaths],
+      );
     },
     run,
   });

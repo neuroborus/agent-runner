@@ -74,7 +74,9 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   and, during plan execution, an explicit current plan step. A symlinked
   `.agents`, `.git`, and `.codex` stay protected.
 - The adapter foundation also supports declared directory reads and output-only
-  writes in Codex 0.164.0 or newer, without Git or commit readiness. Directory
+  writes in Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux,
+  without Git or commit readiness. Claude writes through sandboxed Bash to
+  existing declared output roots. Directory
   workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target

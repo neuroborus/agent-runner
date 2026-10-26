@@ -7,6 +7,14 @@ remain in the owning documentation.
 
 ## 2026-10-26
 
+- **Claude directory authority crosses the authenticated command boundary.**
+  Directory probes use ordinary fixtures without Git or commit preparation;
+  native and restricted-host launchers grant only existing declared output
+  roots writable. Native editing tools are omitted so writes cannot bypass
+  command mounts. Filesystem-owned inspection protects controls and external
+  reads, while snapshots check every retired attempt before reconstruction.
+  Repository proofs and commit behavior retain their separate authority.
+
 - **Codex directory authority is explicit and access-specific.** The shared
   adapter contract accepts bound directory declarations, and unsupported adapters
   reject them. Codex uses a named native permission profile instead of legacy

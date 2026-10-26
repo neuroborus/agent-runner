@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, rm } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm, stat } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import {
   basename,
@@ -75,17 +75,27 @@ async function storageRoot(forbiddenPaths, recordedPath) {
     throw environmentError("preparation");
   for (const path of forbiddenPaths) {
     // Task artifacts may not exist yet; check the normalized spelling as well.
-    let canonical = resolve(path);
-    try {
-      canonical = await realpath(path);
-    } catch (cause) {
-      if (cause.code !== "ENOENT") throw cause;
-      canonical = join(
-        await realpath(dirname(path)),
-        path.slice(dirname(path).length + 1),
-      );
+    let ancestor = resolve(path);
+    const missing = [];
+    let canonical;
+    while (canonical === undefined) {
+      try {
+        const info = await stat(ancestor);
+        if (missing.length > 0 && !info.isDirectory())
+          throw environmentError("preparation");
+        canonical = join(await realpath(ancestor), ...missing);
+      } catch (cause) {
+        if (cause.code !== "ENOENT" || dirname(ancestor) === ancestor)
+          throw cause;
+        missing.unshift(basename(ancestor));
+        ancestor = dirname(ancestor);
+      }
     }
-    if (contains(canonical, root) || contains(root, canonical))
+    if (
+      [resolve(path), canonical].some(
+        (candidate) => contains(candidate, root) || contains(root, candidate),
+      )
+    )
       throw environmentError("preparation");
   }
   return root;

@@ -27,12 +27,18 @@ pipeline needs it. A capability probe does not prove authentication or provider
 availability; the first real turn under the selected profile establishes that.
 
 The adapter boundary supports explicitly declared ordinary-directory access in
-Codex 0.164.0 or newer. Read-only analysis and confined output access have
+Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux with proved
+command isolation. Read-only analysis and confined output access have
 separate capability receipts and require no Git repository or local-commit
 readiness. Inputs, references, configuration, artifacts, infrastructure and
 discovered controls stay read-only; only declared outputs may change. Native
 permission paths containing glob metacharacters are rejected to preserve literal
-declarations. The policy survives continuation and reconstruction with existing
+declarations. Claude directory writes use sandboxed Bash, with native Edit/Write
+omitted. Its output roots must already exist as files or directories for exact
+bind mounts; preparation never creates them or grants their parents write access.
+New content can be created inside a declared output directory. Its native and
+restricted-host probes use ordinary directories without Git or commit preparation.
+The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
 declaration before provider work. This foundation does not yet expose directory
 pipelines. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)

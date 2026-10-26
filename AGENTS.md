@@ -237,7 +237,7 @@ All pipelines additionally require:
 | `src/agents/index.js`             | Public agent-adapter directory boundary                              |
 | `src/agents/registry.js`          | Frozen source-controlled provider descriptor registry                |
 | `src/agents/claude/index.js`      | Public Claude provider boundary                                      |
-| `src/agents/claude/`              | Private Claude adapter, commit, and native-sandbox implementation    |
+| `src/agents/claude/`              | Private Claude adapter, directory policy, commit, and native sandbox |
 | `src/agents/codex/index.js`       | Public Codex provider boundary                                       |
 | `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
 | `src/agents/`                     | Shared agent contracts, registration, and provider implementations   |
