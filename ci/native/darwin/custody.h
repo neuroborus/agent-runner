@@ -46,6 +46,41 @@ static long long domain_send_refs(mach_port_t name, int *query) {
   errno = saved;
   return *query == KERN_SUCCESS ? (long long)refs : -1;
 }
+/* Refusal-only own-task hypotheses, never an admission or ownership rule.
+ * XNU 43a9088 ipc_tt.c/task.defs returns copied SEND rights; READ/INSPECT can
+ * allocate on demand, and own-task copyout may substitute a port. Thus equal
+ * names observe an alias, while unequal names leave the endpoint unresolved.
+ * These public contracts do not establish the hosted library's provenance. */
+static kern_return_t domain_refused_aliases(const char *owner, mach_port_t name, mach_port_type_t census_type, int original_query, long long original_refs) {
+  int saved = errno; kern_return_t cleanup = KERN_SUCCESS;
+  if (!MACH_PORT_VALID(name)) return cleanup;
+  const int selectors[] = {TASK_KERNEL_PORT, TASK_NAME_PORT, TASK_READ_PORT, TASK_INSPECT_PORT};
+  const char *labels[] = {"TASK_KERNEL_PORT", "TASK_NAME_PORT", "TASK_READ_PORT", "TASK_INSPECT_PORT"};
+  /* Only this already-refused child changes disposition; a closed diagnostic
+   * pipe must not interrupt settlement of copies or the caller's cleanup. */
+  (void)signal(SIGPIPE, SIG_IGN);
+  for (unsigned i = 0; i < 4; i++) {
+    int before_query = original_query, held_query = -1, after_query = -1;
+    long long before = i ? domain_send_refs(name, &before_query) : original_refs;
+    mach_port_t copy = MACH_PORT_NULL;
+    kern_return_t got = task_get_special_port(mach_task_self(), selectors[i], &copy);
+    bool acquired = got == KERN_SUCCESS && MACH_PORT_VALID(copy);
+    long long held = acquired ? domain_send_refs(name, &held_query) : -1;
+    /* One release per successful valid acquisition, even an alias of a cache
+     * or the original name. Failed outputs own nothing; never retry a release. */
+    kern_return_t released = acquired ? mach_port_deallocate(mach_task_self(), copy) : -1;
+    long long after = domain_send_refs(name, &after_query);
+    if (acquired && released != KERN_SUCCESS) {
+      if (cleanup == KERN_SUCCESS) cleanup = released;
+      fprintf(stderr, "native-darwin-port-probe-cleanup: owner=%s pid=%d selector=%s result=%d\n",
+        owner, getpid(), labels[i], released);
+    }
+    fprintf(stderr, "native-darwin-port-probe: owner=%s pid=%d refused=%u census-type=%#x post-refusal=1 selector=%s get=%d name=%u acquired=%u match=%u before-query=%d before-refs=%lld held-query=%d held-refs=%lld release=%d after-query=%d after-refs=%lld\n",
+      owner, getpid(), name, census_type, labels[i], got, got == KERN_SUCCESS ? copy : MACH_PORT_NULL,
+      !!acquired, !!(acquired && copy == name), before_query, before, held_query, held, released, after_query, after);
+  }
+  fflush(stderr); errno = saved; return cleanup;
+}
 /* XNU 43a9088: task.defs/std_types.defs use COPY_SEND for the setter;
  * ipc_task_init creates a fresh space and copies the parent's bootstrap slot.
  * Prevent runtime acquisition there instead of releasing unproved userspace refs.

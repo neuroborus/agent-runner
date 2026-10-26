@@ -400,7 +400,22 @@ the pre-bootstrap-release and first-refusal observations with PID and release
 status. Counted aliases and copied parent bookkeeping cannot change admission or
 cleanup ownership. Failed queries with written outputs, zero/full-width counts,
 failed releases and failed diagnostics preserve unavailable values, the original
-refusal and errno. No query adds a release or supplies endpoint identity.
+refusal and errno. The SEND-reference query adds no release or endpoint identity.
+An additional actual-body fixture executes the shared refusal-only own-task
+KERNEL/NAME/READ/INSPECT probe and its reference-query helper. It protects fixed
+selector order, current-name matches and inconclusive unequal names, explicitly
+post-refusal acquisitions, before/held/after counts, failed queries with written
+outputs, failed getters with live output names, null/dead results, one release
+attempt per successful valid copy including original/cache/repeated aliases,
+multiple cleanup failures, failed diagnostic writes/flushes and preserved errno.
+Invalid refused names produce no acquisitions. The existing fault/launcher
+actual-body fixtures independently bind the helper call to the saved first
+refusal before cleanup and retain the original primary cause when probing fails;
+the shared probe fixture owns the detailed acquisition matrix once. The finite
+feasibility diagnostic catalog recognizes `fault-port-probe-release` without
+accepting arbitrary probe-operation names. These portable fixtures do not prove
+hosted compilation, original endpoint origin/lifetime, startup repair, or native
+acceptance; unknown authority still refuses payload execution.
 The fast Darwin build fixture also executes the shared registered/bootstrap fork guard and
 the fault owner's refusal path. Injected getters/setters protect verified null
 inheritance before runtime callbacks, the final single-thread check, exact parent slot/exported-value

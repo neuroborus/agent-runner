@@ -517,6 +517,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-port-list",
     "fault-port-list-release",
     "fault-port-owner",
+    "fault-port-probe-release",
     "fault-process-limit",
     "fault-reexec",
     "fault-reexec-binding",

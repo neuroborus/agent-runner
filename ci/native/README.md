@@ -9134,8 +9134,8 @@ SEND reference query and the existing release result, alongside one SEND query
 for the first refused name and the reporting PID. Unattempted queries and
 unavailable counts are -1; failed queries cannot publish their output as a count.
 A failed bootstrap release retains its observation without retrying the release.
-Counts and equal local names, including aliases or reuse, establish neither
-endpoint identity nor ownership; producer/reference evidence is still required
+Counts alone and names copied from another task or retired attempt establish neither
+current endpoint identity nor ownership; producer/reference evidence is still required
 to authorize a post-hoc release. The earlier original child's affected census
 name/type and its cache/API or
 producer binding remain unproved; this repair cannot identify that right by
@@ -9144,6 +9144,33 @@ not a trap fallback. Matching hosted compilation, export lookup, interception,
 original workflows and independent retirement are still required; portable
 fixtures establish none of those native successes. Other TCP/audit/fault-port
 causes and complete native acceptance remain open.
+
+After saving and reporting that original refusal, both ordinary Darwin paths use
+one shared refusal-only helper in `custody.h`'s runtime-reply scope. In the same
+original child, it sequentially queries its own `TASK_KERNEL_PORT`,
+`TASK_NAME_PORT`, `TASK_READ_PORT`, and `TASK_INSPECT_PORT`. Fixed
+`native-darwin-port-probe` records bind owner/PID, refused name and census type,
+selector/getter result, successfully returned name, acquisition and exact-match
+flags, and available refused-right SEND counts before acquisition, while the
+copy is held and after its release attempt. The first before sample is the saved
+original observation. Unattempted/failed queries use -1 counts; a failed getter's
+written output is not published as a returned name or adopted for cleanup.
+
+Every record labels its acquisitions `post-refusal=1`. Pinned XNU `ipc_tt.c`
+creates READ/INSPECT ports on demand and can substitute ports during own-task
+copyout; successful probes do not prove that these ports existed before refusal.
+Equal local names provide a positive current alias observation; unequal names
+leave the endpoint unresolved. Each successful valid getter copy receives one
+release attempt even when names alias an original right, borrowed cache, or
+another selector's copy. Original unowned references and borrowed caches remain
+untouched. Per-selector `native-darwin-port-probe-cleanup` records retain failed
+releases without retry, and fault custody separately retains the first failure
+as `fault-port-probe-release` cleanup uncertainty. Diagnostic write failures do
+not replace the saved refusal/errno or prevent owned-copy cleanup. Unavailable
+observations add no launch prerequisite. Neither an observed alias nor its counts
+prove original acquisition/lifetime, authorize acceptance/destruction, repair
+startup, or establish matching-host success. Census and parent restoration,
+payload prohibition and independent cleanup remain unchanged.
 
 Ordinary experimental launcher and fault custody fence bootstrap and registered
 slots at their existing single-threaded fork boundary. The guard completely

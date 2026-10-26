@@ -336,6 +336,7 @@ mach_cleanup: {
       fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
         getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
       fflush(stderr); errno = saved;
+      (void)domain_refused_aliases("launcher", refused_name, refused_type, send_query, send_refs);
     }
     /* One entry per acquisition, even when local names alias. Never retry a
      * failed release or let it replace the original refusal. */

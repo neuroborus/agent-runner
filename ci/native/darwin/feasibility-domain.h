@@ -358,6 +358,9 @@ static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_typ
     name, census_type, query, current, object_query, kind, (unsigned long long)object,
     getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
   fflush(stderr); errno = saved;
+  kern_return_t probe_release = domain_refused_aliases("fault", name, census_type, send_query, send_refs);
+  if (probe_release != KERN_SUCCESS) remember_cleanup("fault-port-probe-release", "mach", probe_release);
+  errno = saved;
 }
 static void domain_sanitize(void) {
   invariant(domain_port_owner == getpid(), "fault-port-owner");

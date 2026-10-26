@@ -4189,6 +4189,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       "mach_port_names/authority",
       unknownType,
     ]),
+    [
+      { unknownType: SEND, probeRelease: 15 },
+      "mach_port_names/authority",
+      SEND,
+    ],
     ...[0, 0xffffffff, 3, 6, 7, 200].map((bootstrap) => [{ bootstrap }]),
     ...[
       {},
@@ -4978,6 +4983,27 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         MACH_PORT_TYPE_DEAD_NAME: DEAD,
         MACH_PORT_RIGHT_SEND: 0,
         MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
+        // Shared actual-body coverage owns the probe effects; bind this call
+        // to the first original refusal before any independent array cleanup.
+        domain_refused_aliases(owner, name, type, query, refs) {
+          const original = machCalls.find(
+            (entry) => Array.isArray(entry) && entry[0] === "refusal",
+          );
+          assert.equal(owner, "launcher");
+          assert.ok(original);
+          assert.deepEqual(
+            [name, type, query, refs],
+            [original[2], original[3], original[9], original[10]],
+          );
+          assert.ok(
+            !machCalls.some(
+              (entry) => Array.isArray(entry) && entry[0] === "array-release",
+            ),
+          );
+          machCalls.push(["alias-probe", name]);
+          api.errno = 96;
+          return machCase.probeRelease ?? 0;
+        },
         TASK_BOOTSTRAP_PORT: 3,
         TASK_DEBUG_CONTROL_PORT: 4,
         TASK_RESOURCE_NOTIFY_PORT: 5,
@@ -5278,6 +5304,12 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         ]);
       const portFacts = machCalls.filter(
         (entry) => Array.isArray(entry) && entry[0] === "refusal",
+      );
+      assert.equal(
+        machCalls.filter(
+          (entry) => Array.isArray(entry) && entry[0] === "alias-probe",
+        ).length,
+        portFacts.length,
       );
       assert.ok(referenceSamples.length <= 2);
       const beforeRefs = referenceSamples.find((sample) => !sample.refused),

@@ -817,6 +817,242 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
   }
 });
 
+test("Darwin refused-right probes settle only new copies and retain inconclusive observations", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const functions = [
+    ["domain_send_refs", "name,query"],
+    [
+      "domain_refused_aliases",
+      "owner,name,census_type,original_query,original_refs",
+    ],
+  ]
+    .map(([name, args]) => {
+      const body = new RegExp(
+        `static (?:kern_return_t|long long) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        "u",
+      ).exec(source)?.[1];
+      assert.ok(body, name);
+      return `function ${name}(${args}) {${body
+        .replace(
+          /const int selectors\[\] = \{([^;]+)\};/u,
+          "const selectors=[$1];",
+        )
+        .replace(
+          /const char \*labels\[\] = \{([^;]+)\};/u,
+          "const labels=[$1];",
+        )
+        .replaceAll("*query", "query.value")
+        .replace(
+          /&(refs|copy|before_query|held_query|after_query)\b/gu,
+          (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+        )
+        .replaceAll("(void)", "")
+        .replaceAll("(long long)", "")
+        .replace(
+          /\b(?:int|unsigned|long long|mach_port_t|mach_port_urefs_t|kern_return_t|bool) /gu,
+          "let ",
+        )}
+    }`;
+    })
+    .join("\n");
+  const script = new Script(
+    `${functions}\ndomain_refused_aliases("fixture", refused, 0x10000, originalQuery, originalRefs);`,
+  );
+  const labels = [
+    "TASK_KERNEL_PORT",
+    "TASK_NAME_PORT",
+    "TASK_READ_PORT",
+    "TASK_INSPECT_PORT",
+  ];
+  const valid = (name) => name !== 0 && name !== 0xffffffff;
+  const aliases = Array.from({ length: 4 }, (_, match) => ({
+    copies: labels.map((_, index) => ({
+      name: index === match ? 71 : 82 + index,
+    })),
+  }));
+  for (const options of [
+    ...aliases,
+    { copies: [1, 3, 6, 82].map((name) => ({ name })) },
+    { copies: labels.map(() => ({ name: 71 })) },
+    {
+      copies: [
+        { name: 71, get: 5 },
+        { name: 0 },
+        { name: 0xffffffff },
+        { name: 71 },
+      ],
+    },
+    { query: 15 },
+    { diagnosticsFail: true },
+    {
+      copies: [
+        { name: 71, release: 15 },
+        { name: 71, release: 20 },
+        { name: 82 },
+        { name: 83 },
+      ],
+      diagnosticsFail: true,
+    },
+    { refused: 0 },
+    { refused: 0xffffffff },
+  ]) {
+    const refused = options.refused ?? 71;
+    const copies = options.copies ?? [82, 83, 84, 85].map((name) => ({ name }));
+    const baseline = new Map([
+      [71, 2],
+      [1, 1],
+      [3, 1],
+      [6, 1],
+    ]);
+    const references = new Map(baseline),
+      expectedReferences = new Map(baseline);
+    const expected = [],
+      reports = [],
+      releases = [],
+      cleanup = [];
+    let acquisitions = 0,
+      pending = null,
+      ignored = false;
+    const query = options.query ?? 0;
+    const available = (count) => (query ? -1 : count);
+    const api = {
+      refused,
+      originalQuery: query,
+      originalRefs: available(2),
+      errno: 37,
+      stderr: {},
+      KERN_SUCCESS: 0,
+      MACH_PORT_NULL: 0,
+      MACH_PORT_RIGHT_SEND: 0,
+      MACH_PORT_VALID: valid,
+      TASK_KERNEL_PORT: 11,
+      TASK_NAME_PORT: 12,
+      TASK_READ_PORT: 13,
+      TASK_INSPECT_PORT: 14,
+      SIGPIPE: 13,
+      SIG_IGN: 1,
+      signal(which, disposition) {
+        assert.deepEqual([which, disposition], [13, 1]);
+        ignored = true;
+        api.errno = 99;
+      },
+      getpid: () => 42,
+      mach_task_self: () => 1,
+      task_get_special_port(self, selector, out) {
+        assert.equal(self, 1);
+        assert.equal(selector, 11 + acquisitions);
+        assert.equal(
+          pending,
+          null,
+          "Each earlier acquisition has one release attempt",
+        );
+        const index = acquisitions++,
+          copy = copies[index];
+        const got = copy.get ?? 0,
+          owned = !got && valid(copy.name);
+        const before = references.get(refused),
+          held = before + Number(owned && copy.name === refused);
+        const released = owned ? (copy.release ?? 0) : -1;
+        const after =
+          held - Number(owned && copy.name === refused && !released);
+        expected.push([
+          "fixture",
+          42,
+          refused,
+          0x10000,
+          labels[index],
+          got,
+          got ? 0 : copy.name,
+          owned,
+          owned && copy.name === refused,
+          query,
+          available(before),
+          owned ? query : -1,
+          owned ? available(held) : -1,
+          released,
+          query,
+          available(after),
+        ]);
+        out.value = copy.name; // Failed outputs deliberately contain live aliases.
+        if (owned) {
+          pending = copy;
+          references.set(copy.name, (references.get(copy.name) ?? 0) + 1);
+          if (released)
+            expectedReferences.set(
+              copy.name,
+              (expectedReferences.get(copy.name) ?? 0) + 1,
+            );
+        }
+        api.errno = 91;
+        return got;
+      },
+      mach_port_get_refs(self, name, right, out) {
+        assert.deepEqual([self, name, right], [1, refused, 0]);
+        out.value = query ? 0xffffffff : references.get(name);
+        api.errno = 92;
+        return query;
+      },
+      mach_port_deallocate(self, name) {
+        assert.equal(self, 1);
+        assert.ok(
+          pending,
+          "Original references and borrowed caches remain unowned",
+        );
+        assert.equal(name, pending.name);
+        const result = pending.release ?? 0;
+        releases.push({ name, result });
+        if (!result) references.set(name, references.get(name) - 1);
+        pending = null;
+        api.errno = 93;
+        return result;
+      },
+      fprintf(stream, format, ...values) {
+        assert.equal(stream, api.stderr);
+        assert.ok(ignored);
+        assert.equal(pending, null);
+        if (format.startsWith("native-darwin-port-probe-cleanup:"))
+          cleanup.push(values);
+        else {
+          assert.ok(format.includes("post-refusal=1"));
+          reports.push(values);
+        }
+        api.errno = 94;
+        return options.diagnosticsFail ? -1 : 1;
+      },
+      fflush() {
+        api.errno = 95;
+        return options.diagnosticsFail ? -1 : 0;
+      },
+    };
+    const result = script.runInNewContext(api);
+    assert.equal(result, releases.find((copy) => copy.result)?.result ?? 0);
+    assert.equal(api.errno, 37);
+    assert.equal(acquisitions, valid(refused) ? 4 : 0);
+    assert.deepEqual(reports, expected);
+    assert.equal(releases.length, expected.filter((row) => row[7]).length);
+    assert.deepEqual(
+      cleanup,
+      copies.flatMap((copy, index) =>
+        copy.release && valid(refused)
+          ? [["fixture", 42, labels[index], copy.release]]
+          : [],
+      ),
+    );
+    assert.deepEqual(
+      [...references].filter(([, count]) => count),
+      [...expectedReferences],
+    );
+  }
+  const cause = darwinFeasibilityCause("fault", {
+    code: 126,
+    stderr:
+      "native-darwin: operation=fault-port-probe-release domain=mach value=15 effects=possible settlement=unsettled\n",
+  });
+  assert.ok(
+    cause.detail.includes("Native fault-port-probe-release failed (mach=15)."),
+  );
+});
+
 test("Darwin hosted ancestry is scoped to installed paths and experiment purpose", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8");
   const reader = await readFile(new URL("custody-reader.c", SOURCE), "utf8");
@@ -5975,6 +6211,12 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       "fault-port-authority",
       0,
     ],
+    [
+      "probe cleanup failure cannot replace the original census refusal",
+      { bootstrapExtra: true, probeRelease: 15 },
+      "fault-port-authority",
+      0,
+    ],
     ...[
       { inheritedOwner: 41 },
       { bootstrapRefsQuery: 15 },
@@ -6765,6 +7007,32 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       },
       domain_access_diagnostic: (...facts) => lifecycle.push(facts),
       domain_fork_diagnostic: (owner) => assert.equal(owner, "fault"),
+      // The shared actual-body probe fixture owns acquisition/release semantics;
+      // this caller fixture binds the original facts and separate cleanup cause.
+      domain_refused_aliases(owner, name, type, query, refs) {
+        assert.equal(owner, "fault");
+        assert.equal(first.operation, "fault-port-authority");
+        assert.equal(portDiagnostics.length, 1);
+        assert.deepEqual(
+          [name, type, query, refs],
+          [
+            portDiagnostics[0][0],
+            portDiagnostics[0][1],
+            portDiagnostics[0][12],
+            portDiagnostics[0][13],
+          ],
+        );
+        assert.ok(!calls.some(([op]) => op === "census-release"));
+        calls.push(["alias-probe", name]);
+        if (options.probeRelease)
+          releaseFailures.push({
+            operation: "fault-port-probe-release",
+            kind: "mach",
+            value: options.probeRelease,
+          });
+        context.errno = 96;
+        return options.probeRelease ?? 0;
+      },
       fflush() {},
     };
     const launch = script.runInNewContext(context);
@@ -6826,6 +7094,11 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       label,
     );
     assert.deepEqual(cleanup, releaseFailures, label);
+    assert.equal(
+      calls.filter(([op]) => op === "alias-probe").length,
+      portDiagnostics.length,
+      label,
+    );
     assert.ok(referenceSamples.length <= 2, label);
     const beforeRefs = referenceSamples.find((sample) => !sample.census),
       refusedRefs = referenceSamples.find((sample) => sample.census),
