@@ -12870,18 +12870,50 @@ test("actual retained startup readback selects only held resources and masks and
     new URL("custody-reader.c", import.meta.url),
     "utf8",
   );
+  // Admission/lifecycle wiring is outside the portable sampler bodies below.
+  assert.match(
+    source,
+    /static void ownership_launch\([^\n]+\) \{\s+release_invalidate\(\);/u,
+  );
+  assert.match(
+    source,
+    /static void ownership_retain\([^\n]+\) \{\s+if\(!ownership_count\)release_invalidate\(\);/u,
+  );
+  assert.match(
+    source,
+    /#define close_file\(value\) \(release_file_closing\(value\), \(close_file\)\(value\)\)/u,
+  );
+  const retirementStart = source.indexOf(
+    '!strcmp(values[0], "ownership-account-retire")',
+  );
+  assert.ok(retirementStart >= 0);
+  const retirement = source.slice(retirementStart);
+  const invalidation = retirement.indexOf("release_invalidate();");
+  const closure = retirement.indexOf("CloseHandle(ownership_processes[i])");
+  assert.ok(invalidation >= 0 && closure > invalidation);
   const names = [
+    "release_invalidate",
+    "release_file_closing",
+    "release_capture_name",
     "readback_now",
+    "release_live",
+    "release_capture",
+    "ownership_send",
     "readback_original",
     "readback_resource",
     "readback_collect",
   ];
   const project = (name) => {
     const match = new RegExp(
-      `static [^\\n]+ ${name}\\(([^\\n]*)\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static [^\\n]+ \\*?${name}\\(([^\\n]*)\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source);
     assert.ok(match, name);
+    if (["release_capture", "readback_original"].includes(name))
+      assert.doesNotMatch(
+        match[2],
+        /\b(?:OpenProcess|CreateProcessW|CreateProcessAsUserW|ResumeThread)\(/u,
+      );
     const args = match[1]
       .split(",")
       .filter((arg) => arg.trim() !== "void")
@@ -12897,7 +12929,18 @@ test("actual retained startup readback selects only held resources and masks and
         "struct readback_status status={0};struct readback_token metadata={0};",
         "var status=freshStatus(),metadata=freshMetadata();",
       )
+      .replace(
+        "struct release_binding captured={0};struct readback_status status={0};",
+        "var captured=freshRelease(),status=freshStatus();",
+      )
+      .replace(
+        "struct release_image_query imageQuery={0};",
+        "var imageQuery={attempted:false,succeeded:false,exitRead:false,error:0,waitError:0,exitCode:0,exitError:0};",
+      )
       .replace("TOKEN_STATISTICS before,after;", "var before={},after={};")
+      .replace("TOKEN_STATISTICS current,after;", "var current={},after={};")
+      .replace("BYTE bytes[32768];", "var bytes=[];")
+      .replace("char pid[32];", "var pid=[];")
       .replace(
         "DWORD granted[3]={0};BOOL allowed[3]={0},api[3]={0};",
         "var granted=[0,0,0],allowed=[false,false,false],api=[false,false,false];",
@@ -12917,6 +12960,23 @@ test("actual retained startup readback selects only held resources and masks and
         "var created={},exited={},kernel={},user={},image=[];",
       )
       .replace("FILE_ID_INFO id;", "var id={};")
+      .replace(
+        "FILETIME created,exited,kernel,user;WCHAR expected[4096];",
+        "var created={},exited={},kernel={},user={},expected=[];",
+      )
+      .replace(
+        /sizeof\(captured\.(imageId|candidate|nonce|hash)\)/gu,
+        (_, key) => ({ imageId: 24, candidate: 41, nonce: 33, hash: 65 })[key],
+      )
+      .replaceAll("sizeof(bytes)", "32768")
+      .replace(/sizeof\((?:captured\.path|expected|image)\)/gu, "8192")
+      .replaceAll("expected+4", "expected.slice(4)")
+      .replace(/\bL("(?:\\.|[^"\\])*")/gu, "$1")
+      .replaceAll("L':'", "58")
+      .replaceAll("L'\\\\'", "92")
+      .replace(/'([PCRGEAQ])'/gu, (_, byte) => byte.charCodeAt(0))
+      .replaceAll("#ifdef NATIVE_CI_EXPERIMENT", "")
+      .replaceAll("#endif", "")
       .replace(
         /\(\(ULONGLONG\)(time|created)\.dwHighDateTime<<32\)\|\1\.dwLowDateTime/gu,
         "$1.ticks",
@@ -12940,7 +13000,7 @@ test("actual retained startup readback selects only held resources and masks and
       )
       .replace(/(?<!&)&probe\[i\]/gu, "probe[i]")
       .replace(
-        /(?<!&)&(pid|birth|length)\b/gu,
+        /(?<!&)&(pid|birth|length|temporary|used|query\.exitCode)\b/gu,
         (_, key) => `ref(()=>${key},v=>${key}=v)`,
       )
       .replace(/\*(pid|birth)\b/gu, "$1.value")
@@ -12950,19 +13010,27 @@ test("actual retained startup readback selects only held resources and masks and
       )
       .replace(/(?<!&)&file\.id\b/gu, "file.id")
       .replace(
-        /(?<!&)&(status|metadata|object|before|after|created|exited|kernel|user|id|time|ownership_policy_file|original_refusal\.imageId|entries\[6\]\.file\.id)\b/gu,
+        /(?<!&)&(captured\.(?:imageId|statistics)|status|metadata|imageQuery|current|object|before|after|created|exited|kernel|user|id|time|original_release\.(?:imageId|statistics)|ownership_policy_file|original_refusal\.imageId|entries\[6\]\.file\.id)\b/gu,
         "$1",
       )
       .replace(/\b(\w+)\[\]=\{([^}]+)\}/gu, "$1=[$2]")
-      .replace(/\((?:DWORD|size_t)\)/gu, "")
+      .replace(/\((?:BYTE|DWORD|size_t)\)/gu, "")
       .replace(
-        /\b(?:const )?(?:struct held_file|PSECURITY_DESCRIPTOR|ULONGLONG|DWORD|BOOL|HANDLE|unsigned|int|char) \*?/gu,
+        /\b(?:const )?(?:struct held_file|PSECURITY_DESCRIPTOR|ULONGLONG|DWORD|BOOL|HANDLE|unsigned|size_t|int|char) \*?/gu,
         "var ",
       );
-    return `function ${name}(${args}){${body}}`;
+    const projected =
+      name === "release_capture"
+        ? "capture:{" +
+          body
+            .replaceAll("goto finished;", "break capture;")
+            .replace("\nfinished:", "}\n")
+        : body;
+    return `function ${name}(${args}){${projected}}`;
   };
   const program = new Script(
-    names.map(project).join("\n") + "\n({collect:readback_collect});",
+    names.map(project).join("\n") +
+      "\n({collect:readback_collect,send:ownership_send,capture:release_capture,invalidate:release_invalidate,closing:release_file_closing});",
   );
   for (const fault of [
     null,
@@ -12981,6 +13049,46 @@ test("actual retained startup readback selects only held resources and masks and
     "policy-denial",
     "deadline",
     "cleanup",
+    "exited-image-error31",
+    "exited-missing-capture",
+    "exited-stale-nonce",
+    "exited-changed-statistics",
+    "live-image-error31",
+    "terminal-wait-error",
+    "terminal-wait-result",
+    "terminal-exit-error",
+    "malformed-image",
+    "missing-capture",
+    "capture-image",
+    "capture-unterminated-image",
+    "capture-path",
+    "capture-file-id",
+    "capture-open",
+    "capture-failed-output",
+    "capture-borrowed-output",
+    "capture-statistics",
+    "capture-current-changed",
+    "capture-retained-changed",
+    "capture-not-primary",
+    "capture-exited",
+    "capture-deadline",
+    "capture-close",
+    "wrong-process",
+    "wrong-token",
+    "wrong-image",
+    "stale-candidate",
+    "stale-nonce",
+    "stale-pin",
+    "saved-image-id",
+    "saved-token-id",
+    "saved-authentication-id",
+    "saved-modified-id",
+    "dispatch-failed",
+    "dispatch-short",
+    "reset",
+    "image-close",
+    "unrelated-close",
+    "recapture",
   ]) {
     const chars = (value) => [...value].map((v) => v.charCodeAt(0)).concat(0);
     const text = (value) =>
@@ -13001,6 +13109,25 @@ test("actual retained startup readback selects only held resources and masks and
       value: 0,
       closureUncertain: false,
       cleanupValue: 0,
+    });
+    const freshRelease = () => ({
+      state: 0,
+      dispatched: false,
+      process: 0,
+      token: 0,
+      image: 0,
+      pid: 0,
+      birth: 0,
+      from: 0,
+      to: 0,
+      release: 0,
+      candidate: [],
+      nonce: [],
+      hash: [],
+      path: [],
+      imageId: {},
+      statistics: {},
+      status: freshStatus(),
     });
     const freshMetadata = () => ({
       before: stats(),
@@ -13047,9 +13174,13 @@ test("actual retained startup readback selects only held resources and masks and
     };
     const calls = [],
       rows = [],
-      freed = new Set();
+      freed = new Set(),
+      closed = new Set();
     let remaining = fault === "expired" ? 0 : 30000,
-      reads = 0;
+      reads = 0,
+      error = 5,
+      phase = "capture",
+      waits = 0;
     const ref = (get, set) => ({
       get value() {
         return get();
@@ -13065,6 +13196,7 @@ test("actual retained startup readback selects only held resources and masks and
       freshStatus,
       freshMetadata,
       freshObject,
+      freshRelease,
       at: (target, offset) => ({ target, offset }),
       NULL: null,
       TRUE: true,
@@ -13073,6 +13205,18 @@ test("actual retained startup readback selects only held resources and masks and
       FileIdInfo: 18,
       ERROR_INVALID_HANDLE: 6,
       ERROR_INVALID_DATA: 13,
+      ERROR_TIMEOUT: 1460,
+      MAXDWORD: 4294967295,
+      WAIT_OBJECT_0: 0,
+      WAIT_TIMEOUT: 258,
+      WAIT_FAILED: 4294967295,
+      RELEASE_UNSTARTED: 0,
+      RELEASE_UNAVAILABLE: 1,
+      RELEASE_INVALIDATED: 2,
+      RELEASE_USABLE: 3,
+      TOKEN_QUERY: 8,
+      FILE_NAME_NORMALIZED: 0,
+      VOLUME_NAME_DOS: 0,
       FILE_READ_DATA: 1,
       FILE_EXECUTE: 32,
       FILE_TRAVERSE: 32,
@@ -13086,7 +13230,22 @@ test("actual retained startup readback selects only held resources and masks and
         birth: 90,
         image: chars("C:\\sample\\payload.exe"),
         imageId: id(6),
+        hash: "c".repeat(64),
+        to: 1000,
       },
+      original_release: freshRelease(),
+      candidate: "a".repeat(40),
+      nonce: "b".repeat(32),
+      errno: 9,
+      ownership_count: 1,
+      ownership_control: 77,
+      ownership_owner: { hProcess: 80 },
+      ownership_stage: 5,
+      ownership_creation_verified: true,
+      ownership_policy_installed: true,
+      ownership_spoofed: false,
+      ownership_released: false,
+      access_mode: false,
       // An even token handle exposes accidental bitwise AND in C projection.
       ownership_literal: fault !== "nonliteral",
       ownership_processes: [42],
@@ -13098,6 +13257,7 @@ test("actual retained startup readback selects only held resources and masks and
         restrictingSid: "S-1-5-21-7002",
       },
       entries: Array.from({ length: 7 }, (_, i) => ({
+        pin: "c".repeat(64),
         file: {
           handle: fault === "missing-storage" && i === 3 ? 0 : i + 10,
           id: id(i),
@@ -13105,7 +13265,107 @@ test("actual retained startup readback selects only held resources and masks and
       })),
       ownership_policy_file: { handle: 40, id: id(7) },
       refusal_remaining: () => remaining,
-      GetLastError: () => 5,
+      GetLastError: () => error,
+      SetLastError(value) {
+        error = value;
+      },
+      GetTickCount64() {
+        calls.push("tick-start");
+        return 1000;
+      },
+      strlen: (value) => text(value).length,
+      strnlen_s: (value, maximum) => Math.min(text(value).length, maximum),
+      wcsnlen_s: (value, maximum) => Math.min(text(value).length, maximum),
+      nibble: (value) => parseInt(value, 16),
+      need(value) {
+        assert.ok(value, "native refusal");
+      },
+      WriteFile(handle, bytes, count, used) {
+        assert.deepEqual([handle, bytes[0], count], [77, 82, 1]);
+        assert.equal(api.original_refusal.from, 200 + calls.length);
+        assert.equal(api.original_release.dispatched, false);
+        if (api.original_release.state === 3)
+          assert.equal(closed.has(72), true);
+        calls.push("dispatch");
+        used.value = fault === "dispatch-short" ? 0 : count;
+        return fault !== "dispatch-failed";
+      },
+      WaitForSingleObject(handle, timeout) {
+        assert.equal(timeout, 0, "Capture and fallback never add a wait");
+        if (handle === 80) return 258;
+        assert.equal(handle, 42);
+        calls.push(`${phase}:wait`);
+        if (phase === "capture")
+          return fault === "capture-exited" && ++waits === 2 ? 0 : 258;
+        if (fault === "terminal-wait-error") {
+          error = 6;
+          return 4294967295;
+        }
+        if (fault === "terminal-wait-result") return 128;
+        return fault === "live-image-error31" ? 258 : 0;
+      },
+      GetExitCodeProcess(handle, out) {
+        assert.equal(handle, 42);
+        calls.push("exit");
+        if (fault === "terminal-exit-error") {
+          error = 87;
+          return false;
+        }
+        out.value = 0xc0000022;
+        return true;
+      },
+      GetFinalPathNameByHandleW(handle, out, maximum, flags) {
+        assert.deepEqual([handle, maximum, flags], [16, 4096, 0]);
+        calls.push("final-path");
+        const path = chars(
+          "\\\\?\\C:\\sample\\" +
+            (fault === "capture-path" ? "other.exe" : "payload.exe"),
+        );
+        out.splice(0, path.length, ...path);
+        return path.length - 1;
+      },
+      OpenProcessToken(handle, mask, out) {
+        assert.deepEqual([handle, mask], [42, 8]);
+        calls.push("open-token");
+        out.value =
+          fault === "capture-open"
+            ? null
+            : fault === "capture-borrowed-output"
+              ? 70
+              : 72;
+        error = 5;
+        api.errno = 88;
+        return ![
+          "capture-open",
+          "capture-failed-output",
+          "capture-borrowed-output",
+        ].includes(fault);
+      },
+      readback_close(handle, status) {
+        assert.equal(
+          handle,
+          72,
+          "Borrowed handles never become temporary ownership",
+        );
+        assert.equal(closed.has(handle), false);
+        closed.add(handle);
+        calls.push("close-token");
+        error = 6;
+        if (fault === "capture-close")
+          Object.assign(status, {
+            closureUncertain: true,
+            cleanupDomain: "win32",
+            cleanupValue: 6,
+          });
+      },
+      memcpy(target, value) {
+        if (Array.isArray(target)) target.push(...chars(text(value)));
+        else Object.assign(target, structuredClone(value));
+      },
+      memset(target, _value, bytes) {
+        target.length = bytes / 2;
+        target.fill(65535);
+      },
       GetSystemTimePreciseAsFileTime(out) {
         out.ticks = 200 + calls.length;
       },
@@ -13116,35 +13376,64 @@ test("actual retained startup readback selects only held resources and masks and
       },
       GetProcessTimes(handle, created) {
         assert.equal(handle, 42);
-        created.ticks = fault === "birth" ? 91 : 90;
+        created.ticks = phase === "readback" && fault === "birth" ? 91 : 90;
         return true;
       },
       QueryFullProcessImageNameW(handle, flags, out, length) {
         assert.deepEqual([handle, flags], [42, 0]);
+        calls.push(`${phase}:image-query`);
+        if (
+          (phase === "capture" && fault === "capture-image") ||
+          (phase === "readback" &&
+            (fault?.startsWith("exited-") ||
+              [
+                "live-image-error31",
+                "terminal-wait-error",
+                "terminal-wait-result",
+                "terminal-exit-error",
+              ].includes(fault)))
+        ) {
+          error = 31;
+          return false;
+        }
         const path = chars(
-          fault === "process-image"
+          phase === "readback" && fault === "process-image"
             ? "C:\\sample\\other.exe"
             : "C:\\sample\\payload.exe",
         );
-        out.push(...path);
+        out.splice(0, path.length, ...path);
         length.value = path.length - 1;
+        if (phase === "capture" && fault === "capture-unterminated-image")
+          out[length.value] = 65535;
+        if (phase === "readback" && fault === "malformed-image") length.value++;
         return true;
       },
       GetFileInformationByHandleEx(handle, kind, out) {
         assert.deepEqual([handle, kind], [16, 18]);
-        Object.assign(out, id(fault === "held-image" ? 8 : 6));
+        Object.assign(
+          out,
+          id(
+            (phase === "readback" && fault === "held-image") ||
+              (phase === "capture" && fault === "capture-file-id")
+              ? 8
+              : 6,
+          ),
+        );
         return true;
       },
       _wcsicmp: (a, b) =>
         Number(text(a).toLowerCase() !== text(b).toLowerCase()),
       strcmp: (a, b) => Number(text(a) !== text(b)),
+      wmemcmp: (a, b, size) =>
+        Number(text(a).slice(0, size) !== text(b).slice(0, size)),
       memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
       readback_fail(status, domain, operation, value) {
         if (!status.failed)
           Object.assign(status, { failed: true, domain, operation, value });
         return false;
       },
-      readback_ready: () => remaining > 0,
+      readback_ready: (status, operation) =>
+        remaining > 0 || api.readback_fail(status, "budget", operation, 1460),
       readback_metadata(token, value) {
         assert.equal(token, 70);
         Object.assign(value, freshMetadata());
@@ -13152,10 +13441,24 @@ test("actual retained startup readback selects only held resources and masks and
           Object.assign(value, { last: false, stable: false });
       },
       readback_sid_equal: (a, b) => a === b,
-      readback_statistics(token, out) {
-        assert.equal(token, 70);
+      readback_statistics(token, out, status) {
+        assert.ok([70, 72].includes(token));
         Object.assign(out, stats());
         reads++;
+        if (phase === "capture") {
+          if (fault === "capture-not-primary") out.TokenType = 2;
+          if (
+            (fault === "capture-current-changed" && token === 72) ||
+            (fault === "capture-retained-changed" && reads === 3)
+          )
+            out.ModifiedId.LowPart = 9;
+          if (fault === "capture-deadline" && token === 72) remaining = 0;
+          return (
+            (remaining > 0 &&
+              !(fault === "capture-statistics" && token === 72)) ||
+            api.readback_fail(status, "win32", "GetTokenInformation", 5)
+          );
+        }
         if (fault === "statistics-changed" && reads === 2)
           out.ModifiedId.LowPart = 9;
         return remaining > 0 && !(fault === "statistics-last" && reads === 2);
@@ -13234,9 +13537,112 @@ test("actual retained startup readback selects only held resources and masks and
         else current.readbackResources++;
       },
     };
-    program.runInNewContext(api).collect(report);
-    if (["nonliteral", "other-command", "expired"].includes(fault)) {
-      assert.deepEqual(calls, []);
+    const run = program.runInNewContext(api);
+    if (["missing-capture", "exited-missing-capture"].includes(fault))
+      api.ownership_literal = false;
+    if (["dispatch-failed", "dispatch-short"].includes(fault)) {
+      assert.throws(() => run.send("52"), /native refusal/u);
+      assert.equal(api.original_release.state, 2);
+      assert.equal(!!api.original_refusal.sent, false);
+    } else run.send("52");
+    assert.equal(api.errno, 9);
+    assert.equal(
+      error,
+      5,
+      "Capture preserves original error independently of cleanup",
+    );
+    assert.equal(api.original_refusal.tick, 1000);
+    if (!fault) {
+      const dispatched = JSON.stringify(api.original_release),
+        count = calls.length;
+      assert.throws(() => run.send("52"), /native refusal/u);
+      assert.equal(
+        calls.length,
+        count,
+        "A second R cannot replay capture or dispatch",
+      );
+      assert.equal(JSON.stringify(api.original_release), dispatched);
+    }
+    const failedAcquisition = [
+      "capture-open",
+      "capture-failed-output",
+      "capture-borrowed-output",
+    ].includes(fault);
+    assert.equal(
+      closed.size,
+      calls.includes("open-token") && !failedAcquisition ? 1 : 0,
+    );
+    if (fault?.startsWith("capture-") || fault === "expired") {
+      assert.equal(api.original_release.state, 1);
+      assert.equal(
+        api.original_release.process,
+        0,
+        "Incomplete identity is never published",
+      );
+    }
+    if (
+      ["reset", "recapture", "image-close", "unrelated-close"].includes(fault)
+    ) {
+      const identity = ({ state: _state, dispatched: _dispatched, ...saved }) =>
+        JSON.stringify(saved);
+      const frozen = identity(api.original_release);
+      const count = calls.length;
+      if (fault === "recapture") run.capture();
+      else if (fault.endsWith("close"))
+        run.closing(api.entries[fault === "image-close" ? 6 : 4].file);
+      else run.invalidate();
+      assert.equal(
+        api.original_release.state,
+        fault === "unrelated-close" ? 3 : 2,
+      );
+      assert.equal(
+        identity(api.original_release),
+        frozen,
+        "Invalidation cannot reconstruct saved identity",
+      );
+      assert.equal(calls.length, count);
+    }
+    if (fault === "wrong-process") api.original_release.process = 44;
+    if (fault === "wrong-token") api.original_release.token = 71;
+    if (fault === "wrong-image") api.original_release.image = 17;
+    if (fault === "stale-candidate") api.candidate = "d".repeat(40);
+    if (["stale-nonce", "exited-stale-nonce"].includes(fault))
+      api.nonce = "e".repeat(32);
+    if (fault === "stale-pin") api.entries[6].pin = "f".repeat(64);
+    if (fault === "saved-image-id") api.original_release.imageId = id(8);
+    if (fault?.startsWith("saved-") && fault !== "saved-image-id") {
+      const field = {
+        "saved-token-id": "TokenId",
+        "saved-authentication-id": "AuthenticationId",
+        "saved-modified-id": "ModifiedId",
+      }[fault];
+      api.original_release.statistics[field].LowPart++;
+    }
+    if (fault === "exited-changed-statistics")
+      api.original_release.statistics.ModifiedId.LowPart++;
+    api.ownership_literal = fault !== "nonliteral";
+    phase = "readback";
+    reads = 0;
+    const inspected = JSON.stringify(api.original_release),
+      beforeCollect = calls.length;
+    run.collect(report);
+    assert.equal(
+      JSON.stringify(api.original_release),
+      inspected,
+      "Refusal never recreates release evidence",
+    );
+    assert.equal(
+      api.original_refusal.tick,
+      1000,
+      "Neither capture nor refusal resets the deadline",
+    );
+    assert.equal(calls.filter((value) => value === "tick-start").length, 1);
+    if (
+      ["nonliteral", "other-command", "expired", "capture-deadline"].includes(
+        fault,
+      )
+    ) {
+      assert.deepEqual(calls.slice(beforeCollect), []);
       assert.deepEqual(rows, []);
       assert.equal(report.readbackStarted, false);
       continue;
@@ -13295,7 +13701,32 @@ test("actual retained startup readback selects only held resources and masks and
         "statistics-changed",
         "probe-api",
         "deadline",
-      ].includes(fault)
+        "live-image-error31",
+        "terminal-wait-error",
+        "terminal-wait-result",
+        "terminal-exit-error",
+        "malformed-image",
+        "missing-capture",
+        "exited-missing-capture",
+        "exited-stale-nonce",
+        "exited-changed-statistics",
+        "wrong-process",
+        "wrong-token",
+        "wrong-image",
+        "stale-candidate",
+        "stale-nonce",
+        "stale-pin",
+        "saved-image-id",
+        "saved-token-id",
+        "saved-authentication-id",
+        "saved-modified-id",
+        "dispatch-failed",
+        "dispatch-short",
+        "reset",
+        "image-close",
+        "recapture",
+      ].includes(fault) ||
+      fault?.startsWith("capture-")
     ) {
       assert.match(rows[1], /discretionary:unavailable,granted:unavailable/u);
       assert.doesNotMatch(rows[1], /authorization:grant/u);
@@ -13311,7 +13742,49 @@ test("actual retained startup readback selects only held resources and masks and
         /discretionary:deny,granted:0,mic-denied:0,authorization:deny/u,
       );
     if (fault === "cleanup") assert.equal(!!report.readbackClosure, true);
-    if (!fault)
+    if (fault === "capture-close") {
+      assert.equal(!!report.readbackClosure, true);
+      assert.match(
+        rows[0],
+        /capture=unavailable .*capture-closure-uncertain=1/u,
+      );
+    }
+    if (
+      fault?.startsWith("exited-") ||
+      [
+        "live-image-error31",
+        "terminal-wait-error",
+        "terminal-wait-result",
+        "terminal-exit-error",
+      ].includes(fault)
+    ) {
+      assert.match(
+        rows[0],
+        /image-query-attempted=1 image-query-succeeded=0 image-query-error=31/u,
+      );
+      assert.equal(
+        calls.includes("exit"),
+        ![
+          "live-image-error31",
+          "terminal-wait-error",
+          "terminal-wait-result",
+        ].includes(fault),
+      );
+    }
+    if (["process-image", "malformed-image"].includes(fault)) {
+      assert.equal(
+        calls.includes("readback:wait"),
+        false,
+        "Successful malformed/mismatched queries never fall back",
+      );
+    }
+    if (fault === "exited-image-error31") {
+      assert.match(rows[0], /binding=1 capture=usable/u);
+      assert.match(rows[0], /binding-source=release-exited/u);
+      assert.match(rows[0], /terminal-exit-read=1 terminal-exit=3221225506/u);
+      assert.doesNotMatch(rows.slice(1).join(""), /authorization:unavailable/u);
+    }
+    if ([null, "exited-image-error31", "unrelated-close"].includes(fault))
       assert.deepEqual(
         [
           report.readbackProbes,
@@ -13804,6 +14277,12 @@ test("original-child refusal collection owns bounded partial publication and can
         thread: null,
         report: freshReport(),
       },
+      original_release: {
+        from: 0,
+        to: 0,
+        status: { value: 0, closureUncertain: false },
+      },
+      release_capture_name: () => "unstarted",
       ownership_released: fault !== "unreleased",
       ownership_count: 1,
       ownership_creation_verified: true,
@@ -14070,6 +14549,10 @@ test("original-child refusal collection owns bounded partial publication and can
       /command=ownership-output sequence=46 source=custody.h line=421 error=109/u,
     );
     assert.match(output, /resume-time=unavailable/u);
+    assert.match(
+      output,
+      /capture=unstarted capture-from=0 capture-to=0 capture-status=none\/0/u,
+    );
     assert.ok(api.original_refusal.report.examined <= 64);
     if (
       [

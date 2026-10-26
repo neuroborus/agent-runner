@@ -253,7 +253,34 @@ custody `[2]`, outer `[0]` (one traverse each), then the materialized policy fil
 (read data). These are ten separate declared masks, not observed startup access
 requirements. No PID-based reopen, ancestor/dependency discovery, impersonation,
 permission change or additional child is involved. Original held PID/birth,
-process image and held image identity are rechecked. Token metadata includes
+process image and held image identity are rechecked. Before the original literal
+R write, the reader captures one release binding after the existing witness and
+creation guards. The same 30-second tick starts before capture; release FILETIME
+is stamped immediately before dispatch and the tick never restarts. Capture
+failure is nonfatal diagnostic unavailability, not an admission prerequisite.
+The record binds candidate/nonce, capture interval, continuously held original
+process/token/image handles, PID/birth, bounded process image path, normalized
+held DOS path, volume/FileId and the previously verified image SHA-256. Zero-time
+waits require a live process around capture. Retained primary-token statistics
+bracket a successful current-token acquisition on that process; all statistics
+must match, and temporary settlement precedes publication. Successful original
+R dispatch seals use; failed dispatch, new launch/original retention or bound
+handle release invalidates it. Refusal and later witness booleans never recreate
+or replace this evidence.
+
+Post-refusal image queries remain explicit. Successful output must be bounded
+and match the captured image; malformed or mismatched success never falls back.
+A failed query retains its actual Win32 error separately from binding validity.
+Only a zero-time signaled observation of that same retained process plus a
+successful exit-code read permits release-bound fallback, with candidate/nonce,
+handle lineage, PID/birth, held FileId/hash and token statistics still matching.
+Thus exited-child error 31 can coexist with available probe answers without
+claiming a successful image query. A live query failure, missing/stale/expired
+binding or unavailable terminal observation leaves authorization unavailable.
+Token rows retain unstarted/unavailable/invalidated/usable capture state,
+capture interval/status, binding source, image-query and terminal outcomes within
+the existing row and byte bounds. Context also retains capture state and status
+when sampling cannot start. Token metadata includes
 TokenId, AuthenticationId, ModifiedId, subject/restricting SIDs, privilege count,
 integrity and mandatory policy. Metadata and each resource probe set have separate
 original-token statistics brackets; failed or changed statistics make authorization
@@ -262,8 +289,9 @@ Resource rows retain actual file identities, descriptor/DACL hashes, owner,
 bounded actual ACE type/flags/mask/principal projections and actual or defaulted
 mandatory labels. Unsupported projections are explicit. Native API failure is
 unavailable evidence; discretionary answers and MIC denial masks remain separate.
-Private-directory and policy-file denials can be intentional. Each sampling
-interval is post-refusal and the seven resources are not an atomic snapshot.
+Private-directory and policy-file denials can be intentional. Token metadata
+and resource sampling remain post-refusal; the seven resources are not an
+atomic snapshot.
 Neither separate AccessCheck results nor FileIo fields identify the original
 requested access, first failing syscall or complete loader requirements. Window
 stations/desktops, pipes, Jobs, other kernel objects, unheld ancestors and loader
@@ -271,8 +299,10 @@ dependencies remain unobserved.
 
 Readback uses only the remaining release budget, without an additional wait.
 Its entire token/hash/projection/cleanup chain is nonfatal. The worker settles
-temporary duplicated tokens, strict same-object observer reopens, descriptors,
-hash resources and buffers once; borrowed custody handles stay untouched.
+successfully acquired temporary tokens, strict same-object observer reopens,
+descriptors, hash resources and buffers once; borrowed custody handles stay untouched.
+Failed token-acquisition output parameters confer no ownership, even when
+non-null or equal to borrowed custody. Cleanup uncertainty remains separate.
 At most one token row and seven uniquely identified resource rows join the
 existing 64 event rows, for at most 74 lines including context/completion within
 the unchanged byte caps and reserved completion space. Separate readback row and

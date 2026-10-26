@@ -338,14 +338,15 @@ refused:
 /* Preserve AccessCheck's API result separately from its discretionary answer.
  * The surrounding resource owner brackets every probe with original statistics. */
 static BOOL readback_access(HANDLE original, PSECURITY_DESCRIPTOR sd, DWORD desired, DWORD *granted, BOOL *allowed, struct readback_status *status) {
-  HANDLE token=NULL;BOOL valid=FALSE;
+  HANDLE token=NULL;BOOL valid=FALSE,acquired=FALSE;
   if(!readback_ready(status,"DuplicateToken"))return FALSE;
-  if(!DuplicateToken(original,SecurityImpersonation,&token)){readback_fail(status,"win32","DuplicateToken",GetLastError());goto finished;}
+  acquired=DuplicateToken(original,SecurityImpersonation,&token);
+  if(!acquired){readback_fail(status,"win32","DuplicateToken",GetLastError());goto finished;}
   if(!readback_ready(status,"AccessCheck"))goto finished;
   valid=access_result(sd,token,FALSE,desired,granted,allowed);
   if(!valid)readback_fail(status,"win32","AccessCheck",GetLastError());
 finished:
-  readback_close(token,status);return valid;
+  if(acquired)readback_close(token,status);return valid;
 }
 static BOOL readback_range(const void *part, DWORD length, const void *bytes, DWORD size) {
   uintptr_t first=(uintptr_t)bytes,at=(uintptr_t)part;

@@ -376,9 +376,9 @@ function readbackNative(source, fault) {
     DuplicateToken(token, level, out) {
       assert.deepEqual([token, level], [7, 2]);
       calls.push("duplicate");
-      out.value = 4;
+      out.value = fault === "duplicate-borrowed" ? 7 : 4;
       error = 5;
-      return fault !== "duplicate";
+      return !["duplicate", "duplicate-borrowed"].includes(fault);
     },
     AccessCheck(
       sd,
@@ -497,6 +497,7 @@ test("retained readback executes nonfatal token, descriptor, hash, discretionary
     "denial",
     "access-api",
     "duplicate",
+    "duplicate-borrowed",
     "token-close",
   ]) {
     const f = readbackNative(source, fault),
@@ -562,7 +563,15 @@ test("retained readback executes nonfatal token, descriptor, hash, discretionary
         assert.equal(f.calls.includes("hash-update"), false);
       continue;
     }
-    if (["denial", "access-api", "duplicate", "token-close"].includes(fault)) {
+    if (
+      [
+        "denial",
+        "access-api",
+        "duplicate",
+        "duplicate-borrowed",
+        "token-close",
+      ].includes(fault)
+    ) {
       const granted = { value: 0 },
         allowed = { value: false };
       const valid = f.native.readback_access(
@@ -574,7 +583,14 @@ test("retained readback executes nonfatal token, descriptor, hash, discretionary
         status,
       );
       assert.equal(valid, ["denial", "token-close"].includes(fault));
-      assert.equal(f.calls.filter((call) => call === "close:4").length, 1);
+      assert.equal(
+        f.calls.filter((call) => call === "close:4").length,
+        ["duplicate", "duplicate-borrowed"].includes(fault) ? 0 : 1,
+      );
+      if (["duplicate", "duplicate-borrowed"].includes(fault)) {
+        assert.equal(status.value, 5);
+        assert.equal(status.closureUncertain, false);
+      }
       if (fault === "denial")
         assert.deepEqual(
           [allowed.value, granted.value, status.failed],

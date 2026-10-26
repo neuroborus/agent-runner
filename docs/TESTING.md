@@ -2729,6 +2729,18 @@ SID strings, buffers and hash resources once without entering fatal helpers.
 Custody actual-body fixtures protect the original held process/token binding,
 seven-resource/ten-mask order, missing or changed resources, unavailable
 authorization with preserved object facts, and shared-deadline partial sampling.
+Those same extracted bodies cover literal R capture/dispatch, live process and
+normalized held-image matching, retained/current primary-token brackets,
+immutable candidate/nonce/handle lineage and invalidation. Exited-child image
+error 31 preserves its query outcome while valid release evidence exposes all
+ten authorization results. Live failures, malformed successful image output,
+missing/failed capture, wrong/stale identities, changed statistics, failed/short
+dispatch, reset, unavailable wait/exit observations, capture expiry and temporary
+close failure remain unavailable. Injected failures with non-null and borrowed
+token outputs prove success-qualified, once-only settlement through the existing
+custody and effective fixtures. No process is reopened by PID, no additional
+child or wait is introduced, refusal cannot reconstruct evidence, and the
+original release tick and fatal no-frame/exit/framing coverage remain intact.
 The existing collector fixture retains Event Log accounting and original
 error/errno across unstarted, partial, complete and blocked readback. Real channel
 fixtures accept all 74 bounded lines and reject missing context, duplicate token
