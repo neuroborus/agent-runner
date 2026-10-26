@@ -432,6 +432,7 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "fault-registered-capture",
     "fault-registered-clear",
     "fault-registered-empty",
+    "fault-registered-child-clear",
     "fault-registered-child-empty",
     "fault-registered-restore",
     "fault-registered-match",

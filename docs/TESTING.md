@@ -412,9 +412,14 @@ nonnull readbacks, changed caches, restoration failures and failed releases keep
 the first refusal and independent cleanup causes.
 Registered-slot cases preserve order, nulls, getter aliases and exact counts through
 successful/failed forks and preparation refusals. They independently fail capture,
-clear, parent/child readback, per-reference release and array release, and reject
-reordered or shortened restoration without adopting failed getter outputs or
-parent names in the child. Nonnull exception tuples with aliased handlers retain
+parent and child clearing, parent/child readback, per-reference release and array
+release, and reject reordered or shortened restoration without adopting failed getter outputs or
+parent names in the child. Callback-populated child slots clear after child
+bookkeeping is bound; separate readback injections retain aliased getter-copy and
+array cleanup obligations even after clearing fails. Replacing kernel slots never
+authorizes releasing callback-owned userspace references, and the final strict
+unknown-right census remains required. Nonnull exception tuples with aliased
+handlers retain
 their masks/behaviors/flavors without any setter; failed queries remain unavailable
 and owned release failures retain cleanup causes. Cached diagnostic bodies add no
 query, reference or errno change, and issue overflow preserves the first refusal

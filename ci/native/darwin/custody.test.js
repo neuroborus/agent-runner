@@ -96,6 +96,35 @@ test("Darwin experimental launcher retains the fork child through registered and
       0,
       [
         {
+          operation: "registered-child-clear",
+          kind: "mach",
+          value: 5,
+          cleanup: false,
+        },
+        {
+          operation: "registered-child-empty",
+          kind: "invariant",
+          value: 0,
+          cleanup: false,
+        },
+        {
+          operation: "registered-copy-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+        {
+          operation: "registered-array-release",
+          kind: "mach",
+          value: 15,
+          cleanup: true,
+        },
+      ],
+    ],
+    [
+      0,
+      [
+        {
           operation: "registered-child-empty",
           kind: "invariant",
           value: 0,

@@ -251,13 +251,46 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
         ["bootstrap-match", "invariant", 0],
       ],
     ],
+    [{ fork: 0, childRegistered: [10, 0, 10] }, []],
+    [{ fork: 0, registered: [10, 0, 10], childRegistered: [10, 0, 10] }, []],
     [
-      { fork: 0, childRegistered: [10, 0, 10] },
+      { fork: 0, registeredChildClear: 5 },
+      [["registered-child-clear", "mach", 5]],
+    ],
+    [
+      { fork: 0, registeredChildClear: 5, childRegistered: [10, 0, 10] },
+      [
+        ["registered-child-clear", "mach", 5],
+        ["registered-child-empty", "invariant", 0],
+      ],
+    ],
+    [
+      { fork: 0, childReadback: [10, 0, 10], registered: [10, 0, 10] },
       [["registered-child-empty", "invariant", 0]],
     ],
     [
       { fork: 0, registeredChildQuery: 5 },
       [["registered-child-empty", "mach", 5]],
+    ],
+    [
+      { fork: 0, arrayRelease: "child" },
+      [["registered-array-release", "mach", 15]],
+    ],
+    [
+      {
+        fork: 0,
+        childRegistered: [21, 0, 21],
+        registeredChildClear: 5,
+        registeredRelease: true,
+        arrayRelease: "child",
+      },
+      [
+        ["registered-child-clear", "mach", 5],
+        ["registered-child-empty", "invariant", 0],
+        ["registered-copy-release", "mach", 15],
+        ["registered-copy-release", "mach", 15],
+        ["registered-array-release", "mach", 15],
+      ],
     ],
     [{ exceptionQuery: 5 }, []],
     [
@@ -403,7 +436,14 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
         calls.push(["get", phase, output.value]);
         if (!status && api.MACH_PORT_VALID(output.value))
           acquired.push(output.value);
-        if (phase === "child") assert.ok(calls.includes("bind"));
+        if (phase === "child") {
+          assert.ok(calls.includes("bind"));
+          assert.equal(
+            registeredSets,
+            2,
+            "Child slot clearing precedes readback",
+          );
+        }
         if (phase === "child" && options.childReadCache)
           api.bootstrap_port = 77;
         return status ?? 0;
@@ -455,7 +495,11 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
               child: "registeredChildQuery",
             }[phase]
           ] ?? 0;
-        const value = [...(options[phase + "Registered"] ?? registered)];
+        const readback =
+          phase === "child"
+            ? options.childReadback
+            : options[phase + "Registered"];
+        const value = [...(readback ?? registered)];
         ports.value = status ? [666] : value;
         count.value = ports.value.length;
         calls.push(["registered-get", phase, ...ports.value]);
@@ -481,9 +525,21 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
           );
           assert.deepEqual(ports, options.registered ?? [0, 0, 0]);
           assert.equal(count, ports.length);
-        } else assert.deepEqual([ports, count], [null, 0]);
+        } else {
+          assert.deepEqual([ports, count], [null, 0]);
+          if (pid === 42) {
+            assert.ok(calls.includes("bind"));
+            assert.equal(api.domain_port_owner, pid);
+          }
+        }
         const result =
-          options[restore ? "registeredRestore" : "registeredClear"] ?? 0;
+          options[
+            restore
+              ? "registeredRestore"
+              : pid === 42
+                ? "registeredChildClear"
+                : "registeredClear"
+          ] ?? 0;
         if (!result) registered = restore ? [...ports] : [0, 0, 0];
         return result;
       },
@@ -718,6 +774,8 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
     assert.equal(bounded.issues[0].value, 0);
     assert.equal(bounded.issues.at(-1).operation, "fork-issues-truncated");
     if (pid === 41) {
+      if (!options.registeredRestore)
+        assert.deepEqual(registered, options.registered ?? [0, 0, 0], label);
       assert.equal(
         api.bootstrap_port,
         options.restoreCache ? 77 : cached,
@@ -750,7 +808,9 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
       assert.equal(
         released.length,
         (options.childSlot ? 1 : 0) +
-          (options.childRegistered?.filter(api.MACH_PORT_VALID).length ?? 0),
+          arrays
+            .filter((entry) => entry.phase === "child")
+            .flatMap((entry) => entry.value.filter(api.MACH_PORT_VALID)).length,
         label,
       );
     }

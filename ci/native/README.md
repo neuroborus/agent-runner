@@ -9035,10 +9035,14 @@ then clears and independently verifies them before the final thread check and
 fork. This prevents their inheritance before libSystem's runtime callbacks;
 later child sanitation alone cannot provide that fence. The bootstrap getter,
 borrowed exported `bootstrap_port` value and null-slot/cache checks remain intact.
-The child receives a fresh IPC space, binds its reply producer bookkeeping before
-its first Mach readback and independently requires empty registered slots and a
-null bootstrap slot/exported value before continuing. It never adopts the parent's
-getter names or array, even if a fresh child getter returns the same integers.
+The child receives a fresh IPC space and binds its reply producer bookkeeping.
+After runtime callbacks and binding, it explicitly clears its registered kernel
+slots, then independently requires null readback and a null bootstrap slot/exported
+value before continuing. Slot replacement releases kernel references, not any
+userspace references acquired by callbacks; it does not establish their ownership
+or solve the later unknown-right census refusal. The strict final census remains
+unchanged. The child never adopts the parent's getter names or array, even if a
+fresh child getter returns the same integers.
 The parent restores the exact registered count, order and null entries and its
 exact bootstrap slot/exported value after successful or failed fork and preparation
 failure, then independently reads back each restored set. Each successful getter

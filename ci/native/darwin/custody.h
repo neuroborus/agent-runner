@@ -205,6 +205,10 @@ static void domain_bootstrap_fork(struct domain_bootstrap_fork *out, pid_t *reta
      * It must never enter child cleanup, even if a new local name aliases it. */
     if (!out->count) {
       bind();
+      /* Runtime child callbacks can repopulate kernel slots before fork returns.
+       * Replacing them releases no userspace getter copies or borrowed names. */
+      kern_return_t cleared = mach_ports_register(mach_task_self(), NULL, 0);
+      domain_bootstrap_check(out, cleared == KERN_SUCCESS, "registered-child-clear", "mach", cleared, false);
       domain_bootstrap_read(out, MACH_PORT_NULL, "bootstrap-empty", false);
       domain_registered_read(out, NULL, 0, true, "registered-child-empty", false);
       domain_bootstrap_check(out, bootstrap_port == MACH_PORT_NULL, "bootstrap-cache", "invariant", 0, false);
