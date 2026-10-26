@@ -367,6 +367,100 @@ reviewed-input release audit. Actual CI observations, complete release source cl
 provider integrations remain pending; their missing evidence remains BLOCKED.
 The historical audit below retains its original inspection scope and conclusions.
 
+### Original TCP classification observation boundary
+
+The preserved Windows TCP failure reached `WSAEWOULDBLOCK` (`10035`), then
+`select` timed out. The subsequent diagnostic `SO_ERROR` sample was zero;
+neither observation established connect completion. Its interval-only comparison
+returned `count=3`, `scanned=3`, `complete=1` and `truncated=0`. All three candidate
+headers describe inbound listener DROP events with reversed endpoints and
+foreign AppIds, rather than the original client's outbound classification.
+The separate fact-output incomplete marker concerns bounded diagnostic
+publication; it does not turn that comparison into a row-limit truncation.
+These observations do not support pagination or retention changes as a remedy
+for the missing client decision. A short retained log also cannot prove that no
+earlier event was overwritten or that every classification generated an event.
+
+The original installed-option reads succeeded with
+`FWPM_ENGINE_COLLECT_NET_EVENTS` equal to one and
+`FWPM_ENGINE_NET_EVENT_MATCH_ANY_KEYWORDS` equal to zero, both `FWP_UINT32`.
+The helper only reads these settings. The relevant public contracts establish
+the following distinct boundaries:
+
+- [WFP logging](https://learn.microsoft.com/en-us/windows/win32/fwp/logging)
+  describes logged drops and IKE/AuthIP failures, circular retention and
+  enumeration snapshots. The
+  [engine-option contract](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nf-fwpmu-fwpmenginesetoption0)
+  documents outbound collection and the zero keyword setting's exclusion of
+  inbound multicast/broadcast events. Zero keywords therefore do not establish
+  disabled outbound-unicast collection, nor do those descriptions establish
+  a record of every allowed ALE classification.
+- [FWPM_NET_EVENT2](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_net_event2)
+  contains an event type and a union of versioned payload pointers, including
+  distinct DROP and ALLOW structures.
+  [FWPM_NET_EVENT_CLASSIFY_ALLOW0](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_net_event_classify_allow0)
+  identifies the allowing filter and layer, reauthorization reason, profiles,
+  direction and loopback status of an available allow event. It does not
+  specify when that event is generated. Its documented direction uses
+  `FWP_DIRECTION_INBOUND`/`FWP_DIRECTION_OUTBOUND`; DROP packet encodings must
+  not be applied to that different payload by analogy.
+- [FwpmNetEventSubscribe1](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nf-fwpmu-fwpmneteventsubscribe1)
+  registers delivery through
+  [FWPM_NET_EVENT_CALLBACK1](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nc-fwpmu-fwpm_net_event_callback1),
+  whose input is a `const FWPM_NET_EVENT2` pointer.
+  [FWPM_NET_EVENT_SUBSCRIPTION0](https://learn.microsoft.com/en-us/windows/win32/api/fwpmtypes/ns-fwpmtypes-fwpm_net_event_subscription0)
+  filters notifications with an enumeration template; a null template matches
+  all objects and its flags are unused. Broadening that template selects
+  available notifications. It supplies no documented event-generation switch
+  or loss/exhaustion accounting for an absent client classification.
+- [FwpmNetEventUnsubscribe0](https://learn.microsoft.com/en-us/windows/win32/api/fwpmu/nf-fwpmu-fwpmneteventunsubscribe0)
+  stops notifications and waits for an executing callback to complete. The
+  caller must hold no lock needed by the callback; session termination also
+  cancels subscriptions. A future bounded callback must retain only copied
+  values, keep its context alive through checked cancellation, and preserve
+  subscription, callback, engine and token cleanup failures independently.
+  This lifetime contract does not promise a finite API-return deadline or
+  delivery of every earlier classification before cancellation.
+- Microsoft's
+  [UWP firewall troubleshooting guide](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/troubleshooting-uwp-firewall#debugging-live-drops)
+  obtains allow/drop examples using `netsh wfp capture start keywords=19` and
+  explicitly says the trace otherwise collects only drop netEvents. That
+  capture recipe is not an unchanged-setting subscription contract. Its
+  numeric capture keywords cannot be assumed to map directly to the engine
+  option, and this experiment does not run it or change collection settings.
+
+These contracts establish a notification mechanism, but leave indispensable
+producer semantics unresolved for a useful additional original-client
+observation: whether a client-side `FWPM_NET_EVENT_TYPE_CLASSIFY_ALLOW` at
+`ALE_AUTH_CONNECT_V4` for AppContainer loopback is generated and delivered to
+`FwpmNetEventSubscribe1` with collection one and engine keywords zero, and
+which collection prerequisites govern that availability. No cited contract
+establishes that subscribing supplies classifications missing from the logged
+event stream. Earlier receipt of an available event could be useful, but the
+preserved failure supplies no evidence of a retention race to repair. This is
+a public-contract gap, not proof that a user-mode observer is impossible or
+that the platform permitted or blocked the client. The earlier DNS failure
+was only an acquisition obstacle; the named API documents are now available.
+No speculative subscription or census change is implemented on that basis.
+
+The smallest next investigation is the current public generation/keyword
+contract for that event, layer and collection state, including the relationship
+between capture keywords and engine options. A supported partial positive
+observation is sufficient; exhaustive ALE coverage is not a prerequisite.
+Neither the retired attempt's missing decision nor a historical filter lookup
+is required before implementing a supported observer for a fresh original
+operation. Any such observer must arm before the existing connect release,
+retain the original socket, process birth/token/package/user/image, exclusive
+tuple and actual call interval through checked teardown, and use the existing
+deadlines and diagnostic allowance. Only a correlated fresh event can authorize
+filter/layer/provider/callout lookup. Absent, unsupported, failed, truncated and
+expired capture remain distinct from observed permit or block. A permit at one
+layer cannot prove connection success, and absence of DROP proves neither
+permit nor lack of generation. Native `10013` plus attributed outbound DROP,
+all original controls and independent cleanup remain required. This
+documentation supplies supplemental evidence only, with no native acceptance
+or completed functional TCP repair.
+
 ### Ordinary system experiment evidence
 
 The native index also exposes an explicit version-7 system job with
