@@ -1399,7 +1399,10 @@ static BOOL ownership_policy_restored, ownership_policy_possible;
 /* This one-shot state and its unfinished thread remain owned by the fatal
  * reader until need_at calls ExitProcess. Never free, detach, or close a live
  * thread's resources. ExitProcess is not independent process-retirement proof. */
-struct refusal_report { unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget; };
+struct refusal_report {
+  unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget;
+  unsigned readbackTokens,readbackResources,readbackProbes,readbackUnavailable;BOOL readbackStarted,readbackFinished,readbackClosure;
+};
 static SRWLOCK refusal_lock=SRWLOCK_INIT;
 static struct {
   BOOL tried,sent,creationVerified; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
@@ -1481,9 +1484,106 @@ static void refusal_publish(const char *line, struct refusal_report *report) {
   AcquireSRWLockExclusive(&refusal_lock);
   if(line){size_t size=strlen(line);
     if(size>sizeof(original_refusal.bytes)-1025-original_refusal.used)report->truncated=TRUE;
-    else{memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;}
+    else{
+      memcpy(original_refusal.bytes+original_refusal.used,line,size);original_refusal.used+=(DWORD)size;
+      if(!strncmp(line,"native-windows-original-child: token ",strlen("native-windows-original-child: token ")))report->readbackTokens++;
+      if(!strncmp(line,"native-windows-original-child: resource ",strlen("native-windows-original-child: resource ")))report->readbackResources++;
+    }
   }
   original_refusal.report=*report;ReleaseSRWLockExclusive(&refusal_lock);
+}
+static ULONGLONG readback_now(void) {
+  FILETIME time;GetSystemTimePreciseAsFileTime(&time);return ((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;
+}
+static BOOL readback_original(DWORD *pid, ULONGLONG *birth, struct readback_status *status) {
+  HANDLE process=ownership_processes[0];FILETIME created,exited,kernel,user;WCHAR image[4096];DWORD length=4096;FILE_ID_INFO id;
+  if(!process||!ownership_tokens[0])return readback_fail(status,"unavailable","unheld-original",ERROR_INVALID_HANDLE);
+  if(!readback_ready(status,"GetProcessId"))return FALSE;
+  *pid=GetProcessId(process);
+  if(!*pid)return readback_fail(status,"win32","GetProcessId",GetLastError());
+  if(!readback_ready(status,"GetProcessTimes"))return FALSE;
+  if(!GetProcessTimes(process,&created,&exited,&kernel,&user))return readback_fail(status,"win32","GetProcessTimes",GetLastError());
+  *birth=((ULONGLONG)created.dwHighDateTime<<32)|created.dwLowDateTime;
+  if(*pid!=original_refusal.pid||*birth!=original_refusal.birth)return readback_fail(status,"invariant","original-birth",ERROR_INVALID_DATA);
+  if(!readback_ready(status,"QueryFullProcessImageNameW"))return FALSE;
+  if(!QueryFullProcessImageNameW(process,0,image,&length))return readback_fail(status,"win32","QueryFullProcessImageNameW",GetLastError());
+  if(!length||length>=4096||image[length]||_wcsicmp(image,original_refusal.image))return readback_fail(status,"invariant","original-image",ERROR_INVALID_DATA);
+  if(!entries[6].file.handle)return readback_fail(status,"unavailable","unheld-image",ERROR_INVALID_HANDLE);
+  if(!readback_ready(status,"image-FileIdInfo"))return FALSE;
+  if(!GetFileInformationByHandleEx(entries[6].file.handle,FileIdInfo,&id,sizeof(id)))return readback_fail(status,"win32","image-FileIdInfo",GetLastError());
+  return (!memcmp(&id,&original_refusal.imageId,sizeof(id))&&!memcmp(&id,&entries[6].file.id,sizeof(id)))||
+    readback_fail(status,"invariant","original-image-identity",ERROR_INVALID_DATA);
+}
+static void readback_resource(const char *role, struct held_file *file, const DWORD *masks, unsigned count, const struct readback_token *metadata, BOOL originalBound, struct refusal_report *report) {
+  ULONGLONG from=readback_now();struct readback_status status={0},probe[3]={{0}};struct readback_object object={0};
+  TOKEN_STATISTICS before,after;BOOL first=readback_statistics(ownership_tokens[0],&before,&status),last,stable;
+  PSECURITY_DESCRIPTOR sd=readback_describe(file->handle,&file->id,case_record.accountSid,case_record.restrictingSid,&object,&status);
+  DWORD granted[3]={0};BOOL allowed[3]={0},api[3]={0};
+  for(unsigned i=0;i<count;i++){
+    if(ownership_tokens[0]&&object.bound&&sd&&refusal_remaining()){
+      report->readbackProbes++;api[i]=readback_access(ownership_tokens[0],sd,masks[i],&granted[i],&allowed[i],&probe[i]);
+    }else readback_fail(&probe[i],"unavailable","not-sampled",0);
+  }
+  last=readback_statistics(ownership_tokens[0],&after,&status);
+  stable=metadata->stable&&first&&last&&readback_same(&before,&after)&&readback_same(&metadata->before,&before);
+  if(first&&last&&!stable)readback_fail(&status,"invariant","token-changed",ERROR_INVALID_DATA);
+  BOOL mic=stable&&(metadata->fields&24)==24&&(metadata->policy&TOKEN_MANDATORY_POLICY_NO_WRITE_UP)&&object.labelValid;
+  DWORD denied=mic?readback_mic(metadata->integrity,metadata->policy,object.level,object.label):0;
+  readback_free(sd,&status);report->readbackClosure|=status.closureUncertain;
+  char identity[33]="unavailable",probes[1536]="",line[6144];DWORD used=0;
+  if(object.identified)for(unsigned i=0;i<16;i++)snprintf(identity+i*2,sizeof(identity)-i*2,"%02x",object.actual.FileId.Identifier[i]);
+  BOOL complete=originalBound&&stable&&object.bound&&object.descriptorHash&&object.daclHash&&object.ownerValid&&object.acesValid&&object.labelValid&&mic&&!status.failed;
+  for(unsigned i=0;i<count;i++){
+    char access[32]="unavailable",mandatory[32]="unavailable";BOOL discretionary=originalBound&&stable&&object.bound&&api[i];
+    if(discretionary)snprintf(access,sizeof(access),"%lu",granted[i]);
+    if(discretionary&&mic)snprintf(mandatory,sizeof(mandatory),"%lu",denied&masks[i]);
+    const char *answer=discretionary&&mic?(allowed[i]&&!(denied&masks[i])?"grant":"deny"):"unavailable";
+    int n=snprintf(probes+used,sizeof(probes)-used," probe%u=requested:%lu,api:%s/%lu,operation:%s,discretionary:%s,granted:%s,mic-denied:%s,authorization:%s,closure-uncertain:%u,cleanup:%s/%lu",
+      i,masks[i],probe[i].failed?probe[i].domain:"win32",probe[i].value,probe[i].failed?probe[i].operation:"AccessCheck",
+      discretionary?(allowed[i]?"grant":"deny"):"unavailable",access,mandatory,answer,!!probe[i].closureUncertain,
+      probe[i].cleanupDomain?probe[i].cleanupDomain:"none",probe[i].cleanupValue);
+    report->readbackClosure|=probe[i].closureUncertain;
+    if(!discretionary||!mic||probe[i].closureUncertain)complete=FALSE;
+    if(n<0||(DWORD)n>=sizeof(probes)-used){report->truncated=TRUE;complete=FALSE;break;}used+=(DWORD)n;
+  }
+  if(!complete)report->readbackUnavailable++;
+  int n=snprintf(line,sizeof(line),"native-windows-original-child: resource role=%s post-refusal=1 sample-from=%llu sample-to=%llu identified=%u bound=%u volume=%llu id=%s descriptor-sha256=%s dacl-sha256=%s owner=%s dacl-present=%u aces-complete=%u aces=%s label-available=%u label-defaulted=%u object-level=%lu label-mask=%lu statistics-read=%u,%u token-stable=%u status=%s/%lu operation=%s closure-uncertain=%u cleanup=%s/%lu%s\n",
+    role,from,readback_now(),!!object.identified,!!object.bound,object.actual.VolumeSerialNumber,identity,
+    object.descriptorHash?object.descriptor:"unavailable",object.daclHash?object.dacl:"unavailable",object.ownerValid?object.owner:"unavailable",
+    !!object.daclPresent,!!object.acesValid,object.aces[0]?object.aces:"unavailable",!!object.labelValid,!!object.labelDefaulted,object.level,object.label,
+    !!first,!!last,!!stable,status.domain?status.domain:"none",status.value,status.operation?status.operation:"none",!!status.closureUncertain,
+    status.cleanupDomain?status.cleanupDomain:"none",status.cleanupValue,probes);
+  if(n>0&&(size_t)n<sizeof(line))refusal_publish(line,report);else{report->truncated=TRUE;refusal_publish(NULL,report);}
+}
+static void readback_collect(struct refusal_report *report) {
+  if(!ownership_literal||strcmp(original_refusal.command,"ownership-output")||!refusal_remaining())return;
+  report->readbackStarted=TRUE;refusal_publish(NULL,report);
+  ULONGLONG from=readback_now(),birth=0;DWORD pid=0;struct readback_status status={0};struct readback_token metadata={0};
+  BOOL bound=readback_original(&pid,&birth,&status);
+  readback_metadata(ownership_tokens[0],&metadata,&status);
+  BOOL principals=(metadata.fields&3)==3&&metadata.restrictingCount==1&&readback_sid_equal(metadata.subject,case_record.accountSid)&&
+    readback_sid_equal(metadata.restricting,case_record.restrictingSid);
+  BOOL usable=bound&&principals&&metadata.stable&&metadata.fields==31&&metadata.before.TokenType==TokenPrimary;
+  if(!usable)report->readbackUnavailable++;
+  report->readbackClosure|=status.closureUncertain;
+  char line[4096];int n=snprintf(line,sizeof(line),"native-windows-original-child: token post-refusal=1 sample-from=%llu sample-to=%llu binding=%u pid=%lu birth=%llu fields=%u subject=%s restricting-count=%lu restricting=%s privileges=%lu integrity=%s integrity-level=%lu mandatory-policy=%lu principals-match=%u statistics-read=%u,%u stable=%u token-id=%08lx%08lx authentication-id=%08lx%08lx modified-id=%08lx%08lx after-token-id=%08lx%08lx after-authentication-id=%08lx%08lx after-modified-id=%08lx%08lx type=%u status=%s/%lu operation=%s closure-uncertain=%u cleanup=%s/%lu scope=separate-probes original-request=unobserved first-syscall=unobserved atomic=0 unobserved=window-station,desktop,pipe,job,other-kernel-objects,unheld-ancestors,loader-dependencies\n",
+    from,readback_now(),!!bound,pid,birth,metadata.fields,metadata.fields&1?metadata.subject:"unavailable",metadata.restrictingCount,
+    metadata.fields&2?(metadata.restricting[0]?metadata.restricting:"none"):"unavailable",metadata.privileges,
+    metadata.fields&8?metadata.integritySid:"unavailable",metadata.integrity,metadata.policy,!!principals,!!metadata.first,!!metadata.last,!!metadata.stable,
+    (DWORD)metadata.before.TokenId.HighPart,metadata.before.TokenId.LowPart,(DWORD)metadata.before.AuthenticationId.HighPart,metadata.before.AuthenticationId.LowPart,
+    (DWORD)metadata.before.ModifiedId.HighPart,metadata.before.ModifiedId.LowPart,(DWORD)metadata.after.TokenId.HighPart,metadata.after.TokenId.LowPart,
+    (DWORD)metadata.after.AuthenticationId.HighPart,metadata.after.AuthenticationId.LowPart,(DWORD)metadata.after.ModifiedId.HighPart,metadata.after.ModifiedId.LowPart,
+    metadata.before.TokenType,status.domain?status.domain:"none",status.value,status.operation?status.operation:"none",!!status.closureUncertain,
+    status.cleanupDomain?status.cleanupDomain:"none",status.cleanupValue);
+  if(n>0&&(size_t)n<sizeof(line))refusal_publish(line,report);else{report->truncated=TRUE;refusal_publish(NULL,report);}
+  const unsigned indices[]={6,4,3,1,2,0};const char *roles[]={"image","workspace","storage","case","custody","outer"};
+  const DWORD image[]={FILE_READ_DATA,FILE_EXECUTE},workspace[]={FILE_TRAVERSE,FILE_LIST_DIRECTORY,FILE_ADD_FILE|FILE_ADD_SUBDIRECTORY},traverse[]={FILE_TRAVERSE},policy[]={FILE_READ_DATA};
+  for(unsigned i=0;i<7;i++){
+    if(!refusal_remaining()){refusal_publish(NULL,report);return;}
+    struct held_file *file=i<6?&entries[indices[i]].file:&ownership_policy_file;
+    readback_resource(i<6?roles[i]:"policy",file,i==0?image:i==1?workspace:i==6?policy:traverse,i==0?2:i==1?3:1,&metadata,usable,report);
+  }
+  report->readbackFinished=TRUE;refusal_publish(NULL,report);
 }
 static int ownership_literal_context(char *output, DWORD maximum, int used) {
   if(used<=0||!original_literal_output.active)return used;
@@ -1590,6 +1690,7 @@ static void refusal_record(EVT_HANDLE context, EVT_HANDLE event, unsigned channe
 }
 static DWORD WINAPI refusal_worker(void *unused) {
   struct refusal_report report=original_refusal.report;
+  readback_collect(&report);
   const WCHAR *channels[]={L"Security",L"Application",L"Microsoft-Windows-CodeIntegrity/Operational"};
   WCHAR from[32],to[32];
   if(!refusal_time(original_refusal.from,from)||!refusal_time(original_refusal.to,to)){report.malformed++;goto finished;}
@@ -1660,7 +1761,8 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   BOOL unavailable=report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
   BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
   BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published;
-  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu\n",!!report.finished,!!incomplete,!incomplete&&!report.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError);
+  const char *readbackState=!published?"unavailable":!report.readbackStarted?"unstarted":report.readbackFinished&&report.readbackTokens==1&&report.readbackResources==7&&report.readbackProbes==10&&!report.readbackUnavailable&&!report.readbackClosure&&!report.truncated?"complete":"partial";
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u\n",!!report.finished,!!incomplete,!incomplete&&!report.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure);
   if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
   SetLastError(saved);errno=savedErrno;
 }

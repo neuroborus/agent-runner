@@ -345,22 +345,37 @@ export function windowsCustodyChannel(
               text = bytes.toString("latin1"),
               lines = text.split("\n");
             const prefix = "native-windows-original-child: ";
+            const resources = lines.filter((line) =>
+              line.startsWith(prefix + "resource "),
+            );
+            const roles = resources.map(
+              (line) =>
+                /^native-windows-original-child: resource role=(image|workspace|storage|case|custody|outer|policy) /u.exec(
+                  line,
+                )?.[1],
+            );
             requireWindows(
               /^[\x20-\x7e\n]+$/u.test(text) &&
                 lines.pop() === "" &&
-                lines.length <= 66 &&
+                lines.length <= 74 &&
+                lines[0]?.startsWith(
+                  `${prefix}context command=ownership-output sequence=${value.sequence} source=${value.source} line=${value.line} error=${value.lastError} `,
+                ) &&
                 lines.at(-1)?.startsWith(prefix + "completion ") &&
                 lines.filter((line) => line.startsWith(prefix + "record "))
                   .length <= 64 &&
+                lines.filter((line) => line.startsWith(prefix + "token "))
+                  .length <= 1 &&
+                resources.length <= 7 &&
+                roles.every((role) => role !== undefined) &&
+                new Set(roles).size === roles.length &&
                 lines
-                  .slice(0, -1)
+                  .slice(1, -1)
                   .every(
-                    (line, index) =>
-                      (index === 0 &&
-                        line.startsWith(
-                          `${prefix}context command=ownership-output sequence=${value.sequence} source=${value.source} line=${value.line} error=${value.lastError} `,
-                        )) ||
-                      line.startsWith(prefix + "record "),
+                    (line) =>
+                      line.startsWith(prefix + "record ") ||
+                      line.startsWith(prefix + "token ") ||
+                      line.startsWith(prefix + "resource "),
                   ),
             );
             publish("windows-original-child", { stderr: bytes });

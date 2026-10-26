@@ -246,12 +246,50 @@ API errors retain their existing framing; absent or corroborating records
 leave the denied operation unestablished. Further repairs require fresh joined
 matching-host evidence and a reviewed plan.
 
+At the start of that same worker, literal experiment refusals sample the retained
+original token and seven fixed held resources: image `[6]` (read data, execute),
+workspace `[4]` (traverse, list, add file/subdirectory), storage `[3]`, case `[1]`,
+custody `[2]`, outer `[0]` (one traverse each), then the materialized policy file
+(read data). These are ten separate declared masks, not observed startup access
+requirements. No PID-based reopen, ancestor/dependency discovery, impersonation,
+permission change or additional child is involved. Original held PID/birth,
+process image and held image identity are rechecked. Token metadata includes
+TokenId, AuthenticationId, ModifiedId, subject/restricting SIDs, privilege count,
+integrity and mandatory policy. Metadata and each resource probe set have separate
+original-token statistics brackets; failed or changed statistics make authorization
+unavailable while independently valid object facts remain reportable.
+Resource rows retain actual file identities, descriptor/DACL hashes, owner,
+bounded actual ACE type/flags/mask/principal projections and actual or defaulted
+mandatory labels. Unsupported projections are explicit. Native API failure is
+unavailable evidence; discretionary answers and MIC denial masks remain separate.
+Private-directory and policy-file denials can be intentional. Each sampling
+interval is post-refusal and the seven resources are not an atomic snapshot.
+Neither separate AccessCheck results nor FileIo fields identify the original
+requested access, first failing syscall or complete loader requirements. Window
+stations/desktops, pipes, Jobs, other kernel objects, unheld ancestors and loader
+dependencies remain unobserved.
+
+Readback uses only the remaining release budget, without an additional wait.
+Its entire token/hash/projection/cleanup chain is nonfatal. The worker settles
+temporary duplicated tokens, strict same-object observer reopens, descriptors,
+hash resources and buffers once; borrowed custody handles stay untouched.
+At most one token row and seven uniquely identified resource rows join the
+existing 64 event rows, for at most 74 lines including context/completion within
+the unchanged byte caps and reserved completion space. Separate readback row and
+probe counts, unstarted/partial/complete state, unavailable observations and
+cleanup uncertainty do not change Event Log records, joins or empty-query facts.
+An unavailable synchronized publication leaves readback state unavailable.
+Missing rows prove neither grants nor denials. Original error/errno precedence,
+unfinished-thread custody through fatal-reader exit and independent retirement
+remain authoritative. This diagnostic does not repair startup or Windows TCP/audit
+and adds no admission or acceptance prerequisite.
+
 The collector now publishes through the existing authenticated reader/bridge
 pipe. Scheduled reader setup binds stdout to that pipe but establishes no stderr
 binding. A single GS (`0x1d`) `reader-diagnostic` frame carries the latched
 sequence/command/source/line/error and hex-encoded collector text; the subsequent
 RS (`0x1e`) fatal frame keeps its existing schema and limits. The consumer
-publishes the original context/record/completion bytes through the raw diagnostic
+publishes the original context/token/resource/record/completion bytes through the raw diagnostic
 sink before rejecting work. Diagnostic frames never resolve replies or supply
 receipts. Fragmented or coalesced delivery remains bounded; an interrupted frame
 resynchronizes only on an actual fatal frame, with its encoded prefix retained

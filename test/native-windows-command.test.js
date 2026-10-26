@@ -4935,9 +4935,20 @@ test("both native per-user audit enumerators retain SDK pointer, validation and 
     /#define WINDOWS_SECURITY_XML_ONLY\s*#include "effective-reader\.h"\s*#undef WINDOWS_SECURITY_XML_ONLY/u,
   );
   assert.match(sources[1], /^#ifndef WINDOWS_SECURITY_XML_ONLY\r?\n/u);
+  // Nested experiment guards do not close the outer XML-only boundary.
+  let depth = 0,
+    guardEnd = -1;
+  for (const directive of sources[1].matchAll(
+    /^#(if|ifdef|ifndef|endif)\b/gmu,
+  )) {
+    depth += directive[1] === "endif" ? -1 : 1;
+    if (depth === 0) {
+      guardEnd = directive.index;
+      break;
+    }
+  }
   assert.ok(
-    sources[1].indexOf("static BOOL audit_principal_exists(") <
-      sources[1].search(/\r?\n#endif\r?\n/u),
+    sources[1].indexOf("static BOOL audit_principal_exists(") < guardEnd,
   );
   // Source contracts neither compile the selected MSVC/SDK variants nor exercise audit APIs.
 });

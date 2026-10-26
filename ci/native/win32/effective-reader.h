@@ -59,6 +59,11 @@ static void file_security_failure(const char *operation, BOOL api_failure, DWORD
   if (freeFailed) fprintf(stderr, "native-windows-security-cleanup: operation=LocalFree error=%lu\n", freeError);
   fflush(stderr); SetLastError(error); need_at(false, __FILE__, line);
 }
+static DWORD file_sd_query(HANDLE file, SE_OBJECT_TYPE kind, PSECURITY_DESCRIPTOR *sd) {
+  SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
+    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
+  return GetSecurityInfo(file, kind, info, NULL, NULL, NULL, NULL, sd);
+}
 static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
   HANDLE temporary = INVALID_HANDLE_VALUE;
   FILE_ID_INFO before, after;
@@ -67,9 +72,7 @@ static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
     if (!read) file_security_failure("security-read-original-id", TRUE, error, temporary, NULL, __LINE__);
   }
   PSECURITY_DESCRIPTOR sd = NULL;
-  SECURITY_INFORMATION info = OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION |
-    DACL_SECURITY_INFORMATION | LABEL_SECURITY_INFORMATION | SACL_SECURITY_INFORMATION;
-  DWORD status = GetSecurityInfo(file, kind, info, NULL, NULL, NULL, NULL, &sd);
+  DWORD status = file_sd_query(file, kind, &sd);
   /* Complete original grants need no new open. Only denied file queries may
    * acquire the same strict observer handle used by insufficient-grant callers. */
   if (kind == SE_FILE_OBJECT && status == ERROR_ACCESS_DENIED) {
@@ -87,7 +90,7 @@ static PSECURITY_DESCRIPTOR file_sd(HANDLE file, SE_OBJECT_TYPE kind) {
     BOOL read = GetFileInformationByHandleEx(temporary, FileIdInfo, &after, sizeof(after)); error = GetLastError();
     if (!read) file_security_failure("security-read-reopened-id", TRUE, error, temporary, NULL, __LINE__);
     if (memcmp(&before, &after, sizeof(before))) file_security_failure("security-read-same-object", FALSE, ERROR_INVALID_DATA, temporary, NULL, __LINE__);
-    status = GetSecurityInfo(temporary, kind, info, NULL, NULL, NULL, NULL, &sd);
+    status = file_sd_query(temporary, kind, &sd);
   }
   if (status != ERROR_SUCCESS) file_security_failure("security-read-descriptor", TRUE, status, temporary, sd, __LINE__);
   if (!IsValidSecurityDescriptor(sd)) file_security_failure("security-read-valid", FALSE, ERROR_INVALID_SECURITY_DESCR, temporary, sd, __LINE__);
@@ -123,14 +126,20 @@ static void sd_read(PSECURITY_DESCRIPTOR sd) {
   printf(",\"protectedDacl\":%s,\"daclSha256\":\"%s\",\"descriptorSha256\":\"%s\",\"aces\":", flags & SE_DACL_PROTECTED ? "true" : "false", hash, descriptorHash); acl_read(dacl);
   printf(",\"sacl\":"); if (present && sacl) acl_read(sacl); else printf("[]"); putchar('}');
 }
+static BOOL access_result(PSECURITY_DESCRIPTOR sd, HANDLE token, BOOL registry, DWORD desired, DWORD *granted, BOOL *allowed) {
+  GENERIC_MAPPING mapping = registry ? (GENERIC_MAPPING){KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS} :
+    (GENERIC_MAPPING){FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
+  DWORD size = 65536; BYTE privileges[65536];
+  *granted = 0; *allowed = FALSE;
+  BOOL read = AccessCheck(sd, token, desired, &mapping, (PPRIVILEGE_SET)privileges, &size, granted, allowed);
+  if (read && !*allowed) *granted = 0;
+  return read;
+}
 static void access_read(unsigned subject, PSECURITY_DESCRIPTOR sd, BOOL registry) {
   need(subject < process_count); HANDLE token; TOKEN_STATISTICS *before = token_info(tokens[subject], TokenStatistics);
   need(DuplicateToken(tokens[subject], SecurityImpersonation, &token));
-  GENERIC_MAPPING mapping = registry ? (GENERIC_MAPPING){KEY_READ, KEY_WRITE, KEY_EXECUTE, KEY_ALL_ACCESS} :
-    (GENERIC_MAPPING){FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS};
-  DWORD desired = MAXIMUM_ALLOWED, granted = 0, size = 65536; BOOL allowed;
-  BYTE privileges[65536]; need(AccessCheck(sd, token, desired, &mapping, (PPRIVILEGE_SET)privileges, &size, &granted, &allowed));
-  if (!allowed) granted = 0;
+  DWORD granted = 0; BOOL allowed;
+  need(access_result(sd, token, registry, MAXIMUM_ALLOWED, &granted, &allowed));
   /* AccessCheck is discretionary. Apply the separately read token mandatory
    * policy and object label, including the default medium/no-write-up label. */
   TOKEN_MANDATORY_LABEL *level = token_info(token, TokenIntegrityLevel);
@@ -167,6 +176,266 @@ static void effective_acl(unsigned subject, struct entry *entry) {
   need(GetSecurityDescriptorLength(sd) == GetSecurityDescriptorLength(again) && !memcmp(sd, again, GetSecurityDescriptorLength(sd)));
   LocalFree(sd); LocalFree(again); putchar('}');
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Refusal sampling has no admission authority. These helpers deliberately have
+ * no path to token_info, sum, sd_read, file_security_failure or a fatal guard. */
+static DWORD refusal_remaining(void);
+struct readback_status { const char *domain, *operation, *cleanupDomain; DWORD value, cleanupValue; BOOL failed, closureUncertain; };
+struct readback_token {
+  TOKEN_STATISTICS before, after; BOOL first, last, stable; unsigned fields;
+  DWORD privileges, integrity, policy, restrictingCount;
+  char subject[184], restricting[1473], integritySid[184];
+};
+static BOOL readback_fail(struct readback_status *status, const char *domain, const char *operation, DWORD value) {
+  if(!status->failed){status->domain=domain;status->operation=operation;status->value=value;status->failed=TRUE;}
+  return FALSE;
+}
+static BOOL readback_ready(struct readback_status *status, const char *operation) {
+  return refusal_remaining()?TRUE:readback_fail(status,"budget",operation,ERROR_TIMEOUT);
+}
+static void readback_cleanup(struct readback_status *status, const char *domain, DWORD value) {
+  if(!status->closureUncertain){status->cleanupDomain=domain;status->cleanupValue=value;}
+  status->closureUncertain=TRUE;
+}
+static void readback_close(HANDLE handle, struct readback_status *status) {
+  if(handle&&handle!=INVALID_HANDLE_VALUE&&!CloseHandle(handle))readback_cleanup(status,"win32",GetLastError());
+}
+static void readback_free(void *bytes, struct readback_status *status) {
+  if(bytes&&LocalFree(bytes))readback_cleanup(status,"win32",GetLastError());
+}
+static BOOL readback_query(HANDLE token, TOKEN_INFORMATION_CLASS kind, void *bytes, DWORD capacity, DWORD minimum, DWORD *used, struct readback_status *status) {
+  *used=0;
+  if(!readback_ready(status,"GetTokenInformation"))return FALSE;
+  if(!GetTokenInformation(token,kind,bytes,capacity,used))return readback_fail(status,"win32","GetTokenInformation",GetLastError());
+  return (*used>=minimum&&*used<=capacity)||readback_fail(status,"invariant","token-size",ERROR_INVALID_DATA);
+}
+static BOOL readback_statistics(HANDLE token, TOKEN_STATISTICS *statistics, struct readback_status *status) {
+  DWORD used;memset(statistics,0,sizeof(*statistics));
+  return readback_query(token,TokenStatistics,statistics,sizeof(*statistics),sizeof(*statistics),&used,status);
+}
+static BOOL readback_same(const TOKEN_STATISTICS *before, const TOKEN_STATISTICS *after) {
+  return !memcmp(&before->TokenId,&after->TokenId,sizeof(LUID))&&
+    !memcmp(&before->AuthenticationId,&after->AuthenticationId,sizeof(LUID))&&
+    !memcmp(&before->ModifiedId,&after->ModifiedId,sizeof(LUID))&&
+    before->ExpirationTime.QuadPart==after->ExpirationTime.QuadPart&&before->TokenType==after->TokenType&&
+    before->ImpersonationLevel==after->ImpersonationLevel&&before->DynamicCharged==after->DynamicCharged&&
+    before->DynamicAvailable==after->DynamicAvailable&&before->GroupCount==after->GroupCount&&before->PrivilegeCount==after->PrivilegeCount;
+}
+static BOOL readback_sid_inside(PSID sid, const void *bytes, DWORD size) {
+  uintptr_t first=(uintptr_t)bytes,at=(uintptr_t)sid;
+  if(!sid||at<first||at-first>size||size-(at-first)<8)return FALSE;
+  BYTE count=*GetSidSubAuthorityCount(sid);
+  return count<=SID_MAX_SUB_AUTHORITIES&&8+4*(DWORD)count<=size-(at-first)&&IsValidSid(sid);
+}
+static BOOL readback_sid(PSID sid, const void *bytes, DWORD size, char text[184], struct readback_status *status) {
+  WCHAR *wide=NULL;BOOL valid=FALSE;
+  if(!readback_sid_inside(sid,bytes,size))return readback_fail(status,"invariant","sid-bounds",ERROR_INVALID_SID);
+  if(!readback_ready(status,"ConvertSidToStringSidW"))return FALSE;
+  if(!ConvertSidToStringSidW(sid,&wide)){
+    readback_fail(status,"win32","ConvertSidToStringSidW",GetLastError());readback_free(wide,status);return FALSE;
+  }
+  size_t length=wcsnlen_s(wide,184);
+  if(length&&length<184){
+    valid=TRUE;
+    for(size_t i=0;i<length;i++){if(wide[i]<33||wide[i]>126){valid=FALSE;break;}text[i]=(char)wide[i];}
+    text[length]=0;
+  }
+  readback_free(wide,status);
+  return valid||readback_fail(status,"invariant","sid-projection",ERROR_INVALID_SID);
+}
+static BOOL readback_sid_equal(const char *text, const WCHAR *wide) {
+  size_t length=strnlen_s(text,184);
+  if(length==184||wcsnlen_s(wide,184)!=length)return FALSE;
+  for(size_t i=0;i<length;i++)if((unsigned char)text[i]!=wide[i])return FALSE;
+  return TRUE;
+}
+static void readback_metadata(HANDLE token, struct readback_token *value, struct readback_status *status) {
+  value->first=readback_statistics(token,&value->before,status);
+  BYTE *bytes=NULL;DWORD used;
+  if(!readback_ready(status,"token-buffer"))goto finished;
+  bytes=calloc(1,65536);
+  if(!bytes){readback_fail(status,"memory","token-buffer",ERROR_NOT_ENOUGH_MEMORY);goto finished;}
+  if(readback_query(token,TokenUser,bytes,65536,sizeof(TOKEN_USER),&used,status)&&
+    readback_sid(((TOKEN_USER *)bytes)->User.Sid,bytes,used,value->subject,status))value->fields|=1;
+  if(readback_query(token,TokenRestrictedSids,bytes,65536,FIELD_OFFSET(TOKEN_GROUPS,Groups),&used,status)){
+    TOKEN_GROUPS *groups=(void *)bytes;value->restrictingCount=groups->GroupCount;
+    BOOL valid=groups->GroupCount<=8&&groups->GroupCount<=(used-FIELD_OFFSET(TOKEN_GROUPS,Groups))/sizeof(SID_AND_ATTRIBUTES);DWORD offset=0;
+    for(DWORD i=0;valid&&i<groups->GroupCount;i++){
+      char sid[184];valid=readback_sid(groups->Groups[i].Sid,bytes,used,sid,status);
+      if(valid){int n=snprintf(value->restricting+offset,sizeof(value->restricting)-offset,"%s%s",i?",":"",sid);valid=n>0&&(size_t)n<sizeof(value->restricting)-offset;if(valid)offset+=(DWORD)n;}
+    }
+    if(valid)value->fields|=2;else readback_fail(status,"invariant","restricting-projection",ERROR_INVALID_DATA);
+  }
+  if(readback_query(token,TokenPrivileges,bytes,65536,FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges),&used,status)){
+    TOKEN_PRIVILEGES *privileges=(void *)bytes;value->privileges=privileges->PrivilegeCount;
+    if(value->privileges<=64&&value->privileges<=(used-FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges))/sizeof(LUID_AND_ATTRIBUTES))value->fields|=4;
+    else readback_fail(status,"invariant","privilege-bounds",ERROR_INVALID_DATA);
+  }
+  if(readback_query(token,TokenIntegrityLevel,bytes,65536,sizeof(TOKEN_MANDATORY_LABEL),&used,status)){
+    PSID sid=((TOKEN_MANDATORY_LABEL *)bytes)->Label.Sid;
+    if(readback_sid(sid,bytes,used,value->integritySid,status)&&*GetSidSubAuthorityCount(sid)){
+      value->integrity=*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);value->fields|=8;
+    }else readback_fail(status,"invariant","integrity-projection",ERROR_INVALID_SID);
+  }
+  if(readback_query(token,TokenMandatoryPolicy,bytes,65536,sizeof(TOKEN_MANDATORY_POLICY),&used,status)){
+    value->policy=((TOKEN_MANDATORY_POLICY *)bytes)->Policy;value->fields|=16;
+  }
+finished:
+  free(bytes);value->last=readback_statistics(token,&value->after,status);
+  value->stable=value->first&&value->last&&readback_same(&value->before,&value->after);
+  if(value->first&&value->last&&!value->stable)readback_fail(status,"invariant","token-changed",ERROR_INVALID_DATA);
+}
+static BOOL readback_hash(const BYTE *bytes, DWORD size, char text[65], struct readback_status *status) {
+  BCRYPT_ALG_HANDLE algorithm=NULL;BCRYPT_HASH_HANDLE hash=NULL;BYTE digest[32];NTSTATUS result;BOOL valid=FALSE;
+  if(!readback_ready(status,"BCryptOpenAlgorithmProvider"))goto finished;
+  result=BCryptOpenAlgorithmProvider(&algorithm,BCRYPT_SHA256_ALGORITHM,NULL,0);
+  if(result){readback_fail(status,"ntstatus","BCryptOpenAlgorithmProvider",(DWORD)result);goto finished;}
+  if(!readback_ready(status,"BCryptCreateHash"))goto finished;
+  result=BCryptCreateHash(algorithm,&hash,NULL,0,NULL,0,0);
+  if(result){readback_fail(status,"ntstatus","BCryptCreateHash",(DWORD)result);goto finished;}
+  if(!readback_ready(status,"BCryptHashData"))goto finished;
+  result=BCryptHashData(hash,(BYTE *)bytes,size,0);
+  if(result){readback_fail(status,"ntstatus","BCryptHashData",(DWORD)result);goto finished;}
+  if(!readback_ready(status,"BCryptFinishHash"))goto finished;
+  result=BCryptFinishHash(hash,digest,32,0);
+  if(result){readback_fail(status,"ntstatus","BCryptFinishHash",(DWORD)result);goto finished;}
+  for(unsigned i=0;i<32;i++)snprintf(text+i*2,65-i*2,"%02x",digest[i]);valid=TRUE;
+finished:
+  if(hash){result=BCryptDestroyHash(hash);if(result)readback_cleanup(status,"ntstatus",(DWORD)result);}
+  if(algorithm){result=BCryptCloseAlgorithmProvider(algorithm,0);if(result)readback_cleanup(status,"ntstatus",(DWORD)result);}
+  return valid;
+}
+static PSECURITY_DESCRIPTOR readback_sd(HANDLE file, FILE_ID_INFO *actual, BOOL *identified, struct readback_status *status) {
+  PSECURITY_DESCRIPTOR sd=NULL;HANDLE temporary=INVALID_HANDLE_VALUE;FILE_ID_INFO after;DWORD error;
+  *identified=FALSE;
+  if(!file||file==INVALID_HANDLE_VALUE){readback_fail(status,"unavailable","unheld",ERROR_INVALID_HANDLE);return NULL;}
+  if(!readback_ready(status,"FileIdInfo"))return NULL;
+  if(!GetFileInformationByHandleEx(file,FileIdInfo,actual,sizeof(*actual))){readback_fail(status,"win32","FileIdInfo",GetLastError());return NULL;}
+  *identified=TRUE;
+  if(!readback_ready(status,"GetSecurityInfo"))return NULL;
+  error=file_sd_query(file,SE_FILE_OBJECT,&sd);
+  if(error==ERROR_ACCESS_DENIED){
+    readback_free(sd,status);sd=NULL;
+    if(status->closureUncertain){readback_fail(status,"win32","GetSecurityInfo",error);goto refused;}
+    if(!readback_ready(status,"ReOpenFile"))goto refused;
+    temporary=ReOpenFile(file,READ_CONTROL|ACCESS_SYSTEM_SECURITY|FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+      FILE_FLAG_OPEN_REPARSE_POINT|FILE_FLAG_BACKUP_SEMANTICS);
+    if(temporary==INVALID_HANDLE_VALUE){readback_fail(status,"win32","ReOpenFile",GetLastError());goto refused;}
+    if(!readback_ready(status,"reopened-FileIdInfo"))goto refused;
+    if(!GetFileInformationByHandleEx(temporary,FileIdInfo,&after,sizeof(after))){readback_fail(status,"win32","reopened-FileIdInfo",GetLastError());goto refused;}
+    if(memcmp(actual,&after,sizeof(after))){readback_fail(status,"invariant","reopened-identity",ERROR_INVALID_DATA);goto refused;}
+    if(!readback_ready(status,"GetSecurityInfo"))goto refused;
+    error=file_sd_query(temporary,SE_FILE_OBJECT,&sd);
+  }
+  if(error){readback_fail(status,"win32","GetSecurityInfo",error);goto refused;}
+  if(!sd||!IsValidSecurityDescriptor(sd)||GetSecurityDescriptorLength(sd)<SECURITY_DESCRIPTOR_MIN_LENGTH||GetSecurityDescriptorLength(sd)>65536){
+    readback_fail(status,"invariant","descriptor-bounds",ERROR_INVALID_SECURITY_DESCR);goto refused;
+  }
+  readback_close(temporary,status);return sd;
+refused:
+  readback_close(temporary,status);readback_free(sd,status);return NULL;
+}
+/* Preserve AccessCheck's API result separately from its discretionary answer.
+ * The surrounding resource owner brackets every probe with original statistics. */
+static BOOL readback_access(HANDLE original, PSECURITY_DESCRIPTOR sd, DWORD desired, DWORD *granted, BOOL *allowed, struct readback_status *status) {
+  HANDLE token=NULL;BOOL valid=FALSE;
+  if(!readback_ready(status,"DuplicateToken"))return FALSE;
+  if(!DuplicateToken(original,SecurityImpersonation,&token)){readback_fail(status,"win32","DuplicateToken",GetLastError());goto finished;}
+  if(!readback_ready(status,"AccessCheck"))goto finished;
+  valid=access_result(sd,token,FALSE,desired,granted,allowed);
+  if(!valid)readback_fail(status,"win32","AccessCheck",GetLastError());
+finished:
+  readback_close(token,status);return valid;
+}
+static BOOL readback_range(const void *part, DWORD length, const void *bytes, DWORD size) {
+  uintptr_t first=(uintptr_t)bytes,at=(uintptr_t)part;
+  return part&&at>=first&&at-first<=size&&length<=size-(at-first);
+}
+static BOOL readback_label(PSECURITY_DESCRIPTOR sd, DWORD *level, DWORD *mask, BOOL *defaulted, struct readback_status *status) {
+  PACL sacl;BOOL present,unused;unsigned labels=0;
+  *level=SECURITY_MANDATORY_MEDIUM_RID;*mask=SYSTEM_MANDATORY_LABEL_NO_WRITE_UP;*defaulted=TRUE;
+  if(!readback_ready(status,"GetSecurityDescriptorSacl"))return FALSE;
+  if(!GetSecurityDescriptorSacl(sd,&present,&sacl,&unused))return readback_fail(status,"win32","GetSecurityDescriptorSacl",GetLastError());
+  if(!present||!sacl)return TRUE;
+  DWORD size=GetSecurityDescriptorLength(sd);
+  if(!readback_range(sacl,sizeof(ACL),sd,size)||!readback_range(sacl,sacl->AclSize,sd,size)||!IsValidAcl(sacl)||sacl->AceCount>32)
+    return readback_fail(status,"invariant","sacl-bounds",ERROR_INVALID_ACL);
+  for(unsigned i=0;i<sacl->AceCount;i++){
+    SYSTEM_MANDATORY_LABEL_ACE *ace;
+    if(!readback_ready(status,"GetAce"))return FALSE;
+    if(!GetAce(sacl,i,(void **)&ace))return readback_fail(status,"win32","GetAce",GetLastError());
+    if(!readback_range(ace,sizeof(ACE_HEADER),sacl,sacl->AclSize)||!readback_range(ace,ace->Header.AceSize,sacl,sacl->AclSize)||ace->Header.AceSize<sizeof(ACE_HEADER))
+      return readback_fail(status,"invariant","label-ace-bounds",ERROR_INVALID_ACL);
+    if(ace->Header.AceType!=SYSTEM_MANDATORY_LABEL_ACE_TYPE)continue;
+    PSID sid=&ace->SidStart;
+    if(++labels!=1||ace->Header.AceSize<12||!readback_sid_inside(sid,ace,ace->Header.AceSize)||
+      GetLengthSid(sid)+8!=ace->Header.AceSize||!*GetSidSubAuthorityCount(sid))return readback_fail(status,"invariant","label-projection",ERROR_INVALID_ACL);
+    *level=*GetSidSubAuthority(sid,*GetSidSubAuthorityCount(sid)-1);*mask=ace->Mask;*defaulted=FALSE;
+    if(*mask&~(SYSTEM_MANDATORY_LABEL_NO_WRITE_UP|SYSTEM_MANDATORY_LABEL_NO_READ_UP|SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP))
+      return readback_fail(status,"unsupported","label-mask",ERROR_NOT_SUPPORTED);
+  }
+  return TRUE;
+}
+static DWORD readback_mic(DWORD subject, DWORD policy, DWORD object, DWORD label) {
+  DWORD denied=0;
+  if(subject<object){
+    if((label&SYSTEM_MANDATORY_LABEL_NO_WRITE_UP)&&(policy&TOKEN_MANDATORY_POLICY_NO_WRITE_UP))denied|=FILE_GENERIC_WRITE|FILE_DELETE_CHILD|DELETE|WRITE_DAC|WRITE_OWNER;
+    if(label&SYSTEM_MANDATORY_LABEL_NO_READ_UP)denied|=FILE_GENERIC_READ;
+    if(label&SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP)denied|=FILE_GENERIC_EXECUTE;
+  }
+  return denied&~(READ_CONTROL|SYNCHRONIZE);
+}
+struct readback_object {
+  FILE_ID_INFO actual;BOOL identified,bound,descriptorHash,daclHash,ownerValid,acesValid,labelValid,labelDefaulted,daclPresent;
+  DWORD level,label;char descriptor[65],dacl[65],owner[184],aces[2048];
+};
+static BOOL readback_aces(PACL acl, const WCHAR *account, const WCHAR *restricting, char text[2048], struct readback_status *status) {
+  if(!acl){strcpy_s(text,2048,"none");return TRUE;}
+  if(!IsValidAcl(acl)||acl->AclSize>65535||acl->AceCount>32)return readback_fail(status,"invariant","dacl-bounds",ERROR_INVALID_ACL);
+  DWORD offset=0;BOOL complete=TRUE;
+  for(unsigned i=0;i<acl->AceCount;i++){
+    ACCESS_ALLOWED_ACE *ace;char sid[184];const char *principal="unsupported";
+    if(!readback_ready(status,"GetAce"))return FALSE;
+    if(!GetAce(acl,i,(void **)&ace))return readback_fail(status,"win32","GetAce",GetLastError());
+    if(!readback_range(ace,sizeof(ACE_HEADER),acl,acl->AclSize)||!readback_range(ace,ace->Header.AceSize,acl,acl->AclSize)||ace->Header.AceSize<sizeof(ACE_HEADER))
+      return readback_fail(status,"invariant","ace-bounds",ERROR_INVALID_ACL);
+    BOOL supported=ace->Header.AceType==ACCESS_ALLOWED_ACE_TYPE||ace->Header.AceType==ACCESS_DENIED_ACE_TYPE||
+      ace->Header.AceType==SYSTEM_AUDIT_ACE_TYPE||ace->Header.AceType==SYSTEM_MANDATORY_LABEL_ACE_TYPE;
+    if(supported&&ace->Header.AceSize>=12&&readback_sid((PSID)&ace->SidStart,ace,ace->Header.AceSize,sid,status)&&GetLengthSid(&ace->SidStart)+8==ace->Header.AceSize){
+      principal=!strcmp(sid,"S-1-5-18")?"system":readback_sid_equal(sid,account)?"account":readback_sid_equal(sid,restricting)?"restricting":"other";
+    }else{complete=FALSE;readback_fail(status,"unsupported","ace-projection",ERROR_NOT_SUPPORTED);}
+    int n=supported&&strcmp(principal,"unsupported")?
+      snprintf(text+offset,2048-offset,"%s%u/%u/%lu/%s",i?",":"",ace->Header.AceType,ace->Header.AceFlags,ace->Mask,principal):
+      snprintf(text+offset,2048-offset,"%s%u/%u/unavailable/unsupported",i?",":"",ace->Header.AceType,ace->Header.AceFlags);
+    if(n<0||(DWORD)n>=2048-offset)return readback_fail(status,"invariant","ace-text-bound",ERROR_INSUFFICIENT_BUFFER);
+    offset+=(DWORD)n;
+  }
+  if(!offset)strcpy_s(text,2048,"none");return complete;
+}
+static PSECURITY_DESCRIPTOR readback_describe(HANDLE file, const FILE_ID_INFO *expected, const WCHAR *account, const WCHAR *restricting, struct readback_object *object, struct readback_status *status) {
+  PSECURITY_DESCRIPTOR sd=readback_sd(file,&object->actual,&object->identified,status);
+  object->bound=object->identified&&!memcmp(&object->actual,expected,sizeof(*expected));
+  if(object->identified&&!object->bound)readback_fail(status,"invariant","custody-identity",ERROR_INVALID_DATA);
+  if(!sd)return NULL;
+  DWORD size=GetSecurityDescriptorLength(sd);PACL acl;PSID owner;BOOL defaulted;
+  object->descriptorHash=readback_hash((BYTE *)sd,size,object->descriptor,status);
+  if(readback_ready(status,"GetSecurityDescriptorOwner")){
+    if(GetSecurityDescriptorOwner(sd,&owner,&defaulted))object->ownerValid=readback_sid(owner,sd,size,object->owner,status);
+    else readback_fail(status,"win32","GetSecurityDescriptorOwner",GetLastError());
+  }
+  if(readback_ready(status,"GetSecurityDescriptorDacl")){
+    if(!GetSecurityDescriptorDacl(sd,&object->daclPresent,&acl,&defaulted))readback_fail(status,"win32","GetSecurityDescriptorDacl",GetLastError());
+    else if(!object->daclPresent||!acl){
+      object->daclHash=readback_hash((BYTE *)"",0,object->dacl,status);strcpy_s(object->aces,2048,"none");object->acesValid=TRUE;
+    }else if(readback_range(acl,sizeof(ACL),sd,size)&&readback_range(acl,acl->AclSize,sd,size)&&IsValidAcl(acl)&&acl->AceCount<=32){
+      object->daclHash=readback_hash((BYTE *)acl,acl->AclSize,object->dacl,status);
+      object->acesValid=readback_aces(acl,account,restricting,object->aces,status);
+    }else readback_fail(status,"invariant","dacl-bounds",ERROR_INVALID_ACL);
+  }
+  object->labelValid=readback_label(sd,&object->level,&object->label,&object->labelDefaulted,status);
+  return sd;
+}
+#endif
 /* Observe the read-access escape with public AccessCheck, rather than infer
  * TOKEN_WRITE_RESTRICTED from an undocumented TokenAccessInformation bit. The
  * second descriptor is a positive control for the exact retained token. */

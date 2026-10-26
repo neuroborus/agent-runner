@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
+
 import {
   createWindowsEffectiveReaders,
   normalizeWindowsBarrierRead,
@@ -16,6 +17,648 @@ import {
 import { digest } from "./protocol.js";
 import { encode } from "./custody-protocol.js";
 import { observationDigest } from "../index.js";
+
+// Execute the retained diagnostic bodies with opaque SDK storage and injected
+// calls. This projection changes C representations, never the branch policy.
+function readbackNative(source, fault) {
+  const sizes = {
+    LUID: 8,
+    ACE_HEADER: 4,
+    ACL: 8,
+    TOKEN_USER: 16,
+    TOKEN_MANDATORY_LABEL: 16,
+    TOKEN_MANDATORY_POLICY: 4,
+    SID_AND_ATTRIBUTES: 16,
+    LUID_AND_ATTRIBUTES: 12,
+  };
+  const types =
+    "GENERIC_MAPPING|TOKEN_STATISTICS|TOKEN_GROUPS|TOKEN_PRIVILEGES|TOKEN_USER|TOKEN_MANDATORY_LABEL|TOKEN_MANDATORY_POLICY|PSECURITY_DESCRIPTOR|SECURITY_INFORMATION|TOKEN_INFORMATION_CLASS|SE_OBJECT_TYPE|FILE_ID_INFO|SYSTEM_MANDATORY_LABEL_ACE|ACCESS_ALLOWED_ACE|BCRYPT_ALG_HANDLE|BCRYPT_HASH_HANDLE|PPRIVILEGE_SET|NTSTATUS|uintptr_t|size_t|HANDLE|PACL|PSID|WCHAR|DWORD|BOOL|BYTE|unsigned char|unsigned|char|void|int";
+  const names = [
+    "file_sd_query",
+    "access_result",
+    "readback_fail",
+    "readback_ready",
+    "readback_cleanup",
+    "readback_close",
+    "readback_free",
+    "readback_query",
+    "readback_statistics",
+    "readback_same",
+    "readback_sid_inside",
+    "readback_sid",
+    "readback_sid_equal",
+    "readback_metadata",
+    "readback_hash",
+    "readback_sd",
+    "readback_access",
+    "readback_range",
+    "readback_label",
+    "readback_mic",
+    "readback_aces",
+    "readback_describe",
+  ];
+  const project = (name) => {
+    const match = new RegExp(
+      `static [^\\n]+ ${name}\\(([^\\n]*)\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source);
+    assert.ok(match, name);
+    const args = match[1]
+      .split(",")
+      .map((arg) => /([a-zA-Z_]\w*)(?:\[\d+\])?$/u.exec(arg.trim())[1])
+      .join(",");
+    let body = match[2]
+      .replaceAll("->", ".")
+      .replace(/\(GENERIC_MAPPING\)\{([^}]+)\}/gu, "[$1]")
+      .replace(/sizeof\(\*(statistics|actual|expected)\)/gu, (_, kind) =>
+        kind === "statistics" ? "56" : "24",
+      )
+      .replaceAll("sizeof(after)", "24")
+      .replaceAll("sizeof(value.restricting)", "1473")
+      .replace(/sizeof\((\w+)\)/gu, (all, kind) => sizes[kind] ?? all)
+      .replaceAll("FIELD_OFFSET(TOKEN_GROUPS,Groups)", "8")
+      .replaceAll("FIELD_OFFSET(TOKEN_PRIVILEGES,Privileges)", "4")
+      .replace(
+        new RegExp(`\\((?:const )?(?:${types})(?:\\s*\\*)*\\)`, "gu"),
+        "",
+      )
+      .replace(/\b(?:BYTE|char) (digest|privileges|sid)\[\d+\]/gu, "var $1=[]")
+      .replace("FILE_ID_INFO after;", "var after={};")
+      .replace(/\*(GetSidSubAuthority(?:Count)?\()/gu, "$1")
+      .replace(
+        /\*(used|granted|allowed|level|mask|defaulted|identified)\b/gu,
+        "$1.value",
+      )
+      .replace(
+        /(?<!&)&(object\.(?:identified|daclPresent|level|label|labelDefaulted))\b/gu,
+        (_, path) => `ref(()=>${path},v=>${path}=v)`,
+      )
+      .replace(
+        /(?<!&)&(sd|wide|algorithm|hash|token|used|size|owner|acl|sacl|present|unused|defaulted|ace)\b(?!\.)/gu,
+        (_, path) => `ref(()=>${path},v=>${path}=v)`,
+      )
+      .replace(
+        /(?<!&)&((?:before|after|value|object)\.\w+|ace\.SidStart|after)\b/gu,
+        "$1",
+      )
+      .replace(/(?<!&)&mapping\b/gu, "mapping")
+      .replace(/\bvalue\.restricting\+offset/gu, "at(value.restricting,offset)")
+      .replace(/\btext\+i\*2/gu, "at(text,i*2)")
+      .replace(/\btext\+offset/gu, "at(text,offset)")
+      .replace(
+        new RegExp(
+          `\\b(?:const )?(?:struct readback_\\w+|${types}) \\*?`,
+          "gu",
+        ),
+        "var ",
+      );
+    const label = /\n(?:finished|refused):/u.exec(body);
+    if (label)
+      body =
+        "sampling:{" +
+        body
+          .slice(0, label.index)
+          .replace(/goto (?:finished|refused);/gu, "break sampling;") +
+        "}\n" +
+        body.slice(label.index + label[0].length);
+    return `function ${name}(${args}){${body}}`;
+  };
+  const text = (value) =>
+    Array.isArray(value)
+      ? value
+          .slice(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0))
+          .map((v) => String.fromCharCode(v))
+          .join("")
+      : String(value);
+  const wide = (value) => [...value].map((v) => v.charCodeAt(0)).concat(0);
+  const memory = (address, fields = {}) =>
+    Object.assign(fields, { valueOf: () => address });
+  const sidText = new Map([
+    [1016, "S-1-5-21-7001"],
+    [1032, "S-1-5-21-7002"],
+    [1048, "S-1-16-4096"],
+    [2016, "S-1-5-18"],
+    [2220, "S-1-5-18"],
+    [2328, "S-1-16-8192"],
+  ]);
+  const calls = [],
+    settled = new Set();
+  let remaining = 30000,
+    error = 109,
+    statistics = 0;
+  const ref = (get, set) => ({
+    get value() {
+      return get();
+    },
+    set value(v) {
+      set(v);
+    },
+  });
+  const settle = (value) => {
+    assert.ok(!settled.has(value), "Temporary resources settle once");
+    assert.notEqual(value, 7, "The retained token is borrowed");
+    assert.notEqual(value, 1, "The held file is borrowed");
+    settled.add(value);
+  };
+  const descriptor = () =>
+    memory(2000, {
+      owner: 2016,
+      dacl: memory(2200, {
+        AclSize: 64,
+        AceCount: 1,
+        ace: memory(2212, {
+          Header: {
+            AceType: fault === "unsupported-ace" ? 9 : 0,
+            AceFlags: 0,
+            AceSize: 20,
+          },
+          Mask: 1,
+          SidStart: 2220,
+        }),
+      }),
+      sacl: memory(2300, {
+        AclSize: 64,
+        AceCount: 1,
+        ace: memory(2320, {
+          Header: { AceType: 17, AceFlags: 0, AceSize: 20 },
+          Mask: fault === "unsupported-label" ? 8 : 7,
+          SidStart: 2328,
+        }),
+      }),
+    });
+  const api = {
+    ref,
+    at: (target, offset) => ({ target, offset }),
+    NULL: null,
+    TRUE: true,
+    FALSE: false,
+    INVALID_HANDLE_VALUE: -1,
+    ERROR_TIMEOUT: 1460,
+    ERROR_INVALID_DATA: 13,
+    ERROR_INVALID_SID: 1337,
+    ERROR_INVALID_HANDLE: 6,
+    ERROR_INVALID_SECURITY_DESCR: 1338,
+    ERROR_INVALID_ACL: 1336,
+    ERROR_NOT_SUPPORTED: 50,
+    ERROR_INSUFFICIENT_BUFFER: 122,
+    ERROR_NOT_ENOUGH_MEMORY: 8,
+    ERROR_ACCESS_DENIED: 5,
+    OWNER_SECURITY_INFORMATION: 1,
+    GROUP_SECURITY_INFORMATION: 2,
+    DACL_SECURITY_INFORMATION: 4,
+    SACL_SECURITY_INFORMATION: 8,
+    LABEL_SECURITY_INFORMATION: 16,
+    READ_CONTROL: 0x20000,
+    ACCESS_SYSTEM_SECURITY: 0x1000000,
+    FILE_READ_ATTRIBUTES: 128,
+    FILE_SHARE_READ: 1,
+    FILE_SHARE_WRITE: 2,
+    FILE_SHARE_DELETE: 4,
+    FILE_FLAG_OPEN_REPARSE_POINT: 0x200000,
+    FILE_FLAG_BACKUP_SEMANTICS: 0x2000000,
+    FileIdInfo: 18,
+    SE_FILE_OBJECT: 1,
+    FILE_GENERIC_READ: 0x120089,
+    FILE_GENERIC_WRITE: 0x120116,
+    FILE_GENERIC_EXECUTE: 0x1200a0,
+    FILE_ALL_ACCESS: 0x1f01ff,
+    FILE_DELETE_CHILD: 64,
+    DELETE: 0x10000,
+    WRITE_DAC: 0x40000,
+    WRITE_OWNER: 0x80000,
+    SYNCHRONIZE: 0x100000,
+    TOKEN_MANDATORY_POLICY_NO_WRITE_UP: 1,
+    SYSTEM_MANDATORY_LABEL_NO_WRITE_UP: 1,
+    SYSTEM_MANDATORY_LABEL_NO_READ_UP: 2,
+    SYSTEM_MANDATORY_LABEL_NO_EXECUTE_UP: 4,
+    SECURITY_MANDATORY_MEDIUM_RID: 8192,
+    SID_MAX_SUB_AUTHORITIES: 15,
+    SECURITY_DESCRIPTOR_MIN_LENGTH: 20,
+    ACCESS_ALLOWED_ACE_TYPE: 0,
+    ACCESS_DENIED_ACE_TYPE: 1,
+    SYSTEM_AUDIT_ACE_TYPE: 2,
+    SYSTEM_MANDATORY_LABEL_ACE_TYPE: 17,
+    TokenStatistics: 10,
+    TokenUser: 1,
+    TokenRestrictedSids: 11,
+    TokenPrivileges: 3,
+    TokenIntegrityLevel: 25,
+    TokenMandatoryPolicy: 27,
+    SecurityImpersonation: 2,
+    BCRYPT_SHA256_ALGORITHM: "SHA256",
+    refusal_remaining: () => (fault === "expired" ? 0 : remaining),
+    GetLastError: () => error,
+    memset(out) {
+      for (const key of Object.keys(out)) delete out[key];
+    },
+    calloc: () => memory(1000),
+    free: (bytes) => {
+      if (bytes) settle(bytes);
+    },
+    memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+    strcmp: (a, b) => Number(text(a) !== text(b)),
+    strnlen_s: (value, limit) => Math.min(text(value).length, limit),
+    wcsnlen_s: (value, limit) => Math.min(text(value).length, limit),
+    strcpy_s(out, capacity, value) {
+      api.snprintf(out, capacity, "%s", value);
+    },
+    snprintf(out, capacity, format, ...values) {
+      const result = format.replace(/%(?:02x|lu|[su])/gu, (match) => {
+        const value = values.shift();
+        return match === "%02x"
+          ? value.toString(16).padStart(2, "0")
+          : match === "%s"
+            ? text(value)
+            : String(value);
+      });
+      assert.equal(values.length, 0);
+      const target = out.target ?? out,
+        offset = out.offset ?? 0;
+      for (let i = 0; i < Math.min(result.length, capacity - 1); i++)
+        target[offset + i] = result.charCodeAt(i);
+      target[offset + Math.min(result.length, capacity - 1)] = 0;
+      return result.length;
+    },
+    GetTokenInformation(token, kind, out, capacity, used) {
+      assert.equal(token, 7);
+      calls.push(`token:${kind}`);
+      used.value = kind === 10 ? 56 : 512;
+      if (kind === 10) {
+        statistics++;
+        Object.assign(out, {
+          TokenId: 1,
+          AuthenticationId: 2,
+          ModifiedId: fault === "statistics-changed" && statistics > 1 ? 4 : 3,
+          ExpirationTime: { QuadPart: 99 },
+          TokenType: 1,
+          ImpersonationLevel: 0,
+          DynamicCharged: 1,
+          DynamicAvailable: 2,
+          GroupCount: 1,
+          PrivilegeCount: 1,
+        });
+        if (fault === "statistics-last" && statistics === 2) {
+          error = 5;
+          return false;
+        }
+      } else if (kind === 1) out.User = { Sid: 1016 };
+      else if (kind === 11)
+        Object.assign(out, { GroupCount: 1, Groups: [{ Sid: 1032 }] });
+      else if (kind === 3) out.PrivilegeCount = 1;
+      else if (kind === 25) out.Label = { Sid: 1048 };
+      else out.Policy = 1;
+      if (fault === "token-query" && kind === 1) {
+        error = 5;
+        return false;
+      }
+      assert.ok(used.value <= capacity);
+      return true;
+    },
+    GetSidSubAuthorityCount: (sid) => sidText.get(sid).split("-").length - 3,
+    GetSidSubAuthority: (sid) => Number(sidText.get(sid).split("-").at(-1)),
+    GetLengthSid: (sid) => 8 + 4 * (sidText.get(sid).split("-").length - 3),
+    IsValidSid: (sid) => sidText.has(sid),
+    ConvertSidToStringSidW(sid, out) {
+      out.value = wide(sidText.get(sid));
+      if (fault === "sid-projection") {
+        error = 5;
+        return false;
+      }
+      return true;
+    },
+    GetFileInformationByHandleEx(handle, _kind, out) {
+      calls.push(`id:${handle}`);
+      Object.assign(out, {
+        volume: 1,
+        id: fault === "reopen-identity" && handle === 2 ? 3 : 2,
+      });
+      return true;
+    },
+    GetSecurityInfo(handle, kind, flags, _owner, _group, _dacl, _sacl, out) {
+      assert.deepEqual([kind, flags], [1, 31]);
+      calls.push(`sd:${handle}`);
+      out.value = descriptor();
+      return handle === 1 && fault?.startsWith("reopen-") ? 5 : 0;
+    },
+    ReOpenFile(handle, access, sharing, flags) {
+      assert.deepEqual(
+        [handle, access, sharing, flags],
+        [1, 0x1020080, 7, 0x2200000],
+      );
+      calls.push("reopen");
+      return 2;
+    },
+    IsValidSecurityDescriptor: () => true,
+    GetSecurityDescriptorLength: () => 512,
+    IsValidAcl: () => true,
+    GetSecurityDescriptorOwner(sd, owner) {
+      owner.value = sd.owner;
+      return true;
+    },
+    GetSecurityDescriptorDacl(sd, present, acl) {
+      present.value = true;
+      acl.value = sd.dacl;
+      if (fault === "dacl-query") {
+        error = 5;
+        return false;
+      }
+      return true;
+    },
+    GetSecurityDescriptorSacl(sd, present, acl) {
+      present.value = fault !== "default-label";
+      acl.value = sd.sacl;
+      return true;
+    },
+    GetAce(acl, _index, out) {
+      out.value = acl.ace;
+      return true;
+    },
+    DuplicateToken(token, level, out) {
+      assert.deepEqual([token, level], [7, 2]);
+      calls.push("duplicate");
+      out.value = 4;
+      error = 5;
+      return fault !== "duplicate";
+    },
+    AccessCheck(
+      sd,
+      token,
+      desired,
+      mapping,
+      _privileges,
+      size,
+      granted,
+      allowed,
+    ) {
+      assert.equal(token, 4);
+      assert.equal(desired, 1);
+      assert.equal(mapping[0], api.FILE_GENERIC_READ);
+      assert.equal(size.value, 65536);
+      calls.push("access");
+      granted.value = 1;
+      allowed.value = fault !== "denial";
+      error = 5;
+      return fault !== "access-api";
+    },
+    CloseHandle(handle) {
+      settle(handle);
+      calls.push(`close:${handle}`);
+      error = 6;
+      return fault !== "token-close";
+    },
+    LocalFree(value) {
+      settle(value);
+      calls.push("free-local");
+      error = 6;
+      return ["local-free", "reopen-free"].includes(fault) ? value : null;
+    },
+    BCryptOpenAlgorithmProvider(out) {
+      out.value = { kind: "algorithm" };
+      calls.push("hash-open");
+      return fault === "hash-open" ? -1 : 0;
+    },
+    BCryptCreateHash(algorithm, out) {
+      assert.equal(algorithm.kind, "algorithm");
+      out.value = { kind: "hash" };
+      calls.push("hash-create");
+      if (fault === "hash-budget") remaining = 0;
+      return fault === "hash-create" ? -2 : 0;
+    },
+    BCryptHashData() {
+      calls.push("hash-update");
+      return fault === "hash-update" ? -3 : 0;
+    },
+    BCryptFinishHash(_hash, digest) {
+      calls.push("hash-final");
+      for (let i = 0; i < 32; i++) digest[i] = 0x35;
+      return fault === "hash-final" ? -4 : 0;
+    },
+    BCryptDestroyHash(handle) {
+      settle(handle);
+      calls.push("hash-destroy");
+      return fault === "hash-close" ? -5 : 0;
+    },
+    BCryptCloseAlgorithmProvider(handle) {
+      settle(handle);
+      calls.push("hash-close");
+      return 0;
+    },
+  };
+  for (const guard of [
+    "need",
+    "need_at",
+    "token_info",
+    "sum",
+    "sd_read",
+    "file_security_failure",
+  ])
+    api[guard] = () => assert.fail(`Readback entered fatal helper ${guard}`);
+  const native = new Script(
+    names.map(project).join("\n") + `\n({${names.join(",")}})`,
+  ).runInNewContext(api);
+  return {
+    native,
+    api,
+    calls,
+    settled,
+    text,
+    wide,
+    status: () => ({ failed: false, closureUncertain: false, value: 0 }),
+  };
+}
+
+test("retained readback executes nonfatal token, descriptor, hash, discretionary and mandatory paths with once-only temporary ownership", async () => {
+  const source = await readFile(
+    new URL("effective-reader.h", import.meta.url),
+    "utf8",
+  );
+  for (const fault of [
+    null,
+    "token-query",
+    "statistics-last",
+    "statistics-changed",
+    "sid-projection",
+    "hash-open",
+    "hash-create",
+    "hash-update",
+    "hash-final",
+    "hash-close",
+    "hash-budget",
+    "expired",
+    "object",
+    "reopen-success",
+    "reopen-identity",
+    "reopen-free",
+    "local-free",
+    "dacl-query",
+    "unsupported-ace",
+    "unsupported-label",
+    "default-label",
+    "denial",
+    "access-api",
+    "duplicate",
+    "token-close",
+  ]) {
+    const f = readbackNative(source, fault),
+      status = f.status();
+    if (
+      [
+        null,
+        "token-query",
+        "statistics-last",
+        "statistics-changed",
+        "sid-projection",
+      ].includes(fault)
+    ) {
+      const value = {
+        before: {},
+        after: {},
+        fields: 0,
+        subject: [],
+        restricting: [],
+        integritySid: [],
+      };
+      f.native.readback_metadata(7, value, status);
+      assert.equal(
+        !!value.stable,
+        !["statistics-last", "statistics-changed"].includes(fault),
+        fault,
+      );
+      assert.equal(
+        value.fields === 31,
+        !["token-query", "sid-projection"].includes(fault),
+        fault,
+      );
+      if (!fault) {
+        assert.equal(f.text(value.subject), "S-1-5-21-7001");
+        assert.equal(f.text(value.restricting), "S-1-5-21-7002");
+        assert.equal(value.integrity, 4096);
+      }
+      assert.equal(f.calls.filter((call) => call === "token:10").length, 2);
+      assert.equal(
+        f.settled.size,
+        fault === "token-query" ? 3 : 4,
+        "SID strings and the metadata buffer settle once",
+      );
+      continue;
+    }
+    if (fault?.startsWith("hash-") || fault === "expired") {
+      const out = [],
+        valid = f.native.readback_hash([], 0, out, status);
+      assert.equal(valid, fault === "hash-close", fault);
+      if (fault === "hash-close") {
+        assert.equal(status.closureUncertain, true);
+        assert.equal(f.text(out), "35".repeat(32));
+      } else assert.equal(status.failed, true, fault);
+      assert.equal(
+        f.calls.filter((call) => call === "hash-close").length,
+        fault === "expired" ? 0 : 1,
+      );
+      assert.equal(
+        f.calls.filter((call) => call === "hash-destroy").length,
+        ["expired", "hash-open"].includes(fault) ? 0 : 1,
+      );
+      if (fault === "hash-budget")
+        assert.equal(f.calls.includes("hash-update"), false);
+      continue;
+    }
+    if (["denial", "access-api", "duplicate", "token-close"].includes(fault)) {
+      const granted = { value: 0 },
+        allowed = { value: false };
+      const valid = f.native.readback_access(
+        7,
+        {},
+        1,
+        granted,
+        allowed,
+        status,
+      );
+      assert.equal(valid, ["denial", "token-close"].includes(fault));
+      assert.equal(f.calls.filter((call) => call === "close:4").length, 1);
+      if (fault === "denial")
+        assert.deepEqual(
+          [allowed.value, granted.value, status.failed],
+          [false, 0, false],
+        );
+      if (fault === "access-api")
+        assert.deepEqual(
+          [status.domain, status.operation, status.value],
+          ["win32", "AccessCheck", 5],
+        );
+      if (fault === "token-close") assert.equal(status.closureUncertain, true);
+      continue;
+    }
+    const object = {
+      actual: {},
+      descriptor: [],
+      dacl: [],
+      owner: [],
+      aces: [],
+    };
+    const sd = f.native.readback_describe(
+      1,
+      { volume: 1, id: 2 },
+      f.wide("S-1-5-21-7001"),
+      f.wide("S-1-5-21-7002"),
+      object,
+      status,
+    );
+    assert.equal(
+      !!sd,
+      !["reopen-identity", "reopen-free"].includes(fault),
+      fault,
+    );
+    assert.equal(object.bound, true);
+    if (sd) f.native.readback_free(sd, status);
+    if (fault === "object") {
+      assert.deepEqual(
+        [
+          object.descriptorHash,
+          object.daclHash,
+          object.ownerValid,
+          object.acesValid,
+          object.labelValid,
+        ],
+        [true, true, true, true, true],
+      );
+      assert.equal(f.text(object.aces), "0/0/1/system");
+      assert.equal(f.text(object.owner), "S-1-5-18");
+    }
+    if (fault === "reopen-identity")
+      assert.deepEqual(
+        [status.domain, status.operation],
+        ["invariant", "reopened-identity"],
+      );
+    if (fault === "local-free") assert.equal(status.closureUncertain, true);
+    if (fault === "reopen-free") {
+      assert.equal(status.closureUncertain, true);
+      assert.equal(f.calls.includes("reopen"), false);
+    }
+    if (fault === "unsupported-ace") {
+      assert.equal(object.acesValid, false);
+      assert.match(f.text(object.aces), /9\/0\/unavailable\/unsupported/u);
+    }
+    if (fault === "unsupported-label") assert.equal(object.labelValid, false);
+    if (fault === "default-label")
+      assert.deepEqual(
+        [object.labelValid, object.labelDefaulted, object.level, object.label],
+        [true, true, 8192, 1],
+      );
+    if (fault === "dacl-query") assert.equal(object.descriptorHash, true);
+    if (["reopen-success", "reopen-identity"].includes(fault))
+      assert.equal(f.calls.filter((call) => call === "close:2").length, 1);
+  }
+  const f = readbackNative(source);
+  assert.equal(f.native.readback_sd(0, {}, { value: true }, f.status()), null);
+  assert.deepEqual(f.calls, [], "An unheld resource acquires nothing");
+  assert.equal(
+    f.native.readback_mic(4096, 1, 8192, 7) & 0x120000,
+    0,
+    "MIC excludes shared query/synchronization rights",
+  );
+  assert.equal(f.native.readback_mic(4096, 1, 8192, 7) & 0x23, 0x23);
+  assert.equal(f.native.readback_mic(8192, 1, 4096, 7), 0);
+});
 
 async function securityNative({
   writer = false,
@@ -272,6 +915,7 @@ async function securityNative({
         "file_security_failure",
         "operation,api_failure,error,temporary,sd,line",
       ),
+      project(source, "file_sd_query", "file,kind,sd"),
       project(source, "file_sd", "file,kind"),
       project(source, "set_file_security", "file,info,dacl,sacl"),
       "({file_sd,set_file_security})",

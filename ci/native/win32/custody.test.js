@@ -3575,6 +3575,7 @@ test("held baseline guards acquire complete original grants and retain strict fa
         "file_security_failure",
         "operation,api_failure,error,temporary,sd,line",
       ),
+      security("file_sd_query", "file,kind,sd"),
       security("file_sd", "file,kind"),
       `(i,hash)=>{try{${reading}}catch(cause){if(cause!==refused)throw cause;}${cleanup}}`,
     ].join("\n"),
@@ -4028,6 +4029,7 @@ test("Windows owned policy borrows acquired handles across install, inspection a
   const program = new Script(
     [
       project(reader, "case_copy", "target,source,parent"),
+      project(effective, "file_sd_query", "file,kind,sd"),
       project(effective, "file_sd", "file,kind"),
       project(reader, "ownership_acl", "i,restore,inspectOnly"),
       "({case_copy,ownership_acl})",
@@ -12660,8 +12662,14 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
     "bad-hex",
     "binary",
     "missing-completion",
+    "missing-context",
     "extra-context",
     "record-limit",
+    "readback",
+    "maximum-rows",
+    "token-limit",
+    "resource-duplicate",
+    "unknown-resource",
     "duplicate",
     "receipt",
     "queued",
@@ -12700,6 +12708,10 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
       value.hex = Buffer.from(context + "\0" + completion).toString("hex");
     if (fault === "missing-completion")
       value.hex = Buffer.from(context).toString("hex");
+    if (fault === "missing-context")
+      value.hex = Buffer.from(
+        "native-windows-original-child: record x\n" + completion,
+      ).toString("hex");
     if (fault === "extra-context")
       value.hex = Buffer.from(context + context + completion).toString("hex");
     if (fault === "record-limit")
@@ -12708,6 +12720,43 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
           "native-windows-original-child: record x\n".repeat(65) +
           completion,
       ).toString("hex");
+    if (
+      [
+        "readback",
+        "maximum-rows",
+        "token-limit",
+        "resource-duplicate",
+        "unknown-resource",
+      ].includes(fault)
+    ) {
+      const token =
+        "native-windows-original-child: token post-refusal=1 stable=0\n";
+      const roles = [
+        "image",
+        "workspace",
+        "storage",
+        "case",
+        "custody",
+        "outer",
+        "policy",
+      ];
+      if (fault === "resource-duplicate") roles[6] = "image";
+      if (fault === "unknown-resource") roles[6] = "ancestor";
+      value.hex = Buffer.from(
+        context +
+          token.repeat(fault === "token-limit" ? 2 : 1) +
+          roles
+            .map(
+              (role) =>
+                `native-windows-original-child: resource role=${role} bound=0\n`,
+            )
+            .join("") +
+          "native-windows-original-child: record x\n".repeat(
+            fault === "maximum-rows" ? 64 : 0,
+          ) +
+          completion,
+      ).toString("hex");
+    }
     bytes =
       fault === "invalid-json"
         ? Buffer.from("\x1d{bad}\n")
@@ -12762,6 +12811,8 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
           assert.equal(await closed, first);
           const published = [
             null,
+            "readback",
+            "maximum-rows",
             "duplicate",
             "receipt",
             "queued",
@@ -12811,6 +12862,464 @@ test("original-child diagnostic framing cannot resolve replies or replace the fi
       f.child.stdout.destroy();
       f.child.stderr.destroy();
     }
+  }
+});
+
+test("actual retained startup readback selects only held resources and masks and suppresses unstable authorization", async () => {
+  const source = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const names = [
+    "readback_now",
+    "readback_original",
+    "readback_resource",
+    "readback_collect",
+  ];
+  const project = (name) => {
+    const match = new RegExp(
+      `static [^\\n]+ ${name}\\(([^\\n]*)\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(source);
+    assert.ok(match, name);
+    const args = match[1]
+      .split(",")
+      .filter((arg) => arg.trim() !== "void")
+      .map((arg) => /([a-zA-Z_]\w*)$/u.exec(arg.trim())[1])
+      .join(",");
+    const body = match[2]
+      .replaceAll("->", ".")
+      .replace(
+        "struct readback_status status={0},probe[3]={{0}};struct readback_object object={0};",
+        "var status=freshStatus(),probe=[freshStatus(),freshStatus(),freshStatus()],object=freshObject();",
+      )
+      .replace(
+        "struct readback_status status={0};struct readback_token metadata={0};",
+        "var status=freshStatus(),metadata=freshMetadata();",
+      )
+      .replace("TOKEN_STATISTICS before,after;", "var before={},after={};")
+      .replace(
+        "DWORD granted[3]={0};BOOL allowed[3]={0},api[3]={0};",
+        "var granted=[0,0,0],allowed=[false,false,false],api=[false,false,false];",
+      )
+      .replace(
+        'char identity[33]="unavailable",probes[1536]="",line[6144];',
+        'var identity=chars("unavailable"),probes=[],line=[];',
+      )
+      .replace(
+        'char access[32]="unavailable",mandatory[32]="unavailable";',
+        'var access=chars("unavailable"),mandatory=chars("unavailable");',
+      )
+      .replace("char line[4096];", "var line=[];")
+      .replace("FILETIME time;", "var time={};")
+      .replace(
+        "FILETIME created,exited,kernel,user;WCHAR image[4096];",
+        "var created={},exited={},kernel={},user={},image=[];",
+      )
+      .replace("FILE_ID_INFO id;", "var id={};")
+      .replace(
+        /\(\(ULONGLONG\)(time|created)\.dwHighDateTime<<32\)\|\1\.dwLowDateTime/gu,
+        "$1.ticks",
+      )
+      .replace(
+        /sizeof\((identity|probes|line|access|mandatory|id)\)/gu,
+        (_, key) =>
+          ({
+            identity: 33,
+            probes: 1536,
+            line: name === "readback_collect" ? 4096 : 6144,
+            access: 32,
+            mandatory: 32,
+            id: 24,
+          })[key],
+      )
+      .replace(/\b(identity|probes)\+(i\*2|used)/gu, "at($1,$2)")
+      .replace(
+        /(?<!&)&(granted|allowed)\[i\]/gu,
+        (_, key) => `ref(()=>${key}[i],v=>${key}[i]=v)`,
+      )
+      .replace(/(?<!&)&probe\[i\]/gu, "probe[i]")
+      .replace(
+        /(?<!&)&(pid|birth|length)\b/gu,
+        (_, key) => `ref(()=>${key},v=>${key}=v)`,
+      )
+      .replace(/\*(pid|birth)\b/gu, "$1.value")
+      .replace(
+        /(?<!&)&entries\[indices\[i\]\]\.file/gu,
+        "entries[indices[i]].file",
+      )
+      .replace(/(?<!&)&file\.id\b/gu, "file.id")
+      .replace(
+        /(?<!&)&(status|metadata|object|before|after|created|exited|kernel|user|id|time|ownership_policy_file|original_refusal\.imageId|entries\[6\]\.file\.id)\b/gu,
+        "$1",
+      )
+      .replace(/\b(\w+)\[\]=\{([^}]+)\}/gu, "$1=[$2]")
+      .replace(/\((?:DWORD|size_t)\)/gu, "")
+      .replace(
+        /\b(?:const )?(?:struct held_file|PSECURITY_DESCRIPTOR|ULONGLONG|DWORD|BOOL|HANDLE|unsigned|int|char) \*?/gu,
+        "var ",
+      );
+    return `function ${name}(${args}){${body}}`;
+  };
+  const program = new Script(
+    names.map(project).join("\n") + "\n({collect:readback_collect});",
+  );
+  for (const fault of [
+    null,
+    "nonliteral",
+    "other-command",
+    "expired",
+    "birth",
+    "process-image",
+    "held-image",
+    "missing-storage",
+    "workspace-identity",
+    "statistics-last",
+    "statistics-changed",
+    "metadata-last",
+    "probe-api",
+    "policy-denial",
+    "deadline",
+    "cleanup",
+  ]) {
+    const chars = (value) => [...value].map((v) => v.charCodeAt(0)).concat(0);
+    const text = (value) =>
+      Array.isArray(value)
+        ? value
+            .slice(0, value.indexOf(0) < 0 ? value.length : value.indexOf(0))
+            .map((v) => String.fromCharCode(v))
+            .join("")
+        : String(value);
+    const stats = () => ({
+      TokenId: { HighPart: 0, LowPart: 1 },
+      AuthenticationId: { HighPart: 0, LowPart: 2 },
+      ModifiedId: { HighPart: 0, LowPart: 3 },
+      TokenType: 1,
+    });
+    const freshStatus = () => ({
+      failed: false,
+      value: 0,
+      closureUncertain: false,
+      cleanupValue: 0,
+    });
+    const freshMetadata = () => ({
+      before: stats(),
+      after: stats(),
+      fields: 31,
+      first: true,
+      last: true,
+      stable: true,
+      subject: "S-1-5-21-7001",
+      restricting: "S-1-5-21-7002",
+      restrictingCount: 1,
+      privileges: 0,
+      integrity: 4096,
+      integritySid: "S-1-16-4096",
+      policy: 1,
+    });
+    const freshObject = () => ({
+      actual: { VolumeSerialNumber: 0 },
+      identified: false,
+      bound: false,
+      descriptorHash: false,
+      daclHash: false,
+      ownerValid: false,
+      acesValid: false,
+      labelValid: false,
+      labelDefaulted: false,
+      level: 0,
+      label: 0,
+      aces: "",
+    });
+    const id = (value) => ({
+      VolumeSerialNumber: 1,
+      FileId: { Identifier: Array(16).fill(value) },
+    });
+    const report = {
+      readbackStarted: false,
+      readbackFinished: false,
+      readbackTokens: 0,
+      readbackResources: 0,
+      readbackProbes: 0,
+      readbackUnavailable: 0,
+      readbackClosure: false,
+      truncated: false,
+    };
+    const calls = [],
+      rows = [],
+      freed = new Set();
+    let remaining = fault === "expired" ? 0 : 30000,
+      reads = 0;
+    const ref = (get, set) => ({
+      get value() {
+        return get();
+      },
+      set value(v) {
+        set(v);
+      },
+    });
+    const api = {
+      chars,
+      text,
+      ref,
+      freshStatus,
+      freshMetadata,
+      freshObject,
+      at: (target, offset) => ({ target, offset }),
+      NULL: null,
+      TRUE: true,
+      FALSE: false,
+      TokenPrimary: 1,
+      FileIdInfo: 18,
+      ERROR_INVALID_HANDLE: 6,
+      ERROR_INVALID_DATA: 13,
+      FILE_READ_DATA: 1,
+      FILE_EXECUTE: 32,
+      FILE_TRAVERSE: 32,
+      FILE_LIST_DIRECTORY: 1,
+      FILE_ADD_FILE: 2,
+      FILE_ADD_SUBDIRECTORY: 4,
+      TOKEN_MANDATORY_POLICY_NO_WRITE_UP: 1,
+      original_refusal: {
+        command: fault === "other-command" ? "other" : "ownership-output",
+        pid: 123,
+        birth: 90,
+        image: chars("C:\\sample\\payload.exe"),
+        imageId: id(6),
+      },
+      // An even token handle exposes accidental bitwise AND in C projection.
+      ownership_literal: fault !== "nonliteral",
+      ownership_processes: [42],
+      ownership_tokens: [70],
+      tokens: [999],
+      case_token: 888,
+      case_record: {
+        accountSid: "S-1-5-21-7001",
+        restrictingSid: "S-1-5-21-7002",
+      },
+      entries: Array.from({ length: 7 }, (_, i) => ({
+        file: {
+          handle: fault === "missing-storage" && i === 3 ? 0 : i + 10,
+          id: id(i),
+        },
+      })),
+      ownership_policy_file: { handle: 40, id: id(7) },
+      refusal_remaining: () => remaining,
+      GetLastError: () => 5,
+      GetSystemTimePreciseAsFileTime(out) {
+        out.ticks = 200 + calls.length;
+      },
+      GetProcessId(handle) {
+        assert.equal(handle, 42);
+        calls.push("pid");
+        return 123;
+      },
+      GetProcessTimes(handle, created) {
+        assert.equal(handle, 42);
+        created.ticks = fault === "birth" ? 91 : 90;
+        return true;
+      },
+      QueryFullProcessImageNameW(handle, flags, out, length) {
+        assert.deepEqual([handle, flags], [42, 0]);
+        const path = chars(
+          fault === "process-image"
+            ? "C:\\sample\\other.exe"
+            : "C:\\sample\\payload.exe",
+        );
+        out.push(...path);
+        length.value = path.length - 1;
+        return true;
+      },
+      GetFileInformationByHandleEx(handle, kind, out) {
+        assert.deepEqual([handle, kind], [16, 18]);
+        Object.assign(out, id(fault === "held-image" ? 8 : 6));
+        return true;
+      },
+      _wcsicmp: (a, b) =>
+        Number(text(a).toLowerCase() !== text(b).toLowerCase()),
+      strcmp: (a, b) => Number(text(a) !== text(b)),
+      memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+      readback_fail(status, domain, operation, value) {
+        if (!status.failed)
+          Object.assign(status, { failed: true, domain, operation, value });
+        return false;
+      },
+      readback_ready: () => remaining > 0,
+      readback_metadata(token, value) {
+        assert.equal(token, 70);
+        Object.assign(value, freshMetadata());
+        if (fault === "metadata-last")
+          Object.assign(value, { last: false, stable: false });
+      },
+      readback_sid_equal: (a, b) => a === b,
+      readback_statistics(token, out) {
+        assert.equal(token, 70);
+        Object.assign(out, stats());
+        reads++;
+        if (fault === "statistics-changed" && reads === 2)
+          out.ModifiedId.LowPart = 9;
+        return remaining > 0 && !(fault === "statistics-last" && reads === 2);
+      },
+      readback_same: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+      readback_describe(handle, expected, _account, _restricting, object) {
+        calls.push(`describe:${handle}`);
+        if (!handle) return null;
+        Object.assign(object, {
+          actual: structuredClone(expected),
+          identified: true,
+          bound: !(fault === "workspace-identity" && handle === 14),
+          descriptorHash: true,
+          daclHash: true,
+          ownerValid: true,
+          acesValid: true,
+          labelValid: true,
+          labelDefaulted: true,
+          level: 8192,
+          label: 1,
+          descriptor: "a".repeat(64),
+          dacl: "b".repeat(64),
+          owner: "S-1-5-18",
+          aces: "0/0/1/system",
+        });
+        return { handle };
+      },
+      readback_access(token, sd, mask, granted, allowed, status) {
+        assert.equal(token, 70);
+        calls.push([sd.handle, mask]);
+        granted.value = mask;
+        allowed.value = true;
+        if (fault === "deadline") remaining = 0;
+        if (fault === "cleanup") status.closureUncertain = true;
+        if (fault === "policy-denial" && sd.handle === 40) {
+          granted.value = 0;
+          allowed.value = false;
+        }
+        if (fault === "probe-api" && sd.handle === 16)
+          return api.readback_fail(status, "win32", "AccessCheck", 5);
+        return true;
+      },
+      readback_mic: () => 6,
+      readback_free(sd) {
+        if (sd) {
+          assert.equal(freed.has(sd), false);
+          freed.add(sd);
+        }
+      },
+      snprintf(out, capacity, format, ...values) {
+        const rendered = format.replace(
+          /%(?:08lx|02x|llu|lu|[su])/gu,
+          (match) => {
+            const value = values.shift();
+            return match === "%08lx" || match === "%02x"
+              ? value.toString(16).padStart(match === "%02x" ? 2 : 8, "0")
+              : match === "%s"
+                ? text(value)
+                : String(Number(value));
+          },
+        );
+        assert.equal(values.length, 0);
+        const target = out.target ?? out,
+          offset = out.offset ?? 0;
+        for (let i = 0; i < Math.min(rendered.length, capacity - 1); i++)
+          target[offset + i] = rendered.charCodeAt(i);
+        target[offset + Math.min(rendered.length, capacity - 1)] = 0;
+        return rendered.length;
+      },
+      refusal_publish(line, current) {
+        if (!line) return;
+        const value = text(line);
+        rows.push(value);
+        assert.ok(value.length < 6144);
+        if (value.includes(": token ")) current.readbackTokens++;
+        else current.readbackResources++;
+      },
+    };
+    program.runInNewContext(api).collect(report);
+    if (["nonliteral", "other-command", "expired"].includes(fault)) {
+      assert.deepEqual(calls, []);
+      assert.deepEqual(rows, []);
+      assert.equal(report.readbackStarted, false);
+      continue;
+    }
+    const probes = calls.filter(Array.isArray);
+    const expected = [
+      [16, 1],
+      [16, 32],
+      [14, 32],
+      [14, 1],
+      [14, 6],
+      [13, 32],
+      [11, 32],
+      [12, 32],
+      [10, 32],
+      [40, 1],
+    ];
+    assert.deepEqual(
+      probes,
+      fault === "missing-storage"
+        ? expected.filter(([handle]) => handle !== 13)
+        : fault === "workspace-identity"
+          ? expected.filter(([handle]) => handle !== 14)
+          : fault === "deadline"
+            ? expected.slice(0, 1)
+            : expected,
+    );
+    assert.match(rows[0], /token post-refusal=1/u);
+    assert.equal(report.readbackTokens, 1);
+    assert.deepEqual(
+      rows.slice(1).map((row) => /role=(\w+)/u.exec(row)[1]),
+      fault === "deadline"
+        ? ["image"]
+        : [
+            "image",
+            "workspace",
+            "storage",
+            "case",
+            "custody",
+            "outer",
+            "policy",
+          ],
+    );
+    assert.equal(report.readbackFinished, fault !== "deadline");
+    assert.equal(
+      freed.size,
+      fault === "deadline" ? 1 : fault === "missing-storage" ? 6 : 7,
+    );
+    if (
+      [
+        "birth",
+        "process-image",
+        "held-image",
+        "metadata-last",
+        "statistics-last",
+        "statistics-changed",
+        "probe-api",
+        "deadline",
+      ].includes(fault)
+    ) {
+      assert.match(rows[1], /discretionary:unavailable,granted:unavailable/u);
+      assert.doesNotMatch(rows[1], /authorization:grant/u);
+      assert.match(
+        rows[1],
+        /descriptor-sha256=a{64}/u,
+        "Valid object facts survive unavailable authorization",
+      );
+    }
+    if (fault === "policy-denial")
+      assert.match(
+        rows.at(-1),
+        /discretionary:deny,granted:0,mic-denied:0,authorization:deny/u,
+      );
+    if (fault === "cleanup") assert.equal(!!report.readbackClosure, true);
+    if (!fault)
+      assert.deepEqual(
+        [
+          report.readbackProbes,
+          report.readbackUnavailable,
+          report.readbackResources,
+        ],
+        [10, 0, 7],
+      );
   }
 });
 
@@ -13110,6 +13619,7 @@ test("original-child refusal collection owns bounded partial publication and can
         "let report=structuredClone(original_refusal.report);",
       )
       .replace("struct refusal_report report={0};", "let report=freshReport();")
+      .replace("const char *readbackState=", "const readbackState=")
       .replaceAll(
         "report=original_refusal.report;",
         "report=structuredClone(original_refusal.report);",
@@ -13220,6 +13730,9 @@ test("original-child refusal collection owns bounded partial publication and can
     "unreleased",
     "already-expired",
     "remaining",
+    "readback-pending",
+    "readback-partial",
+    "readback-complete",
   ]) {
     let tick =
         fault === "already-expired" ? 30001 : fault === "remaining" ? 7000 : 0,
@@ -13244,6 +13757,13 @@ test("original-child refusal collection owns bounded partial publication and can
       finished: false,
       truncated: false,
       overBudget: false,
+      readbackTokens: 0,
+      readbackResources: 0,
+      readbackProbes: 0,
+      readbackUnavailable: 0,
+      readbackStarted: false,
+      readbackFinished: false,
+      readbackClosure: false,
     });
     const handle = (kind) => ({ kind, serial: serial++, next: 0 });
     const api = {
@@ -13305,6 +13825,22 @@ test("original-child refusal collection owns bounded partial publication and can
       })),
       refusal_lock: {},
       ownership_literal_context: (_context, _maximum, size) => size,
+      readback_collect(report) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        if (!fault?.startsWith("readback-")) return;
+        report.readbackStarted = true;
+        api.refusal_publish(null, report);
+        if (fault === "readback-pending") throw blocked;
+        Object.assign(report, {
+          readbackTokens: 1,
+          readbackResources: fault === "readback-complete" ? 7 : 1,
+          readbackProbes: fault === "readback-complete" ? 10 : 2,
+          readbackUnavailable: fault === "readback-complete" ? 0 : 1,
+          readbackFinished: fault === "readback-complete",
+        });
+        api.refusal_publish(null, report);
+      },
       stderr: {},
       GetLastError: () => lastError,
       SetLastError: (v) => {
@@ -13315,6 +13851,8 @@ test("original-child refusal collection owns bounded partial publication and can
         out.ticks = 200;
       },
       strcmp: (a, b) => Number(a !== b),
+      strncmp: (a, b, size) =>
+        Number(text(a).slice(0, size) !== text(b).slice(0, size)),
       strlen: (v) => text(v).length,
       AcquireSRWLockExclusive: () => {
         assert.equal(locked, false);
@@ -13533,19 +14071,34 @@ test("original-child refusal collection owns bounded partial publication and can
     );
     assert.match(output, /resume-time=unavailable/u);
     assert.ok(api.original_refusal.report.examined <= 64);
-    if (["next-pending", "cancel", "query-pending", "wait"].includes(fault)) {
+    if (
+      [
+        "next-pending",
+        "cancel",
+        "query-pending",
+        "wait",
+        "readback-pending",
+      ].includes(fault)
+    ) {
       assert.equal(api.original_refusal.thread, 400);
       assert.equal(calls.includes("thread-close"), false);
       assert.match(output, /incomplete=1/u);
       assert.match(output, /closure-uncertain=1/u);
       assert.equal(
         calls.includes("cancel"),
-        !["query-pending", "wait"].includes(fault),
+        !["query-pending", "wait", "readback-pending"].includes(fault),
       );
     } else if (fault !== "create" && fault !== "already-expired")
       assert.equal(calls.filter((v) => v === "thread-close").length, 1);
     if (fault === "record-cap")
       assert.equal(api.original_refusal.report.examined, 64);
+    assert.match(
+      output,
+      new RegExp(
+        `readback=${fault === "publication" ? "unavailable" : fault === "readback-complete" ? "complete" : fault?.startsWith("readback-") ? "partial" : "unstarted"}`,
+        "u",
+      ),
+    );
     if (fault === "byte-cap") assert.match(output, /truncated=1/u);
     if (fault === "empty") assert.match(output, /empty=1/u);
     if (

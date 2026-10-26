@@ -195,10 +195,10 @@ test("both retirement-gated audit owners use only the shared SID removal and req
     assert.match(source, /#include "audit-policy-remove\.h"/u);
     assert.doesNotMatch(source, /AuditDeletePerUserPolicy/u);
   }
-  const restore = reader.slice(
-    reader.indexOf("static void audit_restore("),
-    reader.indexOf("\n#endif"),
-  );
+  const restore = /static void audit_restore\([^\n]*\) \{[\s\S]*?\n\}/u.exec(
+    reader,
+  )?.[0];
+  assert.ok(restore, "The audit restoration body must remain present.");
   const removal = restore.indexOf("audit_remove_owned_policy");
   for (const prerequisite of [
     "!helpers[0].process",

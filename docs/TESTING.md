@@ -2720,6 +2720,22 @@ Raw text is limited to 32256 bytes so hex encoding plus framing stays within
 64 KiB. Tests use injected APIs and clocks, add no harness or slow-tier command,
 and establish neither actual collector execution nor a matching-host startup
 diagnosis, native success or retirement.
+The existing effective suite also executes the extracted query/access and
+nonfatal token, statistics, SID/ACE/label, hashing and observer-readback bodies.
+Injected failures distinguish discretionary denial from API unavailability,
+retain MIC operation masks and default labels, reject changed/failed final token
+statistics and unsupported projections, and settle temporary handles, descriptors,
+SID strings, buffers and hash resources once without entering fatal helpers.
+Custody actual-body fixtures protect the original held process/token binding,
+seven-resource/ten-mask order, missing or changed resources, unavailable
+authorization with preserved object facts, and shared-deadline partial sampling.
+The existing collector fixture retains Event Log accounting and original
+error/errno across unstarted, partial, complete and blocked readback. Real channel
+fixtures accept all 74 bounded lines and reject missing context, duplicate token
+or resource rows and unknown resource roles without accepting replies or changing
+the original fatal error. These remain portable fixtures in the same explicit
+native harness; no duplicate leaf command, slow-tier requirement or native
+acceptance is added.
 Additional Windows actual-body regressions retain complete bounded AppId byte
 sizes/digests and encoded prefixes, typed event/time/endpoint facts, IPv6 arms,
 missing identity fields and type-checked DROP data. Wrong unions, malformed
