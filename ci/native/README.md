@@ -11007,6 +11007,12 @@ process DACL and instance; it cannot contain setup work or normal finish records
 Missing, duplicated, reordered or substituted acknowledgements retain exclusion.
 The original case ledger supplies child births; no second inventory or control
 protocol is introduced.
+Closed original identities are unique by PID and immutable creation time. The
+verifier's own birth and duplicate original births, including conflicting SID or
+session metadata, remain refused. Distinct original births may reuse a PID with
+each other or the fresh verifier; that replacement grants no live custody or
+signaling authority. Repeated Job observations stay separate by original nonce,
+PID and birth.
 A fresh bootstrap/source/plan read rejoins candidate/build pins, file identities
 and protected parents without opening final helpers. Complete process censuses
 surround two reads of every original Job slot, compiler/controlling Job and owned

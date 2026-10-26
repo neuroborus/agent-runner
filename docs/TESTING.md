@@ -1811,8 +1811,13 @@ The existing Windows custody fixture executes the complete cold census/acquisiti
 owner with injected native calls. It covers present exited originals, allowed and
 watchdog/out-of-range exits, live originals, disappearance during acquisition,
 newer replacement births, changed/older births, inaccessible handles and incomplete
-or duplicate inventories. Every failed predicate retains its immediate native
-error; separately failed closes cannot replace it. The actual bounded diagnostic
+or duplicate inventories. Closed-owner cases allow a fresh live verifier and
+successive originals to reuse a PID with distinct births. They reject the actual
+verifier birth, duplicate births and conflicting SID/session metadata, and isolate
+each original's repeated recovery-slot, compiler and controlling Job observations
+while retaining both complete process censuses and owned-task reads. Every failed
+predicate retains its immediate native error; separately failed closes cannot
+replace it. The actual bounded diagnostic
 producer passes through fragmented authenticated transport and remains failure
 evidence only. Repeated original Job/task checks and normal/recovery refusal
 matrices remain required. The preparation fixture holds actual bridge exit after

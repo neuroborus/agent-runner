@@ -10449,23 +10449,29 @@ test("Windows verification expiry fences later native reads and late protected r
   assert.equal(receipt.events.length, 1);
 });
 
+function coldVerificationFixture() {
+  const f = fixture();
+  f.input.purpose = "experiment";
+  f.input.context.executionId = "build";
+  f.input.bindingSha256 = f.input.reviewSha256;
+  delete f.input.reviewSha256;
+  f.input.sources.push({
+    path: "C:\\Fixture\\Sealed\\experiment.h",
+    sha256: hash,
+  });
+  return verificationFixture(f);
+}
+
 test("Windows experiment cold custody proves disappeared originals without retaining them and refuses uncertain native observations", async () => {
-  const experiment = () => {
-    const f = fixture();
-    f.input.purpose = "experiment";
-    f.input.context.executionId = "build";
-    f.input.bindingSha256 = f.input.reviewSha256;
-    delete f.input.reviewSha256;
-    const header = { path: "C:\\Fixture\\Sealed\\experiment.h", sha256: hash };
-    f.input.sources.push(header);
-    return verificationFixture(f);
-  };
   const faults = [
     null,
     "present-retired",
     "replacement-birth",
     "replacement-changes",
     "reordered-identity",
+    "verifier-pid-reuse",
+    "verifier-birth",
+    "verifier-birth-sid",
     "reviewed",
     "pid-reuse",
     "session",
@@ -10494,9 +10500,22 @@ test("Windows experiment cold custody proves disappeared originals without retai
     "watchdog",
   ];
   for (const fault of faults) {
-    const k = experiment(),
-      helper = structuredClone(k.f.helper),
-      bridge = identity(10, runnerSid),
+    const k = coldVerificationFixture(),
+      helper = structuredClone(
+        fault === "verifier-birth" ? k.f.verifier : k.f.helper,
+      ),
+      bridge =
+        fault?.startsWith("verifier-") && fault !== "verifier-birth"
+          ? {
+              ...k.f.verifier,
+              creationTime:
+                fault === "verifier-pid-reuse"
+                  ? "9000"
+                  : k.f.verifier.creationTime,
+              sessionId: 2,
+              userSid: runnerSid,
+            }
+          : identity(10, runnerSid),
       birth = {
         schemaVersion: 1,
         nonce,
@@ -10511,6 +10530,11 @@ test("Windows experiment cold custody proves disappeared originals without retai
       });
     k.states.delete(helper.pid);
     k.states.delete(bridge.pid);
+    if (fault === "verifier-pid-reuse")
+      k.states.set(k.f.verifier.pid, {
+        identity: k.f.verifier,
+        retired: false,
+      });
     k.state.absent = fault !== "task";
     if (
       [
@@ -10543,7 +10567,11 @@ test("Windows experiment cold custody proves disappeared originals without retai
     k.state.damage = (operation, frame) => {
       if (operation === "verify-cold-process") {
         scans++;
-        if (fault?.startsWith("replacement-") && frame.value.present) {
+        if (
+          (fault?.startsWith("replacement-") ||
+            fault === "verifier-pid-reuse") &&
+          frame.value.present
+        ) {
           frame.value.original = false;
           delete frame.value.signaled;
           delete frame.value.exitCode;
@@ -10611,9 +10639,12 @@ test("Windows experiment cold custody proves disappeared originals without retai
     const verify = () => k.verifier.verifyColdPreparation(k.f.input, [owner]);
     if (
       fault &&
-      !["present-retired", "replacement-birth", "reordered-identity"].includes(
-        fault,
-      )
+      ![
+        "present-retired",
+        "replacement-birth",
+        "reordered-identity",
+        "verifier-pid-reuse",
+      ].includes(fault)
     ) {
       await assert.rejects(verify, undefined, fault);
       const count = k.events.length;
@@ -10626,6 +10657,16 @@ test("Windows experiment cold custody proves disappeared originals without retai
       assert.equal(proof.noLiveMembers, true);
       assert.equal(proof.tasksRemoved, true);
       assert.deepEqual(proof.originals, [owner]);
+      if (fault === "verifier-pid-reuse") {
+        const replacement = {
+          complete: true,
+          present: true,
+          original: false,
+          identity: k.f.verifier,
+        };
+        assert.deepEqual(proof.processCensus.before[1], replacement);
+        assert.deepEqual(proof.processCensus.after[1], replacement);
+      }
       if (!fault)
         assert.deepEqual(proof.processCensus, {
           before: [
@@ -10651,6 +10692,116 @@ test("Windows experiment cold custody proves disappeared originals without retai
         k.events.filter(({ operation }) => operation === "verify-task").length,
         2,
       );
+    }
+    assert.ok(!k.events.some(({ operation }) => operation === "verify-retain"));
+  }
+});
+
+test("Windows cold custody separates reused original births and each owner's repeated Job observations", async () => {
+  const fields = ["jobs", "compilerJob", "controllingJob"];
+  for (const fault of [
+    null,
+    "duplicate-birth",
+    "conflicting-sid",
+    "conflicting-session",
+    ...fields.flatMap((field) => [`${field}-0`, `${field}-1`]),
+  ]) {
+    const k = coldVerificationFixture(),
+      helper = identity(20),
+      bridge = identity(10, runnerSid),
+      laterHelper =
+        fault === "duplicate-birth"
+          ? helper
+          : fault === "conflicting-sid"
+            ? identity(bridge.pid)
+            : { ...helper, creationTime: "20020" },
+      laterBridge =
+        fault === "conflicting-session"
+          ? { ...bridge, sessionId: 2 }
+          : identity(30, runnerSid),
+      owners = [
+        { nonce, helper, bridge },
+        { nonce: "d".repeat(32), helper: laterHelper, bridge: laterBridge },
+      ].map((original) => {
+        const birth = {
+          ...original,
+          schemaVersion: 1,
+          taskSha256: hash,
+          status: "POSSIBLE",
+        };
+        return windowsClosedPreparationOwner(birth, {
+          ...birth,
+          status: "RETIRED",
+        });
+      }),
+      reads = [0, 0];
+    k.states.clear();
+    k.state.absent = true;
+    k.state.damage = (operation, frame) => {
+      const actual = frame.value;
+      if (operation === "verify-cold-jobs") {
+        const index = owners.findIndex((owner) => owner.nonce === actual.nonce),
+          job = {
+            daclSha256: index === 0 ? hash : "d".repeat(64),
+            limitFlags: 0x2008,
+            processLimit: 32,
+            uiRestrictions: 255,
+            members: [],
+          };
+        actual.controllingJob = { ...job };
+        if (actual.pid === helper.pid) {
+          reads[index]++;
+          actual.jobs[127] = { ...job };
+          actual.compilerJob = { ...job, processLimit: 31 };
+          for (const field of fields)
+            if (fault === `${field}-${index}` && reads[index] === 2) {
+              const changed =
+                field === "jobs" ? actual.jobs[127] : actual[field];
+              changed.daclSha256 = "f".repeat(64);
+            }
+        }
+      }
+      return Buffer.from(JSON.stringify(frame) + "\n");
+    };
+    const verify = () => k.verifier.verifyColdPreparation(k.f.input, owners);
+    if (fault) {
+      await assert.rejects(verify, undefined, fault);
+      if (!fields.some((field) => fault.startsWith(field)))
+        assert.equal(
+          k.events.length,
+          0,
+          "Contradictory births fail before native reads",
+        );
+    } else {
+      const proof = await verify(),
+        processes = owners.flatMap((owner) =>
+          owner.identities.map(({ pid, creationTime }) => [
+            String(pid),
+            creationTime,
+          ]),
+        ),
+        jobs = owners.flatMap((owner) =>
+          owner.identities.map(({ pid, creationTime }) => [
+            String(pid),
+            creationTime,
+            owner.nonce,
+          ]),
+        ),
+        tasks = owners.map((owner) => ["custody", hex(owner.nonce)]);
+      assert.equal(proof.status, "RETIRED");
+      assert.deepEqual(proof.originals, owners);
+      assert.deepEqual(reads, [2, 2]);
+      for (const [operation, expected] of [
+        ["verify-cold-process", processes],
+        ["verify-cold-jobs", jobs],
+        ["verify-task", tasks],
+      ])
+        assert.deepEqual(
+          k.events
+            .filter((event) => event.operation === operation)
+            .map((event) => event.args),
+          [...expected, ...expected],
+        );
     }
     assert.ok(!k.events.some(({ operation }) => operation === "verify-retain"));
   }

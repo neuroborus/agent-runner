@@ -392,7 +392,8 @@ export function createWindowsCustodyVerifier(
       dense(owners, 64).length > 0 &&
         new Set(owners.map(({ nonce }) => nonce)).size === owners.length,
     );
-    const identities = new Map();
+    const identities = new Map(),
+      verifierIdentity = verifier();
     for (const owner of owners) {
       closed(owner, ["nonce", "identities", "taskSha256", "receiptsSha256"]);
       requireWindows(
@@ -405,11 +406,14 @@ export function createWindowsCustodyVerifier(
       systemIdentity(owner.identities[0]);
       requireWindows(owner.identities[1].userSid === input.runnerSid);
       for (const value of owner.identities) {
-        const identity = normalizeWindowsIdentity(value);
+        const identity = normalizeWindowsIdentity(value),
+          key = `${identity.pid}:${identity.creationTime}`;
         requireWindows(
-          identity.pid !== verifier().pid && !identities.has(identity.pid),
+          (identity.pid !== verifierIdentity.pid ||
+            identity.creationTime !== verifierIdentity.creationTime) &&
+            !identities.has(key),
         );
-        identities.set(identity.pid, identity);
+        identities.set(key, identity);
       }
     }
     requireWindows(identities.size <= maximumSubjects);
@@ -433,6 +437,7 @@ export function createWindowsCustodyVerifier(
       for (const { nonce, identities: originals } of owners) {
         for (const value of originals) {
           const identity = normalizeWindowsIdentity(value),
+            key = `${nonce}:${identity.pid}:${identity.creationTime}`,
             actual = await call("cold-jobs", [
               identity.pid,
               identity.creationTime,
@@ -460,7 +465,7 @@ export function createWindowsCustodyVerifier(
               actual.controllingJob.processLimit === 32 &&
                 actual.controllingJob.uiRestrictions === 255,
             );
-          const previous = jobs.get(identity.pid);
+          const previous = jobs.get(key);
           if (previous)
             requireWindows(
               actual.jobs.every((job, index) =>
@@ -469,7 +474,7 @@ export function createWindowsCustodyVerifier(
                 consistent(previous.compilerJob, actual.compilerJob) &&
                 consistent(previous.controllingJob, actual.controllingJob),
             );
-          jobs.set(identity.pid, actual);
+          jobs.set(key, actual);
           observations.push(actual);
         }
         const absent = await task("custody", nonce);
