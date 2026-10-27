@@ -1613,7 +1613,9 @@ export async function buildDarwinFeasibility(
       "feasibility-sandbox.h",
       "feasibility-domain.h",
       "custody.h",
-      ...(commandObservation ? ["feasibility-command.h"] : []),
+      ...(commandObservation
+        ? ["feasibility-command.h", "exec-handoff.h"]
+        : []),
     ])
       pins.set(
         path.join(SOURCE, file),
@@ -1688,6 +1690,9 @@ export async function buildDarwinFeasibility(
                       await fs.readFile(
                         path.join(SOURCE, "feasibility-command.h"),
                       ),
+                    ),
+                    handoffSourceSha256: pins.get(
+                      path.join(SOURCE, "exec-handoff.h"),
                     ),
                   }
                 : {}),

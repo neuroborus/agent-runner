@@ -4149,9 +4149,9 @@ test("Darwin feasibility attempts later independent compiles and retains the ori
 });
 
 test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
-  const [commandSource, helperSource] = await Promise.all(
-      ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
-        readFile(new URL(name, SOURCE)),
+  const [commandSource, helperSource, handoffSource] = await Promise.all(
+      ["feasibility-command.h", "feasibility-helper.c", "exec-handoff.h"].map(
+        (name) => readFile(new URL(name, SOURCE)),
       ),
     ),
     injected = effects(),
@@ -4164,7 +4164,9 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
       ? commandSource
       : file.endsWith("/feasibility-helper.c")
         ? helperSource
-        : read(file);
+        : file.endsWith("/exec-handoff.h")
+          ? handoffSource
+          : read(file);
   injected.fs.writeFile = async (file, bytes) => {
     if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
   };
@@ -4182,8 +4184,77 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
     for (const flag of ["-DNATIVE_FEASIBILITY_COMMAND", "-lbsm"])
       assert.equal(args.includes(flag), args.at(-2).endsWith("/helper"));
   assert.equal(report.builds[0].commandSourceSha256, digest(commandSource));
+  assert.equal(report.builds[0].handoffSourceSha256, digest(handoffSource));
   assert.equal(report.builds[0].sourceSha256, digest(helperSource));
   assert.equal(Object.hasOwn(report.builds[1], "commandSourceSha256"), false);
+  assert.equal(Object.hasOwn(report.builds[1], "handoffSourceSha256"), false);
+  const consumer = await readFile(
+      new URL("feasibility-command-effects.js", SOURCE),
+      "utf8",
+    ),
+    start = consumer.indexOf(
+      "      need(\n        build.builds[0].handoffSourceSha256",
+    ),
+    end = consumer.indexOf("      const abi =", start);
+  assert.ok(start > 0 && end > start);
+  const verify = new Script(
+    `(async () => {${consumer.slice(start, end).replaceAll("import.meta.url", JSON.stringify(SOURCE.href))}})()`,
+  );
+  for (const pin of [
+    digest(handoffSource),
+    digest(Buffer.from("changed")),
+    undefined,
+  ]) {
+    const observed = verify.runInNewContext({
+      build: { builds: [{ handoffSourceSha256: pin }] },
+      URL,
+      digest,
+      readFile: async (file) => {
+        assert.equal(file.href, new URL("exec-handoff.h", SOURCE).href);
+        return handoffSource;
+      },
+      need: (value) => {
+        assert.ok(value);
+      },
+    });
+    if (pin === digest(handoffSource)) await observed;
+    else await assert.rejects(observed);
+  }
+});
+
+test("Darwin command builds refuse shared handoff drift before and after compilation", async () => {
+  const source = await readFile(new URL("exec-handoff.h", SOURCE));
+  for (const phase of ["before", "after"]) {
+    const injected = effects(),
+      read = injected.fs.readFile,
+      run = injected.executeFile;
+    let reads = 0,
+      compiled = 0,
+      published = false;
+    injected.fs.readFile = async (file) => {
+      if (!file.endsWith("/exec-handoff.h")) return read(file);
+      reads++;
+      return reads > 1 && (phase === "before" || compiled)
+        ? Buffer.concat([source, Buffer.from("/* changed */")])
+        : source;
+    };
+    injected.executeFile = async (file, args, options) => {
+      if (file === "/fixture/clang" && args[0] !== "--version") compiled++;
+      return run(file, args, options);
+    };
+    injected.fs.writeFile = async (file) => {
+      if (file.endsWith("/evidence/build.json")) published = true;
+    };
+    await assert.rejects(
+      buildDarwinFeasibility("/fixture/run", [], {
+        ...injected,
+        commandObservation: true,
+      }),
+    );
+    assert.ok(reads >= 2);
+    assert.equal(compiled, phase === "before" ? 0 : 1);
+    assert.equal(published, false);
+  }
 });
 
 test("Darwin build requires native signature verification and unchanged signed UUID/image bytes before admission", async () => {

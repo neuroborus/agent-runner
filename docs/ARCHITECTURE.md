@@ -821,6 +821,14 @@ cleanup are required; PID/group exit alone cannot pass. Missing privileges or
 interfaces remain BLOCKED before effects, and emergency or uncertain settlement
 prevents further provider admission. This supplies no full observer approvals or
 arbitrary Darwin domain recovery; native behavior remains externally unverified.
+The CI-private `darwin/exec-handoff.h` now owns prepared suspended SETEXEC actions,
+private gate/receipt I/O and the identity-transition predicate. Its immediate
+command consumer retains capture-aware waiting, held executable/policy admission,
+trace acknowledgements, custody and continuation. Receipt EOF and stopped state
+remain observations only. Returned SETEXEC always refuses; initialized objects
+are independently released without replacing the original failure. Command builds
+pin the transitive header before compilation, recheck afterward and join its
+recorded digest again before command preparation. No production boundary changes.
 The existing Darwin command-effects owner keeps one broker reader through work
 cancellation and cleanup. Pending work uses the operation signal; cancellation
 fences admission and signals the original native failure owner. Its unreleased

@@ -692,6 +692,10 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         ),
         args = build.builds[0].args,
         sdk = args[args.indexOf("-isysroot") + 1];
+      need(
+        build.builds[0].handoffSourceSha256 ===
+          digest(await readFile(new URL("./exec-handoff.h", import.meta.url))),
+      );
       const abi = await readFile(
         path.join(sdk, "usr/include/bsm/audit_record.h"),
       );

@@ -953,6 +953,16 @@ interrupted release, expiration or closed admission after the image/policy
 recheck, and changed authority cannot resume the target. Unused pipe-end close
 failures must stop either launch owner before it advances. Refusal cleanup closes
 acquired gates/descriptors and retains session-release failures separately.
+These command regressions execute the extracted `exec-handoff.h` bodies through
+their actual command call sites. They cover each spawn initialization/descriptor
+failure, positive POSIX errors despite unrelated errno, every returned SETEXEC,
+gate EOF/interruption, and independent destruction of initialized objects.
+Existing full command admission cases retain held-image/policy substitution,
+identity/epoch drift, capture, expiry and trace acknowledgement checks before
+continuation. The build suite binds the actual shared header, rejects input drift
+before/after compilation and exercises the command receipt consumer against
+missing or stale pins. These are focused portable checks, not native acceptance
+or new finalization commands.
 Startup trace fixtures in
 `test/native-darwin-startup.test.js` exercise bounded numeric page-size and
 libpthread stack observations, all six `mmap` inputs and its result separately

@@ -6,7 +6,7 @@
 #include <sys/poll.h>
 #include <sys/select.h>
 #include <sys/time.h>
-#include <spawn.h>
+#include "exec-handoff.h"
 #include <grp.h>
 #if defined(AUDIT_HEADER_VERSION_OPENBSM)
 /* Apple's record producer uses this SDK declaration, not a Solaris version. */
@@ -69,6 +69,12 @@ static void command_guard_at(bool ok, const char *caller, unsigned line, const c
   command_guard_at(native_result comparison, __func__, __LINE__, #call " " #comparison, \
     native_result < 0 ? "errno" : "status", native_result, native_error, 126); \
 } while (0)
+static void command_handoff_refuse(struct exec_handoff *handoff) {
+  exec_handoff_destroy(handoff);
+  if (handoff->files_cleanup) remember_cleanup("handoff-files-destroy", "errno", handoff->files_cleanup);
+  if (handoff->attributes_cleanup) remember_cleanup("handoff-attributes-destroy", "errno", handoff->attributes_cleanup);
+  command_guard_at(false, __func__, __LINE__, handoff->operation, handoff->kind, handoff->value, handoff->value, 126);
+}
 static void command_expire(int value) { (void)value; command_expired = 1; }
 static void command_hex(const unsigned char *bytes, size_t size) { for (size_t i=0;i<size;i++) printf("%02x",bytes[i]); }
 static void command_path(char *out, const char *leaf) { need(snprintf(out,4096,"%s/%s",command_root,leaf)>0 && strlen(out)<4095); }
@@ -423,19 +429,15 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
     pid_t child=fork();command_observed(child>=0, child, errno);
     if(!child){
       command_native(close(birth[1]), == 0);
-      posix_spawnattr_t attributes;posix_spawn_file_actions_t files;
-      command_native(posix_spawnattr_init(&attributes), == 0);command_native(posix_spawn_file_actions_init(&files), == 0);
-      command_native(posix_spawnattr_setflags(&attributes,POSIX_SPAWN_SETEXEC|POSIX_SPAWN_START_SUSPENDED|POSIX_SPAWN_CLOEXEC_DEFAULT), == 0);
-      command_native(posix_spawn_file_actions_adddup2(&files,input[0],0), == 0);command_native(posix_spawn_file_actions_adddup2(&files,output[1],1), == 0);
-      command_native(posix_spawn_file_actions_adddup2(&files,errors[1],2), == 0);
       char home[4120],codex_home[4128],path_env[8192];need(snprintf(home,sizeof(home),"HOME=%s/%s",command_root,home_leaf)<(int)sizeof(home)&&snprintf(codex_home,sizeof(codex_home),"CODEX_HOME=%s/%s",command_root,home_leaf)<(int)sizeof(codex_home));
       char directory[4096];need(strlen(command_image)<sizeof(directory));strcpy(directory,command_image);char *last=strrchr(directory,'/');need(last);*last=0;
       need(snprintf(path_env,sizeof(path_env),"PATH=%s/codex-path:/usr/bin:/bin",directory)<(int)sizeof(path_env));
       char *environment[]={home,codex_home,path_env,"LANG=C","CI=true","GITHUB_ACTIONS=true","RUNNER_ENVIRONMENT=github-hosted","RUNNER_OS=macOS",NULL};
+      struct exec_handoff handoff = {0}; int descriptors[] = {input[0], output[1], errors[1]};
+      if (!exec_handoff_prepare(&handoff, descriptors, 3)) command_handoff_refuse(&handoff);
       /* No target exec is possible before the root's one-shot X. EOF refuses. */
-      command_native(write(receipt[1],"B",1), == 1);
-      command_native(read(exec_gate[0],&byte,1), == 1);need(byte=='X');command_native(close(exec_gate[0]), == 0);
-      command_native(posix_spawn(NULL,args[0],&files,&attributes,args,environment), == 0);need(0);_exit(126);
+      exec_handoff_execute(&handoff, exec_gate[0], receipt[1], args[0], args, environment);
+      command_handoff_refuse(&handoff);_exit(126);
     }
     command_native(close(exec_gate[0]), == 0);command_native(close(receipt[1]), == 0);command_native(write(birth[1],&child,sizeof(child)), == sizeof(child));
     close(birth[1]);close(input[0]);close(output[1]);close(errors[1]);int status;command_native(waitpid(child,&status,0), == child);_exit(WIFEXITED(status)?WEXITSTATUS(status):126);
@@ -455,7 +457,8 @@ static struct identity command_spawn(char **args, const char *home_leaf) {
   command_native(read(birth[0],&child,sizeof(child)), == sizeof(child));command_native(close(birth[0]), == 0);
   struct identity identity;need(inspect(child,&identity));need(identity.bsd.pbi_ppid==wrapper && identity.bsd.pbi_svuid==command_uid && identity.bsd.pbi_svgid==command_gid && identity.token.val[6]==owner.token.val[6]);
   for(unsigned i=0;i<5;i++)need(identity.token.val[i]==owner.token.val[i]);
-  command_native(read(command_exec_receipt,&byte,1), == 1);need(byte=='B');
+  struct exec_handoff handoff = {0};
+  if (!exec_handoff_receive(&handoff, command_exec_receipt, false)) command_handoff_refuse(&handoff);
   command_image_identity(identity,command_helper,command_helper_hash);command_executable();
   command_native(feasibility_sandbox_active(sandbox_binding,child), == 1);
   command_in=input[1];command_out=output[0];command_err=errors[0];return identity;
@@ -477,20 +480,18 @@ static struct identity command_exec(struct identity parked, const char *operatio
   command_image_identity(parked,command_helper,command_helper_hash);command_executable();command_policy_check();
   command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)parked.token.val[5]), == 1);
   command_release_ready();need(live(command_launch_owner) && live(parked));
-  command_native(write(command_exec_gate,"X",1), == 1);command_native(close(command_exec_gate), == 0);command_exec_gate=-1;
+  struct exec_handoff handoff = {0};
+  if (!exec_handoff_release(&handoff, &command_exec_gate)) command_handoff_refuse(&handoff);
   fd_set ready;
   for(;;){command_release_ready();command_wait(&ready,true,true,false,1000);command_drain();
     command_release_ready();if(FD_ISSET(command_exec_receipt,&ready))break;}
-  char byte;command_native(read(command_exec_receipt,&byte,1), == 0);
+  if (!exec_handoff_receive(&handoff, command_exec_receipt, true)) command_handoff_refuse(&handoff);
   struct proc_bsdinfo state;
   for(;;){command_release_ready();command_native(proc_pidinfo((pid_t)parked.token.val[5],PROC_PIDTBSDINFO,0,&state,sizeof(state)), == sizeof(state));
     need(state.pbi_start_tvsec==parked.bsd.pbi_start_tvsec && state.pbi_start_tvusec==parked.bsd.pbi_start_tvusec && state.pbi_status!=SZOMB);
     if(state.pbi_status==SSTOP)break;command_poll();}
   struct identity target;need(inspect((pid_t)parked.token.val[5],&target));
-  need(target.bsd.pbi_status==SSTOP && target.bsd.pbi_start_tvsec==parked.bsd.pbi_start_tvsec && target.bsd.pbi_start_tvusec==parked.bsd.pbi_start_tvusec &&
-    target.bsd.pbi_svuid==parked.bsd.pbi_svuid && target.bsd.pbi_svgid==parked.bsd.pbi_svgid &&
-    target.token.val[7]!=parked.token.val[7]);
-  for(unsigned i=0;i<7;i++)need(target.token.val[i]==parked.token.val[i]);
+  need(exec_handoff_identity(parked, target));
   command_executable();command_policy_check();command_image_identity(target,command_exec_path,command_exec_hash);
   command_native(feasibility_sandbox_active(sandbox_binding,(pid_t)target.token.val[5]), == 1);
   command_release_ready();need(live(command_launch_owner));

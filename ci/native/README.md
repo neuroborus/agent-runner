@@ -3505,6 +3505,15 @@ a fresh owned empty home and an eight-key credential-free environment to
 disable web search and MCP integrations; both command policies deny network and
 exclude ambient temporary write authority.
 
+The CI-private `darwin/exec-handoff.h` shares prepared suspended SETEXEC actions,
+private gate/receipt operations and the unchanged PID/birth/session/credentials
+with changed audit pidversion predicate. The command path consumes it directly.
+It grants no admission or continuation authority: command-owned held image and
+policy checks, live custody, BSM draining and trace acknowledgements still precede
+identity-bound continuation. Gate EOF, receipt EOF and SSTOP alone never release
+the target. Every returned SETEXEC refuses, including zero and positive POSIX
+errors; initialized spawn objects receive independent checked cleanup on refusal.
+
 Before any Codex release, a root prerequisite control must establish a cloned
 LOCAL audit pipe, native task/audit identities, audit-token signalling and complete
 all-UID membership of a fresh held audit session through its retirement. The
@@ -3522,7 +3531,9 @@ legacy-macro fallback. Prerequisite reporting retains that SDK-bound version;
 the native token reader and JavaScript decoder reject captured versions that
 disagree with it. An observed record never chooses its own accepted version.
 Ordinary and opt-in command build recipes retain independent compiler/SDK
-identities and actual source digests, including the command header when enabled.
+identities and actual source digests, including both command and shared handoff
+headers when enabled. Their pins are checked before and after compilation; the
+command build receipt carries `handoffSourceSha256`, freshly rejoined before use.
 The command file and FIFO readers pass their held stat snapshots to the shared
 ACL inspection. Portable source and injected fixtures establish neither actual
 SDK compilation nor native admission; both variants still require matching macOS CI.

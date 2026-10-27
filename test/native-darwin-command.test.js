@@ -25,6 +25,10 @@ import {
 
 const sha = (value) => createHash("sha256").update(value).digest("hex"),
   PIN = sha("fixture");
+const handoffSource = await readFile(
+  new URL("../ci/native/darwin/exec-handoff.h", import.meta.url),
+  "utf8",
+);
 const identity = {
   pid: 123,
   pidVersion: 2,
@@ -51,6 +55,18 @@ function commandGuards(header, helper, body, caller, options = {}) {
     project = (value) =>
       value
         .replaceAll("->", ".")
+        .replace(
+          "struct exec_handoff handoff = {0};",
+          "const handoff={files:{},attributes:{}};",
+        )
+        .replace(
+          /int descriptors\[\] = \{([^}]+)\};/gu,
+          "const descriptors=[$1];",
+        )
+        .replaceAll("*gate", "gate.value")
+        .replaceAll(/(?<!&)&handoff\.(attributes|files)\b/gu, "handoff.$1")
+        .replaceAll(/(?<!&)&handoff\b/gu, "handoff")
+        .replace(/\bchar byte = expected;/gu, "let byte = expected;")
         .replace("const char *previous_cleanup=", "const previous_cleanup=")
         .replace(
           /int \*owned\[\]=\{([^}]+)\};/gu,
@@ -64,6 +80,10 @@ function commandGuards(header, helper, body, caller, options = {}) {
               .join(",")}];`,
         )
         .replaceAll("*owned[i]", "owned[i].value")
+        .replaceAll(
+          "&command_exec_gate",
+          "{get value(){return command_exec_gate},set value(v){command_exec_gate=v}}",
+        )
         .replace(/^#(?:ifdef|endif).*$/gmu, "")
         .replace("pid_t pids[4096];", "const pids=[];")
         .replace(
@@ -132,7 +152,10 @@ function commandGuards(header, helper, body, caller, options = {}) {
         )
         .replace(/(?<!&)&foreign\b/gu, "{set value(v){foreign=v}}")
         .replace(/(?<!&)&right\b/gu, "{set value(v){right=v}}")
-        .replace(/(?<!&)&byte\b/gu, "{set value(v){byte=v}}")
+        .replace(
+          /(?<!&)&byte\b/gu,
+          "{get value(){return byte},set value(v){byte=v}}",
+        )
         .replace(
           /(?<!&)&(prerequisite_status)\b/gu,
           "{set value(v){prerequisite_status=v}}",
@@ -267,6 +290,29 @@ function commandGuards(header, helper, body, caller, options = {}) {
     [helper, "failure", "code"],
     [header, "command_guard_at", "ok,caller,line,guard,kind,result,error,code"],
     [header, "command_failure", ""],
+    ...(options.handoff || options.exec || body.includes("exec_handoff_")
+      ? [
+          [
+            handoffSource,
+            "exec_handoff_check",
+            "handoff,ok,operation,kind,value",
+          ],
+          [handoffSource, "exec_handoff_posix", "handoff,result,operation"],
+          [handoffSource, "exec_handoff_prepare", "handoff,descriptors,count"],
+          [handoffSource, "exec_handoff_destroy", "handoff"],
+          [handoffSource, "exec_handoff_byte", "handoff,fd,sending,expected"],
+          [handoffSource, "exec_handoff_close", "handoff,fd"],
+          [
+            handoffSource,
+            "exec_handoff_execute",
+            "handoff,gate,receipt,image,argv,environment",
+          ],
+          [handoffSource, "exec_handoff_release", "handoff,gate"],
+          [handoffSource, "exec_handoff_receive", "handoff,receipt,replaced"],
+          [handoffSource, "exec_handoff_identity", "parked,target"],
+          [header, "command_handoff_refuse", "handoff"],
+        ]
+      : []),
     ...(options.wait || options.coldAck || options.exec
       ? [
           [
@@ -2543,85 +2589,272 @@ test("Darwin launch checks unused pipe ends before advancing either owner", asyn
   }
 });
 
-test("Darwin pre-exec child needs its private one-shot byte before replacing itself", async () => {
+test("Darwin command creator receipt must acknowledge the private pre-exec child", async () => {
   const [header, helper] = await Promise.all(
     ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
       readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
     ),
   );
-  const start = header.indexOf('    command_native(write(receipt[1],"B",1)'),
-    end = header.indexOf("\n    }", start),
-    flags = /command_native\(posix_spawnattr_setflags\([^;]+;/u.exec(
-      header,
-    )?.[0];
-  assert.ok(start > 0 && end > start && flags);
+  const start = header.indexOf(
+      "  struct exec_handoff handoff = {0};\n  if (!exec_handoff_receive",
+    ),
+    end = header.indexOf("  command_in=", start);
+  assert.ok(start > 0 && end > start);
   for (const [count, byte] of [
+    [1, "B"],
     [1, "X"],
-    [1, "T"],
     [0, ""],
     [-1, ""],
   ]) {
     const calls = [],
-      executed = new Error("Exec replaced helper"),
       f = commandGuards(
         header,
         helper,
-        `let byte;${(flags + header.slice(start, end)).replaceAll(/&(files|attributes)\b/gu, "$1")}`,
+        header.slice(start, end),
         "command_spawn",
         {
           context: {
             command_prerequisite: false,
-            POSIX_SPAWN_SETEXEC: 1,
-            POSIX_SPAWN_START_SUSPENDED: 2,
-            POSIX_SPAWN_CLOEXEC_DEFAULT: 4,
-            posix_spawnattr_setflags(_attributes, flags) {
-              assert.equal(flags, 7);
-              calls.push("flags");
-              return 0;
-            },
-            receipt: [41, 42],
-            exec_gate: [43, 44],
-            args: ["/fixture/codex"],
-            files: {},
-            attributes: {},
-            environment: [],
-            write(fd, value) {
-              assert.deepEqual([fd, value], [42, "B"]);
-              calls.push("ready");
-              return 1;
-            },
+            command_owner: 0,
+            command_exec_receipt: 42,
+            identity: {},
+            command_helper: "/fixture/helper",
+            command_helper_hash: PIN,
+            sandbox_binding: {},
+            child: 123,
             read(fd, value) {
-              assert.equal(fd, 43);
+              assert.equal(fd, 42);
+              calls.push("receipt");
               value.value = byte;
-              calls.push("gate");
+              f.context.errno = 4;
               return count;
             },
-            close(fd) {
-              assert.equal(fd, 43);
-              calls.push("close");
-              return 0;
+            command_image_identity() {
+              calls.push("image");
             },
-            posix_spawn(pid, image) {
-              assert.equal(pid, null);
-              assert.equal(image, "/fixture/codex");
-              calls.push("exec");
-              throw executed;
+            command_executable() {
+              calls.push("held");
+            },
+            feasibility_sandbox_active() {
+              calls.push("sandbox");
+              return 1;
             },
           },
         },
       );
-    assert.throws(
-      () => f.run("/fixture/codex"),
-      (error) =>
-        count === 1 && byte === "X" ? error === executed : error.code === 126,
-    );
-    assert.deepEqual(
-      calls,
-      count === 1 && byte === "X"
-        ? ["flags", "ready", "gate", "close", "exec"]
-        : ["flags", "ready", "gate"],
-    );
+    if (count === 1 && byte === "B") {
+      f.run();
+      assert.deepEqual(calls, ["receipt", "image", "held", "sandbox"]);
+    } else {
+      assert.throws(f.run, { code: 126 });
+      assert.deepEqual(calls, ["receipt"]);
+    }
   }
+});
+
+test("Darwin shared handoff prepares descriptors, refuses every return and settles both spawn objects", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const setup = header.slice(
+      header.indexOf("      struct exec_handoff handoff"),
+      header.indexOf("      /* No target exec"),
+    ),
+    start = header.indexOf("      exec_handoff_execute("),
+    execute = header.slice(start, header.indexOf("\n    }", start));
+  assert.ok(
+    setup.includes("exec_handoff_prepare") &&
+      execute.includes("command_handoff_refuse"),
+  );
+  for (const fault of [
+    null,
+    "attributes-init",
+    "files-init",
+    "flags",
+    "dup-0",
+    "dup-1",
+    "dup-2",
+    "ready",
+    "gate-eof",
+    "gate-error",
+    "gate-byte",
+    "close",
+    "spawn-zero",
+    "spawn-error",
+    "spawn-error-cleanup",
+    "spawn-error-files-cleanup",
+    "spawn-error-attributes-cleanup",
+    "gate-error-cleanup",
+  ]) {
+    const calls = [],
+      executed = new Error("Exec replaced helper");
+    const api = (name) => {
+      calls.push(name);
+      return fault === name ? 22 : 0;
+    };
+    const f = commandGuards(header, helper, setup + execute, "command_spawn", {
+      handoff: true,
+      context: {
+        command_prerequisite: false,
+        command_owner: 0,
+        POSIX_SPAWN_SETEXEC: 1,
+        POSIX_SPAWN_START_SUSPENDED: 2,
+        POSIX_SPAWN_CLOEXEC_DEFAULT: 4,
+        input: [31],
+        output: [0, 32],
+        errors: [0, 33],
+        receipt: [41, 42],
+        exec_gate: [43, 44],
+        args: ["/fixture/codex"],
+        environment: ["CI=true"],
+        posix_spawnattr_init: () => api("attributes-init"),
+        posix_spawn_file_actions_init: () => api("files-init"),
+        posix_spawnattr_setflags(_attributes, flags) {
+          assert.equal(flags, 7);
+          return api("flags");
+        },
+        posix_spawn_file_actions_adddup2(_files, from, to) {
+          assert.equal(from, 31 + to);
+          return api(`dup-${to}`);
+        },
+        write(fd, value) {
+          assert.deepEqual([fd, value.value ?? value], [42, "B"]);
+          calls.push("ready");
+          f.context.errno = 5;
+          return fault === "ready" ? -1 : 1;
+        },
+        read(fd, value) {
+          assert.equal(fd, 43);
+          calls.push("gate");
+          value.value = fault === "gate-byte" ? "T" : "X";
+          f.context.errno = 4;
+          return fault?.startsWith("gate-error")
+            ? -1
+            : fault === "gate-eof"
+              ? 0
+              : 1;
+        },
+        close(fd) {
+          assert.equal(fd, 43);
+          calls.push("close");
+          f.context.errno = 5;
+          return fault === "close" ? -1 : 0;
+        },
+        posix_spawn(pid, image, _files, _attributes, argv, environment) {
+          assert.equal(pid, null);
+          assert.equal(image, argv[0]);
+          assert.equal(environment[0], "CI=true");
+          calls.push("exec");
+          f.context.errno = 91;
+          if (fault === null) throw executed;
+          return fault === "spawn-zero" ? 0 : 35;
+        },
+        posix_spawn_file_actions_destroy() {
+          calls.push("files-destroy");
+          return fault?.endsWith("cleanup") &&
+            fault !== "spawn-error-attributes-cleanup"
+            ? 11
+            : 0;
+        },
+        posix_spawnattr_destroy() {
+          calls.push("attributes-destroy");
+          return fault?.endsWith("cleanup") &&
+            fault !== "spawn-error-files-cleanup"
+            ? 12
+            : 0;
+        },
+      },
+    });
+    assert.throws(f.run, (error) => {
+      if (fault === null) return error === executed;
+      assert.equal(error.code, 126, fault);
+      const value = [
+        "attributes-init",
+        "files-init",
+        "flags",
+        "dup-0",
+        "dup-1",
+        "dup-2",
+      ].includes(fault)
+        ? 22
+        : fault.startsWith("gate-error")
+          ? 4
+          : ["ready", "close"].includes(fault)
+            ? 5
+            : fault.startsWith("spawn-error")
+              ? 35
+              : 0;
+      assert.equal(error.value, value, fault);
+      assert.equal(error.kind, value ? "errno" : "invariant", fault);
+      assert.deepEqual(
+        error.cleanup,
+        fault.endsWith("cleanup")
+          ? fault === "spawn-error-attributes-cleanup"
+            ? ["handoff-attributes-destroy", "errno", 12]
+            : ["handoff-files-destroy", "errno", 11]
+          : null,
+      );
+      return true;
+    });
+    assert.equal(
+      calls.includes("exec"),
+      fault === null || fault.startsWith("spawn-"),
+      fault,
+    );
+    assert.equal(
+      calls.includes("files-destroy"),
+      fault !== null && !["attributes-init", "files-init"].includes(fault),
+      fault,
+    );
+    assert.equal(
+      calls.includes("attributes-destroy"),
+      fault !== null && fault !== "attributes-init",
+      fault,
+    );
+    if (fault?.endsWith("cleanup"))
+      assert.ok(
+        calls.indexOf("files-destroy") < calls.indexOf("attributes-destroy"),
+      );
+  }
+});
+
+test("Darwin shared spawn cleanup does not retry an uncertain destroy", async () => {
+  const [header, helper] = await Promise.all(
+    ["feasibility-command.h", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(`../ci/native/darwin/${name}`, import.meta.url), "utf8"),
+    ),
+  );
+  const calls = [],
+    handoff = { files_owned: true, attributes_owned: true },
+    f = commandGuards(
+      header,
+      helper,
+      "exec_handoff_destroy(handoff);exec_handoff_destroy(handoff);",
+      "exec_handoff_destroy",
+      {
+        context: {
+          handoff,
+          posix_spawn_file_actions_destroy() {
+            calls.push("files");
+            return 11;
+          },
+          posix_spawnattr_destroy() {
+            calls.push("attributes");
+            return 12;
+          },
+        },
+      },
+    );
+  f.run();
+  assert.deepEqual(calls, ["files", "attributes"]);
+  assert.deepEqual(handoff, {
+    files_owned: false,
+    attributes_owned: false,
+    files_cleanup: 11,
+    attributes_cleanup: 12,
+  });
 });
 
 test("Darwin exec verifies the held image, policy and new epoch before target resume", async () => {
@@ -2648,6 +2881,7 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
     "held",
     "policy",
     "write",
+    "gate-close",
     "receipt",
     "receipt-error",
     "wait-error",
@@ -2658,6 +2892,9 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
     "session",
     "tracer-parent",
     "saved",
+    "saved-gid",
+    "birth-usec",
+    ...[0, 2, 3, 4, 5].map((index) => `token-${index}`),
     "image",
     "sandbox",
     "expired-late",
@@ -2688,6 +2925,9 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
     if (fault === "session") target.token.val[6]++;
     if (fault === "tracer-parent") target.bsd.pbi_ppid = 900;
     if (fault === "saved") target.bsd.pbi_svuid++;
+    if (fault === "saved-gid") target.bsd.pbi_svgid++;
+    if (fault === "birth-usec") target.bsd.pbi_start_tvusec++;
+    if (fault?.startsWith("token-")) target.token.val[Number(fault.slice(6))]++;
     const projected = body
       .replace("struct proc_bsdinfo state;", "const state={};")
       .replace(
@@ -2798,13 +3038,14 @@ test("Darwin exec verifies the held image, policy and new epoch before target re
           return fault === "sandbox" ? 0 : 1;
         },
         write(fd, value) {
-          assert.deepEqual([fd, value], [41, "X"]);
+          assert.deepEqual([fd, value.value ?? value], [41, "X"]);
           calls.push("X");
           return fault === "write" ? -1 : 1;
         },
         close(fd) {
           calls.push(`close:${fd}`);
-          return 0;
+          f.context.errno = 5;
+          return fault === "gate-close" && fd === 41 ? -1 : 0;
         },
         read(fd) {
           assert.equal(fd, 42);

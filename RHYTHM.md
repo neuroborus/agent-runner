@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Share suspended Darwin exec mechanics without admission authority
+
+The finite command path now consumes a CI-private handoff owner for prepared
+SETEXEC/START_SUSPENDED/CLOEXEC_DEFAULT actions, private gate/receipt I/O and the
+unchanged identity/new audit epoch predicate. Builds pin and recheck that header;
+command preparation rejoins the recorded source digest. Image/policy validation,
+capture, trace acknowledgements, custody and continuation stay command-owned.
+Every SETEXEC return refuses, with independent initialized-object cleanup. This
+extraction supplies reusable mechanics, not full-domain admission or native PASS.
+
 ## 2026-10-27 — Fence experimental Darwin bootstrap before helper initialization
 
 Ordinary launcher spawns and same-process fault-custodian SETEXEC use the selected
