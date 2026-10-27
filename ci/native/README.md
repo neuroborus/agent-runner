@@ -222,31 +222,57 @@ custody or disposing the host. It preserves command/sequence/source/line/error,
 candidate/nonce, original PID/creation FILETIME, held image identity/hash and the
 existing creation/release observations. The timestamp immediately before the
 existing R send and its successful dispatch do not establish exact resume time.
-One diagnostic thread queries already-produced Security 4656 Audit Failure
-records in that release-to-refusal interval. Typed payload PID/image and available
-principal/logon fields accompany provider/schema, time, object type/name,
-access mask/reason and outcome keywords; the logging provider's execution PID
-is never substituted. Known Application Error payload identity/birth can only
+Before original literal R dispatch, the same one-shot collector thread arms a
+Security 4656 Audit Failure pull subscription with
+`EvtSubscribeToFutureEvents | EvtSubscribeStrict`. Reader-owned, non-inherited
+readiness/refusal/stop events coordinate its handoff. Native arming success or
+actual failure is published independently of later readback; readiness waits
+consume only the existing remaining budget and never change release authorization.
+The worker waits for a completely latched refusal before readback or event
+classification, preserving context-first publication. It drains through service
+notifications, resetting before enumeration so arrival after an empty drain
+retains its wakeup. Empty queues remain nonterminal until a bound failed request,
+settlement, error, exhaustion or the original deadline. Zero-match expiry is
+expired/incomplete, never proof of audit absence; missing audit policy or object
+auditing can leave a fully armed subscription without a matching event.
+
+Typed payload PID/image/principal, supported provider/version/failure keywords,
+release-to-refusal event time and nonempty object type/name plus a nonzero 32-bit
+access mask are required for a failed-request join. The original held release
+binding and token metadata must remain valid. Native readiness and delivery
+timestamps distinguish event occurrence from delayed delivery and reject
+inconsistent ordering. Principal/logon fields, mask/reason and outcome keywords
+remain explicit; the logging provider's execution PID is never substituted.
+A match identifies an original failed handle request, not the first causal
+loader failure or a returned NTSTATUS. Original exit status and observer API
+errors remain separate. Known Application Error payload identity/birth can only
 corroborate; unsupported Application/CodeIntegrity schemas remain unjoined.
 Optional channels are inspected only when already enabled; no audit policy,
 channel or SACL is enabled. No source is assumed to contain the denied operation.
-All queries share one non-resetting 30-second release-based deadline, 64 examined
+Subscription, readback and optional queries share one non-resetting 30-second
+budget starting before release capture, 64 examined
 records and a 64-KiB encoded diagnostic frame including context/completion and
 transport framing. Raw collector text is capped at 32256 bytes, reserving room
 for hex encoding and the closed transport header.
-Query/enumeration/render/normal closure stay on their creating thread. Expiry
-requests cancellation only of an available query handle, publishes synchronized
-partial data and continues the original fatal path without waiting for a stuck
-query. Fatal-reader-owned static state/unfinished thread custody survives until
-process exit. Unstarted or expired queries remain unavailable/incomplete and
-never become an empty completed inspection. Empty, inaccessible, malformed, unavailable, over-budget, truncated
+Subscription/enumeration/render/normal closure stay on their creating thread.
+The worker cancels its subscription through `EvtClose`; only the existing
+optional query handle supports the separate query-cancellation path.
+Uncertain subscription closure retains its notification until reader-process exit.
+Normal output, failed dispatch, invalidation and teardown request settlement
+without a new deadline. Thread and handoff handles close once, only after
+confirmed thread completion. Pending native calls retain static state and all
+resources they may use until completion or reader-process exit; borrowed custody
+is never closed by this worker. Partial publication continues the original fatal
+path without waiting beyond the existing budget. Unstarted or expired capture
+remains unavailable/incomplete and never becomes an empty completed inspection.
+Empty, inaccessible, malformed, unavailable, over-budget, truncated
 and closure/cancellation uncertainty remain distinct. Neither cancellation nor
 reader exit proves independent retirement. The original child exit and actual
 API errors retain their existing framing; absent or corroborating records
 leave the denied operation unestablished. Further repairs require fresh joined
 matching-host evidence and a reviewed plan.
 
-At the start of that same worker, literal experiment refusals sample the retained
+After the refusal handoff, that same worker samples the retained
 original token and seven fixed held resources: image `[6]` (read data, execute),
 workspace `[4]` (traverse, list, add file/subdirectory), storage `[3]`, case `[1]`,
 custody `[2]`, outer `[0]` (one traverse each), then the materialized policy file
@@ -308,7 +334,7 @@ shared 64 examined-record allowance. Nine mandatory coverage rows bring the
 maximum to 83 lines including context/completion within the unchanged byte caps
 and reserved completion space. Separate readback row and
 probe counts, unstarted/partial/complete state, unavailable observations and
-cleanup uncertainty do not change Event Log records, joins or empty-query facts.
+cleanup uncertainty never substitute for joined original failed-request evidence.
 An unavailable synchronized publication leaves readback state unavailable.
 Missing rows prove neither grants nor denials. Original error/errno precedence,
 unfinished-thread custody through fatal-reader exit and independent retirement
@@ -323,7 +349,7 @@ classes map to documented public readers rather than inferred private layouts:
 
 | Class                  | Reader and observation limit                                                                                                                                                                                                          |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Request/status         | Existing typed Security 4656 query; available original requests, never complete tracing or a proven first request                                                                                                                     |
+| Request/status         | Pre-release Security 4656 pull subscription and typed failed-request join; conditional original request identification, never complete tracing or a proven first request                                                              |
 | Declared imports       | Public [PE import/delay-import directories](https://learn.microsoft.com/en-us/windows/win32/debug/pe-format), bounded same-file `ReOpenFile` read; declarations only                                                                  |
 | Loader dependencies    | [CreateToolhelp32Snapshot](https://learn.microsoft.com/en-us/windows/win32/api/tlhelp32/nf-tlhelp32-createtoolhelp32snapshot), `Module32FirstW`/`Module32NextW`; available pre-release module snapshots, not a completed loader graph |
 | KnownDLL objects       | Unsupported; module names do not identify section objects                                                                                                                                                                             |

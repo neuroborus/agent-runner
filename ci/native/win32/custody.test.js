@@ -3061,6 +3061,7 @@ test("actual witness completion preserves original child and parent refusals bef
       reader_witness: { active: false, child: Buffer.alloc(1024) },
       reader_diagnostics_ready: true,
       ownership_refusal_collect: () => {},
+      refusal_settle: () => {},
       reader_command: outsideControl
         ? "ownership-outside-control"
         : "ownership-witness",
@@ -3784,6 +3785,7 @@ test("Windows custody EOF refuses a lost response while reader diagnostics remai
       diagnosticProgram.runInNewContext({
         reader_diagnostics_ready: true,
         ownership_refusal_collect: () => {},
+        refusal_settle: () => {},
         signature_trust: { active: false },
         reader_witness_failure: () => false,
         ownership_failure_write: () => false,
@@ -4946,6 +4948,7 @@ test("original creator-census calls retain guard errors, clear successful contex
           reader_command: command,
           reader_diagnostics_ready: true,
           ownership_refusal_collect: () => {},
+          refusal_settle: () => {},
           signature_trust: { active: false },
           reader_witness_failure: () => false,
           ownership_failure_write: () => false,
@@ -6914,6 +6917,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
           capturedError: refusalError,
           reader_diagnostics_ready: true,
           ownership_refusal_collect: () => {},
+          refusal_settle: () => {},
           signature_trust: { active: false },
           strrchr,
           reader_witness_failure: () => false,
@@ -6989,6 +6993,7 @@ test("Windows installed-input open guards diagnose only sampled failures and pre
   dispatch.runInNewContext({
     reader_diagnostics_ready: true,
     ownership_refusal_collect: () => {},
+    refusal_settle: () => {},
     signature_trust: { active: false },
     strrchr,
     reader_open_failure() {
@@ -12900,6 +12905,7 @@ test("original-child diagnostics use the actual guard and immediate authenticate
         error = 5;
         return fault !== "mode";
       },
+      refusal_settle: () => {},
       ownership_refusal_collect(source, line, value) {
         if (api.original_refusal.tried) return;
         Object.assign(api.original_refusal, {
@@ -13673,6 +13679,8 @@ test("actual retained startup readback selects only held resources and masks and
         to: 1000,
       },
       original_release: freshRelease(),
+      refusal_arm: () => calls.push("arm"),
+      refusal_settle: () => {},
       startup_capture: () => {},
       candidate: "a".repeat(40),
       nonce: "b".repeat(32),
@@ -14515,19 +14523,19 @@ test("literal output drains the original pipe before exit and shares the release
   }
 });
 
-test("original-child refusal collection owns bounded partial publication and cancellation until the fatal reader exits", async () => {
+test("original-child capture arms before release and retains delayed delivery and owned settlement", async () => {
   const source = await readFile(
     new URL("custody-reader.c", import.meta.url),
     "utf8",
   );
   const body = (name) =>
     new RegExp(
-      `static (?:void|DWORD(?: WINAPI)?) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+      `static (?:void|BOOL|EVT_HANDLE|DWORD(?: WINAPI)?) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
       "u",
     ).exec(source)[1];
   const project = (text) =>
     text
-      .replace(
+      .replaceAll(
         "struct refusal_report report=original_refusal.report;",
         "let report=structuredClone(original_refusal.report);",
       )
@@ -14537,12 +14545,22 @@ test("original-child refusal collection owns bounded partial publication and can
         "report=original_refusal.report;",
         "report=structuredClone(original_refusal.report);",
       )
+      .replaceAll("goto finished;", "break collecting;")
       .replace(
-        "goto finished;",
-        "report.finished=true;refusal_publish(null,report);return 0;",
+        "report.armed=subscription!=NULL;",
+        "collecting:{report.armed=subscription!=NULL;",
+      )
+      .replace("\nfinished:", "}\n")
+      .replace(
+        "if(!report)report=&original_refusal.report;",
+        "if(!report)report=original_refusal.report;",
       )
       .replace(
         "original_refusal.report=*report;",
+        "original_refusal.report=structuredClone(report);",
+      )
+      .replace(
+        "original_refusal.report=report;",
         "original_refusal.report=structuredClone(report);",
       )
       .replaceAll("report->", "report.")
@@ -14554,6 +14572,8 @@ test("original-child refusal collection owns bounded partial publication and can
       .replace("WCHAR from[32],to[32];", "const from={},to={};")
       .replace("WCHAR expression[1024];", "const expression={};")
       .replace("EVT_VARIANT enabled={0};", "const enabled={};")
+      .replace(/(signals|handles)\[\]=\{([^}]+)\}/gu, "$1=[$2]")
+      .replaceAll("WaitForMultipleObjects(", "yield WaitForMultipleObjects(")
       .replace("FILETIME time;", "const time={};")
       .replace(
         "((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime",
@@ -14603,20 +14623,29 @@ test("original-child refusal collection owns bounded partial publication and can
       .replaceAll('L"', '"')
       .replace(/\((?:DWORD|ULONGLONG|void)\)/gu, "")
       .replace(
-        /\b(?:const )?(?:EVT_HANDLE|DWORD|BOOL|LONGLONG|ULONGLONG|unsigned|size_t|int) /gu,
+        /\b(?:const )?(?:EVT_HANDLE|HANDLE|DWORD|BOOL|LONGLONG|ULONGLONG|unsigned|size_t|int) /gu,
         "let ",
       );
   const program = new Script(
     [
       ["refusal_remaining", ""],
       ["refusal_publish", "line,report"],
+      ["refusal_render_context", "channel"],
+      ["refusal_stopped", "report"],
       ["refusal_worker", "unused"],
+      ["refusal_reap", ""],
+      ["refusal_settle", ""],
+      ["refusal_arm", ""],
+      ["release_invalidate", ""],
       ["ownership_refusal_collect", "source,line,error"],
     ]
-      .map(
-        ([name, args]) => `function ${name}(${args}){${project(body(name))}}`,
+      .map(([name, args]) =>
+        name === "refusal_worker"
+          ? `function* ${name}(${args}){${project(body(name))}}`
+          : `function ${name}(${args}){${project(body(name))}}`,
       )
-      .join("\n") + "\n({collect:ownership_refusal_collect})",
+      .join("\n") +
+      "\n({arm:refusal_arm,collect:ownership_refusal_collect,settle:refusal_settle,invalidate:release_invalidate})",
   );
   for (const fault of [
     null,
@@ -14648,13 +14677,46 @@ test("original-child refusal collection owns bounded partial publication and can
     "readback-pending",
     "readback-partial",
     "readback-complete",
+    "ready-create",
+    "wake-create",
+    "stop-create",
+    "notification-create",
+    "context-create",
+    "subscribe-pending",
+    "subscription-next-pending",
+    "subscription-close",
+    "notification-close",
+    "reset",
+    "handoff",
+    "arm-wait",
+    "signal",
+    "wake-signal",
+    "subscribe-zero",
+    "next-failed-output",
+    "normal-output",
+    "failed-dispatch",
+    "invalidate",
+    "race-before-reset",
+    "race-after-empty",
+    "arming-expired",
+    "context-deadline",
+    "arming-stopped",
+    "optional-failed-output",
+    "next-count",
+    "optional-count",
   ]) {
     let tick =
         fault === "already-expired" ? 30001 : fault === "remaining" ? 7000 : 0,
       lastError = 109,
       worker = false,
       locked = false,
-      entry;
+      entry,
+      iterator,
+      pending,
+      nativePending = false,
+      done = false,
+      eventCount = 0,
+      drains = 0;
     const calls = [],
       writes = [],
       closed = new Set(),
@@ -14662,6 +14724,13 @@ test("original-child refusal collection owns bounded partial publication and can
     let serial = 0;
     const text = (v) => (typeof v === "object" ? (v?.text ?? "") : String(v));
     const freshReport = () => ({
+      arming: -1,
+      armed: false,
+      ready: 0,
+      delivery: 0,
+      requestBound: false,
+      interrupted: false,
+      handoffError: 0,
       examined: 0,
       records: 0,
       joined: 0,
@@ -14682,6 +14751,20 @@ test("original-child refusal collection owns bounded partial publication and can
       requestStatusRecords: 0,
     });
     const handle = (kind) => ({ kind, serial: serial++, next: 0 });
+    const advance = (value) => {
+      worker = true;
+      try {
+        iterator ??= entry(null);
+        const next = iterator.next(value);
+        done = next.done;
+        pending = next.value;
+      } catch (error) {
+        assert.equal(error, blocked);
+        nativePending = true;
+      } finally {
+        worker = false;
+      }
+    };
     const api = {
       structuredClone,
       freshReport,
@@ -14695,6 +14778,8 @@ test("original-child refusal collection owns bounded partial publication and can
       ERROR_INVALID_DATA: 13,
       ERROR_TIMEOUT: 1460,
       ERROR_NO_MORE_ITEMS: 259,
+      RELEASE_UNSTARTED: 0,
+      RELEASE_INVALIDATED: 2,
       WAIT_FAILED: 4294967295,
       WAIT_TIMEOUT: 258,
       WAIT_OBJECT_0: 0,
@@ -14703,6 +14788,8 @@ test("original-child refusal collection owns bounded partial publication and can
       EvtQueryChannelPath: 1,
       EvtQueryReverseDirection: 512,
       EvtRenderContextValues: 0,
+      EvtSubscribeToFutureEvents: 1,
+      EvtSubscribeStrict: 65536,
       original_refusal: {
         tried: false,
         sent: true,
@@ -14719,6 +14806,13 @@ test("original-child refusal collection owns bounded partial publication and can
         query: null,
         thread: null,
         report: freshReport(),
+        initialized: false,
+        latched: false,
+        reaped: false,
+        createError: 0,
+        armWaitError: 0,
+        notifyClose: 0,
+        reapError: 0,
       },
       original_release: {
         from: 0,
@@ -14756,16 +14850,28 @@ test("original-child refusal collection owns bounded partial publication and can
       readback_collect(report) {
         assert.equal(worker, true);
         assert.equal(locked, false);
-        if (!fault?.startsWith("readback-")) return;
+        assert.equal(api.original_refusal.latched, true);
+        assert.ok(
+          api.original_refusal.used > 0,
+          "Context precedes post-refusal reads",
+        );
+        calls.push("readback");
+        if (!fault?.startsWith("readback-") && fault !== "denied") return;
         report.readbackStarted = true;
         api.refusal_publish(null, report);
         if (fault === "readback-pending") throw blocked;
         Object.assign(report, {
           readbackTokens: 1,
-          readbackResources: fault === "readback-complete" ? 7 : 1,
-          readbackProbes: fault === "readback-complete" ? 10 : 2,
-          readbackUnavailable: fault === "readback-complete" ? 0 : 1,
-          readbackFinished: fault === "readback-complete",
+          readbackResources: ["readback-complete", "denied"].includes(fault)
+            ? 7
+            : 1,
+          readbackProbes: ["readback-complete", "denied"].includes(fault)
+            ? 10
+            : 2,
+          readbackUnavailable: ["readback-complete", "denied"].includes(fault)
+            ? 0
+            : 1,
+          readbackFinished: ["readback-complete", "denied"].includes(fault),
         });
         api.refusal_publish(null, report);
       },
@@ -14775,6 +14881,7 @@ test("original-child refusal collection owns bounded partial publication and can
         lastError = v;
       },
       GetTickCount64: () => tick,
+      readback_now: () => (api.original_refusal.latched ? 220 : 95),
       GetSystemTimePreciseAsFileTime: (out) => {
         out.ticks = 200;
       },
@@ -14845,23 +14952,117 @@ test("original-child refusal collection owns bounded partial publication and can
         }
         return 400;
       },
-      WaitForSingleObject(thread, remaining) {
-        assert.deepEqual([thread, remaining], [400, 30000 - tick]);
+      CreateEventW(sa, manual, initial, name) {
+        assert.deepEqual(
+          [sa, manual, initial, name],
+          [null, true, false, null],
+        );
+        const kind = ["ready", "wake", "stop", "notification"][eventCount++];
+        assert.equal(worker, kind === "notification");
+        if (fault === kind + "-create") {
+          lastError = 5;
+          return null;
+        }
+        if (kind === "notification" && fault === "arming-stopped")
+          api.original_refusal.stop.signaled = true;
+        return { ...handle(kind), signaled: false };
+      },
+      SetEvent(event) {
+        if (
+          (fault === "signal" && event.kind === "ready") ||
+          (fault === "wake-signal" && event.kind === "wake")
+        ) {
+          lastError = 6;
+          return false;
+        }
+        event.signaled = true;
+        if (
+          event.kind === "stop" &&
+          iterator &&
+          !done &&
+          !nativePending &&
+          !worker &&
+          fault !== "wait"
+        )
+          advance(0);
+        return true;
+      },
+      ResetEvent(event) {
+        assert.equal(worker, true);
+        assert.equal(event.kind, "notification");
+        calls.push("reset");
+        if (fault === "reset") {
+          lastError = 6;
+          return false;
+        }
+        event.signaled = false;
+        return true;
+      },
+      WaitForMultipleObjects(count, handles, all, remaining) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.equal(count, 2);
+        assert.equal(all, false);
+        assert.equal(remaining, Math.max(0, 30000 - tick));
+        return Array.from(handles);
+      },
+      WaitForSingleObject(event, remaining) {
+        if (event?.kind === "stop") {
+          assert.equal(remaining, 0);
+          return event.signaled ? 0 : 258;
+        }
+        if (event?.kind === "ready") {
+          assert.equal(remaining, 30000 - tick);
+          if (fault === "arming-expired") tick = 30001;
+          advance();
+          assert.equal(calls.includes("readback"), false);
+          assert.equal(
+            calls.includes("next"),
+            false,
+            "No classification before refusal",
+          );
+          if (fault === "arm-wait") {
+            lastError = 6;
+            return 4294967295;
+          }
+          if (!event.signaled) {
+            tick = 30001;
+            return 258;
+          }
+          return 0;
+        }
+        assert.equal(event, 400);
+        if (remaining === 0) return done ? 0 : 258;
+        assert.equal(remaining, Math.max(0, 30000 - tick));
         if (fault === "wait") {
           lastError = 6;
           return 4294967295;
         }
-        worker = true;
-        try {
-          entry(null);
-        } catch (error) {
-          assert.equal(error, blocked);
-          tick = 30001;
-          return 258;
-        } finally {
-          worker = false;
+        for (let turn = 0; !done && !nativePending; turn++) {
+          assert.ok(
+            turn < 8,
+            "Controlled notifications must settle without polling",
+          );
+          if (fault === "handoff" && pending[1].kind === "wake") {
+            lastError = 6;
+            advance(4294967295);
+            continue;
+          }
+          let selected = pending.findIndex((handle) => handle?.signaled);
+          if (
+            selected < 0 &&
+            pending[1]?.kind === "notification" &&
+            fault !== "empty"
+          ) {
+            tick += 7;
+            pending[1].signaled = true;
+            selected = 1;
+          }
+          if (selected < 0) tick = 30001;
+          advance(selected < 0 ? 258 : selected);
         }
-        return 0;
+        if (nativePending) tick = 30001;
+        return done ? 0 : 258;
       },
       EvtOpenChannelConfig() {
         assert.equal(worker, true);
@@ -14884,19 +15085,60 @@ test("original-child refusal collection owns bounded partial publication and can
       EvtCreateRenderContext(count, paths) {
         assert.equal(worker, true);
         assert.equal(locked, false);
+        calls.push("render-context");
         assert.equal(count, 15);
         assert.equal(paths.length, 15);
         assert.equal(
           paths.some((p) => p.includes("Execution")),
           false,
         );
+        if (fault === "context-create") {
+          lastError = 5;
+          return null;
+        }
+        if (fault === "context-deadline") tick = 30001;
         return handle("context");
+      },
+      EvtSubscribe(
+        session,
+        event,
+        channel,
+        query,
+        bookmark,
+        context,
+        callback,
+        flags,
+      ) {
+        assert.equal(worker, true);
+        assert.equal(locked, false);
+        assert.deepEqual(
+          [session, channel, bookmark, context, callback, flags],
+          [null, "Security", null, null, null, 65537],
+        );
+        assert.ok(query.includes("4656") && query.includes("4503599627370496"));
+        calls.push("subscribe");
+        if (fault === "subscribe-pending") throw blocked;
+        if (fault === "subscribe-zero") {
+          lastError = 0;
+          return null;
+        }
+        if (fault === "denied") {
+          lastError = 5;
+          return null;
+        }
+        event.signaled = true;
+        return handle("subscription");
       },
       EvtQuery(_session, channel, query) {
         assert.equal(worker, true);
         assert.equal(locked, false);
         assert.ok(query.text.includes('"100"') && query.text.includes('"200"'));
         calls.push(`query:${channel}`);
+        assert.notEqual(
+          channel,
+          "Security",
+          "The original Security collector has one subscription only",
+        );
         if (fault === "query-pending") throw blocked;
         if (fault === "denied") {
           lastError = 5;
@@ -14909,6 +15151,29 @@ test("original-child refusal collection owns bounded partial publication and can
         assert.equal(locked, false);
         assert.deepEqual([count, timeout], [1, 0]);
         calls.push("next");
+        if (
+          query.kind === "query" &&
+          ["optional-failed-output", "optional-count"].includes(fault)
+        ) {
+          out.value = api.entries[6].file;
+          lastError = 5;
+          return fault === "optional-count";
+        }
+        if (query.kind === "subscription") {
+          assert.equal(api.original_refusal.latched, true);
+          if (fault === "subscription-next-pending") throw blocked;
+          if (["next-failed-output", "next-count"].includes(fault)) {
+            out.value = api.entries[6].file;
+            lastError = 5;
+            return fault === "next-count";
+          }
+          if (drains++ === 0 && fault !== "race-before-reset") {
+            if (fault === "race-after-empty") pending[1].signaled = true;
+            lastError = 259;
+            return false;
+          }
+          assert.ok(calls.lastIndexOf("reset") === calls.length - 2);
+        }
         if (["next-pending", "cancel"].includes(fault)) throw blocked;
         if (
           fault === "empty" ||
@@ -14932,6 +15197,7 @@ test("original-child refusal collection owns bounded partial publication and can
         }
         report.records++;
         report.joined += channel === 0;
+        report.requestStatusRecords += channel === 0;
         api.refusal_publish(
           "native-windows-original-child: record " +
             "x".repeat(fault === "byte-cap" ? 5000 : 5) +
@@ -14942,6 +15208,12 @@ test("original-child refusal collection owns bounded partial publication and can
       EvtClose(value) {
         assert.equal(worker, true);
         assert.equal(locked, false);
+        assert.ok(
+          ["event", "context", "query", "subscription", "channel"].includes(
+            value.kind,
+          ),
+          "Failed getter output is not owned",
+        );
         assert.equal(closed.has(value), false);
         calls.push(`close:${value.kind}`);
         if (fault === value.kind + "-close") {
@@ -14955,17 +15227,28 @@ test("original-child refusal collection owns bounded partial publication and can
         assert.equal(worker, false);
         assert.equal(locked, true);
         assert.equal(query, api.original_refusal.query);
+        assert.equal(
+          query.kind,
+          "query",
+          "EvtCancel never accepts the subscription",
+        );
         assert.equal(closed.has(query), false);
         calls.push("cancel");
         lastError = 8;
         return fault !== "cancel";
       },
-      CloseHandle(thread) {
-        assert.equal(worker, false);
-        assert.equal(thread, 400);
-        calls.push("thread-close");
+      CloseHandle(value) {
+        assert.equal(worker, value?.kind === "notification");
+        assert.equal(closed.has(value), false);
+        if (value === 400) {
+          assert.equal(done, true);
+          calls.push("thread-close");
+        } else calls.push(`handle-close:${value.kind}`);
         lastError = 7;
-        return fault !== "thread-close";
+        if (fault === (value === 400 ? "thread-close" : value.kind + "-close"))
+          return false;
+        closed.add(value);
+        return true;
       },
       refusal_transport(value, size) {
         assert.ok(size <= 32256);
@@ -14982,13 +15265,65 @@ test("original-child refusal collection owns bounded partial publication and can
       `(line,report)=>{${project(body("refusal_publish"))}}`,
     ).runInNewContext(api);
     api.refusal_publish = publisher;
+    run.arm();
+    const arming = api.original_refusal.report.arming;
+    const armedCalls = calls.length;
+    run.arm();
+    assert.equal(
+      calls.length,
+      armedCalls,
+      "One-shot arming cannot recycle state",
+    );
+    assert.equal(
+      calls.filter((v) => v === "thread-create").length,
+      (fault?.endsWith("-create") && eventCount < 4) ||
+        fault === "already-expired"
+        ? 0
+        : 1,
+    );
+    if (
+      [
+        "normal-output",
+        "failed-dispatch",
+        "invalidate",
+        "arming-stopped",
+      ].includes(fault)
+    ) {
+      if (["normal-output", "arming-stopped"].includes(fault)) run.settle();
+      else run.invalidate();
+      assert.equal(calls.includes("readback"), false);
+      assert.equal(calls.includes("next"), false);
+      if (fault === "arming-stopped") {
+        assert.equal(calls.includes("render-context"), false);
+        assert.equal(calls.includes("subscribe"), false);
+      }
+      assert.equal(api.original_refusal.reaped, true);
+      const before = calls.length;
+      run.settle();
+      assert.equal(
+        calls.length,
+        before,
+        "Settlement never closes or rearms twice",
+      );
+      continue;
+    }
+    if (["arming-expired", "context-deadline"].includes(fault))
+      assert.equal(calls.includes("subscribe"), false);
+    const beforeCollect = calls.length;
     run.collect("custody.h", 421, 109);
+    assert.equal(
+      api.original_refusal.report.arming,
+      arming,
+      "Refusal preserves native arming evidence",
+    );
     assert.equal(lastError, 109, fault);
     assert.equal(api.errno, 9, fault);
     assert.equal(locked, false, fault);
     if (["other-command", "unreleased"].includes(fault)) {
-      assert.deepEqual(calls, []);
+      assert.equal(calls.length, beforeCollect);
       assert.deepEqual(writes, []);
+      run.settle();
+      assert.equal(api.original_refusal.reaped, true);
       continue;
     }
     const output = writes.join("");
@@ -15010,6 +15345,8 @@ test("original-child refusal collection owns bounded partial publication and can
         "query-pending",
         "wait",
         "readback-pending",
+        "subscribe-pending",
+        "subscription-next-pending",
       ].includes(fault)
     ) {
       assert.equal(api.original_refusal.thread, 400);
@@ -15018,9 +15355,15 @@ test("original-child refusal collection owns bounded partial publication and can
       assert.match(output, /closure-uncertain=1/u);
       assert.equal(
         calls.includes("cancel"),
-        !["query-pending", "wait", "readback-pending"].includes(fault),
+        ![
+          "query-pending",
+          "wait",
+          "readback-pending",
+          "subscribe-pending",
+          "subscription-next-pending",
+        ].includes(fault),
       );
-    } else if (fault !== "create" && fault !== "already-expired")
+    } else if (api.original_refusal.thread)
       assert.equal(calls.filter((v) => v === "thread-close").length, 1);
     if (fault === "record-cap" || fault === "shared-record-cap")
       assert.equal(api.original_refusal.report.examined, 64);
@@ -15029,12 +15372,39 @@ test("original-child refusal collection owns bounded partial publication and can
     assert.match(
       output,
       new RegExp(
-        `readback=${fault === "publication" ? "unavailable" : fault === "readback-complete" ? "complete" : fault?.startsWith("readback-") ? "partial" : "unstarted"}`,
+        `readback=${fault === "publication" ? "unavailable" : ["readback-complete", "denied"].includes(fault) ? "complete" : fault?.startsWith("readback-") ? "partial" : "unstarted"}`,
         "u",
       ),
     );
     if (fault === "byte-cap") assert.match(output, /truncated=1/u);
-    if (fault === "empty") assert.match(output, /empty=1/u);
+    if (
+      [
+        "malformed",
+        "event-close",
+        "query-close",
+        "context-close",
+        "channel-close",
+        "byte-cap",
+      ].includes(fault)
+    ) {
+      assert.equal(
+        drains,
+        0,
+        "Known terminal failure cannot start a subscription wait",
+      );
+    }
+    if (fault === "empty") {
+      assert.match(output, /empty=0/u);
+      assert.match(output, /incomplete=1/u);
+      assert.match(output, /over-budget=1/u);
+    }
+    if ([null, "race-before-reset", "race-after-empty"].includes(fault)) {
+      assert.match(output, /armed=1 arming=0 ready=95 delivery=220 /u);
+      assert.equal(api.original_refusal.report.requestStatusRecords, 1);
+      assert.equal(calls.filter((v) => v === "subscribe").length, 1);
+      assert.equal(calls.filter((v) => v === "thread-create").length, 1);
+      assert.equal(drains, fault === "race-before-reset" ? 1 : 2);
+    }
     if (
       ["already-expired", "create", "wait", "query-pending"].includes(fault)
     ) {
@@ -15043,6 +15413,11 @@ test("original-child refusal collection owns bounded partial publication and can
       assert.match(output, /empty=0/u);
     }
     if (fault === "denied") assert.match(output, /inaccessible=1/u);
+    if (fault === "subscription-close") {
+      assert.ok(api.original_refusal.subscription);
+      assert.ok(api.original_refusal.notification);
+      assert.equal(calls.includes("handle-close:notification"), false);
+    }
     if (fault === "wait") assert.match(output, /wait-error=6/u);
     if (fault?.endsWith("-close"))
       assert.match(
@@ -15221,6 +15596,19 @@ test("original-child typed events join only supported payload identity, time and
     "code-integrity",
     "long-name",
     "iso",
+    "missing-type",
+    "empty-type",
+    "missing-object",
+    "empty-object",
+    "missing-mask",
+    "zero-mask",
+    "wide-mask",
+    "unbound",
+    "unarmed",
+    "late-ready",
+    "early-ready",
+    "early-delivery",
+    "unsealed",
   ]) {
     const string = (value, address = 1400) =>
       Object.assign(new String(value), { address });
@@ -15262,6 +15650,13 @@ test("original-child typed events join only supported payload identity, time and
     if (fault === "missing-principal") v[7] = { Type: 0 };
     if (fault === "logon") v[8] = str("7x");
     if (fault === "mask") v[11] = str("-1");
+    if (fault === "missing-mask") v[11] = { Type: 0 };
+    if (fault === "zero-mask") v[11] = num(0);
+    if (fault === "wide-mask") v[11] = num(4294967296);
+    if (fault === "missing-type") v[9] = { Type: 0 };
+    if (fault === "empty-type") v[9] = str("");
+    if (fault === "missing-object") v[10] = { Type: 0 };
+    if (fault === "empty-object") v[10] = str("-");
     if (fault === "stale") v[3].FileTimeVal = 99;
     if (fault === "future") v[3].FileTimeVal = 201;
     if (fault === "birth") v[3].FileTimeVal = 80;
@@ -15279,6 +15674,10 @@ test("original-child typed events join only supported payload identity, time and
     if (fault === "long-name") v[10] = str("x".repeat(4097));
     if (fault === "iso") v[3] = str("2026-01-02T03:04:05.0000050Z");
     const report = {
+        armed: fault !== "unarmed",
+        requestBound: fault !== "unbound",
+        ready: fault === "late-ready" ? 101 : fault === "early-ready" ? 94 : 96,
+        delivery: fault === "early-delivery" ? 199 : 220,
         examined: 1,
         requestStatusRecords: 0,
         records: 0,
@@ -15304,6 +15703,14 @@ test("original-child typed events join only supported payload identity, time and
       TRUE: true,
       FALSE: false,
       ERROR_INSUFFICIENT_BUFFER: 122,
+      MAXDWORD: 4294967295,
+      RELEASE_USABLE: 3,
+      original_release: {
+        state: 3,
+        dispatched: fault !== "unsealed",
+        to: 95,
+        release: 100,
+      },
       EvtRenderEventValues: 0,
       ...Object.fromEntries(
         [
@@ -15421,6 +15828,10 @@ test("original-child typed events join only supported payload identity, time and
     assert.equal(report.joined, Number(joined), fault);
     if (fault === "sid-close") assert.equal(report.closeError, 91);
     if (lines.length) {
+      assert.match(
+        lines[0],
+        /ready=\d+ delivery=\d+ request-fields=\d capture-bound=\d/u,
+      );
       assert.match(lines[0], /pid-available=\d pid=\d/u);
       assert.match(lines[0], new RegExp(`joined=${Number(joined)} `, "u"));
       assert.match(
@@ -15555,6 +15966,7 @@ test("actual startup summaries retain every class, interval and independent clea
     ).runInNewContext(context);
     const report = {
       query: [0, 0, 0],
+      armed: true,
       finished: true,
       overBudget: fault === "expired",
       requestStatusRecords: 0,
@@ -15575,7 +15987,9 @@ test("actual startup summaries retain every class, interval and independent clea
         ? /state=expired /u
         : fault === "unpublished"
           ? /state=missing /u
-          : /state=empty /u,
+          : fault === "query-close"
+            ? /state=failed /u
+            : /state=expired /u,
     );
     assert.match(lines[0], /from=120 to=130 /u);
     assert.match(lines[1], /from=100 to=110 /u);

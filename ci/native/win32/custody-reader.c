@@ -13,8 +13,10 @@ static BOOL ownership_failure_write(const char *source, unsigned line, DWORD err
 static void ownership_failure_fence(DWORD error);
 #ifdef NATIVE_CI_EXPERIMENT
 static void ownership_refusal_collect(const char *source, unsigned line, DWORD error);
+static void refusal_settle(void);
 #else
 #define ownership_refusal_collect(source,line,error) ((void)0)
+#define refusal_settle() ((void)0)
 #endif
 #define NATIVE_CUSTODY_FAILURE reader_failure
 #include "custody.h"
@@ -362,6 +364,7 @@ static void reader_failure(const char *file, unsigned line, DWORD error) {
   if (!reader_diagnostics_ready) return;
   const char *source = strrchr(file, '\\'); if (!source) source = strrchr(file, '/'); source = source ? source+1 : file;
   ownership_refusal_collect(source,line,error);
+  refusal_settle();
   if(reader_witness_failure(source,line,error)) { ownership_failure_fence(error); return; }
   if(ownership_failure_write(source,line,error)) { ownership_failure_fence(error); return; }
   ownership_failure_fence(error);
@@ -1423,15 +1426,17 @@ static BOOL ownership_policy_restored, ownership_policy_possible;
  * thread's resources. ExitProcess is not independent process-retirement proof. */
 struct refusal_report {
   unsigned requestStatusRecords;
+  LONGLONG arming; ULONGLONG ready,delivery; BOOL armed,requestBound,interrupted; DWORD handoffError;
   unsigned examined, records, joined, malformed; DWORD renderError, closeError; LONGLONG query[3]; BOOL finished,truncated,overBudget;
   unsigned readbackTokens,readbackResources,readbackProbes,readbackUnavailable;BOOL readbackStarted,readbackFinished,readbackClosure;
 };
 static SRWLOCK refusal_lock=SRWLOCK_INIT;
 static struct {
-  BOOL tried,sent,creationVerified,tickStarted; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
+  BOOL tried,sent,creationVerified,tickStarted,initialized,latched,reaped; DWORD pid,sequence,line,error; ULONGLONG birth,tick,from,to;
   char command[64],source[64],hash[65]; WCHAR image[4096],subject[184]; FILE_ID_INFO imageId;
   /* Hex transport doubles raw text; reserve 1024 encoded bytes for framing. */
-  HANDLE thread; EVT_HANDLE query; struct refusal_report report; DWORD used; char bytes[32256];
+  HANDLE thread,ready,wake,stop; DWORD createError,armWait,armWaitError,notifyClose,reapError; LONGLONG threadClose;
+  EVT_HANDLE query,subscription; HANDLE notification; struct refusal_report report; DWORD used; char bytes[32256];
 } original_refusal;
 enum release_capture_state { RELEASE_UNSTARTED, RELEASE_UNAVAILABLE, RELEASE_INVALIDATED, RELEASE_USABLE };
 /* Fixed selected-SDK coverage, independent of the seven resources/ten probes.
@@ -1456,6 +1461,7 @@ struct release_image_query {
   BOOL attempted,succeeded,exitRead; DWORD error,waited,waitError,exitCode,exitError; const char *source;
 };
 static void release_invalidate(void) {
+  refusal_settle();
   if(original_release.state!=RELEASE_UNSTARTED)original_release.state=RELEASE_INVALIDATED;
   original_release.dispatched=FALSE;
 }
@@ -1537,6 +1543,8 @@ static BOOL ownership_literal_read(HANDLE process, HANDLE input, char *bytes, DW
 }
 static void refusal_publish(const char *line, struct refusal_report *report) {
   AcquireSRWLockExclusive(&refusal_lock);
+  if(!report)report=&original_refusal.report;
+  report->truncated|=original_refusal.report.truncated;
   if(line){size_t size=strlen(line);
     /* Reserve all class summaries and completion even after optional overflow. */
     if(size>sizeof(original_refusal.bytes)-4097-original_refusal.used)report->truncated=TRUE;
@@ -1851,6 +1859,7 @@ static void readback_collect(struct refusal_report *report) {
   BOOL principals=(metadata.fields&3)==3&&metadata.restrictingCount==1&&readback_sid_equal(metadata.subject,case_record.accountSid)&&
     readback_sid_equal(metadata.restricting,case_record.restrictingSid);
   BOOL usable=bound&&principals&&metadata.stable&&metadata.fields==31&&metadata.before.TokenType==TokenPrimary;
+  report->requestBound=usable;
   if(!usable)report->readbackUnavailable++;
   report->readbackClosure|=status.closureUncertain||original_release.status.closureUncertain;
   const char *captureState=release_capture_name();
@@ -1969,22 +1978,70 @@ static void refusal_record(EVT_HANDLE context, EVT_HANDLE event, unsigned channe
   BOOL identity=payload&&pid==original_refusal.pid&&image&&!_wcsicmp(image,original_refusal.image);
   BOOL principal=subject&&original_refusal.subject[0]&&!wcscmp(subject,original_refusal.subject);
   BOOL security=!channel&&!wcscmp(provider,L"Microsoft-Windows-Security-Auditing")&&id==4656&&version<=1&&(keywords&4503599627370496ULL)&&!(keywords&9007199254740992ULL);
+  BOOL request=type&&type[0]&&wcscmp(type,L"-")&&object&&object[0]&&wcscmp(object,L"-")&&hasMask&&mask&&mask<=MAXDWORD;
+  BOOL capture=report->armed&&report->requestBound&&original_release.state==RELEASE_USABLE&&original_release.dispatched&&
+    original_release.release==original_refusal.from&&original_release.to<=report->ready&&report->ready<=original_refusal.from&&
+    report->delivery>=original_refusal.to&&report->delivery>=time;
   /* Known Application Error payload schema; other Application/CodeIntegrity
    * layouts remain explicitly unjoined, even if their execution PID matches. */
   ULONGLONG birth=0;BOOL application=channel==1&&!wcscmp(provider,L"Application Error")&&id==1000&&!version&&refusal_number(&v[14],buffer.bytes,used,&birth)&&birth==original_refusal.birth;
-  BOOL joined=interval&&identity&&((security&&principal)||application);
+  BOOL joined=interval&&identity&&((security&&principal&&request&&capture)||application);
   char p[1025],im[16385],sub[737],ty[1025],obj[16385],why[16385],line[57344];
   if(!refusal_hex(provider,p,sizeof(p))||!refusal_hex(image,im,sizeof(im))||!refusal_hex(subject,sub,sizeof(sub))||!refusal_hex(type,ty,sizeof(ty))||!refusal_hex(object,obj,sizeof(obj))||!refusal_hex(reason,why,sizeof(why))){report->truncated=TRUE;return;}
-  int size=sprintf_s(line,sizeof(line),"native-windows-original-child: record channel=%u provider-utf16=%s event=%llu version=%llu time=%llu keywords=%llu pid-available=%u pid=%llu image-utf16=%s subject-utf16=%s logon-available=%u logon=%llu object-type-utf16=%s object-utf16=%s mask-available=%u mask=%llu reason-utf16=%s interval=%u identity=%u principal=%u schema=%u joined=%u corroboration=%u\n",channel,p,id,version,time,keywords,!!payload,pid,im,sub,!!hasLogon,logon,ty,obj,!!hasMask,mask,why,!!interval,!!identity,!!principal,!!(security||application),!!joined,!!(joined&&application));
+  int size=sprintf_s(line,sizeof(line),"native-windows-original-child: record channel=%u provider-utf16=%s event=%llu version=%llu time=%llu keywords=%llu pid-available=%u pid=%llu image-utf16=%s subject-utf16=%s logon-available=%u logon=%llu object-type-utf16=%s object-utf16=%s mask-available=%u mask=%llu reason-utf16=%s interval=%u identity=%u principal=%u schema=%u ready=%llu delivery=%llu request-fields=%u capture-bound=%u joined=%u corroboration=%u\n",channel,p,id,version,time,keywords,!!payload,pid,im,sub,!!hasLogon,logon,ty,obj,!!hasMask,mask,why,!!interval,!!identity,!!principal,!!(security||application),report->ready,report->delivery,!!request,!!capture,!!joined,!!(joined&&application));
   if(size>0){report->records++;report->joined+=!!joined;report->requestStatusRecords+=!!(joined&&security);refusal_publish(line,report);}else report->truncated=TRUE;
 }
+static EVT_HANDLE refusal_render_context(unsigned channel) {
+  const WCHAR *paths[]={L"Event/System/Provider/@Name",L"Event/System/EventID",L"Event/System/Version",L"Event/System/TimeCreated/@SystemTime",L"Event/System/Keywords",L"Event/EventData/Data[@Name='ProcessId']",channel==1?L"Event/EventData/Data[@Name='AppPath']":L"Event/EventData/Data[@Name='ProcessName']",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/EventData/Data[@Name='ObjectType']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='AccessMask']",L"Event/EventData/Data[@Name='AccessReason']",L"Event/EventData/Data[@Name='AccessList']",L"Event/EventData/Data[@Name='ProcessCreationTime']"};
+  return EvtCreateRenderContext(15,paths,EvtRenderContextValues);
+}
+static BOOL refusal_stopped(struct refusal_report *report) {
+  DWORD waited=WaitForSingleObject(original_refusal.stop,0);
+  if(waited==WAIT_TIMEOUT)return FALSE;
+  report->interrupted=TRUE;
+  if(waited==WAIT_FAILED)report->handoffError=GetLastError();
+  else if(waited!=WAIT_OBJECT_0)report->handoffError=ERROR_INVALID_DATA;
+  return TRUE;
+}
 static DWORD WINAPI refusal_worker(void *unused) {
-  struct refusal_report report=original_refusal.report;
+  struct refusal_report report={0};
+  AcquireSRWLockExclusive(&refusal_lock);report=original_refusal.report;ReleaseSRWLockExclusive(&refusal_lock);
+  EVT_HANDLE subscription=NULL,securityContext=NULL;HANDLE notification=NULL,signals[]={original_refusal.stop,original_refusal.wake};
+  if(refusal_remaining()&&!refusal_stopped(&report)){
+    notification=CreateEventW(NULL,TRUE,FALSE,NULL);original_refusal.notification=notification;
+    if(!notification)report.arming=GetLastError();
+    else if(refusal_remaining()&&!refusal_stopped(&report)){
+      securityContext=refusal_render_context(0);
+      if(!securityContext)report.arming=GetLastError();
+      else if(refusal_remaining()&&!refusal_stopped(&report)){
+        subscription=EvtSubscribe(NULL,notification,L"Security",L"*[System[Provider[@Name='Microsoft-Windows-Security-Auditing'] and EventID=4656 and band(Keywords,4503599627370496)]]",NULL,NULL,NULL,EvtSubscribeToFutureEvents|EvtSubscribeStrict);
+        report.arming=subscription?0:GetLastError();
+      }
+    }
+  }
+  if(!refusal_remaining())report.overBudget=TRUE;
+  original_refusal.subscription=subscription;
+  report.armed=subscription!=NULL;report.query[0]=report.arming;
+  if(subscription)report.ready=readback_now();
+  refusal_publish(NULL,&report);
+  if(!SetEvent(original_refusal.ready)){report.handoffError=GetLastError();goto finished;}
+  DWORD waited=WaitForMultipleObjects(2,signals,FALSE,refusal_remaining());
+  DWORD waitError=waited==WAIT_FAILED?GetLastError():0;
+  /* The caller publishes context and the complete refusal before signaling.
+   * Refresh publication flags without resetting native arming evidence. */
+  AcquireSRWLockExclusive(&refusal_lock);report=original_refusal.report;ReleaseSRWLockExclusive(&refusal_lock);
+  if(waited!=WAIT_OBJECT_0+1||!original_refusal.latched){
+    report.interrupted=TRUE;if(waited==WAIT_FAILED)report.handoffError=waitError;
+    if(waited==WAIT_TIMEOUT)report.overBudget=TRUE;goto finished;
+  }
   readback_collect(&report);
   const WCHAR *channels[]={L"Security",L"Application",L"Microsoft-Windows-CodeIntegrity/Operational"};
   WCHAR from[32],to[32];
   if(!refusal_time(original_refusal.from,from)||!refusal_time(original_refusal.to,to)){report.malformed++;goto finished;}
-  for(unsigned channel=0;channel<3;channel++){
+  /* Optional existing readback cannot be starved by waiting for Security. */
+  for(unsigned channel=1;channel<3;channel++){
+    if(report.renderError||report.closeError||report.malformed||report.truncated)break;
+    if(refusal_stopped(&report))break;
     if(!refusal_remaining()||report.examined==64){report.overBudget=TRUE;break;}
     if(channel){
       EVT_HANDLE config=EvtOpenChannelConfig(NULL,channels[channel],0);DWORD error=config?ERROR_SUCCESS:GetLastError();EVT_VARIANT enabled={0};DWORD used=0;
@@ -1993,17 +2050,18 @@ static DWORD WINAPI refusal_worker(void *unused) {
       if(config&&!EvtClose(config)&&!report.closeError)report.closeError=GetLastError();
       if(!read||used!=sizeof(enabled)||enabled.Type!=EvtVarTypeBoolean||!enabled.BooleanVal){report.query[channel]=error?error:ERROR_NOT_SUPPORTED;refusal_publish(NULL,&report);continue;}
     }
-    const WCHAR *paths[]={L"Event/System/Provider/@Name",L"Event/System/EventID",L"Event/System/Version",L"Event/System/TimeCreated/@SystemTime",L"Event/System/Keywords",L"Event/EventData/Data[@Name='ProcessId']",channel==1?L"Event/EventData/Data[@Name='AppPath']":L"Event/EventData/Data[@Name='ProcessName']",L"Event/EventData/Data[@Name='SubjectUserSid']",L"Event/EventData/Data[@Name='SubjectLogonId']",L"Event/EventData/Data[@Name='ObjectType']",L"Event/EventData/Data[@Name='ObjectName']",L"Event/EventData/Data[@Name='AccessMask']",L"Event/EventData/Data[@Name='AccessReason']",L"Event/EventData/Data[@Name='AccessList']",L"Event/EventData/Data[@Name='ProcessCreationTime']"};
-    EVT_HANDLE context=EvtCreateRenderContext(15,paths,EvtRenderContextValues),query=NULL;WCHAR expression[1024];
+    if(report.closeError)break;
+    EVT_HANDLE context=refusal_render_context(channel),query=NULL;WCHAR expression[1024];
     if(!context){report.query[channel]=GetLastError();refusal_publish(NULL,&report);continue;}
-    int size=swprintf_s(expression,1024,L"*[System[TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]%ls]]",from,to,channel?L"":L" and Provider[@Name=\"Microsoft-Windows-Security-Auditing\"] and EventID=4656 and band(Keywords,4503599627370496)");
+    int size=swprintf_s(expression,1024,L"*[System[TimeCreated[@SystemTime>=\"%ls\" and @SystemTime<=\"%ls\"]]]",from,to);
     BOOL attempted=size>0&&refusal_remaining();if(attempted)query=EvtQuery(NULL,channels[channel],expression,EvtQueryChannelPath|EvtQueryReverseDirection);
     DWORD queryError=query?ERROR_SUCCESS:GetLastError();
     report.query[channel]=query?ERROR_SUCCESS:attempted?queryError:size<=0?ERROR_INVALID_DATA:ERROR_TIMEOUT;
     AcquireSRWLockExclusive(&refusal_lock);original_refusal.query=query;ReleaseSRWLockExclusive(&refusal_lock);refusal_publish(NULL,&report);
-    while(query&&refusal_remaining()&&report.examined<64){
+    while(query&&refusal_remaining()&&report.examined<64&&!report.renderError&&!report.closeError&&!report.malformed&&!report.truncated){
+      if(refusal_stopped(&report))break;
       EVT_HANDLE event=NULL;DWORD count=0;BOOL next=EvtNext(query,1,&event,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
-      if(!next||count!=1||!event){if(error!=ERROR_NO_MORE_ITEMS)report.query[channel]=error?error:ERROR_INVALID_DATA;if(event&&!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();break;}
+      if(!next||count!=1||!event){if(error!=ERROR_NO_MORE_ITEMS)report.query[channel]=error?error:ERROR_INVALID_DATA;break;}
       report.examined++;refusal_publish(NULL,&report);
       if(refusal_remaining())refusal_record(context,event,channel,&report);else report.overBudget=TRUE;
       if(!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
@@ -2013,8 +2071,102 @@ static DWORD WINAPI refusal_worker(void *unused) {
     if(query&&!EvtClose(query)&&!report.closeError)report.closeError=GetLastError();
     if(!EvtClose(context)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
   }
+  if(report.renderError||report.closeError||report.malformed||report.truncated)goto finished;
+  signals[1]=notification;
+  while(subscription&&!report.interrupted&&!report.requestStatusRecords&&refusal_remaining()&&report.examined<64){
+    waited=WaitForMultipleObjects(2,signals,FALSE,refusal_remaining());
+    if(waited!=WAIT_OBJECT_0+1){
+      if(waited==WAIT_TIMEOUT)report.overBudget=TRUE;
+      else{report.interrupted=TRUE;if(waited==WAIT_FAILED)report.query[0]=GetLastError();}
+      break;
+    }
+    for(;;){
+      if(!refusal_remaining()||report.examined==64)break;
+      if(refusal_stopped(&report))break;
+      /* Reset before enumeration: an arrival after an empty drain keeps its
+       * service notification. An empty queue never proves audit absence. */
+      if(!ResetEvent(notification)){report.query[0]=GetLastError();goto finished;}
+      EVT_HANDLE event=NULL;DWORD count=0;BOOL next=EvtNext(subscription,1,&event,0,0,&count);DWORD error=next?ERROR_SUCCESS:GetLastError();
+      if(!next||count!=1||!event){
+        if(!next&&error==ERROR_NO_MORE_ITEMS)break;
+        report.query[0]=error?error:ERROR_INVALID_DATA;goto finished;
+      }
+      report.examined++;report.delivery=readback_now();
+      if(refusal_remaining())refusal_record(securityContext,event,0,&report);else report.overBudget=TRUE;
+      if(!EvtClose(event)&&!report.closeError)report.closeError=GetLastError();refusal_publish(NULL,&report);
+      if(report.requestStatusRecords||report.renderError||report.closeError||report.malformed||report.truncated)goto finished;
+    }
+  }
+  if(!refusal_remaining()||report.examined==64)report.overBudget=TRUE;
 finished:
+  /* EvtSubscribe is cancelled by its owning thread's EvtClose, never EvtCancel. */
+  if(subscription){
+    if(EvtClose(subscription)){original_refusal.subscription=NULL;subscription=NULL;}
+    else if(!report.closeError)report.closeError=GetLastError();
+  }
+  if(securityContext&&!EvtClose(securityContext)&&!report.closeError)report.closeError=GetLastError();
+  /* An uncertain cancellation may still signal its borrowed notification. */
+  if(notification&&!subscription){
+    if(CloseHandle(notification))original_refusal.notification=NULL;
+    else if(!report.closeError)report.closeError=GetLastError();
+  }
   report.finished=TRUE;refusal_publish(NULL,&report);return 0;
+}
+static void refusal_reap(void) {
+  if(!original_refusal.initialized||original_refusal.reaped)return;
+  if(original_refusal.thread){
+    DWORD waited=WaitForSingleObject(original_refusal.thread,0);
+    if(waited!=WAIT_OBJECT_0){
+      if(waited==WAIT_FAILED)original_refusal.reapError=GetLastError();
+      else if(waited!=WAIT_TIMEOUT)original_refusal.reapError=ERROR_INVALID_DATA;
+      return;
+    }
+  }
+  original_refusal.reaped=TRUE;
+  if(original_refusal.thread)original_refusal.threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();
+  HANDLE handles[]={original_refusal.ready,original_refusal.wake,original_refusal.stop};
+  for(unsigned i=0;i<3;i++)if(handles[i]&&!CloseHandle(handles[i])&&!original_refusal.notifyClose)original_refusal.notifyClose=GetLastError();
+}
+static void refusal_settle(void) {
+  int savedErrno=errno;DWORD saved=GetLastError();
+  if(original_refusal.initialized&&!original_refusal.reaped){
+    if(original_refusal.stop&&!SetEvent(original_refusal.stop)&&!original_refusal.notifyClose)original_refusal.notifyClose=GetLastError();
+    /* No new observation/cleanup deadline. Pending calls keep every resource
+     * and the one-shot state until actual completion or reader-process exit. */
+    refusal_reap();
+  }
+  SetLastError(saved);errno=savedErrno;
+}
+static void refusal_arm(void) {
+  if(original_refusal.initialized)return;
+  int savedErrno=errno;DWORD saved=GetLastError();original_refusal.initialized=TRUE;
+  original_refusal.threadClose=-1;original_refusal.armWait=WAIT_TIMEOUT;
+  original_refusal.report.arming=-1;for(unsigned i=0;i<3;i++)original_refusal.report.query[i]=-1;
+  original_refusal.report.examined=original_startup.examined;
+  wcscpy_s(original_refusal.image,4096,entries[6].path);wcscpy_s(original_refusal.subject,184,case_record.accountSid);
+  original_refusal.imageId=entries[6].file.id;strcpy_s(original_refusal.hash,65,entries[6].pin);
+  original_refusal.createError=ERROR_TIMEOUT;
+  if(refusal_remaining()){
+    original_refusal.ready=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.ready)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.ready&&refusal_remaining()){
+    original_refusal.wake=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.wake)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.wake&&refusal_remaining()){
+    original_refusal.stop=CreateEventW(NULL,TRUE,FALSE,NULL);
+    if(!original_refusal.stop)original_refusal.createError=GetLastError();
+  }
+  if(original_refusal.stop&&refusal_remaining()){
+    original_refusal.thread=CreateThread(NULL,0,refusal_worker,NULL,0,NULL);
+    original_refusal.createError=original_refusal.thread?0:GetLastError();
+  }
+  if(original_refusal.thread){
+    original_refusal.armWait=WaitForSingleObject(original_refusal.ready,refusal_remaining());
+    if(original_refusal.armWait==WAIT_FAILED)original_refusal.armWaitError=GetLastError();
+  }else refusal_reap();
+  SetLastError(saved);errno=savedErrno;
 }
 /* Mandatory summaries use reserved space, even when the worker never starts.
  * No empty query identifies a first request or supplies missing namespaces. */
@@ -2028,8 +2180,8 @@ static DWORD startup_publish(char *output, DWORD capacity, DWORD used, const str
     BOOL closure=i?original_startup.closure:!published||!report->finished||report->closeError;
     DWORD cleanup=i?original_startup.cleanup:report->closeError;
     if(!i){
-      state=!published?0:report->overBudget?(refusal_remaining()?5:4):report->truncated?5:report->query[0]<0?0:
-        report->query[0]==ERROR_NOT_SUPPORTED?3:report->query[0]||report->malformed||report->renderError?6:!report->finished?0:report->requestStatusRecords?1:2;
+      state=!published?0:report->overBudget?(refusal_remaining()?5:4):!refusal_remaining()&&!report->requestStatusRecords?4:report->truncated?5:report->query[0]<0?0:
+        report->query[0]==ERROR_NOT_SUPPORTED?3:!report->armed||report->query[0]||report->malformed||report->renderError||report->interrupted||report->handoffError?6:!report->finished?0:report->requestStatusRecords?1:report->closeError?6:4;
       error=report->query[0]>0?(DWORD)report->query[0]:0;
     }
     int size=snprintf(output+used,capacity-used,"native-windows-original-child: coverage class=%u name=%s state=%s status=%lu pid=%lu birth=%llu from=%llu to=%llu bound=%u published=%u closure-uncertain=%u cleanup=%lu first-request=unobserved\n",
@@ -2049,38 +2201,41 @@ static void ownership_refusal_collect(const char *source, unsigned line, DWORD e
   FILETIME time;GetSystemTimePreciseAsFileTime(&time);original_refusal.to=((ULONGLONG)time.dwHighDateTime<<32)|time.dwLowDateTime;
   wcscpy_s(original_refusal.image,4096,entries[6].path);wcscpy_s(original_refusal.subject,184,case_record.accountSid);
   original_refusal.imageId=entries[6].file.id;strcpy_s(original_refusal.hash,65,entries[6].pin);
-  struct refusal_report report={0};for(unsigned i=0;i<3;i++)report.query[i]=-1;
+  struct refusal_report report={0};report.arming=-1;for(unsigned i=0;i<3;i++)report.query[i]=-1;
+  report.examined=original_startup.examined;
+  if(!original_refusal.initialized)original_refusal.report=report;
   char image[16385],subject[737],identity[33],context[20000];
   for(unsigned i=0;i<16;i++)sprintf_s(identity+i*2,sizeof(identity)-i*2,"%02x",original_refusal.imageId.FileId.Identifier[i]);
   BOOL encoded=refusal_hex(original_refusal.image,image,sizeof(image))&&refusal_hex(original_refusal.subject,subject,sizeof(subject));
   int size=encoded?sprintf_s(context,sizeof(context),"native-windows-original-child: context command=%s sequence=%lu source=%s line=%lu error=%lu candidate=%s nonce=%s pid=%lu birth=%llu image-utf16=%s image-volume=%llu image-id=%s image-sha256=%s subject-utf16=%s release=%llu refusal=%llu dispatch-succeeded=%u creation-verified=%u capture=%s capture-from=%llu capture-to=%llu capture-status=%s/%lu capture-operation=%s capture-closure-uncertain=%u resume-time=unavailable\n",original_refusal.command,original_refusal.sequence,original_refusal.source,original_refusal.line,error,candidate,nonce,original_refusal.pid,original_refusal.birth,image,original_refusal.imageId.VolumeSerialNumber,identity,original_refusal.hash,subject,original_refusal.from,original_refusal.to,!!original_refusal.sent,!!original_refusal.creationVerified,release_capture_name(),original_release.from,original_release.to,original_release.status.domain?original_release.status.domain:"none",original_release.status.value,original_release.status.operation?original_release.status.operation:"none",!!original_release.status.closureUncertain):-1;
   size=ownership_literal_context(context,sizeof(context),size);
-  if(size>0)refusal_publish(context,&report);else{report.truncated=TRUE;refusal_publish(NULL,&report);}
-  report.examined=original_startup.examined;
+  if(size>0)refusal_publish(context,NULL);else{
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.report.truncated=TRUE;ReleaseSRWLockExclusive(&refusal_lock);
+  }
   DWORD before=original_refusal.used;
-  if(original_startup.used)refusal_publish(original_startup.bytes,&report);else refusal_publish(NULL,&report);
+  if(original_startup.used)refusal_publish(original_startup.bytes,NULL);
   original_startup.published=original_refusal.used-before==original_startup.used;
-  DWORD createError=0,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1,threadClose=-1;
-  if(refusal_remaining()&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
-    original_refusal.thread=CreateThread(NULL,0,refusal_worker,NULL,0,NULL);
-    if(original_refusal.thread){waited=WaitForSingleObject(original_refusal.thread,refusal_remaining());if(waited==WAIT_FAILED)waitError=GetLastError();}else createError=GetLastError();
-  }else{report.overBudget=!refusal_remaining();createError=report.overBudget?ERROR_TIMEOUT:ERROR_INVALID_DATA;refusal_publish(NULL,&report);}
-  /* The shared lock never covers query/render calls. Pin an available handle
-   * through EvtCancel; its creator clears publication before normal EvtClose.
-   * A pending EvtQuery has no result handle to cancel. Never invent one. */
+  DWORD createError=original_refusal.initialized?original_refusal.createError:ERROR_INVALID_DATA,waitError=0,waited=WAIT_TIMEOUT;LONGLONG canceled=-1;
+  if(original_refusal.thread&&!original_refusal.reaped&&original_refusal.sent&&original_refusal.pid&&original_refusal.from&&original_refusal.to>=original_refusal.from){
+    AcquireSRWLockExclusive(&refusal_lock);original_refusal.latched=TRUE;ReleaseSRWLockExclusive(&refusal_lock);
+    if(!SetEvent(original_refusal.wake))waitError=GetLastError();
+    else{waited=WaitForSingleObject(original_refusal.thread,refusal_remaining());if(waited==WAIT_FAILED)waitError=GetLastError();}
+  }
+  /* Only an optional query supports the retained query-cancellation path.
+   * Subscription settlement belongs to its owning thread, including expiry. */
   char output[32256];DWORD used=0;BOOL published=TryAcquireSRWLockExclusive(&refusal_lock);
   if(published){
     if(waited!=WAIT_OBJECT_0&&original_refusal.query)canceled=EvtCancel(original_refusal.query)?0:GetLastError();
     report=original_refusal.report;used=original_refusal.used;memcpy(output,original_refusal.bytes,used);ReleaseSRWLockExclusive(&refusal_lock);
   }
   if(!published&&size>0){used=(DWORD)size;memcpy(output,context,used);}
-  if(waited==WAIT_OBJECT_0&&original_refusal.thread){threadClose=CloseHandle(original_refusal.thread)?0:GetLastError();if(!threadClose)original_refusal.thread=NULL;}
-  BOOL unavailable=report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
+  refusal_settle();LONGLONG threadClose=original_refusal.threadClose;
+  BOOL unavailable=!report.armed||report.arming!=0||report.query[0]!=0||report.query[1]!=0||report.query[2]!=0;
   BOOL inaccessible=report.query[0]==ERROR_ACCESS_DENIED||report.query[1]==ERROR_ACCESS_DENIED||report.query[2]==ERROR_ACCESS_DENIED;
-  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose>0||!published||original_startup.closure;
+  BOOL incomplete=waited!=WAIT_OBJECT_0||!report.finished||!report.requestStatusRecords||report.interrupted||report.handoffError||report.truncated||report.overBudget||report.malformed||report.closeError||report.renderError||unavailable||threadClose!=0||original_refusal.notifyClose||original_refusal.reapError||original_refusal.armWaitError||!published||original_startup.closure;
   const char *readbackState=!published?"unavailable":!report.readbackStarted?"unstarted":report.readbackFinished&&report.readbackTokens==1&&report.readbackResources==7&&report.readbackProbes==10&&!report.readbackUnavailable&&!report.readbackClosure&&!report.truncated?"complete":"partial";
   used=startup_publish(output,sizeof(output),used,&report,published);
-  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u\n",!!report.finished,!!incomplete,!incomplete&&report.examined==original_startup.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0||original_startup.closure),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure);
+  int ending=sprintf_s(output+used,sizeof(output)-used,"native-windows-original-child: completion finished=%u incomplete=%u empty=%u inaccessible=%u unavailable=%u malformed=%u over-budget=%u truncated=%u examined=%u records=%u joined=%u query=%lld,%lld,%lld render-error=%lu close-error=%lu thread-close=%lld cancellation=%lld create-error=%lu publication=%u closure-uncertain=%u wait=%lu wait-error=%lu readback=%s readback-token-rows=%u readback-resource-rows=%u readback-probes=%u readback-unavailable=%u readback-closure-uncertain=%u armed=%u arming=%lld ready=%llu delivery=%llu interrupted=%u handoff-error=%lu arm-wait=%lu arm-wait-error=%lu notification-close=%lu reap-error=%lu\n",!!report.finished,!!incomplete,!incomplete&&report.examined==original_startup.examined,!!inaccessible,!!unavailable,report.malformed,report.overBudget||(waited!=WAIT_OBJECT_0&&!refusal_remaining()),report.truncated,report.examined,report.records,report.joined,report.query[0],report.query[1],report.query[2],report.renderError,report.closeError,threadClose,canceled,createError,!!published,!!(!published||!report.finished||report.closeError||threadClose!=0||original_refusal.notifyClose||original_startup.closure),waited,waitError,readbackState,report.readbackTokens,report.readbackResources,report.readbackProbes,report.readbackUnavailable,!!report.readbackClosure,!!report.armed,report.arming,report.ready,report.delivery,!!report.interrupted,report.handoffError,original_refusal.armWait,original_refusal.armWaitError,original_refusal.notifyClose,original_refusal.reapError);
   if(ending>0){used+=(DWORD)ending;refusal_transport(output,used);}
   SetLastError(saved);errno=savedErrno;
 }
@@ -2666,7 +2821,7 @@ static void ownership_send(const char *value) {
 #ifdef NATIVE_CI_EXPERIMENT
   if(size==2&&bytes[0]=='R'){
     if(!original_refusal.tickStarted){original_refusal.tick=GetTickCount64();original_refusal.tickStarted=TRUE;}
-    if(ownership_literal)release_capture();
+    if(ownership_literal){release_capture();refusal_arm();}
     original_refusal.from=readback_now();
     if(ownership_literal&&original_release.state==RELEASE_USABLE)original_release.release=original_refusal.from;
   }
@@ -2783,6 +2938,7 @@ static void ownership_outside_control(const wchar_t *mode) {
 static void access_quiesce(void);
 static void operation_empty(HANDLE job);
 static void ownership_stop(void) {
+  refusal_settle();
   if (ownership_control) { need(CloseHandle(ownership_control)); ownership_control = NULL; }
   if (ownership_launcher.hProcess) need(WaitForSingleObject(ownership_launcher.hProcess, 30000) == WAIT_OBJECT_0);
   ownership_close_owner();
@@ -5411,7 +5567,7 @@ int wmain(int argc, wchar_t **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
       if(!strcmp(values[0],"ownership-output")&&ownership_literal){
         need(ownership_released&&ownership_creation_verified&&ownership_count&&ownership_processes[0]);
-        need(ownership_literal_read(ownership_processes[0],ownership_output,bytes,16384));captured=TRUE;
+        need(ownership_literal_read(ownership_processes[0],ownership_output,bytes,16384));refusal_settle();captured=TRUE;
       }
 #endif
       if(!captured)line(!strcmp(values[0], "ownership-control") ? ownership_frames : ownership_output, bytes, package_mode ? sizeof(bytes) : 16384);

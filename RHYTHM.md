@@ -5,6 +5,17 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Arm original Windows audit capture before release
+
+The existing experiment collector arms its supported Security pull subscription
+before original dispatch and waits for a latched refusal before readback or
+classification. Empty drains retain notification-driven waiting within the same
+budget. A bound Audit Failure identifies an original failed handle request;
+zero-match expiry remains incomplete and unsupported/unaudited coverage stays
+unobserved. Native readiness/delivery, original exit and cleanup evidence remain
+separate. Owning-thread subscription closure and retained pending-call state
+preserve custody without a new observer, permission change or acceptance claim.
+
 ## 2026-10-27 — Bind refusal observers without replacing the original child
 
 Darwin retains the original trace target and binds one diagnostic fork to the

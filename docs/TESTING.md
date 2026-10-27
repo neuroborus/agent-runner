@@ -2699,8 +2699,20 @@ Successful original child exit plus fresh complete zero accounting establishes
 settlement; best-effort notifications only wake reinspection. The concrete
 active-count-one refusal retains an opaque synthetic 1024-of-2391-byte prefix.
 This coverage remains in the same harness and supplies no native PASS.
-The same custody fixture executes the original-child refusal collector's worker,
-bounded publisher and terminal wait with injected clocks/Event Log/thread APIs.
+The same custody fixture executes the original-child collector's arming,
+refusal/settlement handoff, bounded publisher and worker with injected
+clocks/Event Log/thread APIs. A controlled coroutine suspends the actual worker
+at native notification waits: pre-release arming performs no readback or request
+classification. After the refusal latch, an empty drain followed by delayed
+delivery still joins; arrivals around reset/exhaustion retain their notification.
+Acquisition, readiness signaling, subscription, enumeration, reset and closure
+failures retain actual errors and once-only ownership. Stalled arming/collection
+retain live state/resources; normal output, failed dispatch and invalidation
+request settlement without a fresh deadline or another worker.
+Expiry or settlement between arming acquisitions prevents the next native call;
+failed or inconsistent enumeration outputs never confer handle ownership.
+Known projection, publication or closure failures stop collection before another
+subscription wait.
 The actual literal pipe/process body covers signaled children with absent or
 partial frames while writers remain open, buffered output after exit, delayed
 delivery, live-child expiry, failed/short pipe reads and actual wait/exit errors.
@@ -2713,11 +2725,16 @@ budget after early capture, then verify single-use process/image/request binding
 successful-path policy/image/exit and independent witness guards, and recovery
 after refusal. The original argv fixture and all nonliteral paths remain intact.
 It covers one release-based deadline, shared 64-record/64-KiB encoded-frame caps,
-synchronized partial publication, thread-affine normal closure, available-handle
-cancellation, pending-query lifetime and separate projection/closure failures.
+synchronized partial publication, thread-affine subscription closure, optional
+query cancellation, pending native-call lifetime and separate arming/readback/
+projection/closure failures. Zero-match expiry is incomplete, never completed
+audit absence. Failed getter outputs are not acquired handles.
 Actual typed event projection rejects foreign/stale identities, unsupported
-schemas, malformed fields and successful-access records while retaining original
-refusal errors.
+schemas, malformed or incomplete object/access fields, invalid release/readiness/
+delivery ordering and successful-access records while retaining original refusal
+errors. A matching failure identifies an original failed handle request only;
+unsupported or unaudited requests and the first causal loader failure remain
+unobserved. Module-snapshot errors and original exit status remain separate.
 No logging-provider execution PID can supply payload identity; Application
 corroboration cannot establish the denied operation.
 The same fixtures execute the actual fatal guard, reader failure dispatcher and

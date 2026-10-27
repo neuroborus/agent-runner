@@ -268,6 +268,7 @@ export async function compilerTrustFixture({
     reader_command: "open",
     reader_transfer: { active: false },
     ownership_refusal_collect: () => {},
+    refusal_settle: () => {},
     reader_witness_failure: () => false,
     ownership_failure_write: () => false,
     // Compiler trust failures precede any ownership creator acquisition.
