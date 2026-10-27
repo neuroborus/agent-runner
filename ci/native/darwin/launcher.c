@@ -36,6 +36,10 @@ extern mach_port_t bootstrap_port;
 #include "custody.h"
 #undef NATIVE_RUNTIME_REPLIES
 #ifdef NATIVE_CI_EXPERIMENT
+#include "image-closure.h"
+struct image_frame { unsigned version; struct identity identity; };
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
 static void launch_need_at(bool ok, const char *file, unsigned line);
 #undef need
 #define need(ok) launch_need_at(!!(ok), __FILE__, __LINE__)
@@ -81,9 +85,8 @@ static void launch_stage(const char *stage, const char *operation, long result, 
 static void launch_failure(const char *operation, long result, int error, int revents, long used, pid_t child);
 #ifdef NATIVE_CI_EXPERIMENT
 static pid_t launch_reply_owner;
-static mach_port_t launch_bootstrap_local, launch_reply_borrowed, launch_special_borrowed;
-static domain_special_reply_fn launch_special_reply;
-static char launch_exec_suffix[256];
+static mach_port_t launch_bootstrap_local;
+static struct exec_handoff *launch_handoff;
 static void launch_replies_begin(void);
 static void launch_bootstrap_entry(void) {
   struct domain_bootstrap_fork entry = {0}; domain_bootstrap_entry(&entry);
@@ -114,6 +117,11 @@ static pid_t launch_bootstrap_fork(void) {
 static void launch_need_at(bool ok, const char *file, unsigned line) {
   if (!ok) {
     int error = errno;
+    if (launch_handoff) {
+      exec_handoff_destroy(launch_handoff);
+      fprintf(stderr, "native-darwin-image-cleanup: files=%d attributes=%d\n", launch_handoff->files_cleanup, launch_handoff->attributes_cleanup);
+      launch_handoff = NULL;
+    }
     if (launch_reply_owner == getpid()) {
       mach_port_t local = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
       if (MACH_PORT_VALID(local)) {
@@ -129,35 +137,11 @@ static void launch_need_at(bool ok, const char *file, unsigned line) {
   }
   need_at(ok, file, line);
 }
-/* Bind before the child's first observation. Borrowing a cache never creates
- * an owned reference; the inherited bootstrap local is a separate acquisition. */
+/* The local bootstrap getter is owned by this child, independently of slots.
+ * Reply caches and arbitrary namespace entries do not survive SETEXEC. */
 static void launch_replies_begin(void) {
-  const char *operation = "mig_get_special_reply_port/binding"; long result = 0; int error = 0;
-  launch_reply_owner = getpid(); domain_runtime_replies_begin(launch_reply_owner);
+  launch_reply_owner = getpid();
   launch_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
-  launch_reply_borrowed = launch_special_borrowed = MACH_PORT_NULL;
-  launch_special_reply = domain_special_reply_lookup();
-  if (!launch_special_reply) goto reply_failure;
-  launch_stage("mach-reply-bind", NULL, 0, 0);
-  operation = "mig_get_reply_port/identity"; launch_reply_borrowed = mig_get_reply_port();
-  result = launch_reply_borrowed; error = errno;
-  if (!MACH_PORT_VALID(launch_reply_borrowed)) goto reply_failure;
-  operation = "mig_get_special_reply_port/identity"; launch_special_borrowed = launch_special_reply();
-  result = launch_special_borrowed; error = errno;
-  if (MACH_PORT_VALID(launch_special_borrowed) && launch_special_borrowed != launch_reply_borrowed) return;
-reply_failure:
-  launch_failure(operation, result, error, 0, -1, 0);
-}
-/* Cache/PID/producer stability is a launcher policy, not a type exemption. */
-static const char *launch_replies_changed(unsigned count, const mach_port_t *runtime) {
-  if (launch_reply_owner != getpid()) return "runtime-reply-owner";
-  if (mig_get_reply_port() != launch_reply_borrowed) return "mig_get_reply_port/identity";
-  if (!launch_special_reply || launch_special_reply() != launch_special_borrowed) return "mig_get_special_reply_port/identity";
-  if (domain_runtime_reply_owner != getpid() || !domain_runtime_reply_imported || domain_runtime_reply_overflow || domain_runtime_reply_count != count)
-    return "runtime-reply-producer";
-  for (unsigned i = 0; i < count; i++)
-    if (runtime[i] != domain_runtime_replies[i]) return "runtime-reply-producer";
-  return NULL;
 }
 #endif
 static bool launch_exception_readback(struct domain_bootstrap_fork *out, task_t self, thread_t thread) {
@@ -171,220 +155,7 @@ static bool launch_exception_readback(struct domain_bootstrap_fork *out, task_t 
   return ok;
 }
 static void mach_rights(void) {
-#ifdef NATIVE_CI_EXPERIMENT
-  launch_stage("mach-acquire", NULL, 0, 0);
-  task_t self = mach_task_self(); thread_t thread = MACH_PORT_NULL;
-  mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL, reply = launch_reply_borrowed, special = launch_special_borrowed;
-  mach_port_t held_host = MACH_PORT_NULL, held_access = MACH_PORT_NULL, held_bootstrap = MACH_PORT_NULL;
-  mach_port_t held_thread = MACH_PORT_NULL, runtime[8] = {0}, refused_name = MACH_PORT_NULL;
-  mach_port_t bootstrap = MACH_PORT_NULL; int bootstrap_query = -1, bootstrap_release = -1;
-  long long bootstrap_refs = -1;
-  mach_port_type_t refused_type = MACH_PORT_TYPE_NONE; const char *binding = "unproved";
-  unsigned runtime_count = 0, runtime_seen = 0; bool replies_bound = false;
-  mach_port_type_t access_type = MACH_PORT_TYPE_NONE, reply_type = MACH_PORT_TYPE_NONE;
-  natural_t type = 0; mach_vm_address_t address = 0;
-  mach_port_name_array_t names = NULL; mach_port_type_array_t types = NULL;
-  mach_msg_type_number_t n = 0, nt = 0; bool service = false, seen = false;
-  kern_return_t notify_release = KERN_SUCCESS, readback_release = KERN_SUCCESS;
-  int notify_error = 0, readback_error = 0;
-  const char *operation; long result = 0; int error = 0;
-  operation = "runtime-reply-owner"; result = launch_reply_owner; error = errno;
-  if (launch_reply_owner != getpid()) goto mach_cleanup;
-  held_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
-  bootstrap = held_bootstrap;
-  thread = mach_thread_self(); held_thread = MACH_PORT_VALID(thread) ? thread : MACH_PORT_NULL;
-  operation = "mach_thread_self"; result = thread; error = errno;
-  if (!MACH_PORT_VALID(thread) || thread == self) goto mach_cleanup;
-  launch_stage("mach-host", NULL, 0, 0);
-  operation = "task_get_special_port/TASK_HOST_PORT";
-  result = task_get_special_port(self, TASK_HOST_PORT, &host); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  held_host = MACH_PORT_VALID(host) ? host : MACH_PORT_NULL;
-  operation = "mach_port_kobject"; result = mach_port_kobject(self, host, &type, &address); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "mach_port_kobject/type"; result = type;
-  if (type != 3) goto mach_cleanup;
-  launch_stage("mach-access", NULL, 0, 0);
-  operation = "task_get_special_port/TASK_ACCESS_PORT";
-  result = task_get_special_port(self, TASK_ACCESS_PORT, &access); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  if (MACH_PORT_VALID(access)) {
-    /* The getter owns a copy before the fallible query. Unsupported types with
-     * no deallocatable reference grant no authority over an unowned receive. */
-    held_access = access;
-    operation = "mach_port_type/access"; result = mach_port_type(self, access, &access_type); error = errno;
-    if (result == KERN_SUCCESS && !(access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
-      held_access = MACH_PORT_NULL;
-    if (result != KERN_SUCCESS) goto mach_cleanup;
-    if (access_type == MACH_PORT_TYPE_SEND) {
-      type = ~0U;
-      operation = "mach_port_kobject/access"; result = mach_port_kobject(self, access, &type, &address); error = errno;
-      if (result != KERN_SUCCESS) goto mach_cleanup;
-      operation = "mach_port_kobject/access/type"; result = type;
-      if (type != 0) goto mach_cleanup; /* IKOT_NONE, never task/thread authority. */
-      operation = "TASK_ACCESS_PORT/identity"; result = access;
-      if (access == self || access == thread || access == host) goto mach_cleanup;
-      service = true;
-    } else {
-      operation = "TASK_ACCESS_PORT/authority"; result = access_type;
-      if (access_type != MACH_PORT_TYPE_DEAD_NAME) goto mach_cleanup;
-      held_access = MACH_PORT_NULL;
-      operation = "mach_port_deallocate/access"; result = mach_port_deallocate(self, access); error = errno;
-      if (result != KERN_SUCCESS) goto mach_cleanup;
-    }
-  }
-  launch_stage("mach-special-ports", NULL, 0, 0);
-  operation = "task_set_special_port/TASK_BOOTSTRAP_PORT"; result = task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  if (MACH_PORT_VALID(held_bootstrap)) {
-    mach_port_t local = held_bootstrap; held_bootstrap = MACH_PORT_NULL;
-    bootstrap_refs = domain_send_refs(local, &bootstrap_query);
-    operation = "mach_port_deallocate/bootstrap"; result = mach_port_deallocate(self, local); error = errno;
-    bootstrap_release = (int)result;
-    if (result != KERN_SUCCESS) goto mach_cleanup;
-  }
-  operation = "task_set_special_port/TASK_DEBUG_CONTROL_PORT"; result = task_set_special_port(self, TASK_DEBUG_CONTROL_PORT, MACH_PORT_NULL); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  {
-    /* XNU may omit both resource-notify selectors. Failed getter output owns
-     * nothing; successful getter copies must settle before later sanitation. */
-    mach_port_t notify = MACH_PORT_NULL, readback = MACH_PORT_NULL;
-    kern_return_t notify_get = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &notify); int get_error = errno;
-    kern_return_t notify_set = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL); int set_error = errno;
-    kern_return_t notify_read = KERN_FAILURE;
-    operation = NULL;
-    if (!(notify_get == KERN_INVALID_ARGUMENT && notify_set == KERN_INVALID_ARGUMENT)) {
-      if (notify_get != KERN_SUCCESS) {
-        operation = "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = notify_get; error = get_error;
-      } else if (notify_set != KERN_SUCCESS) {
-        operation = "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT"; result = notify_set; error = set_error;
-      } else {
-        notify_read = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &readback); error = errno;
-        if (notify_read != KERN_SUCCESS) {
-          operation = "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback"; result = notify_read;
-        } else if (readback != MACH_PORT_NULL) {
-          operation = "TASK_RESOURCE_NOTIFY_PORT/null"; result = readback;
-        }
-      }
-    }
-    launch_stage("resource-notify-cleanup", operation, result, error);
-    if (notify_get == KERN_SUCCESS && MACH_PORT_VALID(notify)) {
-      notify_release = mach_port_deallocate(self, notify); notify_error = errno;
-    }
-    if (notify_read == KERN_SUCCESS && MACH_PORT_VALID(readback)) {
-      readback_release = mach_port_deallocate(self, readback); readback_error = errno;
-    }
-    if (operation || notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) goto mach_cleanup;
-  }
-  launch_stage("mach-exceptions", NULL, 0, 0);
-  operation = "mach_ports_register"; result = mach_ports_register(self, NULL, 0); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "task_set_exception_ports"; result = task_set_exception_ports(self, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "thread_set_exception_ports"; result = thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  struct domain_bootstrap_fork exceptions = {0};
-  if (!launch_exception_readback(&exceptions, self, thread)) {
-    struct domain_bootstrap_issue issue = exceptions.issues[0];
-    operation = issue.operation; result = issue.value; error = 0; goto mach_cleanup;
-  }
-  operation = "mig_get_reply_port/identity"; result = reply; error = errno;
-  if (!MACH_PORT_VALID(reply) || reply == self || reply == thread || reply == host || (service && reply == access)) goto mach_cleanup;
-  operation = "mig_get_special_reply_port/identity"; result = special;
-  if (!MACH_PORT_VALID(special) || special == self || special == thread || special == host || special == reply || (service && special == access)) goto mach_cleanup;
-  runtime_count = domain_runtime_reply_count;
-  operation = "runtime-reply-producer"; result = runtime_count;
-  if (domain_runtime_reply_owner != getpid() || !domain_runtime_reply_imported || domain_runtime_reply_overflow || runtime_count > 8) goto mach_cleanup;
-  for (unsigned i = 0; i < runtime_count; i++) {
-    runtime[i] = domain_runtime_replies[i]; result = runtime[i];
-    if (!MACH_PORT_VALID(runtime[i]) || runtime[i] == self || runtime[i] == thread || runtime[i] == host || (service && runtime[i] == access)) goto mach_cleanup;
-    for (unsigned j = 0; j < i; j++) if (runtime[j] == runtime[i]) goto mach_cleanup;
-  }
-  replies_bound = true;
-  operation = launch_replies_changed(runtime_count, runtime); result = 0;
-  if (operation) goto mach_cleanup;
-  operation = "mach_port_type/reply"; result = mach_port_type(self, reply, &reply_type); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "mach_port_type/reply/type"; result = reply_type;
-  if (reply_type != MACH_PORT_TYPE_RECEIVE) {
-    refused_name = reply; refused_type = reply_type; binding = "ordinary-cache"; goto mach_cleanup;
-  }
-  launch_stage("mach-census", NULL, 0, 0);
-  operation = "mach_port_names"; result = mach_port_names(self, &names, &n, &types, &nt); error = errno;
-  if (result != KERN_SUCCESS) goto mach_cleanup;
-  operation = "mach_port_names/count"; result = n;
-  if (n != nt || n > 4096 || !names || !types) goto mach_cleanup;
-  operation = launch_replies_changed(runtime_count, runtime); result = 0;
-  if (operation) goto mach_cleanup;
-  launch_stage("mach-census-check", NULL, 0, 0);
-  bool self_seen = false, thread_seen = false, host_seen = false, reply_seen = false, special_seen = false;
-  for (mach_msg_type_number_t i = 0; i < n; i++) {
-    bool allowed, produced = false;
-    for (unsigned j = 0; j < runtime_count; j++) if (names[i] == runtime[j]) { produced = true; runtime_seen |= 1u << j; }
-    if (names[i] == self) { allowed = types[i] == MACH_PORT_TYPE_SEND; self_seen = true; }
-    else if (names[i] == thread) { allowed = types[i] == MACH_PORT_TYPE_SEND; thread_seen = true; }
-    else if (names[i] == host) { allowed = types[i] == MACH_PORT_TYPE_SEND; host_seen = true; }
-    else if (names[i] == reply) { allowed = types[i] == MACH_PORT_TYPE_RECEIVE; reply_seen = true; }
-    else if (names[i] == special) { allowed = types[i] == (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_RECEIVE); special_seen = true; }
-    else if (service && names[i] == access) { allowed = types[i] == MACH_PORT_TYPE_SEND; seen = true; }
-    else if (produced) allowed = types[i] == MACH_PORT_TYPE_RECEIVE;
-    else allowed = types[i] == MACH_PORT_TYPE_DEAD_NAME;
-    for (unsigned j = 0; j < i; j++) if (names[j] == names[i]) allowed = false;
-    if (!allowed) {
-      operation = "mach_port_names/authority"; result = types[i]; refused_name = names[i]; refused_type = types[i];
-      binding = names[i] == reply ? "ordinary-cache" : names[i] == special ? "special-cache" : produced ? "producer" :
-        names[i] == self ? "task" : names[i] == thread ? "thread" : names[i] == host ? "host" : service && names[i] == access ? "task-access" : "unproved";
-      goto mach_cleanup;
-    }
-  }
-  operation = "mach_port_names/authority"; result = MACH_PORT_TYPE_NONE;
-  if (!(self_seen && thread_seen && host_seen && reply_seen && special_seen && (!service || seen) && runtime_seen == ((1u << runtime_count) - 1))) {
-    refused_name = !self_seen ? self : !thread_seen ? thread : !host_seen ? host : !reply_seen ? reply : !special_seen ? special : service && !seen ? access : MACH_PORT_NULL;
-    if (!MACH_PORT_VALID(refused_name)) for (unsigned i = 0; i < runtime_count; i++)
-      if (!(runtime_seen & (1u << i))) { refused_name = runtime[i]; break; }
-    binding = "missing"; goto mach_cleanup;
-  }
-  operation = NULL;
-mach_cleanup: {
-    const char *prior = operation; long prior_result = result; int prior_error = error;
-    if (!prior && notify_release != KERN_SUCCESS) { prior = "mach_port_deallocate/notify"; prior_result = notify_release; prior_error = notify_error; }
-    if (!prior && readback_release != KERN_SUCCESS) { prior = "mach_port_deallocate/readback"; prior_result = readback_release; prior_error = readback_error; }
-    launch_stage("mach-cleanup", prior, prior_result, prior_error);
-    /* One refused-name fact or failed bootstrap release, before cleanup RPCs,
-     * never a broader inventory or an explanation of an earlier child's right. */
-    if (operation && (MACH_PORT_VALID(refused_name) || (bootstrap_release != -1 && bootstrap_release != KERN_SUCCESS))) {
-      int saved = errno, send_query = -1;
-      long long send_refs = domain_send_refs(refused_name, &send_query);
-      (void)signal(SIGPIPE, SIG_IGN);
-      domain_fork_diagnostic("launcher");
-      fprintf(stderr, "native-darwin-launch-port: pid=%d name=%u type=%#x binding=%s bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
-        getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
-      fflush(stderr); errno = saved;
-      domain_refusal_request(refused_name);
-    }
-    /* One entry per acquisition, even when local names alias. Never retry a
-     * failed release or let it replace the original refusal. */
-    const char *cleanup_operations[] = {"mach_port_deallocate/notify", "mach_port_deallocate/readback", "mach_vm_deallocate/names", "mach_vm_deallocate/types", "mach_port_deallocate/access", "mach_port_deallocate/host", "mach_port_deallocate/thread", "mach_port_deallocate/bootstrap"};
-    kern_return_t releases[8] = {notify_release,readback_release,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS,KERN_SUCCESS};
-    int errors[8] = {notify_error,readback_error,0,0,0,0,0,0};
-    if (names) { releases[2] = mach_vm_deallocate(self, (mach_vm_address_t)names, (mach_vm_size_t)n * sizeof(*names)); errors[2] = errno; }
-    if (types) { releases[3] = mach_vm_deallocate(self, (mach_vm_address_t)types, (mach_vm_size_t)nt * sizeof(*types)); errors[3] = errno; }
-    if (MACH_PORT_VALID(held_access)) { releases[4] = mach_port_deallocate(self, held_access); errors[4] = errno; }
-    if (MACH_PORT_VALID(held_host)) { releases[5] = mach_port_deallocate(self, held_host); errors[5] = errno; }
-    if (MACH_PORT_VALID(held_thread)) { releases[6] = mach_port_deallocate(self, held_thread); errors[6] = errno; }
-    if (MACH_PORT_VALID(held_bootstrap)) { releases[7] = mach_port_deallocate(self, held_bootstrap); errors[7] = errno; }
-    for (unsigned i = 0; i < 8; i++) if (releases[i] != KERN_SUCCESS) {
-      (void)signal(SIGPIPE, SIG_IGN);
-      fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s result=%d errno=%d\n", cleanup_operations[i], releases[i], errors[i]);
-      fflush(stderr);
-      if (!operation) { operation = cleanup_operations[i]; result = releases[i]; error = errors[i]; }
-    }
-    if (!operation && replies_bound) { operation = launch_replies_changed(runtime_count, runtime); result = 0; error = 0; }
-    if (operation) {
-      launch_failure(operation, result, error, 0, -1, 0);
-    }
-  }
-#else
+#ifndef NATIVE_CI_EXPERIMENT
   task_t self = mach_task_self(); thread_t thread = mach_thread_self();
   mach_port_t host, access; natural_t type; mach_vm_address_t address;
   /* SIP forbids clearing itk_host. Require the ordinary IKOT_HOST (XNU value 3),
@@ -478,8 +249,7 @@ static void child_exec(char **argv, char **environment, bool provider) {
   if (provider) { execve(argv[6], &argv[12], environment); _exit(126); }
   /* This copy cannot survive successful exec. Only a failed exec uses it. */
 #ifdef NATIVE_CI_EXPERIMENT
-  (void)domain_prepared_exec(argv[6], &argv[12], environment); int error = errno;
-  domain_exec_failure(launch_diagnostic, "native-darwin-launch: owner=child operation=execve result=-1 errno=", launch_exec_suffix, error);
+  (void)argv; (void)environment; need(false); _exit(126);
 #else
   int diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 3);
   if (diagnostic < 0) launch_failure("fcntl-stderr", diagnostic, errno, 0, -1, 0);
@@ -753,7 +523,6 @@ int main(int argc, char **argv) {
   struct proc_taskinfo task;
   need(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &task, sizeof(task)) == (int)sizeof(task) && task.pti_threadnum == 1);
 #ifdef NATIVE_CI_EXPERIMENT
-  domain_refusal_begin(30000);
   pid_t child = launch_bootstrap_fork();
 #else
   pid_t child = fork(); if (child < 0) launch_failure("fork", child, errno, 0, -1, 0);
@@ -769,6 +538,15 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
     launch_diagnostic = fcntl(2, F_DUPFD_CLOEXEC, 5); int diagnostic_error = errno;
     if (!(launch_diagnostic == 5)) launch_failure("fcntl-stderr", launch_diagnostic, diagnostic_error, 0, -1, 0);
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+    char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
+    need(length > 0 && (size_t)length < sizeof(home));
+    char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
+      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
+    struct exec_handoff handoff = {0}; const int inherited[] = {0, 1, 1};
+    launch_handoff = &handoff;
+    need(exec_handoff_prepare(&handoff, inherited, 3));
 #endif
     auditinfo_addr_t audit = {0}; audit.ai_auid = uid; audit.ai_asid = AU_ASSIGN_ASID;
     audit.ai_termid.at_type = AU_IPv4;
@@ -786,18 +564,11 @@ int main(int argc, char **argv) {
     launch_stage("sandbox", NULL, 0, 0);
     char *error = NULL; need(!sandbox_init((const char *)policy, 0, &error));
 #ifdef NATIVE_CI_EXPERIMENT
-    char home[PATH_MAX + 6]; int length = snprintf(home, sizeof(home), "HOME=%s", argv[5]);
-    need(length > 0 && (size_t)length < sizeof(home));
-    char *env[] = { home, "PATH=/nonexistent", "LANG=en_US.UTF-8", "TMPDIR=.",
-      "CI=true", "GITHUB_ACTIONS=true", ownership ? "NATIVE_OWNERSHIP_CUSTODY=true" : access ? "NATIVE_ACCESS_CUSTODY=true" : NULL, NULL };
-    int suffix_size = snprintf(launch_exec_suffix, sizeof(launch_exec_suffix), " revents=0 read=-1 launcher=%d reporter=%d start-seconds=%llu start-micros=%llu\n",
-      launcher_pid, getpid(), (unsigned long long)launcher_identity.bsd.pbi_start_tvsec, (unsigned long long)launcher_identity.bsd.pbi_start_tvusec);
-    need(suffix_size > 0 && suffix_size < sizeof(launch_exec_suffix));
-    alarm(30);
-    struct identity creator_identity = inspect(getpid());
-    need(domain_creator_checkpoint(3, 4, creator_identity));
-#endif
+    mach_port_t local_bootstrap = launch_bootstrap_local; launch_bootstrap_local = MACH_PORT_NULL;
+    image_closure_prepare(&handoff, local_bootstrap);
+#else
     mach_rights();
+#endif
     launch_stage("domain-controls", NULL, 0, 0);
     descriptors(); domain_controls(parent_asid, getppid()); struct identity identity = inspect(getpid());
     need(identity.bsd.pbi_uid == uid && identity.bsd.pbi_ruid == uid && identity.bsd.pbi_svuid == uid &&
@@ -812,20 +583,17 @@ int main(int argc, char **argv) {
 #endif
     launch_stage("parked-publication", NULL, 0, 0);
 #ifdef NATIVE_CI_EXPERIMENT
-    need(!launch_replies_changed(domain_runtime_reply_count, domain_runtime_replies));
-    need(audit_identity_same(identity, creator_identity) && dup2(1, 2) == 2 && domain_creator_final(3, identity));
+    struct image_frame frame = {.version = 2, .identity = identity};
+    need(write(3, &frame, sizeof(frame)) == sizeof(frame));
+    argv[12] = argv[6];
+    exec_handoff_execute(&handoff, 4, 3, argv[6], &argv[12], env);
+    exec_handoff_destroy(&handoff); launch_handoff = NULL;
+    (void)signal(SIGPIPE, SIG_IGN);
+    dprintf(launch_diagnostic, "native-darwin-image: operation=%s value=%d files-cleanup=%d attributes-cleanup=%d\n",
+      handoff.operation ? handoff.operation : "image-exec", handoff.value, handoff.files_cleanup, handoff.attributes_cleanup);
+    _exit(126);
 #else
     need(write(3, &identity, sizeof(identity)) == sizeof(identity) && !close(3));
-#endif
-#ifdef NATIVE_CI_EXPERIMENT
-    char final_gate; ssize_t final_read = read(4, &final_gate, 1);
-    if (final_read != 1) domain_exec_failure(launch_diagnostic,
-      final_read < 0 ? "native-darwin: operation=creator-release-read domain=errno value=" : "native-darwin: operation=creator-release-read domain=status value=",
-      " effects=possible settlement=unsettled\n", final_read < 0 ? errno : (int)final_read);
-    if (final_gate != 'R') domain_exec_failure(launch_diagnostic, "native-darwin: operation=creator-release-value domain=invariant value=", " effects=possible settlement=unsettled\n", 0);
-    if (close(4)) domain_exec_failure(launch_diagnostic, "native-darwin: operation=creator-release-close domain=errno value=", " effects=possible settlement=unsettled\n", errno);
-    alarm(0);
-#else
     need(command(4, 30000) == 'R' && !close(4));
     struct stat named; need(!lstat(argv[6], &named) && named.st_dev == image.st_dev &&
       named.st_ino == image.st_ino && named.st_mode == image.st_mode && named.st_uid == 0 &&
@@ -842,33 +610,33 @@ int main(int argc, char **argv) {
   if (provider) { close(4); close(5); }
   free(policy); close(ready[1]); close(release[0]); close(3); close(workspace); close(storage); close(custody);
 #ifdef NATIVE_CI_EXPERIMENT
-  struct domain_creator_frame pre, post;
-  need(read(ready[0], &pre, sizeof(pre)) == sizeof(pre) && pre.version == 1 && pre.phase == 1 && pre.identity.token.val[5] == (unsigned)child);
-  struct identity first = inspect(child); need(audit_identity_same(first, pre.identity));
-  (void)audit_hold(first.token.val[6]); need(audit_identity_same(first, inspect(child)));
-  printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(first); puts(",\"creator\":{\"version\":1,\"phase\":1}}"); fflush(stdout);
-  char creator[DOMAIN_CREATOR_BYTES];
-  need(read(0, creator, sizeof(creator)) == sizeof(creator) && write(release[1], creator, sizeof(creator)) == sizeof(creator));
-  need(read(ready[0], &post, sizeof(post)) == sizeof(post));
-  if (post.version == 1 && post.phase == 3)
-    domain_refusal_inspect(release[1], post, first, launcher_identity, getenv("NATIVE_EVIDENCE_CANDIDATE"), "launcher-census", creator);
-  need(post.version == 1 && post.phase == 2 &&
-    audit_identity_same(first, post.identity));
-  char trailing; need(read(ready[0], &trailing, 1) == 0 && !close(ready[0]));
-  struct identity parked = post.identity;
+  struct image_frame frame; struct exec_handoff handoff = {0};
+  need(read(ready[0], &frame, sizeof(frame)) == sizeof(frame) && frame.version == 2 && frame.identity.token.val[5] == (unsigned)child);
+  struct identity parked = inspect(child); need(audit_identity_same(parked, frame.identity));
+  (void)audit_hold(parked.token.val[6]);
+  need(exec_handoff_receive(&handoff, ready[0], false) && audit_identity_same(parked, inspect(child)));
+  printf("{\"version\":2,\"phase\":\"creator\",\"helper\":"); emit(inspect(getpid()));
+  fputs(",\"payload\":", stdout); emit(parked); puts(",\"controls\":true}"); fflush(stdout);
+  need(command(0, 30000) == 'X' && exec_handoff_release(&handoff, &release[1]));
+  need(exec_handoff_receive(&handoff, ready[0], true) && !close(ready[0]));
+  struct timespec started, now; need(!clock_gettime(CLOCK_MONOTONIC, &started)); struct identity live;
+  for (;;) {
+    live = inspect(child); if (exec_handoff_identity(parked, live)) break;
+    need(!clock_gettime(CLOCK_MONOTONIC, &now) && now.tv_sec - started.tv_sec < 30);
+    (void)poll(NULL, 0, 1);
+  }
+  printf("{\"version\":2,\"phase\":\"image\",\"helper\":"); emit(inspect(getpid()));
+  fputs(",\"payload\":", stdout); emit(live); puts(",\"controls\":true}"); fflush(stdout);
+  /* Only the bound independent root reader continues the stopped replacement. */
+  need(command(0, 30000) == 'C');
 #else
   struct identity parked = parked_identity(ready[0], child);
-#endif
-  /* Acquire after fork: only root custody gets the session reference. This
-   * original launcher remains a recoverable holder if reader IPC is lost. */
-#ifndef NATIVE_CI_EXPERIMENT
   (void)audit_hold(parked.token.val[6]);
-#endif
   struct identity live = inspect(child);
-  need(!memcmp(&live.token, &parked.token, sizeof(live.token)) &&
-       live.bsd.pbi_start_tvsec == parked.bsd.pbi_start_tvsec && live.bsd.pbi_start_tvusec == parked.bsd.pbi_start_tvusec);
+  need(audit_identity_same(live, parked));
   printf("{\"helper\":"); emit(inspect(getpid())); printf(",\"payload\":"); emit(live); puts(",\"controls\":true}"); fflush(stdout);
   char value = command(0, 30000); need(value == 'R' && write(release[1], &value, 1) == 1 && !close(release[1]));
+#endif
   int status; while (waitpid(child, &status, 0) < 0) need(errno == EINTR);
   if (ownership) {
     printf("{\"exitCode\":");

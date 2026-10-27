@@ -2118,16 +2118,21 @@ tool runs on development hosts, policy is unchanged, and tracing cannot grant
 denial evidence, readiness or acceptance. Observer uncertainty fences progress.
 This enables startup attribution without a new policy grant; a matching native
 cause and source-supported startup correction remain external prerequisites.
-A separate fixed constructor mode of the same observer supplies ordinary Darwin
-pre-exec creator evidence. It arms behind the original parent's P barrier, binds
-installed sudo/DTrace identities and tool digests, and uses mandatory typed public
-proc translations plus XNU's Mach-return arg0. Kernel create/start and private
-read fences join the original child and the complete bounded constructor sequence;
-buffer arrival order cannot stand in for that sequence. Shared custody imports one
-closed 512-byte, versioned receipt bound to parent, fork epoch and child birth/audit
-identity. Both launcher and fault census owners retain exact types, checked cache
-aliases and acquired-reference cleanup. Pre-census frames remain distinct from
-completed controls. The root parent holds audit custody only after fork.
+Ordinary Darwin ownership/access/Git launch uses version-two creation-bound
+suspended SETEXEC admission. The private `image-closure.h` owner clears and reads
+inheritable inputs without admitting arbitrary old namespace entries. The bound
+root reader holds control/getter references for the trusted creator and actual
+stopped replacement, compares inherited host/access endpoints only in its own
+namespace, and verifies the new epoch, unchanged birth/session/credentials,
+held image/signature, cwd, stdio closure and complete expected policy. Durable
+protected receipt readback and repeated observations precede handle settlement
+and one identity-bound continuation. Both epochs and original audit custody remain
+recoverable across publication or continuation uncertainty; recovery never replays
+work. Ordinary host-inherited service trust is unchanged and establishes no raw
+service-message safety. Reviewed/protected null-service refusals stay distinct.
+The constructor observer remains for fault admission and historical decoding;
+its closed fork/birth/audit receipt, sequence fences, alias handling and checked
+cleanup remain required there. Portable coverage supplies no native acceptance.
 Ordinary Darwin experimental launcher spawns use the selected SDK's native
 empty-bootstrap attribute without changing reader authority. Fault-custodian
 SETEXEC retains the same process and FD0–3, including the writable journal;

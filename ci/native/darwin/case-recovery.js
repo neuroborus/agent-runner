@@ -1,3 +1,4 @@
+import { assertDarwinImageRecord } from "./image-admission.js";
 import path from "node:path";
 import {
   observationDigest,
@@ -16,6 +17,7 @@ import {
   darwinOperationPreparation,
 } from "./case-operations.js";
 import { darwinAccessPreparation } from "./access-effects.js";
+import { assessDarwinEnumeration } from "./retirement.js";
 import { createDarwinAuditDecoder } from "./audit.js";
 import {
   darwinPfAuthorityDigest,
@@ -72,6 +74,11 @@ const operationPhases = [
   "git-ordinary-release",
   "git-ordinary-finish",
   "case-resume",
+  "image-creator",
+  "image-exec",
+  "image-read",
+  "image-continue",
+  "image-recover",
   "root-domain",
   "root-retired",
   "signature",
@@ -116,7 +123,7 @@ const operationBirths = new Map([
   ["transfer-recovery", ["file-admitted", 1]],
 ]);
 
-function joinOperationBirths(entries, history) {
+function joinOperationBirths(entries, history, imageSessions = []) {
   const receipts = new Map(
     history.map(({ pin, record }) => [pin.index, record]),
   );
@@ -131,7 +138,15 @@ function joinOperationBirths(entries, history) {
         // A later owner or start cannot supply an earlier missing birth.
         complete();
         [kind, required] = operationBirths.get(phase) ?? [null, 0];
-        identities = [];
+        identities =
+          phase === "case-session"
+            ? imageSessions.filter(
+                (value) =>
+                  value.pid === Number(record.record.request.arguments[5]) &&
+                  value.pidVersion ===
+                    Number(record.record.request.arguments[7]),
+              )
+            : [];
       }
     } else if (record.phase === "operation-receipt" && kind) {
       const value = receipts.get(record.pin.index);
@@ -180,6 +195,16 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           hash(intent.templateSha256),
       );
       const operation = Object.hasOwn(declared.bindings, "operations");
+      const imageRecovery =
+        operation &&
+        declared.custody.purpose === "experiment" &&
+        declared.id === "git.ordinary" &&
+        entries.some(
+          ({ record }) =>
+            record.phase === "operation-receipt-possible" &&
+            record.imageVersion === 2 &&
+            record.kind === "ordinary-created",
+        );
       const access = declared.id.startsWith("access.");
       const ownership = entries.some(({ record }) =>
         ["ownership-receipt", "ownership-receipt-possible"].includes(
@@ -225,6 +250,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         .map(({ record }) => record.record);
       const allowed = new Set([
         ...(operation || access ? operationPhases : []),
+        ...(imageRecovery ? ["case-members"] : []),
         ...(access
           ? [
               "socket",
@@ -277,6 +303,15 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         ...(ownership
           ? [
               "case-start",
+              ...(declared.custody.purpose === "experiment"
+                ? [
+                    "image-creator",
+                    "image-exec",
+                    "image-read",
+                    "image-continue",
+                    "image-recover",
+                  ]
+                : []),
               "case-creator",
               ...(declared.custody.purpose === "experiment"
                 ? ["case-refusal"]
@@ -466,7 +501,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
       if (!ownership && !operation)
         for (const subject of subjects)
           reads.push(await native.retired(subject));
-      let recovered;
+      let recovered,
+        recoveryReserved = false;
       if (operation) {
         const possible = entries.filter(
           ({ record }) => record.phase === "operation-receipt-possible",
@@ -475,19 +511,47 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           ({ record }) => record.phase === "operation-receipt",
         );
         requireObservation(
-          possible.length === receipts.length &&
-            possible.every(
-              ({ record }, i) =>
-                record.pin.index === i &&
-                same(record.pin, receipts[i].record.pin),
-            ),
+          possible.every(
+            ({ record }, i) =>
+              record.pin.index === i &&
+              (receipts.some((entry) => same(entry.record.pin, record.pin)) ||
+                (imageRecovery &&
+                  record.imageVersion === 2 &&
+                  [
+                    "ordinary-created",
+                    "ordinary-admitted",
+                    "ordinary-image",
+                    "ordinary-progress",
+                  ].includes(record.kind))),
+          ) &&
+            receipts.every((entry) =>
+              possible.some((prior) =>
+                same(prior.record.pin, entry.record.pin),
+              ),
+            ) &&
+            new Set(receipts.map(({ record }) => record.pin.index)).size ===
+              receipts.length,
         );
         const history = [];
         for (const { record } of possible) {
-          const bytes = await native.ownershipReceipt(
+          const bytes = await native.recoverOwnershipReceipt(
             record.pin.index,
             record.pin.sha256,
           );
+          if (bytes === null) {
+            requireObservation(
+              imageRecovery &&
+                record.imageVersion === 2 &&
+                [
+                  "ordinary-created",
+                  "ordinary-admitted",
+                  "ordinary-image",
+                  "ordinary-progress",
+                ].includes(record.kind) &&
+                !receipts.some((entry) => same(entry.record.pin, record.pin)),
+            );
+            continue;
+          }
           const value = JSON.parse(bytes);
           requireObservation(
             bytes.equals(Buffer.from(JSON.stringify(value) + "\n")) &&
@@ -495,7 +559,33 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           );
           history.push({ pin: record.pin, record: value });
         }
-        joinOperationBirths(entries, history);
+        for (const { record } of possible.filter(
+          ({ record }) => record.kind === "ordinary-progress",
+        ))
+          requireObservation(
+            history.some(
+              (entry) =>
+                entry.pin.index < record.pin.index &&
+                entry.record.kind === "ordinary-created" &&
+                entry.record.version === 2,
+            ),
+          );
+        const imageSessions = [],
+          imageCustodies = [];
+        for (const { record } of history.filter(
+          ({ record }) =>
+            record.kind === "ordinary-created" && record.version === 2,
+        )) {
+          requireObservation(imageRecovery);
+          const value = await native.recoverImageSession(
+            record.payload,
+            record.source,
+          );
+          reads.push(value);
+          imageSessions.push(record.payload);
+          imageCustodies.push(value);
+        }
+        joinOperationBirths(entries, history, imageSessions);
         for (const { record } of history)
           if (record.kind === "ordinary-admitted") {
             requireObservation(
@@ -508,15 +598,25 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
               ),
             );
           }
-        const known = history.flatMap(({ record }) =>
-          record.identity
+        for (const { record } of history.filter(
+          ({ record }) => record.kind === "ordinary-image",
+        )) {
+          requireObservation(record.version === 2);
+          assertDarwinImageRecord(record.image);
+          requireObservation(
+            sameDarwinIdentity(record.payload, record.image.creator),
+          );
+        }
+        const known = history.flatMap(({ record }) => [
+          ...(record.image?.target ? [record.image.target] : []),
+          ...(record.identity
             ? [record.identity]
             : record.payload
               ? [record.payload]
               : record.admission?.helper
                 ? [record.admission.helper]
-                : [],
-        );
+                : []),
+        ]);
         const domains = custody
           .filter((record) => record.phase === "root-domain")
           .map((record) =>
@@ -536,6 +636,73 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             !domains.some((domain) => domain.asid === identity.asid)
           )
             domains.push(identity);
+        const heldImages = imageCustodies.filter((value) => value.held);
+        requireObservation(heldImages.length <= 1);
+        if (heldImages.length) {
+          const session = heldImages[0],
+            now = state.now ?? (() => performance.now()),
+            deadline = now() + 30000,
+            bounded = () =>
+              requireObservation(!signal?.aborted && now() <= deadline);
+          // New audit custody precedes retiring any original root holder.
+          const roots = [
+            ...subjects,
+            ...known.filter((value) => value.uid === 0),
+          ].filter(
+            (value, i, all) =>
+              all.findIndex((other) => sameDarwinIdentity(other, value)) === i,
+          );
+          for (const identity of roots) {
+            bounded();
+            requireObservation(identity.pid !== admission.helper.pid);
+            const stopped = await native.signalOwnership(identity);
+            requireObservation(
+              ["sent", "not-found", "zombie"].includes(stopped.outcome),
+            );
+          }
+          for (const identity of roots) {
+            bounded();
+            reads.push(await native.retired(identity));
+          }
+          await native.open(10);
+          await native.reserve(
+            10,
+            observationDigest(declared.custody.context).slice(0, 32),
+          );
+          recoveryReserved = true;
+          for (let pass = 0; pass < 32; pass++) {
+            bounded();
+            const members = assessDarwinEnumeration(
+              await native.ownershipMembers(session.asid),
+              declared.bindings.input.request,
+              session.asid,
+              known.filter((value) => value.asid === session.asid),
+            );
+            if (!members.live.length) break;
+            for (const identity of members.live) {
+              bounded();
+              if (!known.some((value) => sameDarwinIdentity(value, identity)))
+                known.push(identity);
+              const stopped = await native.signalOwnership(identity);
+              requireObservation(
+                ["sent", "not-found", "zombie"].includes(stopped.outcome),
+              );
+            }
+          }
+          const verified = await native.verifyOwnership(session.asid);
+          assessDarwinEnumeration(
+            verified.enumeration,
+            declared.bindings.input.request,
+            session.asid,
+            known.filter((value) => value.asid === session.asid),
+          );
+          requireObservation(
+            !verified.enumeration.live.length &&
+              !verified.enumeration.zombies.length,
+          );
+          bounded();
+          reads.push(verified);
+        }
         for (const identity of known)
           reads.push(
             await native.retired(identity, {
@@ -550,6 +717,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           receiptIndex: possible.length,
           subjects: known,
           domains,
+          imageSessions: imageCustodies,
         };
       }
       if (ownership) {
@@ -565,7 +733,16 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             "phase",
             "kind",
             "pin",
+            ...(Object.hasOwn(record, "admissionVersion")
+              ? ["admissionVersion"]
+              : []),
           ]);
+          if (Object.hasOwn(record, "admissionVersion"))
+            requireObservation(
+              record.admissionVersion === 2 &&
+                record.kind === "admission" &&
+                declared.custody.purpose === "experiment",
+            );
           observationObject(record.pin, ["index", "sha256"]);
           requireObservation(
             hash(record.pin.sha256) &&
@@ -604,8 +781,13 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           );
         }
         requireObservation(
-          (access || possible.length === receipts.length) &&
-            possible.every(({ record }, i) => record.pin.index === i) &&
+          possible.every(
+            ({ record }, i) =>
+              record.pin.index === i &&
+              (access ||
+                receipts.some((entry) => same(entry.record.pin, record.pin)) ||
+                record.admissionVersion === 2),
+          ) &&
             receipts.every(({ record }) =>
               possible.some(
                 (entry) =>
@@ -636,8 +818,10 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           );
           if (bytes === null) {
             requireObservation(
-              access &&
-                record.kind !== "admission" &&
+              ((access && record.kind !== "admission") ||
+                (record.admissionVersion === 2 &&
+                  declared.custody.purpose === "experiment" &&
+                  record.kind === "admission")) &&
                 !receipts.some((entry) => same(entry.record.pin, record.pin)),
             );
             continue;
@@ -653,18 +837,35 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
             record: value,
           });
         }
-        const admitted = history.find(
-          ({ pin }) => pin.index === latest?.index,
-        )?.record;
-        if (latest) {
+        const retained = history
+          .filter(({ kind }) => kind === "admission")
+          .at(-1);
+        const admitted = retained?.record;
+        if (latest && !retained) requireObservation(false);
+        if (admitted) {
           requireObservation(
             admitted.candidateSha === state.job.candidateSha &&
               admitted.nonce ===
                 observationDigest(declared.custody.context).slice(0, 32),
           );
         }
+        let imageSession;
+        if (admitted?.schemaVersion === 2 && admitted.creatorChild) {
+          if (admitted.image) {
+            assertDarwinImageRecord(admitted.image);
+            requireObservation(
+              sameDarwinIdentity(admitted.image.creator, admitted.creatorChild),
+            );
+          }
+          imageSession = await native.recoverImageSession(
+            admitted.creatorChild,
+            admitted.helpers.find(({ role }) => role === "launcher").identity,
+          );
+        }
         const pendingPayload = admitted?.payload ?? admitted?.creatorChild;
-        const members = pendingPayload ? [pendingPayload] : [];
+        const members = [admitted?.creatorChild, pendingPayload].filter(
+          Boolean,
+        );
         for (const { record } of receipts.filter(({ record }) =>
           ["members", "retirement"].includes(record.kind),
         )) {
@@ -693,7 +894,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
         recovered = {
           admitted,
           members,
-          pin: latest,
+          pin: retained?.pin,
+          imageSession,
           receiptIndex: possible.length,
           outside: snapshots[0]?.record.snapshot,
           history,
@@ -711,7 +913,8 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           await native.recoverOwnershipSession(
             recovered.admitted.payload ?? recovered.admitted.creatorChild,
             recovered.admitted.sessionCustody ??
-              recovered.admitted.creatorSessionCustody,
+              recovered.admitted.creatorSessionCustody ??
+              recovered.imageSession,
           ),
         );
       if (
@@ -744,11 +947,13 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           if (record.subjects.helper.asid > 0)
             reads.push(await native.retiredRootDomain(record.subjects.helper));
       }
-      await native.open(10);
-      await native.reserve(
-        10,
-        observationDigest(declared.custody.context).slice(0, 32),
-      );
+      if (!recoveryReserved) {
+        await native.open(10);
+        await native.reserve(
+          10,
+          observationDigest(declared.custody.context).slice(0, 32),
+        );
+      }
       const rawPlan = (
         await state.read(
           declared.custody.plan.path,

@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Admit ordinary Darwin replacements before userspace
+
+Ordinary ownership/access/Git launch now consumes the shared suspended SETEXEC
+handoff. A private closure owner clears/readbacks inheritable inputs; bound root
+custody compares held creator/replacement endpoints in one IPC namespace and
+checks the stopped new epoch, image and complete expected policy. Durable receipt
+readback and repeated observations precede reference settlement and one identity-
+bound continuation. Recovery retains both epochs and original audit custody
+without replaying work. The exact ordinary inherited-service exception stays
+unchanged; reviewed null-service refusal and fault constructor admission remain.
+Portable/source evidence supplies no native PASS.
+
 ## 2026-10-27 — Share suspended Darwin exec mechanics without admission authority
 
 The finite command path now consumes a CI-private handoff owner for prepared

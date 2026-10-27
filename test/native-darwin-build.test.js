@@ -6250,7 +6250,7 @@ test("Darwin audit custody binds all-UID census, native controls and recoverable
   }
   const operation = reader.slice(
     reader.indexOf(
-      "static void case_session(char **fields, bool recovering) {",
+      "static void case_session(char **fields, bool recovering, bool reconstructing) {",
     ),
     reader.indexOf("static void case_session_closed(void) {"),
   );

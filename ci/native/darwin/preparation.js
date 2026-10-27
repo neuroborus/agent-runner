@@ -173,7 +173,18 @@ export function normalizeDarwinPreparation(
     "file-identity.h",
     "effective-reader.h",
     "feasibility-sandbox.h",
-    ...(purpose === "experiment" ? ["experiment.h", "pf-abi.h"] : []),
+    ...(purpose === "experiment"
+      ? [
+          "experiment.h",
+          "pf-abi.h",
+          ...(value.sources?.some(
+            ({ name }) =>
+              name === "image-closure.h" || name === "exec-handoff.h",
+          )
+            ? ["exec-handoff.h", "image-closure.h"]
+            : []),
+        ]
+      : []),
   ];
   requireObservation(
     Array.isArray(value.sources) && value.sources.length === sourceNames.length,
@@ -565,7 +576,6 @@ export function darwinPreparationContext(input, options) {
     env,
     fs,
     now: options.now ?? (() => performance.now()),
-    openConstructorTrace: options.openConstructorTrace,
     read,
     receipt,
     write,

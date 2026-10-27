@@ -48,7 +48,12 @@ const jobContext = (job) =>
     ),
   );
 
-export function darwinExperimentBuildInput(prepared, job, directory) {
+export function darwinExperimentBuildInput(
+  prepared,
+  job,
+  directory,
+  { recovery = false } = {},
+) {
   observationObject(prepared, [
     "schemaVersion",
     "purpose",
@@ -88,16 +93,25 @@ export function darwinExperimentBuildInput(prepared, job, directory) {
       /^[A-Za-z0-9.]+$/u.test(prepared.sdk.build) &&
       /^(?:Apple )?clang version /u.test(prepared.compilerVersion),
   );
+  const sourceNames =
+    recovery &&
+    !prepared.sources?.some(
+      ({ name }) => name === "image-closure.h" || name === "exec-handoff.h",
+    )
+      ? DARWIN_EXPERIMENT_SOURCES.filter(
+          (name) => !["image-closure.h", "exec-handoff.h"].includes(name),
+        )
+      : DARWIN_EXPERIMENT_SOURCES;
   requireObservation(
     Array.isArray(prepared.sources) &&
-      prepared.sources.length === DARWIN_EXPERIMENT_SOURCES.length &&
+      prepared.sources.length === sourceNames.length &&
       new Set(prepared.sources.map(({ name }) => name)).size ===
         prepared.sources.length,
   );
   for (const source of prepared.sources) {
     observationObject(source, ["name", "sha256"]);
     requireObservation(
-      DARWIN_EXPERIMENT_SOURCES.includes(source.name) && hash(source.sha256),
+      sourceNames.includes(source.name) && hash(source.sha256),
     );
   }
   requireObservation(
@@ -598,7 +612,9 @@ async function selected(job, directory, options, recovery = false) {
       (key) => prepared.binding[key] === options.binding[key],
     ),
   );
-  const declaration = darwinExperimentBuildInput(prepared, job, directory);
+  const declaration = darwinExperimentBuildInput(prepared, job, directory, {
+    recovery,
+  });
   await candidateSources(prepared, options);
   const state = darwinPreparationContext(declaration, options),
     readReceipt = recovery

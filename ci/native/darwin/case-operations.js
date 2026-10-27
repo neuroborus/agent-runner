@@ -116,7 +116,8 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
   const specification = provisioned.operations;
   requireObservation(specification && specification.id === recipe.id);
   let failure,
-    receiptIndex = recovered?.receiptIndex ?? 0;
+    receiptIndex = recovered?.receiptIndex ?? 0,
+    imageAdmissionPossible = (recovered?.imageSessions?.length ?? 0) > 0;
   const history = [...(recovered?.history ?? [])];
   const receipts = new Map(
       (recovered?.pins ?? []).map((pin) => [pin.sha256, pin]),
@@ -140,13 +141,31 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
   const persist = latch(async (record) => {
     const bytes = Buffer.from(JSON.stringify(record) + "\n");
     const pin = { index: receiptIndex++, sha256: digest(bytes) };
-    await save(recipe.id, { phase: "operation-receipt-possible", pin });
+    const imageRecord =
+      binding.purpose === "experiment" &&
+      recipe.id === "git.ordinary" &&
+      record.version === 2 &&
+      ["ordinary-created", "ordinary-admitted", "ordinary-image"].includes(
+        record.kind,
+      );
+    imageAdmissionPossible ||= imageRecord;
+    const admission = imageAdmissionPossible
+      ? {
+          imageVersion: 2,
+          kind: imageRecord ? record.kind : "ordinary-progress",
+        }
+      : {};
+    await save(recipe.id, {
+      phase: "operation-receipt-possible",
+      pin,
+      ...admission,
+    });
     requireObservation(
       (await reader.ownershipReceipt(pin.index, pin.sha256, bytes)).equals(
         bytes,
       ),
     );
-    await save(recipe.id, { phase: "operation-receipt", pin });
+    await save(recipe.id, { phase: "operation-receipt", pin, ...admission });
     receipts.set(pin.sha256, pin);
     history.push({ pin, record: structuredClone(record) });
     return {
@@ -241,6 +260,13 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
     specification,
     persist,
     recover,
+    async publishImage(record) {
+      const value = await persist(record);
+      return {
+        pin: receipts.get(value.receiptSha256),
+        bytes: Buffer.from(JSON.stringify(record) + "\n"),
+      };
+    },
     witness,
     born,
     retire,
@@ -290,6 +316,8 @@ export function createDarwinOperationEffects(state, current, save, recovered) {
         await owner.finish();
         const result = await retire();
         const objects = await reader.retireCase();
+        for (const session of recovered?.imageSessions ?? [])
+          if (session.held) await reader.finishOwnershipSession(session.asid);
         const custody = await reader.close();
         requireObservation(
           custody.status === "RETIRED" && custody.closed && custody.independent,

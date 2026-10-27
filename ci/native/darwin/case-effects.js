@@ -18,13 +18,17 @@ import {
   verifyPolicyBinding,
   assertPolicyParameters,
 } from "./experiment-policy.js";
+import {
+  admitDarwinImage,
+  darwinImageFrame,
+  assertDarwinImageRecord,
+} from "./image-admission.js";
 import { DARWIN_OWNERSHIP_CASES } from "./ownership.js";
 import {
   assessDarwinEnumeration,
   assertDarwinSessionCustody,
 } from "./retirement.js";
 import {
-  openDarwinStartupTrace,
   createDarwinRefusalBinding,
   DARWIN_CONSTRUCTOR_TRACE_INTENT,
 } from "./startup-trace.js";
@@ -75,6 +79,86 @@ export function darwinOwnershipPolicy(request) {
   ].join("\n");
 }
 
+// Historical constructor records grant recovery evidence only. Invalid or
+// incomplete capture never suppresses independent observer retirement.
+export async function retireDarwinConstructorHistory(reader, recovered) {
+  const admitted = recovered?.admitted;
+  let uncertain;
+  try {
+    const history = recovered?.history ?? [],
+      refusals = history.filter(({ kind }) => kind === "constructor-refusal"),
+      children = history.filter(({ kind }) => kind === "constructor-child"),
+      sealed = history.filter(({ kind }) => kind === "constructor-sealed");
+    // CR1 may already have permitted a diagnostic fork before the first
+    // registration survived. Only a successful seal rules that out.
+    if (children.length || refusals.length || sealed.length) {
+      requireObservation(children.length === 1);
+      const child = children[0].record;
+      observationObject(child, [
+        "identity",
+        "parent",
+        "receiptSha256",
+        "receipt",
+      ]);
+      requireObservation(
+        sameDarwinIdentity(child.identity, admitted.creatorChild) &&
+          sameDarwinIdentity(
+            child.parent,
+            admitted.helpers.find(({ role }) => role === "launcher")?.identity,
+          ) &&
+          /^[a-f0-9]{1024}$/u.test(child.receipt) &&
+          digest(Buffer.from(child.receipt, "hex")) === child.receiptSha256,
+      );
+      if (!refusals.length) {
+        requireObservation(sealed.length === 1);
+        const result = sealed[0].record;
+        requireObservation(
+          result.status === "observed" &&
+            result.captureComplete === true &&
+            result.cleanup === "RETIRED" &&
+            result.programSha256 ===
+              DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
+            result.refusal === null &&
+            sameDarwinIdentity(result.creator?.identity, child.identity) &&
+            result.creator.receiptSha256 === child.receiptSha256,
+        );
+      } else {
+        requireObservation(sealed.length === 0);
+        const binding = createDarwinRefusalBinding(
+          child.parent,
+          child.identity,
+          admitted.candidateSha,
+          child.receiptSha256,
+        );
+        for (const { record } of refusals) {
+          const { bindingSha256, ...registration } = record;
+          requireObservation(
+            binding.consume(
+              record.phase === "register" ? registration : record,
+            ) === bindingSha256,
+          );
+        }
+        requireObservation(binding.evidence().cleanup === "RETIRED");
+      }
+    }
+  } catch (cause) {
+    uncertain = cause;
+  }
+  for (const { record: observer } of recovered?.history?.filter(
+    ({ kind }) => kind === "constructor-observer",
+  ) ?? []) {
+    try {
+      requireObservation(
+        (await reader.constructorObserver("retire", observer.identity))
+          .status === "RETIRED",
+      );
+    } catch (cause) {
+      uncertain ??= cause;
+    }
+  }
+  return uncertain;
+}
+
 /** Private ownership composition. Every effect crosses the sealed root reader;
  * purpose-bound expectations remain data, including the complete policy. */
 export function createDarwinCaseEffects(state, current, save, recovered) {
@@ -93,10 +177,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     expectedBytes = Buffer.from(
       access?.seatbelt ?? darwinOwnershipPolicy(request),
     );
-  let constructorTrace,
-    constructorResult,
-    creatorReceiptPossible = false,
-    failure,
+  let failure,
     admitted = recovered?.admitted,
     admissionPin = recovered?.pin,
     retirement,
@@ -126,13 +207,27 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   const persist = async (kind, record) => {
     const bytes = Buffer.from(JSON.stringify(record) + "\n"),
       pin = { index: receiptIndex++, sha256: digest(bytes) };
-    await save(recipe.id, { phase: "ownership-receipt-possible", kind, pin });
+    const version =
+      kind === "admission" && record.schemaVersion === 2
+        ? { admissionVersion: 2 }
+        : {};
+    await save(recipe.id, {
+      phase: "ownership-receipt-possible",
+      kind,
+      pin,
+      ...version,
+    });
     requireObservation(
       (await reader.ownershipReceipt(pin.index, pin.sha256, bytes)).equals(
         bytes,
       ),
     );
-    await save(recipe.id, { phase: "ownership-receipt", kind, pin });
+    await save(recipe.id, {
+      phase: "ownership-receipt",
+      kind,
+      pin,
+      ...version,
+    });
     if (kind === "admission") admissionPin = pin;
     return pin;
   };
@@ -154,6 +249,14 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
             assertDarwinSessionCustody(record.sessionCustody, record.payload)
               .held)),
     );
+    if (record.schemaVersion === 2 && record.image) {
+      assertDarwinImageRecord(record.image);
+      requireObservation(
+        sameDarwinIdentity(record.image.creator, record.creatorChild) &&
+          (!record.image.target ||
+            sameDarwinIdentity(record.image.target, record.payload)),
+      );
+    }
     return record;
   };
   const witness = async () => {
@@ -270,104 +373,10 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
   const retire = async () => {
     let observerRetirement;
     const retireObservers = () =>
-      (observerRetirement ??= (async () => {
-        let uncertain;
-        try {
-          if (constructorTrace) {
-            constructorResult ??= await constructorTrace.finish();
-            requireObservation(constructorResult.cleanup === "RETIRED");
-            // Receipt transfer can precede every refusal row. A partial live
-            // capture cannot rule out an unregistered diagnostic attempt.
-            requireObservation(
-              !creatorReceiptPossible ||
-                constructorResult.captureComplete === true ||
-                constructorResult.refusal?.cleanup === "RETIRED",
-            );
-          }
-          const history = recovered?.history ?? [],
-            refusals = history.filter(
-              ({ kind }) => kind === "constructor-refusal",
-            ),
-            children = history.filter(
-              ({ kind }) => kind === "constructor-child",
-            ),
-            sealed = history.filter(
-              ({ kind }) => kind === "constructor-sealed",
-            );
-          // CR1 may already have permitted a diagnostic fork before the first
-          // registration survived. Only a successful seal rules that out.
-          if (children.length || refusals.length || sealed.length) {
-            requireObservation(children.length === 1);
-            const child = children[0].record;
-            observationObject(child, [
-              "identity",
-              "parent",
-              "receiptSha256",
-              "receipt",
-            ]);
-            requireObservation(
-              sameDarwinIdentity(child.identity, admitted.creatorChild) &&
-                sameDarwinIdentity(
-                  child.parent,
-                  admitted.helpers.find(({ role }) => role === "launcher")
-                    ?.identity,
-                ) &&
-                /^[a-f0-9]{1024}$/u.test(child.receipt) &&
-                digest(Buffer.from(child.receipt, "hex")) ===
-                  child.receiptSha256,
-            );
-            if (!refusals.length) {
-              requireObservation(sealed.length === 1);
-              const result = sealed[0].record;
-              requireObservation(
-                result.status === "observed" &&
-                  result.captureComplete === true &&
-                  result.cleanup === "RETIRED" &&
-                  result.programSha256 ===
-                    DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
-                  result.refusal === null &&
-                  sameDarwinIdentity(
-                    result.creator?.identity,
-                    child.identity,
-                  ) &&
-                  result.creator.receiptSha256 === child.receiptSha256,
-              );
-            } else {
-              requireObservation(sealed.length === 0);
-              const binding = createDarwinRefusalBinding(
-                child.parent,
-                child.identity,
-                request.candidateSha,
-                child.receiptSha256,
-              );
-              for (const { record } of refusals) {
-                const { bindingSha256, ...registration } = record;
-                requireObservation(
-                  binding.consume(
-                    record.phase === "register" ? registration : record,
-                  ) === bindingSha256,
-                );
-              }
-              requireObservation(binding.evidence().cleanup === "RETIRED");
-            }
-          }
-        } catch (cause) {
-          uncertain = cause;
-        }
-        for (const { record: observer } of recovered?.history?.filter(
-          ({ kind }) => kind === "constructor-observer",
-        ) ?? []) {
-          try {
-            requireObservation(
-              (await reader.constructorObserver("retire", observer.identity))
-                .status === "RETIRED",
-            );
-          } catch (cause) {
-            uncertain ??= cause;
-          }
-        }
-        return uncertain;
-      })());
+      (observerRetirement ??= retireDarwinConstructorHistory(
+        reader,
+        recovered,
+      ));
     // Original process settlement cannot depend on a complete observer capture.
     // The finally branch still retires observers if original cleanup refuses.
     try {
@@ -391,8 +400,18 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
       await reader.fenceOwnership();
       const custodians = [
         ...(recovered?.custodians ?? []),
-        ...((record.sessionCustody ?? record.creatorSessionCustody)
-          ? [(record.sessionCustody ?? record.creatorSessionCustody).owner]
+        ...((record.sessionCustody ??
+        record.creatorSessionCustody ??
+        recovered?.imageSession ??
+        admitted?.creatorSessionCustody)
+          ? [
+              (
+                record.sessionCustody ??
+                record.creatorSessionCustody ??
+                recovered?.imageSession ??
+                admitted?.creatorSessionCustody
+              ).owner,
+            ]
           : []),
       ]
         .map(root)
@@ -402,7 +421,10 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         );
       let sessionCustody = payload
         ? assertDarwinSessionCustody(
-            record.sessionCustody ?? record.creatorSessionCustody,
+            record.sessionCustody ??
+              record.creatorSessionCustody ??
+              recovered?.imageSession ??
+              admitted?.creatorSessionCustody,
             payload,
           )
         : null;
@@ -583,7 +605,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     const helper = root(hello.helper);
     requireObservation(helper.pid === born.pid && hello.payload === null);
     admitted = {
-      schemaVersion: 1,
+      schemaVersion: binding.purpose === "experiment" ? 2 : 1,
       candidateSha: request.candidateSha,
       nonce: request.nonce,
       requestSha256,
@@ -598,120 +620,125 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     requireObservation(
       (await reader.helper(helper)).sha256 === request.launcher.sha256,
     );
-    if (binding.purpose === "experiment") {
-      await persist("constructor-intent", {
-        parent: helper,
-        intent: DARWIN_CONSTRUCTOR_TRACE_INTENT,
-      });
-      constructorTrace = (state.openConstructorTrace ?? openDarwinStartupTrace)(
-        { identity: helper, candidateSha: request.candidateSha },
-        {
-          constructorMode: true,
-          readObserver: (pid) => reader.constructorObserver("read", pid),
-          observeObserver: (identity) =>
-            reader.constructorObserver("observe", identity),
-          retireObserver: (identity) =>
-            reader.constructorObserver("retire", identity),
-          onObserver: (observer) => persist("constructor-observer", observer),
-          onFailure: (cause) => {
-            failure ??= cause;
-          },
-        },
-      );
-      requireObservation((await constructorTrace.arm()).status === "armed");
-      requireObservation(
-        (await reader.helper(helper)).sha256 === request.launcher.sha256,
-      );
-    }
     await reader.sendOwnership(false, "P");
-    if (constructorTrace) {
-      const pre = await reader.ownershipControl();
-      observationObject(pre, ["helper", "payload", "creator"]);
-      observationObject(pre.creator, ["version", "phase"]);
-      requireObservation(
-        pre.creator.version === 1 &&
-          pre.creator.phase === 1 &&
-          sameDarwinIdentity(pre.helper, helper),
-      );
-      const identity = inDomain(pre.payload, pre.payload.asid);
-      admitted.creatorChild = identity;
+    const parked = await reader.ownershipControl();
+    const authorities = [];
+    const policy = async (target) => {
+      const values = [];
+      if (!access) {
+        for (let i = 0; i < 7; i++) {
+          const value = await reader.authority(target, i);
+          const expected =
+            i === 3
+              ? [0, 0, 0, 0, 1]
+              : i === 5
+                ? [0, 1, 1, 1, 0]
+                : [1, 1, 1, 1, 1];
+          requireObservation(
+            binding.purpose === "experiment"
+              ? same(value.decisions, expected)
+              : value.decisions[1] === expected[1] &&
+                  value.decisions[4] === expected[4],
+          );
+          values.push(value);
+        }
+      } else {
+        requireObservation(current.accessPolicy);
+        const objects = [];
+        for (const item of current.accessPolicy.seatbelt) {
+          const object = await reader.inspect(item.index);
+          objects.push({
+            ...item,
+            path: await reader.location(item.index),
+            identity: object.identity,
+            ...(binding.purpose === "experiment" && item.aclSha256 === null
+              ? {
+                  aclSha256: (await reader.authority(target, item.index))
+                    .aclSha256,
+                }
+              : {}),
+          });
+        }
+        if (binding.purpose === "experiment") {
+          const freshPf = await current.accessPolicy.inspectPf();
+          // Independent witness identities and passive observation digests may
+          // differ; validated effective policy and exclusion must not.
+          const policyBinding = ({ verifier, evidenceSha256, ...value }) =>
+            value;
+          requireObservation(
+            same(
+              policyBinding(freshPf),
+              policyBinding(current.accessPolicy.pf),
+            ),
+          );
+        }
+        values.push(
+          await createDarwinEffectiveReaders(
+            reader,
+            binding.context,
+            current.admission.helper,
+          ).seatbelt(
+            access.value,
+            { ...admitted, payload: target, phase: "verify" },
+            6,
+            objects,
+            args,
+          ),
+          current.accessPolicy.pf,
+        );
+      }
+      return values;
+    };
+    if (binding.purpose === "experiment") {
+      const creator = darwinImageFrame(parked, "creator", helper);
+      admitted.creatorChild = creator;
+      known.push(creator);
+      await persist("admission", admitted); // birth precedes fallible custody acquisition
       admitted.creatorSessionCustody = assertDarwinSessionCustody(
-        await reader.holdOwnershipSession(identity, helper),
-        identity,
+        await reader.holdOwnershipSession(creator, helper),
+        creator,
+      );
+      const result = await admitDarwinImage({
+        reader,
+        creator,
+        helper,
+        next: () => reader.ownershipControl(),
+        executable: request.executable,
+        policySha256: request.policy.sha256,
+        guard,
+        now,
+        observe: policy,
+        publish: async (image) => {
+          admitted.image = image;
+          admitted.controls = true;
+          admitted.sessionCustody = admitted.creatorSessionCustody;
+          if (image.target) {
+            admitted.payload = image.target;
+            if (!known.some((value) => sameDarwinIdentity(value, image.target)))
+              known.push(image.target);
+          }
+          const pin = await persist("admission", admitted);
+          return { pin, bytes: Buffer.from(JSON.stringify(admitted) + "\n") };
+        },
+      });
+      authorities.push(...result.policy);
+    } else {
+      observationObject(parked, ["helper", "payload", "controls"]);
+      requireObservation(
+        parked.controls === true && sameDarwinIdentity(parked.helper, helper),
+      );
+      admitted.payload = inDomain(parked.payload, parked.payload.asid);
+      known.push(admitted.payload);
+      admitted.controls = true;
+      admitted.sessionCustody = assertDarwinSessionCustody(
+        await reader.holdOwnershipSession(admitted.payload, helper),
+        admitted.payload,
       );
       await persist("admission", admitted);
-      // Persist original identity before transferring any receipt/release authority.
-      const receipt = await constructorTrace.receipt(identity, current.signal);
-      await persist("constructor-child", {
-        identity,
-        parent: helper,
-        receiptSha256: digest(receipt),
-        receipt: receipt.toString("hex"),
-      });
-      creatorReceiptPossible = true;
-      await reader.creatorReceipt(receipt);
+      await recoverReceipt();
+      if (!access) authorities.push(...(await policy(admitted.payload)));
+      await reader.sendOwnership(false, "R");
     }
-    let parked = await reader.ownershipControl();
-    for (let i = 0; parked.refusal && i < 2; i++) {
-      observationObject(parked, ["refusal"]);
-      requireObservation(constructorTrace);
-      const bindingSha256 = constructorTrace.refusal(parked.refusal);
-      await persist("constructor-refusal", {
-        ...parked.refusal,
-        bindingSha256,
-      });
-      await reader.refusalReply(
-        parked.refusal.phase,
-        bindingSha256,
-        parked.refusal.observer,
-      );
-      parked = await reader.ownershipControl();
-    }
-    observationObject(parked, ["helper", "payload", "controls"]);
-    requireObservation(parked.controls === true);
-    requireObservation(sameDarwinIdentity(parked.helper, helper));
-    admitted.payload = inDomain(parked.payload, parked.payload.asid);
-    known.push(admitted.payload);
-    admitted.controls = true;
-    admitted.sessionCustody = assertDarwinSessionCustody(
-      admitted.creatorSessionCustody ??
-        (await reader.holdOwnershipSession(admitted.payload, helper)),
-      admitted.payload,
-    );
-    await persist("admission", admitted);
-    await recoverReceipt();
-    // Query the installed sandbox while the child is still behind R. The
-    // executing root owner has already enforced credentials, Mach rights and
-    // RLIMIT_NPROC; fixture output is not evidence of those operations.
-    const authorities = [];
-    for (let i = 0; !access && i < 7; i++) {
-      const authority = await reader.authority(admitted.payload, i);
-      requireObservation(
-        authority.decisions[1] === (i === 3 ? 0 : 1) &&
-          authority.decisions[4] === (i === 5 ? 0 : 1),
-      );
-      authorities.push(authority);
-    }
-    await state.admit(current.signal);
-    if (constructorTrace) {
-      constructorResult = await constructorTrace.finish();
-      requireObservation(
-        constructorResult.status === "observed" &&
-          constructorResult.captureComplete &&
-          constructorResult.cleanup === "RETIRED" &&
-          constructorResult.programSha256 ===
-            DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
-          sameDarwinIdentity(
-            constructorResult.creator.identity,
-            admitted.payload,
-          ),
-      );
-      await persist("constructor-sealed", constructorResult);
-      requireObservation(
-        (await reader.helper(helper)).sha256 === request.launcher.sha256,
-      );
-    }
-    await reader.sendOwnership(false, "R");
     let ready;
     if (literal(recipe.id) || access) {
       ready = JSON.parse(await reader.ownershipOutput());
@@ -728,42 +755,17 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     if (access)
       requireObservation((await reader.access("payload-sockets")).held === 8);
     const actual = await subject(admitted.payload.pid, admitted.payload);
+    if (binding.purpose === "experiment")
+      requireObservation(
+        sameDarwinIdentity(actual.identity, admitted.image.target),
+      );
     admitted.parkedPayload = admitted.payload;
     admitted.payload = actual.identity;
     known.push(actual.identity);
     admitted.authority = { cwd: actual.cwd };
     admitted.helpers.push({ role: "verifier", identity: await witness() });
-    if (access) {
-      requireObservation(current.accessPolicy);
-      const objects = [];
-      for (const item of current.accessPolicy.seatbelt) {
-        const object = await reader.inspect(item.index);
-        objects.push({
-          ...item,
-          path: await reader.location(item.index),
-          identity: object.identity,
-          ...(binding.purpose === "experiment" && item.aclSha256 === null
-            ? {
-                aclSha256: (
-                  await reader.authority(admitted.payload, item.index)
-                ).aclSha256,
-              }
-            : {}),
-        });
-      }
-      const actualPolicy = await createDarwinEffectiveReaders(
-        reader,
-        binding.context,
-        current.admission.helper,
-      ).seatbelt(
-        access.value,
-        { ...admitted, phase: "verify" },
-        6,
-        objects,
-        args,
-      );
-      authorities.push(actualPolicy, current.accessPolicy.pf);
-    }
+    if (access && binding.purpose !== "experiment")
+      authorities.push(...(await policy(admitted.payload)));
     const observed = {
       schemaVersion: 1,
       context: structuredClone(binding.context),

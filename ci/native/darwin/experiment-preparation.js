@@ -129,6 +129,7 @@ function systemInput(job, preparation, { recovery = false } = {}) {
     preparation.prepared,
     job,
     preparation.prepared.directory,
+    { recovery },
   );
   input.manifest.helpers = preparation.build.helpers.map(
     ({ name, sha256, sourceSha256 }) => ({ name, sha256, sourceSha256 }),

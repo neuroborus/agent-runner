@@ -610,6 +610,7 @@ export function createDarwinAccessEffects(state, current, save) {
       current.accessPolicy = {
         seatbelt: specification.objects,
         pf: await pfSnapshot(),
+        inspectPf: pfSnapshot,
       };
       proof = await caseOwner.prepare();
       return proof.observed;

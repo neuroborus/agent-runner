@@ -4579,6 +4579,61 @@ or query refusal. Releasing a getter copy neither
 clears the slot nor establishes confinement, and no slot setter or service message
 is introduced.
 
+Ordinary ownership, access and Git launch now use a version-two creation-bound
+admission. The trusted child prepares stdio/argv/environment, installs the final
+credentials, audit session, limits and policy, and clears/readbacks registered,
+bootstrap, debug, resource-notify and the complete public task/thread exception
+inputs. `image-closure.h` uses selected-SDK spawn special/exception attributes and
+`exec-handoff.h` for SETEXEC/START_SUSPENDED/CLOEXEC_DEFAULT. The resource-notify
+exception remains exactly the paired unsupported getter/setter result. Parent
+exception metadata is never rewritten. No access-slot setter is attempted.
+
+The replacement creates a fresh IPC space and image/thread state. Arbitrary old
+namespace entries, reply caches, vouchers and old mappings supply no inherited
+namespace authority; no namespace allowlist or destructive cleanup admits them.
+The exec contract rebuilds dyld state and clears the calling thread's voucher.
+Fresh spawn attributes supply no watchport actions; XNU's retained watchport
+priority boosts do not copy arbitrary names into the replacement's IPC space.
+The original kernel policy, credentials, session, cwd and explicit stdio remain
+bound across creation and descendants. The loader/signature and executable
+allowlist retain their existing checks and no new acquisition/delegation grant.
+UID inequality alone supplies no exclusion proof.
+
+The independent root custody reader captures creator and stopped-replacement
+control handles only after binding their original audit epoch and birth. MAC
+checks remain; handles never reach the payload. Exact typed host/access getter
+copies are held and compared in this reader's own namespace across creation.
+An IKOT_NONE classification or a name from another process cannot substitute for
+that inherited endpoint. Root's task-control acquisition uses its kernel root
+path, without a new taskgated protocol or payload grant. This retains the exact
+ordinary disposable-host exception; neither the kernel/MIG supplement nor this
+cutover proves service-handler authentication, effects or raw-message safety.
+Reviewed/protected/provider launch retains its stricter null-service refusal.
+
+Possible replacement effects and original domain ownership precede X. Before
+one identity-bound continuation, the owner independently checks the actual stopped
+new epoch, unchanged birth/session/credentials, held image/hash/signature, cwd,
+stdio closure, inherited ports and complete expected effective policy. Versioned
+protected admission receipts are durably published and freshly read; image,
+closure and policy observations repeat unchanged. Inspection handles settle before
+SIGCONT, within the original bounded gate. EOF, stopped state and a sandbox-active
+bit alone authorize nothing. Fixture readiness and every original control follow.
+Unpublished epochs, failed receipts and uncertain continuation recover through
+original protected audit custody and complete domain retirement, never replaying
+payload work. Ordinary Git recovery retires live original holders, the bound
+observer and the complete held subject domain before closing audit custody.
+An incomplete progress receipt is recoverable only after the protected version-two
+creator record; it supplies no launch, continuation or settlement authority.
+Current source inventories pin both transitive headers before and
+after compilation; old source/admission records retain recovery-only bindings.
+These portable/source changes establish no native PASS.
+
+#### Retained fault and historical constructor protocol
+
+The following constructor/census mechanism remains owned by fault admission and
+historical recovery. Ordinary launcher admission uses the stopped-image protocol
+above and no longer starts a constructor observer.
+
 The accepted service and ordinary host getter copies stay held through the bounded
 Mach-name census. Only this task and its current thread with exact SEND types,
 the ordinary MIG cache with exact RECEIVE type, the cached special reply with
@@ -4604,8 +4659,8 @@ an owned reference or consume another entry's reference.
 
 The ordinary MIG cache is not a complete inventory of runtime replies. Pinned
 [`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach_init.c)
-allocates a distinct task fallback at initialization and after fork. Ordinary
-launch and fault custody therefore use a fixed constructor mode in the existing
+allocates a distinct task fallback at initialization and after fork. Fault
+custody therefore uses a fixed constructor mode in the existing
 `startup-trace.js` owner, rather than dyld interception or a hidden runtime global.
 The original parent remains behind P while the observer is armed, its sudo/DTrace
 chain is independently identified and its installed tool digests are recorded.
@@ -4637,7 +4692,7 @@ buffered across CPUs: every sequence through the pre-census fence must arrive
 before import; arrival order is not kernel event order. The existing exact-type
 census admits legitimate constructor/cache aliases as one name. Missing names,
 incompatible aliases, changed caches and unknown live rights still refuse.
-After census, ordinary launcher controls and checked cleanup, the child publishes
+After census, fault creator controls and checked cleanup, the child publishes
 a distinct final frame and parks on a one-byte private read. Fault payload
 controls retain their sandboxed post-exec phase; constructor evidence authorizes
 only the original pre-exec namespace.

@@ -48,6 +48,32 @@
 #include "custody.h"
 #include "file-identity.h"
 #include "feasibility-sandbox.h"
+#ifdef NATIVE_CI_EXPERIMENT
+#include "image-closure.h"
+static char image_cdhash[41];
+static unsigned image_policy_index;
+static bool image_recovering;
+static struct image_closure image_inherited, image_inspected;
+static bool image_settle(void) {
+  bool ok = image_closure_release(&image_inspected);
+  ok = image_closure_release(&image_inherited) && ok;
+  return ok && !image_inspected.outcome.count && !image_inherited.outcome.count;
+}
+static void image_failure_cleanup(void) {
+  (void)image_settle();
+  struct image_closure *values[] = {&image_inspected, &image_inherited};
+  for (unsigned j = 0; j < 2; j++) for (unsigned i = 0; i < values[j]->outcome.count; i++) {
+    struct domain_bootstrap_issue issue = values[j]->outcome.issues[i];
+    fprintf(stderr, "native-darwin-image-cleanup: operation=%s domain=%s value=%d cleanup=%d\n", issue.operation, issue.kind, issue.value, issue.cleanup);
+  }
+}
+static void image_reader_need(bool ok, const char *file, unsigned line) {
+  if (!ok) image_failure_cleanup();
+  need_at(ok, file, line);
+}
+#undef need
+#define need(ok) image_reader_need(!!(ok), __FILE__, __LINE__)
+#endif
 
 /* The matched SDK/export review must bind these dyld interfaces and this
  * version-one record. Absence is a build/admission failure, never a fallback. */
@@ -1127,6 +1153,9 @@ static void case_start(const char *mode, const char *cdhash) {
   struct entry *launcher = &entries[4], *payload = &entries[5], *policy = &entries[6];
   for (unsigned i = 0; i < 7; i++) stable(&entries[i]);
   signature(payload->path, cdhash);
+#ifdef NATIVE_CI_EXPERIMENT
+  memcpy(image_cdhash, cdhash, 41); image_policy_index = 6;
+#endif
   /* The launcher copy is joined to the independently approved final build pin
    * by the controller before this command; native validity is checked again. */
   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)launcher->path, strlen(launcher->path), false);
@@ -1314,14 +1343,15 @@ static void case_audit_emit(void) {
   fputs(",\"subject\":", stdout); emit(case_audit.subject); fputs(",\"source\":", stdout); emit(case_audit.source);
   fputs(",\"custodian\":", stdout); emit(case_audit.custodian); putchar('}');
 }
-static void case_session(char **fields, bool recovering) {
+static void case_session(char **fields, bool recovering, bool reconstructing) {
+  if (reconstructing) need(case_fenced && case_recovery);
   need(case_mode);
   if (recovering) need(case_fenced && case_recovery);
   if (!recovering || reservation_fd >= 0) reservation_guard();
   struct identity subject = case_identity(fields);
   unsigned asid = subject.token.val[6]; need(asid > 0 && asid < INT32_MAX && subject.token.val[0] == subject_uid);
   if (!recovering) {
-    need(!case_fenced && !case_asid && (!case_audit.version || case_audit.closed)); struct identity source = case_identity(fields + 12);
+    need((!case_fenced || reconstructing) && !case_asid && (!case_audit.version || case_audit.closed)); struct identity source = case_identity(fields + 12);
     need(audit_identity_same(source, inspect(source.token.val[5])) && source.token.val[1] == 0);
     char path[PATH_MAX]; need(proc_pidpath(source.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, entries[4].path));
     stable(&entries[4]); struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st));
@@ -1416,6 +1446,22 @@ static void case_session_closed(void) {
     (errno == ESRCH || errno == ENOENT) && !root_members(case_audit.custodian.token.val[6], false));
   int fd = case_audit_open(false); case_audit.closed = true; case_audit_store(fd); need(!close(fd)); case_asid = 0; fputs("{\"closed\":true}", stdout);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+/* Only the already recorded observer in the original reader's audit domain.
+ * Its full birth/epoch is checked by case_signal before this image check. */
+static bool image_recovery_observer(struct identity actual, const char *path) {
+  if (!image_recovering || !case_fenced || !case_recovery || !case_audit.ready || case_audit.closed ||
+      actual.token.val[6] != case_audit.owner.token.val[6]) return false;
+  char expected[PATH_MAX]; need(snprintf(expected, sizeof(expected), "%s/custody/observer", case_path) < sizeof(expected));
+  if (strcmp(path, expected)) return false;
+  unsigned found = 0;
+  for (unsigned i = 0; i < count; i++) if (!strcmp(entries[i].path, path)) {
+    need(!strcmp(entries[i].kind, "helper")); struct stat st;
+    free(file(path, subject_gid, 0550, 134217728, entries[i].pin, &st)); found++;
+  }
+  need(found == 1); return true;
+}
+#endif
 static void case_signal(char **fields) {
   need(case_mode); struct identity expected = {0}; unsigned order[] = {0, 1, 2, 3, 4, 5, 6, 7};
   for (unsigned i = 0; i < 8; i++) expected.token.val[order[i]] = case_number(fields[i], UINT32_MAX);
@@ -1439,7 +1485,13 @@ static void case_signal(char **fields) {
         if (!actual.token.val[1] && !(case_asid && actual.token.val[6] == case_asid && actual.token.val[0] == subject_uid)) {
           char path[PATH_MAX]; need(proc_pidpath(pid, path, sizeof(path)) > 0);
           if (!strcmp(path, entries[4].path)) { stable(&entries[4]); struct stat st; free(file(path, 0, 0550, 134217728, entries[4].pin, &st)); }
-          else { char own[PATH_MAX]; need(proc_pidpath(getpid(), own, sizeof(own)) > 0 && !strcmp(path, own)); }
+          else { char own[PATH_MAX]; need(proc_pidpath(getpid(), own, sizeof(own)) > 0);
+#ifdef NATIVE_CI_EXPERIMENT
+            need(!strcmp(path, own) || image_recovery_observer(actual, path));
+#else
+            need(!strcmp(path, own));
+#endif
+          }
         } else need(case_asid && actual.token.val[6] == case_asid && actual.token.val[0] == subject_uid);
         need(!proc_signal_with_audittoken(&actual.token, SIGKILL)); outcome = "sent";
         if (pid == case_custodian_child) { int status; while (waitpid(pid, &status, 0) < 0) need(errno == EINTR); need(WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL); case_custodian_child = 0; }
@@ -1478,7 +1530,11 @@ static void case_retire(void) {
     need(!close(case_in) && !close(case_out) && !close(case_data)); case_pid = 0;
   }
   for (unsigned i = 0; i < case_socket_count; i++) need(!close(case_sockets[i])); case_socket_count = 0;
-  no_subjects(); if (count == 12 || (operation_mode && operations_retired())) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
+  no_subjects();
+#ifdef NATIVE_CI_EXPERIMENT
+  need(image_settle());
+#endif
+  if (count == 12 || (operation_mode && operations_retired())) { need(!close(reservation_fd)); reservation_fd = -1; reservation_entry = NULL; }
   fputs("{\"noLiveUid\":true,\"closed\":true}", stdout);
 }
 /* Only a directory in the independently pinned plan may be created/resealed.
@@ -2535,6 +2591,9 @@ static void git_ordinary_start(struct entry *git, struct entry *metadata, struct
   need(!case_fenced);
   operation_guard(); no_subjects(); need(!git_pid && (!strcmp(mode, "inspect") || !strcmp(mode, "git-add") || !strcmp(mode, "git-commit")));
   struct entry *launcher = &entries[4], *payload = &entries[5]; signature(payload->path, cdhash);
+#ifdef NATIVE_CI_EXPERIMENT
+  memcpy(image_cdhash, cdhash, 41); image_policy_index = (unsigned)(policy - entries);
+#endif
   stable(git); stable(metadata); stable(hooks); stable(policy);
   int in[2], out[2], data[2]; need(!pipe(in) && !pipe(out) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
 #ifdef NATIVE_CI_EXPERIMENT
@@ -2619,12 +2678,145 @@ static void file_name(struct entry *root, unsigned pair) {
   printf("{\"nativeIdentity\":\"%s\",\"aliasIdentity\":\"%s\",\"beforeSha256\":\"%s\",\"afterSha256\":\"%s\"}", identity, identity, before, again);
 }
 
+#ifdef NATIVE_CI_EXPERIMENT
+/* A fresh reader cannot reconstruct continuation authority. Recovery retains
+ * audit custody and retires the whole original domain, including unseen epochs. */
+static unsigned image_phase;
+static struct identity image_creator, image_target;
+static struct timespec image_started;
+static void image_deadline(void) {
+  struct timespec now; need(!clock_gettime(CLOCK_MONOTONIC, &now));
+  need(now.tv_sec > image_started.tv_sec || now.tv_nsec >= image_started.tv_nsec);
+  need(now.tv_sec - image_started.tv_sec < 30);
+}
+static void image_inputs(struct image_closure *value, struct identity expected) {
+  task_t task = MACH_PORT_NULL; thread_act_array_t threads = NULL; mach_msg_type_number_t count = 0;
+  kern_return_t got = task_for_pid(mach_task_self(), expected.token.val[5], &task);
+  if (got == KERN_SUCCESS) image_copy(value, task);
+  bool ok = image_mach(value, got, "image-control-get");
+  audit_token_t token = {{0}}; mach_msg_type_number_t size = TASK_AUDIT_TOKEN_COUNT;
+  if (ok) ok = image_mach(value, task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&token, &size), "image-control-epoch") &&
+    image_assert(value, size == TASK_AUDIT_TOKEN_COUNT && !memcmp(&token, &expected.token, sizeof(token)), "image-control-binding");
+  if (ok) {
+    got = task_threads(task, &threads, &count);
+    ok = image_mach(value, got, "image-threads-get");
+    if (got == KERN_SUCCESS) {
+      bool single = count == 1 && threads;
+      ok = image_assert(value, single, "image-single-thread") && ok;
+      if (single) image_copy(value, threads[0]);
+      else for (unsigned i = 0; threads && i < count; i++) {
+        kern_return_t release = mach_port_deallocate(mach_task_self(), threads[i]);
+        domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-thread-release", "mach", release, true);
+      }
+      if (ok) ok = image_closure_read(value, task, threads[0]);
+      if (threads) {
+        kern_return_t release = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)threads, count * sizeof(*threads));
+        ok = domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-threads-array-release", "mach", release, true) && ok;
+      }
+    }
+  }
+  if (!ok) { image_failure_cleanup(); image_closure_require(value, false); }
+  need(audit_identity_same(expected, inspect(expected.token.val[5])));
+}
+static void image_begin(void) {
+  need(case_mode && !case_fenced && (!image_phase || image_phase == 4) && case_audit.ready && !case_audit.closed);
+  reservation_guard(); image_creator = case_audit.subject;
+  need(case_audit.source.token.val[5] == (unsigned)(operation_mode ? git_pid : case_pid));
+  need(audit_identity_same(case_audit.source, inspect(case_audit.source.token.val[5])) &&
+    audit_identity_same(image_creator, inspect(image_creator.token.val[5])));
+  char path[PATH_MAX]; need(proc_pidpath(image_creator.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, entries[4].path));
+  need(image_creator.token.val[0] == subject_uid && image_creator.token.val[1] == subject_uid && image_creator.token.val[2] == subject_gid);
+  memset(&image_inherited, 0, sizeof(image_inherited)); memset(&image_target, 0, sizeof(image_target));
+  image_inputs(&image_inherited, image_creator);
+  need(!clock_gettime(CLOCK_MONOTONIC, &image_started)); image_phase = 1;
+  fputs("{\"version\":2,\"creator\":", stdout); emit(image_creator); fputs(",\"closed\":true}", stdout);
+}
+static void image_exec(void) {
+  need(image_phase == 1 && !case_fenced); image_deadline();
+  need(audit_identity_same(image_creator, inspect(image_creator.token.val[5])));
+  image_phase = 2; /* consumed before a possibly delivered write */
+  need(write(operation_mode ? git_in : case_in, "X", 1) == 1); fputs("null", stdout);
+}
+static void image_observe(void) {
+  need(image_phase == 2 || image_phase == 3); image_deadline(); reservation_guard();
+  struct identity target = inspect(image_creator.token.val[5]); need(exec_handoff_identity(image_creator, target));
+  if (image_phase == 3) need(audit_identity_same(target, image_target));
+  image_target = target;
+  struct entry *payload = &entries[5], *work = &entries[3]; stable(payload); stable(work);
+  char path[PATH_MAX]; need(proc_pidpath(target.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, payload->path));
+  struct stat st; free(file(path, payload->stat.st_gid, payload->stat.st_mode & 07777, 134217728, payload->pin, &st)); same_stat(st, payload->stat);
+  signature(path, image_cdhash); stable(payload);
+  need(image_policy_index < count); struct entry *policy = &entries[image_policy_index]; stable(policy);
+  free(file(policy->path, 0, 0400, 1048576, policy->pin, &st)); same_stat(st, policy->stat); stable(policy);
+  struct proc_vnodepathinfo cwd; need(proc_pidinfo(target.token.val[5], PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd));
+  need(cwd.pvi_cdir.vip_vi.vi_stat.vst_dev == work->stat.st_dev && cwd.pvi_cdir.vip_vi.vi_stat.vst_ino == work->stat.st_ino && sandbox_active(target.token.val[5]) == 1);
+  struct proc_fdinfo fds[4]; int size = proc_pidinfo(target.token.val[5], PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+  need(size == 3 * sizeof(*fds)); unsigned mask = 0;
+  for (unsigned i = 0; i < 3; i++) { need(fds[i].proc_fd >= 0 && fds[i].proc_fd <= 2); mask |= 1u << fds[i].proc_fd; }
+  need(mask == 7);
+  memset(&image_inspected, 0, sizeof(image_inspected)); image_inputs(&image_inspected, target);
+  bool same = image_inspected.host == image_inherited.host && image_inspected.access == image_inherited.access &&
+    image_inspected.resource_unsupported == image_inherited.resource_unsupported;
+  bool released = image_closure_release(&image_inspected);
+  if (!same || !released) { image_failure_cleanup(); image_closure_require(&image_inspected, false); }
+  need(audit_identity_same(target, inspect(target.token.val[5])) && inspect(target.token.val[5]).bsd.pbi_status == SSTOP);
+  image_phase = 3;
+}
+static void image_read(void) {
+  image_observe(); fputs("{\"version\":2,\"creator\":", stdout); emit(image_creator);
+  fputs(",\"target\":", stdout); emit(image_target);
+  printf(",\"closed\":true,\"stopped\":true,\"imageSha256\":\"%s\",\"cdhash\":\"%s\",\"policySha256\":\"%s\"}", entries[5].pin, image_cdhash, entries[image_policy_index].pin);
+}
+static void image_continue(unsigned index, const char *pin) {
+  need(image_phase == 3 && !case_fenced && index < 32768 && strlen(pin) == 64 && strspn(pin, "0123456789abcdef") == 64);
+  /* Fresh protected receipt read precedes repeated observations and release.
+   * Its complete versioned identity/policy binding is checked by the owner. */
+  char path[PATH_MAX]; need(snprintf(path, sizeof(path), "%s/receipt-%u.json", entries[1].path, index) < sizeof(path));
+  struct stat st; free(file(path, 0, 0400, 65535, pin, &st));
+  image_observe(); bool released = image_closure_release(&image_inherited);
+  image_closure_require(&image_inherited, released); image_deadline();
+  struct identity target = inspect(image_target.token.val[5]);
+  need(audit_identity_same(target, image_target) && target.bsd.pbi_status == SSTOP);
+  image_phase = 4; /* uncertain continuation is never replayable */
+  need(write(operation_mode ? git_in : case_in, "C", 1) == 1);
+  need(!proc_signal_with_audittoken(&target.token, SIGCONT)); fputs("{\"continued\":true}", stdout);
+}
+static void image_recover(char **fields) {
+  need(case_fenced && case_recovery); struct stat named; errno = 0;
+  bool absent = fstatat(entries[1].fd, "audit-custody", &named, AT_SYMLINK_NOFOLLOW) == -1;
+  if (absent) need(errno == ENOENT);
+  unsigned matches = 0, unclosed = 0;
+  if (!absent) {
+    struct identity expected = case_identity(fields); int fd = case_audit_open(false); struct stat before, after;
+    need(!fstat(fd, &before));
+    for (off_t at = 0; at < before.st_size; at += sizeof(case_audit)) {
+      struct case_audit_custody value; read_at(fd, &value, sizeof(value), at);
+      need(value.version == 1 && !memcmp(value.context, case_context, 65));
+      if (!value.closed) need(++unclosed == 1);
+      if (audit_identity_same(value.subject, expected)) need(++matches == 1);
+    }
+    need(!fstat(fd, &after)); same_stat(before, after); need(!close(fd));
+  }
+  /* Historical closed attempts may precede the current open domain. Only an
+   * exact existing record can be read while another domain remains open. */
+  need(matches == 1 || !unclosed);
+  /* New custody is limited to the still-bound original creator. Recovery
+   * never opens the exec gate or reconstructs continuation authority. */
+  case_session(fields, matches == 1, matches == 0);
+  image_recovering = true;
+}
+#endif
 static void case_resume(char **values) {
   operation_guard(); need(git_pid); audit_token_t token = {{0}};
   for (unsigned i = 0; i < 8; i++) token.val[i] = number(values[i]);
   uint64_t seconds = number(values[8]); unsigned micros = number(values[9]), saved_uid = number(values[10]), saved_gid = number(values[11]);
   need(token.val[0] == subject_uid && token.val[1] == subject_uid && token.val[2] == subject_gid && token.val[3] == subject_uid && token.val[4] == subject_gid && token.val[5] > 1 && token.val[6] > 0 && token.val[7] > 0 && saved_uid == subject_uid && saved_gid == subject_gid);
   struct identity actual = inspect(token.val[5]); need(!memcmp(&actual.token, &token, sizeof(token)) && actual.bsd.pbi_start_tvsec == seconds && actual.bsd.pbi_start_tvusec == micros && actual.bsd.pbi_svuid == saved_uid && actual.bsd.pbi_svgid == saved_gid);
+#ifdef NATIVE_CI_EXPERIMENT
+  /* This legacy operation belongs to Git workers. It cannot bypass or replay
+   * the replacement's receipt-bound one-shot continuation. */
+  need(actual.token.val[5] != image_creator.token.val[5]);
+#endif
   need(!proc_signal_with_audittoken(&token, SIGCONT)); fputs("{\"resumed\":true}", stdout);
 }
 static bool operation_domain_finished(void) { return operation_mode && !git_pid && !file_pid; }
@@ -2820,18 +3012,15 @@ int main(int argc, char **argv) {
       printf("{\"kind\":\"%s\",\"parentPid\":%u,\"toolSha256\":\"%s\",\"identity\":", kind, value.bsd.pbi_ppid, hash); emit(value); putchar('}');
     } else if (!strcmp(tokens[0], "case-observer-observe") || !strcmp(tokens[0], "case-observer-retire")) {
       need(case_mode && n == 14); case_observer(&tokens[2], !strcmp(tokens[0], "case-observer-retire"));
-    } else if (!strcmp(tokens[0], "case-creator")) {
-      need(case_mode && case_pid && !case_fenced && n == 3 && strlen(tokens[2]) == 1024);
-      char bytes[512]; for (unsigned i = 0; i < 512; i++) bytes[i] = digit(tokens[2][2*i])*16 + digit(tokens[2][2*i+1]);
-      need(write(case_in, bytes, sizeof(bytes)) == sizeof(bytes)); fputs("null", stdout);
-    } else if (!strcmp(tokens[0], "case-refusal")) {
-      need(case_mode && case_pid && !case_fenced && ((n == 8 && !strcmp(tokens[2], "DR1")) || (n == 4 && !strcmp(tokens[2], "DS1"))) &&
-        strlen(tokens[3]) == 64 && strspn(tokens[3], "0123456789abcdef") == 64);
-      for (unsigned i = 4; i < n; i++) need(*tokens[i] && strspn(tokens[i], "0123456789") == strlen(tokens[i]));
-      char bytes[160]; int length = n == 8
-        ? snprintf(bytes, sizeof(bytes), "DR1 %s %s %s %s %s\n", tokens[3], tokens[4], tokens[5], tokens[6], tokens[7])
-        : snprintf(bytes, sizeof(bytes), "DS1 %s\n", tokens[3]);
-      need(length > 0 && length < sizeof(bytes) && write(case_in, bytes, length) == length); fputs("null", stdout);
+
+#endif
+#ifdef NATIVE_CI_EXPERIMENT
+    } else if (!strcmp(tokens[0], "image-recover")) {
+      need(n == 26); image_recover(&tokens[2]);
+    } else if (!strcmp(tokens[0], "image-creator")) { need(n == 2); image_begin();
+    } else if (!strcmp(tokens[0], "image-exec")) { need(n == 2); image_exec();
+    } else if (!strcmp(tokens[0], "image-read")) { need(n == 2); image_read();
+    } else if (!strcmp(tokens[0], "image-continue")) { need(n == 4); image_continue(number(tokens[2]), tokens[3]);
 #endif
     } else if (!strcmp(tokens[0], "case-send")) { need(n == 4); case_send(number(tokens[2]) == 1, tokens[3]);
     } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4], false);
@@ -2839,11 +3028,17 @@ int main(int argc, char **argv) {
     } else if (!strcmp(tokens[0], "case-receipt-optional")) { need(n == 4); case_receipt(number(tokens[2]), tokens[3], NULL, true);
     } else if (!strcmp(tokens[0], "case-fence")) {
       need(case_mode && n == 2); if (reservation_fd >= 0) reservation_guard();
-      case_fenced = true; fputs("{\"closed\":true}", stdout);
+      case_fenced = true;
+#ifdef NATIVE_CI_EXPERIMENT
+      /* JavaScript refusals need not fail a native command. Settle their held
+       * inspection copies here without reopening either image gate. */
+      need(image_settle());
+#endif
+      fputs("{\"closed\":true}", stdout);
     } else if (!strcmp(tokens[0], "case-session")) {
-      need(n == 26); case_session(&tokens[2], false);
+      need(n == 26); case_session(&tokens[2], false, false);
     } else if (!strcmp(tokens[0], "case-session-read")) {
-      need(n == 14); case_session(&tokens[2], true);
+      need(n == 14); case_session(&tokens[2], true, false);
     } else if (!strcmp(tokens[0], "case-session-close")) {
       need(n == 2); case_session_closed();
     } else if (!strcmp(tokens[0], "case-members")) { need(n == 3); case_members(number(tokens[2]), false);

@@ -370,17 +370,17 @@ writes and unavailable signal protection remain advisory. Existing errno, signal
 disposition, framing, acquired-reference cleanup and protected/provider checks stay
 required. Richer kernel reasons remain explicitly unavailable without a verified
 selected-SDK declaration; these portable tests establish no native success.
-The same actual launch-body fixture retains protected/provider null-only refusals
-and executes the complete experiment Mach body through census and cleanup.
-It covers absent/dead/service values, kernel/type/query refusals, missing/changed
-census entries, partial arrays and reference/array release failures. Owned arrays
-and deallocatable acquired references, including aliases, require one release attempt;
-unsupported access types grant no receive-right destruction authority. Independent
-cleanup diagnostics preserve the primary failure. Direct kernel results, including
-signed errors and full-width type/port values, survive failed diagnostic writes
-and flushes; the Mach diagnostic also survives the existing transport-loss fixture.
-Successful sanitation, provider stdio and parked-handshake regressions remain
-covered. These portable checks establish no successful native launch or cleanup.
+Ordinary stopped-image admission uses `test/native-darwin-image.test.js` for
+durable original ownership, exact epoch/birth binding, receipt failures, repeated
+policy drift, expiry and uncertain continuation. Injected C bodies retain exact
+service alternatives, rejected-name ownership and one-shot gate consumption.
+The native ownership/Git/recovery fixtures exercise the migrated private protocol;
+shared command-handoff and reviewed/protected null-only controls remain required.
+Fault sanitation retains constructor/cache/census and cleanup coverage until its
+own cutover. Each removed launcher census guarantee is retained by fresh-space
+creation, complete inheritable-input inspection, exact held endpoint provenance,
+checked acquisition cleanup and actual stopped-image admission. These portable
+checks establish neither selected-SDK compilation nor native launch or retirement.
 The experiment binds child bookkeeping before observations and executes the shared
 producer/checked-lookup bodies from the scoped `custody.h` section. Borrowed ordinary
 and special caches survive while owned bootstrap/getter aliases release once each.

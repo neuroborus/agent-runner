@@ -24,6 +24,8 @@ export const DARWIN_HOSTED_OUTPUT_BYTES = 256 * 1024;
 export const DARWIN_EXPERIMENT_SOURCES = Object.freeze([
   ...DARWIN_HELPER_NAMES.map((name) => name + ".c"),
   "custody.h",
+  "exec-handoff.h",
+  "image-closure.h",
   "file-identity.h",
   "effective-reader.h",
   "feasibility-sandbox.h",

@@ -109,9 +109,10 @@ export function normalizeDarwinCustodyInput(value, purpose = "reviewed") {
     tools.elevation.path === "/usr/bin/sudo" &&
       tools.environment.path === "/usr/bin/env",
   );
-  const sources = observationList(value.sources, 16).map((source) =>
-    entry(source),
-  );
+  const sources = observationList(
+    value.sources,
+    purpose === "experiment" ? 18 : 16,
+  ).map((source) => entry(source));
   requireDarwin(
     new Set(sources.map((source) => source.path)).size === sources.length,
   );
@@ -669,6 +670,7 @@ export function createDarwinCustodyReader(value, options = {}) {
     "case-session",
     "case-fence",
     "case-session-read",
+    "image-recover",
     "case-session-close",
     "operation-authority",
     "slots-closed",
@@ -1206,6 +1208,32 @@ export function createDarwinCustodyReader(value, options = {}) {
       return value;
     },
     ownershipControl: () => command("case-control"),
+    imageCreator: () => {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          ["image-closure.h", "exec-handoff.h"].every((name) =>
+            input.sources.some((source) => path.basename(source.path) === name),
+          ),
+      );
+      return command("image-creator");
+    },
+    async imageExec() {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          (await command("image-exec")) === null,
+      );
+    },
+    imageRead: () => command("image-read"),
+    async imageContinue(pin) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          integer(pin.index, 32767) &&
+          hash(pin.sha256),
+      );
+      const value = await command("image-continue", pin.index, pin.sha256);
+      observationObject(value, ["continued"]);
+      requireDarwin(value.continued === true);
+    },
     async ownershipEof() {
       const value = await command("case-eof");
       observationObject(value, ["complete"]);
@@ -1222,16 +1250,6 @@ export function createDarwinCustodyReader(value, options = {}) {
         Buffer.from(value.hex, "hex"),
       );
     },
-    async creatorReceipt(bytes) {
-      requireDarwin(
-        input.purpose === "experiment" &&
-          Buffer.isBuffer(bytes) &&
-          bytes.length === 512,
-      );
-      requireDarwin(
-        (await command("case-creator", bytes.toString("hex"))) === null,
-      );
-    },
     async constructorObserver(operation, value) {
       requireDarwin(
         input.purpose === "experiment" &&
@@ -1243,33 +1261,6 @@ export function createDarwinCustodyReader(value, options = {}) {
             "case-observer-" + operation,
             ...darwinIdentityArguments(value),
           );
-    },
-    async refusalReply(phase, bindingSha256, observer) {
-      requireDarwin(
-        input.purpose === "experiment" &&
-          ["register", "settle"].includes(phase) &&
-          hash(bindingSha256),
-      );
-      const birth =
-        phase === "register"
-          ? [
-              observer.pid,
-              observer.parentPid,
-              observer.startSeconds,
-              observer.startMicroseconds,
-            ]
-          : [];
-      requireDarwin(
-        birth.every((field) => Number.isSafeInteger(field) && field >= 0),
-      );
-      requireDarwin(
-        (await command(
-          "case-refusal",
-          phase === "register" ? "DR1" : "DS1",
-          bindingSha256,
-          ...birth,
-        )) === null,
-      );
     },
     async sendOwnership(payload, value) {
       requireDarwin(
@@ -1374,6 +1365,23 @@ export function createDarwinCustodyReader(value, options = {}) {
           sameDarwinIdentity(value.source, source),
       );
       ownershipSessions.set(value.asid, structuredClone(value));
+      return value;
+    },
+    async recoverImageSession(subject, source) {
+      requireDarwin(input.purpose === "experiment");
+      subject = normalizeDarwinIdentity(subject);
+      source = root(source);
+      const value = await command(
+        "image-recover",
+        ...darwinIdentityArguments(subject),
+        ...darwinIdentityArguments(source),
+      );
+      assertDarwinSessionCustody(value, subject);
+      requireDarwin(
+        sameDarwinIdentity(value.subject, subject) &&
+          sameDarwinIdentity(value.source, source),
+      );
+      ownershipSessions.set(subject.asid, structuredClone(value));
       return value;
     },
     async finishOwnershipSession(asid) {

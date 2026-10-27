@@ -1,3 +1,5 @@
+import { retireDarwinConstructorHistory } from "./case-effects.js";
+import { createDarwinRefusalBinding } from "./startup-trace.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
@@ -37,7 +39,6 @@ import {
   createDarwinExperimentSystemEffects,
   createDarwinBuildEffects,
   createDarwinSystemEffects,
-  createDarwinConstructorCapture,
   normalizeDarwinPreparation,
   DARWIN_HELPER_NAMES,
   DARWIN_LITERAL_ARGUMENTS,
@@ -75,7 +76,10 @@ import { darwinPfRootDigest } from "./pf-preparation.js";
 import { assertDarwinLiteralObservation } from "./literal.js";
 import { DARWIN_BUILD_CUSTODY_MS } from "./build.js";
 import { darwinCustodyChannel } from "./channel.js";
-import { createDarwinCustodyReader } from "./custody.js";
+import {
+  createDarwinCustodyReader,
+  normalizeDarwinCustodyInput,
+} from "./custody.js";
 import { fixture as darwinCustodyFixture } from "./custody.test.js";
 import {
   prepareDarwinExperimentBuild,
@@ -1315,6 +1319,10 @@ test("Darwin hosted preparation compiles each helper once and publishes only obs
     f.options,
   );
   assert.equal(prepared.schemaVersion, 3);
+  assert.deepEqual(
+    normalizeDarwinCustodyInput(prepared.bootstrap, "experiment").sources,
+    prepared.bootstrap.sources,
+  );
   assert.equal(prepared.command.toolchain, undefined);
   assert.equal(prepared.bootstrapSeed, undefined);
   assert.equal(
@@ -2330,7 +2338,12 @@ test("Darwin build entry classifies fixed installed tools through the default pr
       plan.bootstrap.purpose = purpose;
       plan.bootstrap.bindingSha256 = plan.bootstrap.reviewSha256;
       delete plan.bootstrap.reviewSha256;
-      for (const name of ["experiment.h", "pf-abi.h"]) {
+      for (const name of [
+        "experiment.h",
+        "pf-abi.h",
+        "exec-handoff.h",
+        "image-closure.h",
+      ]) {
         plan.sources.push({ name, sha256: hash });
         plan.bootstrap.sources.push({
           path: path.join(path.dirname(plan.bootstrap.reader.path), name),
@@ -3294,7 +3307,12 @@ function buildTranscripts(experiment = false, complete = false) {
     f.manifest.environment.DEVELOPER_DIR = toolchainSelection.developer.path;
     for (const request of f.requests)
       request.env.DEVELOPER_DIR = toolchainSelection.developer.path;
-    for (const name of ["experiment.h", "pf-abi.h"])
+    for (const name of [
+      "experiment.h",
+      "pf-abi.h",
+      "exec-handoff.h",
+      "image-closure.h",
+    ])
       plan.sources.push({ name, sha256: hash });
     if (!complete)
       plan.cases = plan.cases.filter(
@@ -3307,7 +3325,12 @@ function buildTranscripts(experiment = false, complete = false) {
       entry.purpose = "experiment";
       entry.bindingSha256 = entry.reviewSha256;
       delete entry.reviewSha256;
-      for (const name of ["experiment.h", "pf-abi.h"])
+      for (const name of [
+        "experiment.h",
+        "pf-abi.h",
+        "exec-handoff.h",
+        "image-closure.h",
+      ])
         entry.sources.push({
           path: path.dirname(entry.reader.path) + "/" + name,
           sha256: hash,
@@ -3357,8 +3380,6 @@ function buildTranscripts(experiment = false, complete = false) {
     foreignReceipt = false,
     compilerPolicyFault = false,
     caseFault = null,
-    constructorCapture,
-    refusalToken,
     accessSpec,
     operationFrames,
     pfInstalled = false,
@@ -3511,6 +3532,8 @@ function buildTranscripts(experiment = false, complete = false) {
     let ownershipMode,
       launcher,
       payload,
+      imageCreator,
+      imagePhase = 0,
       pfHelper,
       pfWorker,
       pfOperation,
@@ -4136,58 +4159,68 @@ function buildTranscripts(experiment = false, complete = false) {
           live(launcher, planEntries[4].path);
           control.push({ helper: launcher, payload: null });
           value = { pid: launcher.pid };
-        } else if (name === "case-creator") {
-          assert.equal(Buffer.from(args[0], "hex").length, 512);
-          if (caseFault === "constructor-refusal") {
-            constructorCapture.consume(
-              `created ${launcher.pid} 105 ${launcher.pid + 900}`,
-            );
-            control.push({
-              refusal: {
-                version: 1,
-                phase: "register",
-                candidateSha,
-                parent: launcher,
-                original: payload,
-                receiptSha256: createHash("sha256")
-                  .update(Buffer.from(args[0], "hex"))
-                  .digest("hex"),
-                refusedName: 128,
-                observer: {
-                  pid: launcher.pid + 900,
-                  parentPid: launcher.pid,
-                  startSeconds: 100,
-                  startMicroseconds: 2,
-                },
-              },
-            });
-          } else control.push({ helper: launcher, payload, controls: true });
+        } else if (name === "image-creator") {
+          assert.ok(experiment && !fenced);
+          imageCreator = structuredClone(payload);
+          imagePhase = 1;
+          value = {
+            version: 2,
+            creator: imageCreator,
+            closed: caseFault !== "image-closure",
+          };
+        } else if (name === "image-exec") {
+          assert.equal(imagePhase, 1);
+          imagePhase = 2;
+          payload = { ...payload, pidVersion: payload.pidVersion + 1 };
+          live(payload, planEntries[5].path);
+          control.push({
+            version: 2,
+            phase: "image",
+            helper: launcher,
+            payload,
+            controls: true,
+          });
           value = null;
-        } else if (name === "case-refusal") {
-          assert.equal(args[1], refusalToken);
-          if (args[0] === "DR1") {
-            assert.deepEqual(
-              args.slice(2),
-              [launcher.pid + 900, launcher.pid, 100, 2].map(String),
-            );
-            control.push({
-              refusal: {
-                version: 1,
-                phase: "settle",
-                bindingSha256: refusalToken,
-                reaped: true,
-                status: 0,
-                error: 0,
-                cleanup: 0,
-                channelLost: false,
-                observed: true,
-              },
-            });
-          } else assert.equal(args[0], "DS1");
-          value = null;
+        } else if (name === "image-read") {
+          assert.ok(imagePhase === 2 || imagePhase === 3);
+          imagePhase = 3;
+          if (caseFault === "image-drift")
+            payload = {
+              ...payload,
+              startMicroseconds: payload.startMicroseconds + 1,
+            };
+          value = {
+            version: 2,
+            creator: imageCreator,
+            target: payload,
+            closed: true,
+            stopped: true,
+            imageSha256: planEntries[5].pin,
+            cdhash,
+            policySha256: planEntries[6].pin,
+          };
+        } else if (name === "image-continue") {
+          assert.equal(imagePhase, 3);
+          imagePhase = 4;
+          const receipt = files.get(
+            planEntries[1].path + "/receipt-" + args[0] + ".json",
+          );
+          assert.ok(receipt);
+          assert.equal(digest(receipt.bytes), args[1]);
+          if (caseFault === "image-publication")
+            throw new Error("Image continuation unavailable");
+          data.push(
+            ["literal", "storage", "access"].includes(ownershipMode)
+              ? '{"phase":"armed"}\n'
+              : JSON.stringify({
+                  nonce: argsForCase.slice(0, 32),
+                  phase: "armed",
+                  pid: payload.pid,
+                  count: 0,
+                }) + "\n",
+          );
+          value = { continued: true };
         } else if (name === "case-control") {
-          if (!control.length && caseFault === "constructor-refusal")
-            throw new Error("Original Mach refusal");
           assert.ok(control.length);
           value = control.shift();
         } else if (name === "case-observer-retire") {
@@ -4242,9 +4275,11 @@ function buildTranscripts(experiment = false, complete = false) {
             control.push(
               experiment
                 ? {
+                    version: 2,
+                    phase: "creator",
                     helper: launcher,
                     payload,
-                    creator: { version: 1, phase: 1 },
+                    controls: true,
                   }
                 : { helper: launcher, payload, controls: true },
             );
@@ -4306,7 +4341,11 @@ function buildTranscripts(experiment = false, complete = false) {
         } else if (name === "case-fence") {
           fenced = true;
           value = { closed: true };
-        } else if (name === "case-session" || name === "case-session-read") {
+        } else if (
+          name === "case-session" ||
+          name === "case-session-read" ||
+          name === "image-recover"
+        ) {
           assert.ok(held.has("1") && held.has("4"));
           assert.ok(name === "case-session" ? reserved && !fenced : fenced);
           const keys = [
@@ -4331,7 +4370,10 @@ function buildTranscripts(experiment = false, complete = false) {
             );
           const file = planEntries[1].path + "/audit-custody";
           const key = file + ":" + subject.asid;
-          if (name === "case-session") {
+          if (
+            name === "case-session" ||
+            (name === "image-recover" && !auditCustodies.has(key))
+          ) {
             assert.ok(!auditCustodies.has(key));
             assert.ok(
               [...auditCustodies].every(
@@ -4405,7 +4447,13 @@ function buildTranscripts(experiment = false, complete = false) {
           const file = planEntries[1].path + "/receipt-" + args[0] + ".json";
           if (name === "case-receipt") {
             assert.ok(!files.has(file));
-            put(file, Buffer.from(args[2], "hex"), 0o400);
+            const bytes = Buffer.from(args[2], "hex"),
+              record = JSON.parse(bytes);
+            if (record.image?.target && caseFault === "image-receipt-before")
+              throw new Error("Image receipt unavailable");
+            put(file, bytes, 0o400);
+            if (record.image?.target && caseFault === "image-receipt-after")
+              throw new Error("Image receipt readback lost");
           }
           if (name === "case-receipt-optional" && !files.has(file))
             value = null;
@@ -4793,62 +4841,6 @@ function buildTranscripts(experiment = false, complete = false) {
   };
   const options = {
     fs,
-    openConstructorTrace: ({ identity: parent }) => {
-      const capture = createDarwinConstructorCapture(parent, candidateSha);
-      constructorCapture = capture;
-      let original,
-        result,
-        refused = false;
-      return {
-        arm: async () => ({ status: "armed" }),
-        receipt: async (identity) => {
-          original = identity;
-          for (const row of [
-            `created ${parent.pid} 100 ${identity.pid}`,
-            `started ${identity.pid} 101 7`,
-            `constructor ${identity.pid} 102 7 1 117`,
-            `fence ${identity.pid} 103 7 1 1 512`,
-          ])
-            capture.consume(row);
-          return capture.receipt(identity);
-        },
-        refusal(value) {
-          refused = true;
-          return (refusalToken = capture.refusal(value));
-        },
-        finish: async () => {
-          if (result) return result;
-          if (!original)
-            return (result = { status: "partial", cleanup: "RETIRED" });
-          if (refused) {
-            // Bound diagnostic settlement does not prove the live tracer's
-            // retirement or supply the refused original's second fence.
-            return (result = {
-              status: "partial",
-              captureComplete: false,
-              cleanup: "UNCERTAIN",
-              programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
-              creator: null,
-              refusal: capture.diagnostic(),
-            });
-          }
-          for (const row of [
-            `imported ${original.pid} 104 512`,
-            `fence ${original.pid} 105 7 2 1 1`,
-            `terminal ${original.pid} 106 1 2`,
-          ])
-            capture.consume(row);
-          return (result = {
-            status: "observed",
-            captureComplete: true,
-            cleanup: "RETIRED",
-            programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
-            creator: capture.complete(),
-            refusal: null,
-          });
-        },
-      };
-    },
     env: f.options.env,
     ownerUid: () => 1001,
     readerOptions: {
@@ -6492,9 +6484,11 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     "fresh-members-missing",
     "tcp-deadline",
     "mach-control-timeout",
-    "constructor-incomplete",
-    "constructor-unsealed",
-    "constructor-refusal",
+    "image-closure",
+    "image-drift",
+    "image-publication",
+    "image-receipt-before",
+    "image-receipt-after",
   ]) {
     const access = ["tcp-deadline", "mach-control-timeout"].includes(fault),
       id = access ? "access.read-only" : "ownership.cancel",
@@ -6502,34 +6496,22 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
       binding = experimentCase(f, id),
       recipe = darwinSystemRecipes().find((recipe) => recipe.id === id),
       work = new AbortController();
-    if (fault === "constructor-incomplete")
-      f.options.openConstructorTrace = () => ({
-        arm: async () => ({ status: "refused" }),
-        finish: async () => {
-          assert.ok(
-            f.events.includes("case-signal"),
-            "Original process retirement must precede an incomplete observer wait",
-          );
-          return { status: "partial", cleanup: "RETIRED" };
-        },
-      });
-    if (fault === "constructor-unsealed") {
-      const openTrace = f.options.openConstructorTrace;
-      f.options.openConstructorTrace = (...values) => ({
-        ...openTrace(...values),
-        finish: async () => {
-          assert.ok(f.events.includes("case-creator"));
-          return {
-            status: "partial",
-            captureComplete: false,
-            cleanup: "RETIRED",
-            refusal: null,
-          };
-        },
-      });
-    }
     const effects = createDarwinSystemEffects(f.input, f.options);
     f.caseFault(fault);
+    if (
+      [
+        "image-publication",
+        "image-receipt-before",
+        "image-receipt-after",
+      ].includes(fault)
+    ) {
+      await effects.bootstrap();
+      const build = darwinSystemRecipes().find(({ id }) => id === "build");
+      await effects.settle(build, null, {
+        signal: new AbortController().signal,
+        execution: execution(build),
+      });
+    }
     let prepared;
     if (
       [
@@ -6543,9 +6525,11 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "gid-alias",
         "subject-authority",
         "mach-control-timeout",
-        "constructor-incomplete",
-        "constructor-unsealed",
-        "constructor-refusal",
+        "image-closure",
+        "image-drift",
+        "image-publication",
+        "image-receipt-before",
+        "image-receipt-after",
       ].includes(fault)
     )
       await assert.rejects(
@@ -6556,9 +6540,7 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         }),
         fault === "mach-control-timeout"
           ? /Unverified Darwin mach-lookup:/u
-          : fault === "constructor-refusal"
-            ? /Original Mach refusal/u
-            : undefined,
+          : undefined,
       );
     else {
       prepared = await effects.prepare(recipe, {
@@ -6580,12 +6562,55 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
       signal: new AbortController().signal,
       execution: execution(recipe),
     });
-    if (fault === "constructor-incomplete")
-      assert.equal(settled(settlement).status, "RETIRED");
-    if (["constructor-unsealed", "constructor-refusal"].includes(fault))
-      assert.equal(settled(settlement).status, "RETAINED");
-    if (fault === "constructor-unsealed")
-      assert.ok(f.events.includes("case-signal"));
+    if (
+      [
+        "image-publication",
+        "image-receipt-before",
+        "image-receipt-after",
+      ].includes(fault)
+    ) {
+      f.caseFault(null);
+      const failures = [],
+        gates = f.events.filter((name) =>
+          ["image-exec", "image-continue"].includes(name),
+        ).length;
+      const result = await withNativeDiagnostics(
+        () =>
+          createDarwinSystemEffects(f.input, f.options).recover({
+            request: {
+              candidateSha,
+              platform: "darwin",
+              jobSha256: observationDigest(f.input.job),
+              preparationSha256: observationDigest(f.input.preparation),
+            },
+            job: f.input.job,
+            preparation: f.input.preparation,
+          }),
+        (owner, value) => {
+          if (value.exception)
+            failures.push(owner + ": " + value.exception.stack);
+        },
+      );
+      assert.equal(result.status, "RETIRED", failures.join("\n"));
+      assert.equal(
+        f.events.filter((name) =>
+          ["image-exec", "image-continue"].includes(name),
+        ).length,
+        gates,
+      );
+    }
+    if (
+      [
+        "image-closure",
+        "image-drift",
+        "image-publication",
+        "image-receipt-before",
+        "image-receipt-after",
+      ].includes(fault)
+    ) {
+      assert.ok(f.events.includes("case-signal"), fault);
+      assert.ok(!f.events.includes("case-creator"));
+    }
     await assert.rejects(
       effects.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
     );
@@ -7034,7 +7059,12 @@ test("Darwin partial case recovery rejoins protected births and objects without 
   }
 });
 
-test("Darwin constructor recovery requires a sealed capture or checked refusal settlement and independently retires originals and tracers", async () => {
+test("Darwin legacy constructor recovery retains strict seals and settlements while independently retiring observers", async () => {
+  const parent = identity(41),
+    child = { ...identity(42), uid: 90001, auid: 90001, gid: 90002 },
+    observer = identity(901),
+    receipt = Buffer.alloc(512),
+    receiptSha256 = digest(receipt);
   for (const [refused, fault] of [
     [true, null],
     [true, "unregistered"],
@@ -7044,132 +7074,96 @@ test("Darwin constructor recovery requires a sealed capture or checked refusal s
     [false, null],
     [false, "binding"],
   ]) {
-    const f = buildTranscripts(true),
-      binding = experimentCase(f, "ownership.cancel"),
-      recipe = darwinSystemRecipes().find(
-        ({ id }) => id === "ownership.cancel",
-      ),
-      openTrace = f.options.openConstructorTrace;
-    f.options.openConstructorTrace = (binding, options) => {
-      const trace = openTrace(binding, options);
-      return {
-        ...trace,
-        async arm() {
-          await options.onObserver({
-            kind: "dtrace",
-            parentPid: 999,
-            toolSha256: hash,
-            identity: { ...binding.identity, pid: binding.identity.pid + 901 },
-          });
-          return trace.arm();
+    const history = [
+      {
+        kind: "constructor-child",
+        record: {
+          identity: child,
+          parent,
+          receiptSha256,
+          receipt: receipt.toString("hex"),
+        },
+      },
+      { kind: "constructor-observer", record: { identity: observer } },
+    ];
+    if (refused) {
+      const registration = {
+        version: 1,
+        phase: "register",
+        candidateSha,
+        parent,
+        original: child,
+        receiptSha256,
+        refusedName: 128,
+        observer: {
+          pid: 900,
+          parentPid: parent.pid,
+          startSeconds: 100,
+          startMicroseconds: 2,
         },
       };
-    };
-    f.caseFault(refused ? "constructor-refusal" : null);
-    const effects = createDarwinSystemEffects(f.input, f.options);
-    const build = darwinSystemRecipes().find(({ id }) => id === "build");
-    await effects.bootstrap();
-    await effects.settle(build, null, {
-      signal: new AbortController().signal,
-      execution: execution(build),
-    });
-    const preparing = effects.prepare(recipe, {
-      policyBinding: binding,
-      recordPolicy() {},
-    });
-    if (refused) await assert.rejects(preparing, /Original Mach refusal/u);
-    else await preparing;
-    const records = [...f.files].flatMap(([file, entry]) => {
-      try {
-        return [{ file, entry, record: JSON.parse(entry.bytes) }];
-      } catch {
-        return [];
-      }
-    });
-    const receipt = records.find(({ record }) =>
-      refused
-        ? record?.phase === "settle"
-        : record?.status === "observed" &&
-          record.programSha256 ===
-            DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
-    );
-    assert.ok(receipt);
-    const previous = digest(receipt.entry.bytes);
-    if (["unregistered", "missing"].includes(fault)) {
-      const absent =
-        fault === "unregistered"
-          ? records.find(({ record }) => record?.phase === "register")
-          : receipt;
-      assert.ok(absent);
-      const prefix = `darwin-case-${recipe.id}-`,
-        lost = records.find(
-          ({ record }) =>
-            record?.phase === "ownership-receipt-possible" &&
-            record.pin.sha256 === digest(absent.entry.bytes),
-        );
-      assert.ok(lost);
-      const cutoff = Number(path.basename(lost.file).slice(prefix.length, -5));
-      for (const file of f.files.keys()) {
-        const name = path.basename(file);
-        if (
-          name.startsWith(prefix) &&
-          Number(name.slice(prefix.length, -5)) >= cutoff
-        )
-          f.files.delete(file);
-      }
-      f.files.delete(absent.file);
-      f.files.delete(receipt.file);
-      if (fault === "unregistered") {
-        assert.ok(
-          records.some(
-            ({ file, record }) =>
-              f.files.has(file) && record?.kind === "constructor-child",
-          ),
-        );
-        assert.ok(
-          !records.some(
-            ({ file, record }) =>
-              f.files.has(file) && record?.kind === "constructor-refusal",
-          ),
-        );
-      }
-    } else if (fault) {
-      if (fault === "binding") {
-        if (refused) receipt.record.bindingSha256 = "f".repeat(64);
-        else receipt.record.creator.receiptSha256 = "f".repeat(64);
-      } else receipt.record.reaped = false;
-      receipt.entry.bytes = Buffer.from(JSON.stringify(receipt.record) + "\n");
-      for (const { entry, record } of records)
-        if (record?.pin?.sha256 === previous) {
-          record.pin.sha256 = digest(receipt.entry.bytes);
-          entry.bytes = Buffer.from(JSON.stringify(record) + "\n");
-        }
-    }
-    f.caseFault(null);
-    const before = f.events.length;
-    const result = await createDarwinSystemEffects(f.input, f.options).recover({
-      request: {
+      const binding = createDarwinRefusalBinding(
+        parent,
+        child,
         candidateSha,
-        platform: "darwin",
-        jobSha256: observationDigest(f.input.job),
-        preparationSha256: observationDigest(f.input.preparation),
+        receiptSha256,
+      );
+      const bindingSha256 = binding.consume(registration);
+      if (fault !== "unregistered")
+        history.push({
+          kind: "constructor-refusal",
+          record: { ...registration, bindingSha256 },
+        });
+      if (fault !== "missing")
+        history.push({
+          kind: "constructor-refusal",
+          record: {
+            version: 1,
+            phase: "settle",
+            bindingSha256: fault === "binding" ? "f".repeat(64) : bindingSha256,
+            reaped: fault !== "uncertain",
+            status: 0,
+            error: 0,
+            cleanup: 0,
+            channelLost: false,
+            observed: true,
+          },
+        });
+    } else
+      history.push({
+        kind: "constructor-sealed",
+        record: {
+          status: "observed",
+          captureComplete: true,
+          cleanup: "RETIRED",
+          programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+          refusal: null,
+          creator: {
+            identity: child,
+            receiptSha256: fault === "binding" ? "f".repeat(64) : receiptSha256,
+          },
+        },
+      });
+    const retired = [];
+    const uncertain = await retireDarwinConstructorHistory(
+      {
+        constructorObserver: async (operation, identity) => {
+          assert.equal(operation, "retire");
+          retired.push(identity);
+          return { status: "RETIRED" };
+        },
       },
-      job: f.input.job,
-      preparation: f.input.preparation,
-    });
-    assert.equal(result.status, fault ? "RETAINED" : "RETIRED", fault);
-    const cleanup = f.events.slice(before);
-    assert.ok(cleanup.includes("case-signal"));
-    assert.ok(cleanup.includes("case-observer-retire"));
-    assert.ok(
-      cleanup.indexOf("case-signal") < cleanup.indexOf("case-observer-retire"),
+      {
+        admitted: {
+          candidateSha,
+          creatorChild: child,
+          helpers: [{ role: "launcher", identity: parent }],
+        },
+        history,
+      },
     );
-    assert.ok(!cleanup.includes("case-refusal"));
-    assert.equal(
-      [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
-        .length,
-      0,
-    );
+    assert.equal(Boolean(uncertain), Boolean(fault), String(fault));
+    assert.deepEqual(retired, [observer]);
   }
 });
 
@@ -8537,7 +8531,9 @@ function gitBinding(f, id, fault, generatedInput) {
   result.dynamic("git-hooks", [["policy", "hooks", "identitySha256"]]);
   result.approve();
   const input = generatedInput ?? syntheticInput;
-  let owner,
+  let ordinaryCreator,
+    ordinaryPolicy,
+    owner,
     worker,
     payload,
     mode,
@@ -8657,14 +8653,22 @@ function gitBinding(f, id, fault, generatedInput) {
     if (name === "git-ordinary-start") {
       ordinary = true;
       mode = args[4];
+      ordinaryPolicy = Number(args[3]);
       stage = "root";
       owner = spawn(ctx, request.launcher.path, 0);
       return { pid: owner.pid };
     }
     if (name === "git-event" && ordinary) {
       if (stage === "root") return { helper: owner, payload: null };
-      if (stage === "payload")
-        return { helper: owner, payload, controls: true };
+      if (stage === "payload" || stage === "image")
+        return {
+          ...(f.manifest.purpose === "experiment"
+            ? { version: 2, phase: stage === "payload" ? "creator" : "image" }
+            : {}),
+          helper: owner,
+          payload,
+          controls: true,
+        };
       if (stage === "ready")
         return { nonce: request.nonce, parked: true, pid: payload.pid };
       if (stage === "worker") return { worker };
@@ -8677,6 +8681,39 @@ function gitBinding(f, id, fault, generatedInput) {
               : "",
         };
       if (stage === "exit") return { exitCode: 0, signal: null };
+    }
+    if (name === "image-creator" && ordinary) {
+      ctx.imageCreator = structuredClone(payload);
+      // Retain on the fixture closure across independent protocol commands.
+      ordinaryCreator = structuredClone(payload);
+      return { version: 2, creator: ordinaryCreator, closed: true };
+    }
+    if (name === "image-exec" && ordinary) {
+      payload = {
+        ...payload,
+        pidVersion: payload.pidVersion + (fault === "epoch-stale" ? 0 : 1),
+      };
+      if (fault === "epoch-birth") payload.startMicroseconds++;
+      if (fault === "epoch-session") payload.asid++;
+      if (fault === "epoch-credentials") payload.svuid = 0;
+      ctx.live(payload, request.executable.path);
+      stage = "image";
+      return null;
+    }
+    if (name === "image-read" && ordinary)
+      return {
+        version: 2,
+        creator: ordinaryCreator,
+        target: payload,
+        closed: true,
+        stopped: true,
+        imageSha256: request.executable.sha256,
+        cdhash: request.executable.cdhash,
+        policySha256: ctx.planEntries[ordinaryPolicy].pin,
+      };
+    if (name === "image-continue" && ordinary) {
+      stage = "ready";
+      return { continued: true };
     }
     if (name === "git-ordinary-release") {
       if (args[0] === "0" && args[1] === "P") {
@@ -8741,8 +8778,18 @@ function gitBinding(f, id, fault, generatedInput) {
     }
     if (name === "case-resume") return { resumed: true };
     if (name === "authority") {
-      const target = ctx.snapshot(ctx.planEntries[Number(args[1])].path, true),
+      const slot = Number(args[1]);
+      const target = ctx.held.get(args[1]).object,
         subject = f.processes.get(Number(args[0])).identity;
+      const executable = slot === slots.git || slot === 5;
+      const workspace = slot === 3;
+      const readable = executable || workspace || slot === slots.metadata;
+      const writable =
+        workspace &&
+        f.files
+          .get(ctx.planEntries[ordinaryPolicy].path)
+          .bytes.toString()
+          .includes("(allow file-write*");
       return {
         subject,
         object: target,
@@ -8751,7 +8798,14 @@ function gitBinding(f, id, fault, generatedInput) {
         ),
         aclSha256: hash,
         sandboxed: true,
-        decisions: [0, 1, 1, 1, 1],
+        decisions:
+          subject.pid === payload?.pid && f.manifest.purpose === "experiment"
+            ? [
+                readable ? 0 : 1,
+                ...Array(3).fill(writable ? 0 : 1),
+                executable ? 0 : 1,
+              ]
+            : [0, 1, 1, 1, 1],
       };
     }
     if (name === "git-ordinary-finish") {
@@ -9871,6 +9925,121 @@ function completeExperimentCase(f, id, mach, scopedTarget) {
   };
 }
 
+test("interrupted ordinary Darwin Git recovers live original domains without replaying image admission", async () => {
+  for (const fault of [
+    "session-publication",
+    "image-receipt-before",
+    "image-receipt-after",
+    "continuation-loss",
+    "members-missing",
+    "unknown-zombie",
+  ]) {
+    const f = buildTranscripts(true, true),
+      setup = completeExperimentCase(f, "git.ordinary");
+    if (fault === "continuation-loss") {
+      const start = f.options.readerOptions.transport;
+      let interrupted = false;
+      f.options.readerOptions.transport = async (...args) => {
+        const owner = await start(...args),
+          send = owner.send;
+        owner.send = async (frame) => {
+          const result = await send.call(owner, frame);
+          if (!interrupted && frame.startsWith("image-continue ")) {
+            interrupted = true;
+            throw new Error("Lost continuation response");
+          }
+          return result;
+        };
+        return owner;
+      };
+    } else
+      f.caseFault(
+        ["members-missing", "unknown-zombie"].includes(fault)
+          ? "image-receipt-before"
+          : fault,
+      );
+    const effects = createDarwinSystemEffects(f.input, f.options),
+      recipe = darwinSystemRecipes().find(({ id }) => id === "git.ordinary"),
+      build = darwinSystemRecipes().find(({ id }) => id === "build");
+    await effects.bootstrap();
+    await effects.settle(build, null, {
+      signal: new AbortController().signal,
+      execution: execution(build),
+    });
+    const prepared = await effects.prepare(recipe, {
+      policyBinding: setup.binding,
+      recordPolicy() {},
+    });
+    const result = await runDarwinGitCase(
+      "git.ordinary-denial",
+      prepared.input,
+      prepared.effects,
+    ).catch(() => ({ status: "FAIL" }));
+    assert.notEqual(result.status, "OBSERVED");
+    await effects.settle(recipe, prepared, {
+      signal: new AbortController().signal,
+      execution: execution(recipe),
+    });
+    assert.ok(f.processes.size > 0);
+    const uncertain = ["members-missing", "unknown-zombie"].includes(fault);
+    f.caseFault(uncertain ? fault : null);
+    const before = f.events.filter((name) =>
+        [
+          "image-exec",
+          "image-continue",
+          "git-start",
+          "git-ordinary-start",
+        ].includes(name),
+      ).length,
+      failures = [];
+    const recover = () =>
+      createDarwinSystemEffects(f.input, f.options).recover({
+        request: {
+          candidateSha,
+          platform: "darwin",
+          jobSha256: observationDigest(f.input.job),
+          preparationSha256: observationDigest(f.input.preparation),
+        },
+        job: f.input.job,
+        preparation: f.input.preparation,
+      });
+    const recovered = await withNativeDiagnostics(recover, (owner, value) => {
+      if (value.exception) failures.push(owner + ": " + value.exception.stack);
+    });
+    assert.equal(
+      recovered.status,
+      uncertain ? "RETAINED" : "RETIRED",
+      fault + "\n" + failures.join("\n"),
+    );
+    if (uncertain) assert.ok(f.processes.size > 0);
+    else {
+      assert.equal(f.processes.size, 0);
+      assert.equal(
+        (
+          await withNativeDiagnostics(recover, (owner, value) => {
+            if (value.exception)
+              failures.push(owner + ": " + value.exception.stack);
+          })
+        ).status,
+        "RETIRED",
+        "repeat " + fault + "\n" + failures.join("\n"),
+      );
+      assert.equal(f.processes.size, 0);
+    }
+    assert.equal(
+      f.events.filter((name) =>
+        [
+          "image-exec",
+          "image-continue",
+          "git-start",
+          "git-ordinary-start",
+        ].includes(name),
+      ).length,
+      before,
+    );
+  }
+});
+
 test("complete Darwin experiments retain all file and Git native owners and original recovery", async () => {
   for (const id of [...DARWIN_FILE_CASE_IDS, "git.ordinary", "git.fixed"]) {
     const f = buildTranscripts(true, true),
@@ -10619,7 +10788,7 @@ test("indexed Darwin experiment preparation seals the complete large aggregate a
   assert.ok(aggregateBytes.length > 1048576, String(aggregateBytes.length));
   assert.ok(aggregateBytes.length <= 4194304);
   assert.equal(aggregate.system.uploads.length, 109);
-  assert.equal(aggregate.build.commands.length, 78);
+  assert.equal(aggregate.build.commands.length, 80);
   assert.ok(
     aggregate.build.commands.some(({ stderr }) => stderr === diagnostic),
   );

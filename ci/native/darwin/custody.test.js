@@ -136,7 +136,7 @@ test("Darwin experimental launcher retains the fork child through registered and
   assert.ok(body);
   assert.match(
     source,
-    /#ifdef NATIVE_CI_EXPERIMENT\s+domain_refusal_begin\(30000\);\s+pid_t child = launch_bootstrap_fork\(\);\s+#else\s+pid_t child = fork\(\);/u,
+    /#ifdef NATIVE_CI_EXPERIMENT\s+pid_t child = launch_bootstrap_fork\(\);\s+#else\s+pid_t child = fork\(\);/u,
   );
   const script = new Script(`function run() {${body
     .replace("struct domain_bootstrap_fork outcome;", "let outcome = {};")
@@ -4049,7 +4049,7 @@ test("Darwin custody completion rejects an unconsumed trailing frame", async () 
     child.stdout.destroy();
   }
 });
-test("Darwin ownership launch bodies preserve setup and handshake causes on the original diagnostic channel", async () => {
+test("Darwin protected launch bodies preserve setup and handshake causes on the original diagnostic channel", async () => {
   const [reader, launcher, custody] = await Promise.all(
     ["custody-reader.c", "launcher.c", "custody.h"].map((name) =>
       readFile(new URL(name, import.meta.url), "utf8"),
@@ -4183,11 +4183,9 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         /\b(?:long long|mach_port_urefs_t|int|long|unsigned|bool|ssize_t|size_t|pid_t|gid_t|domain_special_reply_fn|task_t|thread_t|mach_port_t|mach_port_type_t|natural_t|mach_vm_address_t|kern_return_t|mach_port_name_array_t|mach_port_type_array_t|mach_msg_type_number_t) /gu,
         "let ",
       );
-  const [ordinary, protectedBody] = body(launcher, "mach_rights").split(
-      "#else\n",
-    ),
-    experiment = ordinary.replace("#ifdef NATIVE_CI_EXPERIMENT", ""),
-    mach = protectedBody.replace("#endif", ""),
+  const mach = body(launcher, "mach_rights")
+      .replace("#ifndef NATIVE_CI_EXPERIMENT", "")
+      .replace("#endif", ""),
     sanitation = mach.indexOf("  need(task_set_special_port");
   assert.ok(sanitation > 0);
   assert.match(
@@ -4199,17 +4197,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     /#undef need\s+#define need\(ok\) launch_need_at\(!!\(ok\), __FILE__, __LINE__\)\s+#endif\s+static int launch_diagnostic = -1;\s+static void descriptors/u,
   );
   assert.match(launcher, /if \(!child\) \{\s+launch_stage\("child-entry"/u);
-  assert.doesNotMatch(experiment, /mig_dealloc_reply_port|mach_port_destroy/u);
-  const earlySetup = launcher
-    .slice(
-      launcher.indexOf("    need(dup2(ready[1], 3)"),
-      launcher.indexOf("\n#ifdef NATIVE_CI_EXPERIMENT\n    char home"),
-    )
-    .replaceAll(/#(?:ifdef NATIVE_CI_EXPERIMENT|endif)/gu, "");
-  const experimentExec = body(launcher, "child_exec").replace(
-    /#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#else[\s\S]*?#endif/u,
-    "$1",
-  );
   const functions =
     `const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};\n` +
     [
@@ -4228,23 +4215,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       [launcher, "child_stdio", "workspace,provider"],
       [launcher, "child_exec", "argv,environment,provider"],
       [launcher, "parked_identity", "fd,child"],
-      [launcher, "launch_replies_begin", ""],
-      [launcher, "launch_need_at", "ok,file,line"],
       [launcher, "descriptors", ""],
-      [launcher, "launch_replies_changed", "count,runtime"],
-      [custody, "domain_runtime_replies_begin", "owner"],
-      [custody, "domain_special_reply_lookup", ""],
-      [custody, "domain_send_refs", "name,query"],
     ]
       .map(
         ([source, name, args]) =>
           `function ${name}(${args}) {${translate(body(source, name))}}`,
       )
       .join("\n") +
-    `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}` +
-    `\nfunction experiment_mach_rights(){launch_replies_begin();domain_runtime_reply_imported=true;after_reply_binding();${translate(experiment)}}` +
-    `\nfunction early_child_setup(){${translate(earlySetup)}}` +
-    `\nfunction experiment_child_exec(argv,environment,provider){${translate(experimentExec)}}`;
+    `\nfunction initial_mach_rights(){${translate(mach.slice(0, sanitation))}mach_sanitation();}`;
   const start = reader.indexOf("static void case_start("),
     setup = reader
       .slice(
@@ -4362,239 +4340,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
     RECEIVE = 0x20000,
     ONCE = 0x40000,
     DEAD = 0x100000;
-  const machCases = [
-    ...["task", "thread"].flatMap((owner) => [
-      [{ [`${owner}ExceptionSet`]: 5 }, `${owner}_set_exception_ports`, 5, 33],
-      [{ [`${owner}ExceptionGet`]: 5 }, `${owner}-exception-read`, 5, 0],
-      [{ [`${owner}ExceptionStuck`]: true }, `${owner}-exception-read`, 0, 0],
-    ]),
-    [
-      { taskExceptionGet: 5, exceptionRelease: 15 },
-      "task-exception-read",
-      5,
-      0,
-    ],
-    ...["reply", "census", "cleanup"].map((fatal) => [
-      { fatal },
-      "parked-read",
-      0,
-      0,
-    ]),
-    [{ fatal: "cleanup", notify: 300, release: "notify" }, "parked-read", 0, 0],
-    [{ stageWriteFailure: true }],
-    [{ stageSignalFailure: true }],
-    ...[0, 0xffffffff, 200, 201].map((access) => [{ access }]),
-    [{ type: DEAD }],
-    [{ access: 7 }, "TASK_ACCESS_PORT/identity", 7], // The host copy now remains held.
-    ...[1, 2, 3, 99].map((kind) => [
-      { kind },
-      "mach_port_kobject/access/type",
-      kind,
-    ]),
-    ...[RECEIVE, ONCE, SEND | RECEIVE, SEND | DEAD, 0, 0x80000000].map(
-      (type) => [{ type }, "TASK_ACCESS_PORT/authority", type],
-    ),
-    [{ typeQuery: 15 }, "mach_port_type/access", 15],
-    [{ type: RECEIVE, typeQuery: 15 }, "mach_port_type/access", 15],
-    [{ accessKobject: 17 }, "mach_port_kobject/access", 17],
-    [{ accessGet: 19 }, "task_get_special_port/TASK_ACCESS_PORT", 19],
-    [{ hostGet: -37 }, "task_get_special_port/TASK_HOST_PORT", -37],
-    [{ hostKobject: 17 }, "mach_port_kobject", 17],
-    ...[1, 2].map((access) => [
-      { access },
-      "TASK_ACCESS_PORT/identity",
-      access,
-    ]),
-    [{ reply: 200 }, "mig_get_reply_port/identity", 200, 33],
-    [{ missing: true }, "mach_port_names/authority", 0],
-    [{ changed: true }, "mach_port_names/authority", ONCE],
-    [{ duplicate: true }, "mach_port_names/authority", SEND],
-    [{ list: 25 }, "mach_port_names", 25],
-    [{ mismatch: true }, "mach_port_names/count", 7],
-    [{ overflow: true }, "mach_port_names/count", 4097],
-    [{ partial: true, list: 25 }, "mach_port_names", 25],
-    [{ partial: true }, "mach_port_names/count", 7],
-    [{ sanitation: 23 }, "task_set_special_port/TASK_DEBUG_CONTROL_PORT", 23],
-    ...[RECEIVE, SEND, SEND | RECEIVE, 0].map((unknownType) => [
-      { unknownType },
-      "mach_port_names/authority",
-      unknownType,
-    ]),
-    ...[0, 0xffffffff, 3, 6, 7, 200].map((bootstrap) => [{ bootstrap }]),
-    ...[
-      {},
-      { bootstrapRefsQuery: 15 },
-      { refusedRefsQuery: 15 },
-      { refusedRefs: 0 },
-      { refusedRefs: 0xffffffff },
-    ].map((options) => [
-      { bootstrapExtra: true, bootstrap: 50, unknownType: SEND, ...options },
-      "mach_port_names/authority",
-      SEND,
-    ]),
-    ...[3, 6].map((notify) => [{ notify }]),
-    [{ notify: 6, readback: 6 }, "TASK_RESOURCE_NOTIFY_PORT/null", 6, 33],
-    [{ producer: [11, 3] }],
-    [{ producer: [0, 0xffffffff] }, "runtime-reply-producer", 0, 33],
-    [{ producer: [11, 11] }, "runtime-reply-producer", 11, 33],
-    [{ producer: [6] }],
-    [
-      { producer: Array.from({ length: 9 }, (_, i) => 11 + i) },
-      "runtime-reply-producer",
-      9,
-      33,
-    ],
-    [{ producer: [11], omit: 11 }, "mach_port_names/authority", 0],
-    [{ producer: [11], producerType: SEND }, "mach_port_names/authority", SEND],
-    ...[1, 2, 7, 3, 6].map((omit) => [
-      { omit },
-      "mach_port_names/authority",
-      0,
-    ]),
-    [{ duplicateName: 3 }, "mach_port_names/authority", RECEIVE],
-    [{ duplicateName: 6 }, "mach_port_names/authority", SEND | RECEIVE],
-    [{ specialType: RECEIVE }, "mach_port_names/authority", RECEIVE],
-    [
-      { replyType: SEND | RECEIVE },
-      "mach_port_type/reply/type",
-      SEND | RECEIVE,
-    ],
-    ...[0, 0xffffffff].map((reply) => [
-      { reply },
-      "mig_get_reply_port/identity",
-      reply,
-    ]),
-    ...[0, 0xffffffff, 3].map((special) => [
-      { special },
-      "mig_get_special_reply_port/identity",
-      special,
-    ]),
-    [{ bindingMissing: true }, "mig_get_special_reply_port/binding", 0, 0],
-    [{ bindingError: true }, "mig_get_special_reply_port/binding", 0, 0],
-    [
-      { bindingMissing: true, release: "bootstrap" },
-      "mig_get_special_reply_port/binding",
-      0,
-      0,
-    ],
-    [{ preMach: true }, "fchdir", -1],
-    [{ preMach: true, bootstrap: 3, release: "bootstrap" }, "fchdir", -1],
-    ...[-1, 6].map((reservation) => [
-      { reservation },
-      "fcntl-stderr",
-      reservation,
-      24,
-    ]),
-    [{ reservation: -1, release: "bootstrap" }, "fcntl-stderr", -1, 24],
-    [{ reservation: 5 }],
-    [{ wrongOwner: true }, "runtime-reply-owner", 99],
-    ...["before", "census", "release"].flatMap((at) => [
-      [
-        { changeCache: at },
-        "mig_get_reply_port/identity",
-        0,
-        at === "release" ? 0 : at === "before" ? 33 : 13,
-      ],
-      [
-        { changeSpecial: at },
-        "mig_get_special_reply_port/identity",
-        0,
-        at === "release" ? 0 : at === "before" ? 33 : 13,
-      ],
-    ]),
-    ...["census", "release"].map((producerAt) => [
-      { producerAt },
-      "runtime-reply-producer",
-      0,
-      producerAt === "release" ? 0 : 13,
-    ]),
-    ...["census", "release"].flatMap((at) => [
-      [
-        { producer: [11], mutateProducer: at },
-        "runtime-reply-producer",
-        0,
-        at === "release" ? 0 : 13,
-      ],
-      [
-        { changeOwner: at },
-        "runtime-reply-owner",
-        0,
-        at === "release" ? 0 : 13,
-      ],
-    ]),
-    ...["names", "types", "access", "thread", "host", "bootstrap"].map(
-      (release) => [
-        { release },
-        `${release === "names" || release === "types" ? "mach_vm" : "mach_port"}_deallocate/${release}`,
-        15,
-        22,
-      ],
-    ),
-    [{ type: DEAD, release: "access" }, "mach_port_deallocate/access", 15, 22],
-    [{ kind: 1, release: "access" }, "mach_port_kobject/access/type", 1],
-    [{ changed: true, release: "all" }, "mach_port_names/authority", ONCE],
-    [{ notifyGet: 4, notifySet: 4, notify: 300 }],
-    ...[0, 0xffffffff, 300, 200, 2, 7].map((notify) => [{ notify }]),
-    ...[
-      [4, 0],
-      [4, 5],
-      [5, 0],
-      [5, 4],
-      [5, 5],
-    ].map(([notifyGet, notifySet]) => [
-      { notifyGet, notifySet, notify: 300 },
-      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT",
-      notifyGet,
-      31,
-    ]),
-    ...[4, 5].map((notifySet) => [
-      { notifySet, notify: 300 },
-      "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT",
-      notifySet,
-      32,
-    ]),
-    ...[4, 5].map((readbackGet) => [
-      { notify: 300, readback: 301, readbackGet },
-      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback",
-      readbackGet,
-      33,
-    ]),
-    ...[0xffffffff, 301, 300, 200, 2, 7].map((readback) => [
-      { notify: 300, readback },
-      "TASK_RESOURCE_NOTIFY_PORT/null",
-      readback,
-      33,
-    ]),
-    [{ notify: 300, release: "notify" }, "mach_port_deallocate/notify", 15, 41],
-    [
-      { notify: 200, readback: 200, readbackGet: 5, release: "all" },
-      "task_get_special_port/TASK_RESOURCE_NOTIFY_PORT/readback",
-      5,
-      33,
-    ],
-    [
-      { notify: 300, notifySet: 4, release: "all" },
-      "task_set_special_port/TASK_RESOURCE_NOTIFY_PORT",
-      4,
-      32,
-    ],
-    ...["notify", "readback", ["notify", "readback"], "all"].map((release) => [
-      { notify: 200, readback: 200, release },
-      "TASK_RESOURCE_NOTIFY_PORT/null",
-      200,
-      33,
-    ]),
-  ];
-  for (const [
-    fault,
-    invocation,
-    operation,
-    result,
-    error,
-    revents,
-    used,
-    machCase,
-  ] of [
+  for (const [fault, invocation, operation, result, error, revents, used] of [
     ["setup", "setup()", "spawn-stderr", 22, 0, 0, -1],
     ["child", "child_stdio(10,false)", "fchdir", -1, 13, 0, -1],
     ["exec", "child_exec(argv,env,false)", "execve", -1, 2, 0, -1],
@@ -4691,16 +4437,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       -1,
     ],
     ["success"],
-    ...machCases.map(([value, operation, result, error = 13]) => [
-      "experiment",
-      "experiment_mach_rights()",
-      operation,
-      result,
-      error,
-      0,
-      -1,
-      value,
-    ]),
   ]) {
     const diagnostics = [],
       output = [],
@@ -4837,7 +4573,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       sigaction(number, action, previous) {
         assert.equal(number, 13);
         api.errno = 98;
-        if (machCase?.stageSignalFailure) return -1;
         if (previous) {
           assert.equal(action.sa_handler, 1);
           assert.equal(action.sa_mask.value, "empty");
@@ -4931,11 +4666,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(stream, api.stderr);
         if (format.startsWith("native-darwin-launch-port:"))
           machCalls.push(["refusal", ...values]);
-        if (machCase && format.startsWith("native-darwin-launch-cleanup:"))
-          assert.ok(
-            pipeIgnored,
-            "Cleanup reporting must survive a closed diagnostic pipe",
-          );
         diagnostics.push(record(format, values));
         return -1;
       },
@@ -4952,7 +4682,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(size, Buffer.byteLength(bytes.record.line));
         stageAttempts.push(bytes.record);
         api.errno = 99;
-        if (machCase?.stageWriteFailure) return -1;
         diagnostics.push(bytes.record);
         return size;
       },
@@ -4973,15 +4702,8 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           cloexec.add(fd);
           return 0;
         }
-        if (machCase?.reservation !== undefined) {
-          assert.deepEqual([fd, operation, minimum], [2, 64, 5]);
-          assert.deepEqual([...descriptors.keys()].sort(), [0, 1, 2, 3, 4]);
-          assert.equal(descriptors.get(2), "diagnostic");
-          machCalls.push("reserve");
-          api.errno = 24;
-          if (machCase.reservation === -1) return -1;
-        } else assert.deepEqual([fd, operation, minimum], [2, 64, 3]);
-        let copy = machCase?.reservation ?? minimum;
+        assert.deepEqual([fd, operation, minimum], [2, 64, 3]);
+        let copy = minimum;
         while (descriptors.has(copy)) copy++;
         descriptors.set(copy, descriptors.get(fd));
         cloexec.add(copy);
@@ -5008,14 +4730,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         assert.equal(file, "launcher.c");
         assert.equal(line, 1);
         if (!ok) {
-          assert.equal(api.errno, error, JSON.stringify(machCase));
+          assert.equal(api.errno, error);
           throw new Error("launch refused");
         }
       },
       need(ok) {
         guardPidRead = !ok;
         try {
-          return native.launch_need_at(ok, "launcher.c", 1);
+          return api.need_at(ok, "launcher.c", 1);
         } finally {
           guardPidRead = false;
         }
@@ -5052,11 +4774,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         return 1;
       },
       close(fd) {
-        if (machCase?.reservation !== undefined) {
-          assert.ok(fd >= 5 && fd !== api.launch_diagnostic);
-          descriptors.delete(fd);
-          return 0;
-        }
         assert.equal(fd, 8);
         return 0;
       },
@@ -5072,7 +4789,7 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       fchdir(workspace) {
         assert.equal(workspace, 10);
         api.errno = 13;
-        return fault === "child" || machCase?.preMach ? -1 : 0;
+        return fault === "child" ? -1 : 0;
       },
       dup2(from, to) {
         descriptors.set(to, descriptors.get(from));
@@ -5090,708 +4807,14 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
         return fault === "setup" && to === 2 ? 22 : 0;
       },
     };
-    for (const name of [
-      "setrlimit",
-      "setaudit_addr",
-      "getaudit_addr",
-      "setgroups",
-      "setgid",
-      "setuid",
-      "getgroups",
-      "getrlimit",
-      "sandbox_init",
-    ])
-      api[name] = (...args) => {
-        assert.equal(api.launch_diagnostic, 5);
-        assert.equal(descriptors.get(5), "diagnostic");
-        machCalls.push(name);
-        if (name === "getaudit_addr") args[0].ai_asid = 12;
-        if (name === "getgroups") args[1].value = api.gid;
-        if (name === "getrlimit")
-          Object.assign(args[1], { rlim_cur: 32, rlim_max: 32 });
-        if (name === "sandbox_init") descriptors.set(8, "sdk");
-        return name === "getgroups" ? 1 : 0;
-      };
-    const acquired = [],
-      released = [],
-      arrays = [],
-      destroyed = [];
-    if (machCase) {
-      const access = machCase.access ?? 200,
-        accessType = machCase.type ?? SEND;
-      let accessRead = false,
-        cachedReply = machCase.reply ?? 3,
-        cachedSpecial = machCase.special ?? 6,
-        allocation = 0,
-        notifyReads = 0;
-      const resourceCopies = [];
-      const exceptionSlots = { task: 64 | 128, thread: 64 | 128 };
-      const bootstrap = machCase.bootstrap ?? 10;
-      if (bootstrap !== 0 && bootstrap !== 0xffffffff)
-        acquired.push({ kind: "bootstrap", name: bootstrap });
-      const change = (at) => {
-        if (machCase.changeCache === at) cachedReply = 13;
-        if (machCase.changeSpecial === at) cachedSpecial = 14;
-        if (machCase.producerAt === at) native.importConstructorRecord();
-        if (machCase.mutateProducer === at) api.domain_runtime_replies[0] = 12;
-        if (machCase.changeOwner === at) api.launch_reply_owner = 99;
-      };
-      const resourcesSettled = () => {
-        for (const copy of resourceCopies)
-          assert.deepEqual(
-            released
-              .filter((entry) => entry.kind === copy.kind)
-              .map(({ kind, name, status }) => ({ kind, name, status })),
-            [{ ...copy, status: 0 }],
-          );
-      };
-      const portRelease = (kind, name) => {
-        const status =
-          machCase.release === kind ||
-          (Array.isArray(machCase.release) &&
-            machCase.release.includes(kind)) ||
-          (machCase.release === "all" && !["host", "bootstrap"].includes(kind))
-            ? 15
-            : 0;
-        api.errno = kind === "notify" ? 41 : kind === "readback" ? 42 : 22;
-        released.push({ kind, name, status, error: api.errno });
-        return status;
-      };
-      Object.assign(api, {
-        NULL: null,
-        bootstrap_port: bootstrap,
-        launch_reply_owner: 41,
-        launch_bootstrap_local: 999,
-        launch_reply_borrowed: 998,
-        launch_special_borrowed: 997,
-        launch_special_reply: () => assert.fail("Inherited callable used"),
-        domain_runtime_reply_owner: 41,
-        domain_runtime_reply_count: 1,
-        domain_runtime_reply_overflow: false,
-        domain_runtime_reply_imported: false,
-        domain_runtime_reply_epoch: 0,
-        domain_runtime_replies: Array(8).fill(996),
-        RTLD_DEFAULT: -2,
-        dlerror() {
-          return ++lookupReads === 1
-            ? "stale"
-            : machCase.bindingError
-              ? "lookup failed"
-              : null;
-        },
-        dlsym(handle, symbol) {
-          assert.equal(handle, -2);
-          assert.equal(symbol, "mig_get_special_reply_port");
-          return machCase.bindingMissing
-            ? null
-            : () => {
-                api.errno = 13;
-                return cachedSpecial;
-              };
-        },
-        receipt_name() {
-          const name = machCase.producer?.[allocation++] ?? 11;
-          machCalls.push(["producer", name]);
-          return name;
-        },
-        after_reply_binding() {
-          change("before");
-          if (machCase.wrongOwner) api.launch_reply_owner = 99;
-          if (machCase.preMach) native.child_stdio(10, false);
-          if (machCase.reservation !== undefined) {
-            native.child_stdio(10, false);
-            descriptors.set(8, "creator");
-            descriptors.set(9, "release");
-            native.early_child_setup();
-          }
-        },
-        KERN_INVALID_ARGUMENT: 4,
-        KERN_FAILURE: 5,
-        MACH_PORT_DEAD: 0xffffffff,
-        MACH_PORT_TYPE_NONE: 0,
-        MACH_PORT_TYPE_SEND: SEND,
-        MACH_PORT_TYPE_RECEIVE: RECEIVE,
-        MACH_PORT_TYPE_SEND_ONCE: ONCE,
-        MACH_PORT_TYPE_DEAD_NAME: DEAD,
-        MACH_PORT_RIGHT_SEND: 0,
-        MACH_PORT_VALID: (name) => name !== 0 && name !== 0xffffffff,
-        domain_refusal_request(name) {
-          const original = machCalls.find(
-            (entry) => Array.isArray(entry) && entry[0] === "refusal",
-          );
-          assert.ok(original);
-          assert.equal(name, original[2]);
-          machCalls.push(["refusal-request", name]);
-        },
-        TASK_BOOTSTRAP_PORT: 3,
-        TASK_DEBUG_CONTROL_PORT: 4,
-        TASK_RESOURCE_NOTIFY_PORT: 5,
-        EXCEPTION_DEFAULT: 1,
-        THREAD_STATE_NONE: 0,
-        mach_thread_self() {
-          machCalls.push("thread");
-          acquired.push({ kind: "thread", name: 2 });
-          return 2;
-        },
-        task_get_special_port(self, which, out) {
-          assert.equal(self, 1);
-          assert.ok([1, 2, 5].includes(which));
-          const kind =
-            which === 1
-              ? "host"
-              : which === 2
-                ? "access"
-                : notifyReads++ === 0
-                  ? "notify"
-                  : "readback";
-          machCalls.push(kind);
-          if (which === 2) accessRead = true;
-          const status = machCase[`${kind}Get`] ?? 0;
-          out.value =
-            which === 1 ? 7 : which === 2 ? access : (machCase[kind] ?? 0);
-          if (!status && api.MACH_PORT_VALID(out.value)) {
-            const copy = { kind, name: out.value };
-            acquired.push(copy);
-            if (which === 5) resourceCopies.push(copy);
-          }
-          api.errno = kind === "notify" ? 31 : kind === "readback" ? 33 : 13;
-          return status;
-        },
-        mach_port_kobject(self, name, type, address) {
-          assert.equal(self, 1);
-          // Even an unknown IKOT_NONE right has no cache/API/producer binding.
-          if (name === 50) {
-            machCalls.push(["kobject", name]);
-            type.value = 0;
-            address.value = 4096;
-            return 0;
-          }
-          assert.equal(name, accessRead ? access : 7);
-          machCalls.push(["kobject", name]);
-          type.value = accessRead ? (machCase.kind ?? 0) : 3;
-          address.value = 4096;
-          api.errno = 13;
-          return machCase[accessRead ? "accessKobject" : "hostKobject"] ?? 0;
-        },
-        mach_port_type(self, name, out) {
-          assert.equal(self, 1);
-          machCalls.push(["type", name]);
-          api.errno = 13;
-          out.value =
-            name === access ? accessType : (machCase.replyType ?? RECEIVE);
-          return name === access ? (machCase.typeQuery ?? 0) : 0;
-        },
-        mach_port_get_refs(self, name, right, out) {
-          assert.deepEqual([self, right], [1, 0]);
-          assert.ok(api.MACH_PORT_VALID(name));
-          const refused = stageAttempts.at(-1)?.values[0] === "mach-cleanup";
-          if (!refused) {
-            assert.equal(name, bootstrap);
-            assert.equal(
-              released.some((entry) => entry.kind === "bootstrap"),
-              false,
-            );
-          }
-          const count =
-            acquired.filter((entry) => entry.name === name).length -
-            released.filter((entry) => entry.name === name && !entry.status)
-              .length +
-            Number(machCase.bootstrapExtra && name === bootstrap) +
-            Number(name === cachedSpecial);
-          const query =
-            (refused
-              ? machCase.refusedRefsQuery
-              : machCase.bootstrapRefsQuery) ?? 0;
-          out.value =
-            (refused ? machCase.refusedRefs : undefined) ?? Math.max(1, count);
-          referenceSamples.push({ name, refused, query, refs: out.value });
-          machCalls.push(["send-refs", name]);
-          api.errno = 73;
-          return query;
-        },
-        mach_port_deallocate(self, name) {
-          assert.equal(self, 1);
-          if (
-            machCase.fatal === "cleanup" &&
-            stageAttempts.at(-1)?.values[0] === "mach-cleanup"
-          )
-            throw killed;
-          machCalls.push(["release", name]);
-          const resource = resourceCopies.find(
-            (copy) =>
-              copy.name === name &&
-              !released.some((entry) => entry.kind === copy.kind),
-          );
-          const cleanup = stageAttempts.at(-1)?.values[0] === "mach-cleanup";
-          const unmatched = (kind) =>
-            acquired.some((copy) => copy.kind === kind && copy.name === name) &&
-            !released.some((entry) => entry.kind === kind);
-          const kind =
-            resource?.kind ??
-            (!cleanup && unmatched("bootstrap")
-              ? "bootstrap"
-              : ["access", "host", "thread", "bootstrap"].find(unmatched));
-          assert.ok(kind, "Only an owned acquisition can be released");
-          return portRelease(kind, name);
-        },
-        task_set_special_port(self, slot, name) {
-          assert.deepEqual([self, name], [1, 0]);
-          assert.ok([3, 4, 5].includes(slot));
-          machCalls.push(["set", slot]);
-          api.errno = slot === 5 ? 32 : 13;
-          return slot === 5
-            ? (machCase.notifySet ?? 0)
-            : slot === 4
-              ? (machCase.sanitation ?? 0)
-              : 0;
-        },
-        mach_ports_register(self, ports, count) {
-          assert.deepEqual([self, ports, count], [1, null, 0]);
-          resourcesSettled();
-          machCalls.push("register");
-          return 0;
-        },
-        task_set_exception_ports(self, mask, handler, behavior, flavor) {
-          assert.deepEqual([self, handler, behavior, flavor], [1, 0, 1, 0]);
-          if (!machCase.taskExceptionSet && !machCase.taskExceptionStuck)
-            exceptionSlots.task &= ~mask;
-          return machCase.taskExceptionSet ?? 0;
-        },
-        thread_set_exception_ports(thread, mask, handler, behavior, flavor) {
-          assert.deepEqual([thread, handler, behavior, flavor], [2, 0, 1, 0]);
-          if (!machCase.threadExceptionSet && !machCase.threadExceptionStuck)
-            exceptionSlots.thread &= ~mask;
-          return machCase.threadExceptionSet ?? 0;
-        },
-        // Shared actual-body coverage owns getter acquisition and settlement.
-        domain_exception_readback(out, self, thread) {
-          assert.deepEqual([self, thread], [1, 2]);
-          machCalls.push("exception-readback");
-          for (const owner of ["task", "thread"]) {
-            const got = machCase[`${owner}ExceptionGet`] ?? 0;
-            if (got || exceptionSlots[owner])
-              out.issues.push({
-                operation: `${owner}-exception-read`,
-                kind: got ? "mach" : "invariant",
-                value: got,
-                cleanup: false,
-              });
-          }
-          if (machCase.exceptionRelease)
-            out.issues.push({
-              operation: "exception-copy-release",
-              kind: "mach",
-              value: machCase.exceptionRelease,
-              cleanup: true,
-            });
-          out.count = out.issues.length;
-          return out.count === 0;
-        },
-        mig_get_reply_port() {
-          api.errno = 13;
-          if (machCase.fatal === "reply") throw killed;
-          return cachedReply;
-        },
-        mig_dealloc_reply_port(name) {
-          assert.fail("Borrowed caches cannot be replaced");
-        },
-        mach_port_names(self, names, n, types, nt) {
-          assert.equal(self, 1);
-          resourcesSettled();
-          machCalls.push("census");
-          api.errno = 13;
-          const live = api.MACH_PORT_VALID(access) && accessType === SEND;
-          if (machCase.fatal === "census") throw killed;
-          const rows = [
-            1,
-            2,
-            7,
-            cachedReply,
-            cachedSpecial,
-            9,
-            ...(live && !machCase.missing ? [access] : []),
-            ...new Set(
-              (machCase.producer ?? []).filter(
-                (name) =>
-                  api.MACH_PORT_VALID(name) &&
-                  name !== cachedReply &&
-                  name !== cachedSpecial,
-              ),
-            ),
-          ].filter((name) => name !== machCase.omit);
-          if (machCase.duplicate) rows.push(access);
-          if (machCase.duplicateName) rows.push(machCase.duplicateName);
-          if (machCase.unknownType !== undefined) rows.push(50);
-          const kinds = rows.map((name) =>
-            name === cachedReply
-              ? (machCase.replyType ?? RECEIVE)
-              : name === cachedSpecial
-                ? (machCase.specialType ?? SEND | RECEIVE)
-                : name === access && machCase.changed
-                  ? ONCE
-                  : name === 9
-                    ? DEAD
-                    : name === 50
-                      ? machCase.unknownType
-                      : (machCase.producer ?? []).includes(name)
-                        ? (machCase.producerType ?? RECEIVE)
-                        : SEND,
-          );
-          change("census");
-          n.value = machCase.overflow ? 4097 : rows.length;
-          nt.value = rows.length + Number(Boolean(machCase.mismatch));
-          names.value = rows;
-          arrays.push({ kind: "names", buffer: rows, size: n.value * 4 });
-          if (!machCase.partial) {
-            types.value = kinds;
-            arrays.push({ kind: "types", buffer: kinds, size: nt.value * 4 });
-          }
-          return machCase.list ?? 0;
-        },
-        mach_port_destroy(self, name) {
-          destroyed.push(name);
-          assert.fail("Unknown census names cannot be destroyed");
-        },
-        mach_vm_deallocate(self, buffer, size) {
-          assert.equal(self, 1);
-          if (machCase.fatal === "cleanup") throw killed;
-          const allocation = arrays.find((entry) => entry.buffer === buffer);
-          assert.ok(allocation);
-          assert.equal(size, allocation.size);
-          machCalls.push(["array-release", allocation.kind]);
-          change("release");
-          return portRelease(allocation.kind, buffer);
-        },
-      });
-    }
     const program = new Script(
         functions +
-          `\nfunction importConstructorRecord(){domain_runtime_replies_begin(getpid());const name=receipt_name();domain_runtime_replies[domain_runtime_reply_count++]=name;domain_runtime_reply_overflow=domain_runtime_reply_count>8;return name;}
-          const entered=launch_stage;
+          `\n          const entered=launch_stage;
           launch_stage=(...args)=>{const saved=errno,ignored=stage_signal_ignored();entered(...args);stage_preserved(saved,ignored);};
-          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,experiment_mach_rights,importConstructorRecord,launch_need_at,descriptors,early_child_setup,experiment_child_exec,setup,capture});`,
+          function setup(){${setup}}\nfunction capture(){${capture}}\n({case_line,command,child_stdio,child_exec,parked_identity,initial_mach_rights,descriptors,setup,capture});`,
       ),
       native = program.runInNewContext(api);
     native.capture();
-    if (machCase) {
-      reporter = 42;
-      for (const name of machCase.producer ?? [])
-        assert.equal(native.importConstructorRecord(), name);
-      if (machCase.fatal) {
-        assert.throws(
-          native.experiment_mach_rights,
-          (cause) => cause === killed,
-        );
-        const last = stageAttempts.at(-1);
-        assert.deepEqual(last.values.slice(0, 5), [
-          {
-            reply: "mach-reply-bind",
-            census: "mach-census",
-            cleanup: "mach-cleanup",
-          }[machCase.fatal],
-          41,
-          42,
-          100,
-          200,
-        ]);
-        assert.deepEqual(
-          last.values.slice(5),
-          machCase.release === "notify"
-            ? ["mach_port_deallocate/notify", 15, 41]
-            : ["none", 0, 0],
-        );
-        assert.ok(last.line.includes("entered=1"));
-        assert.ok(
-          !diagnostics.some(({ line }) =>
-            line.startsWith("native-darwin-launch:"),
-          ),
-        );
-        reporter = 41;
-        api.read = (fd) => {
-          assert.equal(fd, 8);
-          return 0;
-        };
-        api.waitid = (kind, pid, status, flags) => {
-          assert.deepEqual([kind, pid, flags], [1, 42, 7]);
-          Object.assign(status, { si_pid: 42, si_code: 2, si_status: 9 });
-          api.errno = 71;
-          return 0;
-        };
-        assert.throws(() => native.parked_identity(8, 42), /launch refused/u);
-        const termination = diagnostics.at(-1);
-        assert.match(
-          termination.line,
-          /available=1 pid=42 code=2 status=9 kernel-reason=unavailable/u,
-        );
-        assert.ok(
-          diagnostics
-            .at(-2)
-            .line.includes("operation=parked-read result=0 errno=0"),
-        );
-        assert.equal(api.errno, 0);
-        assert.deepEqual(output, []);
-        continue;
-      }
-      if (operation)
-        assert.throws(
-          native.experiment_mach_rights,
-          (cause) => {
-            if (!/launch refused/u.test(cause.message)) throw cause;
-            return true;
-          },
-          JSON.stringify(machCase),
-        );
-      else native.experiment_mach_rights();
-      const primary = diagnostics.filter(({ line }) =>
-        line.startsWith("native-darwin-launch:"),
-      );
-      assert.equal(primary.length, operation ? 1 : 0);
-      if (operation)
-        assert.deepEqual(primary[0].values.slice(0, 5), [
-          operation,
-          result,
-          error,
-          0,
-          -1,
-        ]);
-      const portFacts = machCalls.filter(
-        (entry) => Array.isArray(entry) && entry[0] === "refusal",
-      );
-      assert.equal(
-        machCalls.filter(
-          (entry) => Array.isArray(entry) && entry[0] === "refusal-request",
-        ).length,
-        portFacts.length,
-      );
-      assert.ok(referenceSamples.length <= 2);
-      const beforeRefs = referenceSamples.find((sample) => !sample.refused),
-        refusedRefs = referenceSamples.find((sample) => sample.refused),
-        availableRefs = (sample) =>
-          sample && !sample.query ? sample.refs : -1;
-      if (machCase.bootstrapExtra) {
-        assert.equal(beforeRefs.refs, 2);
-        assert.equal(refusedRefs.refs, machCase.refusedRefs ?? 1);
-      }
-      const provenance = [
-        machCase.bootstrap ?? 10,
-        beforeRefs?.query ?? -1,
-        availableRefs(beforeRefs),
-        beforeRefs
-          ? operation === "mach_port_deallocate/bootstrap"
-            ? 15
-            : 0
-          : -1,
-        refusedRefs?.query ?? -1,
-        availableRefs(refusedRefs),
-      ];
-      assert.ok(
-        !machCalls.some(
-          (entry) =>
-            Array.isArray(entry) && entry[0] === "kobject" && entry[1] === 50,
-        ),
-      );
-      if (
-        operation === "mach_port_names/authority" ||
-        operation === "mach_port_type/reply/type"
-      ) {
-        const missing = machCase.missing || machCase.omit !== undefined;
-        const name = missing
-          ? (machCase.omit ?? 200)
-          : machCase.unknownType !== undefined
-            ? 50
-            : (machCase.duplicateName ??
-              (machCase.specialType !== undefined
-                ? 6
-                : machCase.producerType !== undefined
-                  ? 11
-                  : machCase.replyType !== undefined
-                    ? 3
-                    : 200));
-        const binding = missing
-          ? "missing"
-          : name === 3
-            ? "ordinary-cache"
-            : name === 6
-              ? "special-cache"
-              : name === 11
-                ? "producer"
-                : name === 200
-                  ? "task-access"
-                  : "unproved";
-        assert.equal(refusedRefs?.name, name);
-        assert.deepEqual(portFacts, [
-          ["refusal", 42, name, result, binding, ...provenance],
-        ]);
-        if (arrays.length)
-          assert.ok(
-            machCalls.indexOf(portFacts[0]) <
-              machCalls.findIndex(
-                (entry) => Array.isArray(entry) && entry[0] === "array-release",
-              ),
-          );
-      } else
-        assert.deepEqual(
-          portFacts,
-          operation === "mach_port_deallocate/bootstrap"
-            ? [["refusal", 42, 0, 0, "unproved", ...provenance]]
-            : [],
-        );
-      assert.equal(lookupReads, 2);
-      if (machCalls.includes("exception-readback")) {
-        assert.equal(
-          machCalls.filter((call) => call === "exception-readback").length,
-          1,
-        );
-        if (operation?.includes("exception-read"))
-          assert.equal(machCalls.includes("census"), false);
-        else if (!operation)
-          assert.ok(
-            machCalls.indexOf("exception-readback") <
-              machCalls.indexOf("census"),
-          );
-      }
-      const accessType = machCase.type ?? SEND;
-      const unowned =
-        !(machCase.typeQuery ?? 0) && !(accessType & (SEND | ONCE | DEAD));
-      const owned = acquired.filter(
-        (entry) =>
-          !(unowned && entry.kind === "access") &&
-          !(machCase.wrongOwner && entry.kind === "bootstrap"),
-      );
-      for (const name of new Set(owned.map((entry) => entry.name)))
-        assert.equal(
-          released.filter((entry) => entry.name === name).length,
-          owned.filter((entry) => entry.name === name).length,
-        );
-      assert.equal(
-        released.filter((entry) => typeof entry.name === "number").length,
-        owned.length,
-      );
-      for (const allocation of arrays)
-        assert.equal(
-          released.filter((entry) => entry.name === allocation.buffer).length,
-          1,
-        );
-      const failed = released.filter((entry) => entry.status);
-      const early =
-        operation === "mach_port_deallocate/bootstrap" ||
-        (accessType === DEAD && operation === "mach_port_deallocate/access");
-      const cleanup = diagnostics.filter(({ line }) =>
-        line.startsWith("native-darwin-launch-cleanup:"),
-      );
-      assert.deepEqual(
-        cleanup.map((entry) => entry.values),
-        [
-          ...(machCase.exceptionRelease
-            ? [["exception-copy-release", "mach", machCase.exceptionRelease]]
-            : []),
-          ...failed
-            .slice(Number(early))
-            .map(({ kind, status, error }) => [
-              `${kind === "names" || kind === "types" ? "mach_vm" : "mach_port"}_deallocate/${kind}`,
-              status,
-              error,
-            ]),
-        ],
-      );
-      if (machCalls.includes("notify")) {
-        assert.equal(machCalls.filter((call) => call === "notify").length, 1);
-        const shouldReadBack =
-          !(machCase.notifyGet ?? 0) && !(machCase.notifySet ?? 0);
-        assert.equal(
-          machCalls.filter((call) => call === "readback").length,
-          Number(shouldReadBack),
-        );
-        if (
-          operation?.includes("RESOURCE_NOTIFY_PORT") ||
-          [
-            "mach_port_deallocate/notify",
-            "mach_port_deallocate/readback",
-          ].includes(operation)
-        ) {
-          assert.equal(machCalls.includes("register"), false);
-          assert.equal(machCalls.includes("census"), false);
-        }
-      }
-      if (!operation) {
-        assert.equal(pipeIgnored, false);
-        assert.deepEqual(destroyed, []);
-        assert.equal(machCalls.filter((value) => value === "census").length, 1);
-        assert.deepEqual(
-          machCalls
-            .filter(Array.isArray)
-            .filter(([at]) => at === "set")
-            .map(([, slot]) => slot),
-          [3, 4, 5],
-        );
-      }
-      assert.ok(stageAttempts.length <= (machCase.reservation === 5 ? 14 : 11));
-      assert.ok(
-        Buffer.byteLength(diagnostics.map(({ line }) => line).join("")) < 8192,
-      );
-      if (machCase.stageWriteFailure || machCase.stageSignalFailure)
-        assert.deepEqual(diagnostics, []);
-      if (
-        api.MACH_PORT_VALID(machCase.access ?? 200) &&
-        accessType === SEND &&
-        arrays.length
-      ) {
-        const census = machCalls.indexOf("census"),
-          release = machCalls.findLastIndex(
-            (entry) =>
-              Array.isArray(entry) &&
-              entry[0] === "release" &&
-              entry[1] === (machCase.access ?? 200),
-          );
-        assert.ok(release > census);
-      }
-      assert.equal(reads, 0);
-      assert.deepEqual(output, []);
-      assert.equal(descriptors.get(2), "diagnostic");
-      if (machCase.reservation !== undefined) {
-        assert.equal(machCalls.filter((call) => call === "reserve").length, 1);
-        assert.equal(
-          machCalls.includes("setrlimit"),
-          machCase.reservation === 5,
-        );
-        if (machCase.reservation === 5) {
-          native.descriptors();
-          assert.deepEqual([...descriptors.keys()].sort(), [0, 1, 2, 3, 4, 5]);
-          assert.deepEqual(
-            [descriptors.get(3), descriptors.get(4)],
-            ["creator", "release"],
-          );
-          assert.ok(cloexec.has(5));
-          const redirect = /dup2\(1, 2\) == 2/u.exec(
-            launcher.slice(
-              launcher.indexOf('launch_stage("parked-publication"'),
-            ),
-          )[0];
-          assert.ok(new Script(redirect).runInNewContext(api));
-          api.domain_prepared_exec = () => {
-            api.errno = 2;
-            return -1;
-          };
-          api.domain_exec_failure = (fd, prefix, suffix, error) => {
-            assert.equal(descriptors.get(fd), "diagnostic");
-            assert.deepEqual([fd, error], [5, 2]);
-            throw new Error("exec refused");
-          };
-          api.launch_exec_suffix = " fixture\n";
-          assert.throws(
-            () => native.experiment_child_exec(api.argv, api.env, false),
-            /exec refused/u,
-          );
-          api.domain_prepared_exec = api.execve;
-          assert.throws(
-            () => native.experiment_child_exec(api.argv, api.env, false),
-            (cause) => cause === replaced,
-          );
-          assert.deepEqual([...descriptors.keys()], [0, 1, 2]);
-        }
-      }
-      continue;
-    }
     if (fault === "child" || fault === "exec" || fault.startsWith("mach-"))
       reporter = 42;
     if (fault === "exec") {
