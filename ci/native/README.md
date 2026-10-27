@@ -368,6 +368,24 @@ continue refusal and cleanup. Endpoint/kernel-object snapshots establish neither
 acquisition provenance nor authority to release the unknown right. Native hosted
 execution must still establish installed-interface behavior and retirement.
 
+Constructor tracing retains the original fork's PID, sequence, fences and terminal
+identity. Both transports carry one closed registration bound to candidate,
+parent/original identities, CR1 receipt and the fork owner's independently sampled
+observer PID/birth. The observer parks until DR1 records and echoes that binding;
+its native owner checks the echo before fixed exec. DS1 binds checked settlement to
+the same capture. Buffered create rows reconcile only with that observer,
+regardless of delivery order. Missing, changed, replayed or additional children
+and uncertain settlement refuse the join. Diagnostic evidence supplies no original
+fence or payload release, and native fork ownership alone permits signal/reap.
+Original-domain and tracing-observer retirement remain independent.
+Fresh recovery requires either the same binding and checked settlement from
+protected receipts or a matching successful sealed original capture. A protected
+CR1 child receipt permits a diagnostic attempt before registration survives;
+missing registration or uncertain settlement retains exclusion while independent
+original-domain and tracing-observer cleanup still runs.
+A partial live capture after possible CR1 transfer likewise retains exclusion
+unless diagnostic settlement is checked.
+
 The collector now publishes through the existing authenticated reader/bridge
 pipe. Scheduled reader setup binds stdout to that pipe but establishes no stderr
 binding. A single GS (`0x1d`) `reader-diagnostic` frame carries the latched

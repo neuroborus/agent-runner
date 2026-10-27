@@ -25,6 +25,7 @@ import {
 } from "./retirement.js";
 import {
   openDarwinStartupTrace,
+  createDarwinRefusalBinding,
   DARWIN_CONSTRUCTOR_TRACE_INTENT,
 } from "./startup-trace.js";
 import { buildDarwinPolicy } from "./policy.js";
@@ -94,6 +95,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
     );
   let constructorTrace,
     constructorResult,
+    creatorReceiptPossible = false,
     failure,
     admitted = recovered?.admitted,
     admissionPin = recovered?.pin,
@@ -274,6 +276,80 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
           if (constructorTrace) {
             constructorResult ??= await constructorTrace.finish();
             requireObservation(constructorResult.cleanup === "RETIRED");
+            // Receipt transfer can precede every refusal row. A partial live
+            // capture cannot rule out an unregistered diagnostic attempt.
+            requireObservation(
+              !creatorReceiptPossible ||
+                constructorResult.captureComplete === true ||
+                constructorResult.refusal?.cleanup === "RETIRED",
+            );
+          }
+          const history = recovered?.history ?? [],
+            refusals = history.filter(
+              ({ kind }) => kind === "constructor-refusal",
+            ),
+            children = history.filter(
+              ({ kind }) => kind === "constructor-child",
+            ),
+            sealed = history.filter(
+              ({ kind }) => kind === "constructor-sealed",
+            );
+          // CR1 may already have permitted a diagnostic fork before the first
+          // registration survived. Only a successful seal rules that out.
+          if (children.length || refusals.length || sealed.length) {
+            requireObservation(children.length === 1);
+            const child = children[0].record;
+            observationObject(child, [
+              "identity",
+              "parent",
+              "receiptSha256",
+              "receipt",
+            ]);
+            requireObservation(
+              sameDarwinIdentity(child.identity, admitted.creatorChild) &&
+                sameDarwinIdentity(
+                  child.parent,
+                  admitted.helpers.find(({ role }) => role === "launcher")
+                    ?.identity,
+                ) &&
+                /^[a-f0-9]{1024}$/u.test(child.receipt) &&
+                digest(Buffer.from(child.receipt, "hex")) ===
+                  child.receiptSha256,
+            );
+            if (!refusals.length) {
+              requireObservation(sealed.length === 1);
+              const result = sealed[0].record;
+              requireObservation(
+                result.status === "observed" &&
+                  result.captureComplete === true &&
+                  result.cleanup === "RETIRED" &&
+                  result.programSha256 ===
+                    DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256 &&
+                  result.refusal === null &&
+                  sameDarwinIdentity(
+                    result.creator?.identity,
+                    child.identity,
+                  ) &&
+                  result.creator.receiptSha256 === child.receiptSha256,
+              );
+            } else {
+              requireObservation(sealed.length === 0);
+              const binding = createDarwinRefusalBinding(
+                child.parent,
+                child.identity,
+                request.candidateSha,
+                child.receiptSha256,
+              );
+              for (const { record } of refusals) {
+                const { bindingSha256, ...registration } = record;
+                requireObservation(
+                  binding.consume(
+                    record.phase === "register" ? registration : record,
+                  ) === bindingSha256,
+                );
+              }
+              requireObservation(binding.evidence().cleanup === "RETIRED");
+            }
           }
         } catch (cause) {
           uncertain = cause;
@@ -528,7 +604,7 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         intent: DARWIN_CONSTRUCTOR_TRACE_INTENT,
       });
       constructorTrace = (state.openConstructorTrace ?? openDarwinStartupTrace)(
-        { identity: helper },
+        { identity: helper, candidateSha: request.candidateSha },
         {
           constructorMode: true,
           readObserver: (pid) => reader.constructorObserver("read", pid),
@@ -572,9 +648,25 @@ export function createDarwinCaseEffects(state, current, save, recovered) {
         receiptSha256: digest(receipt),
         receipt: receipt.toString("hex"),
       });
+      creatorReceiptPossible = true;
       await reader.creatorReceipt(receipt);
     }
-    const parked = await reader.ownershipControl();
+    let parked = await reader.ownershipControl();
+    for (let i = 0; parked.refusal && i < 2; i++) {
+      observationObject(parked, ["refusal"]);
+      requireObservation(constructorTrace);
+      const bindingSha256 = constructorTrace.refusal(parked.refusal);
+      await persist("constructor-refusal", {
+        ...parked.refusal,
+        bindingSha256,
+      });
+      await reader.refusalReply(
+        parked.refusal.phase,
+        bindingSha256,
+        parked.refusal.observer,
+      );
+      parked = await reader.ownershipControl();
+    }
     observationObject(parked, ["helper", "payload", "controls"]);
     requireObservation(parked.controls === true);
     requireObservation(sameDarwinIdentity(parked.helper, helper));

@@ -5,6 +5,16 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Bind refusal observers without replacing the original child
+
+Darwin retains the original trace target and binds one diagnostic fork to the
+candidate, CR1 receipt and independently sampled birth before exec. Its native
+fork owner alone signals/reaps it and checks settlement separately. Diagnostic
+success preserves the original refusal and independent domain/trace retirement.
+Live and recovering controllers retain exclusion after CR1 transfer unless a
+complete original capture or checked bound settlement rules out an unsettled
+diagnostic attempt.
+
 ## 2026-10-26 — Collect original blocker evidence before causal repair
 
 Native refusal evidence stays bound to the original attempt. Darwin keeps the

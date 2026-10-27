@@ -150,6 +150,198 @@ test("actual live-child reader rejects reused birth, exit and failed getters wit
   }
 });
 
+test("actual refusal birth and replies reject substituted identities and controller loss before exec", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const birthBody = /static bool domain_refusal_birth[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("struct proc_bsdinfo again;", "const again = {};")
+    .replaceAll("birth->", "birth.")
+    .replaceAll("&again", "again")
+    .replaceAll("sizeof(*birth)", "1")
+    .replaceAll("sizeof(again)", "1")
+    .replaceAll("(unsigned)", "");
+  for (const fault of [null, "birth", "parent", "failed-output"]) {
+    let reads = 0;
+    const birth = new Script(
+      `(function(pid,parent,birth){${birthBody}})`,
+    ).runInNewContext({
+      PROC_PIDTBSDINFO: 1,
+      proc_pidinfo(pid, _kind, _arg, value) {
+        Object.assign(value, {
+          pbi_pid: pid,
+          pbi_ppid: fault === "parent" ? 41 : 42,
+          pbi_start_tvsec: 100,
+          pbi_start_tvusec: fault === "birth" && reads++ ? 3 : 2,
+        });
+        return fault === "failed-output" ? -1 : 1;
+      },
+    });
+    assert.equal(birth(44, 42, {}), fault === null, fault);
+  }
+  const replyBody = /static int domain_refusal_reply[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace(
+      "char reply[160]; unsigned used = 0, length = 68 + (unsigned)strlen(suffix);",
+      "const reply = Array(160).fill(0); let used = 0, length = 68 + strlen(suffix);",
+    )
+    .replace(
+      /struct pollfd input = [^;]+;/u,
+      "const input = {fd:0,events:POLLIN};",
+    )
+    .replaceAll("sizeof(reply)", "160")
+    .replaceAll("&input", "input")
+    .replaceAll("reply + used", "{set value(v){reply[used]=v}}")
+    .replaceAll("reply + 68", "reply.slice(68)")
+    .replaceAll("reply + 4", "reply.slice(4)")
+    .replace(/\b(?:int|ssize_t|unsigned) /gu, "let ");
+  for (const fault of [null, "birth", "token", "frame", "loss", "expired"]) {
+    const registered = fault === "token",
+      prefix = registered ? "DS1 " : "DR1 ";
+    const suffix = registered ? "\n" : " 44 42 100 2\n";
+    const token = Array.from("a".repeat(64));
+    const wire =
+      (fault === "frame" ? "DR2 " : prefix) +
+      (registered ? "b" : "a").repeat(64) +
+      (fault === "birth" ? " 44 42 100 3\n" : suffix);
+    let at = 0;
+    const reply = new Script(
+      `(function(prefix,token,registered,suffix){${replyBody}})`,
+    ).runInNewContext({
+      POLLIN: 1,
+      EINTR: 4,
+      ETIMEDOUT: 60,
+      EINVAL: 22,
+      EPIPE: 32,
+      errno: 0,
+      strlen: (value) => value.length,
+      memcmp: (left, right, size) =>
+        Array.from(left).slice(0, size).join("") !==
+        Array.from(right).slice(0, size).join(""),
+      memcpy: (target, value, size) =>
+        target.splice(0, size, ...value.slice(0, size)),
+      strchr: (value, byte) => value.includes(byte),
+      domain_refusal_remaining: () => (fault === "expired" ? 0 : 1000),
+      poll(input) {
+        input.revents = fault === "loss" ? 16 : 1;
+        return 1;
+      },
+      read(fd, output) {
+        assert.equal(fd, 0);
+        output.value = wire[at++];
+        return 1;
+      },
+    });
+    assert.equal(
+      reply(prefix, token, registered, suffix),
+      fault === null
+        ? 0
+        : fault === "expired"
+          ? 60
+          : fault === "loss"
+            ? 32
+            : 22,
+      fault,
+    );
+  }
+});
+
+test("actual refusal observer waits for registration and closes creator custody before fixed exec", async () => {
+  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
+  const body = /if \(!observer\) \{([\s\S]*?)\n      \}/u
+    .exec(source.slice(source.indexOf("static void domain_refusal_inspect")))[1]
+    .replace(
+      "unsigned seconds = (unsigned)domain_refusal_remaining() / 1000;",
+      "let seconds = Math.floor(domain_refusal_remaining()/1000);",
+    )
+    .replace(
+      /struct pollfd held = [^;]+; char permission = 0;/u,
+      "const held = {fd:gatefd[0],events:POLLIN}; let permission = 0;",
+    )
+    .replace("char pid[24];", "const pid = {};")
+    .replace("struct proc_fdinfo fds[4096];", "const fds = [];")
+    .replace(
+      /char \*(arguments|environment)\[\] = \{([^;]+)\};/gu,
+      "const $1 = [$2];",
+    )
+    .replace('"-p", pid, NULL', '"-p", pid.value, NULL')
+    .replaceAll("sizeof(pid)", "24")
+    .replaceAll("sizeof(fds[0])", "1")
+    .replaceAll("sizeof(fds)", "4096")
+    .replaceAll("&held", "held")
+    .replaceAll("&permission", "{set value(v){permission=v}}")
+    .replaceAll("(unsigned)", "")
+    .replace(/\b(?:int|unsigned) /gu, "let ");
+  for (const fault of [null, "loss", "wrong-ack", "timeout", "exec"]) {
+    const events = [],
+      exit = new Error("child exit"),
+      executed = new Error("exec image");
+    const run = new Script(`(function(){${body}})`).runInNewContext({
+      gatefd: [11, 12],
+      pipefd: [13, 14],
+      original: { token: { val: [0, 0, 0, 0, 0, 43] } },
+      SIGALRM: 14,
+      SIG_DFL: 0,
+      SIG_ERR: -1,
+      POLLIN: 1,
+      PROC_PIDLISTFDS: 1,
+      NULL: null,
+      domain_refusal_remaining: () => 1500,
+      signal: () => 0,
+      alarm: () => {},
+      getpid: () => 44,
+      close(fd) {
+        events.push(["close", fd]);
+        return 0;
+      },
+      dup2: () => 1,
+      poll(held) {
+        events.push(["held"]);
+        held.revents = 1;
+        return fault === "timeout" ? 0 : 1;
+      },
+      read(_fd, output) {
+        output.value = fault === "wrong-ack" ? "R" : "D";
+        return fault === "loss" ? 0 : 1;
+      },
+      snprintf(target, _size, _format, pid) {
+        target.value = String(pid);
+      },
+      proc_pidinfo(_pid, _kind, _arg, fds) {
+        fds.push({ proc_fd: 3 }, { proc_fd: 4 }, { proc_fd: 5 });
+        return 3;
+      },
+      execve(file, args, environment) {
+        assert.equal(file, "/usr/bin/lsmp");
+        assert.deepEqual(Array.from(args), [file, "-p", "43", null]);
+        assert.deepEqual(Array.from(environment), [
+          "PATH=/usr/bin:/bin",
+          "LANG=C",
+          null,
+        ]);
+        assert.deepEqual(
+          events
+            .filter(([kind, fd]) => kind === "close" && fd >= 3)
+            .map(([, fd]) => fd),
+          [12, 11, 13, 14, 3, 4, 5],
+        );
+        events.push(["exec"]);
+        if (fault !== "exec") throw executed;
+        return -1;
+      },
+      _exit(code) {
+        events.push(["exit", code]);
+        throw exit;
+      },
+    });
+    assert.throws(run, (error) => error === (fault === null ? executed : exit));
+    assert.equal(
+      events.some(([kind]) => kind === "exec"),
+      fault === null || fault === "exec",
+    );
+    if (fault) assert.equal(events.at(-1)[1], fault === "exec" ? 127 : 126);
+  }
+});
+
 test("actual refusal observer settles once and lost wait ownership never authorizes a signal", async () => {
   const source = await readFile(new URL("custody.h", SOURCE), "utf8");
   const body = (name) =>
@@ -157,11 +349,11 @@ test("actual refusal observer settles once and lost wait ownership never authori
       .exec(source)[1]
       .replace(/\*(status|reaped|owned)\b/gu, "$1.value")
       .replace(/\b(?:int|pid_t) /gu, "let ");
-  for (const fault of [null, "wait-lost", "kill", "expired"]) {
+  for (const fault of [null, "fork", "wait-lost", "kill", "expired"]) {
     const events = [],
       status = {},
       reaped = { value: false },
-      owned = { value: true };
+      owned = { value: fault !== "fork" };
     const context = {
       errno: 7,
       EINTR: 4,
@@ -190,14 +382,19 @@ test("actual refusal observer settles once and lost wait ownership never authori
       api.settle(73, status, reaped, owned),
       fault === "kill" ? 7 : 0,
     );
-    assert.equal(reaped.value, fault !== "wait-lost" && fault !== "expired");
+    assert.equal(
+      reaped.value,
+      !["fork", "wait-lost", "expired"].includes(fault),
+    );
     assert.deepEqual(
       events,
-      fault === "wait-lost"
-        ? ["wait"]
-        : fault === "expired"
-          ? ["kill"]
-          : ["kill", "wait"],
+      fault === "fork"
+        ? []
+        : fault === "wait-lost"
+          ? ["wait"]
+          : fault === "expired"
+            ? ["kill"]
+            : ["kill", "wait"],
     );
     const count = events.length;
     api.wait(73, status, reaped, owned);

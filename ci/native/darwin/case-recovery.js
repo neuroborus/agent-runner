@@ -278,6 +278,9 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
           ? [
               "case-start",
               "case-creator",
+              ...(declared.custody.purpose === "experiment"
+                ? ["case-refusal"]
+                : []),
               "case-observer",
               "case-observer-observe",
               "case-observer-retire",
@@ -577,6 +580,7 @@ export async function recoverDarwinCases(state, options, records, { signal }) {
                       "constructor-intent",
                       "constructor-observer",
                       "constructor-child",
+                      "constructor-refusal",
                       "constructor-sealed",
                     ]
                   : []),

@@ -3357,6 +3357,8 @@ function buildTranscripts(experiment = false, complete = false) {
     foreignReceipt = false,
     compilerPolicyFault = false,
     caseFault = null,
+    constructorCapture,
+    refusalToken,
     accessSpec,
     operationFrames,
     pfInstalled = false,
@@ -4136,11 +4138,61 @@ function buildTranscripts(experiment = false, complete = false) {
           value = { pid: launcher.pid };
         } else if (name === "case-creator") {
           assert.equal(Buffer.from(args[0], "hex").length, 512);
-          control.push({ helper: launcher, payload, controls: true });
+          if (caseFault === "constructor-refusal") {
+            constructorCapture.consume(
+              `created ${launcher.pid} 105 ${launcher.pid + 900}`,
+            );
+            control.push({
+              refusal: {
+                version: 1,
+                phase: "register",
+                candidateSha,
+                parent: launcher,
+                original: payload,
+                receiptSha256: createHash("sha256")
+                  .update(Buffer.from(args[0], "hex"))
+                  .digest("hex"),
+                refusedName: 128,
+                observer: {
+                  pid: launcher.pid + 900,
+                  parentPid: launcher.pid,
+                  startSeconds: 100,
+                  startMicroseconds: 2,
+                },
+              },
+            });
+          } else control.push({ helper: launcher, payload, controls: true });
+          value = null;
+        } else if (name === "case-refusal") {
+          assert.equal(args[1], refusalToken);
+          if (args[0] === "DR1") {
+            assert.deepEqual(
+              args.slice(2),
+              [launcher.pid + 900, launcher.pid, 100, 2].map(String),
+            );
+            control.push({
+              refusal: {
+                version: 1,
+                phase: "settle",
+                bindingSha256: refusalToken,
+                reaped: true,
+                status: 0,
+                error: 0,
+                cleanup: 0,
+                channelLost: false,
+                observed: true,
+              },
+            });
+          } else assert.equal(args[0], "DS1");
           value = null;
         } else if (name === "case-control") {
+          if (!control.length && caseFault === "constructor-refusal")
+            throw new Error("Original Mach refusal");
           assert.ok(control.length);
           value = control.shift();
+        } else if (name === "case-observer-retire") {
+          assert.ok(experiment);
+          value = { status: "RETIRED" };
         } else if (name === "case-eof") {
           assert.equal(data.length, 0);
           value = { complete: true };
@@ -4742,8 +4794,11 @@ function buildTranscripts(experiment = false, complete = false) {
   const options = {
     fs,
     openConstructorTrace: ({ identity: parent }) => {
-      const capture = createDarwinConstructorCapture(parent);
-      let original;
+      const capture = createDarwinConstructorCapture(parent, candidateSha);
+      constructorCapture = capture;
+      let original,
+        result,
+        refused = false;
       return {
         arm: async () => ({ status: "armed" }),
         receipt: async (identity) => {
@@ -4757,21 +4812,40 @@ function buildTranscripts(experiment = false, complete = false) {
             capture.consume(row);
           return capture.receipt(identity);
         },
+        refusal(value) {
+          refused = true;
+          return (refusalToken = capture.refusal(value));
+        },
         finish: async () => {
-          if (!original) return { status: "partial", cleanup: "RETIRED" };
+          if (result) return result;
+          if (!original)
+            return (result = { status: "partial", cleanup: "RETIRED" });
+          if (refused) {
+            // Bound diagnostic settlement does not prove the live tracer's
+            // retirement or supply the refused original's second fence.
+            return (result = {
+              status: "partial",
+              captureComplete: false,
+              cleanup: "UNCERTAIN",
+              programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+              creator: null,
+              refusal: capture.diagnostic(),
+            });
+          }
           for (const row of [
             `imported ${original.pid} 104 512`,
             `fence ${original.pid} 105 7 2 1 1`,
             `terminal ${original.pid} 106 1 2`,
           ])
             capture.consume(row);
-          return {
+          return (result = {
             status: "observed",
             captureComplete: true,
             cleanup: "RETIRED",
             programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
             creator: capture.complete(),
-          };
+            refusal: null,
+          });
         },
       };
     },
@@ -6419,6 +6493,8 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     "tcp-deadline",
     "mach-control-timeout",
     "constructor-incomplete",
+    "constructor-unsealed",
+    "constructor-refusal",
   ]) {
     const access = ["tcp-deadline", "mach-control-timeout"].includes(fault),
       id = access ? "access.read-only" : "ownership.cancel",
@@ -6437,6 +6513,21 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
           return { status: "partial", cleanup: "RETIRED" };
         },
       });
+    if (fault === "constructor-unsealed") {
+      const openTrace = f.options.openConstructorTrace;
+      f.options.openConstructorTrace = (...values) => ({
+        ...openTrace(...values),
+        finish: async () => {
+          assert.ok(f.events.includes("case-creator"));
+          return {
+            status: "partial",
+            captureComplete: false,
+            cleanup: "RETIRED",
+            refusal: null,
+          };
+        },
+      });
+    }
     const effects = createDarwinSystemEffects(f.input, f.options);
     f.caseFault(fault);
     let prepared;
@@ -6453,6 +6544,8 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         "subject-authority",
         "mach-control-timeout",
         "constructor-incomplete",
+        "constructor-unsealed",
+        "constructor-refusal",
       ].includes(fault)
     )
       await assert.rejects(
@@ -6463,7 +6556,9 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
         }),
         fault === "mach-control-timeout"
           ? /Unverified Darwin mach-lookup:/u
-          : undefined,
+          : fault === "constructor-refusal"
+            ? /Original Mach refusal/u
+            : undefined,
       );
     else {
       prepared = await effects.prepare(recipe, {
@@ -6487,6 +6582,10 @@ test("Darwin experiment cases withhold admission for mixed bindings and unavaila
     });
     if (fault === "constructor-incomplete")
       assert.equal(settled(settlement).status, "RETIRED");
+    if (["constructor-unsealed", "constructor-refusal"].includes(fault))
+      assert.equal(settled(settlement).status, "RETAINED");
+    if (fault === "constructor-unsealed")
+      assert.ok(f.events.includes("case-signal"));
     await assert.rejects(
       effects.prepare(recipe, { policyBinding: binding, recordPolicy() {} }),
     );
@@ -6931,6 +7030,145 @@ test("Darwin partial case recovery rejoins protected births and objects without 
     assert.equal(
       f.events.filter((name) => name.startsWith("tool:")).length,
       experiment ? 0 : 22,
+    );
+  }
+});
+
+test("Darwin constructor recovery requires a sealed capture or checked refusal settlement and independently retires originals and tracers", async () => {
+  for (const [refused, fault] of [
+    [true, null],
+    [true, "unregistered"],
+    [true, "missing"],
+    [true, "binding"],
+    [true, "uncertain"],
+    [false, null],
+    [false, "binding"],
+  ]) {
+    const f = buildTranscripts(true),
+      binding = experimentCase(f, "ownership.cancel"),
+      recipe = darwinSystemRecipes().find(
+        ({ id }) => id === "ownership.cancel",
+      ),
+      openTrace = f.options.openConstructorTrace;
+    f.options.openConstructorTrace = (binding, options) => {
+      const trace = openTrace(binding, options);
+      return {
+        ...trace,
+        async arm() {
+          await options.onObserver({
+            kind: "dtrace",
+            parentPid: 999,
+            toolSha256: hash,
+            identity: { ...binding.identity, pid: binding.identity.pid + 901 },
+          });
+          return trace.arm();
+        },
+      };
+    };
+    f.caseFault(refused ? "constructor-refusal" : null);
+    const effects = createDarwinSystemEffects(f.input, f.options);
+    const build = darwinSystemRecipes().find(({ id }) => id === "build");
+    await effects.bootstrap();
+    await effects.settle(build, null, {
+      signal: new AbortController().signal,
+      execution: execution(build),
+    });
+    const preparing = effects.prepare(recipe, {
+      policyBinding: binding,
+      recordPolicy() {},
+    });
+    if (refused) await assert.rejects(preparing, /Original Mach refusal/u);
+    else await preparing;
+    const records = [...f.files].flatMap(([file, entry]) => {
+      try {
+        return [{ file, entry, record: JSON.parse(entry.bytes) }];
+      } catch {
+        return [];
+      }
+    });
+    const receipt = records.find(({ record }) =>
+      refused
+        ? record?.phase === "settle"
+        : record?.status === "observed" &&
+          record.programSha256 ===
+            DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+    );
+    assert.ok(receipt);
+    const previous = digest(receipt.entry.bytes);
+    if (["unregistered", "missing"].includes(fault)) {
+      const absent =
+        fault === "unregistered"
+          ? records.find(({ record }) => record?.phase === "register")
+          : receipt;
+      assert.ok(absent);
+      const prefix = `darwin-case-${recipe.id}-`,
+        lost = records.find(
+          ({ record }) =>
+            record?.phase === "ownership-receipt-possible" &&
+            record.pin.sha256 === digest(absent.entry.bytes),
+        );
+      assert.ok(lost);
+      const cutoff = Number(path.basename(lost.file).slice(prefix.length, -5));
+      for (const file of f.files.keys()) {
+        const name = path.basename(file);
+        if (
+          name.startsWith(prefix) &&
+          Number(name.slice(prefix.length, -5)) >= cutoff
+        )
+          f.files.delete(file);
+      }
+      f.files.delete(absent.file);
+      f.files.delete(receipt.file);
+      if (fault === "unregistered") {
+        assert.ok(
+          records.some(
+            ({ file, record }) =>
+              f.files.has(file) && record?.kind === "constructor-child",
+          ),
+        );
+        assert.ok(
+          !records.some(
+            ({ file, record }) =>
+              f.files.has(file) && record?.kind === "constructor-refusal",
+          ),
+        );
+      }
+    } else if (fault) {
+      if (fault === "binding") {
+        if (refused) receipt.record.bindingSha256 = "f".repeat(64);
+        else receipt.record.creator.receiptSha256 = "f".repeat(64);
+      } else receipt.record.reaped = false;
+      receipt.entry.bytes = Buffer.from(JSON.stringify(receipt.record) + "\n");
+      for (const { entry, record } of records)
+        if (record?.pin?.sha256 === previous) {
+          record.pin.sha256 = digest(receipt.entry.bytes);
+          entry.bytes = Buffer.from(JSON.stringify(record) + "\n");
+        }
+    }
+    f.caseFault(null);
+    const before = f.events.length;
+    const result = await createDarwinSystemEffects(f.input, f.options).recover({
+      request: {
+        candidateSha,
+        platform: "darwin",
+        jobSha256: observationDigest(f.input.job),
+        preparationSha256: observationDigest(f.input.preparation),
+      },
+      job: f.input.job,
+      preparation: f.input.preparation,
+    });
+    assert.equal(result.status, fault ? "RETAINED" : "RETIRED", fault);
+    const cleanup = f.events.slice(before);
+    assert.ok(cleanup.includes("case-signal"));
+    assert.ok(cleanup.includes("case-observer-retire"));
+    assert.ok(
+      cleanup.indexOf("case-signal") < cleanup.indexOf("case-observer-retire"),
+    );
+    assert.ok(!cleanup.includes("case-refusal"));
+    assert.equal(
+      [...f.processes.values()].filter(({ identity }) => identity.uid === 90001)
+        .length,
+      0,
     );
   }
 });

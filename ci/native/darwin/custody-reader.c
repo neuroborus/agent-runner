@@ -2772,6 +2772,14 @@ int main(int argc, char **argv) {
       need(case_mode && case_pid && !case_fenced && n == 3 && strlen(tokens[2]) == 1024);
       char bytes[512]; for (unsigned i = 0; i < 512; i++) bytes[i] = digit(tokens[2][2*i])*16 + digit(tokens[2][2*i+1]);
       need(write(case_in, bytes, sizeof(bytes)) == sizeof(bytes)); fputs("null", stdout);
+    } else if (!strcmp(tokens[0], "case-refusal")) {
+      need(case_mode && case_pid && !case_fenced && ((n == 8 && !strcmp(tokens[2], "DR1")) || (n == 4 && !strcmp(tokens[2], "DS1"))) &&
+        strlen(tokens[3]) == 64 && strspn(tokens[3], "0123456789abcdef") == 64);
+      for (unsigned i = 4; i < n; i++) need(*tokens[i] && strspn(tokens[i], "0123456789") == strlen(tokens[i]));
+      char bytes[160]; int length = n == 8
+        ? snprintf(bytes, sizeof(bytes), "DR1 %s %s %s %s %s\n", tokens[3], tokens[4], tokens[5], tokens[6], tokens[7])
+        : snprintf(bytes, sizeof(bytes), "DS1 %s\n", tokens[3]);
+      need(length > 0 && length < sizeof(bytes) && write(case_in, bytes, length) == length); fputs("null", stdout);
 #endif
     } else if (!strcmp(tokens[0], "case-send")) { need(n == 4); case_send(number(tokens[2]) == 1, tokens[3]);
     } else if (!strcmp(tokens[0], "case-receipt")) { need(n == 5); case_receipt(number(tokens[2]), tokens[3], tokens[4], false);

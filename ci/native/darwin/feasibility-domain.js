@@ -312,7 +312,7 @@ export async function openDarwinFaultDomain(
           acquired.parent = parent;
           acquire(async () => {
             trace = openTrace(
-              { identity: parent },
+              { identity: parent, candidateSha: candidate },
               {
                 constructorMode: true,
                 readObserver: (pid) => observe("constructor-observer", pid),
@@ -364,6 +364,26 @@ export async function openDarwinFaultDomain(
             creatorReceiptHash = digest(receipt);
             need(!failed);
             owner.stdin.write("creator " + receipt.toString("hex") + "\n");
+          });
+        } else if (value.refusal) {
+          need(
+            Object.keys(value).length === 1 &&
+              creator &&
+              trace &&
+              !sealed &&
+              !releasePossible,
+          );
+          acquire(async () => {
+            const bindingSha256 = trace.refusal(value.refusal);
+            acquired.refusal = { ...value.refusal, bindingSha256 };
+            retain(acquired);
+            need(!failed);
+            const observer = value.refusal.observer;
+            owner.stdin.write(
+              value.refusal.phase === "register"
+                ? `DR1 ${bindingSha256} ${observer.pid} ${observer.parentPid} ${observer.startSeconds} ${observer.startMicroseconds}\n`
+                : `DS1 ${bindingSha256}\n`,
+            );
           });
         } else if (value.sealed) {
           const record = creatorFrame(value.sealed, 2);
@@ -483,6 +503,7 @@ export async function openDarwinFaultDomain(
     if (trace) {
       try {
         acquired.traceResult = await trace.finish();
+        need(acquired.traceResult.cleanup === "RETIRED");
       } catch (cleanupError) {
         error.observerError = cleanupError;
         error.cleanupError ??= cleanupError;

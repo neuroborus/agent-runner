@@ -3999,6 +3999,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     ["cancel", "admission"],
     ["cancel", "creator-refusal"],
     ["cancel", "child-refusal"],
+    ["cancel", "child-refusal-bound"],
     ["owner-loss", "child-refusal-trace"],
     ["cancel", "ready-refusal"],
   ]) {
@@ -4012,7 +4013,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
       "native-darwin: operation=fault-access-authority domain=invariant value=0 effects=possible settlement=unsettled\n";
     const observerFailure = new Error("Observer retirement unavailable");
     const admissionFailure = new Error("Custody stream unavailable");
-    let failTrace;
+    let failTrace, refusalCapture, refusalToken;
     const owner = {
       pid: 42,
       pidVersion: 7,
@@ -4133,6 +4134,36 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
     };
     child.stdin.on("data", (chunk) => {
       const text = chunk.toString();
+      if (text.startsWith("DR1 ")) {
+        const [, token, ...birth] = text.trim().split(" ");
+        refusalToken = token;
+        assert.deepEqual(birth, ["9002", "9000", "100", "2"]);
+        refusalCapture.consume("created 9000 105 9002");
+        send({
+          refusal: {
+            version: 1,
+            phase: "settle",
+            bindingSha256: token,
+            reaped: true,
+            status: 0,
+            error: 0,
+            cleanup: 0,
+            observed: true,
+            channelLost: false,
+          },
+        });
+        return;
+      }
+      if (text.startsWith("DS1 ")) {
+        assert.equal(text, `DS1 ${refusalToken}\n`);
+        send({
+          stream: "stderr",
+          hex: Buffer.from(childDiagnostic).toString("hex"),
+        });
+        send({ exit: { code: 126, signal: 0 } });
+        child.emit("close", 78, null);
+        return;
+      }
       if (text.startsWith("O ")) {
         send({ observerStored: true });
         return;
@@ -4147,6 +4178,31 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         if (childRefusal) {
           child.stderr.write(parentDiagnostic.slice(0, 35));
           child.stderr.write(parentDiagnostic.slice(35));
+          if (trailing === "child-refusal-bound") {
+            const registration =
+              JSON.stringify({
+                refusal: {
+                  version: 1,
+                  phase: "register",
+                  candidateSha: SHA,
+                  parent: custodian,
+                  original: record.owner,
+                  receiptSha256: createHash("sha256")
+                    .update(receipt)
+                    .digest("hex"),
+                  refusedName: 128,
+                  observer: {
+                    pid: 9002,
+                    parentPid: 9000,
+                    startSeconds: 100,
+                    startMicroseconds: 2,
+                  },
+                },
+              }) + "\n";
+            child.stdout.write(registration.slice(0, 23));
+            child.stdout.write(registration.slice(23));
+            return;
+          }
           const frame =
             JSON.stringify({
               stream: "stderr",
@@ -4274,7 +4330,8 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
         openTrace: (binding, options) => {
           failTrace = options.onFailure;
           assert.deepEqual(binding.identity, custodian);
-          const capture = createDarwinConstructorCapture(custodian);
+          const capture = createDarwinConstructorCapture(custodian, SHA);
+          refusalCapture = capture;
           for (const line of [
             "created 9000 100 42",
             "started 42 101 7",
@@ -4305,6 +4362,7 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
                 throw new Error("Constructor receipt unavailable");
               return capture.receipt(identity);
             },
+            refusal: (value) => capture.refusal(value),
             finish: async () => {
               if (acquired.traceResult) return acquired.traceResult;
               assert.equal(
@@ -4313,6 +4371,13 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
               );
               if (childRefusal) {
                 assert.equal(child.stdin.writableEnded, true);
+                if (trailing === "child-refusal-bound") {
+                  assert.equal(
+                    capture.diagnostic().bindingSha256,
+                    refusalToken,
+                  );
+                  return { status: "partial", cleanup: "UNCERTAIN" };
+                }
                 throw observerFailure;
               }
               if (trailing === "creator-refusal") {
@@ -4418,8 +4483,11 @@ test("Darwin fault custody transport keeps the original fault stdio separate fro
           assert.equal(error.custodyError.stderr.toString(), parentDiagnostic);
           assert.equal(error.custodyError.exitCode, 78);
           if (childRefusal) {
-            assert.equal(error.cleanupError, observerFailure);
-            assert.equal(error.observerError, observerFailure);
+            assert.equal(error.cleanupError, error.observerError);
+            assert.ok(error.observerError);
+            if (trailing === "child-refusal-bound")
+              assert.equal(acquired.traceResult.cleanup, "UNCERTAIN");
+            else assert.equal(error.observerError, observerFailure);
           } else {
             assert.equal(error, admissionFailure);
             assert.equal(error.cleanupError, undefined);

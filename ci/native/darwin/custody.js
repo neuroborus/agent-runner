@@ -1244,6 +1244,33 @@ export function createDarwinCustodyReader(value, options = {}) {
             ...darwinIdentityArguments(value),
           );
     },
+    async refusalReply(phase, bindingSha256, observer) {
+      requireDarwin(
+        input.purpose === "experiment" &&
+          ["register", "settle"].includes(phase) &&
+          hash(bindingSha256),
+      );
+      const birth =
+        phase === "register"
+          ? [
+              observer.pid,
+              observer.parentPid,
+              observer.startSeconds,
+              observer.startMicroseconds,
+            ]
+          : [];
+      requireDarwin(
+        birth.every((field) => Number.isSafeInteger(field) && field >= 0),
+      );
+      requireDarwin(
+        (await command(
+          "case-refusal",
+          phase === "register" ? "DR1" : "DS1",
+          bindingSha256,
+          ...birth,
+        )) === null,
+      );
+    },
     async sendOwnership(payload, value) {
       requireDarwin(
         typeof payload === "boolean" &&

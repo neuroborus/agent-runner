@@ -996,6 +996,22 @@ missing evidence, both-original observation before intervention, partial custody
 parent fencing and separate reaping uncertainty. Actual-source gate and failure-hook
 execution checks unreleased-child reaping and preserves the unconfined control.
 No native API or compiler runs; no slow-tier assignment is added.
+
+Actual D create-action and production capture fixtures preserve the first PID
+while joining one bound observer across fragmented/reordered delivery. They
+reject malformed, substituted, replayed, missing and extra ownership evidence.
+Injected native bodies cover birth/reply checks, held pre-exec descriptor
+isolation, failed fork/exec, controller loss and uncertain owner-only settlement.
+The fault/launcher transports retain refusal and separate cleanup. Neutral
+identities and controlled events/clocks require no sleeps or native tools;
+fast discovery and the explicit harness remain unchanged.
+Fresh recovery coverage rejects missing, mismatched and uncertain refusal
+settlements, including loss before the first registration, while still attempting
+original-domain and tracer retirement. Matching successful sealed captures retain
+their cleanup result; substituted receipt bindings refuse it.
+Partial live capture after CR1 transfer retains exclusion, while trace failure
+before receipt transfer still permits independently established retirement.
+
 `test/native-darwin-startup.test.js` injects stream events and every startup-control
 effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
 malformed/oversized output, complete stdout counts, self-exec fault phases/signals,

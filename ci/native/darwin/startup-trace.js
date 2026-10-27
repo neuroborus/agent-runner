@@ -31,7 +31,7 @@ int child_pid; uint64_t constructors; int gates;
 dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
 proc:::create /pid == $1/ {
   printf("created %d %llu %d\\n", pid, timestamp, args[0]->pr_pid);
-  child_pid = args[0]->pr_pid;
+  child_pid = child_pid == 0 ? args[0]->pr_pid : child_pid;
 }
 proc:::start /pid == child_pid/ {
   printf("started %d %llu %llu\\n", pid, timestamp, (uint64_t)tid);
@@ -57,15 +57,112 @@ export const DARWIN_CONSTRUCTOR_TRACE_INTENT = Object.freeze({
 });
 const DARWIN_CREATOR_RECEIPT_BYTES = 512;
 
+/** Live capture and protected recovery receipts share this one-shot exchange.
+ * Settlement is evidence only; it grants no new signal or reap authority. */
+export function createDarwinRefusalBinding(
+  parent,
+  identity,
+  candidateSha,
+  receiptSha256,
+) {
+  parent = normalizeDarwinIdentity(parent);
+  identity = normalizeDarwinIdentity(identity);
+  need(
+    /^[a-f0-9]{40}$/u.test(candidateSha) &&
+      /^[a-f0-9]{64}$/u.test(receiptSha256),
+  );
+  let registration, settlement, bindingSha256;
+  return {
+    consume(value) {
+      need(value && !Array.isArray(value) && value.version === 1);
+      if (value.phase === "register") {
+        need(
+          !registration &&
+            Object.keys(value).sort().join(",") ===
+              "candidateSha,observer,original,parent,phase,receiptSha256,refusedName,version" &&
+            value.candidateSha === candidateSha &&
+            sameDarwinIdentity(value.parent, parent) &&
+            sameDarwinIdentity(value.original, identity) &&
+            value.receiptSha256 === receiptSha256 &&
+            Number.isSafeInteger(value.refusedName) &&
+            value.refusedName > 0 &&
+            value.refusedName < 0xffffffff,
+        );
+        const observer = value.observer;
+        need(
+          observer &&
+            Object.keys(observer).sort().join(",") ===
+              "parentPid,pid,startMicroseconds,startSeconds" &&
+            Number.isSafeInteger(observer.pid) &&
+            observer.pid > 1 &&
+            observer.pid <= 0x7fffffff &&
+            observer.pid !== identity.pid &&
+            observer.pid !== parent.pid &&
+            observer.parentPid === parent.pid &&
+            Number.isSafeInteger(observer.startSeconds) &&
+            observer.startSeconds > 0 &&
+            Number.isSafeInteger(observer.startMicroseconds) &&
+            observer.startMicroseconds >= 0 &&
+            observer.startMicroseconds < 1000000,
+        );
+        registration = {
+          ...value,
+          parent,
+          original: identity,
+          observer: { ...observer },
+        };
+        bindingSha256 = digest(
+          JSON.stringify([
+            DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
+            registration,
+          ]),
+        );
+      } else {
+        need(
+          registration &&
+            !settlement &&
+            value.phase === "settle" &&
+            Object.keys(value).sort().join(",") ===
+              "bindingSha256,channelLost,cleanup,error,observed,phase,reaped,status,version" &&
+            value.bindingSha256 === bindingSha256 &&
+            [value.reaped, value.channelLost, value.observed].every(
+              (field) => typeof field === "boolean",
+            ) &&
+            [value.cleanup, value.error, value.status].every(
+              (field) =>
+                Number.isSafeInteger(field) &&
+                field >= 0 &&
+                field <= 0x7fffffff,
+            ),
+        );
+        settlement = { ...value };
+      }
+      return bindingSha256;
+    },
+    evidence() {
+      need(registration && settlement);
+      return {
+        registration,
+        settlement,
+        bindingSha256,
+        cleanup:
+          settlement.reaped && !settlement.cleanup ? "RETIRED" : "UNCERTAIN",
+      };
+    },
+  };
+}
+
 /** Bounded unordered delivery, ordered kernel sequence. A fence is not a flush:
  * all records through its count must arrive before a receipt can be issued. */
-export function createDarwinConstructorCapture(parent) {
+export function createDarwinConstructorCapture(parent, candidateSha) {
   parent = normalizeDarwinIdentity(parent);
   const rows = [],
     records = new Map(),
-    fences = new Map();
-  let created, started, imported, terminal, identity, receipt;
+    fences = new Map(),
+    children = new Map();
+  let created, started, imported, terminal, identity, receipt, refusal;
   const ready = () => {
+    created = started && children.get(started[1]);
     if (!created || !started || !fences.has(1)) return false;
     const fence = fences.get(1);
     return (
@@ -106,6 +203,7 @@ export function createDarwinConstructorCapture(parent) {
     }
     if (identity) need(identity.pid === Number(pid));
     if (final) {
+      need(children.size === 1 && !refusal);
       const post = fences.get(2);
       need(
         identity &&
@@ -155,8 +253,14 @@ export function createDarwinConstructorCapture(parent) {
       );
       rows.push(row);
       if (kind === "created") {
-        need(!created && Number(row[3]) > 1 && Number(row[3]) <= 0x7fffffff);
-        created = row;
+        need(
+          children.size < 2 &&
+            !children.has(row[3]) &&
+            row[1] === String(parent.pid) &&
+            Number(row[3]) > 1 &&
+            Number(row[3]) <= 0x7fffffff,
+        );
+        children.set(row[3], row);
       }
       if (kind === "started") {
         need(!started && row[3] !== "0");
@@ -222,6 +326,34 @@ export function createDarwinConstructorCapture(parent) {
       receipt = Buffer.alloc(DARWIN_CREATOR_RECEIPT_BYTES);
       receipt.write(text, "ascii");
       return Buffer.from(receipt);
+    },
+    refusal(value) {
+      need(receipt);
+      refusal ??= createDarwinRefusalBinding(
+        parent,
+        identity,
+        candidateSha,
+        digest(receipt),
+      );
+      return refusal.consume(value);
+    },
+    diagnostic() {
+      if (!refusal) {
+        need(children.size <= 1);
+        return null;
+      }
+      validate();
+      const evidence = refusal.evidence();
+      const observer = children.get(String(evidence.registration.observer.pid));
+      need(
+        children.size === 2 &&
+          observer &&
+          BigInt(observer[2]) > BigInt(created[2]) &&
+          (!terminal ||
+            (terminal[1] === String(identity.pid) &&
+              BigInt(observer[2]) <= BigInt(terminal[2]))),
+      );
+      return evidence;
     },
     complete() {
       validate(true);
@@ -620,7 +752,7 @@ export function openDarwinStartupTrace(
   );
   const execRequired = !constructorMode && STARTUP_EXEC_REQUIRED[operation];
   const creators = constructorMode
-    ? createDarwinConstructorCapture(binding.identity)
+    ? createDarwinConstructorCapture(binding.identity, binding.candidateSha)
     : null;
   const creatorReady = Promise.withResolvers();
   creatorReady.promise.catch(() => {});
@@ -1100,6 +1232,20 @@ export function openDarwinStartupTrace(
         if (aborted) signal.removeEventListener("abort", aborted);
       }
     },
+    refusal(value) {
+      try {
+        need(
+          constructorMode &&
+            domainBound &&
+            targetIdentity &&
+            Date.now() < captureDeadline,
+        );
+        return creators.refusal(value);
+      } catch (error) {
+        fail(error, "capture");
+        throw error;
+      }
+    },
     async bindExec(value, signal) {
       let aborted;
       try {
@@ -1221,8 +1367,16 @@ export function openDarwinStartupTrace(
             1000,
           ).catch((error) => fail(error, "retirement"));
         }
-        let constructorEvidence;
+        let constructorEvidence, refusalEvidence;
         if (constructorMode) {
+          try {
+            refusalEvidence = creators.diagnostic();
+            if (refusalEvidence?.cleanup === "UNCERTAIN")
+              throw new Error("Refusal observer settlement is uncertain");
+          } catch (error) {
+            cleanup = "UNCERTAIN";
+            fail(error, "retirement");
+          }
           try {
             constructorEvidence = creators.complete();
           } catch (error) {
@@ -1310,6 +1464,7 @@ export function openDarwinStartupTrace(
             ? {
                 programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
                 creator: constructorEvidence ?? null,
+                refusal: refusalEvidence ?? null,
               }
             : {}),
           ...(coldCommand

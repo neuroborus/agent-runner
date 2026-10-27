@@ -840,7 +840,7 @@ int main(int argc, char **argv) {
   need(read(0, creator, sizeof(creator)) == sizeof(creator) && write(release[1], creator, sizeof(creator)) == sizeof(creator));
   need(read(ready[0], &post, sizeof(post)) == sizeof(post));
   if (post.version == 1 && post.phase == 3)
-    domain_refusal_inspect(release[1], post, first, getenv("NATIVE_EVIDENCE_CANDIDATE"), "launcher-census");
+    domain_refusal_inspect(release[1], post, first, launcher_identity, getenv("NATIVE_EVIDENCE_CANDIDATE"), "launcher-census", creator);
   need(post.version == 1 && post.phase == 2 &&
     audit_identity_same(first, post.identity));
   char trailing; need(read(ready[0], &trailing, 1) == 0 && !close(ready[0]));

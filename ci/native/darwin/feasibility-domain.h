@@ -835,8 +835,9 @@ static void domain_start(int argc, char **argv) {
   domain_io(write(release[1], receipt, sizeof(receipt)), sizeof(receipt), "fault-gate-write");
   domain_io(read(ready[0], &post, sizeof(post)), sizeof(post), "fault-final-read");
   if (post.version == 1 && post.phase == 3) {
-    domain_refusal_inspect(release[1], post, domain_record.owner, domain_record.candidate, "fault-census");
-    remember("fault-port-authority", "invariant", 0); failure(126);
+    remember("fault-port-authority", "invariant", 0);
+    domain_refusal_inspect(release[1], post, domain_record.owner, domain_record.custodian, domain_record.candidate, "fault-census", receipt);
+    failure(126);
   }
   char trailing; domain_io(read(ready[0], &trailing, 1), 0, "fault-final-drain"); domain_close(&ready[0]);
   invariant(post.version == 1 && post.phase == 2 && audit_identity_same(post.identity, domain_record.owner) &&

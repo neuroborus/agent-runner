@@ -971,17 +971,72 @@ static int domain_refusal_poll(int output, int remaining, bool *channel_lost) {
   if (ready > 0 && streams[1].revents) { *channel_lost = true; return 0; }
   return ready;
 }
+/* The controller records the binding before this parent's held fork may exec.
+ * Replies are fixed-size, one-shot and consume only the existing lifetime. */
+static int domain_refusal_reply(const char *prefix, char token[65], bool registered, const char *suffix) {
+  char reply[160]; unsigned used = 0, length = 68 + (unsigned)strlen(suffix);
+  if (length > sizeof(reply)) return EINVAL;
+  while (used < length) {
+    struct pollfd input = {.fd = 0, .events = POLLIN};
+    int remaining = domain_refusal_remaining();
+    if (remaining <= 500) return ETIMEDOUT;
+    int result = poll(&input, 1, remaining - 500);
+    if (result < 0 && errno == EINTR) continue;
+    if (result != 1 || !(input.revents & POLLIN)) return EPIPE;
+    ssize_t size = read(0, reply + used, 1);
+    if (size != 1) return EPIPE;
+    used++;
+  }
+  if (memcmp(reply, prefix, 4) || memcmp(reply + 68, suffix, length - 68)) return EINVAL;
+  for (unsigned i = 4; i < 68; i++) if (!strchr("0123456789abcdef", reply[i]) || !reply[i]) return EINVAL;
+  if (registered && memcmp(token, reply + 4, 64)) return EINVAL;
+  memcpy(token, reply + 4, 64); token[64] = 0; return 0;
+}
+static bool domain_refusal_birth(pid_t pid, pid_t parent, struct proc_bsdinfo *birth) {
+  struct proc_bsdinfo again;
+  return proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, birth, sizeof(*birth)) == sizeof(*birth) &&
+    proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &again, sizeof(again)) == sizeof(again) &&
+    birth->pbi_pid == (unsigned)pid && birth->pbi_ppid == (unsigned)parent &&
+    again.pbi_pid == birth->pbi_pid && again.pbi_ppid == birth->pbi_ppid &&
+    birth->pbi_start_tvsec > 0 && birth->pbi_start_tvsec == again.pbi_start_tvsec &&
+    birth->pbi_start_tvusec < 1000000 && birth->pbi_start_tvusec == again.pbi_start_tvusec;
+}
+static int domain_refusal_register(struct identity parent, struct identity original, const char *candidate,
+    const char receipt[512], unsigned name, struct proc_bsdinfo birth, char token[65]) {
+  unsigned char sum[32]; char hash[65], suffix[90];
+  int length = snprintf(suffix, sizeof(suffix), " %u %u %llu %llu\n", birth.pbi_pid, birth.pbi_ppid,
+    (unsigned long long)birth.pbi_start_tvsec, (unsigned long long)birth.pbi_start_tvusec);
+  if (length <= 0 || length >= sizeof(suffix)) return EINVAL;
+  if (!CC_SHA256(receipt, 512, sum)) return EIO;
+  for (unsigned i = 0; i < 32; i++) snprintf(hash + 2*i, 3, "%02x", sum[i]);
+  printf("{\"refusal\":{\"version\":1,\"phase\":\"register\",\"candidateSha\":\"%s\",\"parent\":", candidate);
+  emit(parent); fputs(",\"original\":", stdout); emit(original);
+  printf(",\"receiptSha256\":\"%s\",\"refusedName\":%u,\"observer\":{\"pid\":%u,\"parentPid\":%u,\"startSeconds\":%llu,\"startMicroseconds\":%llu}}}\n",
+    hash, name, birth.pbi_pid, birth.pbi_ppid, (unsigned long long)birth.pbi_start_tvsec, (unsigned long long)birth.pbi_start_tvusec);
+  if (fflush(stdout) || ferror(stdout)) return EPIPE;
+  return domain_refusal_reply("DR1 ", token, false, suffix);
+}
+static int domain_refusal_settlement(char token[65], bool reaped, int status, int error, int cleanup, bool channel_lost, bool observed) {
+  printf("{\"refusal\":{\"version\":1,\"phase\":\"settle\",\"bindingSha256\":\"%s\",\"reaped\":%s,\"status\":%d,\"error\":%d,\"cleanup\":%d,\"channelLost\":%s,\"observed\":%s}}\n",
+    token, reaped ? "true" : "false", status, error, cleanup, channel_lost ? "true" : "false", observed ? "true" : "false");
+  if (fflush(stdout) || ferror(stdout)) return EPIPE;
+  return domain_refusal_reply("DS1 ", token, true, "\n");
+}
 /* Apple system_cmds 408bba7 lsmp.1/lsmp.c: -p selects output; root still
  * enumerates task read ports internally. This installed stock tool is trusted
  * under the hosted-image assumption, not as provenance or cleanup authority.
  * Only this parent's successful fork owns a kill/wait; all output is bounded. */
 static void domain_refusal_inspect(int acknowledgement, struct domain_creator_frame frame,
-    struct identity original, const char *candidate, const char *phase) {
-  int saved = errno, pipefd[2] = {-1,-1}, status = 0, error = 0, cleanup = 0;
+    struct identity original, struct identity parent, const char *candidate, const char *phase, const char receipt[512]) {
+  static bool attempted;
+  int saved = errno, pipefd[2] = {-1,-1}, gatefd[2] = {-1,-1}, status = 0, error = 0, cleanup = 0;
+  char token[65] = {0}; bool registered = false;
+  (void)signal(SIGPIPE, SIG_IGN);
   pid_t observer = -1; bool reaped = false, eof = false, truncated = false, owned = false, selected = false, expired = false, channel_lost = false;
   unsigned used = 0; char bytes[8193], selection[64]; struct stat tool; struct sigaction child_policy;
-  bool bound = frame.version == 1 && frame.phase == 3 && MACH_PORT_VALID(frame.refused_name) &&
+  bool bound = !attempted && parent.token.val[5] == (unsigned)getpid() && frame.version == 1 && frame.phase == 3 && MACH_PORT_VALID(frame.refused_name) &&
     audit_identity_same(frame.identity, original) && domain_refusal_live(original);
+  attempted = true;
   const char *outcome = !bound ? "identity-mismatch" : !domain_refusal_remaining() ? "expired" : "unsupported";
   bool before = bound, after = false, available = false;
   if (bound && domain_refusal_remaining() && candidate && strlen(candidate) == 40 &&
@@ -993,7 +1048,7 @@ static void domain_refusal_inspect(int acknowledgement, struct domain_creator_fr
     }
   }
   if (available) {
-    if (pipe(pipefd)) { error = errno; pipefd[0] = pipefd[1] = -1; outcome = "collector-failed"; }
+    if (pipe(pipefd) || pipe(gatefd)) { error = errno; outcome = "collector-failed"; }
     else {
       observer = fork();
       if (!observer) {
@@ -1001,6 +1056,11 @@ static void domain_refusal_inspect(int acknowledgement, struct domain_creator_fr
         unsigned seconds = (unsigned)domain_refusal_remaining() / 1000;
         if (!seconds || signal(SIGALRM, SIG_DFL) == SIG_ERR) _exit(126);
         alarm(seconds);
+        if (close(gatefd[1])) _exit(126);
+        struct pollfd held = {.fd = gatefd[0], .events = POLLIN}; char permission = 0;
+        int remaining = domain_refusal_remaining();
+        if (!remaining || poll(&held, 1, remaining) != 1 || !(held.revents & POLLIN) ||
+            read(gatefd[0], &permission, 1) != 1 || permission != 'D' || close(gatefd[0])) _exit(126);
         char pid[24]; snprintf(pid, sizeof(pid), "%u", original.token.val[5]);
         if (close(0) || dup2(pipefd[1], 1) < 0 || dup2(pipefd[1], 2) < 0) _exit(126);
         if (close(pipefd[0]) || close(pipefd[1])) _exit(126);
@@ -1018,7 +1078,21 @@ static void domain_refusal_inspect(int acknowledgement, struct domain_creator_fr
       pipefd[1] = -1;
       if (observer > 0) {
         owned = true; outcome = "collector-failed";
-        while (domain_refusal_remaining() > 500 && used < sizeof(bytes) - 1) {
+        struct proc_bsdinfo birth, again;
+        if (close(gatefd[0])) cleanup = errno;
+        gatefd[0] = -1;
+        if (!domain_refusal_birth(observer, getpid(), &birth)) error = EINVAL;
+        if (!error) {
+          error = domain_refusal_register(parent, original, candidate, receipt, frame.refused_name, birth, token);
+          registered = !error;
+        }
+        if (!error && (!domain_refusal_birth(observer, getpid(), &again) ||
+            birth.pbi_start_tvsec != again.pbi_start_tvsec || birth.pbi_start_tvusec != again.pbi_start_tvusec ||
+            !domain_refusal_live(original))) error = EINVAL;
+        if (!error && write(gatefd[1], "D", 1) != 1) error = errno ? errno : EPIPE;
+        if (close(gatefd[1]) && !cleanup) cleanup = errno;
+        gatefd[1] = -1;
+        while (!error && domain_refusal_remaining() > 500 && used < sizeof(bytes) - 1) {
           error = domain_refusal_wait(observer, &status, &reaped, &owned);
           if (error) { cleanup = error; break; }
           if (reaped && eof) break;
@@ -1046,7 +1120,15 @@ static void domain_refusal_inspect(int acknowledgement, struct domain_creator_fr
       }
     }
   }
-  for (unsigned i = 0; i < 2; i++) if (pipefd[i] >= 0 && close(pipefd[i]) && !cleanup) cleanup = errno;
+  for (unsigned i = 0; i < 2; i++) {
+    if (pipefd[i] >= 0 && close(pipefd[i]) && !cleanup) cleanup = errno;
+    if (gatefd[i] >= 0 && close(gatefd[i]) && !cleanup) cleanup = errno;
+  }
+  if (registered) {
+    int transport = domain_refusal_settlement(token, reaped, status, error, cleanup, channel_lost, !strcmp(outcome, "observed"));
+    if (transport && !error) error = transport;
+    if (transport) outcome = "collector-failed";
+  }
   (void)signal(SIGPIPE, SIG_IGN);
   fprintf(stderr, "native-darwin-refusal: candidate=%s pid=%u birth=%llu,%llu phase=%s child-name=%u before=%u after=%u status=%s error=%d observer=%d reaped=%u observer-status=%d bytes=%u truncated=%u cleanup=%d uncertain=%u selected=%u channel-lost=%u internal-task-enumeration=1 acquisition=unobserved release=0\n",
     candidate ? candidate : "unavailable", original.token.val[5], (unsigned long long)original.bsd.pbi_start_tvsec,
