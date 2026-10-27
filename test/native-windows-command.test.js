@@ -23,7 +23,9 @@ import {
   buildWindowsCustodyReader,
   WINDOWS_BUILD_COMMAND_MS,
   WINDOWS_BUILD_LIBRARIES,
+  WINDOWS_HELPER_NAMES,
   windowsCompilerArguments,
+  windowsHostedCompilerArguments,
   createWindowsCommandPreparation,
   windowsFeasibilityToolEnvironment,
   windowsFeasibilityCause,
@@ -3019,6 +3021,195 @@ test("native build entry uses the shared fixed link tail", async () => {
       }),
     recipe.slice(recipe.indexOf("/link")),
   );
+});
+
+test("only the experimental argv target selects the same native and hosted startup probe", async () => {
+  const native = await readFile(
+    new URL("../ci/native/win32/build-helper.c", import.meta.url),
+    "utf8",
+  );
+  const guarded = [
+    ...native.matchAll(/#ifdef NATIVE_CI_EXPERIMENT\n([\s\S]*?)#endif/gu),
+  ]
+    .map((match) => match[1])
+    .join("\n");
+  const predicate = /BOOL argvProbe = ([^;]+);/u.exec(guarded)[1];
+  const select = new Script(
+    predicate
+      .replaceAll("slash+1", "sourceName")
+      .replaceAll("leaf+1", "targetName")
+      .replaceAll('L"', '"'),
+  );
+  const flags = [
+    ...guarded.matchAll(
+      /if \(argvProbe\) quoted\(command, 32767, L"([^"]+)"\);/gu,
+    ),
+  ].map((match) => match[1]);
+  assert.deepEqual(flags, [
+    "/DNATIVE_ARGV_ENTRY_PROBE=1",
+    "/ENTRY:native_argv_entry",
+  ]);
+  assert.doesNotMatch(
+    native.replace(/#ifdef NATIVE_CI_EXPERIMENT\n[\s\S]*?#endif/gu, ""),
+    /argvProbe|NATIVE_ARGV_ENTRY_PROBE|native_argv_entry/u,
+  );
+  for (const name of WINDOWS_HELPER_NAMES) {
+    const source = `C:\\source\\${name}.c`,
+      target = `C:\\output\\${name}.exe`;
+    const reviewed = windowsCompilerArguments(source, target);
+    assert.deepEqual(reviewed, [
+      "/nologo",
+      "/std:c17",
+      "/O2",
+      "/W4",
+      "/Brepro",
+      source,
+      `/Fo${target}.obj`,
+      `/Fe${target}`,
+      "/link",
+      "/Brepro",
+      "/INCREMENTAL:NO",
+      "/DYNAMICBASE",
+      "/NXCOMPAT",
+      ...WINDOWS_BUILD_LIBRARIES,
+    ]);
+    for (const purpose of ["reviewed", "experiment"]) {
+      const vector = windowsCompilerArguments(source, target, purpose);
+      const enabled =
+        purpose === "experiment" &&
+        select.runInNewContext({
+          sourceName: `${name}.c`,
+          targetName: `${name}.exe`,
+          wcscmp: (a, b) => (a === b ? 0 : 1),
+        });
+      assert.deepEqual(
+        vector.filter((arg) => flags.includes(arg)),
+        enabled ? flags : [],
+      );
+      assert.deepEqual(
+        vector.filter((arg) => !flags.includes(arg)),
+        purpose === "experiment"
+          ? [
+              ...reviewed.slice(0, 5),
+              "/DNATIVE_CI_EXPERIMENT=1",
+              "/FIC:\\source\\experiment.h",
+              "/sourceDependencies",
+              `${target}.deps.json`,
+              ...reviewed.slice(5),
+            ]
+          : reviewed,
+      );
+    }
+    const experimental = windowsCompilerArguments(source, target, "experiment");
+    assert.deepEqual(
+      windowsHostedCompilerArguments(source, target),
+      experimental.filter(
+        (arg) => arg !== "/sourceDependencies" && arg !== `${target}.deps.json`,
+      ),
+    );
+  }
+  for (const [sourceName, targetName] of [
+    ["argv-fixture.c", "other.exe"],
+    ["other.c", "argv-fixture.exe"],
+    ["ARGV-FIXTURE.c", "argv-fixture.exe"],
+  ]) {
+    assert.equal(
+      select.runInNewContext({
+        sourceName,
+        targetName,
+        wcscmp: (a, b) => (a === b ? 0 : 1),
+      }),
+      false,
+    );
+    assert.deepEqual(
+      windowsCompilerArguments(sourceName, targetName, "experiment").filter(
+        (arg) => flags.includes(arg),
+      ),
+      [],
+    );
+  }
+});
+
+test("the experimental fixture checks native marker writes before delegating to normal CRT startup", async () => {
+  const source = await readFile(
+    new URL("../ci/native/win32/argv-fixture.c", import.meta.url),
+    "utf8",
+  );
+  const entry =
+    /int __stdcall native_argv_entry\(void\) \{([\s\S]*?)\n\}/u.exec(source)[1];
+  const main =
+    /int wmain\(int argc, wchar_t \*\*argv\) \{\n#ifdef NATIVE_ARGV_ENTRY_PROBE\n([\s\S]*?)#endif/u.exec(
+      source,
+    )[1];
+  // Keep unsupported ABI selection a compile failure, with no /GS suppression.
+  assert.match(
+    source,
+    /!defined\(NATIVE_CI_EXPERIMENT\).*?!defined\(_M_X64\).*?_MSC_VER != 1951/u,
+  );
+  assert.match(source, /extern int __cdecl wmainCRTStartup\(void\);/u);
+  assert.doesNotMatch(
+    source,
+    /safebuffers|#pragma strict_gs_check|__security_init_cookie\s*\(/u,
+  );
+  const project = (body) =>
+    body
+      .replace(/DWORD /gu, "let ")
+      .replace(/sizeof\(("(?:[^"\\]|\\.)*")\)/gu, (_match, literal) =>
+        String(JSON.parse(literal).length + 1),
+      )
+      .replaceAll("&written", "{set value(v){written=v}}");
+  const script = new Script(
+    `function mainMarker(){${project(main)}}\n(function entry(){${project(entry)}})`,
+  );
+  for (const fault of [
+    null,
+    "entry-failed",
+    "entry-short",
+    "wmain-failed",
+    "wmain-short",
+  ]) {
+    const calls = [],
+      failure = new Error("Marker write failed");
+    const context = {
+      NULL: null,
+      STD_OUTPUT_HANDLE: -11,
+      GetStdHandle: (value) => {
+        assert.equal(value, -11);
+        return 7;
+      },
+      WriteFile(handle, text, size, written, overlapped) {
+        assert.equal(handle, 7);
+        assert.equal(overlapped, null);
+        assert.equal(size, Buffer.byteLength(text));
+        const phase = calls.includes("crt") ? "wmain" : "entry";
+        assert.equal(text, `native-argv-${phase}-v1\n`);
+        calls.push(phase);
+        written.value = size - Number(fault === `${phase}-short`);
+        return fault !== `${phase}-failed`;
+      },
+      ExitProcess(code) {
+        assert.equal(code, 125);
+        throw failure;
+      },
+      wmainCRTStartup() {
+        calls.push("crt");
+        context.mainMarker();
+        return 7;
+      },
+    };
+    // The CRT callback enters the extracted first wmain operation in the same VM.
+    const run = script.runInNewContext(context);
+    if (fault)
+      assert.throws(
+        () => run(),
+        (error) => error === failure,
+      );
+    else assert.equal(run(), 7);
+    assert.deepEqual(
+      calls,
+      fault?.startsWith("entry") ? ["entry"] : ["entry", "crt", "wmain"],
+    );
+  }
 });
 
 test("shared removal bytes must remain unchanged across command and custody compilation", async () => {

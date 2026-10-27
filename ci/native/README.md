@@ -204,7 +204,41 @@ the two post-release witnesses. Its private single-use bytes remain joined to
 the admitted original process/image/request; later literal observation retains
 all independent witnesses, policy/image and successful-exit predicates, outside
 controls and retirement. Reviewed and nonliteral paths retain their existing
-ordering, and the original argv fixture is unchanged.
+ordering.
+Only experimental `argv-fixture.c` / `argv-fixture.exe` builds select
+`NATIVE_ARGV_ENTRY_PROBE` and `/ENTRY:native_argv_entry`. The shared compiler
+recipe, native build entry and derived hosted vector agree; every other helper
+and protected build keeps its original vector. Hosted preparation still supplies
+no independent compiler-domain retirement proof or additional launch control.
+
+The wrapper emits exactly `native-argv-entry-v1\n` through the inherited stdout
+handle, then delegates to `int __cdecl wmainCRTStartup(void)`. The first operation
+in `wmain` emits `native-argv-wmain-v1\n` before its existing checks and stdio.
+Both writes use Win32 `WriteFile` with exact-length checks; failure or a short
+write exits with the distinct status 125. The actual UCRT argument parser,
+complete literal corpus and original JSON frame remain unchanged.
+The probe is confined at compile time to the selected MSVC 19.51 x64 family.
+Microsoft's [/ENTRY contract](https://learn.microsoft.com/en-us/cpp/build/reference/entry-entry-point-symbol)
+names the normal wide console CRT startup, and its
+[x64 calling convention](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention)
+unifies `__cdecl` and `__stdcall`. The pre-CRT wrapper has only a four-byte scalar
+local, static string literals and direct Win32 calls: no automatic arrays,
+aggregates, allocation or CRT helper precedes delegation. Normal CRT startup
+still owns [security-cookie initialization](https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/security-init-cookie)
+before protected application code; no `/GS` protection is disabled or suppressed.
+Fresh matching hosted compilation and original-child observations must establish
+that this experimental delegation works. Unsupported delegation is a startup
+limitation, never evidence about the baseline or grounds for guessing an ABI.
+
+The original-child reader requires both exact LF-terminated markers in order
+before the JSON frame, including fragmented delivery. Missing, partial,
+malformed, duplicate or reordered markers and trailing output refuse capture.
+Marker progress is separate from frame completion, and only the unchanged JSON
+frame reaches the existing output API and literal acceptance predicate. The
+existing bound context retains `output-entry`, `output-wmain`, partial marker
+bytes and combined byte count beside capture failures and actual original exit
+status when available. A framing refusal only polls already-held process custody
+without waiting for an exit; it cannot replace the original capture error.
 Only this literal reader replaces blocking line input with bounded pipe/process
 observation. Available bytes drain before exit interpretation, including a
 complete frame buffered before child exit. A signaled child with no frame or a
@@ -215,6 +249,19 @@ uses an explicit reason and zero API error; failed APIs retain their actual
 errors rather than manufacturing pipe error 109. The existing context line
 retains byte counts, framing completeness and actual peek/read/wait/exit results
 without changing authenticated transport or supplying an acceptance receipt.
+
+Both markers, the exact corpus and exit zero establish only that modified-image
+launch, with original suspended-child admission, positive controls, unchanged
+sentinels and independently verified retirement still required. They do not
+explain the baseline failure. A `wmain` marker followed by failure disproves
+failure before `wmain` and directs work away from CRT-startup removal. Native
+entry alone narrows the observed interval without identifying a causal CRT call
+or replacement. No marker, failed writes, incomplete capture or uncertain
+retirement remain inconclusive. Record the corresponding startup limitation and
+stop this experiment for unsuccessful outcomes; prescribe no automatic CRT
+replacement, permission grant or additional diagnostic layer. Portable checks
+establish no native acceptance; both original workflows, all 69 controls and
+provider-route requirements remain required at the same final candidate.
 
 The ordinary Windows experiment reader collects one bounded diagnostic for the
 original `ownership-output` refusal before closing original process/image

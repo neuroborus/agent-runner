@@ -1472,9 +1472,9 @@ static const char *release_capture_name(void) {
   return original_release.state==RELEASE_USABLE?"usable":original_release.state==RELEASE_INVALIDATED?"invalidated":original_release.state==RELEASE_UNAVAILABLE?"unavailable":"unstarted";
 }
 struct literal_output_fact {
-  BOOL active, complete, exitRead;
+  BOOL active, complete, exitRead, exitAttempted;
   LONG peekResult, readResult;
-  DWORD used, available, readBytes, waited, waitError, exitCode, exitError, pipeError;
+  DWORD used, total, markerPhase, markerUsed, available, readBytes, waited, waitError, exitCode, exitError, pipeError, exitWait, exitWaitError;
   const char *refusal;
 };
 static struct literal_output_fact original_literal_output;
@@ -1482,7 +1482,18 @@ static DWORD refusal_remaining(void) {
   ULONGLONG elapsed=GetTickCount64()-original_refusal.tick;
   return elapsed<30000?(DWORD)(30000-elapsed):0;
 }
-static BOOL ownership_literal_refuse(const char *reason, DWORD error) {
+static BOOL ownership_literal_refuse(HANDLE process, const char *reason, DWORD error) {
+  /* A framing failure can precede our normal exit read. Retain an already
+   * available original status without waiting or replacing the capture error. */
+  if(!original_literal_output.exitAttempted&&refusal_remaining()){
+    original_literal_output.exitWait=WaitForSingleObject(process,0);
+    original_literal_output.exitWaitError=original_literal_output.exitWait==WAIT_FAILED?GetLastError():0;
+    if(original_literal_output.exitWait==WAIT_OBJECT_0){
+      original_literal_output.exitAttempted=TRUE;
+      original_literal_output.exitRead=GetExitCodeProcess(process,&original_literal_output.exitCode);
+      original_literal_output.exitError=original_literal_output.exitRead?0:GetLastError();
+    }
+  }
   original_literal_output.refusal=reason;SetLastError(error);return FALSE;
 }
 /* The original retained child and pipe share the collector's R-anchored budget.
@@ -1491,53 +1502,66 @@ static BOOL ownership_literal_refuse(const char *reason, DWORD error) {
 static BOOL ownership_literal_read(HANDLE process, HANDLE input, char *bytes, DWORD maximum) {
   memset(&original_literal_output,0,sizeof(original_literal_output));
   original_literal_output.active=TRUE;original_literal_output.peekResult=-1;original_literal_output.readResult=-1;
-  original_literal_output.waited=MAXDWORD;original_literal_output.refusal="none";
+  original_literal_output.waited=MAXDWORD;original_literal_output.exitWait=MAXDWORD;original_literal_output.refusal="none";
   BOOL exitObserved=FALSE;
   for(;;){
     DWORD remaining=refusal_remaining();
-    if(!remaining)return ownership_literal_refuse("deadline",0);
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
     DWORD available=0;
     original_literal_output.peekResult=PeekNamedPipe(input,NULL,0,NULL,&available,NULL);
     original_literal_output.pipeError=original_literal_output.peekResult?0:GetLastError();
     original_literal_output.available=available;
-    if(!original_literal_output.peekResult)return ownership_literal_refuse("peek",original_literal_output.pipeError);
+    if(!original_literal_output.peekResult)return ownership_literal_refuse(process,"peek",original_literal_output.pipeError);
     while(available){
-      if(!refusal_remaining())return ownership_literal_refuse("deadline",0);
-      if(original_literal_output.used+1>=maximum)return ownership_literal_refuse("frame-bound",0);
+      if(!refusal_remaining())return ownership_literal_refuse(process,"deadline",0);
+      if(original_literal_output.total+1>=maximum)return ownership_literal_refuse(process,"frame-bound",0);
       BYTE byte;DWORD used=0;
       original_literal_output.readResult=ReadFile(input,&byte,1,&used,NULL);
       original_literal_output.pipeError=original_literal_output.readResult?0:GetLastError();
       original_literal_output.readBytes=used;
-      if(!original_literal_output.readResult)return ownership_literal_refuse("read",original_literal_output.pipeError);
-      if(used!=1)return ownership_literal_refuse("short-read",0);
-      if(byte<=0||byte>=128)return ownership_literal_refuse("frame-byte",0);
+      if(!original_literal_output.readResult)return ownership_literal_refuse(process,"read",original_literal_output.pipeError);
+      if(used!=1)return ownership_literal_refuse(process,"short-read",0);
+      original_literal_output.total++;
+      if(byte<=0||byte>=128)return ownership_literal_refuse(process,"frame-byte",0);
       available--;
-      if(byte=='\n'){bytes[original_literal_output.used]=0;original_literal_output.complete=TRUE;break;}
+      if(original_literal_output.markerPhase<2){
+        const char *marker=original_literal_output.markerPhase?"native-argv-wmain-v1\n":"native-argv-entry-v1\n";
+        if(byte!=marker[original_literal_output.markerUsed])return ownership_literal_refuse(process,"marker",0);
+        original_literal_output.markerUsed++;
+        if(byte=='\n'){original_literal_output.markerPhase++;original_literal_output.markerUsed=0;}
+        continue;
+      }
+      if(original_literal_output.complete)return ownership_literal_refuse(process,"trailing-output",0);
+      if(!original_literal_output.used&&byte!='{')return ownership_literal_refuse(process,"frame-start",0);
+      if(byte=='\n'){bytes[original_literal_output.used]=0;original_literal_output.complete=TRUE;continue;}
       bytes[original_literal_output.used++]=byte;
     }
-    if(!original_literal_output.complete&&original_literal_output.available)continue;
+    if(original_literal_output.available)continue;
     remaining=refusal_remaining();
-    if(!remaining)return ownership_literal_refuse("deadline",0);
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
     original_literal_output.waited=WaitForSingleObject(process,original_literal_output.complete?remaining:0);
     original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
     if(original_literal_output.waited==WAIT_OBJECT_0){
       /* The child can write and exit between an empty peek and this poll. */
-      if(!original_literal_output.complete&&!exitObserved){exitObserved=TRUE;continue;}
+      if(!exitObserved){exitObserved=TRUE;continue;}
+      original_literal_output.exitAttempted=TRUE;
       original_literal_output.exitRead=GetExitCodeProcess(process,&original_literal_output.exitCode);
       original_literal_output.exitError=original_literal_output.exitRead?0:GetLastError();
-      if(!original_literal_output.exitRead)return ownership_literal_refuse("exit",original_literal_output.exitError);
+      if(!original_literal_output.exitRead)return ownership_literal_refuse(process,"exit",original_literal_output.exitError);
       if(original_literal_output.complete)return TRUE;
-      return ownership_literal_refuse(original_literal_output.used?"partial-frame":"no-frame",0);
+      return ownership_literal_refuse(process,original_literal_output.markerPhase<2?
+        (original_literal_output.markerUsed?"partial-marker":"no-marker"):
+        (original_literal_output.used?"partial-frame":"no-frame"),0);
     }
-    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse("wait",original_literal_output.waitError);
-    if(original_literal_output.waited!=WAIT_TIMEOUT)return ownership_literal_refuse("wait-result",0);
-    if(original_literal_output.complete)return ownership_literal_refuse("deadline",0);
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse(process,"wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT)return ownership_literal_refuse(process,"wait-result",0);
+    if(original_literal_output.complete)return ownership_literal_refuse(process,"deadline",0);
     remaining=refusal_remaining();
-    if(!remaining)return ownership_literal_refuse("deadline",0);
+    if(!remaining)return ownership_literal_refuse(process,"deadline",0);
     original_literal_output.waited=WaitForSingleObject(process,remaining<10?remaining:10);
     original_literal_output.waitError=original_literal_output.waited==WAIT_FAILED?GetLastError():0;
-    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse("wait",original_literal_output.waitError);
-    if(original_literal_output.waited!=WAIT_TIMEOUT&&original_literal_output.waited!=WAIT_OBJECT_0)return ownership_literal_refuse("wait-result",0);
+    if(original_literal_output.waited==WAIT_FAILED)return ownership_literal_refuse(process,"wait",original_literal_output.waitError);
+    if(original_literal_output.waited!=WAIT_TIMEOUT&&original_literal_output.waited!=WAIT_OBJECT_0)return ownership_literal_refuse(process,"wait-result",0);
     /* Even a signaled wait returns through PeekNamedPipe before exit handling. */
   }
 }
@@ -1887,8 +1911,8 @@ static void readback_collect(struct refusal_report *report) {
 static int ownership_literal_context(char *output, DWORD maximum, int used) {
   if(used<=0||!original_literal_output.active)return used;
   const struct literal_output_fact *value=&original_literal_output;
-  int size=sprintf_s(output+used-1,maximum-used+1," output-refusal=%s output-bytes=%lu output-complete=%u peek=%ld available=%lu read=%ld read-bytes=%lu pipe-error=%lu output-wait=%lu output-wait-error=%lu exit-read=%u exit=%lu exit-error=%lu\n",
-    value->refusal,value->used,!!value->complete,value->peekResult,value->available,value->readResult,value->readBytes,value->pipeError,value->waited,value->waitError,!!value->exitRead,value->exitCode,value->exitError);
+  int size=sprintf_s(output+used-1,maximum-used+1," output-refusal=%s output-bytes=%lu output-total=%lu output-entry=%u output-wmain=%u output-marker-bytes=%lu output-complete=%u peek=%ld available=%lu read=%ld read-bytes=%lu pipe-error=%lu output-wait=%lu output-wait-error=%lu exit-read=%u exit=%lu exit-error=%lu exit-poll=%lu exit-poll-error=%lu\n",
+    value->refusal,value->used,value->total,value->markerPhase>=1,value->markerPhase>=2,value->markerUsed,!!value->complete,value->peekResult,value->available,value->readResult,value->readBytes,value->pipeError,value->waited,value->waitError,!!value->exitRead,value->exitCode,value->exitError,value->exitWait,value->exitWaitError);
   return size>0?used-1+size:-1;
 }
 static void refusal_transport(const char *output, DWORD used) {

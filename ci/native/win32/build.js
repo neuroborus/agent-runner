@@ -127,30 +127,38 @@ export const windowsCompilerArguments = (
   source,
   target,
   purpose = "reviewed",
-) => [
-  "/nologo",
-  "/std:c17",
-  "/O2",
-  "/W4",
-  "/Brepro",
-  ...(purpose === "experiment"
-    ? [
-        "/DNATIVE_CI_EXPERIMENT=1",
-        `/FI${path.join(path.dirname(source), "experiment.h")}`,
-        "/sourceDependencies",
-        `${target}.deps.json`,
-      ]
-    : []),
-  source,
-  `/Fo${target}.obj`,
-  `/Fe${target}`,
-  "/link",
-  "/Brepro",
-  "/INCREMENTAL:NO",
-  "/DYNAMICBASE",
-  "/NXCOMPAT",
-  ...WINDOWS_BUILD_LIBRARIES,
-];
+) => {
+  const argvProbe =
+    purpose === "experiment" &&
+    path.basename(source) === "argv-fixture.c" &&
+    path.basename(target) === "argv-fixture.exe";
+  return [
+    "/nologo",
+    "/std:c17",
+    "/O2",
+    "/W4",
+    "/Brepro",
+    ...(purpose === "experiment"
+      ? [
+          "/DNATIVE_CI_EXPERIMENT=1",
+          `/FI${path.join(path.dirname(source), "experiment.h")}`,
+          "/sourceDependencies",
+          `${target}.deps.json`,
+        ]
+      : []),
+    ...(argvProbe ? ["/DNATIVE_ARGV_ENTRY_PROBE=1"] : []),
+    source,
+    `/Fo${target}.obj`,
+    `/Fe${target}`,
+    "/link",
+    "/Brepro",
+    "/INCREMENTAL:NO",
+    "/DYNAMICBASE",
+    "/NXCOMPAT",
+    ...WINDOWS_BUILD_LIBRARIES,
+    ...(argvProbe ? ["/ENTRY:native_argv_entry"] : []),
+  ];
+};
 
 /** Only reviewed fixed MSVC/SDK vectors can reach the native entry. */
 export function windowsBuildOperation(request, manifest, output) {

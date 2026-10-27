@@ -14267,12 +14267,18 @@ test("literal output drains the original pipe before exit and shares the release
       .replaceAll("value->", "value.")
       .replaceAll("output+used-1", "{target:output,offset:used-1}")
       .replaceAll("byte=='\\n'", "byte===10")
+      .replaceAll("byte!='{'", "byte!==123")
+      .replaceAll("const char *marker=", "const marker=")
+      .replaceAll(
+        "marker[original_literal_output.markerUsed]",
+        "marker.charCodeAt(original_literal_output.markerUsed)",
+      )
       .replaceAll(
         "&original_literal_output.exitCode",
         "{get value(){return original_literal_output.exitCode},set value(v){original_literal_output.exitCode=v}}",
       )
       .replace(
-        /&(available|used|byte)\b/gu,
+        /(?<!&)&(available|used|byte)\b/gu,
         (_match, name) =>
           `{get value(){return ${name}},set value(v){${name}=v}}`,
       )
@@ -14281,7 +14287,7 @@ test("literal output drains the original pipe before exit and shares the release
   const script = new Script(
     [
       ["refusal_remaining", ""],
-      ["ownership_literal_refuse", "reason,error"],
+      ["ownership_literal_refuse", "process,reason,error"],
       ["ownership_literal_read", "process,input,bytes,maximum"],
       ["ownership_literal_context", "output,maximum,used"],
     ]
@@ -14291,7 +14297,32 @@ test("literal output drains the original pipe before exit and shares the release
       .join("\n") +
       "\n({read:ownership_literal_read,remaining:refusal_remaining,context:ownership_literal_context})",
   );
+  const entry = "native-argv-entry-v1\n",
+    main = "native-argv-wmain-v1\n",
+    frame = '{"argvUtf16":[]}\n',
+    wire = entry + main + frame;
+  const malformed = {
+    "entry-only": entry,
+    "markers-only": entry + main,
+    "entry-partial": entry.slice(0, -2),
+    "wmain-partial": entry + main.slice(0, -2),
+    "missing-entry": frame,
+    "missing-wmain": entry + frame,
+    "duplicate-entry": entry + entry + main + frame,
+    "duplicate-wmain": entry + main + main + frame,
+    reordered: main + entry + frame,
+    "malformed-marker": entry.replace("v1", "v2") + main + frame,
+    "marker-crlf": entry.replace("\n", "\r\n") + main + frame,
+    "trailing-entry": wire + entry,
+    "trailing-frame": wire + frame,
+    "trailing-during-exit": wire,
+    "entry-failure": entry,
+    "wmain-failure": entry + main,
+  };
   for (const fault of [
+    ...Object.keys(malformed),
+    "fragmented",
+    "exact-bound",
     "empty-exit",
     "partial-exit",
     "buffered-exit",
@@ -14315,16 +14346,19 @@ test("literal output drains the original pipe before exit and shares the release
   ]) {
     let tick = fault === "expired" ? 31000 : 1000,
       error = 109;
-    let done = [
-      "empty-exit",
-      "partial-exit",
-      "buffered-exit",
-      "exit-error",
-      "nonzero-buffered",
-    ].includes(fault);
+    let done =
+      [
+        "empty-exit",
+        "partial-exit",
+        "buffered-exit",
+        "exit-error",
+        "nonzero-buffered",
+      ].includes(fault) ||
+      (Object.hasOwn(malformed, fault) && fault !== "trailing-during-exit") ||
+      fault === "exact-bound";
     let queued = Buffer.from(
       ["partial-exit", "live-partial", "delayed-exit"].includes(fault)
-        ? "{"
+        ? entry + main + "{"
         : [
               "buffered-exit",
               "complete-live",
@@ -14334,10 +14368,23 @@ test("literal output drains the original pipe before exit and shares the release
               "frame-bound",
               "nonzero-buffered",
               "drain-expiry",
+              "exact-bound",
             ].includes(fault)
-          ? "ok\n"
+          ? wire
           : "",
     );
+    if (Object.hasOwn(malformed, fault)) queued = Buffer.from(malformed[fault]);
+    const pending =
+      fault === "fragmented"
+        ? [
+            entry.slice(2),
+            main.slice(0, 4),
+            main.slice(4),
+            frame.slice(0, 3),
+            frame.slice(3),
+          ].map((v) => Buffer.from(v))
+        : [];
+    if (pending.length) queued = Buffer.from(entry.slice(0, 2));
     if (fault === "bad-byte") queued = Buffer.from([0]);
     const calls = [],
       bytes = [];
@@ -14345,6 +14392,12 @@ test("literal output drains the original pipe before exit and shares the release
       active: false,
       complete: false,
       exitRead: false,
+      exitAttempted: false,
+      markerPhase: 0,
+      markerUsed: 0,
+      total: 0,
+      exitWait: 0,
+      exitWaitError: 0,
       used: 0,
       available: 0,
       readBytes: 0,
@@ -14410,16 +14463,27 @@ test("literal output drains the original pipe before exit and shares the release
         }
         if (fault === "wait-result") return 128;
         if (fault === "exit-during-poll" && !done) {
-          queued = Buffer.from("ok\n");
+          queued = Buffer.from(wire);
           done = true;
           return 0;
         }
         if (done) return 0;
         if (!remaining) return 258;
+        if (fault === "trailing-during-exit") {
+          queued = Buffer.from(entry);
+          done = true;
+          return 0;
+        }
+        if (pending.length) {
+          tick += Math.min(remaining, 1);
+          queued = pending.shift();
+          done = pending.length === 0;
+          return done ? 0 : 258;
+        }
         if (["delayed-output", "delayed-exit"].includes(fault)) {
           tick += Math.min(remaining, 7);
           done = true;
-          if (fault === "delayed-output") queued = Buffer.from("ok\n");
+          if (fault === "delayed-output") queued = Buffer.from(wire);
           return 0;
         }
         tick += remaining;
@@ -14427,15 +14491,20 @@ test("literal output drains the original pipe before exit and shares the release
       },
       GetExitCodeProcess(process, out) {
         assert.equal(process, 43);
-        assert.equal(queued.length, 0);
+        if (!Object.hasOwn(malformed, fault) && fault !== "frame-bound")
+          assert.equal(queued.length, 0);
         calls.push("exit");
         if (fault === "exit-error") {
           error = 87;
           return false;
         }
-        out.value = ["empty-exit", "partial-exit", "nonzero-buffered"].includes(
-          fault,
-        )
+        out.value = [
+          "empty-exit",
+          "partial-exit",
+          "nonzero-buffered",
+          "entry-failure",
+          "wmain-failure",
+        ].includes(fault)
           ? 0xc0000022
           : 0;
         return true;
@@ -14452,7 +14521,16 @@ test("literal output drains the original pipe before exit and shares the release
       },
     };
     const run = script.runInNewContext(api);
-    const accepted = run.read(43, 7, bytes, fault === "frame-bound" ? 2 : 32);
+    const accepted = run.read(
+      43,
+      7,
+      bytes,
+      fault === "frame-bound"
+        ? wire.length
+        : fault === "exact-bound"
+          ? wire.length + 1
+          : 96,
+    );
     assert.equal(
       accepted,
       [
@@ -14460,6 +14538,8 @@ test("literal output drains the original pipe before exit and shares the release
         "delayed-output",
         "exit-during-poll",
         "nonzero-buffered",
+        "fragmented",
+        "exact-bound",
       ].includes(fault),
       fault,
     );
@@ -14467,14 +14547,33 @@ test("literal output drains the original pipe before exit and shares the release
     assert.ok(tick <= 31000, fault);
     const fact = api.original_literal_output;
     if (accepted) {
-      assert.equal(Buffer.from(bytes.slice(0, fact.used)).toString(), "ok");
+      assert.equal(
+        Buffer.from(bytes.slice(0, fact.used)).toString(),
+        frame.trimEnd(),
+      );
       assert.equal(fact.complete, true);
       assert.equal(fact.exitRead, true);
       assert.ok(calls.lastIndexOf("read") < calls.indexOf("exit"));
     } else {
       const expected =
         {
-          "empty-exit": "no-frame",
+          "empty-exit": "no-marker",
+          "entry-only": "no-marker",
+          "markers-only": "no-frame",
+          "entry-partial": "partial-marker",
+          "wmain-partial": "partial-marker",
+          "missing-entry": "marker",
+          "missing-wmain": "marker",
+          "duplicate-entry": "marker",
+          "duplicate-wmain": "frame-start",
+          reordered: "marker",
+          "malformed-marker": "marker",
+          "marker-crlf": "marker",
+          "trailing-entry": "trailing-output",
+          "trailing-frame": "trailing-output",
+          "trailing-during-exit": "trailing-output",
+          "entry-failure": "no-marker",
+          "wmain-failure": "no-frame",
           "partial-exit": "partial-frame",
           "delayed-exit": "partial-frame",
           "peek-error": "peek",
@@ -14499,11 +14598,36 @@ test("literal output drains the original pipe before exit and shares the release
       );
     }
     if (["empty-exit", "partial-exit", "delayed-exit"].includes(fault))
-      assert.ok(
-        run.remaining() > 29980,
-        "Early refusal leaves the collector its original remaining time",
+      assert.equal(
+        run.remaining(),
+        30000 - fact.total - (fault === "delayed-exit" ? 7 : 0),
+        "Early refusal leaves the collector only the original remaining time",
       );
-    if (fault === "nonzero-buffered") assert.equal(fact.exitCode, 0xc0000022);
+    if (
+      ["nonzero-buffered", "entry-failure", "wmain-failure"].includes(fault)
+    ) {
+      assert.equal(fact.exitRead, true);
+      assert.equal(fact.exitCode, 0xc0000022);
+    }
+    if (Object.hasOwn(malformed, fault))
+      assert.equal(fact.exitRead, true, fault);
+    if (fault === "frame-bound") assert.equal(fact.total, wire.length - 1);
+    if (accepted) {
+      assert.equal(fact.markerPhase, 2);
+      assert.equal(fact.total, wire.length);
+    }
+    if (
+      [
+        "entry-only",
+        "entry-failure",
+        "wmain-partial",
+        "missing-wmain",
+        "duplicate-entry",
+      ].includes(fault)
+    )
+      assert.equal(fact.markerPhase, 1);
+    if (["markers-only", "wmain-failure"].includes(fault))
+      assert.equal(fact.markerPhase, 2);
     if (fault === "expired") assert.deepEqual(calls, []);
     if (fault === "wait-error") {
       assert.equal(fact.waited, 0xffffffff);
@@ -14520,6 +14644,14 @@ test("literal output drains the original pipe before exit and shares the release
     assert.ok(context.text.includes("output-refusal=" + fact.refusal));
     assert.ok(context.text.includes("pipe-error=" + fact.pipeError));
     assert.ok(context.text.includes("exit=" + fact.exitCode));
+    assert.ok(
+      context.text.includes("output-entry=" + Number(fact.markerPhase >= 1)),
+    );
+    assert.ok(
+      context.text.includes("output-wmain=" + Number(fact.markerPhase >= 2)),
+    );
+    assert.ok(context.text.includes("output-marker-bytes=" + fact.markerUsed));
+    assert.ok(context.text.includes("output-total=" + fact.total));
   }
 });
 

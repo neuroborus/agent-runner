@@ -2714,8 +2714,15 @@ failed or inconsistent enumeration outputs never confer handle ownership.
 Known projection, publication or closure failures stop collection before another
 subscription wait.
 The actual literal pipe/process body covers signaled children with absent or
-partial frames while writers remain open, buffered output after exit, delayed
-delivery, live-child expiry, failed/short pipe reads and actual wait/exit errors.
+partial markers/frames while writers remain open, fragmented marker/frame
+delivery, failure between startup phases, buffered output after exit and a
+write racing the exit poll. It rejects missing, duplicate, reordered, malformed
+or CRLF markers and trailing bytes, including output delivered during completion.
+The combined marker/frame bound, live-child expiry, failed/short pipe reads and
+actual wait/exit errors remain strict. Progress and total bytes stay separate
+from frame completion; nonzero original exits and capture errors retain their
+own attribution. A refusal's immediate exit poll cannot wait or overwrite the
+original API error.
 Controlled clocks prove output and completion consume the original release
 budget and leave only its remainder for one-shot collection. Unstarted or
 expired collection is unavailable/incomplete, never a completed empty result.
@@ -2723,7 +2730,21 @@ Context-field projection retains the existing single-line diagnostic grammar.
 Existing case-effect fixtures force both post-release witnesses beyond that
 budget after early capture, then verify single-use process/image/request binding,
 successful-path policy/image/exit and independent witness guards, and recovery
-after refusal. The original argv fixture and all nonliteral paths remain intact.
+after refusal. The original JSON frame, corpus, literal acceptance and all
+nonliteral paths remain intact.
+`test/native-windows-command.test.js` compares the actual native entry's probe
+selection with shared and derived hosted compiler vectors, retaining the exact
+protected vectors for all thirteen helpers. Extracted fixture entry/wmain bodies
+exercise checked marker writes, distinct failed/short-write exits and normal CRT
+delegation order. Compile-time guards confine the probe to experimental MSVC
+19.51 x64; the regressions do not compile that toolchain or establish security-cookie
+code generation, ABI compatibility, original-child launch or independent retirement.
+Fresh matching Windows CI owns those facts and the bounded experiment's outcome.
+Entry alone only narrows the interval; a wmain marker followed by failure refutes
+pre-wmain failure. Missing markers, failed writes, incomplete capture or uncertain
+retirement remain inconclusive and stop the experiment without an automatic CRT
+replacement, grant or new diagnostic layer. These focused files add no validation
+entry or slow tier and confer no native acceptance.
 It covers one release-based deadline, shared 64-record/64-KiB encoded-frame caps,
 synchronized partial publication, thread-affine subscription closure, optional
 query cancellation, pending native-call lifetime and separate arming/readback/
