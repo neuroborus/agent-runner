@@ -212,6 +212,7 @@ function commandGuards(header, helper, body, caller, options = {}) {
       cleanup_domain: null,
       cleanup_value: 0,
       resource_uncertain: false,
+      domain_failure_cleanup: false,
       admitted_effects: true,
       prerequisite_mode: false,
       prerequisite_child: -1,

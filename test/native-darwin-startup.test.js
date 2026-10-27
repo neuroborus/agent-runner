@@ -21,8 +21,6 @@ import {
   withNativeDiagnostics,
 } from "../ci/native/index.js";
 import {
-  DARWIN_CONSTRUCTOR_TRACE_INTENT,
-  createDarwinConstructorCapture,
   darwinFeasibilityCause,
   darwinFeasibilityIdentityArguments,
   darwinFeasibilityPhases,
@@ -1813,25 +1811,6 @@ test("Darwin markers reject reordering, duplication, unknown fields and incomple
   );
 });
 
-test("Darwin self-exec ownership probes retain their receipts and signal without fixture-main", async (t) => {
-  const f = streams(t, "exec", [
-    "/fixture/evidence/fault.sb",
-    "/fixture/build/helper",
-    "fault",
-  ]);
-  f.child.stderr.write(markers(EXEC_PHASES.slice(0, 3)));
-  for (const event of ["armed", "detached", "fault-ack"]) {
-    f.child.stdout.write(`${JSON.stringify({ event })}\n`);
-    assert.deepEqual(await f.session.next(), { event });
-  }
-  f.close(null, "SIGTERM");
-  assert.deepEqual(await f.session.finish("SIGTERM"), {
-    code: null,
-    signal: "SIGTERM",
-  });
-  assert.deepEqual(f.session.phases(), EXEC_PHASES.slice(0, 3));
-});
-
 test("Darwin startup failures retain exit/signal facts and only the last validated phase", async (t) => {
   const f = streams(t),
     waiting = f.session.next();
@@ -2848,7 +2827,6 @@ function traceFixture({
   beforeRead,
   observeState,
   coldCommand = false,
-  constructorMode = false,
   operation = coldCommand ? undefined : "exec",
   bindReplacement = true,
   onFailure,
@@ -2872,7 +2850,6 @@ function traceFixture({
       isMatchingCI: true,
       parentPid: 999,
       coldCommand,
-      constructorMode,
       operation,
       onFailure,
       verifyInstalled: async () => {},
@@ -2891,14 +2868,12 @@ function traceFixture({
         ]);
         assert.equal(
           createHash("sha256").update(program).digest("hex"),
-          (constructorMode
-            ? DARWIN_CONSTRUCTOR_TRACE_INTENT
-            : coldCommand
-              ? DARWIN_COLD_STARTUP_TRACE_INTENT
-              : DARWIN_STARTUP_TRACE_INTENT
+          (coldCommand
+            ? DARWIN_COLD_STARTUP_TRACE_INTENT
+            : DARWIN_STARTUP_TRACE_INTENT
           ).programSha256,
         );
-        if (!constructorMode) {
+        {
           assert.ok(
             program.includes(
               `#pragma D option strsize=${coldCommand ? DARWIN_STARTUP_TRACE_LIMITS.argumentBytes + 1 : 129}\n`,
@@ -2973,19 +2948,6 @@ function traceFixture({
             program,
             /\$target|\$[02-9]|copyin\(|system\(|raise\(|stop\(|chill\(|panic\(/u,
           );
-        } else {
-          assert.match(program, /mach_trap::mach_reply_port:return/u);
-          assert.match(program, /args\[0\]->pr_pid/u);
-          assert.match(program, /constructors, \(uint64_t\)arg0/u);
-          assert.match(
-            program,
-            /syscall::read:entry,syscall::read_nocancel:entry/u,
-          );
-          assert.match(
-            program,
-            /syscall::read:return,syscall::read_nocancel:return/u,
-          );
-          assert.doesNotMatch(program, /copyin|offsetof|system\(|stop\(/u);
         }
         assert.equal(options.stdio[0], "ignore");
         if (acknowledge)
@@ -3001,7 +2963,6 @@ function traceFixture({
           });
         const changed = pid === tracerPid && tracerReads++ >= 2;
         return {
-          ...(constructorMode ? { toolSha256: SHA } : {}),
           kind:
             pid === tracerPid && !(changed && substituted === "image")
               ? "dtrace"
@@ -4416,307 +4377,4 @@ test("startup trace intent and arm precede release, with changed bindings fenced
       return true;
     },
   );
-});
-
-test("constructor capture joins buffered fork-bound evidence before census and seals without payload exit", async () => {
-  const f = traceFixture({ constructorMode: true });
-  assert.equal((await f.trace.arm()).status, "armed");
-  const child = { ...IDENTITY, pid: 43 };
-  // The read fence can be delivered before another CPU's constructor buffer.
-  f.child.stdout.write(
-    "fence 43 105 7 1 1 512\ncreated 42 101 43\nstarted 43 102 7\n",
-  );
-  let resolved = false;
-  const waiting = f.trace.receipt(child).then((value) => {
-    resolved = true;
-    return value;
-  });
-  await Promise.resolve();
-  assert.equal(resolved, false);
-  f.child.stdout.write("constructor 43 103 7 1 117\n");
-  const receipt = await waiting;
-  assert.equal(receipt.length, 512);
-  assert.match(receipt.toString(), /^CR1 42 101 /u);
-  f.child.stdout.write(
-    "terminal 43 108 1 2\nfence 43 107 7 2 1 1\nimported 43 106 512\n",
-  );
-  await f.close();
-  const result = await f.trace.finish();
-  assert.equal(result.status, "observed");
-  assert.equal(result.cleanup, "RETIRED");
-  assert.deepEqual(result.creator.constructors, [117]);
-});
-
-test("actual constructor create action keeps the original target while a fragmented refusal observer joins", async () => {
-  for (const uncertain of [false, true]) {
-    const f = traceFixture({ constructorMode: true });
-    await f.trace.arm();
-    const action = /proc:::create \/pid == \$1\/ \{([\s\S]*?)\n\}/u.exec(
-      f.program,
-    )[1];
-    const context = {
-      child_pid: 0,
-      pid: 42,
-      timestamp: 101,
-      args: [{ pr_pid: 43 }],
-      printf: (_format, parent, stamp, child) =>
-        f.child.stdout.write(`created ${parent} ${stamp} ${child}\n`),
-    };
-    const create = new Script(
-      `() => {${action.replaceAll("args[0]->pr_pid", "args[0].pr_pid")}}`,
-    ).runInNewContext(context);
-    create();
-    f.child.stdout.write(
-      "started 43 102 7\nconstructor 43 103 7 1 117\nfence 43 104 7 1 1 512\n",
-    );
-    const original = { ...IDENTITY, pid: 43 },
-      receipt = await f.trace.receipt(original);
-    context.timestamp = 106;
-    context.args[0].pr_pid = 44;
-    create();
-    assert.equal(
-      context.child_pid,
-      43,
-      "A second fork must not replace constructor or terminal identity",
-    );
-    const register = {
-      version: 1,
-      phase: "register",
-      candidateSha: "b".repeat(40),
-      parent: IDENTITY,
-      original,
-      receiptSha256: createHash("sha256").update(receipt).digest("hex"),
-      refusedName: 128,
-      observer: {
-        pid: 44,
-        parentPid: 42,
-        startSeconds: 100,
-        startMicroseconds: 2,
-      },
-    };
-    const bindingSha256 = f.trace.refusal(register);
-    f.trace.refusal({
-      version: 1,
-      phase: "settle",
-      bindingSha256,
-      reaped: !uncertain,
-      status: 0,
-      error: 0,
-      cleanup: 0,
-      channelLost: false,
-      observed: true,
-    });
-    f.child.stdout.write("imported 43 105 512\nfence 43 107 7 2 1 1\ntermi");
-    f.child.stdout.write("nal 43 108 1 2\n");
-    await f.close(1);
-    const result = await f.trace.finish();
-    assert.equal(result.refusal.registration.original.pid, 43);
-    assert.equal(result.refusal.registration.observer.pid, 44);
-    assert.equal(
-      result.captureComplete,
-      false,
-      "Refusal acknowledgement must not authorize payload release",
-    );
-    assert.notEqual(result.status, "observed");
-    assert.equal(result.cleanup, uncertain ? "UNCERTAIN" : "RETIRED");
-  }
-});
-
-test("refusal capture rejects unbound, extra, changed and replayed ownership despite buffered create delivery", () => {
-  const original = { ...IDENTITY, pid: 43 };
-  const observer = {
-    pid: 44,
-    parentPid: 42,
-    startSeconds: 100,
-    startMicroseconds: 2,
-  };
-  const open = (extraFirst = false) => {
-    const capture = createDarwinConstructorCapture(IDENTITY, "b".repeat(40));
-    if (extraFirst) capture.consume("created 42 106 44");
-    for (const row of [
-      "fence 43 104 7 1 1 512",
-      "started 43 102 7",
-      "created 42 101 43",
-      "constructor 43 103 7 1 117",
-    ])
-      capture.consume(row);
-    const receipt = capture.receipt(original);
-    return {
-      capture,
-      register: {
-        version: 1,
-        phase: "register",
-        candidateSha: "b".repeat(40),
-        parent: IDENTITY,
-        original,
-        receiptSha256: createHash("sha256").update(receipt).digest("hex"),
-        refusedName: 128,
-        observer,
-      },
-    };
-  };
-  const settle = (bindingSha256) => ({
-    version: 1,
-    phase: "settle",
-    bindingSha256,
-    reaped: true,
-    status: 0,
-    error: 0,
-    cleanup: 0,
-    channelLost: false,
-    observed: true,
-  });
-  for (const extraFirst of [false, true]) {
-    const { capture, register } = open(extraFirst);
-    const token = capture.refusal(register);
-    if (!extraFirst) capture.consume("created 42 106 44");
-    capture.refusal(settle(token));
-    assert.equal(capture.diagnostic().bindingSha256, token);
-    assert.throws(() => capture.complete());
-    assert.throws(() => capture.refusal(register));
-    assert.throws(() => capture.refusal(settle(token)));
-    assert.throws(() => capture.consume("created 42 107 45"));
-    capture.consume("terminal 44 108 1 1");
-    assert.throws(
-      () => capture.diagnostic(),
-      "Observer terminal cannot replace original",
-    );
-  }
-  for (const change of [
-    { unknown: true },
-    { candidateSha: "c".repeat(40) },
-    { parent: original },
-    { original: { ...original, startMicroseconds: 2 } },
-    { receiptSha256: SHA },
-    { refusedName: 0 },
-    { observer: { ...observer, pid: 43 } },
-    { observer: { ...observer, parentPid: 41 } },
-    { observer: { ...observer, startMicroseconds: 1000000 } },
-  ]) {
-    const { capture, register } = open();
-    assert.throws(() => capture.refusal({ ...register, ...change }));
-  }
-  for (const change of [
-    { bindingSha256: SHA },
-    { reaped: false },
-    { status: 127 },
-    { cleanup: 7 },
-    { channelLost: true },
-    { observed: false },
-  ]) {
-    const { capture, register } = open(true),
-      token = capture.refusal(register);
-    if (change.bindingSha256)
-      assert.throws(() => capture.refusal({ ...settle(token), ...change }));
-    else {
-      capture.refusal({ ...settle(token), ...change });
-      assert.equal(
-        capture.diagnostic().cleanup,
-        change.reaped === false || change.cleanup ? "UNCERTAIN" : "RETIRED",
-      );
-    }
-  }
-  const unbound = open(true).capture;
-  assert.throws(() => unbound.diagnostic());
-  const { capture, register } = open();
-  const token = capture.refusal(register);
-  assert.throws(
-    () => capture.diagnostic(),
-    "Missing observer create or settlement is not ownership",
-  );
-  capture.refusal(settle(token));
-  capture.consume("created 42 106 45");
-  assert.throws(() => capture.diagnostic());
-});
-
-test("constructor receipts refuse namespace substitution, incomplete sequences, changed evidence and phase replay", () => {
-  const parent = IDENTITY,
-    child = { ...IDENTITY, pid: 43 };
-  const rows = [
-    "created 42 101 43",
-    "started 43 102 7",
-    "constructor 43 103 7 1 117",
-    "fence 43 104 7 1 1 512",
-  ];
-  const open = () => {
-    const capture = createDarwinConstructorCapture(parent);
-    rows.forEach((row) => capture.consume(row));
-    return capture;
-  };
-  assert.throws(() => open().receipt(parent));
-  assert.throws(
-    () =>
-      createDarwinConstructorCapture(parent).consume("fence 43 104 7 1 0 512"),
-    "A positive installed constructor observation is required",
-  );
-  assert.throws(() => {
-    const capture = createDarwinConstructorCapture(parent);
-    rows
-      .filter((row) => !row.startsWith("constructor"))
-      .forEach((row) => capture.consume(row));
-    capture.receipt(child);
-  });
-  for (const row of [
-    "constructor 43 103 7 1 117",
-    "constructor 43 105 7 2 118",
-    "fence 43 104 7 1 1 512",
-    "invalid 43 105",
-    "constructor 44 103 7 2 118",
-    "constructor 43 103 8 2 118",
-    "constructor 43 103 7 9 118",
-    "constructor 43 103 7 2 4294967295",
-  ]) {
-    const capture = open();
-    capture.receipt(child);
-    assert.throws(() => capture.consume(row), row);
-  }
-  for (const end of [
-    [],
-    ["fence 43 107 7 2 1 1"],
-    ["imported 43 106 511", "fence 43 107 7 2 1 1", "terminal 43 108 1 2"],
-  ]) {
-    const capture = open();
-    capture.receipt(child);
-    end.forEach((row) => capture.consume(row));
-    assert.throws(() => capture.complete());
-  }
-});
-
-test("constructor completion withholds release after cancellation, observer uncertainty or incomplete output", async () => {
-  for (const fault of ["cancel", "retirement", "stderr", "truncated", "exit"]) {
-    const f = traceFixture({
-      constructorMode: true,
-      cleanupFailure: fault === "retirement",
-    });
-    assert.equal((await f.trace.arm()).status, "armed");
-    f.child.stdout.write(
-      "created 42 101 43\nstarted 43 102 7\nfence 43 104 7 1 1 512\n",
-    );
-    const child = { ...IDENTITY, pid: 43 };
-    if (fault === "cancel") {
-      const controller = new AbortController(),
-        waiting = f.trace.receipt(child, controller.signal);
-      controller.abort();
-      await assert.rejects(waiting, /interrupted/u);
-      f.child.stdout.write("constructor 43 103 7 1 117\n");
-    } else {
-      f.child.stdout.write("constructor 43 103 7 1 117\n");
-      await f.trace.receipt(child);
-    }
-    f.child.stdout.write(
-      "imported 43 105 512\nfence 43 106 7 2 1 1\nterminal 43 107 1 2\n",
-    );
-    if (fault === "stderr") f.child.stderr.write("drop\n");
-    if (fault === "truncated") f.child.stdout.write("constructor ");
-    await f.close(fault === "exit" ? 1 : 0);
-    const result = await f.trace.finish();
-    assert.ok(
-      result.status !== "observed" || result.cleanup !== "RETIRED",
-      fault,
-    );
-    assert.ok(
-      f.calls.some(([operation]) => operation === "observe"),
-      fault,
-    );
-  }
 });

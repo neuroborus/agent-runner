@@ -419,45 +419,20 @@ completion within the existing 32256-byte/64-KiB transport caps. The original
 30-second release tick never restarts; failure or unavailable evidence supplies
 no startup repair, permission change or native acceptance.
 
-Darwin experiment fault and launcher census refusals use a failure-only phase-3
-request on the existing creator pipe and a diagnostic `D` acknowledgement on its
-release pipe. The refused child never enters phase 2 or consumes payload `R` on
-this path. The privileged original parent checks candidate, PID/birth, refusal
-phase and child-local name, then inspects only while that same child is live.
-The stock Apple [lsmp manual/source](https://github.com/apple-oss-distributions/system_cmds/tree/408bba7453608006b89772db185defbac8fe2fd0/lsmp)
-documents `-p <pid>` selection; privileged mode still enumerates task read ports
-internally. Root-owned executable availability and reap-compatible SIGCHLD policy
-are checked under ordinary hosted-image trust; failed execution/permission,
-missing PID-selected output and changed child lifetime cannot become observation.
-Collection uses the existing remaining 20/30-second lifetime, an 8192-byte output
-cap and reserved cleanup time, without sleeps or deadline resets. Only a successful
-owned fork authorizes observer kill/wait; a lost wait never authorizes signaling.
-The observer's own alarm uses only whole seconds remaining in that same lifetime.
-The parent's output poll also watches its existing control input; coordinator
-closure stops inspection and settles the observer within the remaining budget.
-Observer status, truncation and cleanup uncertainty remain independent from the
-original refusal. Acknowledgement, expiry, malformed reply or channel loss all
-continue refusal and cleanup. Endpoint/kernel-object snapshots establish neither
-acquisition provenance nor authority to release the unknown right. Native hosted
-execution must still establish installed-interface behavior and retirement.
-
-Constructor tracing retains the original fork's PID, sequence, fences and terminal
-identity. Both transports carry one closed registration bound to candidate,
-parent/original identities, CR1 receipt and the fork owner's independently sampled
-observer PID/birth. The observer parks until DR1 records and echoes that binding;
-its native owner checks the echo before fixed exec. DS1 binds checked settlement to
-the same capture. Buffered create rows reconcile only with that observer,
-regardless of delivery order. Missing, changed, replayed or additional children
-and uncertain settlement refuse the join. Diagnostic evidence supplies no original
-fence or payload release, and native fork ownership alone permits signal/reap.
-Original-domain and tracing-observer retirement remain independent.
-Fresh recovery requires either the same binding and checked settlement from
-protected receipts or a matching successful sealed original capture. A protected
-CR1 child receipt permits a diagnostic attempt before registration survives;
-missing registration or uncertain settlement retains exclusion while independent
-original-domain and tracing-observer cleanup still runs.
-A partial live capture after possible CR1 transfer likewise retains exclusion
-unless diagnostic settlement is checked.
+Historical Darwin fault and launcher census evidence may contain phase-3 refusal
+requests, diagnostic `D` acknowledgements and CR1/DR1/DS1 constructor bindings.
+Those producers are removed. Current ordinary admission uses the
+[stopped replacement](#ordinary-darwin-task-access) and
+[version-four fault records](#suspended-fault-images-and-original-domain-recovery).
+Retained historical decoders still bind candidate, parent/original identities,
+receipt and observer PID/birth; missing, changed, replayed or additional children
+and uncertain settlement refuse the join. Protected recovery requires the same
+binding and checked settlement or a matching successful sealed original capture.
+Missing registration or uncertain settlement retains exclusion while independent
+original-domain and observer cleanup still runs. These receipts cannot authorize
+new capture, admission or payload release. Endpoint/kernel-object snapshots from
+the old lsmp diagnostic establish neither acquisition provenance nor release
+authority; native fork ownership remains separate from diagnostic evidence.
 
 The collector now publishes through the existing authenticated reader/bridge
 pipe. Scheduled reader setup binds stdout to that pipe but establishes no stderr
@@ -2422,8 +2397,8 @@ and finished is 1. Duplicate/misplaced footers, extra fields, wrong values and
 malformed preceding events reject the entire observation. A zero-count footer
 is empty inspection, never denial evidence.
 
-The following startup/cold-mode contracts remain separate from the constructor
-mode described below. The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
+The following startup/cold-mode contracts remain live after removal of constructor
+admission. The private `startup-trace.js` owner uses only installed `/usr/sbin/dtrace`
 through fixed noninteractive sudo in matching hosted macOS CI. Its fixed program
 observes the held child's full syscall entry/return and startup probes, without
 destructive actions, unrelated predicates or fallback tools. Additional diagnostic
@@ -4628,275 +4603,68 @@ Current source inventories pin both transitive headers before and
 after compilation; old source/admission records retain recovery-only bindings.
 These portable/source changes establish no native PASS.
 
-#### Retained fault and historical constructor protocol
+#### Suspended fault images and original-domain recovery
 
-The following constructor/census mechanism remains owned by fault admission and
-historical recovery. Ordinary launcher admission uses the stopped-image protocol
-above and no longer starts a constructor observer.
+Both `cancel` and `owner-loss` reuse `image-closure.h`, the one-shot handoff and
+ordinary inherited-service rules above. The trusted child installs and verifies
+the final fixed policy, audit session, credentials, limits, cwd and descriptor
+actions before directly replacing itself with the sealed helper's `fault` image.
+There is no later policy-installing intermediate payload exec. The sealed root
+custodian still reexecs with its original writable journal description on FD3;
+only the fault image's explicit stdio survives its suspended replacement.
 
-The accepted service and ordinary host getter copies stay held through the bounded
-Mach-name census. Only this task and its current thread with exact SEND types,
-the ordinary MIG cache with exact RECEIVE type, the cached special reply with
-exact SEND/RECEIVE type, producer-recorded ordinary reply allocations with exact
-RECEIVE type, those two checked local names and dead names are admitted. Every
-expected name must appear once; missing, duplicate or changed entries refuse.
-Unexpected live rights refuse exec without destroying unrelated rights to
-manufacture a safe namespace. Environment setup finishes before this final census
-so it cannot introduce an uninspected runtime right before exec. The census
-arrays, held service, host and thread copies have checked releases; the service's
-slot reference survives.
-Immediately after fork, before its first lifecycle observation, the child takes
-responsibility for the explicitly owned local `bootstrap_port` reference and
-nulls that global. Bookkeeping is bound to the current PID; copied parent entries
-are discarded without operating on names in the child's new IPC namespace.
-Reexec starts with libSystem's new Mach state. Clearing
-`TASK_BOOTSTRAP_PORT` releases the kernel slot's separate reference; it does not
-consume the local one. The local reference is released once before the census,
-including allocated dead names, while null/dead sentinels require no release.
-Each acquired reference retains its own cleanup entry even when bootstrap,
-host, access or resource getter names alias. No name deduplication can discard
-an owned reference or consume another entry's reference.
+Version-four protected fault records retain the original creator and replacement
+epochs, original audit-domain ownership, possible execution, observation digest,
+image signature and one-shot continuation state. Original ownership and possible
+replacement are durable before X. The root custodian binds control handles to the
+creator's exact audit epoch and birth, retains getter references and compares the
+actual stopped replacement's host/access endpoints in that same IPC namespace.
+A separate root reader freshly joins the protected receipt and independently
+checks the stopped identity/image/closure/effective-policy binding. Persisted port
+numbers and equally classified endpoints cannot replace held provenance.
 
-The ordinary MIG cache is not a complete inventory of runtime replies. Pinned
-[`mach_init.c`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach_init.c)
-allocates a distinct task fallback at initialization and after fork. Fault
-custody therefore uses a fixed constructor mode in the existing
-`startup-trace.js` owner, rather than dyld interception or a hidden runtime global.
-The original parent remains behind P while the observer is armed, its sudo/DTrace
-chain is independently identified and its installed tool digests are recorded.
-The fault parent's hello follows sealed reexec. Both parents are revalidated
-before release and retain their single-threaded privileged fork guard.
+Receipt publication and readback, repeated observations and checked handle
+settlement precede exactly one identity-bound SIGCONT within the admission bound.
+The fixed policy bytes and effective file/process decisions are rechecked along
+with the signature, executable hash, cwd and stdio. Unsupported APIs, missing
+closure, stale epochs, drift, failed persistence or uncertain cleanup refuse
+continuation. Both fault recipes retain their original post-exec privilege,
+audit/session and task-access negative controls, acknowledgements, detached
+descendants and original stdout/stderr. No new service message, access-slot setter,
+privilege, acquisition/delegation grant or raw-message safety claim is introduced.
+Reviewed/protected/provider null-service refusals remain distinct.
 
-The literal, mandatory `proc:::create`, `proc:::start`, Mach-return, private-read
-and exec/exit probe descriptions must compile against the installed provider.
-Both public `read` and `read_nocancel` syscall forms use the same fixed private
-descriptor/count fence; libc's cancellation choice cannot bypass observation.
-`args[0]->pr_pid` uses the provider's public process translation, never a guessed
-CTF layout. Pinned XNU `systrace.c` reports the actual
-`mach_trap::mach_reply_port:return` result in arg0. Create/start timestamps and
-constructor/read thread identities must establish ordering for the original
-child. Unsupported installed probes, translations or ordering refuse release;
-source references establish neither installed availability nor hosted success.
+Recovery fences new admissions and settles inspection references before retiring
+the complete original held audit domain. Interrupted pre-replacement setup,
+unpublished replacement epochs, failed receipts and uncertain continuation never
+replay either gate or payload work. Original birth, credentials and session bind
+an unpublished epoch; a published epoch must match exactly. Every discovered live
+member is journaled before an identity-bound signal. Known zombies retain complete
+birth/credential checks, the original direct child must be reaped, and complete
+member censuses retain exclusion until the domain is empty. Independent fresh
+verification occurs before closing custody and again after the custodian and its
+session disappear. The original 32-pass retirement bound and child alarm remain;
+backstop termination and emergency intervention never supply successful proof.
+A failure remains a failure even when its separate cleanup is proved.
 
-After environment/libc setup, the child publishes a version-one pre-census frame
-and blocks on a private 512-byte read. The root parent independently samples its
-birth/audit identity and holds its audit session after fork, before relaying the
-receipt. The child inherits no custody reference. The CR1 receipt binds parent,
-trusted fork epoch, original child PID/birth/audit credentials and at most eight
-distinct constructor names. Exact length, canonical numbers, zero padding and
-one-shot import reject malformed/trailing input, namespace substitution and replay.
-A pre-census frame never satisfies the completed-controls receipt.
+Version-three records retain their exact protected ABI and original bindings for
+historical verification and recovery only. They cannot resume admission, publish
+new version-four state, replay work or authorize continuation. Historical refusal
+bindings, finite diagnostic decoding and observer retirement stay readable for
+live recovery consumers. Superseded constructor capture, CR1 production/import,
+cache/census admission and their unused exports are removed. Useful startup
+DTrace, cold command-exec observation and BSM evidence keep their existing owners.
 
-Kernel read fences carry constructor sequence/count boundaries. Delivery may be
-buffered across CPUs: every sequence through the pre-census fence must arrive
-before import; arrival order is not kernel event order. The existing exact-type
-census admits legitimate constructor/cache aliases as one name. Missing names,
-incompatible aliases, changed caches and unknown live rights still refuse.
-After census, fault creator controls and checked cleanup, the child publishes
-a distinct final frame and parks on a one-byte private read. Fault payload
-controls retain their sandboxed post-exec phase; constructor evidence authorizes
-only the original pre-exec namespace.
-
-That final read ends the observer program without waiting for payload exit.
-The final fence and END record must agree with unchanged constructor evidence;
-successful exit, fully drained error-free streams and independent retirement of
-all observer identities precede R. Forced observer termination cannot establish
-complete capture. Only prepared, nonallocating descriptor closure/release and
-exec follow sealing. Public exec/exit function addresses are resolved before the
-checkpoint; exec refusal preserves errno with fixed buffers and raw writes. Missing, invalid, duplicate, overflowed or dropped records,
-intervening exec and uncertain custody/retirement withhold release. Existing
-journals retain acquired identities and possible effects before dependent
-releases. Both custody paths store the creator receipt before import release;
-fault custody stores program/capture digests before its seal1 release. Its existing intent artifact
-retains complete constructor evidence. Recovery preserves original child, parent
-and observer ownership.
-Before fault admission completes, failure settlement closes the unreleased gates,
-drains bounded original-child output and forwards its actual direct-child status.
-Fragmented child refusal evidence survives custodian and trace failure; parent
-diagnostics and observer cleanup errors remain separate. Partial capture still
-refuses admission and supplies no native acceptance or child-predicate diagnosis.
-
-The complete feasibility helper has two build variants: the ordinary helper and
-the same translation unit with `NATIVE_FEASIBILITY_COMMAND` defined. Both use
-C11, `-arch x86_64`, the selected `-isysroot`, and the existing sandbox and
-BSM linkage. Their source/header identities remain bound by the existing build
-owner. The SDK surface audit covers these transitive owners together:
-
-| Owner                            | SDK declarations and constants retained                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `feasibility-helper.c`           | Its C/POSIX headers cover fixed file, socket, credential, signal and wait operations; `CommonCrypto/CommonDigest.h` supplies SHA-256; `libproc.h`, `sys/proc.h` and `sys/proc_info.h` supply process identities and census records; `sys/acl.h`, `sys/attr.h` and `sys/mount.h` supply held ACL and volume inspection; `bsm/audit.h` and `mach/mach.h` supply audit tokens, task identities, Mach traps and rights; `sandbox.h` supplies policy application. |
-| `feasibility-domain.h`           | `bsm/libbsm.h` and `security/audit/audit_ioctl.h` cover audit-session/census calls; `grp.h`, `sys/poll.h` and `sys/resource.h` cover credential, pipe and process-limit controls; `mach/mach_vm.h` and `mach/mig.h` supply census-array release and the ordinary cached reply accessor.                                                                                                                                                                      |
-| `custody.h`                      | `NATIVE_AUDIT_DOMAIN_ONLY` excludes general custody declarations; `NATIVE_AUDIT_DOMAIN` includes shared identity, audit-session and bounded census operations. The separate `NATIVE_RUNTIME_REPLIES` section uses `dlfcn.h` and `mach/mig.h` for strict bounded receipt import, stable observation bookkeeping and the checked cached accessor. No private SDK header is added.                                                                              |
-| `feasibility-sandbox.h`          | Its public C/POSIX types and `dlfcn.h` support the pinned variadic sandbox-check ABI and separately checked function/data lookups.                                                                                                                                                                                                                                                                                                                           |
-| Optional `feasibility-command.h` | `bsm/libbsm.h`, `bsm/audit_record.h` and `security/audit/audit_ioctl.h` cover BSM parsing, audit-event selection and audit-pipe controls; `sys/ioctl.h`, `sys/poll.h`, `sys/select.h`, `sys/time.h`, `spawn.h` and `grp.h` cover bounded capture, timestamps, suspended/SETEXEC launch and credentials. `AUDIT_HEADER_VERSION_OPENBSM` remains SDK-declared and mandatory.                                                                                   |
-
-The Mach special-port selectors, exact right types, audit constants and spawn
-flags remain supplied by those SDK interfaces; no substitute numeric definitions
-are introduced. The separately resolved exports remain `sandbox_check`, the
-`SANDBOX_CHECK_NO_REPORT` data object, `proc_signal_with_audittoken` and the cached
-special-reply accessor described below. Their existing checks still gate use.
-These source declarations and portable fixtures supply no installed SDK,
-complete compilation or native retirement proof. Both native build variants and
-the original controls still require fresh matching hosted CI.
-
-Before the child's first identity/audit RPC, it separately borrows the exact
-ordinary cache from `mig_get_reply_port` and the special cache from
-`mig_get_special_reply_port`. Pinned
-[`mach_port.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mach_port.c)
-returns an existing cached special reply, allocating only when that cache is
-absent. The helper never calls the allocating/rebinding
-`thread_get_special_reply_port` trap as a query. Ordinary and special caches
-cannot alias. A checked cache borrow and a constructor record may identify the same
-name without minting an owned reference or duplicate census entry.
-All observed producer names must appear with their exact type; cache replacement
-or a new allocation during census/release invalidates the inspected evidence.
-
-The pinned
-[`mach_sync_ipc.h`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/libsyscall/mach/mach/mach_sync_ipc.h)
-declares the cached accessor as `mach_port_t mig_get_special_reply_port(void)`.
-The hosted Xcode 16.4 macOS 15.5 SDK does not install that private header. The
-shared lookup therefore uses the declared function-pointer type with the SDK's public
-`dlfcn.h` interface to resolve the installed `mig_get_special_reply_port` export.
-Each child clears the loader error, performs one lookup and checks its own error
-before borrowing either cache; a null result or lookup error refuses feasibility
-admission as `fault-special-reply-binding` and experimental launch as
-`mig_get_special_reply_port/binding`. A copied parent binding cannot bypass this
-lookup. The checked pointer supplies all subsequent special-cache reads.
-The source declaration establishes the call ABI, not installed availability:
-the native lookup must succeed on the declared hosted runtime. No speculative
-external declaration, private offset, replacement allocator or trap fallback is
-used. Portable fixtures supply no SDK/linker or hosted export evidence; fresh
-original native execution must establish availability and the existing controls.
-
-The helper never invalidates either cache. Pinned
-[`mig_reply_port.c`](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/libsyscall/mach/mig_reply_port.c)
-uses the task fallback while invalidating the ordinary cache and suppresses
-release errors; that operation supplies no additional provenance. All borrowed
-ordinary and special rights remain runtime-owned through exec or refusal.
-Checked cleanup releases only the independently acquired getter/local copies,
-even when one aliases a borrowed reply name. Unknown receive rights remain
-untouched and fence exec, including `IKOT_NONE` objects. A constructor lacking a complete joined receipt remains unknown; its name is
-never inferred by exclusion. Portable fixtures establish no installed provider
-availability, identification of an archived unknown right, confinement or
-retirement success. Fresh original
-hosted execution must prove those facts.
-Special-cache and imported-observation refusals retain their closed native operation
-through the existing redacted failure decoder; raw port metadata grants no
-authority and is not copied into public failure details.
-
-Sanitation refusal releases its tracked owned references, including the host and
-thread copies acquired before access admission. Failure cleanup attempts every
-remaining owned release without retrying an already attempted one. Both census
-array releases run after count or authority refusal and even if one release
-fails. Release failures retain separate cleanup causes without replacing the
-first refusal; successful exec preparation leaves no pending local cleanup.
-The first rejected census predicate additionally records its local name, census
-type, immediate type-query result and kernel-object query/result on stderr
-before cleanup. A missing expected entry uses `MACH_PORT_TYPE_NONE` as its census
-type; `-1` marks an unattempted object query. These diagnostic reads contact no
-service and cannot authorize an unknown right. The bootstrap ownership repair
-does not identify the unknown right in earlier hosted observations. Portable
-reference/alias/refusal fixtures supply no native confinement or retirement proof.
-
-Explicit bootstrap/debug/resource-notify clearing, registered-port removal and
-task/thread exception sanitation remain required, alongside descriptor closure,
-credential separation and the real task/process/IPC negative controls.
-
-The feasibility domain and ordinary `NATIVE_CI_EXPERIMENT` launcher test
-resource-notify availability only on `mach_task_self()`. XNU's
-[`ipc_tt.c`](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/osfmk/kern/ipc_tt.c)
-places both selectors behind `CONFIG_PROC_RESOURCE_LIMITS`; only a getter and
-null setter both returning `KERN_INVALID_ARGUMENT` admit an unavailable facility.
-Every other combination requires a successful getter, clearing and null readback.
-Mixed results, other failures and nonnull readback refuse exec. Failed getter
-output grants no release authority. Every successfully acquired valid getter
-copy is released once, including nonnull readback and aliased names, before
-later sanitation or its census, or before refusal. Both release attempts run
-even when one fails, without retrying a failed release. Release failures preserve
-a separate cleanup cause and cannot replace the earlier selector/readback refusal
-or its saved errno. No resource-notify right is added to the strict live-port
-census. Protected/provider launcher behavior remains unchanged. These source and
-portable-fixture contracts establish no hosted Darwin success, exact hosted-kernel
-availability or native
-cancellation, owner-loss, sentinel or independent-retirement proof.
-
-Bounded lifecycle observations separate `custodian-entry` before sealed reexec,
-`custodian-fork` after reexec and audit-session setup, `child-fork` after the child's
-alarm but before credential/session changes, and the unprivileged `payload` read.
-They retain PID/parent, credentials, getter/type status, local name and release
-status; `-1` means an unattempted query or release. Custodian/child observation
-getters release their own valid copies once, even if their optional type query
-fails; a failed release blocks and retains cleanup diagnosis. These observations
-localize inheritance and supply no endpoint identity, admission or retirement proof.
-The existing JS custody caller forwards custodian stderr through the ordinary CI
-diagnostic sink, separately from relayed original payload stderr; neither stream's
-lifecycle metadata supplies a receipt, admission or retirement proof. A failed
-diagnostic sink cannot interrupt original custody capture or replace its failure
-and cleanup evidence. Fresh matching macOS CI must establish the confined
-launch and independent retirement of both original faults while all eight earlier
-capabilities remain passing.
-Portable classification and caller coverage supply no native acceptance.
-
-The task-access slot remains inherited: XNU refuses replacement of a valid slot,
-and `ipc_task_reset` does not clear it. This correction admits the constrained
-service role under ordinary hosted trust instead of manufacturing slot absence.
-It supplies no native cancellation, owner-loss or independent retirement result.
-
-Failure settlement corrects two separate source defects: acquired domain pipes
-and the direct child previously lived only in `domain_start` locals, and an
-unexpected child exit never reached the payload protocol. Custody now retains
-each acquired endpoint and the original direct child before later operations
-can fail. Before gate release, EOF and checked bounded reaping settle that
-direct child without a numeric-PID signal. Possible gate release is recorded
-before the write; it cannot be inferred absent from a failed write. Partial or
-unverified acquisition retains uncertainty, and the JavaScript admission error
-retains the original acquisition while closing its input.
-
-Once the original audit pin and birth are held, an unexpected original exit
-drains its original diagnostics and reaches the payload protocol promptly. A
-separate `recover` fences further work, reaps the direct child and uses the
-existing complete census, exact-birth checks and journal-before-signal ordering.
-The same 32-pass retirement bound and 20-second helper backstop remain in force;
-backstop termination cannot supply successful proof. Fresh independent held and
-closed-domain verification is required before cleanup can pass. Recovery can
-finish an already empty held domain after a lost finish, without repeating
-payload commands or finish. The failed scenario remains failed even when its
-cleanup is independently proved. This settlement ordering is a source-supported
-candidate, not proof of native retirement or a remedy for inherited authority.
-Version-2 fault receipts pin emergency intervention before its effects; both
-independent verifiers refuse that marker. Legacy receipt layouts are not adopted.
-
-After each acknowledged fault, the root holder fences admissions and recovers
-the complete held session through the shared `custody.h` all-UID census. Every
-new member is journaled before a full audit-token/birth-checked signal. Stale
-identities, unknown zombies, lost custody, unavailable census or exhausted bounds
-retain exclusion. A fresh root verifier establishes its own root audit session,
-joins the same protected receipt and original live holder, acquires its own
-reference and independently proves the domain empty. Only then does custody close;
-another independent read verifies
-the original holder and its session retired. The private root receipt and sealed
-bytes remain protected for the ephemeral worker's evidence lifetime.
-The ordinary per-birth fallback still cannot establish complete ownership.
-Emergency intervention remains unsuccessful evidence, and no next case may run
-without complete independent non-emergency retirement and unchanged sentinels.
-A safety alarm remains a deadline backstop and never supplies successful evidence.
-Inputs, evidence and sentinels are retained for the ephemeral worker's artifact
-lifetime. These probes supply no macOS acceptance, finding closure or production
-support; actual compilation and mechanisms require external macOS CI.
-
-Confined `fault()` streams the original parked owner/child PID locators and, for
-the held-domain recipe, its required native-controls acknowledgment.
-Outside readers retain both births before image/policy queries, join inherited
-credentials, helper bytes and applied policy, then recheck births, parentage,
-policy-file bytes, bindings and persisted intent before release. The helper
-retains gates and child from creation; refusal, EOF and partial failures invoke
-checked unreleased-child reaping through its failure hook. The unconfined
-prerequisite identity control and ordinary access grants remain unchanged. The
-fault-only policy adds only its sealed helper's exact executable/read literals.
-Original outcomes, including missing fault evidence, are recorded before cleanup.
-Partial custody never replaces births; unknown child settlement forbids parent
-teardown and later admission. Native reaping failures remain separate cleanup
-uncertainty even after stream closure or fresh fixture retirement.
+Feasibility build inventories pin both `image-closure.h` and `exec-handoff.h` in
+both build variants and verify transitive bytes before and after compilation.
+Helper receipts carry both source digests; cold preparation rejoins them before
+use. Portable actual-body and injected-channel regressions replace constructor
+admission coverage as mapped in [testing](../../docs/TESTING.md). These changes
+supply no native PASS. Both original workflows at the same final SHA, all 69 real
+controls, positive controls, unchanged sentinels, model-free routes and complete
+independent retirement remain required. Until inspected, the two original FAIL
+results and 23 established Linux controls remain the last native facts; Windows
+or other failures still prevent overall acceptance.
 
 On matching Windows x64 hosted CI, `win32/feasibility.js` builds its separate
 helper and the existing UTF-16 argv fixture with the available native MSVC/SDK.
@@ -9393,10 +9161,11 @@ creates a fresh session. Clear supplemental groups, then privileged
 `setgid`/`setuid`, verifying real/effective/saved IDs and the sole reserved group.
 Install the independently reviewed profile
 while only trusted helper code runs, then clear bootstrap, registered, debug,
-resource-notify and task/thread exception rights and sanitize the remaining Mach
-names. The shared public exception mask is `EXC_MASK_ALL | EXC_MASK_CRASH |
-EXC_MASK_CORPSE_NOTIFY`; `ALL` alone omits the latter two classes. Both launcher
-branches and fault sanitation clear task and thread slots with that complete
+resource-notify and task/thread exception rights. Reviewed launch also sanitizes
+the remaining Mach names. The shared public exception mask is
+`EXC_MASK_ALL | EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY`; `ALL` alone omits the
+latter two classes. Both launcher branches and fault sanitation clear task and
+thread slots with that complete
 mask, then require both bounded getters over the same mask to return only null
 handlers before census or admission. Setter success alone is insufficient:
 XNU's per-action MAC checks can leave individual handlers installed. Failed
@@ -9408,49 +9177,23 @@ failure and separate cleanup failures without retrying a release.
 Reviewed/protected and provider builds replace the cached MIG reply port
 and retain the fresh local receive-only reply needed by sanitation RPCs, together
 with self task/thread rights. Those builds require the inherited
-task-access port to be null. `NATIVE_CI_EXPERIMENT` adopts the getter/type/kernel-object
-checks of the [ordinary inherited-service policy](#ordinary-darwin-task-access).
-Its checked local service copy stays held through the bounded census, where that
-exact name must occur once with its exact type; arbitrary SEND names gain no
-exception. Before any child observation the experiment binds its PID and shared
-producer bookkeeping, takes responsibility for the separate local bootstrap
-reference, and performs its own checked cached-special-reply lookup. It borrows
-ordinary and special caches without replacing or destroying either. The bounded
-census requires exact task/thread/host/service SEND names, the ordinary RECEIVE
-cache, the special SEND/RECEIVE cache and every producer-proven RECEIVE name.
-Cache/producer aliases share a census entry; owned local/getter aliases still
-require one release per acquisition. A launcher-local guard releases a captured
-bootstrap local if child setup refuses before Mach sanitation; release failures
-remain secondary to the saved guard error, and parent bookkeeping grants no authority.
-Cache, PID, producer count and recorded names
-must remain stable through independent array and reference cleanup. Missing,
-duplicate, changed or unknown live names refuse without destruction; a type or
-`IKOT_NONE` query cannot supply missing provenance. Unowned dead names remain untouched.
-The experiment also applies the paired optional resource-notify
-selector policy above: supported slots must clear and read back null, and every
-acquired getter copy must settle before registered-port, exception and census
-sanitation. Resource copies gain no census exemption; their release failures
-retain separate cleanup diagnostics and preserve the first refusal. A census
-refusal reports its affected name/type and observed binding before cleanup
-RPCs. Both sanitation paths also retain the bootstrap local name, one pre-release
-SEND reference query and the existing release result, alongside one SEND query
-for the first refused name and the reporting PID. Unattempted queries and
-unavailable counts are -1; failed queries cannot publish their output as a count.
-A failed bootstrap release retains its observation without retrying the release.
-Counts alone and names copied from another task or retired attempt establish neither
-current endpoint identity nor ownership; producer/reference evidence is still required
-to authorize a post-hoc release. The earlier original child's affected census
-name/type and its cache/API or
-producer binding remain unproved; this repair cannot identify that right by
-exclusion. Missing installed callable/export evidence remains a binding refusal,
-not a trap fallback. Matching hosted compilation, export lookup, interception,
-original workflows and independent retirement are still required; portable
-fixtures establish none of those native successes. Other TCP/audit/fault-port
-causes and complete native acceptance remain open.
+task-access port to be null. `NATIVE_CI_EXPERIMENT` instead uses the
+[ordinary inherited-service policy](#ordinary-darwin-task-access) and shared
+inheritable-input closure. Held getter references establish endpoint inheritance
+across the suspended replacement only within the same reader IPC namespace.
+Each owned acquisition, including aliases and the separate bootstrap local,
+receives one release attempt; cleanup failures remain separate from the primary
+refusal. The paired optional resource-notify rule remains required. Arbitrary old
+namespace entries do not cross the replacement boundary and are neither admitted
+through a type allowlist nor destroyed. Reviewed namespace sanitation remains
+distinct from ordinary stopped-image admission.
 
-Excluded own-task alias probes no longer run. First-refusal observations,
-independent inspection and historical decoding remain; unknown rights still
-refuse without destruction or allowlisting, and prior nonmatches prove no ownership.
+Historical census/refusal decoding remains recover-only. Counts, classifications
+and names copied from another task or retired attempt establish neither current
+endpoint identity nor ownership. The earlier unknown right remains unidentified;
+these changes cannot identify it by exclusion. Matching hosted compilation,
+original controls and independent retirement remain required; portable fixtures
+establish no native success or overall acceptance.
 
 Experimental `case_start` and `git_ordinary_start` use the selected SDK's documented
 [`posix_spawnattr_setspecialport_np`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/posix_spawnattr_setspecialport_np.3.html)
@@ -9468,14 +9211,14 @@ then clears and independently verifies them before the final thread check and
 fork. This prevents their inheritance before libSystem's runtime callbacks;
 later child sanitation alone cannot provide that fence. The bootstrap getter,
 borrowed exported `bootstrap_port` value and null-slot/cache checks remain intact.
-The child receives a fresh IPC space and binds its reply producer bookkeeping.
-After runtime callbacks and binding, it explicitly clears its registered kernel
-slots, then independently requires null readback and a null bootstrap slot/exported
-value before continuing. Slot replacement releases kernel references, not any
-userspace references acquired by callbacks; it does not establish their ownership
-or solve the later unknown-right census refusal. The strict final census remains
-unchanged. The child never adopts the parent's getter names or array, even if a
-fresh child getter returns the same integers.
+The child receives a fresh IPC space. After runtime callbacks, it explicitly
+clears its registered kernel slots, then independently requires null readback and
+a null bootstrap slot/exported value before continuing. Slot replacement releases
+kernel references, not userspace references acquired by callbacks; it does not
+establish their ownership or authorize releasing arbitrary names. Complete
+inheritable-input closure and independent stopped-image admission follow before
+continuation. The child never adopts the parent's getter names or array, even if
+a fresh child getter returns the same integers.
 The parent restores the exact registered count, order and null entries and its
 exact bootstrap slot/exported value after successful or failed fork and preparation
 failure, then independently reads back each restored set. Each successful getter
@@ -9495,16 +9238,15 @@ mask, including CRASH and CORPSE_NOTIFY. Nonnull handlers are permitted;
 the observation never clears or replays exception slots. Only its getter-owned
 copies are released. Query failure remains an unavailable observation, while a
 failed owned release remains an independent cleanup refusal. Fixed bounded cached
-tuples, getter result and per-copy release results accompany existing fork/census
-refusal diagnostics with parent/reporter identity, without another query. The
+tuples, getter result and per-copy release results accompany fork refusal
+diagnostics with parent/reporter identity, without another query. The
 public getter omits privilege/MAC state rewritten by the setter, so these tuples
 do not authorize an exception-specific correction or exact restoration. Whether
 the matching host's original slots are nonnull remains the missing fact. Existing
-child exception sanitation and the strict terminal census remain authoritative;
-neither snapshot identifies or authorizes releasing the unknown SEND right.
-This mask/readback correction does not identify SEND 1287, establish startup
-repair or supply native acceptance. Matching original hosted controls and
-independent cleanup remain required.
+child exception sanitation remains required. Reviewed terminal census and ordinary
+stopped-image closure retain their separate admission rules; neither parent
+snapshot identifies or authorizes releasing an unknown SEND right. Matching
+original hosted controls and independent cleanup remain required.
 
 The ownership account follows pinned Apple XNU
 [`task.defs`](https://github.com/apple-oss-distributions/xnu/blob/43a90889846e00bfb5cf1d255cdc0a701a1e05a4/osfmk/mach/task.defs)
@@ -9546,14 +9288,12 @@ checked kernel-slot and exported-cache readbacks require null before normal
 setup or cache clearing. Fault entry first classifies existing effects as possible;
 verifier and other helper modes retain their bootstrap authority. Only successful
 getter copies authorize release; the exported cache remains borrowed.
-This bounded initialization hypothesis does not prove disappearance of the unknown
-launchd SEND right. Existing fork callbacks and strict original-child census remain.
-Persistent unknown authority means admission is not repaired; unsupported APIs,
-startup refusal, incomplete tracing or uncertain retirement remain blocking or
-inconclusive. Stop this approach without new probes, grants or tracing expansion.
-The stopped Windows entry experiment and all original acceptance requirements remain.
-Exact hosted-library equivalence, actual fork/constructor behavior, native compilation,
-all original controls and independent retirement remain matching-host proof requirements.
+Entry and pre-fork guards alone cannot prove replacement admission. Ordinary
+launch and both fault recipes require the stopped-image closure and provenance
+checks above; reviewed launch retains its strict namespace census. Unsupported
+APIs, startup refusal, incomplete observations or uncertain retirement still refuse
+acceptance. Native compilation, actual fork/replacement behavior, all original
+controls and independent retirement remain matching-host proof requirements.
 Only a classified ordinary host port is permitted; a privileged or
 unknown one fails. Remaining
 descriptors are private stdio and close-on-exec admission pipes. After fork, only

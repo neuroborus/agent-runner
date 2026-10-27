@@ -5,6 +5,20 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Bind both Darwin faults to stopped replacement images
+
+Cancellation and owner-loss now install the final policy during trusted setup and
+replace directly with the sealed fault image while suspended. Version-four protected
+records retain both epochs and possible effects; same-reader inherited endpoint
+checks, independent readback and repeated image/closure/policy observations precede
+checked handle settlement and one-shot continuation. Original audit custody,
+post-exec controls, acknowledgements, detached descendants and stdio remain bound.
+Recovery never replays work and requires independent whole-domain retirement before
+and after custody closure. Historical receipts remain recover-only; superseded
+constructor/census producers are removed while startup/command/BSM diagnostics stay.
+Portable evidence supplies no native PASS; original workflow acceptance remains
+outstanding.
+
 ## 2026-10-27 — Admit ordinary Darwin replacements before userspace
 
 Ordinary ownership/access/Git launch now consumes the shared suspended SETEXEC

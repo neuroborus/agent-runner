@@ -41,6 +41,7 @@ static int failed_value;
 static const char *cleanup_operation, *cleanup_domain;
 static int cleanup_value;
 static bool prerequisite_mode, prerequisite_signalled, resource_uncertain, admitted_effects;
+static bool domain_failure_cleanup;
 static int prerequisite_gate[2] = {-1, -1}, prerequisite_status;
 static pid_t prerequisite_child = -1;
 static int bundle_gate[2] = {-1, -1};
@@ -50,6 +51,10 @@ static pid_t fault_child = -1;
 static bool fault_release_possible;
 static void settle_domain(void);
 static void remember(const char *operation, const char *domain, int value) {
+  if (domain_failure_cleanup) {
+    resource_uncertain = true;
+    if (!cleanup_operation) { cleanup_operation = operation; cleanup_domain = domain; cleanup_value = value; }
+  }
   if (!failed_operation) { failed_operation = operation; failed_domain = domain; failed_value = value; }
 }
 static void remember_cleanup(const char *operation, const char *domain, int value) {
@@ -576,7 +581,7 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_FEASIBILITY_COMMAND
   if (argc >= 2 && !strncmp(argv[1], "command-", 8)) { admitted_effects = true; return command_entry(argc, argv); }
 #endif
-  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-parent") || !strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
+  bool domain = argc >= 2 && (!strcmp(argv[1], "fault-admission") || !strcmp(argv[1], "fault-parent") || !strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody") || !strcmp(argv[1], "fault-verify") || !strcmp(argv[1], "fault-closed"));
   /* These execs continue an acquired fault domain; reset globals cannot prove
    * that its original effects never started, even when startup now fails. */
   admitted_effects = (argc >= 2 && !strcmp(argv[1], "fault-custody")) || getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
@@ -601,6 +606,7 @@ int main(int argc, char **argv) {
     invariant(feasibility_sandbox_available(sandbox_binding), "sandbox-binding");
     if (!strcmp(argv[1], "fault-domain") || !strcmp(argv[1], "fault-custody")) domain_start(argc, argv);
     else if (!strcmp(argv[1], "fault-parent")) { need(argc == 4 && !strcmp(argv[3], "-")); domain_parent_verify(argv[2]); }
+    else if (!strcmp(argv[1], "fault-admission")) { need(argc == 4); domain_admission_verify(argv[2], argv[3]); }
     else { need(argc == 4); domain_verify(!strcmp(argv[1], "fault-closed"), argv[2], argv[3]); }
     return 0;
   }

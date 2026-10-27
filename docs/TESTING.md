@@ -376,172 +376,54 @@ policy drift, expiry and uncertain continuation. Injected C bodies retain exact
 service alternatives, rejected-name ownership and one-shot gate consumption.
 The native ownership/Git/recovery fixtures exercise the migrated private protocol;
 shared command-handoff and reviewed/protected null-only controls remain required.
-Fault sanitation retains constructor/cache/census and cleanup coverage until its
-own cutover. Each removed launcher census guarantee is retained by fresh-space
-creation, complete inheritable-input inspection, exact held endpoint provenance,
-checked acquisition cleanup and actual stopped-image admission. These portable
-checks establish neither selected-SDK compilation nor native launch or retirement.
-The experiment binds child bookkeeping before observations and executes the shared
-producer/checked-lookup bodies from the scoped `custody.h` section. Borrowed ordinary
-and special caches survive while owned bootstrap/getter aliases release once each.
-An early setup refusal also releases the captured bootstrap local exactly once;
-an aliased release failure cannot replace the guard's original error.
-Producer/cache aliases, missing exports, stale/failed loader lookups, copied parent
-state, invalid or duplicate producer names and overflow all retain refusal coverage.
-Missing, duplicate or changed census entries and unknown RECEIVE/SEND/`IKOT_NONE`
-names refuse without destruction. Cache/PID/producer changes before or during the
-census and through cleanup also refuse. A failure-only name/type/binding fact
-precedes independent array/reference release; combined release failures preserve
-the first cause. No fixture identifies the earlier child's unknown right or proves
-installed callable availability, SDK compilation or native interception. Those
-precise hosted observations remain required; the check inventory stays unchanged.
-The same actual-body fixtures execute the shared SEND-reference query and retain
-the pre-bootstrap-release and first-refusal observations with PID and release
-status. Counted aliases and copied parent bookkeeping cannot change admission or
-cleanup ownership. Failed queries with written outputs, zero/full-width counts,
-failed releases and failed diagnostics preserve unavailable values, the original
-refusal and errno. The SEND-reference query adds no release or endpoint identity.
-The excluded own-task alias-probe implementation and its probe-only fixtures are
-removed. First-refusal/reference observations, independent inspection, strict census,
-borrowed-cache, constructor, release and retirement regressions remain. The finite
-failure decoder retains historical probe failures and rejects unknown operations.
-Actual-body fixtures execute the empty-bootstrap spawn attributes, positive POSIX
-errors, partial initialization, independent destroy failures and SETEXEC refusal
-including an unexpected zero return. They protect exact FD0–3 transfer, the original
-writable journal, successful child/channel retention before cleanup, and unchanged
-reader bootstrap authority. Existing getter-copy ownership cases remain; new
-entry cases require null readbacks before scoped setup and retain possible effects
-on fault-entry refusal without clearing or releasing a borrowed cache. These are focused
-implementation checks in `test/native-darwin-build.test.js` and
-`ci/native/darwin/custody.test.js`, with finite-decoder coverage in
-`test/native-feasibility.test.js`; they add no finalization command or slow tier.
-The fast Darwin build fixture also executes the shared registered/bootstrap fork guard and
-the fault owner's refusal path. Injected getters/setters protect verified null
-inheritance before runtime callbacks, the final single-thread check, exact parent slot/exported-value
-restoration after successful or failed fork and preparation failure, and one
-release attempt per successful getter copy including aliases. Failed getter
-outputs own nothing; aliased child names never authorize releasing a parent's
-snapshot. Child producer binding precedes its first Mach readback. Missing or
-nonnull readbacks, changed caches, restoration failures and failed releases keep
-the first refusal and independent cleanup causes.
-Registered-slot cases preserve order, nulls, getter aliases and exact counts through
-successful/failed forks and preparation refusals. They independently fail capture,
-parent and child clearing, parent/child readback, per-reference release and array
-release, and reject reordered or shortened restoration without adopting failed getter outputs or
-parent names in the child. Callback-populated child slots clear after child
-bookkeeping is bound; separate readback injections retain aliased getter-copy and
-array cleanup obligations even after clearing fails. Replacing kernel slots never
-authorizes releasing callback-owned userspace references, and the final strict
-unknown-right census remains required. Nonnull exception tuples with aliased
-handlers retain
-their masks/behaviors/flavors without any setter; failed queries remain unavailable
-and owned release failures retain cleanup causes. Cached diagnostic bodies add no
-query, reference or errno change, and issue overflow preserves the first refusal
-within fixed storage. These observations cannot identify an unknown SEND right or
-prove private-runtime creation closure.
-The emitted guard-operation names also pass through the actual finite feasibility
-diagnostic parser. Owned fork-copy/array cleanup failures remain uncertain, while
-unknown registered/exception operation names remain unrecognized.
-The fault wrapper retains each diagnostic name until failure emission and arms
-the existing child timeout on pre-binding refusal without resetting a bound child.
-The launcher custody fixture executes its actual wrapper, retaining the direct
-child before registered or bootstrap restoration can
-fail and protecting diagnostics from SIGPIPE without replacing the original
-error. Initial custodian reexec and existing final-exec/census fixtures remain
-required. These regressions use the existing fast/native-harness discovery,
-add no command or slow tier, and establish no hosted library equivalence,
-private cache ownership, native launch success or retirement. The
-[native owner](../ci/native/README.md#darwin-private-admission-and-literal-launch-foundation)
-records primary ownership contracts and the remaining matching-host proof limits.
-Resource-notify cases cover paired selector unavailability, supported clearing
-and null readback, mixed selector results, other errors and uncertain failed-getter
-output. Nonnull readback and aliased-copy release failures retain independent
-release attempts, separate cleanup diagnostics and the original refusal/errno.
-Acquired resource copies must settle before later sanitation and its census;
-failed getter output supplies no ownership. These portable cases establish no
-hosted Darwin success and add no harness or validation command.
-Retirement rejects changed admission bindings, trailing custody output and a close
-reply without bounded custodian exit.
-These deterministic fast regressions run no macOS helper; the existing native
-harness and all future check assignments remain unchanged.
-Fault transition regressions execute the original writable-journal handoff and
-audit-session creation bodies with injected native calls, covering descriptor
-substitution, read-only access, exact errors and preserved reexec effects.
+Both fault recipes use `test/native-darwin-fault-image.test.js` for version-four
+creator/replacement records, durable independent readback, repeated observations,
+one-shot continuation, expiry, failed publication, uncertain continuation and
+recovery without gate replay. Executed native bodies protect write-ahead X and
+SIGCONT ordering, release-before-continuation, original birth/credential/session
+binding of unpublished epochs and exact published-epoch matching. Channel fixtures
+retain original native refusal/exit facts separately from custodian diagnostics;
+suspended sessions retain policy markers, gated acknowledgements and original
+stdout/stderr.
+Creator readbacks reject unexpected real, effective or saved credentials and
+inherited audit sessions. Refusal cleanup validates its independent root verifier
+before custody closure, then observes custodian exit before final verification.
+Their acknowledgement/signal cases replace the obsolete intermediate self-exec
+fault-session exception; generic startup exec still requires its fixture-main marker.
 
-Separate feasibility task-access regressions execute the actual sanitation,
-checked-release and original child launch bodies using injected Mach and process
-calls. They accept
-absent/dead values and the specific task-access slot's exact SEND service with
-`IKOT_NONE`, including different local names across lifecycle observations.
-Task/thread/kernel substitutions, mixed/unknown types and failed type or kobject
-queries refuse exec. A getter-copy release cannot clear the slot. The accepted
-service survives the full bounded census and is released only afterward, alongside
-the checked ordinary-host and thread copies. Unknown live census rights refuse
-without destruction; unowned dead names remain untouched. Missing/changed census
-entries, list/count failures and array/reference release failures also refuse.
-Unsupported types without an owned reference are never deallocated; combined
-query/authority and release failures preserve the first refusal and independent
-cleanup cause. Descriptor closure and explicit bootstrap/debug/registered/exception
-sanitation remain covered.
+The removed constructor/cache/census fixtures have these executable replacements:
 
-The same actual-body fixtures begin reference ownership at child entry and
-reject copied parent bookkeeping as cleanup authority. Their original exact-type
-census, cache-binding, acquired-copy and independent cleanup cases remain.
-Constructor observation replaces the former interposer-only callback, declaration
-and concurrency assertions. The production constructor parser reproduces a reply
-created before child entry, requires its actual fork/child join and waits for every
-sequence through a kernel read fence even when delivery is buffered out of order.
-The native CR1 import body rejects malformed/trailing frames, duplicate or
-sentinel names, overflow, wrong parent, birth/audit substitution and replay.
-Constructor/cache aliases retain one censused name and the cache's exact type.
+| Removed admission guarantee                                            | Retained replacement coverage                                                                                                                                                               |
+| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Fork/CR1 provenance, sequence fences and namespace substitution        | Actual creator/replacement epoch and birth checks, held same-reader endpoint comparison and independent receipt reads in the image and fault-image suites                                   |
+| Reply/cache aliases, unknown namespace entries and census completeness | Fresh IPC-space creation, complete inheritable-input closure and actual access/exception bodies in `test/native-darwin-image.test.js`; arbitrary old names are never allowed or destroyed   |
+| Getter aliases, rejected-name ownership and primary/cleanup failures   | Executed closure release, access-type and fenced-retirement bodies in the image suite, plus retained fork/exception/lifecycle fixtures in `test/native-darwin-build.test.js`                |
+| CR1 import, seal/R and raw exec failure                                | Version-four fault channel, repeated readback/drift/persistence failures and executed one-shot handoff/continuation bodies                                                                  |
+| Constructor observer cancellation and incomplete capture               | No constructor observer is started; startup/command tracing retain independent observer retirement tests, and fault recovery retains original-domain custody and direct-child reaping tests |
+| Complete original fault controls and settlement                        | Both recipes in `test/native-feasibility.test.js`, native fault retirement bodies and image/fault-image transport coverage                                                                  |
 
-Existing startup-trace fixtures exercise this fixed mode through arming, private
-receipt acquisition, final read fencing and successful observer closure without
-payload exit. Cancellation, nonzero exit, diagnostics, truncation and uncertain
-independent retirement withhold release. Fault transport and preparation fixtures
-retain separate parent hello/P, pre-census receipt, post-cleanup seal/R and payload
-stdio phases. Environment setup precedes census; completed controls cannot be
-satisfied by a pre-census frame. Post-receipt constructors and changed bindings
-refuse. The original privileged/fault recovery matrices retain their ownership
-checks and record observers before dependent releases.
-Incomplete constructor capture cannot delay the original process retirement
-attempt, and failed process cleanup cannot suppress observer retirement.
-The existing actual-body and transport fixtures also retain original-child
-refusal/status before fault admission, including fragmented frames and separate
-custodian and observer cleanup failures, without releasing either fault role.
+The retained build suite executes registered/bootstrap fork fencing, exact parent
+restoration, ownership before fallible queries, complete public exception masks,
+selected-SDK spawn attributes and independent destroy failures. The writable
+journal handoff, sealed custodian reexec, audit-session creation, partial pipes,
+original direct-child capture, whole-domain census, zombie birth/credential checks
+and non-emergency independent retirement remain executable regressions. Lifecycle
+getters retain errno and their own release attempts; rejected names without owned
+SEND/SEND_ONCE/DEAD_NAME references authorize no deallocation. Legacy receipt and
+finite diagnostic decoders remain for historical recovery, including refusal
+bindings tested by the native preparation harness.
 
-These portable, effect-free cases add no native compilation or installed-provider
-proof, validation command or durable slow-tier assignment. Matching hosted CI
-must still establish installed translation/probe availability, both native build
-variants, actual constructor receipts, every original control and independent
-retirement. The existing explicit native harness owns custody/preparation
-coverage; the ordinary fast tier owns startup, build and feasibility fixtures.
-
-The same fixture executes the cached special-reply loader body with injected
-`dlsym` and `dlerror`. It protects the pinned zero-argument `mach_port_t` call
-type without the unavailable private SDK header, clears a stale loader error,
-and refuses missing exports or a nonnull result accompanied by a lookup error
-before either cache borrow or native observation. A copied parent pointer cannot
-bypass the child's lookup. Refusal still releases its owned bootstrap reference;
-a release failure remains separate from the original binding failure. Existing
-cache, producer, census and retirement matrices remain intact. The public failure
-decoder retains the bounded binding operation without raw loader output. These
-portable regressions establish no installed macOS export availability and add no
-native execution, validation command or slow-tier assignment.
-
-Custodian lifecycle fixtures retain one checked release per valid getter copy,
-no endpoint contact and unchanged errno, including unavailable type queries. The
-child's observation remains after its alarm and before credential/session changes;
-its optional getter/query cannot replace the authoritative payload sanitation, and
-failed copied-reference release stops before that transition. The custody caller
-still forwards fragmented raw lifecycle and malformed metadata without replacing
-the original refusal or separate release cause when diagnostics throw. Bounded
-classification covers service-query, census-authority, special-cache and runtime
-provenance failures through the existing owner. Cancellation/owner-loss and
-independent retirement matrices remain required: primitive cleanup success cannot
-pass cancellation.
-These portable fixtures run no native compiler or macOS tool, supply no native
-acceptance and add no slow-tier assignment.
+`test/native-darwin-startup.test.js` retains startup DTrace and cold command-exec
+capture, complete output, bounds, identity binding and independent observer
+retirement. Constructor capture and cached-reply import tests are removed with
+their superseded producers. Build receipts pin closure/handoff source bytes in
+both feasibility variants and cold preparation rejoins them; drift refuses use.
+These portable tests run no macOS compiler or native tools and establish no native
+PASS. Matching hosted execution must inspect both original workflows at one final
+SHA, all 69 real controls, positive controls, unchanged sentinels, model-free routes
+and independent whole-domain retirement. Two original FAIL results and 23 Linux
+controls remain the last native facts. The fast gate, explicit native harness and
+all accepted future check assignments remain unchanged; no slow suite is added.
 
 `test/native-darwin-command.test.js` additionally executes the actual finite
 command guard, failure and cleanup bodies with injected native calls. Capture
@@ -1006,24 +888,20 @@ parent fencing and separate reaping uncertainty. Actual-source gate and failure-
 execution checks unreleased-child reaping and preserves the unconfined control.
 No native API or compiler runs; no slow-tier assignment is added.
 
-Actual D create-action and production capture fixtures preserve the first PID
-while joining one bound observer across fragmented/reordered delivery. They
-reject malformed, substituted, replayed, missing and extra ownership evidence.
-Injected native bodies cover birth/reply checks, held pre-exec descriptor
-isolation, failed fork/exec, controller loss and uncertain owner-only settlement.
-The fault/launcher transports retain refusal and separate cleanup. Neutral
-identities and controlled events/clocks require no sleeps or native tools;
-fast discovery and the explicit harness remain unchanged.
-Fresh recovery coverage rejects missing, mismatched and uncertain refusal
-settlements, including loss before the first registration, while still attempting
-original-domain and tracer retirement. Matching successful sealed captures retain
-their cleanup result; substituted receipt bindings refuse it.
-Partial live capture after CR1 transfer retains exclusion, while trace failure
-before receipt transfer still permits independently established retirement.
+Historical constructor recovery coverage in
+`ci/native/darwin/preparation-effects.test.js` rejects missing, mismatched and
+uncertain refusal settlements, including loss before registration, while still
+retiring the recorded observer independently. Matching sealed original captures
+retain their cleanup result; substituted receipt bindings refuse it. No current
+constructor capture is started. The image and fault-image suites above replace
+the removed birth/reply, descriptor, interrupted-handoff and owner-settlement
+fixtures through the suspended-image protocol. Neutral identities and controlled
+events/clocks require no sleeps or native tools; fast discovery and the explicit
+harness remain unchanged.
 
 `test/native-darwin-startup.test.js` injects stream events and every startup-control
 effect. It protects fragmented phase/receipt interleaving, ordered finite markers,
-malformed/oversized output, complete stdout counts, self-exec fault phases/signals,
+malformed/oversized output, complete stdout counts, startup phases and signals,
 documented sandbox status -1, fixed-operation attribution through pre-readiness
 and session failures, operation-valid phase prefixes, bounded loader abort
 classes and path-free causes. Injected controls protect image substitution refusal

@@ -25,10 +25,12 @@ static struct identity fault_inspect(pid_t pid) {
 #define AUDIT_DOMAIN_INSPECT(pid) fault_inspect(pid)
 #define AUDIT_DOMAIN_DIAG(ok, operation, kind, value) domain_check(ok, operation, kind, value)
 #define emit(value) emit_identity(value)
-#define NATIVE_RUNTIME_REPLIES 1
+#define NATIVE_CREATION_INPUTS 1
 #include "custody.h"
-#undef NATIVE_RUNTIME_REPLIES
+#undef NATIVE_CREATION_INPUTS
 #undef emit
+#include "image-closure.h"
+#include <Security/Security.h>
 
 struct fault_record {
   unsigned version, stage, members, emergency;
@@ -38,74 +40,67 @@ struct fault_record {
   unsigned observer_count; struct identity observers[4];
   unsigned observer_kinds[4]; char observer_hashes[4][65];
   char creator_receipt[512], constructor_program[65], constructor_capture[65];
+  /* The aligned prefix remains the exact version-three recovery format. */
+  struct identity creator, target;
+  unsigned execution, continuation;
+  uint64_t deadline;
+  char observations[65], cdhash[41], root[4096];
 };
 static struct fault_record domain_record;
+/* Historical receipts are read using their original ABI, never upgraded in place. */
+struct fault_record_legacy {
+  unsigned version, stage, members, emergency;
+  uid_t uid; gid_t gid; au_asid_t asid;
+  char candidate[41], case_id[16], helper_hash[65], policy_hash[65], intent[65];
+  struct identity custodian, owner, descendant, known[32];
+  unsigned observer_count; struct identity observers[4];
+  unsigned observer_kinds[4]; char observer_hashes[4][65];
+  char creator_receipt[512], constructor_program[65], constructor_capture[65];
+};
+#define DOMAIN_LEGACY_SIZE offsetof(struct fault_record, creator)
+_Static_assert(DOMAIN_LEGACY_SIZE == sizeof(struct fault_record_legacy), "fault recovery ABI");
+static bool domain_legacy;
+static unsigned domain_image_phase;
+static struct image_closure domain_inherited, domain_inspected;
+static struct exec_handoff *domain_handoff;
 static char domain_path[4096], domain_helper[4096], domain_policy[4096];
 static int domain_root = -1, domain_journal = -1;
 static mach_port_t domain_pin;
 static bool domain_fenced;
-/* One entry per owned reference, even when local names alias. Special-port
- * slots and uninspected census names never enter this cleanup inventory. */
-static pid_t domain_port_owner;
-static mach_port_t domain_bootstrap_local, domain_host_copy, domain_access_copy, domain_thread_copy;
-static domain_special_reply_fn domain_special_reply;
-static void domain_special_reply_load(void) {
-  domain_special_reply = domain_special_reply_lookup();
-  invariant(domain_special_reply != NULL, "fault-special-reply-binding");
-}
-static mach_port_t domain_reply_borrowed, domain_special_reply_borrowed;
-static void domain_ports_begin(void) {
-  invariant(domain_port_owner != getpid(), "fault-port-owner");
-  /* libSystem reinitializes Mach state after fork and exec. Copied bookkeeping
-   * from another process is not authority over names in this new IPC space. */
-  domain_port_owner = getpid();
-  domain_host_copy = domain_access_copy = domain_thread_copy = MACH_PORT_NULL;
-  domain_runtime_replies_begin(domain_port_owner);
-  extern mach_port_t bootstrap_port;
-  domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
-  domain_reply_borrowed = domain_special_reply_borrowed = MACH_PORT_NULL;
-  domain_special_reply_load();
-  domain_reply_borrowed = mig_get_reply_port();
-  invariant(MACH_PORT_VALID(domain_reply_borrowed), "fault-reply-port");
-  /* This cached acquisition returns the existing special reply if present;
-   * its producer allocates only for an absent cache. The raw allocating and
-   * rebinding thread_get_special_reply_port trap is never used as a query. */
-  domain_special_reply_borrowed = domain_special_reply();
-  invariant(MACH_PORT_VALID(domain_special_reply_borrowed) &&
-    domain_special_reply_borrowed != domain_reply_borrowed, "fault-special-reply-port");
-}
-static kern_return_t domain_port_release(mach_port_t *held, const char *operation) {
-  mach_port_t name = *held; *held = MACH_PORT_NULL;
-  if (!MACH_PORT_VALID(name)) return KERN_SUCCESS;
-  kern_return_t result = mach_port_deallocate(mach_task_self(), name);
-  if (result != KERN_SUCCESS) {
-    remember(operation, "mach", result); remember_cleanup(operation, "mach", result);
-  }
-  return result;
-}
+/* Each successful getter acquisition owns one release, including aliases. */
+static mach_port_t domain_bootstrap_local;
 static void domain_port_cleanup(void) {
-  if (domain_port_owner != getpid()) return;
-  domain_port_owner = 0;
-  domain_port_release(&domain_bootstrap_local, "fault-bootstrap-release");
-  domain_port_release(&domain_access_copy, "fault-access-release");
-  domain_port_release(&domain_host_copy, "fault-host-release");
-  domain_port_release(&domain_thread_copy, "fault-thread-release");
-  domain_reply_borrowed = domain_special_reply_borrowed = MACH_PORT_NULL;
-  /* Constructor observations and cache borrows remain runtime-owned. Retain
-   * observations through release RPCs; exec resets them, fork must rebind them. */
+  if (domain_handoff) {
+    struct exec_handoff *handoff = domain_handoff; domain_handoff = NULL;
+    exec_handoff_destroy(handoff);
+    if (handoff->operation) remember(handoff->operation, handoff->kind, handoff->value);
+    if (handoff->files_cleanup) remember_cleanup("fault-image-cleanup", "errno", handoff->files_cleanup);
+    if (handoff->attributes_cleanup) remember_cleanup("fault-image-cleanup", "errno", handoff->attributes_cleanup);
+  }
+  mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
+  image_copy(&domain_inspected, local);
+  struct image_closure *values[] = {&domain_inspected, &domain_inherited};
+  for (unsigned j = 0; j < 2; j++) {
+    (void)image_closure_release(values[j]);
+    for (unsigned i = 0; i < values[j]->outcome.count; i++) {
+      struct domain_bootstrap_issue issue = values[j]->outcome.issues[i];
+      remember("fault-image-closure", issue.kind, issue.value);
+      if (issue.cleanup) remember_cleanup("fault-image-cleanup", issue.kind, issue.value);
+      fprintf(stderr, "native-darwin-image-cleanup: operation=%s domain=%s value=%d cleanup=%d\n", issue.operation, issue.kind, issue.value, issue.cleanup);
+    }
+  }
 }
 static pid_t domain_controller, domain_child = -1;
 static int domain_status, domain_pipes[5][2] = {{-1,-1},{-1,-1},{-1,-1},{-1,-1},{-1,-1}};
-static bool domain_released, domain_exit_reported;
+static bool domain_released, domain_exit_reported, domain_child_bound;
 static void domain_fault_bind(void) {
-  alarm(20);
+  alarm(20); domain_child_bound = true;
   extern mach_port_t bootstrap_port;
-  invariant(bootstrap_port == MACH_PORT_NULL, "fault-bootstrap-cache");
-  domain_ports_begin();
+  domain_bootstrap_local = bootstrap_port; bootstrap_port = MACH_PORT_NULL;
 }
 static pid_t domain_fault_fork(void) {
   struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &domain_child, domain_fault_bind);
-  if (outcome.child == 0 && domain_port_owner != getpid()) alarm(20);
+  if (outcome.child == 0 && !domain_child_bound) alarm(20);
   /* remember/remember_cleanup borrow these pointers until failure finishes. */
   char operations[DOMAIN_FORK_ISSUES][80];
   for (unsigned i = 0; i < outcome.count; i++) {
@@ -125,6 +120,7 @@ static bool domain_stream(const unsigned char *bytes, ssize_t size, const char *
   remember_cleanup("fault-output-write", "errno", errno); return false;
 }
 static bool domain_exited(void);
+static void domain_failure_retire(void);
 /* Failure owns acquired pipe endpoints before any subsequent operation. An
  * unreleased direct child exits on EOF; no numeric-PID signal is authorized. */
 static void settle_domain(void) {
@@ -137,7 +133,7 @@ static void settle_domain(void) {
     int fd = domain_pipes[pipe][end]; domain_pipes[pipe][end] = -1;
     if (fd >= 0 && close(fd)) remember_cleanup("fault-close", "errno", errno);
   }
-  if (!capture) return;
+  if (!capture) { domain_failure_retire(); return; }
   for (unsigned pass = 0; pass < 200; pass++) {
     for (unsigned pipe = 1; pipe <= 2; pipe++) {
       int fd = domain_pipes[pipe][0]; if (fd < 0) continue;
@@ -177,6 +173,7 @@ static void settle_domain(void) {
     if (close(fd)) remember_cleanup("fault-close", "errno", errno);
   }
   if (reaped_child) (void)domain_exited();
+  domain_failure_retire();
 }
 static void domain_close(int *fd) {
   int held = *fd; *fd = -1;
@@ -257,21 +254,29 @@ static void domain_location(const char *nonce) {
   snprintf(domain_policy, sizeof(domain_policy), "%s/policy", domain_path);
 }
 static void domain_store(unsigned stage) {
+  need(!domain_legacy && domain_record.version == 4);
   domain_record.stage = stage;
   domain_io(pwrite(domain_journal, &domain_record, sizeof(domain_record), 0), sizeof(domain_record), "fault-journal-write");
   posix_check(fsync(domain_journal), "fault-journal-sync");
   posix_check(fsync(domain_root), "fault-root-sync");
 }
 static void domain_emit(void) {
-  char pin[65]; domain_hex(&domain_record, sizeof(domain_record), pin);
+  char pin[65]; domain_hex(&domain_record, domain_legacy ? DOMAIN_LEGACY_SIZE : sizeof(domain_record), pin);
   printf("{\"candidateSha\":\"%s\",\"caseId\":\"%s\",\"asid\":%u,\"stage\":%u,\"emergency\":%s,\"receiptSha256\":\"%s\",\"intentSha256\":\"%s\",\"helperSha256\":\"%s\",\"policySha256\":\"%s\",\"custodian\":",
     domain_record.candidate, domain_record.case_id, domain_record.asid, domain_record.stage, domain_record.emergency ? "true" : "false", pin, domain_record.intent, domain_record.helper_hash, domain_record.policy_hash);
   emit_identity(domain_record.custodian); fputs(",\"owner\":", stdout); emit_identity(domain_record.owner);
   fputs(",\"descendant\":", stdout); emit_identity(domain_record.descendant); fputs(",\"members\":[", stdout);
   for (unsigned i = 0; i < domain_record.members; i++) { if(i) putchar(','); emit_identity(domain_record.known[i]); }
   char creator[65] = {0}; if (domain_record.creator_receipt[0]) domain_hex(domain_record.creator_receipt, sizeof(domain_record.creator_receipt), creator);
-  printf("],\"creatorReceiptSha256\":\"%s\",\"constructorProgramSha256\":\"%s\",\"constructorCaptureSha256\":\"%s\"}",
+  printf("],\"creatorReceiptSha256\":\"%s\",\"constructorProgramSha256\":\"%s\",\"constructorCaptureSha256\":\"%s\"",
     creator, domain_record.constructor_program, domain_record.constructor_capture);
+  if (!domain_legacy) {
+    printf(",\"version\":4,\"execution\":%u,\"continuation\":%u,\"observationsSha256\":\"%s\",\"imageCdhash\":\"%s\",\"creator\":",
+      domain_record.execution, domain_record.continuation, domain_record.observations, domain_record.cdhash);
+    emit_identity(domain_record.creator); fputs(",\"target\":", stdout);
+    if (domain_record.target.token.val[5]) emit_identity(domain_record.target); else fputs("null", stdout);
+  }
+  putchar('}');
 }
 static void domain_copy(const char *source, const char *leaf, const char *pin, mode_t mode, uid_t uid, gid_t gid) {
   int fd = open(source, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); struct stat before, after, named;
@@ -307,6 +312,137 @@ static void domain_policy_check(void) {
   need(!strcmp(hash,domain_record.policy_hash) && !fstat(fd,&after) && !fstatat(domain_root,"policy",&named,AT_SYMLINK_NOFOLLOW) &&
     domain_file_same(&before,&after) && domain_file_same(&before,&named) && !close(fd));
 }
+static uint64_t domain_image_now(void) {
+  struct timespec now; need(!clock_gettime(CLOCK_MONOTONIC, &now));
+  return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+}
+static void domain_creator_check(struct identity creator, au_asid_t parent_asid) {
+  invariant(creator.token.val[0] == domain_record.uid && creator.token.val[1] == domain_record.uid &&
+    creator.token.val[2] == domain_record.gid && creator.token.val[3] == domain_record.uid &&
+    creator.token.val[4] == domain_record.gid && creator.bsd.pbi_svuid == domain_record.uid &&
+    creator.bsd.pbi_svgid == domain_record.gid && creator.token.val[6] > 0 &&
+    creator.token.val[6] != (unsigned)AU_ASSIGN_ASID && creator.token.val[6] != (unsigned)parent_asid,
+    "fault-image-credentials");
+}
+static void domain_image_bound(void) {
+  need(!domain_legacy && domain_record.version == 4 && !domain_fenced && domain_record.stage == 1 &&
+    domain_record.deadline && domain_image_now() <= domain_record.deadline);
+}
+static void domain_image_inputs(struct image_closure *value, struct identity expected) {
+  task_t task = MACH_PORT_NULL; thread_act_array_t threads = NULL; mach_msg_type_number_t count = 0;
+  kern_return_t got = task_for_pid(mach_task_self(), expected.token.val[5], &task);
+  if (got == KERN_SUCCESS) image_copy(value, task);
+  bool ok = image_mach(value, got, "image-control-get");
+  audit_token_t token = {{0}}; mach_msg_type_number_t size = TASK_AUDIT_TOKEN_COUNT;
+  if (ok) ok = image_mach(value, task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&token, &size), "image-control-epoch") &&
+    image_assert(value, size == TASK_AUDIT_TOKEN_COUNT && !memcmp(&token, &expected.token, sizeof(token)), "image-control-binding");
+  if (ok) {
+    got = task_threads(task, &threads, &count); ok = image_mach(value, got, "image-threads-get");
+    if (got == KERN_SUCCESS) {
+      bool single = count == 1 && threads; ok = image_assert(value, single, "image-single-thread") && ok;
+      if (single) { image_copy(value, threads[0]); if (ok) ok = image_closure_read(value, task, threads[0]); }
+      else for (unsigned i = 0; threads && i < count; i++) {
+        kern_return_t result = mach_port_deallocate(mach_task_self(), threads[i]);
+        domain_bootstrap_check(&value->outcome, result == KERN_SUCCESS, "image-thread-release", "mach", result, true);
+      }
+      if (threads) {
+        kern_return_t result = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)threads, count * sizeof(*threads));
+        ok = domain_bootstrap_check(&value->outcome, result == KERN_SUCCESS, "image-threads-array-release", "mach", result, true) && ok;
+      }
+    }
+  }
+  if (!ok) { domain_port_cleanup(); failure(126); }
+  need(audit_identity_same(expected, fault_inspect(expected.token.val[5])));
+}
+static void domain_signature(char hash[41]) {
+  CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)domain_helper, strlen(domain_helper), false);
+  SecStaticCodeRef code = NULL; CFDictionaryRef info = NULL;
+  bool ok = url && SecStaticCodeCreateWithPath(url, kSecCSDefaultFlags, &code) == errSecSuccess && code &&
+    SecStaticCodeCheckValidity(code, kSecCSStrictValidate, NULL) == errSecSuccess &&
+    SecCodeCopySigningInformation(code, kSecCSSigningInformation, &info) == errSecSuccess && info;
+  if (ok) {
+    CFDataRef cd = CFDictionaryGetValue(info, kSecCodeInfoUnique);
+    CFDictionaryRef entitlements = CFDictionaryGetValue(info, kSecCodeInfoEntitlementsDict);
+    ok = cd && CFGetTypeID(cd) == CFDataGetTypeID() && CFDataGetLength(cd) == 20 &&
+      (!entitlements || (CFGetTypeID(entitlements) == CFDictionaryGetTypeID() && !CFDictionaryGetCount(entitlements)));
+    if (ok) for (unsigned i = 0; i < 20; i++) snprintf(hash + i*2, 3, "%02x", CFDataGetBytePtr(cd)[i]);
+  }
+  if (info) CFRelease(info); if (code) CFRelease(code); if (url) CFRelease(url);
+  invariant(ok, "fault-image-signature");
+}
+/* The fixed policy's complete file/process decision matrix, not an active bit. */
+static void domain_effective(struct identity target) {
+  char paths[4][4096]; const char *names[] = {"build/helper", "build/argv-fixture", "build/git", "workspace"};
+  for (unsigned i = 0; i < 4; i++) need(snprintf(paths[i], sizeof(paths[i]), "%s/%s", domain_record.root, names[i]) < sizeof(paths[i]));
+  const char *objects[] = {domain_helper, paths[0], paths[1], paths[2], paths[3], "/usr/lib/libSystem.B.dylib", "/dev/null", "/", domain_policy};
+  const char *operations[] = {"file-read-data", "file-write-data", "file-write-create", "file-write-unlink", "file-map-executable", "process-exec"};
+  for (unsigned i = 0; i < 9; i++) for (unsigned j = 0; j < 6; j++) {
+    bool read = i != 8, write = i == 6, executable = i < 4 || i == 5, exec = i < 4;
+    int expected = j == 0 ? !read : j < 4 ? !write : j == 4 ? !executable : !exec;
+    invariant(feasibility_sandbox_path(sandbox_binding, target.token.val[5], operations[j], objects[i]) == expected, "fault-image-policy");
+  }
+  invariant(sandbox_binding.check(target.token.val[5], "process-fork", *sandbox_binding.no_report) == 0, "fault-image-policy");
+}
+static void domain_image_observe(bool inheritance) {
+  domain_image_bound(); need(domain_record.target.token.val[5]);
+  struct identity target = fault_inspect(domain_record.creator.token.val[5]);
+  need(exec_handoff_identity(domain_record.creator, target) && audit_identity_same(target, domain_record.target));
+  domain_image(target); domain_policy_check(); char signature[41]; domain_signature(signature);
+  if (*domain_record.cdhash) need(!strcmp(signature, domain_record.cdhash)); else strcpy(domain_record.cdhash, signature);
+  struct proc_vnodepathinfo cwd; struct stat root;
+  need(!fstat(domain_root, &root) && proc_pidinfo(target.token.val[5], PROC_PIDVNODEPATHINFO, 0, &cwd, sizeof(cwd)) == sizeof(cwd));
+  need(cwd.pvi_cdir.vip_vi.vi_stat.vst_dev == root.st_dev && cwd.pvi_cdir.vip_vi.vi_stat.vst_ino == root.st_ino);
+  struct proc_fdinfo descriptors[4]; int size = proc_pidinfo(target.token.val[5], PROC_PIDLISTFDS, 0, descriptors, sizeof(descriptors));
+  need(size == 3 * sizeof(*descriptors)); unsigned mask = 0;
+  for (unsigned i = 0; i < 3; i++) { need(descriptors[i].proc_fd >= 0 && descriptors[i].proc_fd <= 2); mask |= 1u << descriptors[i].proc_fd; }
+  need(mask == 7 && feasibility_sandbox_active(sandbox_binding, target.token.val[5]) == 1);
+  domain_effective(target);
+  memset(&domain_inspected, 0, sizeof(domain_inspected)); domain_image_inputs(&domain_inspected, target);
+  bool same = !inheritance || (domain_inspected.host == domain_inherited.host && domain_inspected.access == domain_inherited.access &&
+    domain_inspected.resource_unsupported == domain_inherited.resource_unsupported);
+  bool released = image_closure_release(&domain_inspected);
+  if (!same) remember("fault-image-provenance", "invariant", 0);
+  if (!same || !released) { domain_port_cleanup(); failure(126); }
+  need(audit_identity_same(target, fault_inspect(target.token.val[5])) && fault_inspect(target.token.val[5]).bsd.pbi_status == SSTOP);
+  if (inheritance) domain_image_phase = 3;
+}
+static void domain_known(struct identity value);
+static void domain_image_exec(void) {
+  domain_image_bound(); need(domain_image_phase == 1 && domain_pin != MACH_PORT_NULL);
+  need(audit_identity_same(domain_record.creator, fault_inspect(domain_record.creator.token.val[5])));
+  domain_store(1); domain_image_phase = 2; domain_released = true; /* consume before uncertain X */
+  int *ready = domain_pipes[3], *release = domain_pipes[4]; struct exec_handoff handoff = {0};
+  bool replaced = exec_handoff_release(&handoff, &release[1]) && exec_handoff_receive(&handoff, ready[0], true);
+  domain_check(replaced, "fault-image-exec", handoff.kind ? handoff.kind : "invariant", handoff.value);
+  domain_close(&ready[0]); struct identity target;
+  for (;;) {
+    domain_image_bound(); target = fault_inspect(domain_record.creator.token.val[5]);
+    if (exec_handoff_identity(domain_record.creator, target)) break;
+    (void)poll(NULL, 0, 1);
+  }
+  domain_record.target = domain_record.owner = target; domain_known(target);
+  domain_image_observe(true); domain_store(1);
+}
+static void domain_image_readback(const char *pin) {
+  need(domain_hash(pin)); int fd = openat(domain_root, "receipt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  struct stat before, after, named; struct fault_record record;
+  need(fd >= 0 && !fstat(fd, &before) && S_ISREG(before.st_mode) && !before.st_uid && !before.st_gid && before.st_nlink == 1 &&
+    (before.st_mode & 07777) == 0400 && before.st_size == sizeof(record)); no_acl(fd, &before);
+  need(pread(fd, &record, sizeof(record), 0) == sizeof(record) && !fstat(fd, &after) &&
+    !fstatat(domain_root, "receipt", &named, AT_SYMLINK_NOFOLLOW) && domain_file_same(&before, &after) && domain_file_same(&before, &named) && !close(fd));
+  char hash[65]; domain_hex(&record, sizeof(record), hash);
+  need(!strcmp(hash, pin) && !memcmp(&record, &domain_record, sizeof(record)));
+}
+static void domain_image_continue(const char *pin) {
+  domain_image_bound(); need(domain_image_phase == 3 && domain_record.continuation == 1);
+  domain_image_readback(pin); domain_image_observe(true);
+  bool released = image_closure_release(&domain_inherited);
+  if (!released) { domain_port_cleanup(); failure(126); }
+  domain_image_bound(); domain_image_phase = 4; domain_record.continuation = 2; domain_store(1);
+  struct identity target = fault_inspect(domain_record.target.token.val[5]);
+  need(audit_identity_same(target, domain_record.target) && target.bsd.pbi_status == SSTOP);
+  signal_identity(target, SIGCONT);
+}
 static void domain_access_diagnostic(const char *phase, kern_return_t got, mach_port_t access,
                                      mach_port_type_t type, int query, int released) {
   int saved = errno;
@@ -325,236 +461,14 @@ static void domain_access_observe(const char *phase) {
   int query = -1, released = -1;
   if (got == KERN_SUCCESS && MACH_PORT_VALID(access)) {
     query = mach_port_type(self, access, &type);
-    released = mach_port_deallocate(self, access);
+    if (query != KERN_SUCCESS || (type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
+      released = mach_port_deallocate(self, access);
   }
   domain_access_diagnostic(phase, got, access, type, query, released); errno = saved;
   if (released != -1 && released != KERN_SUCCESS) {
     remember_cleanup("fault-access-release", "mach", released);
     domain_mach(released, "fault-access-release");
   }
-}
-static void domain_access_release(task_t self, mach_port_t access, mach_port_type_t type) {
-  bool owned = type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME);
-  domain_access_copy = MACH_PORT_NULL;
-  kern_return_t released = owned ? mach_port_deallocate(self, access) : KERN_SUCCESS;
-  domain_access_diagnostic("payload", KERN_SUCCESS, access, type, KERN_SUCCESS, owned ? released : -1);
-  if (released != KERN_SUCCESS) {
-    remember("fault-access-release", "mach", released);
-    remember_cleanup("fault-access-release", "mach", released);
-    failure(126);
-  }
-}
-/* Diagnostic reads occur at the first failed census predicate, before releases.
- * They grant no authority and never replace that predicate's original refusal. */
-static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_type, mach_port_t bootstrap, int bootstrap_query, long long bootstrap_refs, int bootstrap_release) {
-  int saved = errno, query, object_query = -1, send_query = -1;
-  domain_fork_diagnostic("fault");
-  long long send_refs = domain_send_refs(name, &send_query);
-  mach_port_type_t current = MACH_PORT_TYPE_NONE; natural_t kind = 0; mach_vm_address_t object = 0;
-  query = mach_port_type(mach_task_self(), name, &current);
-  if (query == KERN_SUCCESS && (current & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_RECEIVE)))
-    object_query = mach_port_kobject(mach_task_self(), name, &kind, &object);
-  fprintf(stderr, "native-darwin-fault-port: name=%u census-type=%#x type-query=%d type=%#x object-query=%d object-kind=%u object=%llu pid=%d bootstrap=%u bootstrap-query=%d bootstrap-refs=%lld bootstrap-release=%d send-query=%d send-refs=%lld\n",
-    name, census_type, query, current, object_query, kind, (unsigned long long)object,
-    getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
-  fflush(stderr); errno = saved;
-  domain_refusal_request(name);
-  errno = saved;
-}
-static void domain_sanitize(void) {
-  invariant(domain_port_owner == getpid(), "fault-port-owner");
-  task_t self = mach_task_self(); thread_t thread = mach_thread_self();
-  domain_thread_copy = thread;
-  invariant(MACH_PORT_VALID(thread) && thread != self, "fault-thread-port");
-  mach_port_t host = MACH_PORT_NULL, access = MACH_PORT_NULL;
-  natural_t type; mach_vm_address_t address;
-  kern_return_t host_get = task_get_special_port(self,TASK_HOST_PORT,&host);
-  if (host_get == KERN_SUCCESS) domain_host_copy = host;
-  domain_mach(host_get, "fault-host-port");
-  domain_mach(mach_port_kobject(self,host,&type,&address), "fault-host-kind"); invariant(type == 3, "fault-host-kind");
-  kern_return_t access_get = task_get_special_port(self,TASK_ACCESS_PORT,&access);
-  if (access_get == KERN_SUCCESS) domain_access_copy = access;
-  domain_mach(access_get, "fault-access-port");
-  /* XNU consults the target task's access port when authorizing task_for_pid.
-   * Ordinary hosted execution trusts that inherited authorization service, not
-   * arbitrary SEND rights. Require the slot's exact SEND type and IKOT_NONE;
-   * a task/thread or other kernel object cannot stand in for the service.
-   * Keep this getter copy through the census. Its local name is meaningful only
-   * in this task; releasing it never clears or overwrites the special slot. */
-  bool access_held = false;
-  mach_port_type_t access_type = access == MACH_PORT_DEAD ? MACH_PORT_TYPE_DEAD_NAME : MACH_PORT_TYPE_NONE;
-  kern_return_t access_query = KERN_SUCCESS;
-  if (MACH_PORT_VALID(access)) access_query = mach_port_type(self, access, &access_type);
-  /* A successful getter transfers a copy before the required type query. Its
-   * failure must not lose that acquired reference. A successful query exposing
-   * no deallocatable reference still cannot authorize a receive-right release. */
-  if (access_query == KERN_SUCCESS &&
-      !(access_type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
-    domain_access_copy = MACH_PORT_NULL;
-  if (access != MACH_PORT_NULL) {
-    fprintf(stderr, "native-darwin-fault-access: name=%u type=%#x query=%d\n", access, access_type, access_query);
-    fflush(stderr);
-  }
-  /* Query refusal authorizes no use of the endpoint; failure only settles copies. */
-  if (access_query != KERN_SUCCESS)
-    domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, access_query, -1);
-  domain_mach(access_query, "fault-access-kind");
-  if (MACH_PORT_VALID(access)) {
-    kern_return_t service_query = KERN_SUCCESS;
-    if (access_type == MACH_PORT_TYPE_SEND) {
-      service_query = mach_port_kobject(self, access, &type, &address);
-      if (service_query != KERN_SUCCESS) remember("fault-access-service", "mach", service_query);
-      else access_held = type == 0; /* IKOT_NONE, not task-control authority. */
-    }
-    bool accepted = access_held || access_type == MACH_PORT_TYPE_DEAD_NAME;
-    if (!accepted && service_query == KERN_SUCCESS) remember("fault-access-authority", "invariant", 0);
-    if (!access_held) domain_access_release(self, access, access_type);
-    if (!accepted) failure(126);
-  } else domain_access_diagnostic("payload", KERN_SUCCESS, access, access_type, -1, -1);
-  domain_mach(task_set_special_port(self, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL), "fault-bootstrap-port");
-  /* Clearing the kernel slot does not consume libSystem's local reference. */
-  mach_port_t bootstrap = domain_bootstrap_local; int bootstrap_query = -1;
-  long long bootstrap_refs = domain_send_refs(bootstrap, &bootstrap_query);
-  kern_return_t bootstrap_release = domain_port_release(&domain_bootstrap_local, "fault-bootstrap-release");
-  if (bootstrap_release != KERN_SUCCESS) {
-    int saved = errno;
-    fprintf(stderr, "native-darwin-fault-bootstrap: pid=%d name=%u query=%d refs=%lld release=%d\n",
-      getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release);
-    fflush(stderr); errno = saved;
-  }
-  domain_mach(bootstrap_release, "fault-bootstrap-release");
-  domain_mach(task_set_special_port(self,TASK_DEBUG_CONTROL_PORT,MACH_PORT_NULL), "fault-debug-port");
-  /* XNU omits both resource-notify selectors without CONFIG_PROC_RESOURCE_LIMITS.
-   * Only that paired result on our own task establishes unavailability. A live
-   * slot must clear and read back null; getter copies are independent references. */
-  mach_port_t notify = MACH_PORT_NULL, readback = MACH_PORT_NULL;
-  kern_return_t notify_get = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &notify);
-  kern_return_t notify_set = task_set_special_port(self, TASK_RESOURCE_NOTIFY_PORT, MACH_PORT_NULL);
-  bool notify_unavailable = notify_get == KERN_INVALID_ARGUMENT && notify_set == KERN_INVALID_ARGUMENT;
-  kern_return_t notify_read = KERN_FAILURE;
-  if (!notify_unavailable) {
-    if (notify_get != KERN_SUCCESS) remember("fault-notify-get", "mach", notify_get);
-    else if (notify_set != KERN_SUCCESS) remember("fault-notify-port", "mach", notify_set);
-    else {
-      notify_read = task_get_special_port(self, TASK_RESOURCE_NOTIFY_PORT, &readback);
-      if (notify_read != KERN_SUCCESS) remember("fault-notify-read", "mach", notify_read);
-      else if (readback != MACH_PORT_NULL) remember("fault-notify-read", "invariant", 0);
-    }
-  }
-  kern_return_t notify_release = notify_get == KERN_SUCCESS && MACH_PORT_VALID(notify)
-    ? mach_port_deallocate(self, notify) : KERN_SUCCESS;
-  kern_return_t readback_release = notify_read == KERN_SUCCESS && MACH_PORT_VALID(readback)
-    ? mach_port_deallocate(self, readback) : KERN_SUCCESS;
-  if (notify_release != KERN_SUCCESS) {
-    remember("fault-notify-release", "mach", notify_release);
-    remember_cleanup("fault-notify-release", "mach", notify_release);
-  }
-  if (readback_release != KERN_SUCCESS) {
-    remember("fault-notify-release", "mach", readback_release);
-    remember_cleanup("fault-notify-release", "mach", readback_release);
-  }
-  if ((!notify_unavailable && (notify_get != KERN_SUCCESS || notify_set != KERN_SUCCESS ||
-      notify_read != KERN_SUCCESS || readback != MACH_PORT_NULL)) ||
-      notify_release != KERN_SUCCESS || readback_release != KERN_SUCCESS) failure(126);
-  domain_mach(mach_ports_register(self, NULL, 0), "fault-registered-ports");
-  domain_mach(task_set_exception_ports(self, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-task-exceptions");
-  domain_mach(thread_set_exception_ports(thread, DOMAIN_EXCEPTION_MASK, MACH_PORT_NULL, EXCEPTION_DEFAULT, THREAD_STATE_NONE), "fault-thread-exceptions");
-  struct domain_bootstrap_fork exceptions = {0};
-  bool exceptions_ok = domain_exception_readback(&exceptions, self, thread);
-  for (unsigned i = 0; i < exceptions.count; i++) {
-    struct domain_bootstrap_issue issue = exceptions.issues[i];
-    const char *operation = !strcmp(issue.operation, "task-exception-read") ? "fault-task-exception-read" :
-      !strcmp(issue.operation, "thread-exception-read") ? "fault-thread-exception-read" : "fault-exception-copy-release";
-    remember(operation, issue.kind, issue.value);
-    if (issue.cleanup) remember_cleanup(operation, issue.kind, issue.value);
-  }
-  if (!exceptions_ok) failure(126);
-  /* Cache reads and producer returns are provenance; the census only checks
-   * that those exact names and types survive. Never invalidate a runtime cache
-   * or promote an unknown receive right by its type or IKOT_NONE observation. */
-  mach_port_t reply = domain_reply_borrowed, special = domain_special_reply_borrowed;
-  invariant(MACH_PORT_VALID(reply) && reply != self && reply != thread &&
-    reply != host && (!access_held || reply != access) && mig_get_reply_port() == reply, "fault-reply-port");
-  invariant(MACH_PORT_VALID(special) && special != self && special != thread &&
-    special != host && special != reply && (!access_held || special != access) &&
-    domain_special_reply() == special, "fault-special-reply-port");
-  unsigned runtime_count = domain_runtime_reply_count, runtime_seen = 0;
-  invariant(domain_runtime_reply_owner == getpid() && domain_runtime_reply_imported && !domain_runtime_reply_overflow &&
-    runtime_count <= 8, "fault-runtime-reply-port");
-  for (unsigned i = 0; i < runtime_count; i++) {
-    mach_port_t name = domain_runtime_replies[i];
-    invariant(MACH_PORT_VALID(name) && name != self && name != thread && name != host &&
-      (!access_held || name != access), "fault-runtime-reply-port");
-    for (unsigned j = 0; j < i; j++)
-      invariant(name != domain_runtime_replies[j], "fault-runtime-reply-port");
-  }
-  mach_port_name_array_t names; mach_port_type_array_t types; mach_msg_type_number_t n, nt;
-  domain_mach(mach_port_names(self, &names, &n, &types, &nt), "fault-port-list");
-  bool census_ok = n == nt && n <= 4096;
-  if (!census_ok) remember("fault-port-count", "invariant", 0);
-  if (mig_get_reply_port() != reply) {
-    remember("fault-reply-port", "invariant", 0); census_ok = false;
-  }
-  if (domain_special_reply() != special) {
-    remember("fault-special-reply-port", "invariant", 0); census_ok = false;
-  }
-  if (domain_runtime_reply_owner != getpid() || !domain_runtime_reply_imported || domain_runtime_reply_overflow ||
-      domain_runtime_reply_count != runtime_count) {
-    remember("fault-runtime-reply-port", "invariant", 0); census_ok = false;
-  }
-  bool self_seen = false, thread_seen = false, reply_seen = false, special_seen = false;
-  bool host_seen = false, access_seen = !access_held;
-  for (unsigned i = 0; census_ok && i < n; i++) {
-    bool allowed, runtime_reply = false;
-    for (unsigned j = 0; j < runtime_count; j++) if (names[i] == domain_runtime_replies[j]) {
-      runtime_reply = true; runtime_seen |= 1u << j;
-    }
-    if (names[i] == self) {
-      allowed = types[i] == MACH_PORT_TYPE_SEND; self_seen = true;
-    } else if (names[i] == thread) {
-      allowed = types[i] == MACH_PORT_TYPE_SEND; thread_seen = true;
-    } else if (names[i] == reply) {
-      allowed = types[i] == MACH_PORT_TYPE_RECEIVE; reply_seen = true;
-    } else if (names[i] == special) {
-      allowed = types[i] == (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_RECEIVE); special_seen = true;
-    } else if (names[i] == host) {
-      allowed = types[i] == MACH_PORT_TYPE_SEND; host_seen = true;
-    } else if (access_held && names[i] == access) {
-      allowed = types[i] == MACH_PORT_TYPE_SEND; access_seen = true;
-    } else if (runtime_reply) allowed = types[i] == MACH_PORT_TYPE_RECEIVE;
-    else allowed = types[i] == MACH_PORT_TYPE_DEAD_NAME;
-    for (unsigned j = 0; j < i; j++) if (names[j] == names[i]) allowed = false;
-    if (!allowed) {
-      remember("fault-port-authority", "invariant", 0);
-      domain_port_diagnostic(names[i], types[i], bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release); census_ok = false;
-    }
-  }
-  /* Unknown live rights refuse exec; destroying them cannot prove confinement. */
-  if (census_ok && !(self_seen && thread_seen && reply_seen && special_seen && host_seen && access_seen &&
-      runtime_seen == ((1u << runtime_count) - 1))) {
-    remember("fault-port-authority", "invariant", 0);
-    mach_port_t missing = !self_seen ? self : !thread_seen ? thread : !reply_seen ? reply :
-      !special_seen ? special : !host_seen ? host : !access_seen ? access : MACH_PORT_NULL;
-    if (!MACH_PORT_VALID(missing)) for (unsigned i = 0; i < runtime_count; i++)
-      if (!(runtime_seen & (1u << i))) { missing = domain_runtime_replies[i]; break; }
-    domain_port_diagnostic(missing, MACH_PORT_TYPE_NONE, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release); census_ok = false;
-  }
-  kern_return_t names_release = mach_vm_deallocate(self, (mach_vm_address_t)names, n*sizeof(*names));
-  kern_return_t types_release = mach_vm_deallocate(self, (mach_vm_address_t)types, nt*sizeof(*types));
-  if (names_release != KERN_SUCCESS) {
-    remember("fault-port-list-release", "mach", names_release); remember_cleanup("fault-port-list-release", "mach", names_release);
-  }
-  if (types_release != KERN_SUCCESS) {
-    remember("fault-port-list-release", "mach", types_release); remember_cleanup("fault-port-list-release", "mach", types_release);
-  }
-  if (!census_ok || names_release != KERN_SUCCESS || types_release != KERN_SUCCESS) failure(126);
-  if (access_held) domain_access_release(self, access, access_type);
-  domain_port_cleanup();
-  if (resource_uncertain) failure(126);
-  invariant(mig_get_reply_port() == reply, "fault-reply-port");
-  invariant(domain_special_reply() == special, "fault-special-reply-port");
-  invariant(domain_runtime_reply_owner == getpid() && domain_runtime_reply_imported && !domain_runtime_reply_overflow &&
-    domain_runtime_reply_count == runtime_count, "fault-runtime-reply-port");
 }
 static void domain_denied(int result, const char *operation) {
   int error = errno;
@@ -590,7 +504,15 @@ static void domain_recheck(void) {
     int size = proc_pidinfo(value.token.val[5], PROC_PIDTBSDINFO, 1, &b, sizeof(b));
     if (!size) { need(errno == ESRCH || errno == ENOENT); continue; }
     need(size == sizeof(b) && domain_birth_same(value, b));
-    if (b.pbi_status != SZOMB) need(audit_identity_same(value, fault_inspect(value.token.val[5])));
+    if (b.pbi_status != SZOMB) {
+      struct identity actual = fault_inspect(value.token.val[5]);
+      if (!audit_identity_same(value, actual)) {
+        need(!domain_legacy && domain_record.execution && audit_identity_same(value, domain_record.creator));
+        for (unsigned j = 0; j < 7; j++) need(value.token.val[j] == actual.token.val[j]);
+        if (domain_record.target.token.val[5]) need(audit_identity_same(actual, domain_record.target));
+        domain_image(actual);
+      }
+    }
   }
 }
 static bool domain_observers_retired(bool retire) {
@@ -625,6 +547,15 @@ static void domain_retire(void) {
   }
   need(false);
 }
+/* A refused native observation must not orphan an already stopped replacement.
+ * Keep the primary cause; every signal still requires the original pin, complete
+ * identity checks and a durable intent. Recursive cleanup cannot repeat effects. */
+static void domain_failure_retire(void) {
+  static bool settling;
+  if (settling || domain_pin == MACH_PORT_NULL || domain_record.stage < 1 || domain_record.stage > 4) return;
+  settling = true; domain_fenced = true; domain_failure_cleanup = true;
+  domain_store(3); domain_retire();
+}
 static void domain_open(const char *nonce, const char *pin) {
   domain_location(nonce); domain_root = open(domain_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
   posix_check(domain_root, "fault-root-open"); struct stat st;
@@ -634,10 +565,14 @@ static void domain_open(const char *nonce, const char *pin) {
   domain_journal = openat(domain_root, "receipt", O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   posix_check(domain_journal, "fault-journal-open"); posix_check(fstat(domain_journal, &st), "fault-journal-stat");
   domain_shape(S_ISREG(st.st_mode) && !st.st_uid && !st.st_gid &&
-    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && st.st_size == sizeof(domain_record), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
-  domain_io(pread(domain_journal, &domain_record, sizeof(domain_record), 0), sizeof(domain_record), "fault-journal-read");
-  char hash[65]; domain_hex(&domain_record, sizeof(domain_record), hash);
-  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == 3, "fault-journal-binding");
+    st.st_nlink == 1 && (st.st_mode & 07777) == 0400 && (st.st_size == sizeof(domain_record) || st.st_size == DOMAIN_LEGACY_SIZE), &st, "fault-journal-shape"); no_acl(domain_journal, &st);
+  domain_legacy = st.st_size == DOMAIN_LEGACY_SIZE; memset(&domain_record, 0, sizeof(domain_record));
+  domain_io(pread(domain_journal, &domain_record, st.st_size, 0), st.st_size, "fault-journal-read");
+  struct stat after, named;
+  need(!fstat(domain_journal, &after) && !fstatat(domain_root, "receipt", &named, AT_SYMLINK_NOFOLLOW) &&
+    domain_file_same(&st, &after) && domain_file_same(&st, &named));
+  char hash[65]; domain_hex(&domain_record, st.st_size, hash);
+  invariant((!pin || (domain_hash(pin) && !strcmp(pin, hash))) && domain_record.version == (domain_legacy ? 3 : 4), "fault-journal-binding");
 }
 static void domain_transfer(void) {
   struct stat inherited, held;
@@ -667,6 +602,14 @@ static void domain_verify(bool closed, const char *nonce, const char *pin) {
   fputs("{\"independent\":true,\"complete\":true,\"held\":", stdout); fputs(closed ? "false" : "true", stdout);
   fputs(",\"verifier\":", stdout); emit_identity(verifier); fputs(",\"record\":", stdout); domain_emit(); puts("}");
 }
+static void domain_admission_verify(const char *nonce, const char *pin) {
+  domain_open(nonce, pin); need(!domain_legacy && domain_record.version == 4 && domain_record.stage == 1);
+  struct identity custodian = fault_inspect(domain_record.custodian.token.val[5]);
+  need(audit_identity_same(custodian, domain_record.custodian)); domain_image(custodian);
+  if (domain_record.target.token.val[5]) domain_image_observe(false);
+  else need(audit_identity_same(domain_record.creator, fault_inspect(domain_record.creator.token.val[5])));
+  fputs("{\"independent\":true,\"record\":", stdout); domain_emit(); puts("}");
+}
 static void domain_parent_verify(const char *nonce) {
   domain_open(nonce, NULL); need(domain_record.stage <= 1 && !domain_record.emergency);
   struct identity actual = fault_inspect(domain_record.custodian.token.val[5]);
@@ -680,23 +623,7 @@ static void domain_parent_verify(const char *nonce) {
   fputs("{\"parent\":", stdout); emit_identity(actual); puts("}");
 }
 static void domain_parent_gate(void) {
-  char line[512];
-  for (;;) {
-    need(fgets(line, sizeof(line), stdin) && strchr(line, '\n'));
-    if (!strcmp(line, "P\n")) break;
-    char *fields[15]; unsigned count = 0;
-    for (char *word = strtok(line, " \n"); word; word = strtok(NULL, " \n")) { need(count < 15); fields[count++] = word; }
-    need(count == 14 && !strcmp(fields[0], "O") && domain_hash(fields[13])); struct identity expected = parse_identity(fields + 1), actual;
-    const char *kind = startup_observer(expected.token.val[5], &actual); char hash[65];
-    need(audit_identity_same(expected, actual) && audit_observer_digest(!strcmp(kind, "sudo") ? "/usr/bin/sudo" : "/usr/sbin/dtrace", hash) && !strcmp(hash, fields[13]));
-    bool known = false; for (unsigned i = 0; i < domain_record.observer_count; i++) if (audit_identity_same(expected, domain_record.observers[i])) { need(!strcmp(hash, domain_record.observer_hashes[i])); known = true; }
-    if (!known) {
-      need(domain_record.observer_count < 4); unsigned index = domain_record.observer_count++;
-      domain_record.observers[index] = expected; domain_record.observer_kinds[index] = !strcmp(kind, "sudo") ? 1 : 2;
-      strcpy(domain_record.observer_hashes[index], hash); domain_store(0);
-    }
-    fputs("{\"observerStored\":true}\n", stdout); fflush(stdout);
-  }
+  char line[4]; need(fgets(line, sizeof(line), stdin) && !strcmp(line, "P\n"));
   need(audit_identity_same(domain_record.custodian, fault_inspect(getpid())));
 }
 static void domain_fault_refuse(struct domain_bootstrap_fork *out) {
@@ -748,7 +675,7 @@ static void domain_start(int argc, char **argv) {
   domain_location(argv[5]);
   if (!strcmp(argv[1], "fault-custody")) {
     domain_open(argv[5], NULL);
-    invariant(!domain_record.stage && !strcmp(domain_record.candidate, argv[3]) && !strcmp(domain_record.case_id, argv[4]) &&
+    invariant(!domain_legacy && domain_record.version == 4 && !domain_record.stage && !strcmp(domain_record.root, canonical) && !strcmp(domain_record.candidate, argv[3]) && !strcmp(domain_record.case_id, argv[4]) &&
       !strcmp(domain_record.helper_hash, argv[6]) && !strcmp(domain_record.policy_hash, argv[7]) && domain_record.uid == 90001 && domain_record.gid == 90002, "fault-reexec-binding");
     domain_transfer();
   } else {
@@ -758,8 +685,9 @@ static void domain_start(int argc, char **argv) {
   domain_initialize(domain_root, true);
   domain_journal = openat(domain_root, "receipt", O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0400); posix_check(domain_journal, "fault-journal-open");
   domain_initialize(domain_journal, false);
-  domain_record.version = 3; domain_record.uid = 90001; domain_record.gid = 90002;
-  strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
+  domain_record.version = 4; domain_record.uid = 90001; domain_record.gid = 90002;
+  domain_record.deadline = domain_image_now() + 12000;
+  strcpy(domain_record.root, canonical); strcpy(domain_record.candidate, argv[3]); strcpy(domain_record.case_id, argv[4]); strcpy(domain_record.helper_hash, argv[6]); strcpy(domain_record.policy_hash, argv[7]);
   domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   char source[4096]; snprintf(source, sizeof(source), "%s/build/helper", canonical); domain_copy(source, "helper", argv[6], 0555, uid, gid);
   snprintf(source, sizeof(source), "%s/evidence/%s.sb", canonical, argv[4]); domain_copy(source, "policy", argv[7], 0444, uid, gid);
@@ -815,75 +743,53 @@ static void domain_start(int argc, char **argv) {
   domain_access_observe("custodian-fork");
   struct proc_taskinfo threads;
   invariant(proc_pidinfo(getpid(), PROC_PIDTASKINFO, 0, &threads, sizeof(threads)) == sizeof(threads) && threads.pti_threadnum == 1, "fault-fork-threads");
-  domain_refusal_begin(20000);
   pid_t child = domain_fault_fork();
   if (!child) {
     domain_access_observe("child-fork");
-    posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close"); audit_fresh(domain_record.uid);
-    struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}; posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
-    posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");
+    posix_check(close(ready[0]), "fault-close"); posix_check(close(release[1]), "fault-close");
+    posix_check(fchdir(domain_root), "fault-cwd");
     posix_check(dup2(in[0], 0), "fault-stdio"); posix_check(dup2(out[1], 1), "fault-stdio"); posix_check(dup2(err[1], 2), "fault-stdio");
-    domain_check(dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4 &&
-      !fcntl(3, F_SETFD, FD_CLOEXEC) && !fcntl(4, F_SETFD, FD_CLOEXEC), "fault-creator-descriptors", "errno", errno);
-    struct proc_fdinfo fds[512]; errno = 0; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
-    int fd_error = errno; domain_check(size > 0, "fault-fd-list", fd_error ? "errno" : "status", fd_error ? fd_error : size);
-    invariant(size < sizeof(fds) && !(size % sizeof(fds[0])), "fault-fd-count");
+    bool descriptors_ready = dup2(ready[1], 3) == 3 && dup2(release[0], 4) == 4 &&
+      !fcntl(3, F_SETFD, FD_CLOEXEC) && !fcntl(4, F_SETFD, FD_CLOEXEC);
+    int descriptor_error = errno;
+    domain_check(descriptors_ready, "fault-creator-descriptors", "errno", descriptor_error);
+    struct proc_fdinfo fds[512]; int size = proc_pidinfo(getpid(), PROC_PIDLISTFDS, 0, fds, sizeof(fds));
+    invariant(size > 0 && size < sizeof(fds) && !(size % sizeof(fds[0])), "fault-fd-count");
     for (unsigned i = 0; i < (unsigned)size/sizeof(fds[0]); i++) if (fds[i].proc_fd > 4) posix_check(close(fds[i].proc_fd), "fault-close");
     char parent[24]; snprintf(parent, sizeof(parent), "%u", parent_asid);
     posix_check(setenv("NATIVE_FAULT_PARENT_ASID", parent, 1), "fault-environment"); posix_check(unsetenv("NATIVE_STARTUP_CUSTODY"), "fault-environment");
-    /* Finish libc setup before the final census: an environment allocation
-     * cannot introduce an uninspected runtime right between sanitation and exec. */
+    char *arguments[] = {domain_helper, "fault", NULL}; extern char **environ;
+    struct exec_handoff handoff = {0}; domain_handoff = &handoff; const int descriptors[] = {0, 1, 2};
+    if (!exec_handoff_prepare(&handoff, descriptors, 3)) {
+      remember("fault-image-prepare", handoff.kind, handoff.value); failure(126);
+    }
+    audit_fresh(domain_record.uid);
+    struct rlimit limit = {.rlim_cur = 32, .rlim_max = 32}, observed;
+    posix_check(setrlimit(RLIMIT_NPROC, &limit), "fault-process-limit");
+    posix_check(setgroups(0, NULL), "fault-groups"); posix_check(setgid(domain_record.gid), "fault-gid"); posix_check(setuid(domain_record.uid), "fault-uid");
+    gid_t group; invariant(getgroups(1, &group) == 1 && group == domain_record.gid &&
+      !getrlimit(RLIMIT_NPROC, &observed) && observed.rlim_cur == 32 && observed.rlim_max == 32, "fault-image-credentials");
+    policy(domain_policy);
+    invariant(feasibility_sandbox_active(sandbox_binding, getpid()) == 1, "fault-image-policy");
+    mach_port_t local = domain_bootstrap_local; domain_bootstrap_local = MACH_PORT_NULL;
+    image_closure_prepare(&handoff, local);
     struct identity birth = fault_inspect(getpid());
-    invariant(domain_creator_checkpoint(3, 4, birth), "fault-creator-receipt");
-    char *arguments[] = {domain_helper, "exec", domain_policy, domain_helper, "fault", NULL};
-    extern char **environ;
-    domain_sanitize();
-    invariant(domain_creator_final(3, birth), "fault-creator-final");
-    char gate; ssize_t gate_read = read(4, &gate, 1);
-    if (gate_read != 1) domain_exec_failure(2, gate_read < 0 ? "native-darwin: operation=fault-gate-read domain=errno value=" : "native-darwin: operation=fault-gate-read domain=status value=", " effects=possible settlement=unsettled\n", gate_read < 0 ? errno : (int)gate_read);
-    if (gate != 'R') domain_exec_failure(2, "native-darwin: operation=fault-gate-value domain=invariant value=", " effects=possible settlement=unsettled\n", 0);
-    if (close(4)) domain_exec_failure(2, "native-darwin: operation=fault-close domain=errno value=", " effects=possible settlement=unsettled\n", errno);
-    (void)domain_prepared_exec(domain_helper, arguments, environ); int exec_error = errno;
-    domain_exec_failure(2, "native-darwin: operation=fault-payload-exec domain=errno value=", " effects=possible settlement=unsettled\n", exec_error);
-  }
-  domain_child = child;
-  domain_close(&ready[1]); domain_close(&release[0]); domain_close(&in[0]);
-  domain_close(&out[1]); domain_close(&err[1]);
-  struct domain_creator_frame pre, post;
-  domain_io(read(ready[0], &pre, sizeof(pre)), sizeof(pre), "fault-birth-read");
-  invariant(pre.version == 1 && pre.phase == 1 && pre.identity.token.val[5] == (unsigned)child &&
-    audit_identity_same(pre.identity, fault_inspect(child)), "fault-birth-binding");
-  domain_record.owner = pre.identity;
-  domain_record.asid = domain_record.owner.token.val[6]; domain_store(1); domain_pin = audit_hold(domain_record.asid);
-  invariant(audit_identity_same(domain_record.owner, fault_inspect(child)), "fault-birth-binding");
-  fputs("{\"creator\":{\"version\":1,\"phase\":1,\"record\":", stdout); domain_emit(); puts("}}"); fflush(stdout);
-  char line[1040], receipt[DOMAIN_CREATOR_BYTES];
-  invariant(fgets(line, sizeof(line), stdin) && strlen(line) == 1033 && !strncmp(line, "creator ", 8) && line[1032] == '\n', "fault-creator-frame");
-  for (unsigned i = 0; i < DOMAIN_CREATOR_BYTES; i++) {
-    char pair[3] = {line[8+2*i], line[9+2*i], 0};
-    invariant(strspn(pair, "0123456789abcdef") == 2, "fault-creator-frame");
-    receipt[i] = (char)strtoul(pair, NULL, 16);
-  }
-  memcpy(domain_record.creator_receipt, receipt, sizeof(receipt)); domain_store(1);
-  domain_io(write(release[1], receipt, sizeof(receipt)), sizeof(receipt), "fault-gate-write");
-  domain_io(read(ready[0], &post, sizeof(post)), sizeof(post), "fault-final-read");
-  if (post.version == 1 && post.phase == 3) {
-    remember("fault-port-authority", "invariant", 0);
-    domain_refusal_inspect(release[1], post, domain_record.owner, domain_record.custodian, domain_record.candidate, "fault-census", receipt);
+    domain_io(write(3, &birth, sizeof(birth)), sizeof(birth), "fault-birth-write");
+    exec_handoff_execute(&handoff, 4, 3, domain_helper, arguments, environ);
+    remember("fault-image-exec", handoff.kind ? handoff.kind : "invariant", handoff.value);
     failure(126);
   }
-  char trailing; domain_io(read(ready[0], &trailing, 1), 0, "fault-final-drain"); domain_close(&ready[0]);
-  invariant(post.version == 1 && post.phase == 2 && audit_identity_same(post.identity, domain_record.owner) &&
-    audit_identity_same(domain_record.owner, fault_inspect(child)), "fault-final-binding");
-  fputs("{\"sealed\":{\"version\":1,\"phase\":2,\"record\":", stdout); domain_emit(); puts("}}"); fflush(stdout);
-  char seal[137];
-  invariant(fgets(seal, sizeof(seal), stdin) && strlen(seal) == 136 && !strncmp(seal, "seal1 ", 6) && seal[70] == ' ' && seal[135] == '\n', "fault-final-release");
-  memcpy(domain_record.constructor_program, seal + 6, 64); memcpy(domain_record.constructor_capture, seal + 71, 64);
-  invariant(domain_hash(domain_record.constructor_program) && domain_hash(domain_record.constructor_capture), "fault-final-release");
-  domain_store(1);
-  domain_released = true; /* Persisted original birth owns an uncertain write. */
-  domain_io(write(release[1], "R", 1), 1, "fault-gate-write"); domain_close(&release[1]);
-  fputs("{\"ready\":", stdout); domain_emit(); puts("}");
+  domain_child = child;
+  domain_close(&ready[1]); domain_close(&release[0]); domain_close(&in[0]); domain_close(&out[1]); domain_close(&err[1]);
+  struct identity creator; struct exec_handoff handoff = {0};
+  domain_io(read(ready[0], &creator, sizeof(creator)), sizeof(creator), "fault-birth-read");
+  invariant(creator.token.val[5] == (unsigned)child && audit_identity_same(creator, fault_inspect(child)) && exec_handoff_receive(&handoff, ready[0], false), "fault-birth-binding");
+  domain_creator_check(creator, parent_asid);
+  domain_record.creator = domain_record.owner = creator; domain_record.asid = creator.token.val[6];
+  domain_record.execution = 1; domain_known(creator); domain_store(1); domain_pin = audit_hold(domain_record.asid);
+  domain_image_inputs(&domain_inherited, creator);
+  domain_image_bound(); domain_store(1); domain_image_phase = 1;
+  fputs("{\"creator\":{\"version\":4,\"phase\":1,\"record\":", stdout); domain_emit(); puts("}}"); fflush(stdout);
   unsigned expected_sequence = 0;
   for (;;) {
     struct pollfd streams[] = {{0,POLLIN,0}, {out[0],POLLIN,0}, {err[0],POLLIN,0}};
@@ -902,12 +808,19 @@ static void domain_start(int argc, char **argv) {
     need(count >= 2); unsigned sequence = number(fields[0]); need(sequence == ++expected_sequence);
     if (!strcmp(fields[1], "recover")) {
       need(count == 2 && !domain_record.emergency && ((domain_record.stage >= 1 && domain_record.stage <= 3) || domain_record.stage == 5) && domain_pin != MACH_PORT_NULL);
-      domain_fenced = true; domain_close(&in[1]);
+      domain_fenced = true; domain_close(&release[1]); domain_close(&in[1]);
+      domain_port_cleanup(); need(!resource_uncertain);
       if (domain_record.stage != 5) { domain_store(3); domain_retire(); }
       domain_output(&out[0], "stdout"); domain_output(&err[0], "stderr"); invariant(domain_exited(), "fault-child-status");
     }
     printf("{\"sequence\":%u,\"value\":", sequence);
-    if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
+    if (!strcmp(fields[1], "image-exec")) { need(count == 2); domain_image_exec(); domain_emit();
+    } else if (!strcmp(fields[1], "image-read")) { need(count == 2); domain_image_observe(true); domain_emit();
+    } else if (!strcmp(fields[1], "image-seal")) {
+      need(count == 3 && domain_image_phase == 3 && !domain_fenced && domain_hash(fields[2]) && !domain_record.continuation);
+      strcpy(domain_record.observations, fields[2]); domain_record.continuation = 1; domain_store(1); domain_emit();
+    } else if (!strcmp(fields[1], "image-continue")) { need(count == 3); domain_image_continue(fields[2]); domain_emit();
+    } else if (!strcmp(fields[1], "payload")) { need(count == 3 && !domain_fenced && strlen(fields[2]) == 1 && strchr("ACL", *fields[2]) && domain_record.stage >= 2 && domain_record.stage < 4); need(write(in[1], fields[2], 1) == 1); fputs("null",stdout);
     } else if (!strcmp(fields[1], "identity")) {
       need(count == 4); pid_t pid = number(fields[2]); struct identity value = fault_inspect(pid);
       need(value.bsd.pbi_ppid == number(fields[3]) && (pid == child || value.bsd.pbi_ppid == child) && value.token.val[6] == domain_record.asid &&
@@ -921,7 +834,7 @@ static void domain_start(int argc, char **argv) {
         else { need(feasibility_sandbox_active(sandbox_binding,value.token.val[5]) == 1); fputs("{\"sandboxed\":true}",stdout); } }
     } else if (!strcmp(fields[1], "files")) { need(count == 2); domain_policy_check(); printf("[{\"sha256\":\"%s\"}]",domain_record.policy_hash);
     } else if (!strcmp(fields[1], "intent")) {
-      need(count == 3 && domain_record.stage == 1 && domain_record.members == 2 && domain_hash(fields[2])); strcpy(domain_record.intent, fields[2]); domain_store(2); domain_emit();
+      need(count == 3 && domain_record.stage == 1 && domain_record.continuation == 2 && domain_record.members >= 2 && domain_hash(fields[2])); strcpy(domain_record.intent, fields[2]); domain_store(2); domain_emit();
     } else if (!strcmp(fields[1], "fault")) {
       need(count == 2 && domain_record.stage == 2); domain_store(3); signal_identity(domain_record.owner, !strcmp(domain_record.case_id,"cancel") ? SIGTERM : SIGKILL);
       int status; pid_t reaped; do { reaped = waitpid(child,&status,0); } while (reaped < 0 && errno == EINTR);

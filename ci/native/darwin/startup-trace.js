@@ -22,42 +22,14 @@ export const DARWIN_STARTUP_TRACE_LIMITS = Object.freeze({
 // Producer storage is independent of capture bounds; hosted sufficiency is unproved.
 const COLD_PRODUCER_BYTES = 16 * 1024 * 1024;
 
-// No raw proc/CTF offsets: compiling args[0]->pr_pid requires the installed
-// proc provider's public psinfo translation. Every description is mandatory.
-// XNU 43a90889846e00bfb5cf1d255cdc0a701a1e05a4 systrace.c reports the
-// mach_reply_port trap result in arg0 (not the pid-provider return arg1).
-const CONSTRUCTOR_PROGRAM = `#pragma D option quiet
-int child_pid; uint64_t constructors; int gates;
-dtrace:::BEGIN { printf("armed %d %llu\\n", pid, timestamp); }
-proc:::create /pid == $1/ {
-  printf("created %d %llu %d\\n", pid, timestamp, args[0]->pr_pid);
-  child_pid = child_pid == 0 ? args[0]->pr_pid : child_pid;
-}
-proc:::start /pid == child_pid/ {
-  printf("started %d %llu %llu\\n", pid, timestamp, (uint64_t)tid);
-}
-mach_trap::mach_reply_port:return /pid == child_pid/ {
-  constructors++; printf("constructor %d %llu %llu %llu %llu\\n", pid, timestamp, (uint64_t)tid, constructors, (uint64_t)arg0);
-}
-syscall::read:entry,syscall::read_nocancel:entry /pid == child_pid && arg0 == 4/ {
-  gates++; self->creator_gate = gates;
-  printf("fence %d %llu %llu %d %llu %llu\\n", pid, timestamp, (uint64_t)tid, gates, constructors, (uint64_t)arg2);
-}
-syscall::read:entry,syscall::read_nocancel:entry /pid == child_pid && arg0 == 4 && gates == 2/ { exit(0); }
-syscall::read:return,syscall::read_nocancel:return /pid == child_pid && self->creator_gate == 1/ {
-  printf("imported %d %llu %lld\\n", pid, timestamp, (int64_t)arg0); self->creator_gate = 0;
-}
-proc:::exec-success,proc:::exit /pid == $1 || pid == child_pid/ { printf("invalid %d %llu\\n", pid, timestamp); exit(1); }
-dtrace:::ERROR { printf("invalid %d %llu\\n", pid, timestamp); exit(1); }
-dtrace:::END { printf("terminal %d %llu %llu %d\\n", child_pid, timestamp, constructors, gates); }
-`;
+// Frozen decoder binding for historical protected receipts; no live producer.
 export const DARWIN_CONSTRUCTOR_TRACE_INTENT = Object.freeze({
   tool: "/usr/sbin/dtrace",
-  programSha256: digest(CONSTRUCTOR_PROGRAM),
+  programSha256:
+    "3419e456418be4813459e962f7b5eb30a505f49e782a738d6a0168e67f4a3bc2",
 });
-const DARWIN_CREATOR_RECEIPT_BYTES = 512;
 
-/** Live capture and protected recovery receipts share this one-shot exchange.
+/** Historical protected recovery receipts retain their one-shot exchange.
  * Settlement is evidence only; it grants no new signal or reap authority. */
 export function createDarwinRefusalBinding(
   parent,
@@ -147,221 +119,6 @@ export function createDarwinRefusalBinding(
         bindingSha256,
         cleanup:
           settlement.reaped && !settlement.cleanup ? "RETIRED" : "UNCERTAIN",
-      };
-    },
-  };
-}
-
-/** Bounded unordered delivery, ordered kernel sequence. A fence is not a flush:
- * all records through its count must arrive before a receipt can be issued. */
-export function createDarwinConstructorCapture(parent, candidateSha) {
-  parent = normalizeDarwinIdentity(parent);
-  const rows = [],
-    records = new Map(),
-    fences = new Map(),
-    children = new Map();
-  let created, started, imported, terminal, identity, receipt, refusal;
-  const ready = () => {
-    created = started && children.get(started[1]);
-    if (!created || !started || !fences.has(1)) return false;
-    const fence = fences.get(1);
-    return (
-      records.size >= Number(fence[5]) &&
-      Array.from({ length: Number(fence[5]) }, (_, i) =>
-        records.has(i + 1),
-      ).every(Boolean)
-    );
-  };
-  const validate = (final = false) => {
-    need(ready() && created[1] === String(parent.pid));
-    const pid = created[3],
-      epoch = BigInt(created[2]),
-      thread = started[3],
-      pre = fences.get(1);
-    need(
-      started[1] === pid &&
-        BigInt(started[2]) >= epoch &&
-        pre[1] === pid &&
-        pre[3] === thread &&
-        pre[4] === "1" &&
-        pre[6] === "512" &&
-        BigInt(pre[2]) >= BigInt(started[2]),
-    );
-    const names = new Set();
-    let previous = BigInt(started[2]);
-    for (const [sequence, row] of [...records].sort(([a], [b]) => a - b)) {
-      need(
-        row[1] === pid &&
-          row[3] === thread &&
-          sequence <= Number(pre[5]) &&
-          BigInt(row[2]) >= previous &&
-          BigInt(row[2]) <= BigInt(pre[2]) &&
-          !names.has(row[5]),
-      );
-      names.add(row[5]);
-      previous = BigInt(row[2]);
-    }
-    if (identity) need(identity.pid === Number(pid));
-    if (final) {
-      need(children.size === 1 && !refusal);
-      const post = fences.get(2);
-      need(
-        identity &&
-          receipt &&
-          imported &&
-          post &&
-          terminal &&
-          imported[1] === pid &&
-          imported[3] === "512" &&
-          BigInt(imported[2]) >= BigInt(pre[2]) &&
-          BigInt(imported[2]) <= BigInt(post[2]) &&
-          post[1] === pid &&
-          post[3] === thread &&
-          post[4] === "2" &&
-          post[5] === pre[5] &&
-          post[6] === "1" &&
-          terminal[1] === pid &&
-          terminal[3] === pre[5] &&
-          terminal[4] === "2" &&
-          BigInt(terminal[2]) >= BigInt(post[2]) &&
-          records.size === Number(pre[5]),
-      );
-    }
-    return [...records]
-      .sort(([a], [b]) => a - b)
-      .map(([, row]) => Number(row[5]));
-  };
-  return {
-    consume(line) {
-      const row = line.split(" "),
-        [kind] = row;
-      const sizes = {
-        created: 4,
-        started: 4,
-        constructor: 6,
-        fence: 7,
-        imported: 4,
-        terminal: 5,
-      };
-      need(
-        Object.hasOwn(sizes, kind) &&
-          row.length === sizes[kind] &&
-          rows.length < 32 &&
-          row.slice(1).every((field) => unsigned(field, 0xffffffffffffffffn)) &&
-          row[1] !== "0" &&
-          row[2] !== "0",
-      );
-      rows.push(row);
-      if (kind === "created") {
-        need(
-          children.size < 2 &&
-            !children.has(row[3]) &&
-            row[1] === String(parent.pid) &&
-            Number(row[3]) > 1 &&
-            Number(row[3]) <= 0x7fffffff,
-        );
-        children.set(row[3], row);
-      }
-      if (kind === "started") {
-        need(!started && row[3] !== "0");
-        started = row;
-      }
-      if (kind === "constructor") {
-        const sequence = Number(row[4]);
-        need(
-          sequence > 0 &&
-            sequence <= 8 &&
-            !records.has(sequence) &&
-            BigInt(row[5]) > 0n &&
-            BigInt(row[5]) < 0xffffffffn,
-        );
-        records.set(sequence, row);
-      }
-      if (kind === "fence") {
-        const phase = Number(row[4]);
-        need(
-          [1, 2].includes(phase) &&
-            !fences.has(phase) &&
-            Number(row[5]) > 0 &&
-            Number(row[5]) <= 8,
-        );
-        fences.set(phase, row);
-      }
-      if (kind === "imported") {
-        need(!imported);
-        imported = row;
-      }
-      if (kind === "terminal") {
-        need(!terminal);
-        terminal = row;
-      }
-      if (receipt && ready()) validate();
-      return ready();
-    },
-    receipt(value) {
-      need(!receipt);
-      identity = normalizeDarwinIdentity(value);
-      const names = validate();
-      const fields = [
-        "CR1",
-        parent.pid,
-        created[2],
-        identity.auid,
-        identity.uid,
-        identity.gid,
-        identity.ruid,
-        identity.rgid,
-        identity.pid,
-        identity.asid,
-        identity.pidVersion,
-        identity.startSeconds,
-        identity.startMicroseconds,
-        identity.svuid,
-        identity.svgid,
-        names.length,
-        ...names,
-      ];
-      const text = fields.join(" ") + "\n";
-      need(Buffer.byteLength(text) < DARWIN_CREATOR_RECEIPT_BYTES);
-      receipt = Buffer.alloc(DARWIN_CREATOR_RECEIPT_BYTES);
-      receipt.write(text, "ascii");
-      return Buffer.from(receipt);
-    },
-    refusal(value) {
-      need(receipt);
-      refusal ??= createDarwinRefusalBinding(
-        parent,
-        identity,
-        candidateSha,
-        digest(receipt),
-      );
-      return refusal.consume(value);
-    },
-    diagnostic() {
-      if (!refusal) {
-        need(children.size <= 1);
-        return null;
-      }
-      validate();
-      const evidence = refusal.evidence();
-      const observer = children.get(String(evidence.registration.observer.pid));
-      need(
-        children.size === 2 &&
-          observer &&
-          BigInt(observer[2]) > BigInt(created[2]) &&
-          (!terminal ||
-            (terminal[1] === String(identity.pid) &&
-              BigInt(observer[2]) <= BigInt(terminal[2]))),
-      );
-      return evidence;
-    },
-    complete() {
-      validate(true);
-      return {
-        identity,
-        forkEpoch: created[2],
-        constructors: validate(true),
-        receiptSha256: digest(receipt),
       };
     },
   };
@@ -734,28 +491,18 @@ export function openDarwinStartupTrace(
     retireObserver,
     parentPid = process.pid,
     coldCommand = false,
-    constructorMode = false,
-    operation = coldCommand || constructorMode ? "exec" : undefined,
+    operation = coldCommand ? "exec" : undefined,
     onObserver,
     onFailure,
   } = {},
 ) {
-  need(
-    typeof coldCommand === "boolean" &&
-      typeof constructorMode === "boolean" &&
-      !(coldCommand && constructorMode),
-  );
+  need(typeof coldCommand === "boolean");
   need(
     typeof operation === "string" &&
       Object.hasOwn(STARTUP_EXEC_REQUIRED, operation) &&
       (!coldCommand || operation === "exec"),
   );
-  const execRequired = !constructorMode && STARTUP_EXEC_REQUIRED[operation];
-  const creators = constructorMode
-    ? createDarwinConstructorCapture(binding.identity, binding.candidateSha)
-    : null;
-  const creatorReady = Promise.withResolvers();
-  creatorReady.promise.catch(() => {});
+  const execRequired = STARTUP_EXEC_REQUIRED[operation];
   let boundPid,
     parkedIdentity,
     targetIdentity,
@@ -812,7 +559,6 @@ export function openDarwinStartupTrace(
     status = reason === "capture" ? "partial" : "refused";
     refuse(error);
     executed.reject(error);
-    creatorReady.reject(error);
     // Capture can fail after E while the cold request is still running. Let its
     // existing owner fence work immediately; observer settlement stays separate.
     try {
@@ -825,11 +571,7 @@ export function openDarwinStartupTrace(
     need(
       observed &&
         !Array.isArray(observed) &&
-        Object.keys(observed).sort().join(",") ===
-          (constructorMode
-            ? "identity,kind,parentPid,toolSha256"
-            : "identity,kind,parentPid") &&
-        (!constructorMode || /^[a-f0-9]{64}$/u.test(observed.toolSha256)) &&
+        Object.keys(observed).sort().join(",") === "identity,kind,parentPid" &&
         ["sudo", "dtrace"].includes(observed.kind) &&
         Number.isSafeInteger(observed.parentPid) &&
         observed.parentPid > 0 &&
@@ -840,14 +582,6 @@ export function openDarwinStartupTrace(
   };
   const retain = (observed) => {
     const { identity } = observed;
-    need(
-      !constructorMode ||
-        owners.every(
-          (owner) =>
-            owner.kind !== observed.kind ||
-            owner.toolSha256 === observed.toolSha256,
-        ),
-    );
     if (!owners.some((value) => sameDarwinIdentity(value.identity, identity)))
       owners.push({ ...observed, identity });
     return observed;
@@ -860,8 +594,7 @@ export function openDarwinStartupTrace(
       need(
         sameDarwinIdentity(owner.identity, again.identity) &&
           owner.kind === again.kind &&
-          owner.parentPid === again.parentPid &&
-          (!constructorMode || owner.toolSha256 === again.toolSha256),
+          owner.parentPid === again.parentPid,
       );
       need(
         retirementState(await retireObserver(owner.identity)).status ===
@@ -898,19 +631,6 @@ export function openDarwinStartupTrace(
         if (!line) {
           need(count > 0 && !terminalSeparator && !pending);
           terminalSeparator = true;
-          continue;
-        }
-        if (constructorMode && !line.startsWith("armed ")) {
-          need(
-            armTime !== undefined &&
-              line.length <= 512 &&
-              BigInt(line.split(" ")[2]) >= armTime &&
-              BigInt(line.split(" ")[2]) - armTime <= 30000000000n &&
-              count < 32,
-          );
-          if (creators.consume(line)) creatorReady.resolve();
-          if (count++) traceHash.update("\n");
-          traceHash.update(line);
           continue;
         }
         row = traceRow(
@@ -1071,11 +791,7 @@ export function openDarwinStartupTrace(
             // must not end capture at SETEXEC before the target resumes.
             ...(coldCommand ? ["-Z"] : []),
             "-n",
-            constructorMode
-              ? CONSTRUCTOR_PROGRAM
-              : coldCommand
-                ? COLD_PROGRAM
-                : PROGRAM,
+            coldCommand ? COLD_PROGRAM : PROGRAM,
             String(boundPid),
           ],
           {
@@ -1094,11 +810,7 @@ export function openDarwinStartupTrace(
             resolve();
             if (arming)
               fail(new Error("Startup trace closed before binding"), "attach");
-            else if (
-              constructorMode
-                ? !targetIdentity
-                : !exitSeen || (coldCommand && !targetIdentity)
-            )
+            else if (!exitSeen || (coldCommand && !targetIdentity))
               fail(
                 new Error("Startup trace closed before target completion"),
                 "capture",
@@ -1174,8 +886,7 @@ export function openDarwinStartupTrace(
                 withinArm() &&
                   sameDarwinIdentity(owner.identity, again.identity) &&
                   owner.kind === again.kind &&
-                  owner.parentPid === again.parentPid &&
-                  (!constructorMode || owner.toolSha256 === again.toolSha256),
+                  owner.parentPid === again.parentPid,
               );
             }
             need(withinArm());
@@ -1193,58 +904,6 @@ export function openDarwinStartupTrace(
         arming = false;
       }
       return { status };
-    },
-    async receipt(value, signal) {
-      let aborted;
-      try {
-        need(
-          constructorMode &&
-            status === "armed" &&
-            !targetIdentity &&
-            !signal?.aborted,
-        );
-        const pending = signal
-          ? Promise.race([
-              creatorReady.promise,
-              new Promise((_, reject) => {
-                aborted = () =>
-                  reject(new Error("Constructor receipt interrupted"));
-                signal.addEventListener("abort", aborted, { once: true });
-                if (signal.aborted) aborted();
-              }),
-            ])
-          : creatorReady.promise;
-        await bounded(pending, Math.max(0, captureDeadline - Date.now()));
-        need(
-          !failure &&
-            !exit &&
-            !signal?.aborted &&
-            domainBound &&
-            Date.now() < captureDeadline,
-        );
-        const bytes = creators.receipt(value);
-        targetIdentity = normalizeDarwinIdentity(value);
-        return bytes;
-      } catch (error) {
-        fail(error, "capture");
-        throw error;
-      } finally {
-        if (aborted) signal.removeEventListener("abort", aborted);
-      }
-    },
-    refusal(value) {
-      try {
-        need(
-          constructorMode &&
-            domainBound &&
-            targetIdentity &&
-            Date.now() < captureDeadline,
-        );
-        return creators.refusal(value);
-      } catch (error) {
-        fail(error, "capture");
-        throw error;
-      }
     },
     async bindExec(value, signal) {
       let aborted;
@@ -1367,30 +1026,12 @@ export function openDarwinStartupTrace(
             1000,
           ).catch((error) => fail(error, "retirement"));
         }
-        let constructorEvidence, refusalEvidence;
-        if (constructorMode) {
-          try {
-            refusalEvidence = creators.diagnostic();
-            if (refusalEvidence?.cleanup === "UNCERTAIN")
-              throw new Error("Refusal observer settlement is uncertain");
-          } catch (error) {
-            cleanup = "UNCERTAIN";
-            fail(error, "retirement");
-          }
-          try {
-            constructorEvidence = creators.complete();
-          } catch (error) {
-            invalid = true;
-            fail(error, "capture");
-          }
-        }
-        const mandatory = constructorMode
-          ? !!constructorEvidence
-          : execSeen === execRequired &&
-            exitSeen &&
-            syscallEntrySeen &&
-            syscallReturnSeen &&
-            (!coldCommand || !!targetIdentity);
+        const mandatory =
+          execSeen === execRequired &&
+          exitSeen &&
+          syscallEntrySeen &&
+          syscallReturnSeen &&
+          (!coldCommand || !!targetIdentity);
         if (!invalid && !pending && !mandatory)
           fail(
             new Error("Startup trace missing mandatory observations"),
@@ -1460,13 +1101,6 @@ export function openDarwinStartupTrace(
           captureComplete: complete,
           argumentStatus,
           arguments: argumentsObserved,
-          ...(constructorMode
-            ? {
-                programSha256: DARWIN_CONSTRUCTOR_TRACE_INTENT.programSha256,
-                creator: constructorEvidence ?? null,
-                refusal: refusalEvidence ?? null,
-              }
-            : {}),
           ...(coldCommand
             ? {
                 runtime: numericRuntime(

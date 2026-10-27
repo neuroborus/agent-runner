@@ -2130,35 +2130,28 @@ and one identity-bound continuation. Both epochs and original audit custody rema
 recoverable across publication or continuation uncertainty; recovery never replays
 work. Ordinary host-inherited service trust is unchanged and establishes no raw
 service-message safety. Reviewed/protected null-service refusals stay distinct.
-The constructor observer remains for fault admission and historical decoding;
-its closed fork/birth/audit receipt, sequence fences, alias handling and checked
-cleanup remain required there. Portable coverage supplies no native acceptance.
-Ordinary Darwin experimental launcher spawns use the selected SDK's native
-empty-bootstrap attribute without changing reader authority. Fault-custodian
-SETEXEC retains the same process and FD0–3, including the writable journal;
-any return refuses. Mode-scoped entry slot/cache readbacks precede setup and
-cache clearing, after fault possible-effect classification. Getter copies alone
-grant release authority; POSIX errors, independent cleanup and successful child
-ownership remain bound. Excluded own-task alias probes are removed; historical
-decoding and independent inspection remain. Native admission remains unproved.
-The ordinary experiment clears and independently reads back the bootstrap slot
-before the existing single-threaded fork, temporarily borrowing the exported
-bootstrap value without releasing a userspace reference. A fresh child binds
-producer bookkeeping and independently verifies null inheritance. The parent
-restores its exact slot and exported value and settles its owned getter copies,
-including aliases, after successful or failed fork. A created child is retained
-before restoration failures are reported. Unproved parent references are
-untouched; no private reset or count-based release is authorized. Reviewed/provider
-launch policy and the strict final child census remain unchanged. Primary contracts
-and hosted-proof limits belong to the native owner.
-Observation continues through census and checked cleanup, then ends at the child's
-final private read without waiting for payload exit. Unchanged evidence, successful
-observer exit, drained error-free streams and independent observer retirement
-precede R and the prepared nonallocating exec tail. Fault controls remain post-exec;
-receipts cannot authorize that replacement namespace. Existing journals and
-recovery retain original parent, child and observer identities. Missing installed
-support or incomplete evidence refuses release; hosted CI remains the native proof
-owner. Startup/cold-command diagnostics and reviewed/provider admission are unchanged.
+Both feasibility fault recipes now use the same closure and suspended handoff.
+The trusted child installs the final policy before directly replacing itself with
+the sealed fault image. The root custodian retains its original writable journal
+through sealed reexec. Version-four records durably bind original ownership,
+possible execution, creator/replacement epochs, image signature, repeated
+observations and one-shot continuation. Held getter references are compared only
+inside that custodian; a fresh independent root reader verifies the stopped image
+and protected receipt without adopting cross-process names. Receipt readback and
+handle settlement precede identity-bound continuation; post-exec controls,
+acknowledgements, detached descendants and original stdio remain required.
+
+Fenced recovery retains original audit custody across unpublished epochs,
+persistence failures and uncertain continuation. Complete censuses, journal-before-
+signal ordering, direct-child reaping and independent empty-domain verification
+before and after custody closure remain mandatory. Legacy version-three receipts
+are recover-only under their original ABI and bindings; they cannot authorize a
+new launch or continuation. Constructor/census admission producers and unused
+exports are removed; historical diagnostic/refusal decoding and observer retirement
+retain live recovery consumers. Startup/cold-command tracing and BSM evidence stay
+separate. Both feasibility build variants pin the closure and handoff headers
+before and after compilation, and cold consumers rejoin their receipt digests.
+Portable coverage establishes no native acceptance or raw service-message safety.
 Per-job reports project only their platform and applicable source/prerequisite
 findings and cannot yield aggregate GO. The aggregate inventory remains all
 three platforms, 23 system cases and six provider checks each, with the four
@@ -2176,9 +2169,10 @@ audit session for an externally reserved non-login UID/GID, drops real/effective
 saved credentials, installs a reviewed Seatbelt profile and sanitizes inherited
 descriptors and Mach rights. An ordinary host port is required because SIP
 prevents clearing that special slot; privileged/unknown host or uncleared
-task-access endpoint blocks launch. XNU uses the target task's access port during
-caller authorization; releasing a getter reference does not clear the slot or
-identify its endpoint. The live/unknown-endpoint refusal remains mandatory.
+task-access endpoint blocks reviewed launch. XNU uses the target task's access port
+during caller authorization; releasing a getter reference does not clear the slot
+or identify its endpoint. Reviewed/protected/provider null-only admission remains
+mandatory; ordinary hosted launch retains only its exact inherited-service exception.
 Root custody acquires the new session's
 send right only after fork, and is tracked separately by stable native identity.
 The feasibility fault owner retains partial pipes and its direct child before
@@ -2186,12 +2180,12 @@ failure, reports original pre-exec exits separately from control-channel closure
 and recovers the held audit domain without repeating payload work or finish.
 Cleanup requires direct-child reaping, the complete bounded native census and
 independent verification before and after custodian closure; it cannot turn the
-original refusal into a passing case. The inherited live task-access slot remains
-an explicit technical blocker: copied-reference release and unrelated setters
-prove no confinement, and no supported replacement launch is established.
+original refusal into a passing case. Getter-copy release and unrelated setters
+prove no confinement; ordinary service treatment supplies no handler or message
+safety proof. Reviewed launch still requires null.
 Thin x64 Mach-O structure, root-owned immutable bytes, native signature/CDHash,
-permitted entitlements and independently reviewed loader closure precede literal
-`execve`. A parked pipe barrier joins separately inspected task audit tokens,
+permitted entitlements and independently reviewed loader closure precede the
+reviewed literal `execve`. A parked pipe barrier joins separately inspected task audit tokens,
 BSD saved IDs/start identities, current-directory objects, private storage,
 complete policy and protected receipts before release. Missing verification/
 retirement owners retain BLOCKED;

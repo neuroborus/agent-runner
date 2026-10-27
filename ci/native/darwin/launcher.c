@@ -31,10 +31,10 @@
 extern mach_port_t bootstrap_port;
 #define NATIVE_AUDIT_DOMAIN 1
 #ifdef NATIVE_CI_EXPERIMENT
-#define NATIVE_RUNTIME_REPLIES 1
+#define NATIVE_CREATION_INPUTS 1
 #endif
 #include "custody.h"
-#undef NATIVE_RUNTIME_REPLIES
+#undef NATIVE_CREATION_INPUTS
 #ifdef NATIVE_CI_EXPERIMENT
 #include "image-closure.h"
 struct image_frame { unsigned version; struct identity identity; };

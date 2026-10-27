@@ -19,6 +19,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { StringDecoder } from "node:string_decoder";
+import { assertDarwinImageTransition } from "./image-admission.js";
 import {
   nativeException,
   attemptNativeBuilds,
@@ -240,6 +241,35 @@ export function darwinFeasibilityIdentityArguments(input) {
 
 function assertDarwinFaultRetirement(evidence, completeFault = true) {
   const { record, fresh, settled } = evidence;
+  if (completeFault) {
+    need(
+      record.version === 4 &&
+        record.execution === 1 &&
+        record.continuation === 2 &&
+        /^[a-f0-9]{64}$/u.test(record.observationsSha256) &&
+        /^[a-f0-9]{40}$/u.test(record.imageCdhash),
+    );
+    assertDarwinImageTransition(
+      normalizeDarwinIdentity(record.creator),
+      normalizeDarwinIdentity(record.target),
+    );
+    need(
+      sameDarwinIdentity(record.owner, record.target) &&
+        [record.creator, record.target].every((identity) =>
+          record.members.some((member) => sameDarwinIdentity(member, identity)),
+        ),
+    );
+    for (const key of [
+      "version",
+      "creator",
+      "target",
+      "execution",
+      "continuation",
+      "observationsSha256",
+      "imageCdhash",
+    ])
+      need(JSON.stringify(settled.record[key]) === JSON.stringify(record[key]));
+  }
   need(
     evidence.complete === true &&
       evidence.independent === true &&
@@ -382,6 +412,15 @@ function prerequisiteDiagnostic(error, cleanupOnly = false) {
     "bundle-child-status",
     "bundle-authorization",
     "bundle-signal",
+    "fault-image-closure",
+    "fault-image-cleanup",
+    "fault-image-prepare",
+    "fault-image-credentials",
+    "fault-image-policy",
+    "fault-image-signature",
+    "fault-image-provenance",
+    "fault-image-exec",
+    "fault-cwd",
     "fault-pipe",
     "fault-fork",
     "fault-close",
@@ -972,20 +1011,21 @@ export function openDarwinFeasibilitySession(
   root,
   operation,
   args,
-  { launch = spawn, startupCustody = false } = {},
+  { launch = spawn, startupCustody = false, suspendedImage = false } = {},
 ) {
   need(typeof startupCustody === "boolean");
   if (startupCustody)
     need(Object.hasOwn(STARTUP_PHASES, operation) && operation !== "bundle");
-  const requiredPhases = expectedPhases(operation);
-  // The existing self-exec fault vector has no argv fixture main.
-  const faultSession =
-    operation === "exec" &&
-    args.length === 3 &&
-    args[1] === path.join(root, "build/helper") &&
-    args[2] === "fault";
+  need(
+    typeof suspendedImage === "boolean" &&
+      (!suspendedImage || operation === "fault"),
+  );
+  const requiredPhases = suspendedImage
+    ? STARTUP_PHASES["policy-only"]
+    : expectedPhases(operation);
+  const faultSession = suspendedImage;
   const gated = operation === "bundle" || faultSession;
-  const phaseCount = requiredPhases.length - (faultSession ? 1 : 0);
+  const phaseCount = requiredPhases.length;
   let child;
   try {
     child = launch(path.join(root, "build/helper"), [operation, ...args], {
@@ -1131,7 +1171,11 @@ export function openDarwinFeasibilitySession(
       });
     try {
       need(total <= 65536);
-      phases = darwinFeasibilityPhases(stderr, operation, false);
+      phases = darwinFeasibilityPhases(
+        stderr,
+        suspendedImage ? "policy-only" : operation,
+        false,
+      );
       if (gated && prerequisiteDiagnostic({ stderr }))
         refuse(new Error("Native gated helper refused admission"));
     } catch (error) {
@@ -1229,7 +1273,10 @@ export function openDarwinFeasibilitySession(
       try {
         if (failureCause) throw failureCause;
         assertDarwinFeasibilityTranscript(transcript, consumed);
-        phases = darwinFeasibilityPhases(stderr, operation);
+        phases = darwinFeasibilityPhases(
+          stderr,
+          suspendedImage ? "policy-only" : operation,
+        );
         need(phases.length === phaseCount);
         completed(exit, signal, code);
         return exit;
@@ -1592,7 +1639,16 @@ export async function buildDarwinFeasibility(
           "-Wextra",
           "-Wno-deprecated-declarations",
           "-Wl,-adhoc_codesign",
-          ...(name === "helper" ? ["-lsandbox", "-lbsm"] : []),
+          ...(name === "helper"
+            ? [
+                "-lsandbox",
+                "-lbsm",
+                "-framework",
+                "Security",
+                "-framework",
+                "CoreFoundation",
+              ]
+            : []),
           ...(name === "helper" && commandObservation
             ? ["-DNATIVE_FEASIBILITY_COMMAND"]
             : []),
@@ -1613,9 +1669,9 @@ export async function buildDarwinFeasibility(
       "feasibility-sandbox.h",
       "feasibility-domain.h",
       "custody.h",
-      ...(commandObservation
-        ? ["feasibility-command.h", "exec-handoff.h"]
-        : []),
+      "image-closure.h",
+      "exec-handoff.h",
+      ...(commandObservation ? ["feasibility-command.h"] : []),
     ])
       pins.set(
         path.join(SOURCE, file),
@@ -1684,15 +1740,18 @@ export async function buildDarwinFeasibility(
               custodySourceSha256: digest(
                 await fs.readFile(path.join(SOURCE, "custody.h")),
               ),
+              imageClosureSourceSha256: pins.get(
+                path.join(SOURCE, "image-closure.h"),
+              ),
+              handoffSourceSha256: pins.get(
+                path.join(SOURCE, "exec-handoff.h"),
+              ),
               ...(commandObservation
                 ? {
                     commandSourceSha256: digest(
                       await fs.readFile(
                         path.join(SOURCE, "feasibility-command.h"),
                       ),
-                    ),
-                    handoffSourceSha256: pins.get(
-                      path.join(SOURCE, "exec-handoff.h"),
                     ),
                   }
                 : {}),
@@ -2775,10 +2834,6 @@ async function ownershipEntry(root, components, baseline, caseId, checkoutSha) {
     digest(policyBytes),
     ENV,
     openDarwinFeasibilitySession,
-    {
-      observe: (operation, value) =>
-        startupObserver(root, operation, value, helperHash),
-    },
   );
   return runDarwinFeasibilityFault(
     root,
@@ -2904,7 +2959,7 @@ export async function runDarwinFeasibilityFault(
       policyFile,
       sandboxed: true,
       completeDomainBoundary: Boolean(domain),
-      ...(domain ? { constructorEvidence: domain.constructorEvidence } : {}),
+      ...(domain ? { imageEvidence: domain.imageEvidence } : {}),
     };
     const intentFile = path.join(root, "evidence", `${caseId}-intent.json`),
       intentHash = digest(JSON.stringify(receipt));

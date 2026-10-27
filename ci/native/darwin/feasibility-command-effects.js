@@ -696,6 +696,10 @@ export function createDarwinCommandEffects(dispatch, inputs) {
         build.builds[0].handoffSourceSha256 ===
           digest(await readFile(new URL("./exec-handoff.h", import.meta.url))),
       );
+      need(
+        build.builds[0].imageClosureSourceSha256 ===
+          digest(await readFile(new URL("./image-closure.h", import.meta.url))),
+      );
       const abi = await readFile(
         path.join(sdk, "usr/include/bsm/audit_record.h"),
       );

@@ -4190,7 +4190,7 @@ test("Darwin protected launch bodies preserve setup and handshake causes on the 
   assert.ok(sanitation > 0);
   assert.match(
     launcher,
-    /#ifdef NATIVE_CI_EXPERIMENT\s+#define NATIVE_RUNTIME_REPLIES 1\s+#endif\s+#include "custody.h"\s+#undef NATIVE_RUNTIME_REPLIES/u,
+    /#ifdef NATIVE_CI_EXPERIMENT\s+#define NATIVE_CREATION_INPUTS 1\s+#endif\s+#include "custody.h"\s+#undef NATIVE_CREATION_INPUTS/u,
   );
   assert.match(
     launcher,
