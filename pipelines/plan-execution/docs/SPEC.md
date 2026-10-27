@@ -167,6 +167,42 @@ The Worker must use the validated subject exactly as returned by the parser. The
 runner must never ask an agent to generate or rewrite it, and multiple planned
 commits must never be merged into one implementation step.
 
+### Plan-kind step policies
+
+Private `step-policy.js` owns the differences between commit and custom steps:
+deterministic parsing/serialization, step context and agreed criteria, workspace
+inspection, initial content-change requirements, role capabilities/access and
+the terminal effect. `commit-workspace.js` owns the existing two-pass Git
+preflight and stale-plan inspection. Commit steps retain clean-worktree and
+identity requirements, ignored clarification artifacts, exact subjects and
+runner-observed nonempty initial implementation. A matching HEAD subject never
+counts as completed work. Consumed commit verification and operator-stop
+reconciliation still precede stale-plan inspection or new implementation proof.
+
+The private custom policy consumes `@agent-runner/custom-plan`, carries each
+step's referenced observable conditions, work, expected results and frozen
+declarations, and permits analysis without an artificial file diff. It selects
+directory inspection through the root-supplied bound capability, grants neither
+retrieval nor paths from plan declarations, and has no `local-commit` access,
+Git effect service or implemented terminal checkpoint. Analysis eligibility is
+not result acceptance. Custom publication and accepted-step settlement are not
+implemented here; no CLI/MCP/configuration selector exposes custom execution,
+and both state creation and persisted validation reject custom execution before
+runtime effects.
+
+The existing mode policy, finding/correction loops, availability handling,
+output-exhaustion recovery and fingerprint-bound gate evidence remain shared
+within this pipeline. Commit-specific effective revisions, validation rebinding,
+replacement execution and derived progress retain their existing contracts and
+eligibility rules. There is no second runner or cross-pipeline dependency.
+
+Pipeline state version 33 persists required `planKind`. New execution states use
+`commit`; the ordered version-32 migration assigns explicit legacy commit
+semantics without changing counters, sessions, saved mode, refinement eligibility,
+validation evidence, completed commits or pending one-shot authorizations.
+Prepared and consumed commits keep their original recovery contract; migration
+never manufactures new effect authority.
+
 ---
 
 ## 5. CLI
@@ -4184,7 +4220,7 @@ At minimum cover:
 73. lazy no-progress, stable-finding, fix, and additional-round behavior remains
     bounded without weakening exact commits, trusted checks, fingerprints, Git
     controls, product decisions, or no-coauthor/no-push rules.
-74. every supported legacy version migrates through state version 32, preserving
+74. every supported legacy version migrates through state version 33, preserving
     its saved mode and defaulting missing modes to `independent`, without
     fabricating effective-revision approval, reviving terminal runs or replaying
     completed or pending commit effects; unfinished work freezes guidance and repeats

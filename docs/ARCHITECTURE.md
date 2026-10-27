@@ -4278,8 +4278,20 @@ publication matches the complete custom header to
 that frozen catalog and source/output selection. Authoring state version 7
 migrates legacy runs to commit-only defaults without changing authority or
 progress. Unchanged default commit inputs preserve existing session-context and
-pending source-fork recovery keys. Execution continues consuming only commit
-plans; custom execution entry points remain unavailable.
+pending source-fork recovery keys.
+
+Plan execution's private `step-policy.js` consumes both deterministic contracts
+and isolates parsing, step/criterion context, workspace inspection, initial
+content-change requirements, role access/capabilities and terminal effects from
+its existing mode and review policies. `commit-workspace.js` retains two-pass
+Git preflight, ignored artifacts and stale-plan inspection; the one-shot commit
+route obtains Git effects only through the commit policy. Custom analysis needs
+no artificial diff, uses only the already bound directory snapshot capability,
+and cannot obtain commit authority. Custom execution remains unavailable through
+CLI/MCP/configuration and persisted execution state. Execution state version 33
+requires `planKind`; version-32 migration adds `commit` without changing any
+gate, consumed effect, accounting or refinement eligibility. Current execution
+still consumes only commit plans and preserves its existing session context.
 
 ## Global Safety Policy
 

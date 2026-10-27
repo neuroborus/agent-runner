@@ -4,13 +4,15 @@ Validation and semantic review are separate sources of evidence. Deterministic
 checks prove executable repository properties; agents assess correctness,
 scope, architecture, and edge cases. Neither substitutes for the other.
 
-Plan execution requires an observed content change for initial implementation of
-each step. Worker completion claims do not suffice. The runner preserves the
+Commit-plan execution requires an observed content change for initial implementation
+of each step. Worker completion claims do not suffice. The runner preserves the
 original step-start evidence across partial work and resume; an unchanged step
 requires plan revision before convergence or finalization. Unchanged corrections
 and confirmations remain valid. Legacy runs without reconstructable original
 evidence pause before further writable work; already-consumed commits still
-settle through verification.
+settle through verification. The private custom step policy permits analysis
+without a file diff; it provides no result acceptance or Git effect authority.
+Custom execution remains inactive until its separate acceptance lifecycle exists.
 
 ## Authoring review
 

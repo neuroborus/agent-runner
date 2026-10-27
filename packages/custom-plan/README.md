@@ -4,7 +4,9 @@
 serialization of criterion-driven plans. It is a pure contract for authoring
 and execution, separate from the commit-specific `@agent-runner/commit-plan`.
 Plan authoring consumes this contract only after explicit custom selection.
-Custom execution remains unavailable; declarations grant no runtime authority.
+Execution's private step policy also consumes it to separate criterion-driven
+context and analysis from commit-specific requirements. Custom execution remains
+unavailable; declarations grant no runtime authority.
 
 ## Representation
 

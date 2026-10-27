@@ -33,7 +33,7 @@ or guarantee that a later worktree will remain compatible with the plan.
 
 ## Plan execution
 
-Plan execution accepts a deterministically validated plan and implements one
+Plan execution accepts a deterministically validated commit plan and implements one
 step at a time. Each accepted step becomes exactly one verified local commit
 with the subject from its plan heading. Findings are resolved within that step,
 not by adding separate review-fix commits. A completed earlier commit is durable

@@ -1,11 +1,7 @@
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
-import {
-  CommitPlanValidationError,
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+import { canonicalExecutionPlan, planKindPolicy } from "./step-policy.js";
 
 import {
   createReplacementCoordinator,
@@ -126,7 +122,6 @@ import {
   MAX_CLARIFICATION_ROUNDS,
   MAX_DIAGNOSTIC_ITEMS,
   MAX_FINALIZATION_CORRECTION_ATTEMPTS,
-  MAX_PLAN_LENGTH,
   MAX_SEMANTIC_FINALIZATION_RETRIES,
   MAX_VALIDATION_ITEMS,
   PlanExecutionWorkflowError,
@@ -193,14 +188,6 @@ const RETRYABLE_PAUSE_REASONS = new Set([
   "review_output_invalid",
   "effective_plan_output_invalid",
   "unsafe_git_state",
-]);
-const GIT_PREFLIGHT_CODES = new Set([
-  "ERR_GIT_IDENTITY_REQUIRED",
-  "ERR_GIT_UNAVAILABLE",
-  "ERR_NOT_GIT_REPOSITORY",
-  "ERR_REPOSITORY_NOT_CLEAN",
-  "ERR_UNSAFE_REPOSITORY_PATH",
-  "ERR_UNSUPPORTED_GIT_CONFIGURATION",
 ]);
 const INVALID_VALIDATION_PATH_CODES = new Set([
   "ERR_UNSAFE_REPOSITORY_PATH",
@@ -335,34 +322,6 @@ function contextKeyFor(role, checkpoint, context) {
     throw workflowError("Plan-execution session checkpoint is invalid.");
   }
   return sha256(`${role}\0${checkpoint}\0${context}`);
-}
-
-function canonicalPlan(source) {
-  if (typeof source === "string" && source.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  let plan;
-  try {
-    plan = serializeCommitPlan(parseCommitPlan(source));
-  } catch (cause) {
-    if (!(cause instanceof CommitPlanValidationError)) {
-      throw cause;
-    }
-    throw new PlanExecutionWorkflowError("plan.md is invalid.", {
-      cause,
-      code: "ERR_INVALID_EXECUTION_PLAN",
-    });
-  }
-  if (plan.length > MAX_PLAN_LENGTH) {
-    throw new PlanExecutionWorkflowError(
-      `plan.md must not exceed ${MAX_PLAN_LENGTH} characters.`,
-      { code: "ERR_INVALID_EXECUTION_PLAN" },
-    );
-  }
-  return plan;
 }
 
 function diagnosticCode(cause, fallback) {
@@ -736,8 +695,10 @@ export async function runPlanExecution({
   operatorStopPreEffectRejection = null,
 }) {
   assertRun(run);
+  const stepPolicy = planKindPolicy(run.pipelineState.planKind);
+  stepPolicy.assertExecutable();
   if (run.pipelineState.workflowState === "CANCELED") return run;
-  assertRuntime(runtime, Object.keys(run.roles));
+  assertRuntime(runtime, Object.keys(run.roles), stepPolicy.kind);
   const resumeAction = normalizeResumeAction(action);
   if (run.pipelineState.settings === null) {
     assertSettings(settings);
@@ -1184,7 +1145,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
     );
     return Object.freeze({
       inputs,
-      canonicalPlan: canonicalPlan(inputs.plan.content),
+      canonicalPlan: canonicalExecutionPlan(
+        inputs.plan.content,
+        stepPolicy.kind,
+      ),
     });
   }
 
@@ -1280,35 +1244,13 @@ Include every listed command exactly once in requiredChecks with its actual cano
     const stepNumber = current.completedCommits.length + 1;
     const step = effectivePlanAuthority(current).steps[stepNumber - 1];
     if (step === undefined) return true;
-    const observed = await runtime.git.inspectHead({
+    const evidence = await stepPolicy.inspectPlanPosition({
+      git: runtime.git,
       projectPath: currentRun.projectPath,
+      baseline: current.repositoryBaseline,
+      step,
     });
-    if (
-      observed.head === current.repositoryBaseline.head &&
-      observed.subject !== step.subject
-    )
-      return true;
-    // Preserve the existing diagnostics for independent control violations.
-    const snapshot = await runtime.git.snapshot({
-      projectPath: currentRun.projectPath,
-      allowedPaths: current.repositoryBaseline.allowedPaths,
-    });
-    if (
-      [
-        "branch",
-        "detached",
-        "remoteConfigurationFingerprint",
-        "identityFingerprint",
-      ].some((field) => snapshot[field] !== current.repositoryBaseline[field])
-    )
-      return true;
-    if (
-      observed.head === current.repositoryBaseline.head &&
-      ["refsFingerprint", "indexFingerprint", "contentFingerprint"].some(
-        (field) => snapshot[field] !== current.repositoryBaseline[field],
-      )
-    )
-      return true;
+    if (evidence === null) return true;
     await transition(
       {
         ...current,
@@ -1321,12 +1263,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
           code: "ERR_STALE_EXECUTION_PLAN",
           explanation:
             "The runner-selected plan step conflicts with the observed HEAD. Revise the plan and start a new run.",
-          evidence: [
-            `Current step ${stepNumber}: ${step.subject}`,
-            observed.subject === step.subject
-              ? "HEAD already has the exact current planned subject."
-              : "HEAD moved outside runner-authorized commit settlement.",
-          ],
+          evidence,
         },
         publicActivity: activity(
           "runner",
@@ -1466,6 +1403,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
         await runtime.adapters[role].probe(),
         role,
         currentRun.sessionLineage.source,
+        stepPolicy.kind,
       );
     } catch (cause) {
       throw new PlanExecutionWorkflowError(`${role} backend is unavailable.`, {
@@ -1761,6 +1699,8 @@ Include every listed command exactly once in requiredChecks with its actual cano
       outputExhaustionPatch,
     } = {},
   ) {
+    if (!stepPolicy.roleAccess[role]?.includes(access))
+      throw workflowError("The plan kind does not authorize this role access.");
     if (state().preflightComplete && !(await verifyFinalizationGuidance())) {
       return null;
     }
@@ -2593,6 +2533,10 @@ Include every listed command exactly once in requiredChecks with its actual cano
     return effectivePlanAuthority(state()).steps[state().currentStep - 1];
   }
 
+  function plannedStepContext(step) {
+    return stepPolicy.stepContext(effectivePlanAuthority(state()).plan, step);
+  }
+
   function fixBudget() {
     return state().settings.maxFixRoundsPerStep + state().additionalFixRounds;
   }
@@ -3145,7 +3089,7 @@ Include every listed command exactly once in requiredChecks with its actual cano
     }
     const validationSchedule = deriveValidationSchedule(
       [state().workerValidation, state().reviewerValidation],
-      parseCommitPlan(state().canonicalPlan).steps.length,
+      stepPolicy.parse(state().canonicalPlan).steps.length,
     );
     return {
       requiredChecks: scheduledChecks(
@@ -4014,65 +3958,16 @@ ${JSON.stringify(
   async function initializeInputs() {
     if (!(await ensureTrustedCapabilities())) return false;
     const input = await readInputs();
-    const discoveryOptions = {
-      allowedPaths: [],
+    const preflight = await stepPolicy.inspectWorkspace({
+      git: runtime.git,
       projectPath: currentRun.projectPath,
-      requireClean: true,
-      requireIdentity: true,
-      requiredIgnoredPaths: [],
-    };
-    let discovery;
-    try {
-      discovery = await runtime.git.preflight(discoveryOptions);
-    } catch (cause) {
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
-        await pause("unsafe_git_state", { code: cause.code });
-        return false;
-      }
-      throw cause;
-    }
-    const repositoryPath = discovery?.snapshot?.projectPath;
-    if (
-      !isRecord(discovery?.snapshot) ||
-      typeof repositoryPath !== "string" ||
-      !isAbsolute(repositoryPath) ||
-      resolve(repositoryPath) !== repositoryPath ||
-      !isWithin(repositoryPath, currentRun.projectPath)
-    ) {
-      throw workflowError("Git preflight returned an invalid repository root.");
-    }
-    const clarificationPath = join(
-      repositoryPath,
-      state().artifactRoot,
-      "agent-runner",
-      currentRun.runId,
-      "clarifications.md",
-    );
-    let preflight;
-    try {
-      preflight = await runtime.git.preflight({
-        allowedPaths: [clarificationPath],
-        projectPath: repositoryPath,
-        requireClean: true,
-        requireIdentity: true,
-        requiredIgnoredPaths: [clarificationPath],
-      });
-    } catch (cause) {
-      if (cause?.code === "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED") {
-        await pause("local_artifacts_not_ignored", { path: clarificationPath });
-        return false;
-      }
-      if (GIT_PREFLIGHT_CODES.has(cause?.code)) {
-        await pause("unsafe_git_state", { code: cause.code });
-        return false;
-      }
-      throw cause;
-    }
-    if (preflight?.snapshot?.projectPath !== repositoryPath) {
-      throw workflowError(
-        "Git preflight returned an unstable repository root.",
-      );
-    }
+      artifactRoot: state().artifactRoot,
+      runId: currentRun.runId,
+      pause,
+    });
+    if (preflight === null) return false;
+    const { clarificationPath } = preflight;
+    const repositoryPath = preflight.snapshot.projectPath;
     const finalizationGuidance =
       await resolveFinalizationGuidance(repositoryPath);
     if (finalizationGuidance === null) return false;
@@ -4089,6 +3984,7 @@ ${JSON.stringify(
               await runtime.adapters[role].probe(),
               role,
               currentRun.sessionLineage.source,
+              stepPolicy.kind,
             ),
           ]),
         ),
@@ -4678,10 +4574,7 @@ ${prefinalizationTrustedCommands()}
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}${
+${plannedStepContext(step)}${
       current.implementationDirection === null
         ? ""
         : `\n\nRequired rework direction:\n${JSON.stringify(current.implementationDirection, null, 2)}\n\nPersisted correction context:\n${JSON.stringify(
@@ -4736,7 +4629,10 @@ ${step.body}${
     if (
       !correction &&
       !evidence.accepted &&
-      (await contentFingerprint()) === evidence.contentFingerprint
+      !stepPolicy.acceptsInitialResult(
+        evidence.contentFingerprint,
+        await contentFingerprint(),
+      )
     ) {
       return pauseForImplementationEvidence(
         "Initial implementation left the step content unchanged. Revise the plan and start a new run.",
@@ -4819,10 +4715,7 @@ ${trustedValidationInstructions(true)}
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 ${
   correction === undefined
     ? ""
@@ -5490,10 +5383,7 @@ ${prefinalizationTrustedCommands()}
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Concrete findings from the preceding clean confirmation:
 ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(correction)}`,
@@ -5681,10 +5571,7 @@ ${JSON.stringify(primaryFindings(state()), null, 2)}${lazyCorrectionPrompt(corre
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Inspected candidate fingerprint: ${inspectedFingerprint}
 
@@ -5868,10 +5755,7 @@ ${JSON.stringify(combinedReview(current.settings) ? current.primaryFindings : cu
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Finalized content fingerprint: ${inspectedFingerprint}
 Validation-infrastructure fingerprint: ${inspectedValidationFingerprint}
@@ -5976,7 +5860,7 @@ ${JSON.stringify(state().previousFindings, null, 2)}${
           {
             ...state(),
             ...acceptedValidation,
-            workflowState: "COMMIT",
+            workflowState: stepPolicy.terminalState,
             pendingConfirmationCorrection: null,
             reviewResult,
             reviewedFingerprint: confirmedFingerprint,
@@ -6111,10 +5995,7 @@ Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionabl
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 Previous candidate findings for this step:
 ${JSON.stringify(current.previousFindings, null, 2)}${
@@ -6402,10 +6283,7 @@ Reuse an existing ID for an unchanged finding. Use FINDINGS with every actionabl
 
 ${evidence}
 
-Current planned commit:
-## Commit ${step.number}: ${step.subject}
-
-${step.body}
+${plannedStepContext(step)}
 
 ${confirmationValidationPrompt(current)}
 
@@ -6606,7 +6484,7 @@ User overrides are runner-owned audit decisions. Do not describe an override as 
     await transition(
       {
         ...state(),
-        workflowState: "COMMIT",
+        workflowState: stepPolicy.terminalState,
         ...(result.validationChange === "ACCEPTED"
           ? acceptedValidationAmendment(current)
           : {}),
@@ -7203,6 +7081,7 @@ ${JSON.stringify(
   }
 
   async function runCommitTurn() {
+    const commit = stepPolicy.commitService(runtime);
     const current = state();
     const step = planStep();
     let pendingCommit = current.pendingCommit;
@@ -7254,7 +7133,7 @@ ${JSON.stringify(
       }
       let authorization;
       try {
-        authorization = await runtime.git.prepareCommit({
+        authorization = await commit.prepareCommit({
           expectedSnapshot: current.repositoryBaseline,
           subject: step.subject,
           persistPendingCommit: async (preparedAuthorization) => {
@@ -7321,33 +7200,30 @@ ${JSON.stringify(
         .find((child) => child.role === "worker")?.sessionId;
       let baseRequest;
       try {
-        baseRequest = await runtime.git.consumeCommit(
-          pendingCommit.authorization,
-          {
-            consumePendingCommit: async () => {
-              commitAuthorizationPersistence = true;
-              await transition(
-                {
-                  ...state(),
-                  pendingCommit: {
-                    status: "consumed",
-                    authorization: pendingCommit.authorization,
-                    preEffectRejection: null,
-                  },
+        baseRequest = await commit.consumeCommit(pendingCommit.authorization, {
+          consumePendingCommit: async () => {
+            commitAuthorizationPersistence = true;
+            await transition(
+              {
+                ...state(),
+                pendingCommit: {
+                  status: "consumed",
+                  authorization: pendingCommit.authorization,
+                  preEffectRejection: null,
                 },
-                {
-                  publicActivity: activity(
-                    "runner",
-                    "commit",
-                    "started",
-                    `Commit ${current.currentStep} authorization consumed.`,
-                  ),
-                },
-              );
-              commitAuthorizationPersistence = false;
-            },
+              },
+              {
+                publicActivity: activity(
+                  "runner",
+                  "commit",
+                  "started",
+                  `Commit ${current.currentStep} authorization consumed.`,
+                ),
+              },
+            );
+            commitAuthorizationPersistence = false;
           },
-        );
+        });
       } catch (cause) {
         if (cause?.code === "ERR_COMMIT_GATE_CHANGED") {
           await transition(
@@ -7443,7 +7319,7 @@ ${step.subject}`),
 
     let verified;
     try {
-      verified = await runtime.git.verifyCommit(pendingCommit.authorization);
+      verified = await commit.verifyCommit(pendingCommit.authorization);
     } catch (cause) {
       if (
         !["ERR_COMMIT_NOT_CREATED", "ERR_COMMIT_CONTRACT_VIOLATED"].includes(

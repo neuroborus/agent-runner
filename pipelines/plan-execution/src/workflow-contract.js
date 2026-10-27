@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { PlanExecutionWorkflowError } from "./errors.js";
 import {
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+  MAX_PLAN_LENGTH,
+  planKindPolicy,
+  requiredRoleCapabilities,
+} from "./step-policy.js";
 
 import { validImplementationEvidence } from "./implementation-evidence.js";
 import {
@@ -41,6 +43,8 @@ import {
   validationEvidenceFingerprint,
 } from "./validation-schedule.js";
 
+export { PlanExecutionWorkflowError, MAX_PLAN_LENGTH };
+
 export const MAX_CLARIFICATION_ROUNDS = 3;
 export const DEFAULT_FINALIZATION_POLICY = "auto";
 export const CONVENTIONAL_FINALIZATION_SKILL_PATHS = Object.freeze([
@@ -67,6 +71,7 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "planKind",
   "planContextVersion",
   "stepImplementation",
   "implementationEvidenceLegacy",
@@ -179,7 +184,6 @@ const FINALIZATION_ISSUE_ID_PATTERN = /^F[1-9][0-9]{0,8}$/u;
 const REQUIRED_CHECK_ID_PATTERN = /^C[1-9][0-9]{0,8}$/u;
 export const MAX_TEXT_LENGTH = 4_000;
 export const MAX_SUMMARY_LENGTH = 20_000;
-export const MAX_PLAN_LENGTH = 100_000;
 export const MAX_ITEMS = 32;
 export const MAX_BOOTSTRAP_ITEMS = 256;
 export const MAX_VALIDATION_ITEMS = MAX_BOOTSTRAP_ITEMS * 2;
@@ -471,30 +475,6 @@ const COMMIT_AUTHORIZATION_FIELDS = Object.freeze([
   "expectedCommitterIdentityFingerprint",
   "subject",
 ]);
-
-export class PlanExecutionWorkflowError extends Error {
-  constructor(
-    message,
-    {
-      cause,
-      code = "ERR_PLAN_EXECUTION_WORKFLOW",
-      diagnostic,
-      diagnostics,
-    } = {},
-  ) {
-    super(message, cause === undefined ? undefined : { cause });
-    this.name = "PlanExecutionWorkflowError";
-    this.code = code;
-    if (diagnostic !== undefined) {
-      this.diagnostic = Object.freeze({ ...diagnostic });
-    }
-    if (diagnostics !== undefined) {
-      this.diagnostics = Object.freeze(
-        diagnostics.map((entry) => Object.freeze({ ...entry })),
-      );
-    }
-  }
-}
 
 export function isRecord(value) {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -3676,7 +3656,7 @@ function validateValidationSchedule(state, planSteps, validations) {
     receipt?.schedule ??
     deriveValidationSchedule(
       validations,
-      parseCommitPlan(state.canonicalPlan).steps.length,
+      planKindPolicy(state.planKind).parse(state.canonicalPlan).steps.length,
     );
   if (
     !isDeepStrictEqual(state.validationSchedule, expected) ||
@@ -4121,10 +4101,15 @@ export function normalizePipelineState(value) {
   if (
     Object.keys(value).length !== PIPELINE_STATE_FIELDS.size ||
     Object.keys(value).some((field) => !PIPELINE_STATE_FIELDS.has(field)) ||
-    !WORKFLOW_STATES.includes(value.workflowState)
+    !WORKFLOW_STATES.includes(value.workflowState) ||
+    !["commit", "custom"].includes(value.planKind)
   ) {
     throw workflowError("Plan-execution state is invalid.");
   }
+  const stepPolicy = planKindPolicy(value.planKind);
+  // No persisted custom state may reach commit-shaped recovery before its
+  // accepted-result lifecycle is implemented and explicitly exposed.
+  stepPolicy.assertExecutable();
   if (
     typeof value.artifactRoot !== "string" ||
     value.artifactRoot.includes("\\") ||
@@ -4366,8 +4351,8 @@ export function normalizePipelineState(value) {
   if (value.canonicalPlan !== null) {
     let canonical;
     try {
-      const plan = parseCommitPlan(value.canonicalPlan);
-      canonical = serializeCommitPlan(plan);
+      const plan = stepPolicy.parse(value.canonicalPlan);
+      canonical = stepPolicy.serialize(plan);
       planSteps = plan.steps;
     } catch {
       throw workflowError("Plan-execution canonical plan is invalid.");
@@ -5498,6 +5483,7 @@ export function normalizePipelineState(value) {
 
 export function createPlanExecutionState({
   artifactRoot = "LOCAL_ARTIFACTS",
+  planKind = "commit",
   proactiveClarification = false,
   settings = null,
   trustedValidation = EMPTY_TRUSTED_VALIDATION,
@@ -5513,6 +5499,7 @@ export function createPlanExecutionState({
   return Object.freeze(
     normalizePipelineState({
       workflowState: "CLARIFY",
+      planKind,
       artifactRoot,
       preflightComplete: false,
       planContextVersion: 1,
@@ -5749,7 +5736,7 @@ export function assertRun(run) {
     typeof run.runId !== "string" ||
     !RUN_ID_PATTERN.test(run.runId) ||
     run.pipelineId !== "plan-execution" ||
-    run.pipelineStateVersion !== 32 ||
+    run.pipelineStateVersion !== 33 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -6277,7 +6264,12 @@ function normalizeSettings(settings) {
   return normalized;
 }
 
-export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
+export function assertRuntime(
+  runtime,
+  activeRoles = resolveActiveRoles(),
+  planKind = "commit",
+) {
+  const stepPolicy = planKindPolicy(planKind);
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
@@ -6299,7 +6291,7 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   }
   for (const name of [
     "finishAgentTurn",
-    "settleVerifiedCommit",
+    ...stepPolicy.runtimeMethods,
     "readInputs",
     "recordChildSession",
     "startAgentTurn",
@@ -6310,18 +6302,7 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
       throw workflowError(`Plan-execution runtime.${name} is invalid.`);
     }
   }
-  for (const name of [
-    "assertUnchanged",
-    "consumeCommit",
-    "contentFingerprint",
-    "inspectHead",
-    "inspectPath",
-    "preflight",
-    "prepareCommit",
-    "snapshot",
-    "validationInfrastructureFingerprint",
-    "verifyCommit",
-  ]) {
+  for (const name of stepPolicy.workspaceMethods) {
     if (typeof runtime.git[name] !== "function") {
       throw workflowError(`Plan-execution Git service.${name} is invalid.`);
     }
@@ -6344,7 +6325,12 @@ export function assertRuntime(runtime, activeRoles = resolveActiveRoles()) {
   }
 }
 
-export function normalizeAdapterCapabilities(value, role, sourceSession) {
+export function normalizeAdapterCapabilities(
+  value,
+  role,
+  sourceSession,
+  planKind = "commit",
+) {
   if (
     !isRecord(value) ||
     typeof value.version !== "string" ||
@@ -6355,17 +6341,7 @@ export function normalizeAdapterCapabilities(value, role, sourceSession) {
       "ERR_UNSUPPORTED_PLAN_EXECUTION_BACKEND",
     );
   }
-  const required =
-    role === "worker"
-      ? [
-          "structuredOutput",
-          "readOnly",
-          "autonomousWrite",
-          "workspaceWrite",
-          "localCommit",
-          "remoteWriteBlocked",
-        ]
-      : ["structuredOutput", "readOnly", "remoteWriteBlocked"];
+  const required = [...requiredRoleCapabilities(planKind, role)];
   if (sourceSession !== null && role !== "arbiter") {
     required.push("nativeSessionFork");
   }

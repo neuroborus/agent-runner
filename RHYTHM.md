@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-27
 
+- **Execution separates plan-kind differences from review policy.** Private
+  step policies own parsing, criterion context, workspace inspection, initial
+  change requirements, role access and terminal effects. Commit execution keeps
+  stale-plan checks, exact subjects, nonempty initial implementation and
+  one-shot recovery. Custom analysis permits no diff and grants no Git effects;
+  its execution entry points remain closed pending accepted-result settlement.
+  State version 33 records explicit kind, migrating legacy runs to commit
+  semantics without changing approvals, consumed effects or refinement eligibility.
+
 - **Custom authoring requires explicit selection and agreed criteria.** The
   authoring descriptor selects Git or directory lifecycle after configuration
   resolution, preserving omitted/legacy commit semantics. Criteria may be

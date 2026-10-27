@@ -288,6 +288,14 @@ Keep the ordinary gate as `npm run check`; never fold slow matrices into it.
 The fast execution `validation-schedule.test.js` uses injected effects to cover
 two-step selection in all modes, persisted reload, confirmation reuse, and
 migration of pending rework and correction accounting.
+The fast execution `step-policy.test.js` covers explicit plan-contract selection,
+criterion context, analysis without an artificial diff, directory-only inspection,
+absence of custom Git effects and closed execution entry points. Its lightweight
+all-mode fixtures verify that adding persisted kind preserves consumed commit
+verification without another provider turn or renewed accounting. Existing
+stale-plan, implementation-evidence, refinement and commit-safety suites retain
+their distinct behavioral coverage. Persisted kind changes also require the
+affected runner and legacy-migration slow coverage listed above.
 The fast execution `bounded-bootstrap.test.js` uses lightweight effects to cover
 multi-step discovery and batch acceptance, persisted interruption and reload,
 role isolation in all modes, output subdivision, migration exhaustion pauses,

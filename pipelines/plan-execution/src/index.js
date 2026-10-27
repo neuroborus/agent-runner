@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
+import { planKindPolicy } from "./step-policy.js";
 import {
   COMMIT_SIZE_DEFAULTS,
   commitSizeThreshold,
@@ -116,11 +117,6 @@ function trustedCheckSelection(value) {
 }
 
 const ROLES = resolveActiveRoles();
-const ROLE_ACCESS = Object.freeze({
-  worker: Object.freeze(["read-only", "workspace-write", "local-commit"]),
-  reviewer: Object.freeze(["read-only"]),
-  arbiter: Object.freeze(["read-only"]),
-});
 const SETTINGS = Object.freeze({
   preferredCommitLineLimit: positiveIntegerSetting(
     COMMIT_SIZE_DEFAULTS.preferredCommitLineLimit,
@@ -1471,11 +1467,17 @@ export function migratePlanExecutionStateV31(run) {
   });
 }
 
+export function migratePlanExecutionStateV32(run) {
+  // Version 32 only executed commit plans. Migration confers no custom access
+  // and preserves every approval, completed commit and consumed authorization.
+  return Object.freeze({ ...run.pipelineState, planKind: "commit" });
+}
+
 export const planExecutionPipeline = Object.freeze({
   id: PLAN_EXECUTION_PIPELINE_ID,
   classifyStopCheckpoint,
   resolveStopBoundary,
-  stateVersion: 32,
+  stateVersion: 33,
   migrations: Object.freeze({
     1: migratePlanExecutionStateV1,
     2: migratePlanExecutionStateV2,
@@ -1513,10 +1515,11 @@ export const planExecutionPipeline = Object.freeze({
     29: migratePlanExecutionStateV29,
     30: migratePlanExecutionStateV30,
     31: migratePlanExecutionStateV31,
+    32: migratePlanExecutionStateV32,
   }),
   roles: ROLES,
-  roleAccess: ROLE_ACCESS,
-  workspace: Object.freeze({ kind: "git", lease: "exclusive" }),
+  roleAccess: planKindPolicy("commit").roleAccess,
+  workspace: planKindPolicy("commit").workspace,
   resolveActiveRoles,
   settings: SETTINGS,
   validateSettings: commitSizeThreshold,
