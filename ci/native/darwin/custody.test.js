@@ -19,6 +19,114 @@ import {
   withNativeDiagnostics,
 } from "../diagnostics.js";
 
+test("Darwin reader retains successful spawn identity and channels before fallible cleanup", async () => {
+  const reader = await readFile(
+    new URL("custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const refuse = /static void case_spawn_refuse[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(reader)[1]
+    .replaceAll("->", ".")
+    .replace("struct domain_bootstrap_issue first", "const first")
+    .replace("unsigned i", "let i")
+    .replace("(void)", "");
+  for (const prefix of ["case", "git"]) {
+    const source = reader.slice(
+      reader.indexOf(
+        prefix === "case"
+          ? "static void case_start("
+          : "static void git_ordinary_start(",
+      ),
+    );
+    const start = source.indexOf("  pid_t child = -1;");
+    const launch = source
+      .slice(start, source.indexOf("#else", start))
+      .replaceAll("->", ".")
+      .replace(
+        /&(actions_owned|attributes_owned|child)\b/gu,
+        (_, key) => `{get value(){return ${key}},set value(v){${key}=v}}`,
+      )
+      .replace(/&(spawn|files|actions|attributes)\b/gu, "$1")
+      .replace("pid_t child", "let child");
+    for (const fault of [null, "spawn", "cleanup"]) {
+      const argv = ["sealed-launcher", "literal", "", "space value"],
+        env = ["CI=true"];
+      const state = () =>
+        ["pid", "in", "out", "data"].map((key) => api[`${prefix}_${key}`]);
+      const api = {
+        argv,
+        env,
+        environment: env,
+        launcher: { path: "sealed-launcher" },
+        actions: {},
+        files: {},
+        attributes: {},
+        spawn: { count: 0, issues: [] },
+        ready: true,
+        actions_owned: true,
+        attributes_owned: true,
+        bootstrap_port: 71,
+        control: [10, 11],
+        output: [12, 14],
+        input: [10, 11],
+        out: [12, 14],
+        data: [13, 15],
+        SIGPIPE: 13,
+        SIG_IGN: 1,
+        stderr: 2,
+        signal() {},
+        fprintf() {},
+        [`${prefix}_pid`]: 0,
+        [`${prefix}_in`]: -1,
+        [`${prefix}_out`]: -1,
+        [`${prefix}_data`]: -1,
+        domain_spawn_check(out, result, operation) {
+          if (result) {
+            out.count++;
+            out.issues.push({ operation, value: result, cleanup: false });
+          }
+          return result === 0;
+        },
+        posix_spawn(child, path, _files, _attributes, args, environment) {
+          assert.equal(path, "sealed-launcher");
+          assert.equal(args, argv);
+          assert.equal(environment, env);
+          child.value = fault === "spawn" ? 987 : 42;
+          return fault === "spawn" ? 35 : 0;
+        },
+        domain_spawn_settle(out) {
+          assert.deepEqual(
+            state(),
+            fault === "spawn" ? [0, -1, -1, -1] : [42, 11, 12, 13],
+          );
+          if (fault === "cleanup") {
+            out.count++;
+            out.issues.push({ operation: "cleanup", value: 11, cleanup: true });
+          }
+        },
+        case_child_failure(child, operation, result, error) {
+          assert.equal(child, state()[0]);
+          assert.deepEqual(
+            [result, error],
+            fault === "spawn" ? [35, 0] : [11, 0],
+          );
+          throw new Error(operation);
+        },
+      };
+      // C's input channel name is a JavaScript keyword.
+      const script = new Script(
+        `function case_spawn_refuse(out, child) {${refuse}}\n${launch.replace(/\bin\b/gu, "input")}`,
+      );
+      if (fault)
+        assert.throws(() => script.runInNewContext(api), {
+          message: fault === "spawn" ? "spawn-launch" : "cleanup",
+        });
+      else script.runInNewContext(api);
+      assert.equal(api.bootstrap_port, 71);
+    }
+  }
+});
+
 test("Darwin experimental launcher retains the fork child through registered and bootstrap restoration refusal", async () => {
   const source = await readFile(new URL("launcher.c", import.meta.url), "utf8");
   const body =
@@ -4105,6 +4213,11 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
   const functions =
     `const DOMAIN_EXCEPTION_MASK = ${/^#define DOMAIN_EXCEPTION_MASK (.+)$/mu.exec(custody)[1]};\n` +
     [
+      [
+        reader,
+        "case_child_failure",
+        "child,operation,result,error,revents,used",
+      ],
       [reader, "case_launch_failure", "operation,result,error,revents,used"],
       [reader, "case_launch_check", "operation,result"],
       [reader, "case_line", "fd,encoded"],
@@ -4141,6 +4254,10 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       .replace(
         "posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;",
         "const actions={},attributes={};",
+      )
+      .replace(
+        /#ifdef NATIVE_CI_EXPERIMENT[\s\S]*?#else\n([\s\S]*?)#endif/gu,
+        "$1",
       )
       .replaceAll(/&(actions|attributes)/gu, "$1"),
     capture = /  launcher_identity = inspect\(getpid\(\)\);/u.exec(
@@ -4303,11 +4420,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       "mach_port_names/authority",
       unknownType,
     ]),
-    [
-      { unknownType: SEND, probeRelease: 15 },
-      "mach_port_names/authority",
-      SEND,
-    ],
     ...[0, 0xffffffff, 3, 6, 7, 200].map((bootstrap) => [{ bootstrap }]),
     ...[
       {},
@@ -5111,28 +5223,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
           assert.equal(name, original[2]);
           machCalls.push(["refusal-request", name]);
         },
-        // Shared actual-body coverage owns the probe effects; bind this call
-        // to the first original refusal before any independent array cleanup.
-        domain_refused_aliases(owner, name, type, query, refs) {
-          const original = machCalls.find(
-            (entry) => Array.isArray(entry) && entry[0] === "refusal",
-          );
-          assert.equal(owner, "launcher");
-          assert.ok(original);
-          assert.deepEqual(machCalls.at(-1), ["refusal-request", name]);
-          assert.deepEqual(
-            [name, type, query, refs],
-            [original[2], original[3], original[9], original[10]],
-          );
-          assert.ok(
-            !machCalls.some(
-              (entry) => Array.isArray(entry) && entry[0] === "array-release",
-            ),
-          );
-          machCalls.push(["alias-probe", name]);
-          api.errno = 96;
-          return machCase.probeRelease ?? 0;
-        },
         TASK_BOOTSTRAP_PORT: 3,
         TASK_DEBUG_CONTROL_PORT: 4,
         TASK_RESOURCE_NOTIFY_PORT: 5,
@@ -5470,12 +5560,6 @@ test("Darwin ownership launch bodies preserve setup and handshake causes on the 
       assert.equal(
         machCalls.filter(
           (entry) => Array.isArray(entry) && entry[0] === "refusal-request",
-        ).length,
-        portFacts.length,
-      );
-      assert.equal(
-        machCalls.filter(
-          (entry) => Array.isArray(entry) && entry[0] === "alias-probe",
         ).length,
         portFacts.length,
       );

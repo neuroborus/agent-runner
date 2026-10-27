@@ -359,8 +359,6 @@ static void domain_port_diagnostic(mach_port_t name, mach_port_type_t census_typ
     getpid(), bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
   fflush(stderr); errno = saved;
   domain_refusal_request(name);
-  kern_return_t probe_release = domain_refused_aliases("fault", name, census_type, send_query, send_refs);
-  if (probe_release != KERN_SUCCESS) remember_cleanup("fault-port-probe-release", "mach", probe_release);
   errno = saved;
 }
 static void domain_sanitize(void) {
@@ -701,6 +699,42 @@ static void domain_parent_gate(void) {
   }
   need(audit_identity_same(domain_record.custodian, fault_inspect(getpid())));
 }
+static void domain_fault_refuse(struct domain_bootstrap_fork *out) {
+  if (!out->count) return;
+  /* Failure emission borrows these names until it exits, never past this scope. */
+  char operations[DOMAIN_FORK_ISSUES][80];
+  for (unsigned i = 0; i < out->count; i++) {
+    struct domain_bootstrap_issue issue = out->issues[i];
+    snprintf(operations[i], sizeof(operations[i]), "fault-%s", issue.operation);
+    remember(operations[i], issue.kind, issue.value);
+    if (issue.cleanup) remember_cleanup(operations[i], issue.kind, issue.value);
+  }
+  failure(126);
+}
+static void domain_fault_bootstrap_entry(void) {
+  struct domain_bootstrap_fork entry = {0}; domain_bootstrap_entry(&entry);
+  domain_fault_refuse(&entry);
+}
+static void domain_reexec(char **argv) {
+  extern char **environ;
+  posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+  struct domain_bootstrap_fork spawn = {0}; bool actions_owned = false, attributes_owned = false;
+  bool ready = domain_spawn_check(&spawn, posix_spawn_file_actions_init(&actions), "spawn-actions-init", false);
+  actions_owned = ready;
+  if (ready) ready = domain_spawn_attributes(&spawn, &attributes, &attributes_owned, POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT);
+  for (int fd = 0; ready && fd <= 3; fd++)
+    ready = domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&actions, fd, fd), "spawn-descriptor", false);
+  if (ready) {
+    pid_t unused = -1;
+    int result = posix_spawn(&unused, domain_helper, &actions, &attributes, argv, environ);
+    domain_spawn_check(&spawn, result, "reexec", false);
+    /* Successful SETEXEC replaces this image. Even a zero return is refusal. */
+    domain_bootstrap_check(&spawn, result != 0, "reexec-return", "invariant", 0, false);
+  }
+  domain_spawn_settle(&spawn, &actions, &actions_owned, &attributes, &attributes_owned);
+  domain_fault_refuse(&spawn);
+  failure(126);
+}
 static void domain_start(int argc, char **argv) {
   invariant(argc == 10 && strlen(argv[3]) == 40 && strspn(argv[3], "0123456789abcdef") == 40 &&
     (!strcmp(argv[4], "cancel") || !strcmp(argv[4], "owner-loss")) && domain_hash(argv[6]) && domain_hash(argv[7]), "fault-start-input");
@@ -740,8 +774,7 @@ static void domain_start(int argc, char **argv) {
     (journal.st_mode & 07777) == 0400 && journal.st_size == sizeof(domain_record), &journal, "fault-journal-shape"); no_acl(domain_journal, &journal);
   posix_check(fsync(domain_root), "fault-root-sync");
   posix_check(dup2(domain_journal, 3), "fault-journal-duplicate"); posix_check(fcntl(3, F_SETFD, 0), "fault-journal-flags");
-  argv[0] = domain_helper; argv[1] = "fault-custody"; execv(domain_helper, argv);
-  int exec_error = errno; remember("fault-reexec", "errno", exec_error); failure(126);
+  argv[0] = domain_helper; argv[1] = "fault-custody"; domain_reexec(argv);
   }
   au_asid_t parent_asid = audit_fresh(0); domain_record.custodian = fault_inspect(getpid()); domain_store(0);
   fputs("{\"hello\":", stdout); domain_emit(); puts("}"); fflush(stdout);

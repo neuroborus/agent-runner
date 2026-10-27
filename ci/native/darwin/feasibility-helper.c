@@ -580,6 +580,9 @@ int main(int argc, char **argv) {
   /* These execs continue an acquired fault domain; reset globals cannot prove
    * that its original effects never started, even when startup now fails. */
   admitted_effects = (argc >= 2 && !strcmp(argv[1], "fault-custody")) || getenv("NATIVE_FAULT_PARENT_ASID") != NULL;
+  if (domain && !strcmp(argv[1], "fault-custody")) {
+    invariant(argc == 10, "fault-start-input"); domain_fault_bootstrap_entry();
+  }
   bool observer = startup_observer_request(argc, argv) || domain;
   if (observer) invariant(getuid() == 0 && geteuid() == 0, "startup-observer-identity");
   else invariant(getuid() > 500 && geteuid() == getuid() && argc >= 2, "worker-identity");

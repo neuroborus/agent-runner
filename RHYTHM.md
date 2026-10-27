@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27 — Fence experimental Darwin bootstrap before helper initialization
+
+Ordinary launcher spawns and same-process fault-custodian SETEXEC use the selected
+SDK's empty-bootstrap attribute. Entry readbacks precede setup while descriptors,
+writable journal, possible effects, owned cleanup and child retention stay bound.
+Excluded own-task alias probes are removed; strict census, independent inspection
+and historical decoding remain. Native admission is unproved; persistent unknown
+authority ends this approach without further probes or policy grants.
+
 ## 2026-10-27 — Arm original Windows audit capture before release
 
 The existing experiment collector arms its supported Security pull subscription

@@ -9382,32 +9382,18 @@ original workflows and independent retirement are still required; portable
 fixtures establish none of those native successes. Other TCP/audit/fault-port
 causes and complete native acceptance remain open.
 
-After saving and reporting that original refusal, both ordinary Darwin paths use
-one shared refusal-only helper in `custody.h`'s runtime-reply scope. In the same
-original child, it sequentially queries its own `TASK_KERNEL_PORT`,
-`TASK_NAME_PORT`, `TASK_READ_PORT`, and `TASK_INSPECT_PORT`. Fixed
-`native-darwin-port-probe` records bind owner/PID, refused name and census type,
-selector/getter result, successfully returned name, acquisition and exact-match
-flags, and available refused-right SEND counts before acquisition, while the
-copy is held and after its release attempt. The first before sample is the saved
-original observation. Unattempted/failed queries use -1 counts; a failed getter's
-written output is not published as a returned name or adopted for cleanup.
+Excluded own-task alias probes no longer run. First-refusal observations,
+independent inspection and historical decoding remain; unknown rights still
+refuse without destruction or allowlisting, and prior nonmatches prove no ownership.
 
-Every record labels its acquisitions `post-refusal=1`. Pinned XNU `ipc_tt.c`
-creates READ/INSPECT ports on demand and can substitute ports during own-task
-copyout; successful probes do not prove that these ports existed before refusal.
-Equal local names provide a positive current alias observation; unequal names
-leave the endpoint unresolved. Each successful valid getter copy receives one
-release attempt even when names alias an original right, borrowed cache, or
-another selector's copy. Original unowned references and borrowed caches remain
-untouched. Per-selector `native-darwin-port-probe-cleanup` records retain failed
-releases without retry, and fault custody separately retains the first failure
-as `fault-port-probe-release` cleanup uncertainty. Diagnostic write failures do
-not replace the saved refusal/errno or prevent owned-copy cleanup. Unavailable
-observations add no launch prerequisite. Neither an observed alias nor its counts
-prove original acquisition/lifetime, authorize acceptance/destruction, repair
-startup, or establish matching-host success. Census and parent restoration,
-payload prohibition and independent cleanup remain unchanged.
+Experimental `case_start` and `git_ordinary_start` use the selected SDK's documented
+[`posix_spawnattr_setspecialport_np`](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/posix_spawnattr_setspecialport_np.3.html)
+with `MACH_PORT_NULL` and `TASK_BOOTSTRAP_PORT` for the sealed image. Direct SDK
+and native linking/loading support are required, without replacement declarations
+or fallback. Reader bootstrap authority, exact argv/environment, descriptor mappings
+and `POSIX_SPAWN_CLOEXEC_DEFAULT` remain. Positive POSIX errors preserve their own
+value; each initialized object settles once, independently, retaining first refusal.
+Failed spawn output owns no PID; success retains child/channels before cleanup.
 
 Ordinary experimental launcher and fault custody fence bootstrap and registered
 slots at their existing single-threaded fork boundary. The guard completely
@@ -9482,9 +9468,24 @@ updates privilege and MAC labels, while the
 only returns grouped public tuples and copies.
 These sources do not establish ownership of the two previously observed residual
 SEND references. Unproved parent references remain untouched; no private cache reset or
-post-hoc count-based release is performed. Initial fault-custodian reexec remains
-unchanged; its subsequent guarded fork and final payload exec inherit the verified
-null bootstrap slot. The strict final census still refuses all unproved live rights.
+post-hoc count-based release is performed. Initial fault-custodian reexec now uses
+`posix_spawn` with `POSIX_SPAWN_SETEXEC | POSIX_SPAWN_CLOEXEC_DEFAULT` and the same
+empty bootstrap attribute. Explicit self-duplication preserves FD0–3, including
+the original writable journal description at FD3; the sealed helper, environment,
+process and post-exec identity publication remain bound. Any SETEXEC return,
+including zero, refuses after independent initialized-object cleanup; the old
+image cannot continue custody setup or adopt a spawn output as a child.
+At the first controlled experimental payload-launch or fault-custody entry,
+checked kernel-slot and exported-cache readbacks require null before normal
+setup or cache clearing. Fault entry first classifies existing effects as possible;
+verifier and other helper modes retain their bootstrap authority. Only successful
+getter copies authorize release; the exported cache remains borrowed.
+This bounded initialization hypothesis does not prove disappearance of the unknown
+launchd SEND right. Existing fork callbacks and strict original-child census remain.
+Persistent unknown authority means admission is not repaired; unsupported APIs,
+startup refusal, incomplete tracing or uncertain retirement remain blocking or
+inconclusive. Stop this approach without new probes, grants or tracing expansion.
+The stopped Windows entry experiment and all original acceptance requirements remain.
 Exact hosted-library equivalence, actual fork/constructor behavior, native compilation,
 all original controls and independent retirement remain matching-host proof requirements.
 Only a classified ordinary host port is permitted; a privileged or

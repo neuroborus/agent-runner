@@ -20,6 +20,30 @@ static bool domain_bootstrap_check(struct domain_bootstrap_fork *out, bool ok, c
   }
   return ok;
 }
+#if defined(NATIVE_CI_EXPERIMENT) || defined(NATIVE_RUNTIME_REPLIES)
+#include <spawn.h>
+/* Use the selected SDK declaration and linked native implementation directly.
+ * POSIX spawn errors are return values, not the caller's ambient errno. */
+static bool domain_spawn_check(struct domain_bootstrap_fork *out, int result, const char *operation, bool cleanup) {
+  return domain_bootstrap_check(out, result == 0, operation, "errno", result, cleanup);
+}
+static bool domain_spawn_attributes(struct domain_bootstrap_fork *out, posix_spawnattr_t *attributes, bool *owned, short flags) {
+  if (!domain_spawn_check(out, posix_spawnattr_init(attributes), "spawn-attributes-init", false)) return false;
+  *owned = true;
+  return domain_spawn_check(out, posix_spawnattr_setflags(attributes, flags), "spawn-flags", false) &&
+    domain_spawn_check(out, posix_spawnattr_setspecialport_np(attributes, MACH_PORT_NULL, TASK_BOOTSTRAP_PORT), "spawn-bootstrap", false);
+}
+static void domain_spawn_settle(struct domain_bootstrap_fork *out, posix_spawn_file_actions_t *actions, bool *actions_owned, posix_spawnattr_t *attributes, bool *attributes_owned) {
+  if (*actions_owned) {
+    *actions_owned = false;
+    domain_spawn_check(out, posix_spawn_file_actions_destroy(actions), "spawn-actions-destroy", true);
+  }
+  if (*attributes_owned) {
+    *attributes_owned = false;
+    domain_spawn_check(out, posix_spawnattr_destroy(attributes), "spawn-attributes-destroy", true);
+  }
+}
+#endif
 /* One release attempt per successful getter acquisition, including aliases.
  * Counts are untrusted; initialized bounded storage is the only cleanup input. */
 static bool domain_exception_settle(struct domain_bootstrap_fork *out, mach_port_t handlers[EXC_TYPES_COUNT], mach_msg_type_number_t count, int releases[EXC_TYPES_COUNT]) {
@@ -99,41 +123,6 @@ static long long domain_send_refs(mach_port_t name, int *query) {
     *query = mach_port_get_refs(mach_task_self(), name, MACH_PORT_RIGHT_SEND, &refs);
   errno = saved;
   return *query == KERN_SUCCESS ? (long long)refs : -1;
-}
-/* Refusal-only own-task hypotheses, never an admission or ownership rule.
- * XNU 43a9088 ipc_tt.c/task.defs returns copied SEND rights; READ/INSPECT can
- * allocate on demand, and own-task copyout may substitute a port. Thus equal
- * names observe an alias, while unequal names leave the endpoint unresolved.
- * These public contracts do not establish the hosted library's provenance. */
-static kern_return_t domain_refused_aliases(const char *owner, mach_port_t name, mach_port_type_t census_type, int original_query, long long original_refs) {
-  int saved = errno; kern_return_t cleanup = KERN_SUCCESS;
-  if (!MACH_PORT_VALID(name)) return cleanup;
-  const int selectors[] = {TASK_KERNEL_PORT, TASK_NAME_PORT, TASK_READ_PORT, TASK_INSPECT_PORT};
-  const char *labels[] = {"TASK_KERNEL_PORT", "TASK_NAME_PORT", "TASK_READ_PORT", "TASK_INSPECT_PORT"};
-  /* Only this already-refused child changes disposition; a closed diagnostic
-   * pipe must not interrupt settlement of copies or the caller's cleanup. */
-  (void)signal(SIGPIPE, SIG_IGN);
-  for (unsigned i = 0; i < 4; i++) {
-    int before_query = original_query, held_query = -1, after_query = -1;
-    long long before = i ? domain_send_refs(name, &before_query) : original_refs;
-    mach_port_t copy = MACH_PORT_NULL;
-    kern_return_t got = task_get_special_port(mach_task_self(), selectors[i], &copy);
-    bool acquired = got == KERN_SUCCESS && MACH_PORT_VALID(copy);
-    long long held = acquired ? domain_send_refs(name, &held_query) : -1;
-    /* One release per successful valid acquisition, even an alias of a cache
-     * or the original name. Failed outputs own nothing; never retry a release. */
-    kern_return_t released = acquired ? mach_port_deallocate(mach_task_self(), copy) : -1;
-    long long after = domain_send_refs(name, &after_query);
-    if (acquired && released != KERN_SUCCESS) {
-      if (cleanup == KERN_SUCCESS) cleanup = released;
-      fprintf(stderr, "native-darwin-port-probe-cleanup: owner=%s pid=%d selector=%s result=%d\n",
-        owner, getpid(), labels[i], released);
-    }
-    fprintf(stderr, "native-darwin-port-probe: owner=%s pid=%d refused=%u census-type=%#x post-refusal=1 selector=%s get=%d name=%u acquired=%u match=%u before-query=%d before-refs=%lld held-query=%d held-refs=%lld release=%d after-query=%d after-refs=%lld\n",
-      owner, getpid(), name, census_type, labels[i], got, got == KERN_SUCCESS ? copy : MACH_PORT_NULL,
-      !!acquired, !!(acquired && copy == name), before_query, before, held_query, held, released, after_query, after);
-  }
-  fflush(stderr); errno = saved; return cleanup;
 }
 /* XNU 43a9088: task.defs/std_types.defs use COPY_SEND for the setter;
  * ipc_task_init creates a fresh space and copies the parent's bootstrap slot.
@@ -226,6 +215,13 @@ static bool domain_bootstrap_read(struct domain_bootstrap_fork *out, mach_port_t
     }
   }
   return ok;
+}
+/* Read before setup or cache clearing. Only successful getter copies are owned;
+ * the exported cache remains a borrow even when it aliases a getter result. */
+static void domain_bootstrap_entry(struct domain_bootstrap_fork *out) {
+  extern mach_port_t bootstrap_port;
+  domain_bootstrap_read(out, MACH_PORT_NULL, "bootstrap-entry", false);
+  domain_bootstrap_check(out, bootstrap_port == MACH_PORT_NULL, "bootstrap-entry-cache", "invariant", 0, false);
 }
 static void domain_bootstrap_fork(struct domain_bootstrap_fork *out, pid_t *retained, void (*bind)(void)) {
   memset(out, 0, sizeof(*out)); out->child = -1;

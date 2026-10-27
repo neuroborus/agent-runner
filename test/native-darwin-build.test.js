@@ -1467,240 +1467,266 @@ test("Darwin exception readback requires every public class and settles independ
   }
 });
 
-test("Darwin refused-right probes settle only new copies and retain inconclusive observations", async () => {
-  const source = await readFile(new URL("custody.h", SOURCE), "utf8");
-  const functions = [
-    ["domain_send_refs", "name,query"],
-    [
-      "domain_refused_aliases",
-      "owner,name,census_type,original_query,original_refs",
-    ],
-  ]
+test("Darwin SETEXEC preserves descriptors and settles initialized spawn objects without continuing on return", async () => {
+  const [header, domain] = await Promise.all(
+    ["custody.h", "feasibility-domain.h"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const parameters = {
+    domain_spawn_check: "out,result,operation,cleanup",
+    domain_spawn_attributes: "out,attributes,owned,flags",
+    domain_spawn_settle:
+      "out,actions,actions_owned,attributes,attributes_owned",
+    domain_reexec: "argv",
+  };
+  const functions = Object.entries(parameters)
     .map(([name, args]) => {
+      const source = name === "domain_reexec" ? domain : header;
       const body = new RegExp(
-        `static (?:kern_return_t|long long) ${name}\\([^\\n]+\\) \\{([\\s\\S]*?)\\n\\}`,
+        `static (?:bool|void) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
         "u",
       ).exec(source)?.[1];
       assert.ok(body, name);
       return `function ${name}(${args}) {${body
+        .replaceAll("->", ".")
+        .replace("extern char **environ;", "")
         .replace(
-          /const int selectors\[\] = \{([^;]+)\};/u,
-          "const selectors=[$1];",
+          "posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;",
+          "const actions={},attributes={};",
         )
         .replace(
-          /const char \*labels\[\] = \{([^;]+)\};/u,
-          "const labels=[$1];",
+          "struct domain_bootstrap_fork spawn = {0};",
+          "const spawn={count:0,issues:[]};",
         )
-        .replaceAll("*query", "query.value")
+        .replace(/\*(owned|actions_owned|attributes_owned)\b/gu, "$1.value")
         .replace(
-          /&(refs|copy|before_query|held_query|after_query)\b/gu,
-          (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+          /&(actions_owned|attributes_owned|unused)\b/gu,
+          (_, key) => `{get value(){return ${key}},set value(v){${key}=v}}`,
         )
-        .replaceAll("(void)", "")
-        .replaceAll("(long long)", "")
-        .replace(
-          /\b(?:int|unsigned|long long|mach_port_t|mach_port_urefs_t|kern_return_t|bool) /gu,
-          "let ",
-        )}
-    }`;
+        .replace(/&(spawn|actions|attributes)\b/gu, "$1")
+        .replace(/\b(?:bool|int|unsigned|pid_t) /gu, "let ")}}`;
     })
     .join("\n");
-  const script = new Script(
-    `${functions}\ndomain_refused_aliases("fixture", refused, 0x10000, originalQuery, originalRefs);`,
-  );
-  const labels = [
-    "TASK_KERNEL_PORT",
-    "TASK_NAME_PORT",
-    "TASK_READ_PORT",
-    "TASK_INSPECT_PORT",
-  ];
-  const valid = (name) => name !== 0 && name !== 0xffffffff;
-  const aliases = Array.from({ length: 4 }, (_, match) => ({
-    copies: labels.map((_, index) => ({
-      name: index === match ? 71 : 82 + index,
-    })),
-  }));
-  for (const options of [
-    ...aliases,
-    { copies: [1, 3, 6, 82].map((name) => ({ name })) },
-    { copies: labels.map(() => ({ name: 71 })) },
-    {
-      copies: [
-        { name: 71, get: 5 },
-        { name: 0 },
-        { name: 0xffffffff },
-        { name: 71 },
-      ],
-    },
-    { query: 15 },
-    { diagnosticsFail: true },
-    {
-      copies: [
-        { name: 71, release: 15 },
-        { name: 71, release: 20 },
-        { name: 82 },
-        { name: 83 },
-      ],
-      diagnosticsFail: true,
-    },
-    { refused: 0 },
-    { refused: 0xffffffff },
+  const script = new Script(`${functions}\ndomain_reexec(argv);`);
+  for (const fault of [
+    null,
+    "spawn-actions-init",
+    "spawn-attributes-init",
+    "spawn-attributes-init-and-cleanup",
+    "spawn-flags",
+    "spawn-bootstrap",
+    ...[0, 1, 2, 3].map((fd) => `descriptor-${fd}`),
+    "spawn",
+    "zero-return",
+    "cleanup",
+    "spawn-and-cleanup",
   ]) {
-    const refused = options.refused ?? 71;
-    const copies = options.copies ?? [82, 83, 84, 85].map((name) => ({ name }));
-    const baseline = new Map([
-      [71, 2],
-      [1, 1],
-      [3, 1],
-      [6, 1],
-    ]);
-    const references = new Map(baseline),
-      expectedReferences = new Map(baseline);
-    const expected = [],
-      reports = [],
-      releases = [],
-      cleanup = [];
-    let acquisitions = 0,
-      pending = null,
-      ignored = false;
-    const query = options.query ?? 0;
-    const available = (count) => (query ? -1 : count);
+    const calls = [],
+      failures = [],
+      argv = ["sealed-helper", "fault-custody"],
+      environ = ["CI=true"];
+    const result = (name) => {
+      calls.push(name);
+      return fault === name || fault === `${name}-and-cleanup` ? 22 : 0;
+    };
     const api = {
-      refused,
-      originalQuery: query,
-      originalRefs: available(2),
-      errno: 37,
-      stderr: {},
-      KERN_SUCCESS: 0,
+      argv,
+      environ,
+      domain_helper: argv[0],
+      domain_child: -1,
+      bootstrap_port: 71,
+      errno: 91,
       MACH_PORT_NULL: 0,
-      MACH_PORT_RIGHT_SEND: 0,
-      MACH_PORT_VALID: valid,
-      TASK_KERNEL_PORT: 11,
-      TASK_NAME_PORT: 12,
-      TASK_READ_PORT: 13,
-      TASK_INSPECT_PORT: 14,
-      SIGPIPE: 13,
-      SIG_IGN: 1,
-      signal(which, disposition) {
-        assert.deepEqual([which, disposition], [13, 1]);
-        ignored = true;
-        api.errno = 99;
-      },
-      getpid: () => 42,
-      mach_task_self: () => 1,
-      task_get_special_port(self, selector, out) {
-        assert.equal(self, 1);
-        assert.equal(selector, 11 + acquisitions);
-        assert.equal(
-          pending,
-          null,
-          "Each earlier acquisition has one release attempt",
-        );
-        const index = acquisitions++,
-          copy = copies[index];
-        const got = copy.get ?? 0,
-          owned = !got && valid(copy.name);
-        const before = references.get(refused),
-          held = before + Number(owned && copy.name === refused);
-        const released = owned ? (copy.release ?? 0) : -1;
-        const after =
-          held - Number(owned && copy.name === refused && !released);
-        expected.push([
-          "fixture",
-          42,
-          refused,
-          0x10000,
-          labels[index],
-          got,
-          got ? 0 : copy.name,
-          owned,
-          owned && copy.name === refused,
-          query,
-          available(before),
-          owned ? query : -1,
-          owned ? available(held) : -1,
-          released,
-          query,
-          available(after),
-        ]);
-        out.value = copy.name; // Failed outputs deliberately contain live aliases.
-        if (owned) {
-          pending = copy;
-          references.set(copy.name, (references.get(copy.name) ?? 0) + 1);
-          if (released)
-            expectedReferences.set(
-              copy.name,
-              (expectedReferences.get(copy.name) ?? 0) + 1,
-            );
+      TASK_BOOTSTRAP_PORT: 4,
+      POSIX_SPAWN_SETEXEC: 32,
+      POSIX_SPAWN_CLOEXEC_DEFAULT: 16,
+      domain_bootstrap_check(out, ok, operation, kind, value, isCleanup) {
+        if (!ok) {
+          const issue = { operation, kind, value, cleanup: isCleanup };
+          out.issues.push(issue);
+          out.count++;
         }
-        api.errno = 91;
-        return got;
+        return ok;
       },
-      mach_port_get_refs(self, name, right, out) {
-        assert.deepEqual([self, name, right], [1, refused, 0]);
-        out.value = query ? 0xffffffff : references.get(name);
-        api.errno = 92;
-        return query;
+      posix_spawn_file_actions_init: () => result("spawn-actions-init"),
+      posix_spawnattr_init: () => result("spawn-attributes-init"),
+      posix_spawnattr_setflags(_attributes, flags) {
+        assert.equal(flags, 48);
+        return result("spawn-flags");
       },
-      mach_port_deallocate(self, name) {
-        assert.equal(self, 1);
-        assert.ok(
-          pending,
-          "Original references and borrowed caches remain unowned",
+      posix_spawnattr_setspecialport_np(_attributes, port, selector) {
+        assert.deepEqual([port, selector], [0, 4]);
+        return result("spawn-bootstrap");
+      },
+      posix_spawn_file_actions_adddup2(_actions, from, to) {
+        assert.equal(from, to);
+        return result(`descriptor-${from}`);
+      },
+      posix_spawn(out, path, _actions, _attributes, args, env) {
+        assert.equal(path, "sealed-helper");
+        assert.equal(args, argv);
+        assert.equal(env, environ);
+        assert.deepEqual(
+          calls.slice(-4),
+          [0, 1, 2, 3].map((fd) => `descriptor-${fd}`),
         );
-        assert.equal(name, pending.name);
-        const result = pending.release ?? 0;
-        releases.push({ name, result });
-        if (!result) references.set(name, references.get(name) - 1);
-        pending = null;
-        api.errno = 93;
-        return result;
+        out.value = 987;
+        calls.push("spawn");
+        if (fault === null) throw new Error("replacement-image");
+        return fault === "spawn" || fault === "spawn-and-cleanup" ? 35 : 0;
       },
-      fprintf(stream, format, ...values) {
-        assert.equal(stream, api.stderr);
-        assert.ok(ignored);
-        assert.equal(pending, null);
-        if (format.startsWith("native-darwin-port-probe-cleanup:"))
-          cleanup.push(values);
-        else {
-          assert.ok(format.includes("post-refusal=1"));
-          reports.push(values);
-        }
-        api.errno = 94;
-        return options.diagnosticsFail ? -1 : 1;
+      posix_spawn_file_actions_destroy() {
+        calls.push("actions-destroy");
+        return fault?.includes("cleanup") ? 11 : 0;
       },
-      fflush() {
-        api.errno = 95;
-        return options.diagnosticsFail ? -1 : 0;
+      posix_spawnattr_destroy() {
+        calls.push("attributes-destroy");
+        return fault?.includes("cleanup") ? 12 : 0;
+      },
+      domain_fault_refuse(out) {
+        failures.push(...out.issues);
+        throw new Error("refused");
+      },
+      failure() {
+        throw new Error("continued old image");
       },
     };
-    const result = script.runInNewContext(api);
-    assert.equal(result, releases.find((copy) => copy.result)?.result ?? 0);
-    assert.equal(api.errno, 37);
-    assert.equal(acquisitions, valid(refused) ? 4 : 0);
-    assert.deepEqual(reports, expected);
-    assert.equal(releases.length, expected.filter((row) => row[7]).length);
-    assert.deepEqual(
-      cleanup,
-      copies.flatMap((copy, index) =>
-        copy.release && valid(refused)
-          ? [["fixture", 42, labels[index], copy.release]]
-          : [],
-      ),
+    assert.throws(() => script.runInNewContext(api), {
+      message: fault === null ? "replacement-image" : "refused",
+    });
+    assert.equal(
+      api.domain_child,
+      -1,
+      "Spawn output never authorizes a second process owner",
     );
     assert.deepEqual(
-      [...references].filter(([, count]) => count),
-      [...expectedReferences],
+      ["actions-destroy", "attributes-destroy"].map(
+        (name) => calls.filter((call) => call === name).length,
+      ),
+      fault === null || fault === "spawn-actions-init"
+        ? [0, 0]
+        : fault.startsWith("spawn-attributes-init")
+          ? [1, 0]
+          : [1, 1],
+    );
+    if (fault !== null) {
+      assert.equal(failures[0].cleanup, false);
+      assert.deepEqual(
+        failures.filter((issue) => issue.cleanup).map((issue) => issue.value),
+        fault === "spawn-attributes-init-and-cleanup"
+          ? [11]
+          : fault.includes("cleanup")
+            ? [11, 12]
+            : [],
+      );
+      assert.equal(
+        failures[0].value,
+        calls.includes("spawn") ? (fault.startsWith("spawn") ? 35 : 0) : 22,
+      );
+      assert.equal(api.errno, 91);
+    }
+    assert.equal(api.bootstrap_port, 71);
+  }
+});
+
+test("Darwin empty entry checks precede scoped setup and retain possible effects", async () => {
+  const [header, helper, launcher] = await Promise.all(
+    ["custody.h", "feasibility-helper.c", "launcher.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  // Getter-copy ownership is covered by the shared actual-body fork fixture.
+  const entryBody = /static void domain_bootstrap_entry[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(header)[1]
+    .replace("extern mach_port_t bootstrap_port;", "");
+  for (const cache of [0, 71]) {
+    let read = false;
+    const api = {
+      out: {},
+      bootstrap_port: cache,
+      MACH_PORT_NULL: 0,
+      domain_bootstrap_read(_out, expected, operation, cleanup) {
+        assert.deepEqual(
+          [expected, operation, cleanup],
+          [0, "bootstrap-entry", false],
+        );
+        read = true;
+        return cache === 0;
+      },
+      domain_bootstrap_check(_out, ok) {
+        assert.equal(
+          read,
+          true,
+          "Cache readback follows the independent kernel read",
+        );
+        assert.equal(ok, cache === 0);
+      },
+    };
+    new Script(entryBody).runInNewContext(api);
+    assert.equal(
+      api.bootstrap_port,
+      cache,
+      "The exported cache remains borrowed",
     );
   }
-  const cause = darwinFeasibilityCause("fault", {
-    code: 126,
-    stderr:
-      "native-darwin: operation=fault-port-probe-release domain=mach value=15 effects=possible settlement=unsettled\n",
-  });
-  assert.ok(
-    cause.detail.includes("Native fault-port-probe-release failed (mach=15)."),
+  const entry = launcher.indexOf(
+    "  launch_bootstrap_entry();",
+    launcher.indexOf("int main("),
   );
+  assert.ok(entry > launcher.indexOf("need(argc >= 13 && argc <= 77"));
+  assert.ok(
+    entry < launcher.indexOf('getenv("NATIVE_OWNERSHIP_CUSTODY")', entry),
+  );
+  assert.match(
+    launcher.slice(entry - 29, entry + 35),
+    /#ifdef NATIVE_CI_EXPERIMENT/u,
+  );
+  const start = helper.indexOf("  bool domain =", helper.indexOf("int main(")),
+    end = helper.indexOf("  bool observer =", start);
+  const body = helper.slice(start, end).replace(/\bbool /gu, "let ");
+  const emission = helper.slice(
+    helper.indexOf('  fprintf(stderr, "native-darwin: operation='),
+    helper.indexOf("  if (cleanup_operation)"),
+  );
+  for (const mode of [
+    "fault-custody",
+    "fault-domain",
+    "fault-verify",
+    "fault-closed",
+    "fault-parent",
+    "prerequisites",
+  ]) {
+    const api = {
+      argc: 10,
+      argv: ["helper", mode],
+      admitted_effects: false,
+      NULL: null,
+      getenv: () => null,
+      strcmp: (a, b) => (a === b ? 0 : 1),
+      invariant: (ok) => assert.ok(ok),
+      domain_fault_bootstrap_entry() {
+        assert.equal(api.admitted_effects, true);
+        new Script(emission).runInNewContext({
+          ...api,
+          stderr: 2,
+          failed_operation: "fault-bootstrap-entry",
+          failed_domain: "mach",
+          failed_value: 5,
+          prerequisite_mode: false,
+          fprintf(_stream, _format, ...values) {
+            assert.equal(values[3], "possible");
+            assert.equal(values[4], "unsettled");
+          },
+        });
+        throw new Error("entry-refused");
+      },
+    };
+    const run = () => new Script(body).runInNewContext(api);
+    if (mode === "fault-custody")
+      assert.throws(run, { message: "entry-refused" });
+    else run();
+  }
 });
 
 test("Darwin hosted ancestry is scoped to installed paths and experiment purpose", async () => {
@@ -6370,7 +6396,7 @@ test("Darwin custodian lifecycle observations balance their own public getter re
     );
   }
   const entry = source.indexOf('domain_access_observe("custodian-entry")'),
-    reexec = source.indexOf("execv(domain_helper, argv)"),
+    reexec = source.indexOf("domain_reexec(argv)"),
     beforeFork = source.indexOf('domain_access_observe("custodian-fork")'),
     fork = source.indexOf("pid_t child = domain_fault_fork()", beforeFork),
     child = source.indexOf('domain_access_observe("child-fork")', fork);
@@ -6892,12 +6918,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
     [
       "another reference to the former bootstrap name remains unknown",
       { bootstrapExtra: true },
-      "fault-port-authority",
-      0,
-    ],
-    [
-      "probe cleanup failure cannot replace the original census refusal",
-      { bootstrapExtra: true, probeRelease: 15 },
       "fault-port-authority",
       0,
     ],
@@ -7729,32 +7749,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
       domain_access_diagnostic: (...facts) => lifecycle.push(facts),
       domain_fork_diagnostic: (owner) => assert.equal(owner, "fault"),
       domain_refusal_request: () => {},
-      // The shared actual-body probe fixture owns acquisition/release semantics;
-      // this caller fixture binds the original facts and separate cleanup cause.
-      domain_refused_aliases(owner, name, type, query, refs) {
-        assert.equal(owner, "fault");
-        assert.equal(first.operation, "fault-port-authority");
-        assert.equal(portDiagnostics.length, 1);
-        assert.deepEqual(
-          [name, type, query, refs],
-          [
-            portDiagnostics[0][0],
-            portDiagnostics[0][1],
-            portDiagnostics[0][12],
-            portDiagnostics[0][13],
-          ],
-        );
-        assert.ok(!calls.some(([op]) => op === "census-release"));
-        calls.push(["alias-probe", name]);
-        if (options.probeRelease)
-          releaseFailures.push({
-            operation: "fault-port-probe-release",
-            kind: "mach",
-            value: options.probeRelease,
-          });
-        context.errno = 96;
-        return options.probeRelease ?? 0;
-      },
       fflush() {},
     };
     const launch = script.runInNewContext(context);
@@ -7837,11 +7831,6 @@ test("Darwin fault sanitation preserves the inherited authorization service and 
             calls.findIndex(([op]) => op === "census"),
         );
     }
-    assert.equal(
-      calls.filter(([op]) => op === "alias-probe").length,
-      portDiagnostics.length,
-      label,
-    );
     assert.ok(referenceSamples.length <= 2, label);
     const beforeRefs = referenceSamples.find((sample) => !sample.census),
       refusedRefs = referenceSamples.find((sample) => sample.census),

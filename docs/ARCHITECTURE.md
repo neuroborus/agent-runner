@@ -2120,6 +2120,14 @@ closed 512-byte, versioned receipt bound to parent, fork epoch and child birth/a
 identity. Both launcher and fault census owners retain exact types, checked cache
 aliases and acquired-reference cleanup. Pre-census frames remain distinct from
 completed controls. The root parent holds audit custody only after fork.
+Ordinary Darwin experimental launcher spawns use the selected SDK's native
+empty-bootstrap attribute without changing reader authority. Fault-custodian
+SETEXEC retains the same process and FD0–3, including the writable journal;
+any return refuses. Mode-scoped entry slot/cache readbacks precede setup and
+cache clearing, after fault possible-effect classification. Getter copies alone
+grant release authority; POSIX errors, independent cleanup and successful child
+ownership remain bound. Excluded own-task alias probes are removed; historical
+decoding and independent inspection remain. Native admission remains unproved.
 The ordinary experiment clears and independently reads back the bootstrap slot
 before the existing single-threaded fork, temporarily borrowing the exported
 bootstrap value without releasing a userspace reference. A fresh child binds

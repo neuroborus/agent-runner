@@ -1086,25 +1086,38 @@ static void case_read(void) {
 }
 /* Finite ownership operations. Privilege is checked here, at the executing
  * owner. No caller path, environment, executable or arbitrary command is used. */
-static void case_launch_failure(const char *operation, long result, int error, int revents, long used) {
+static void case_child_failure(pid_t child, const char *operation, long result, int error, int revents, long used) {
   /* This turn is already fatal; a broken diagnostic pipe must not replace it. */
   (void)signal(SIGPIPE, SIG_IGN);
   struct proc_bsdinfo identity = {0}; siginfo_t status = {0};
-  errno = 0; int identityResult = case_pid > 0 ? proc_pidinfo(case_pid, PROC_PIDTBSDINFO, 1, &identity, sizeof(identity)) : -1;
+  errno = 0; int identityResult = child > 0 ? proc_pidinfo(child, PROC_PIDTBSDINFO, 1, &identity, sizeof(identity)) : -1;
   int identityError = errno; errno = 0;
-  int waitResult = case_pid > 0 ? waitid(P_PID, (id_t)case_pid, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
+  int waitResult = child > 0 ? waitid(P_PID, (id_t)child, &status, WEXITED | WNOHANG | WNOWAIT) : -1;
   int waitError = errno;
-  if (waitResult || status.si_pid != case_pid) memset(&status, 0, sizeof(status));
+  if (waitResult || status.si_pid != child) memset(&status, 0, sizeof(status));
   fprintf(stderr, "native-darwin-launch: owner=reader operation=%s result=%ld errno=%d revents=%d read=%ld launcher=%d identity-result=%d identity-errno=%d start-seconds=%llu start-micros=%llu wait-result=%d wait-errno=%d status-pid=%d status-code=%d status=%d\n",
-    operation, result, error, revents, used, case_pid, identityResult, identityError,
+    operation, result, error, revents, used, child, identityResult, identityError,
     identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvsec : 0,
     identityResult == (int)sizeof(identity) ? (unsigned long long)identity.pbi_start_tvusec : 0,
     waitResult, waitError, status.si_pid, status.si_code, status.si_status);
   fflush(stderr); errno = error; need(false);
 }
+static void case_launch_failure(const char *operation, long result, int error, int revents, long used) {
+  case_child_failure(case_pid, operation, result, error, revents, used);
+}
 static void case_launch_check(const char *operation, int result) {
   if (result) case_launch_failure(operation, result, result < 0 ? errno : 0, 0, -1);
 }
+#ifdef NATIVE_CI_EXPERIMENT
+static void case_spawn_refuse(struct domain_bootstrap_fork *out, pid_t child) {
+  if (!out->count) return;
+  (void)signal(SIGPIPE, SIG_IGN);
+  for (unsigned i = 0; i < out->count; i++) if (out->issues[i].cleanup)
+    fprintf(stderr, "native-darwin-launch-cleanup: owner=reader operation=%s result=%d errno=0\n", out->issues[i].operation, out->issues[i].value);
+  struct domain_bootstrap_issue first = out->issues[0];
+  case_child_failure(child, first.operation, first.value, 0, 0, -1);
+}
+#endif
 static void case_start(const char *mode, const char *cdhash) {
   need(!case_fenced);
   need(case_mode && case_started && !case_pid && !case_recovery && (count == 12 || !strcmp(mode, "access")));
@@ -1123,6 +1136,16 @@ static void case_start(const char *mode, const char *cdhash) {
   case_launch_check("pipe-control", pipe(control)); case_launch_check("pipe-output", pipe(output));
   case_launch_check("socketpair-data", socketpair(AF_UNIX, SOCK_STREAM, 0, data));
   posix_spawn_file_actions_t actions; posix_spawnattr_t attributes;
+#ifdef NATIVE_CI_EXPERIMENT
+  struct domain_bootstrap_fork spawn = {0}; bool actions_owned = false, attributes_owned = false;
+  bool ready = domain_spawn_check(&spawn, posix_spawn_file_actions_init(&actions), "spawn-actions-init", false);
+  actions_owned = ready;
+  if (ready) ready = domain_spawn_attributes(&spawn, &attributes, &attributes_owned, POSIX_SPAWN_CLOEXEC_DEFAULT);
+  if (ready) ready = domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&actions, control[0], 0), "spawn-control", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&actions, output[1], 1), "spawn-output", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&actions, 2, 2), "spawn-stderr", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&actions, data[1], 3), "spawn-data", false);
+#else
   case_launch_check("posix_spawn_file_actions_init", posix_spawn_file_actions_init(&actions));
   case_launch_check("posix_spawnattr_init", posix_spawnattr_init(&attributes));
   case_launch_check("posix_spawnattr_setflags", posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT));
@@ -1131,6 +1154,7 @@ static void case_start(const char *mode, const char *cdhash) {
   /* Explicitly retain the existing diagnostic channel under CLOEXEC_DEFAULT. */
   case_launch_check("spawn-stderr", posix_spawn_file_actions_adddup2(&actions, 2, 2));
   case_launch_check("spawn-data", posix_spawn_file_actions_adddup2(&actions, data[1], 3));
+#endif
   char uid[24], gid[24], nonce[33]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(gid, sizeof(gid), "%u", subject_gid);
   memcpy(nonce, case_context, 32); nonce[32] = 0;
   char *argv[20] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
@@ -1145,9 +1169,18 @@ static void case_start(const char *mode, const char *cdhash) {
 #else
   char *environment[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", !strcmp(mode, "access") ? "NATIVE_ACCESS_CUSTODY=true" : "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
 #endif
+#ifdef NATIVE_CI_EXPERIMENT
+  pid_t child = -1;
+  if (ready) ready = domain_spawn_check(&spawn, posix_spawn(&child, launcher->path, &actions, &attributes, argv, environment), "spawn-launch", false);
+  /* Failed output owns no PID. Retain success before either destroy can fail. */
+  if (ready) { case_pid = child; case_in = control[1]; case_out = output[0]; case_data = data[0]; }
+  domain_spawn_settle(&spawn, &actions, &actions_owned, &attributes, &attributes_owned);
+  case_spawn_refuse(&spawn, case_pid);
+#else
   case_launch_check("posix_spawn", posix_spawn(&case_pid, launcher->path, &actions, &attributes, argv, environment));
   case_launch_check("posix_spawn_file_actions_destroy", posix_spawn_file_actions_destroy(&actions));
   case_launch_check("posix_spawnattr_destroy", posix_spawnattr_destroy(&attributes));
+#endif
   case_launch_check("close-control", close(control[0])); case_launch_check("close-output", close(output[1]));
   case_launch_check("close-data", close(data[1]));
   case_in = control[1]; case_out = output[0]; case_data = data[0];
@@ -2504,15 +2537,34 @@ static void git_ordinary_start(struct entry *git, struct entry *metadata, struct
   struct entry *launcher = &entries[4], *payload = &entries[5]; signature(payload->path, cdhash);
   stable(git); stable(metadata); stable(hooks); stable(policy);
   int in[2], out[2], data[2]; need(!pipe(in) && !pipe(out) && !socketpair(AF_UNIX, SOCK_STREAM, 0, data)); posix_spawn_file_actions_t files; posix_spawnattr_t attributes;
+#ifdef NATIVE_CI_EXPERIMENT
+  struct domain_bootstrap_fork spawn = {0}; bool actions_owned = false, attributes_owned = false;
+  bool ready = domain_spawn_check(&spawn, posix_spawn_file_actions_init(&files), "spawn-actions-init", false);
+  actions_owned = ready;
+  if (ready) ready = domain_spawn_attributes(&spawn, &attributes, &attributes_owned, POSIX_SPAWN_CLOEXEC_DEFAULT);
+  if (ready) ready = domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&files, in[0], 0), "spawn-control", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&files, out[1], 1), "spawn-output", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0), "spawn-stderr", false) &&
+    domain_spawn_check(&spawn, posix_spawn_file_actions_adddup2(&files, data[1], 3), "spawn-data", false);
+#else
   need(!posix_spawn_file_actions_init(&files) && !posix_spawnattr_init(&attributes) &&
     !posix_spawnattr_setflags(&attributes, POSIX_SPAWN_CLOEXEC_DEFAULT) &&
     !posix_spawn_file_actions_adddup2(&files, in[0], 0) && !posix_spawn_file_actions_adddup2(&files, out[1], 1) &&
     !posix_spawn_file_actions_addopen(&files, 2, "/dev/null", O_WRONLY, 0) && !posix_spawn_file_actions_adddup2(&files, data[1], 3));
+#endif
   char uid[24], gid[24], nonce[33]; snprintf(uid, sizeof(uid), "%u", subject_uid); snprintf(gid, sizeof(gid), "%u", subject_gid); memcpy(nonce, case_context, 32); nonce[32] = 0;
   char *argv[] = {launcher->path, uid, gid, entries[1].path, entries[2].path, entries[3].path,
     payload->path, payload->pin, (char *)cdhash, policy->path, policy->pin, nonce, "--", nonce, (char *)mode, git->path, metadata->path, entries[3].path, hooks->path, NULL};
   char *env[] = {"CI=true", "GITHUB_ACTIONS=true", "PATH=/nonexistent", "NATIVE_OWNERSHIP_CUSTODY=true", NULL};
+#ifdef NATIVE_CI_EXPERIMENT
+  pid_t child = -1;
+  if (ready) ready = domain_spawn_check(&spawn, posix_spawn(&child, launcher->path, &files, &attributes, argv, env), "spawn-launch", false);
+  if (ready) { git_pid = child; git_in = in[1]; git_out = out[0]; git_data = data[0]; }
+  domain_spawn_settle(&spawn, &files, &actions_owned, &attributes, &attributes_owned);
+  case_spawn_refuse(&spawn, git_pid);
+#else
   need(!posix_spawn(&git_pid, launcher->path, &files, &attributes, argv, env) && !posix_spawn_file_actions_destroy(&files) && !posix_spawnattr_destroy(&attributes));
+#endif
   need(!close(in[0]) && !close(out[1]) && !close(data[1])); git_in = in[1]; git_out = out[0]; git_data = data[0]; printf("{\"pid\":%d}", git_pid);
 }
 static void git_ordinary_release(bool payload, const char *ack) { need(!case_fenced && git_pid && git_in >= 0 && strlen(ack) == 1 && strchr("PRS", *ack)); need(write(payload ? git_data : git_in, ack, 1) == 1); fputs("null", stdout); }

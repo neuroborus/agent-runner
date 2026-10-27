@@ -401,21 +401,20 @@ status. Counted aliases and copied parent bookkeeping cannot change admission or
 cleanup ownership. Failed queries with written outputs, zero/full-width counts,
 failed releases and failed diagnostics preserve unavailable values, the original
 refusal and errno. The SEND-reference query adds no release or endpoint identity.
-An additional actual-body fixture executes the shared refusal-only own-task
-KERNEL/NAME/READ/INSPECT probe and its reference-query helper. It protects fixed
-selector order, current-name matches and inconclusive unequal names, explicitly
-post-refusal acquisitions, before/held/after counts, failed queries with written
-outputs, failed getters with live output names, null/dead results, one release
-attempt per successful valid copy including original/cache/repeated aliases,
-multiple cleanup failures, failed diagnostic writes/flushes and preserved errno.
-Invalid refused names produce no acquisitions. The existing fault/launcher
-actual-body fixtures independently bind the helper call to the saved first
-refusal before cleanup and retain the original primary cause when probing fails;
-the shared probe fixture owns the detailed acquisition matrix once. The finite
-feasibility diagnostic catalog recognizes `fault-port-probe-release` without
-accepting arbitrary probe-operation names. These portable fixtures do not prove
-hosted compilation, original endpoint origin/lifetime, startup repair, or native
-acceptance; unknown authority still refuses payload execution.
+The excluded own-task alias-probe implementation and its probe-only fixtures are
+removed. First-refusal/reference observations, independent inspection, strict census,
+borrowed-cache, constructor, release and retirement regressions remain. The finite
+failure decoder retains historical probe failures and rejects unknown operations.
+Actual-body fixtures execute the empty-bootstrap spawn attributes, positive POSIX
+errors, partial initialization, independent destroy failures and SETEXEC refusal
+including an unexpected zero return. They protect exact FD0–3 transfer, the original
+writable journal, successful child/channel retention before cleanup, and unchanged
+reader bootstrap authority. Existing getter-copy ownership cases remain; new
+entry cases require null readbacks before scoped setup and retain possible effects
+on fault-entry refusal without clearing or releasing a borrowed cache. These are focused
+implementation checks in `test/native-darwin-build.test.js` and
+`ci/native/darwin/custody.test.js`, with finite-decoder coverage in
+`test/native-feasibility.test.js`; they add no finalization command or slow tier.
 The fast Darwin build fixture also executes the shared registered/bootstrap fork guard and
 the fault owner's refusal path. Injected getters/setters protect verified null
 inheritance before runtime callbacks, the final single-thread check, exact parent slot/exported-value

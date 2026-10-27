@@ -85,6 +85,15 @@ static mach_port_t launch_bootstrap_local, launch_reply_borrowed, launch_special
 static domain_special_reply_fn launch_special_reply;
 static char launch_exec_suffix[256];
 static void launch_replies_begin(void);
+static void launch_bootstrap_entry(void) {
+  struct domain_bootstrap_fork entry = {0}; domain_bootstrap_entry(&entry);
+  if (!entry.count) return;
+  (void)signal(SIGPIPE, SIG_IGN);
+  for (unsigned i = 0; i < entry.count; i++) if (entry.issues[i].cleanup)
+    fprintf(stderr, "native-darwin-launch-cleanup: owner=launcher operation=%s domain=%s result=%d\n", entry.issues[i].operation, entry.issues[i].kind, entry.issues[i].value);
+  struct domain_bootstrap_issue first = entry.issues[0];
+  launch_failure(first.operation, first.value, 0, 0, -1, 0);
+}
 static pid_t launch_bootstrap_fork(void) {
   struct domain_bootstrap_fork outcome; domain_bootstrap_fork(&outcome, &launch_child, launch_replies_begin);
   if (outcome.count) {
@@ -352,7 +361,6 @@ mach_cleanup: {
         getpid(), refused_name, refused_type, binding, bootstrap, bootstrap_query, bootstrap_refs, bootstrap_release, send_query, send_refs);
       fflush(stderr); errno = saved;
       domain_refusal_request(refused_name);
-      (void)domain_refused_aliases("launcher", refused_name, refused_type, send_query, send_refs);
     }
     /* One entry per acquisition, even when local names alias. Never retry a
      * failed release or let it replace the original refusal. */
@@ -705,6 +713,9 @@ int main(int argc, char **argv) {
   need(!provider);
 #endif
   need(argc >= 13 && argc <= 77 && (provider || !strcmp(argv[12], "--")));
+#ifdef NATIVE_CI_EXPERIMENT
+  launch_bootstrap_entry();
+#endif
   const char *ownership = getenv("NATIVE_OWNERSHIP_CUSTODY");
   need(!ownership || (!provider && !strcmp(ownership, "true")));
   const char *access = getenv("NATIVE_ACCESS_CUSTODY");
