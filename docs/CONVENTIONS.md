@@ -9,7 +9,8 @@ records the detailed runtime contract and current system design; it is not a
 reason to preserve an accidental boundary. When a structural change improves
 conformance with these conventions, update the architecture document with the
 implementation. Pipeline specifications own pipeline behavior, and
-`packages/commit-plan/README.md` owns the shared plan format.
+the package READMEs under `packages/commit-plan/` and `packages/custom-plan/`
+own their respective plan formats.
 
 The narrower contract wins when rules overlap, but it may not weaken a safety
 invariant from `AGENTS.md`.
@@ -81,6 +82,7 @@ Assign every behavior to one owner before deciding where its file belongs.
 | Provider protocol, flags, sessions, and output normalization | owning provider adapter     |
 | Workflow decisions and structured role contracts             | owning pipeline             |
 | Commit-plan parsing and subject validation                   | `packages/commit-plan`      |
+| Criterion-driven custom-plan parsing and validation          | `packages/custom-plan`      |
 
 - Do not use `shared`, `common`, `utils`, or a workspace package as a dumping
   ground for code that lacks a clear owner.
@@ -531,5 +533,5 @@ Before handoff:
 
 When placement remains unclear, classify the behavior instead of choosing the
 nearest convenient file: workflow policy belongs to a pipeline; provider
-protocol belongs to its adapter; shared deterministic plan semantics belong to
-`packages/commit-plan`; runtime-wide effects belong to their root capability.
+protocol belongs to its adapter; deterministic plan semantics belong to the
+owning contract under `packages/`; runtime-wide effects belong to their root capability.

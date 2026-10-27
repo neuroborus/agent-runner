@@ -1,14 +1,14 @@
 # Architecture
 
-Agent Runner is an npm-workspaces monorepo with one root CLI/runtime, one shared
-commit-plan contract, and independently owned pipeline workspaces.
+Agent Runner is an npm-workspaces monorepo with one root CLI/runtime, shared
+commit-plan and custom-plan contracts, and independently owned pipeline workspaces.
 
 ## Dependency Direction
 
 ```text
 root CLI/runtime ──static registry──▶ pipeline workspaces
                                            ┊
-                                           └┄ when consumed ┄▶ @agent-runner/commit-plan
+                                           └┄ when consumed ┄▶ shared plan contracts
 ```
 
 The root runner imports registered pipelines. Pipelines do not import the root
@@ -4222,12 +4222,20 @@ invalidates dependent work after the answer; it never invents the requirement.
 If the decision invalidates completed commits or the validated plan, the runner
 requires a revised plan and a new execution run instead of rewriting history.
 
-## Shared Commit-Plan Contract
+## Shared Plan Contracts
 
-`@agent-runner/commit-plan` is the only extracted shared domain package. It owns
-the deterministic `plan.md` representation and validation rules needed by both
-authoring and execution. It does not own prompts, agent roles, review behavior,
-or workflow transitions.
+`@agent-runner/commit-plan` owns the deterministic commit `plan.md`
+representation and subject validation consumed by authoring and execution.
+`@agent-runner/custom-plan` separately owns an explicit `custom` kind, agreed
+criterion IDs/conditions, input/output declarations and contiguous titled steps
+with scoped work, expected results and criterion references. It validates closed
+shapes and reference coverage, parses readable Markdown with a JSON declaration
+and serializes canonically; analysis-only plans may declare no file outputs.
+Its [package contract](../packages/custom-plan/README.md) owns the exact syntax.
+Neither package owns prompts, roles, permissions, result acceptance or workflow
+transitions. Declarations grant no filesystem, retrieval or Git authority.
+Custom pipeline entry points remain unavailable, and no consumer dependency on
+the new package is declared until actual imports land.
 
 ## Global Safety Policy
 

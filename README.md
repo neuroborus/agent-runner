@@ -174,6 +174,11 @@ authoring pipeline produces that artifact; the execution pipeline consumes it.
 Polishing is independently owned and operates directly on the current workspace
 change set.
 
+The separate [`@agent-runner/custom-plan`](packages/custom-plan/README.md)
+package defines criterion-driven `Step N` plans, including analysis-only results.
+It is currently a deterministic contract only; custom CLI/MCP workflows are not
+yet exposed.
+
 ## Configuration
 
 Trusted provider-profile implementations and runner defaults belong to the
@@ -1447,7 +1452,8 @@ saved future work survives interruption, commits and cancellation. See the [arch
 │       ├── service.js
 │       └── snapshot.js
 ├── packages/
-│   └── commit-plan/
+│   ├── commit-plan/
+│   └── custom-plan/
 ├── pipelines/
 │   ├── plan-authoring/
 │   ├── plan-execution/

@@ -13,6 +13,7 @@ const REPOSITORY_PATH = fileURLToPath(new URL("../", import.meta.url));
 const SOURCE_DIRECTORIES = [
   new URL("../src/", import.meta.url),
   new URL("../packages/commit-plan/src/", import.meta.url),
+  new URL("../packages/custom-plan/src/", import.meta.url),
   new URL("../pipelines/plan-authoring/src/", import.meta.url),
   new URL("../pipelines/plan-execution/src/", import.meta.url),
   new URL("../pipelines/polishing/src/", import.meta.url),
@@ -20,6 +21,7 @@ const SOURCE_DIRECTORIES = [
 const PACKAGE_METADATA_FILES = [
   new URL("../package.json", import.meta.url),
   new URL("../packages/commit-plan/package.json", import.meta.url),
+  new URL("../packages/custom-plan/package.json", import.meta.url),
   new URL("../pipelines/plan-authoring/package.json", import.meta.url),
   new URL("../pipelines/plan-execution/package.json", import.meta.url),
   new URL("../pipelines/polishing/package.json", import.meta.url),
@@ -108,7 +110,7 @@ test("documented Node range matches package metadata", async () => {
 });
 
 test("workspace topology keeps pipelines independent", async () => {
-  const [commitPlan, planAuthoring, planExecution, polishing] =
+  const [commitPlan, customPlan, planAuthoring, planExecution, polishing] =
     await Promise.all(
       PACKAGE_METADATA_FILES.slice(1).map(async (metadataUrl) =>
         JSON.parse(await readFile(metadataUrl, "utf8")),
@@ -125,9 +127,11 @@ test("workspace topology keeps pipelines independent", async () => {
     "zod",
   ]);
   assert.equal(commitPlan.dependencies, undefined);
+  assert.equal(customPlan.dependencies, undefined);
 
   for (const workspace of [
     commitPlan,
+    customPlan,
     planAuthoring,
     planExecution,
     polishing,

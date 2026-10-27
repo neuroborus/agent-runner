@@ -5,6 +5,18 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-27
+
+- **Custom plans have their own deterministic contract.** The private
+  `@agent-runner/custom-plan` package validates explicit kind, stable agreed
+  criteria, input/output declarations and contiguous ordinary step titles.
+  Scoped work and expected results reference the criterion catalog; immutable
+  parsing and canonical serialization keep one reviewed representation.
+  Analysis-only plans need no file output or artificial diff. Semantic review
+  and actual permissions stay with consumers; commit subjects and Git authority
+  remain commit-specific. Pipeline exposure and dependencies wait for their
+  actual consumers.
+
 ## 2026-10-26
 
 - **Workspace selection precedes Git-specific lifecycle work.** Pipeline

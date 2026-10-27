@@ -30,7 +30,8 @@ behavior, prompts, review resolution, or pipeline CLI contracts.
 Use the product-document rows in `docs/README.md` for current workflow meaning,
 business rules, operator guarantees, and accepted nuances. `RHYTHM.md` records
 meaningful implemented decisions and their rationale; it does not replace a
-current owning document. `packages/commit-plan/README.md` owns the shared plan
+current owning document. `packages/commit-plan/README.md` owns the commit-plan
+contract; `packages/custom-plan/README.md` owns the criterion-driven custom-plan
 contract.
 
 ## Working Agreements
@@ -62,11 +63,14 @@ contract.
   lease requirements before Git inspection. Directory lifecycles use confined
   filesystem bindings and share an enclosing worktree's canonical exclusion key;
   they never acquire staging or commit authority. Legacy runs retain Git semantics.
-- Keep shared plan parsing and structural and subject validation in
+- Keep commit-plan parsing and structural and subject validation in
   `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
   subjects, deterministic code validates them, and plan execution consumes
   their validated text unchanged.
-- Require each plan heading to carry the exact subject-only Conventional Commit message: `type(scope)[!]: imperative summary`.
+- Keep criterion-driven custom-plan syntax and validation in `packages/custom-plan/`;
+  declarations grant no permissions or Git authority. Declare consumer dependencies
+  only when their imports land.
+- Require each commit-plan heading to carry the exact subject-only Conventional Commit message: `type(scope)[!]: imperative summary`.
 - Outside an Agent Runner workflow, do not create a Git commit during direct repository maintenance unless the user explicitly asks for one. Finalization stages only the relevant change set and drafts its commit message.
 - Never push, mutate a remote ref, change `origin` or another remote's configuration, or write through a hosting-service API or CLI.
 - Never add a `Co-authored-by` trailer or change Git author/committer identity on the user's behalf.
@@ -246,6 +250,7 @@ All pipelines additionally require:
 | `src/agents/codex/`               | Private Codex adapter, transport, commit, and storage implementation |
 | `src/agents/`                     | Shared agent contracts, registration, and provider implementations   |
 | `packages/commit-plan/`           | Shared deterministic commit-plan contract                            |
+| `packages/custom-plan/`           | Shared deterministic criterion-driven custom-plan contract           |
 | `pipelines/plan-authoring/`       | Plan-authoring workflow, prompts, tests, and specification           |
 | `pipelines/plan-execution/`       | Plan-execution workflow, prompts, tests, and specification           |
 | `pipelines/polishing/`            | Polishing workflow, prompts, tests, and specification                |

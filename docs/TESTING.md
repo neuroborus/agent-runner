@@ -11,6 +11,12 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `packages/custom-plan/test/custom-plan.test.js` owns the pure custom-plan
+contract: analysis/output plans, immutable parsing, canonical round trips,
+closed declarations, explicit kind compatibility, sequential steps and complete
+criterion references. It needs no Git, provider, command execution or temporary
+storage. Commit-plan syntax remains covered by its separate package suites.
+
 The fast `test/workspace/inspection.test.js` suite owns the filesystem-only
 directory boundary: non-Git snapshots, enclosing and nested controls for the
 workspace and external reads, Git pointer/shared and bare metadata, pointer
