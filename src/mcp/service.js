@@ -638,9 +638,12 @@ export function createMcpControlPlane(options = {}) {
         if (!exitedBeforeInspection) continue;
         const skew = childExit.exitCode === RUNTIME_VERSION_SKEW_EXIT_CODE;
         const owner =
-          !skew && pipelineRequiresWorktreeLease(run.pipelineId)
+          !skew && pipelineRequiresWorktreeLease(run.pipelineId, run.workspace)
             ? await inspect(() =>
-                runStore.worktreeLeaseOwner(run.projectPath, runIdValue),
+                runStore.worktreeLeaseOwner(
+                  run.workspace?.leasePath ?? run.projectPath,
+                  runIdValue,
+                ),
               )
             : null;
         throw await failure(
@@ -676,11 +679,14 @@ export function createMcpControlPlane(options = {}) {
           return;
       }
       if (
-        pipelineRequiresWorktreeLease(run.pipelineId) &&
+        pipelineRequiresWorktreeLease(run.pipelineId, run.workspace) &&
         stopCheckpointRevision === null
       ) {
         const owner = await inspect(() =>
-          runStore.worktreeLeaseOwner(run.projectPath, runIdValue),
+          runStore.worktreeLeaseOwner(
+            run.workspace?.leasePath ?? run.projectPath,
+            runIdValue,
+          ),
         );
         if (owner !== null && owner !== runIdValue)
           throw await failure(
@@ -807,10 +813,7 @@ export function createMcpControlPlane(options = {}) {
       existing &&
       (await dispatchIsReady(existing.context, existing.context.runId))
         ? null
-        : await runner.validateBoundary({
-            projectPath: input.projectPath,
-            taskPath: input.taskPath,
-          });
+        : await runner.validateBoundary(runnerStartInput(input));
     const context = { runId: runIdFactory() };
     const action = await runStore.beginAction({
       ...identity,
@@ -824,10 +827,7 @@ export function createMcpControlPlane(options = {}) {
       const completedReceipt = { runId: reservedRunId };
       if (await completeReadyDispatch(action, completedReceipt))
         return completedReceipt;
-      boundary ??= await runner.validateBoundary({
-        projectPath: input.projectPath,
-        taskPath: input.taskPath,
-      });
+      boundary ??= await runner.validateBoundary(runnerStartInput(input));
       let run;
       try {
         ({ run } = await inspectDetached(

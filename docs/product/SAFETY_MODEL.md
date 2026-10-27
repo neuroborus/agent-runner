@@ -95,6 +95,19 @@ access cannot request a Git commit, and unsupported providers fail closed.
 Directory workflows remain unexposed; see the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 
+The runner can bind a descriptor-selected directory lifecycle without Git.
+Workspace kind, permissions, exact local input/criterion paths, protected-content
+and identity evidence, and the exclusion key are immutable run input. Directory
+workspaces inside a repository contend with Git workflows on the same canonical
+worktree key. Ordinary directory leases also exclude overlapping parent/child
+scopes; stale reservations require recovery on their original key. Outputs cannot enter a nested worktree requiring a different
+key; read-only nested worktrees remain supported. Recovery, stops and selected
+trusted checks use the filesystem capability; a directory role receives no Git
+effects. Resume retires verified owned execution before reporting frozen-content
+drift, then persists a blocker without probing or invoking providers. References and URLs confer no fetching authority: retrieval permissions
+remain empty. Legacy runs retain Git semantics. Public custom workflows remain
+unavailable.
+
 Task, plan, context, and clarification inputs are hashed and revalidated before
 recovery. Clarification writes occur only through a persisted one-shot editor
 or MCP authorization. Repository-local artifacts must be confined, ignored,

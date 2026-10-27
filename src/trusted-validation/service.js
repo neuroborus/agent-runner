@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { createGitService } from "../git/index.js";
+import { createWorkspaceService } from "../workspace/index.js";
 import {
   gitMetadataExposures,
   resolveTrustedBubblewrap,
@@ -478,6 +479,7 @@ export function createTrustedValidationService(options = {}) {
   }
   const environment = options.environment ?? process.env;
   const git = options.git ?? createGitService();
+  const workspace = options.workspace ?? createWorkspaceService();
   const sandboxCommand = options.sandboxCommand ?? sandboxTrustedCommand;
   const runCommand = options.runCommand ?? runExactCommand;
   const resolveLauncher = options.resolveLauncher ?? resolveTrustedBubblewrap;
@@ -514,25 +516,100 @@ export function createTrustedValidationService(options = {}) {
     return launcherPath;
   }
 
+  async function workspaceScope(
+    projectPath,
+    policy,
+    { recovery = false } = {},
+  ) {
+    if (policy === undefined)
+      return {
+        safety: git,
+        workspacePaths: undefined,
+        controls: gitMetadataExposures(projectPath),
+        forbidden: [],
+      };
+    if (policy?.kind !== "directory" || policy.workspacePath !== projectPath)
+      throw new TrustedValidationError(
+        "Trusted workspace binding is invalid.",
+        { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+      );
+    const { kind: _kind, ...declarations } = policy;
+    // Cleanup does not read inputs or grant writes. Keep their path/control
+    // protection even when a frozen input was deleted during interruption.
+    const inspection = await workspace.inspect(
+      recovery
+        ? {
+            ...declarations,
+            inputPaths: [],
+            sourcePaths: [],
+            configurationPaths: [],
+            artifactPaths: [
+              ...(declarations.artifactPaths ?? []),
+              ...(declarations.inputPaths ?? []),
+              ...(declarations.sourcePaths ?? []),
+              ...(declarations.configurationPaths ?? []),
+            ],
+          }
+        : declarations,
+    );
+    const workspacePaths = [
+      ...new Set([...inspection.readPaths, ...inspection.protectedPaths]),
+    ].filter((path) =>
+      inspection.bindings.some(
+        (binding) => binding.path === path && binding.exists,
+      ),
+    );
+    return {
+      controls: inspection.controlPaths,
+      forbidden: [inspection.stateRoot, ...inspection.protectedPaths],
+      workspacePaths,
+      safety: {
+        async snapshot() {
+          return { ...(await workspace.snapshot({ inspection })), projectPath };
+        },
+        async assertUnchanged(before) {
+          workspace.assertUnchanged({
+            before,
+            after: await workspace.snapshot({ inspection }),
+          });
+        },
+      },
+    };
+  }
+
   async function preflight({
     projectPath,
     snapshot,
     storageForbiddenPaths = [],
+    workspacePolicy,
   }) {
     const selected =
       snapshot === undefined
         ? undefined
         : validateTrustedValidationSnapshot(snapshot);
+    const scope = await workspaceScope(projectPath, workspacePolicy);
+    if (
+      workspacePolicy !== undefined &&
+      selected?.commands.some(
+        (command) => command.capabilities?.sourceProjection === true,
+      )
+    )
+      throw new TrustedValidationError(
+        "Directory validation cannot request Git source projection.",
+        { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+      );
     for (const command of selected?.commands ?? []) {
       const { capabilities } = command;
       if (!needsStorage(capabilities)) continue;
       await storage.preflight(
         [
           projectPath,
-          ...gitMetadataExposures(projectPath),
+          ...scope.controls,
+          ...scope.forbidden,
           ...runtimeStorageExposures(command, {
             cwd: projectPath,
             environment,
+            workspacePaths: scope.workspacePaths,
           }),
           ...storageForbiddenPaths,
         ],
@@ -557,13 +634,16 @@ export function createTrustedValidationService(options = {}) {
       onResource,
       onPreparation,
       storageForbiddenPaths = [],
+      workspacePolicy,
     },
     preparationOnly = false,
   ) {
     signal?.throwIfAborted();
+    const scope = await workspaceScope(projectPath, workspacePolicy);
+    const safety = scope.safety;
     if (
-      typeof git.snapshot !== "function" ||
-      typeof git.assertUnchanged !== "function"
+      typeof safety.snapshot !== "function" ||
+      typeof safety.assertUnchanged !== "function"
     ) {
       throw new TrustedValidationError(
         "Trusted validation Git safety service is unavailable.",
@@ -600,6 +680,14 @@ export function createTrustedValidationService(options = {}) {
       );
     }
     if (
+      workspacePolicy !== undefined &&
+      command.capabilities?.sourceProjection === true
+    )
+      throw new TrustedValidationError(
+        "Directory validation cannot request Git source projection.",
+        { code: "ERR_INVALID_TRUSTED_VALIDATION" },
+      );
+    if (
       command.capabilities?.sourceProjection === true &&
       typeof git.materializeSource !== "function"
     ) {
@@ -630,7 +718,7 @@ export function createTrustedValidationService(options = {}) {
         { code: "ERR_TRUSTED_VALIDATION_RESOURCE_UNVERIFIABLE" },
       );
     }
-    const before = await git.snapshot({ allowedPaths: [], projectPath });
+    const before = await safety.snapshot({ allowedPaths: [], projectPath });
     if (
       !preparationOnly &&
       (before.contentFingerprint !== normalizedBindings.contentFingerprint ||
@@ -646,17 +734,22 @@ export function createTrustedValidationService(options = {}) {
     let resource = null;
     let persistenceFailed = false;
     let processActive = false;
-    const gitMetadataPaths = gitMetadataExposures(before.projectPath);
+    const gitMetadataPaths = scope.controls;
     const storageProtectedPaths = [...storageForbiddenPaths];
     const projectPathIndex = storageProtectedPaths.indexOf(before.projectPath);
     if (projectPathIndex !== -1) {
       storageProtectedPaths.splice(projectPathIndex, 1);
     }
-    const protectedPaths = [...gitMetadataPaths, ...storageProtectedPaths];
+    const protectedPaths = [
+      ...gitMetadataPaths,
+      ...storageProtectedPaths,
+      ...scope.forbidden,
+    ];
     const forbiddenPaths = [
       before.projectPath,
       ...gitMetadataPaths,
       ...storageForbiddenPaths,
+      ...scope.forbidden,
     ];
     const persistResource = async (value) => {
       try {
@@ -680,6 +773,7 @@ export function createTrustedValidationService(options = {}) {
           ...runtimeStorageExposures(command, {
             cwd: before.projectPath,
             environment,
+            workspacePaths: scope.workspacePaths,
           }),
         );
       const bubblewrapPath = defaultSandbox
@@ -773,7 +867,7 @@ export function createTrustedValidationService(options = {}) {
         }
         await storage.verify(allocated);
         try {
-          await git.assertUnchanged(before);
+          await safety.assertUnchanged(before);
         } catch (cause) {
           throw new TrustedValidationError(
             "Trusted validation source changed before execution.",
@@ -792,6 +886,7 @@ export function createTrustedValidationService(options = {}) {
         resources: allocated?.mounts ?? {},
         privateStorageRoot: allocated?.record.root.path,
         protectedPaths,
+        workspacePaths: scope.workspacePaths,
         preparationOnly,
       });
       if (allocated !== null) await storage.verify(allocated);
@@ -892,8 +987,21 @@ export function createTrustedValidationService(options = {}) {
           !acquiring.has(resource.id)
         ) {
           const id = resource.id;
+          // A changed directory control may now reference this allocation.
+          // Rediscover confinement before deletion, retaining ownership when
+          // current controls overlap storage or cannot be inspected safely.
+          const currentScope =
+            workspacePolicy === undefined
+              ? scope
+              : await workspaceScope(projectPath, workspacePolicy, {
+                  recovery: true,
+                });
           await storage.cleanup(resource, {
-            forbiddenPaths,
+            forbiddenPaths: [
+              ...forbiddenPaths,
+              ...currentScope.controls,
+              ...currentScope.forbidden,
+            ],
             onResource: persistResource,
           });
           retiredAcquisitions.delete(id);
@@ -901,7 +1009,7 @@ export function createTrustedValidationService(options = {}) {
       } finally {
         if (retired) {
           try {
-            await git.assertUnchanged(before);
+            await safety.assertUnchanged(before);
           } catch (cause) {
             throw new TrustedValidationError(
               "Runner-trusted validation mutated repository state.",
@@ -974,6 +1082,7 @@ export function createTrustedValidationService(options = {}) {
     projectPath,
     storageForbiddenPaths = [],
     onResource,
+    workspacePolicy,
   }) {
     if (acquiring.has(resource?.id)) {
       throw new TrustedValidationError(
@@ -996,12 +1105,16 @@ export function createTrustedValidationService(options = {}) {
         );
       }
     }
+    const scope = await workspaceScope(projectPath, workspacePolicy, {
+      recovery: true,
+    });
     await createResourceStorage({ storageRoot: resource?.root?.path }).cleanup(
       resource,
       {
         forbiddenPaths: [
           projectPath,
-          ...gitMetadataExposures(projectPath),
+          ...scope.controls,
+          ...scope.forbidden,
           ...storageForbiddenPaths,
         ],
         onResource,

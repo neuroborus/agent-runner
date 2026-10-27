@@ -18,7 +18,7 @@ import {
   validStopSettlement,
 } from "./stop-contract.js";
 
-export const RUN_STATE_SCHEMA_VERSION = 23;
+export const RUN_STATE_SCHEMA_VERSION = 24;
 export const RUNTIME_COMPATIBILITY_VERSION = 1;
 export const RUNTIME_COMPATIBILITY = Object.freeze({
   runnerVersion: RUNTIME_COMPATIBILITY_VERSION,
@@ -56,6 +56,7 @@ const SUPPORTED_RUN_STATE_SCHEMA_VERSIONS = new Set([
   20,
   21,
   22,
+  23,
   RUN_STATE_SCHEMA_VERSION,
 ]);
 
@@ -74,6 +75,7 @@ const STATE_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "workspace",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -1356,6 +1358,117 @@ export function normalizeExecutionResource(
   return structuredClone(value);
 }
 
+function normalizeWorkspace(value, run) {
+  if (value == null) return null; // Legacy runs retain Git semantics, never new authority.
+  assertRecord(value, "run.workspace");
+  const fields = new Set([
+    "schemaVersion",
+    "kind",
+    "lease",
+    "leasePath",
+    "policy",
+    "bindingFingerprint",
+    "protectedFingerprint",
+    "ancestorBindings",
+    "absentInputPaths",
+    "retrievalPermissions",
+  ]);
+  rejectUnknownFields(value, fields, "run.workspace");
+  const canonical = (path) =>
+    typeof path === "string" &&
+    isAbsolute(path) &&
+    resolve(path) === path &&
+    path !== sep &&
+    !/[\0\r\n]/u.test(path);
+  const contains = (root, path) => {
+    const name = relative(root, path);
+    return (
+      name === "" ||
+      (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+    );
+  };
+  if (
+    run.schemaVersion < 24 ||
+    Object.keys(value).length !== fields.size ||
+    value.schemaVersion !== 1 ||
+    !["git", "directory"].includes(value.kind) ||
+    !["none", "exclusive"].includes(value.lease) ||
+    !canonical(value.leasePath) ||
+    !contains(value.leasePath, run.projectPath) ||
+    !Array.isArray(value.ancestorBindings) ||
+    !Array.isArray(value.absentInputPaths) ||
+    value.absentInputPaths.length > 256 ||
+    value.absentInputPaths.some(
+      (path, index) =>
+        !canonical(path) ||
+        path === run.taskPath ||
+        !contains(run.taskPath, path) ||
+        (index > 0 && value.absentInputPaths[index - 1] >= path),
+    ) ||
+    value.ancestorBindings.length > 4096 ||
+    value.ancestorBindings.some(
+      (entry, index) =>
+        !isRecord(entry) ||
+        Object.keys(entry).sort().join() !== "device,inode,mode,path" ||
+        (!canonical(entry.path) && entry.path !== sep) ||
+        [entry.device, entry.inode, entry.mode].some(
+          (field) => typeof field !== "string" || !/^[0-9]+$/u.test(field),
+        ) ||
+        (index > 0 && value.ancestorBindings[index - 1].path >= entry.path),
+    ) ||
+    !Array.isArray(value.retrievalPermissions) ||
+    value.retrievalPermissions.length !== 0
+  )
+    fail("run.workspace is invalid.");
+  if (value.kind === "git") {
+    if (
+      value.leasePath !== run.projectPath ||
+      value.policy !== null ||
+      value.bindingFingerprint !== null ||
+      value.protectedFingerprint !== null ||
+      value.ancestorBindings.length !== 0 ||
+      value.absentInputPaths.length !== 0
+    )
+      fail("Git workspace binding is invalid.");
+  } else {
+    const paths = [
+      "inputPaths",
+      "sourcePaths",
+      "outputPaths",
+      "configurationPaths",
+      "artifactPaths",
+      "infrastructurePaths",
+    ];
+    const policy = value.policy;
+    assertRecord(policy, "run.workspace.policy");
+    rejectUnknownFields(
+      policy,
+      new Set(["kind", "workspacePath", "taskPath", "stateRoot", ...paths]),
+      "run.workspace.policy",
+    );
+    if (
+      Object.keys(policy).length !== paths.length + 4 ||
+      value.lease !== "exclusive" ||
+      policy.kind !== "directory" ||
+      policy.workspacePath !== run.projectPath ||
+      policy.taskPath !== run.taskPath ||
+      !canonical(policy.stateRoot) ||
+      paths.some(
+        (name) =>
+          !Array.isArray(policy[name]) ||
+          policy[name].length > 256 ||
+          policy[name].some((path) => !canonical(path)) ||
+          new Set(policy[name]).size !== policy[name].length,
+      ) ||
+      [value.bindingFingerprint, value.protectedFingerprint].some(
+        (entry) => typeof entry !== "string" || !/^[a-f0-9]{64}$/u.test(entry),
+      )
+    )
+      fail("Directory workspace binding is invalid.");
+  }
+  return structuredClone(value);
+}
+
 export function normalizeRunState(value, expectedRunId) {
   assertRecord(value, "run");
   rejectUnknownFields(value, STATE_FIELDS, "run");
@@ -1426,6 +1539,7 @@ export function normalizeRunState(value, expectedRunId) {
     ),
     projectPath: value.projectPath,
     taskPath: value.taskPath,
+    workspace: normalizeWorkspace(value.workspace, value),
     projectConfigurationProtection: normalizeProjectConfigurationProtection(
       value.projectConfigurationProtection,
       value,

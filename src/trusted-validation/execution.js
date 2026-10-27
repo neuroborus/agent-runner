@@ -620,16 +620,17 @@ export function gitMetadataExposures(cwd) {
 
 function dynamicExposures(
   command,
-  { cwd, environment, homePath, sourceProjection = false },
+  { cwd, environment, homePath, sourceProjection = false, workspacePaths },
 ) {
   const exposures = sourceProjection
     ? []
     : [
-        { source: cwd, target: cwd },
-        ...gitMetadataExposures(cwd).map((path) => ({
-          source: path,
-          target: path,
-        })),
+        ...(workspacePaths ?? [cwd, ...gitMetadataExposures(cwd)]).map(
+          (path) => ({
+            source: path,
+            target: path,
+          }),
+        ),
       ];
   for (const path of String(environment.PATH ?? "").split(delimiter)) {
     if (isAbsolute(path) && existsSync(path)) {
@@ -677,7 +678,10 @@ function dynamicExposures(
   return confined;
 }
 
-export function runtimeStorageExposures(command, { cwd, environment }) {
+export function runtimeStorageExposures(
+  command,
+  { cwd, environment, workspacePaths },
+) {
   try {
     return [
       ...SYSTEM_MOUNTS.filter((path) => existsSync(path)).map((path) =>
@@ -688,6 +692,7 @@ export function runtimeStorageExposures(command, { cwd, environment }) {
         environment,
         homePath: environment.HOME,
         sourceProjection: command.capabilities?.sourceProjection === true,
+        workspacePaths,
       }).flatMap(({ source, target }) => [source, target]),
     ];
   } catch {
@@ -709,6 +714,7 @@ function sandboxArguments(
     resources,
     privateStorageRoot,
     protectedPaths,
+    workspacePaths,
     preparationOnly,
   },
 ) {
@@ -740,10 +746,12 @@ function sandboxArguments(
     environment,
     homePath,
     sourceProjection,
+    workspacePaths,
   });
   const runtimeExposures = runtimeStorageExposures(command, {
     cwd,
     environment,
+    workspacePaths,
   });
   // Private storage must not leak through a runtime, PATH or system exposure.
   // Only the explicit per-command mounts below may expose owned subdirectories.
@@ -816,7 +824,7 @@ function sandboxArguments(
       !isAbsolute(source) ||
       realpathSync(source) !== source ||
       !lstatSync(source).isDirectory() ||
-      [cwd, ...gitMetadataExposures(cwd)].some(
+      (workspacePaths ?? [cwd, ...gitMetadataExposures(cwd)]).some(
         (path) => coversPath(path, target) || coversPath(target, path),
       )
     ) {
@@ -854,6 +862,7 @@ export function sandboxTrustedCommand(
     resources = {},
     privateStorageRoot,
     protectedPaths = [],
+    workspacePaths,
     preparationOnly = false,
     platform = process.platform,
   },
@@ -884,6 +893,7 @@ export function sandboxTrustedCommand(
           resources,
           privateStorageRoot,
           protectedPaths,
+          workspacePaths,
           preparationOnly,
         }),
       }),

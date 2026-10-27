@@ -301,6 +301,7 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.workspace;
     delete event.state.providerPolicies;
     delete event.state.runtimeCompatibility;
     delete event.state.activeTurn;

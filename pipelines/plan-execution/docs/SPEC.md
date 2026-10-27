@@ -32,6 +32,11 @@ This is a local orchestration CLI, not a general agent framework.
 
 ---
 
+The descriptor explicitly selects a Git workspace and an exclusive canonical-worktree lease.
+The root resolves that selection before Git-specific inspection; a missing Git
+repository never selects a directory workflow. Role access, ignored artifacts
+and this pipeline's completion contract retain their existing guarantees.
+
 ## 2. Technology Baseline
 
 Implement the runner as plain modern JavaScript on Node.js with native ES modules.

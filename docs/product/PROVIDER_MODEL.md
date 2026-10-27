@@ -44,6 +44,11 @@ declaration before provider work. This foundation does not yet expose directory
 pipelines. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
+The runner probes every declared directory access separately and pins their
+combined receipt for the logical role. It reproduces that receipt on resume,
+retains native continuation support, and supplies only the saved path policy to
+turns. Neither directory analysis nor output work requests a commit capability.
+
 Adapter execution options and turn requests also accept the portable effort
 values `current`, `low`, `medium`, `high`, and `xhigh`. Effort is separate from
 the model identifier; identifiers containing whitespace, including combined

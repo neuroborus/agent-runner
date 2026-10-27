@@ -17,6 +17,7 @@ export async function inspectTrustedRequirements(
 ) {
   await checkConfiguration();
   await monitor.check();
+  if (run.workspace?.kind === "directory") await validatePersistedBoundary(run);
   const current = await runStore.loadRun(run.runId);
   if (
     current.preparation != null ||
@@ -41,6 +42,7 @@ export async function inspectTrustedRequirements(
         trustedValidation.inspectRequirements({
           ...value,
           projectPath: current.projectPath,
+          workspacePolicy: current.workspace?.policy ?? undefined,
           snapshot: current.pipelineState.trustedValidation,
           storageForbiddenPaths: storageForbiddenPaths(current),
           onPreparation: async (bindings) => {

@@ -58,6 +58,10 @@ contract.
   confined file loading, trusted profiles, and resolution precedence private
   to that capability. Let pipeline descriptors own their roles, settings,
   defaults, and persisted-run validation.
+- Let pipeline descriptors select workspace kind, role access and exclusive
+  lease requirements before Git inspection. Directory lifecycles use confined
+  filesystem bindings and share an enclosing worktree's canonical exclusion key;
+  they never acquire staging or commit authority. Legacy runs retain Git semantics.
 - Keep shared plan parsing and structural and subject validation in
   `packages/commit-plan/`. The plan-authoring Planner proposes exact commit
   subjects, deterministic code validates them, and plan execution consumes

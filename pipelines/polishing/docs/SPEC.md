@@ -13,6 +13,11 @@ execution leases, public activity, CLI dispatch, and MCP control. It does not
 depend on another pipeline or on `@agent-runner/commit-plan`, and it does not
 introduce a workflow DSL or generic workflow engine.
 
+The descriptor explicitly selects a Git workspace and an exclusive canonical-worktree lease.
+The root resolves that selection before Git-specific inspection; a missing Git
+repository never selects a directory workflow. Role access, ignored artifacts
+and this pipeline's completion contract retain their existing guarantees.
+
 ## Technology And Ownership
 
 Use plain JavaScript, native ES modules, Node.js `>=24 <25`, the standard

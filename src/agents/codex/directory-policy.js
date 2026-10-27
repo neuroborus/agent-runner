@@ -59,11 +59,21 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
           inspection: {
             ...inspection,
             // These declarations remain bound by path, but their contents and
-            // identities can change through authorized output/state effects.
+            // identities can change through authorized output/state effects
+            // and runner-owned artifact publication. Explicit reads stay pinned.
             bindings: inspection.bindings.filter(
               ({ path }) =>
                 path !== inspection.stateRoot &&
-                !inspection.outputPaths.includes(path),
+                !inspection.outputPaths.includes(path) &&
+                (!inspection.artifactPaths.includes(path) ||
+                  [
+                    inspection.workspacePath,
+                    inspection.taskPath,
+                    ...inspection.inputPaths,
+                    ...inspection.sourcePaths,
+                    ...inspection.configurationPaths,
+                    ...inspection.infrastructurePaths,
+                  ].includes(path)),
             ),
           },
         }),

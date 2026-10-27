@@ -7,6 +7,18 @@ remain in the owning documentation.
 
 ## 2026-10-26
 
+- **Workspace selection precedes Git-specific lifecycle work.** Pipeline
+  descriptors own workspace kind, role access and exclusion requirements.
+  Directory bindings persist exact declarations and protected fingerprints;
+  filesystem snapshots serve turns, trusted checks and recovery without Git.
+  Repository-contained directory work shares the canonical worktree lease,
+  including stop and detached ownership checks; atomic admission also excludes
+  overlapping ordinary-directory scopes. Frozen-content drift blocks new work
+  after verified owned execution retires, including during operator stops.
+  Legacy runs retain Git authority
+  rather than gaining new permissions on resume. Public custom routes stay
+  closed until their criterion and completion contracts are implemented.
+
 - **Claude directory authority crosses the authenticated command boundary.**
   Directory probes use ordinary fixtures without Git or commit preparation;
   native and restricted-host launchers grant only existing declared output

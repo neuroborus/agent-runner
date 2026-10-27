@@ -12,6 +12,8 @@ import {
   sep,
 } from "node:path";
 
+import { createWorkspaceService } from "../../workspace/index.js";
+
 // The execution-resource journal uses a frozen command identity for each owner.
 // This identity belongs to adapter preparation, never to a trusted check.
 export const CLAUDE_STORAGE_IDENTITY = createHash("sha256")
@@ -122,9 +124,34 @@ async function pinnedRoot(root) {
 export async function recoverClaudeStorage({
   resource,
   storageForbiddenPaths = [],
+  workspacePolicy,
   onResource,
 }) {
   try {
+    if (workspacePolicy !== undefined) {
+      const { kind, ...declarations } = workspacePolicy;
+      if (kind !== "directory") throw environmentError("cleanup");
+      // Retired turns may have changed a control pointer to reference storage.
+      // Discover current exclusions before deletion without accepting frozen
+      // input drift or requiring deleted inputs to exist for owned cleanup.
+      const inspection = await createWorkspaceService().inspect({
+        ...declarations,
+        inputPaths: [],
+        sourcePaths: [],
+        configurationPaths: [],
+        artifactPaths: [
+          ...(declarations.artifactPaths ?? []),
+          ...(declarations.inputPaths ?? []),
+          ...(declarations.sourcePaths ?? []),
+          ...(declarations.configurationPaths ?? []),
+        ],
+      });
+      storageForbiddenPaths = [
+        ...storageForbiddenPaths,
+        inspection.stateRoot,
+        ...inspection.protectedPaths,
+      ];
+    }
     if (
       resource.commandIdentity !== CLAUDE_STORAGE_IDENTITY ||
       resource.hostname !== hostname() ||
@@ -169,6 +196,7 @@ export async function recoverClaudeStorage({
 export async function allocateClaudeStorage({
   cwd,
   storageForbiddenPaths = [],
+  workspacePolicy,
   onResource,
   signal,
 }) {
@@ -223,6 +251,7 @@ export async function allocateClaudeStorage({
           await recoverClaudeStorage({
             resource,
             storageForbiddenPaths: forbiddenPaths,
+            workspacePolicy,
             onResource: publish,
           });
         },
@@ -235,6 +264,7 @@ export async function allocateClaudeStorage({
       await recoverClaudeStorage({
         resource,
         storageForbiddenPaths: forbiddenPaths,
+        workspacePolicy,
         onResource: publish,
       });
     }

@@ -806,6 +806,8 @@ function directoryCommandArguments(directory, access, native) {
 
 test("proves directory access without Git or commit preparation and binds each receipt", async (t) => {
   const directory = await directoryWorkspace(t);
+  const artifactPath = join(directory.root, "artifacts");
+  directory.workspacePolicy.artifactPaths = [artifactPath];
   for (const nativeSandbox of [true, "nested-denied"]) {
     const fake = await createFakeBubblewrap(t);
     const fixture = createFixture({
@@ -819,6 +821,7 @@ test("proves directory access without Git or commit preparation and binds each r
     });
     const receipts = [];
     for (const access of ["read-only", "workspace-write"]) {
+      await rm(artifactPath, { recursive: true, force: true });
       const options = { access, workspacePolicy: directory.workspacePolicy };
       const capabilities = await fixture.adapter.probe(options);
       assert.equal(capabilities.declaredWorkspace, true);
@@ -829,6 +832,11 @@ test("proves directory access without Git or commit preparation and binds each r
       assert.ok(Object.isFrozen(capabilities.policyReceipt));
       receipts.push(capabilities.policyReceipt.fingerprint);
       await writeFile(join(directory.output, "result.md"), "Output.\n");
+      await mkdir(artifactPath);
+      await writeFile(
+        join(artifactPath, "clarifications.md"),
+        "Frozen clarifications\n",
+      );
       assert.deepEqual(
         (await fixture.adapter.probe(options)).policyReceipt,
         capabilities.policyReceipt,
@@ -1305,6 +1313,104 @@ test("rejects directory drift after failed attempts before reconstruction", asyn
     assert.equal(observations[0].outcome, "incomplete");
     await assert.rejects(stat(turnCalls(fixture)[0].commandLauncherPath), {
       code: "ENOENT",
+    });
+  }
+});
+
+test("retains retiring directory turns when current controls reference storage or cannot be inspected", async (t) => {
+  for (const outcome of ["completed", "failed", "malformed-control"]) {
+    await t.test(outcome, async (t) => {
+      let directory;
+      let pointer;
+      let original;
+      let resource;
+      const onResource = (value) => {
+        resource = value;
+      };
+      t.after(async () => {
+        if (resource) {
+          await writeFile(pointer, original);
+          await recoverClaudeStorage({
+            resource,
+            workspacePolicy: directory.workspacePolicy,
+            storageForbiddenPaths: [directory.cwd],
+            onResource,
+          });
+        }
+      });
+      directory = await directoryWorkspace(t);
+      const metadata = join(directory.root, "metadata");
+      pointer = join(directory.cwd, ".git");
+      await mkdir(metadata);
+      original = `gitdir: ${metadata}\n`;
+      await writeFile(pointer, original);
+      let retained;
+      let allocation;
+      const fixture = createFixture({
+        async handle({ call }) {
+          if (call.file !== "claude" || !call.argumentsList.includes("-p"))
+            return;
+          retained = resource;
+          allocation = join(resource.root.path, resource.id);
+          await writeFile(join(allocation, "protected.txt"), "Preserve.\n");
+          await writeFile(
+            pointer,
+            outcome === "malformed-control"
+              ? "invalid\n"
+              : `gitdir: ${allocation}\n`,
+          );
+          if (outcome === "failed")
+            throw processFailure(
+              result({ error: true, output: "authentication failed" }),
+            );
+        },
+      });
+      await assert.rejects(
+        fixture.adapter.run(
+          request({
+            cwd: directory.cwd,
+            access: "workspace-write",
+            workspacePolicy: directory.workspacePolicy,
+            onResource,
+          }),
+        ),
+        {
+          code:
+            outcome === "failed"
+              ? "ERR_CLAUDE_AUTHENTICATION_UNAVAILABLE"
+              : "ERR_EXECUTION_RESOURCE_UNVERIFIABLE",
+        },
+      );
+      assert.equal(resource, retained);
+      assert.equal(resource.phase, "allocated");
+      assert.equal(
+        await readFile(join(allocation, "protected.txt"), "utf8"),
+        "Preserve.\n",
+      );
+      await assert.rejects(
+        recoverClaudeStorage({
+          resource,
+          workspacePolicy: directory.workspacePolicy,
+          storageForbiddenPaths: [directory.cwd],
+          onResource,
+        }),
+        { code: "ERR_EXECUTION_RESOURCE_UNVERIFIABLE" },
+      );
+      assert.equal(resource, retained);
+
+      // The same owner can retire storage after controls are restored, even
+      // when a frozen input disappeared. Cleanup grants no turn replay.
+      await writeFile(pointer, original);
+      await rm(directory.input);
+      await recoverClaudeStorage({
+        resource,
+        workspacePolicy: directory.workspacePolicy,
+        storageForbiddenPaths: [directory.cwd],
+        onResource,
+      });
+      assert.equal(resource, null);
+      await assert.rejects(stat(allocation), { code: "ENOENT" });
+      assert.equal(turnCalls(fixture).length, 1);
     });
   }
 });

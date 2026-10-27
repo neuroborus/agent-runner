@@ -568,7 +568,10 @@ test("reads a complete worktree lease during no-replace publication", async (t) 
   const { created, projectPath, stateRoot, store } = await createFixture(t, {
     onLeasePublicationBoundary: (boundary) => barrier.onBoundary(boundary),
   });
-  const paused = barrier.pause((boundary) => boundary.phase === "published");
+  const paused = barrier.pause(
+    (boundary) =>
+      boundary.filePath.endsWith("/.lease") && boundary.phase === "published",
+  );
   const acquisition = store.acquireWorktreeLease(
     projectPath,
     created.state.runId,

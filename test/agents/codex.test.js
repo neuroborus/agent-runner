@@ -2381,8 +2381,9 @@ test("proves declared directory access without Git, commit readiness, or writabl
   assert.equal(old.processes.length, 0);
 });
 
-test("preserves directory policy receipts across authorized output and state creation", async (t) => {
+test("preserves directory policy receipts across authorized output, artifact and state creation", async (t) => {
   const directory = await directoryWorkspace(t);
+  directory.workspacePolicy.artifactPaths.push(directory.input);
   await rm(directory.output, { recursive: true });
   const fixture = createFixture({ version: "0.164.0" });
   const options = {
@@ -2393,6 +2394,11 @@ test("preserves directory policy receipts across authorized output and state cre
   await mkdir(directory.output);
   await writeFile(join(directory.output, "report.md"), "Accepted result\n");
   await mkdir(directory.workspacePolicy.stateRoot);
+  await mkdir(directory.workspacePolicy.artifactPaths[0]);
+  await writeFile(
+    join(directory.workspacePolicy.artifactPaths[0], "clarifications.md"),
+    "Frozen clarifications\n",
+  );
   const after = await fixture.adapter.probe(options);
   assert.deepEqual(after.policyReceipt, before.policyReceipt);
 
@@ -2758,6 +2764,21 @@ test("validates directory declarations before activity", async (t) => {
     ),
     hasCode("ERR_INVALID_CODEX_OPTIONS"),
   );
+  assert.equal(fixture.executeCalls.length, 0);
+  for (const workspacePolicy of [undefined, directory.workspacePolicy]) {
+    await assert.rejects(
+      fixture.adapter.run(
+        request({
+          cwd: directory.cwd,
+          workspacePolicy,
+          storageForbiddenPaths: Array(
+            workspacePolicy === undefined ? 257 : 1540,
+          ).fill(directory.cwd),
+        }),
+      ),
+      hasCode("ERR_INVALID_CODEX_OPTIONS"),
+    );
+  }
   assert.equal(fixture.executeCalls.length, 0);
   for (const policy of [
     { ...directory.workspacePolicy, outputPaths: [directory.input] },

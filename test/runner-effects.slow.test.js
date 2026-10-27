@@ -499,6 +499,7 @@ test("version-18 consumed-commit recovery retires interrupted observations witho
   for (const event of interruptedEvents) {
     event.schemaVersion = event.state.schemaVersion = 18;
     event.state.runtimeCompatibility.runStateVersion = 18;
+    delete event.state.workspace;
     for (const attempt of event.state.observations?.attempts ?? [])
       delete attempt.measurements;
   }

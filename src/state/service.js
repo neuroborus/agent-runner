@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { watch } from "node:fs";
-import { lstat, mkdir, realpath, rm, rmdir } from "node:fs/promises";
+import { lstat, mkdir, readdir, realpath, rm, rmdir } from "node:fs/promises";
 import { homedir, hostname } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -22,7 +22,12 @@ import {
   availabilityDelayMs,
   DEFAULT_AVAILABILITY_POLICY,
 } from "./availability.js";
-import { atomicWriteFile, resolveRunArtifactPath } from "./files.js";
+import {
+  atomicWriteFile,
+  publishExclusiveFile,
+  readOptionalPublishedText,
+  resolveRunArtifactPath,
+} from "./files.js";
 import {
   DEFAULT_PROVIDER_INACTIVITY_TIMEOUT_MS,
   providerInactivityFingerprint,
@@ -86,6 +91,7 @@ const CREATE_RUN_FIELDS = new Set([
   "projectPath",
   "taskPath",
   "projectConfigurationProtection",
+  "workspace",
   "clientAttribution",
   "clientAttributionFingerprint",
   "roles",
@@ -659,6 +665,7 @@ export function createRunStore({
           runtimeCompatibility: RUNTIME_COMPATIBILITY,
           projectPath,
           taskPath,
+          workspace: input.workspace ?? null,
           projectConfigurationProtection:
             input.projectConfigurationProtection === undefined
               ? null
@@ -849,19 +856,91 @@ export function createRunStore({
   async function acquireWorktreeLease(projectPath, runId) {
     assertRunId(runId);
     const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.acquire(worktreeDirectory, runId);
+    const scope = await canonicalDirectory(projectPath, "Project path");
+    // Serialize admission, rather than check then acquire: parent and child
+    // scopes have distinct keys but must never both gain exclusive ownership.
+    return mutate(dirname(worktreeDirectory), async () => {
+      const scopePath = join(worktreeDirectory, "scope.json");
+      const source = `${JSON.stringify({ schemaVersion: 1, path: scope })}\n`;
+      const saved = await readOptionalPublishedText(scopePath);
+      if (saved === null) await publishExclusiveFile(scopePath, source);
+      else if (saved !== source)
+        throw new RunStoreError("Workspace lease scope changed.", {
+          code: "ERR_INVALID_WORKTREE_LEASE",
+        });
+      const owner = await overlappingWorktreeOwner(
+        worktreeDirectory,
+        scope,
+        runId,
+      );
+      if (owner !== null)
+        throw new RunStoreError("An overlapping workspace is already leased.", {
+          code: "ERR_WORKTREE_LEASED",
+        });
+      return worktreeLeases.acquire(worktreeDirectory, runId);
+    });
+  }
+
+  async function overlappingWorktreeOwner(directory, scope, runId) {
+    const within = (root, path) => {
+      const name = relative(root, path);
+      return (
+        name === "" ||
+        (!isAbsolute(name) && name !== ".." && !name.startsWith(`..${sep}`))
+      );
+    };
+    for (const key of await readdir(dirname(directory))) {
+      if (
+        !/^[a-f0-9]{64}$/u.test(key) ||
+        join(dirname(directory), key) === directory
+      )
+        continue;
+      const candidate = await ensureManagedDirectory(
+        join(dirname(directory), key),
+        "Workspace lease path",
+      );
+      const source = await readOptionalPublishedText(
+        join(candidate, "scope.json"),
+      );
+      if (source === null) continue; // Legacy Git keys still use exact exclusion.
+      let binding;
+      try {
+        binding = JSON.parse(source);
+      } catch {}
+      if (
+        binding?.schemaVersion !== 1 ||
+        Object.keys(binding).sort().join() !== "path,schemaVersion" ||
+        typeof binding.path !== "string" ||
+        !isAbsolute(binding.path) ||
+        resolve(binding.path) !== binding.path ||
+        createHash("sha256").update(binding.path).digest("hex") !== key
+      )
+        throw new RunStoreError("Workspace lease scope is invalid.", {
+          code: "ERR_INVALID_WORKTREE_LEASE",
+        });
+      if (!within(scope, binding.path) && !within(binding.path, scope))
+        continue;
+      const owner = await worktreeLeases.reservationOwner(candidate, runId);
+      if (owner !== null) return owner;
+    }
+    return null;
   }
 
   async function worktreeIsLeased(projectPath, runId) {
-    assertRunId(runId);
-    const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.isLeased(worktreeDirectory, runId);
+    return (await worktreeLeaseOwner(projectPath, runId)) !== null;
   }
 
   async function worktreeLeaseOwner(projectPath, runId) {
     assertRunId(runId);
     const worktreeDirectory = await getWorktreeLeaseDirectory(projectPath);
-    return worktreeLeases.owner(worktreeDirectory, runId);
+    return (
+      (await worktreeLeases.owner(worktreeDirectory, runId)) ??
+      (await overlappingWorktreeOwner(
+        worktreeDirectory,
+        await canonicalDirectory(projectPath, "Project path"),
+        runId,
+      ))
+    );
   }
 
   async function withGuidanceLease(projectPath, operation) {
@@ -909,7 +988,12 @@ export function createRunStore({
 
     const runDirectory = await getRunDirectory(runId);
     const directories = includeOwnership
-      ? [runDirectory, await getWorktreeLeaseDirectory(initial.projectPath)]
+      ? [
+          runDirectory,
+          await getWorktreeLeaseDirectory(
+            initial.workspace?.leasePath ?? initial.projectPath,
+          ),
+        ]
       : [runDirectory];
     return new Promise((resolvePromise, rejectPromise) => {
       let settled = false;

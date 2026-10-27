@@ -75,7 +75,16 @@ export async function prepareDirectoryPolicy(request, AdapterError) {
               bindings: inspection.bindings.filter(
                 ({ path }) =>
                   path !== inspection.stateRoot &&
-                  !inspection.outputPaths.includes(path),
+                  !inspection.outputPaths.includes(path) &&
+                  (!inspection.artifactPaths.includes(path) ||
+                    [
+                      inspection.workspacePath,
+                      inspection.taskPath,
+                      ...inspection.inputPaths,
+                      ...inspection.sourcePaths,
+                      ...inspection.configurationPaths,
+                      ...inspection.infrastructurePaths,
+                    ].includes(path)),
               ),
             },
           }),

@@ -544,6 +544,14 @@ export function createLeaseManager({
     },
     acquire,
     inspect,
+    // A different scope cannot reclaim this reservation. Only acquisition of
+    // its exact key may reconcile process ownership and raced stop requests.
+    async reservationOwner(runDirectory, runId) {
+      const record =
+        (await readManagedLease(join(runDirectory, leaseFilename), runId)) ??
+        (await readManagedLease(join(runDirectory, reclaimingFilename), runId));
+      return record?.runId ?? null;
+    },
     isLeased,
     owner,
     ownerIsLive,

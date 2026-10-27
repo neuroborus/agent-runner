@@ -28,6 +28,11 @@ rounds, the user answers through a text editor, and the runner writes the final
 plan atomically. No other tracked or untracked file, index entry, commit, or ref
 may change.
 
+The descriptor explicitly selects a Git workspace and no exclusive workspace lease.
+The root resolves that selection before Git-specific inspection; a missing Git
+repository never selects a directory workflow. Role access, ignored artifacts
+and this pipeline's completion contract retain their existing guarantees.
+
 ## Configuration
 
 The pipeline descriptor declares the `planner`, `reviewer`, and on-demand

@@ -44,7 +44,7 @@ const ACCESS_CAPABILITIES = Object.freeze({
 });
 const ACCESS_ORDER = Object.freeze(Object.keys(ACCESS_CAPABILITIES));
 
-function roleAccess(pipeline, role) {
+function roleAccess(pipeline, role, workspacePolicy) {
   const access =
     pipeline.roleAccess === undefined
       ? ["read-only"]
@@ -55,7 +55,11 @@ function roleAccess(pipeline, role) {
     !Array.isArray(access) ||
     access.length === 0 ||
     new Set(access).size !== access.length ||
-    access.some((value) => !ACCESS_ORDER.includes(value))
+    access.some(
+      (value) =>
+        !ACCESS_ORDER.includes(value) ||
+        (workspacePolicy !== undefined && value === "local-commit"),
+    )
   ) {
     throw new RunnerError(
       `Pipeline ${pipeline.id} has invalid access requirements for ${role}.`,
@@ -118,11 +122,12 @@ function normalizePolicyReceipt(capabilities) {
 
 function validateCapabilities(
   capabilities,
-  { access, backend, pipelineId, role, sourceSession },
+  { access, backend, pipelineId, role, sourceSession, workspacePolicy },
 ) {
   const requiredCapabilities = [
     "structuredOutput",
     "remoteWriteBlocked",
+    ...(workspacePolicy === undefined ? [] : ["declaredWorkspace"]),
     ...access.flatMap((mode) => ACCESS_CAPABILITIES[mode]),
     ...(sourceSession === null ? [] : ["nativeSessionFork"]),
   ].filter((value, index, values) => values.indexOf(value) === index);
@@ -139,6 +144,10 @@ function validateCapabilities(
     ...(capabilities?.remoteWriteBlocked === true
       ? []
       : ["remote-write-blocked"]),
+    ...(workspacePolicy === undefined ||
+    capabilities?.declaredWorkspace === true
+      ? []
+      : ["declared-workspace"]),
     ...access.filter((mode) =>
       ACCESS_CAPABILITIES[mode].some(
         (capability) => capabilities?.[capability] !== true,
@@ -248,6 +257,91 @@ async function probeAdapter(adapter, backend, options, providers) {
   }
 }
 
+async function probeRole(
+  adapter,
+  pipeline,
+  role,
+  configuration,
+  sourceSession,
+  providers,
+  workspacePolicy,
+) {
+  const access = roleAccess(pipeline, role, workspacePolicy);
+  const options = executionOptions(configuration, providers);
+  const context = {
+    access,
+    backend: configuration.backend,
+    pipelineId: pipeline.id,
+    role,
+    sourceSession,
+    workspacePolicy,
+  };
+  if (workspacePolicy === undefined)
+    return validateCapabilities(
+      await probeAdapter(adapter, configuration.backend, options, providers),
+      context,
+    );
+  const proofs = [];
+  for (const mode of access) {
+    proofs.push(
+      validateCapabilities(
+        await probeAdapter(
+          adapter,
+          configuration.backend,
+          { ...options, access: mode, workspacePolicy },
+          providers,
+        ),
+        { ...context, access: [mode] },
+      ),
+    );
+  }
+  const policyReceipt = Object.freeze({
+    schemaVersion: 1,
+    fingerprint: createHash("sha256")
+      .update(JSON.stringify(proofs.map(({ policyReceipt }) => policyReceipt)))
+      .digest("hex"),
+    supportedAccess: Object.freeze(
+      ACCESS_ORDER.filter((mode) => access.includes(mode)),
+    ),
+  });
+  const capabilities = { version: proofs[0].capabilities.version };
+  const required = [
+    ...new Set(
+      proofs.flatMap(({ capabilities }) => capabilities.requiredCapabilities),
+    ),
+  ];
+  for (const { capabilities: proof } of proofs) {
+    if (proof.version !== capabilities.version)
+      throw new RunnerError("Backend changed during access probing.", {
+        code: "ERR_UNSUPPORTED_BACKEND",
+      });
+    for (const [name, value] of Object.entries(proof)) {
+      if (typeof value === "boolean")
+        capabilities[name] = proofs.every(
+          ({ capabilities }) => capabilities[name] === true,
+        );
+    }
+  }
+  for (const name of required) capabilities[name] = true;
+  return {
+    policyReceipt,
+    capabilities: createCapabilityProof(capabilities, required, policyReceipt),
+  };
+}
+
+function directoryRequest(run, pipeline, role, request) {
+  const policy = run.workspace?.policy;
+  if (policy == null) return request;
+  if (
+    !roleAccess(pipeline, role, policy).includes(request.access) ||
+    request.cwd !== run.projectPath
+  )
+    throw new RunnerError("Turn exceeds the declared workspace access.", {
+      code: "ERR_UNSAFE_WORKSPACE_ACCESS",
+    });
+  return { ...request, workspacePolicy: policy };
+}
+
 function lazyArbiterAdapter(
   run,
   pipeline,
@@ -270,21 +364,15 @@ function lazyArbiterAdapter(
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
       .then(() =>
-        probeAdapter(
+        probeRole(
           resolve(),
-          configuration.backend,
-          executionOptions(configuration, providers),
+          pipeline,
+          "arbiter",
+          configuration,
+          null,
           providers,
+          run.workspace?.policy ?? undefined,
         ),
-      )
-      .then((capabilities) =>
-        validateCapabilities(capabilities, {
-          access: roleAccess(pipeline, "arbiter"),
-          backend: configuration.backend,
-          pipelineId: run.pipelineId,
-          role: "arbiter",
-          sourceSession: null,
-        }),
       )
       .then(async ({ capabilities, policyReceipt }) => {
         await onPolicyReceipt("arbiter", policyReceipt);
@@ -301,7 +389,12 @@ function lazyArbiterAdapter(
     probe: resolveCapabilities,
     async run(request) {
       await resolveCapabilities();
-      return runAdapter(resolve(), configuration.backend, request, providers);
+      return runAdapter(
+        resolve(),
+        configuration.backend,
+        directoryRequest(run, pipeline, "arbiter", request),
+        providers,
+      );
     },
   });
 }
@@ -325,21 +418,15 @@ function configuredAdapter(
   const resolveCapabilities = async () => {
     capabilitiesPromise ??= Promise.resolve()
       .then(() =>
-        probeAdapter(
+        probeRole(
           adapter,
-          configuration.backend,
-          executionOptions(configuration, providers),
-          providers,
-        ),
-      )
-      .then((capabilities) =>
-        validateCapabilities(capabilities, {
-          access: roleAccess(pipeline, role),
-          backend: configuration.backend,
-          pipelineId: run.pipelineId,
+          pipeline,
           role,
-          sourceSession: run.sessionLineage.source,
-        }),
+          configuration,
+          run.sessionLineage.source,
+          providers,
+          run.workspace?.policy ?? undefined,
+        ),
       )
       .then(async ({ capabilities, policyReceipt }) => {
         await onPolicyReceipt(role, policyReceipt);
@@ -356,10 +443,24 @@ function configuredAdapter(
     probe: resolveCapabilities,
     async canReadFiles(request) {
       await resolveCapabilities();
-      return (await adapter.canReadFiles?.(request)) === true;
+      return (
+        (await adapter.canReadFiles?.({
+          ...request,
+          ...(run.workspace?.policy
+            ? { workspacePolicy: run.workspace.policy }
+            : {}),
+        })) === true
+      );
     },
-    run: (request) =>
-      runAdapter(adapter, configuration.backend, request, providers),
+    async run(request) {
+      if (run.workspace?.policy) await resolveCapabilities();
+      return runAdapter(
+        adapter,
+        configuration.backend,
+        directoryRequest(run, pipeline, role, request),
+        providers,
+      );
+    },
   });
 }
 
@@ -429,6 +530,7 @@ export async function probeRequiredRoles(
   adapters,
   sourceSession,
   providers = PROVIDER_REGISTRY,
+  workspacePolicy,
 ) {
   const requiredRoles = Object.keys(roles).filter((role) => role !== "arbiter");
   const receipts = Object.fromEntries(
@@ -437,6 +539,20 @@ export async function probeRequiredRoles(
   const capabilitiesByConfiguration = new Map();
   for (const role of requiredRoles) {
     const configuration = roles[role];
+    if (workspacePolicy !== undefined) {
+      receipts[role] = (
+        await probeRole(
+          resolveAdapter(adapters, pipeline.id, role, configuration.backend),
+          pipeline,
+          role,
+          configuration,
+          sourceSession,
+          providers,
+          workspacePolicy,
+        )
+      ).policyReceipt;
+      continue;
+    }
     const backend = configuration.backend;
     const key = JSON.stringify(configuration);
     if (!capabilitiesByConfiguration.has(key)) {

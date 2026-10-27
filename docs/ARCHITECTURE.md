@@ -62,6 +62,10 @@ The filesystem-only workspace capability lives under `src/workspace/` behind
 Private `paths.js`, `controls.js` and `snapshot.js` own confinement, filesystem
 control discovery and guarded capture; `service.js` composes inspection and
 mutation guards.
+The runner's private `workspace.js` selects descriptor-owned workspace/lease
+requirements before Git inspection and binds directory policies through this
+capability. All three registered pipelines still explicitly select Git; custom
+entry points remain unavailable.
 It is the directory inspection foundation for custom planning/execution, audit
 and init; those workflows are not yet exposed. Git snapshots remain Git-owned.
 `inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
@@ -128,6 +132,15 @@ fingerprints also bind inodes and file timestamps.
 `allowOutputs: true` permits only declared outputs and newly required parent
 directories, preserving unrelated files and all protected inputs. Filesystem
 injection supports deterministic race tests without Git or providers.
+
+Directory lifecycle protected fingerprints exempt only declared outputs and
+artifacts. A task root coinciding with or containing the workspace never exempts
+other project content; runner-owned task artifacts must be declared explicitly.
+
+`readFile({path, projectPath, optional})` confines text input reads to a real
+regular file beneath the supplied root, reusing descriptor-anchored snapshot
+reads with no-follow, nonblocking opens and read-race checks. Only an absent
+optional file returns null; aliases and special files fail before content reads.
 
 `measureChanges({projectPath, baseHead, expectedContentFingerprint})` measures
 the final worktree against the caller-verified immutable step-start commit
@@ -818,7 +831,8 @@ remain subject to the protected-input guard.
 
 ## Run Lifecycle
 
-The root runner resolves the canonical Git root, safely loads runner and
+The root runner first resolves the explicit pipeline workspace selection, then
+resolves the canonical Git root or ordinary directory, safely loads runner and
 project configuration, applies run-wide, role-specific, and accepted
 pipeline-setting overrides, asks the descriptor for the active roles, and
 persists those resolved roles, the resolved settings, artifact root, and
@@ -850,6 +864,58 @@ reconciliation or effect verification still requires the worktree lease.
 `resume` recovers the durable event history and reconstructs the same
 runtime from persisted state without reloading either configuration source or
 requiring a live native session. `status` remains lock-free.
+
+Descriptors declare `workspace.kind` (`git` or `directory`) and `workspace.lease`
+(`none` or `exclusive`), alongside their existing role-access inventory. An
+optional descriptor resolver selects those requirements from explicit run input;
+MCP preflight and run creation supply the same normalized selections.
+Missing Git never selects a directory workflow. Directory lifecycles require
+exclusive ownership, use filesystem-only preflight/configuration/artifact
+confinement and expose snapshot/guard operations through `runtime.workspace`.
+They expose no Git effect capability. Canonical enclosing worktrees are found
+from filesystem Git layouts/pointers; a directory inside one shares its exact
+exclusion key with commit workflows. An ordinary directory uses its own key;
+state-owned admission also excludes overlapping parent/child scopes atomically.
+State placement must be disjoint from the resolved canonical exclusion root
+before provider probing or durable run creation, including a sibling state path
+inside an enclosing repository.
+Outputs inside nested worktrees are rejected at inspection: their discovered
+`.git` directories or pointers require a different exclusion key. Read-only
+nested worktrees remain allowed.
+Stop reconciliation, recovery and detached MCP ownership inspection use the
+persisted key, with the same execution-before-workspace lease order.
+Canonical path, current control confinement and exclusion checks precede owned
+process/resource retirement. Frozen content is accepted only after retirement
+and before provider probing or checkpoint continuation. Changed configuration
+retains its configuration blocker; other directory input/content drift persists
+`workspace_changed` in `WAITING_FOR_USER`. Pending stops retain that blocker
+beneath their operator pause/cancellation without accepting changed inputs.
+Clarification submission revalidates frozen directory inputs under the workspace
+lease before writing answers or consuming the pending response authorization.
+
+Directory bindings freeze normalized local inputs (including criterion files
+when declared), sources, outputs, configuration, infrastructure and artifact
+paths. Their fingerprints pin real ancestors, workspace/control identities and
+protected content. Output identities may evolve; unrelated content and declared
+reads remain frozen. Task-owned artifacts may evolve through the existing
+clarification/publication protocol; task inputs remain pinned individually,
+including the absence of optional files. Their later appearance blocks resume
+and clarification submission before provider work or transcript mutation.
+Creation discovers task-input presence through confined metadata inspection
+before snapshotting; runtime input content uses guarded workspace reads.
+Provider turns additionally compare complete before/after snapshots, permitting
+only declared outputs for writable roles, including on failed retired attempts.
+Trusted execution and capability preparation revalidate frozen directory bindings
+before invoking their service as well as after it returns.
+Access-specific provider proofs are combined into one immutable role receipt;
+directory probes never request commit readiness. Continuation capability remains
+available independently of the requested access. Authorized runner artifact
+publication preserves receipts without unpinning explicit input/source bindings.
+Read references convey no write
+authority; persisted retrieval permissions are empty and authorize no fetching.
+Project configuration retains confined reads, identity/content and ancestor
+protection; only Git workspaces require ignored/untracked status. Repository
+commit pipelines retain all existing ignore and Git guards.
 
 The root runner, rather than a pipeline or provider, checks a non-null
 protection record before recovery and stop reconciliation, immediately before
@@ -1284,6 +1350,14 @@ reconciliation. Consumed effects retain verification-only recovery.
 
 ## External Run State
 
+Common envelope version 24 adds a nullable immutable `workspace` binding. New
+runner-created runs save their selected kind, lease policy and canonical key;
+directory runs also save exact provider declarations, binding/protected-content
+fingerprints and empty retrieval authority. Legacy absence stays null and
+retains Git semantics during ordinary leased migration; resume never derives
+directory authority or replaces a frozen selection from current configuration.
+The detached compatibility token includes this envelope change.
+
 Common envelope version 23 adds `preservationRecords`: at most 1,024 compact
 references to immutable external capture/restoration records. Each reference
 binds an operation UUID to an exact record UUID, SHA-256 and file identity.
@@ -1432,7 +1506,13 @@ start ticks when available. A live reused PID is a replaced owner, not proof
 that the recorded execution survives. Foreign-host, legacy, identity-free, and
 otherwise unverifiable owners remain conservative exclusion barriers. Legacy
 records are read without rewriting them; new acquisitions publish the current
-lease format. Empty key directories may remain after release. Ownership uses
+lease format. New acquisitions pin the canonical scope in an immutable
+`scope.json` beside the lease. The existing mutation boundary serializes scope
+inspection and admission across keys; parent/child scopes cannot both acquire
+exclusive ownership. A different overlapping key treats even dead lease or
+reclaiming records as barriers until exact-key recovery reconciles them. Legacy
+Git records retain exact-key exclusion without rewriting their owner format.
+Scope records and key directories may remain after release. Ownership uses
 `.lease`; a pending stop also retains an interrupted `.lease-reclaiming`
 reservation until reconciliation permits its release.
 
@@ -2526,8 +2606,12 @@ The strict provider-neutral turn contract also accepts an optional
 and `stateRoot`, optional `taskPath`, and the workspace service's six path arrays:
 `inputPaths`, `sourcePaths`, `outputPaths`, `configurationPaths`, `artifactPaths`
 and `infrastructurePaths`. Omitted arrays are empty. The workspace must equal
-`cwd`. Unknown fields, relative paths and directory `local-commit` requests are
-invalid. Execution-option validation remains separate: `probe` additionally
+`cwd`. Each array accepts at most 256 paths. Runner storage exclusions remove
+duplicates and descendants already covered by a parent; directory requests allow
+up to 1,539 exclusions for all six arrays plus workspace, task and state roots.
+Every declared root remains protected. Unknown fields, relative paths and
+directory `local-commit` requests are invalid. Execution-option validation
+remains separate: `probe` additionally
 accepts `access` and this policy, requiring explicit read-only or workspace-write
 access for directory proofs. Unsupported adapters reject it before provider work.
 
@@ -2885,6 +2969,10 @@ preparation identity in `commandIdentity`; this identity never selects or
 attests a trusted validation command. A provider descriptor may register one
 unique resource identity and recovery hook. The runner dispatches retirement
 cleanup through this hook without provider branches or changes to Codex.
+Live directory cleanup and recovery add current filesystem-discovered controls
+to the cleanup exclusions, even when frozen input files are missing. An
+allocation newly referenced by a control pointer remains retained until that
+overlap is resolved.
 
 Cleanup verifies the host, canonical private root, owner, permissions, and child
 identity, pins the root descriptor, removes only the recorded child, syncs the
@@ -3695,8 +3783,22 @@ Timeout cleanup begins immediately. A one-byte readiness signal emitted inside
 the completed isolation profile
 distinguishes setup denial from an executed check failure without exposing
 native output. The runner retains no stdout or stderr and records only bounded
-status, exit/signal/timeout data, command identity, and fixed evidence. A full
-Git snapshot before and after each command rejects workspace, index,
+status, exit/signal/timeout data, command identity, and fixed evidence.
+The selected workspace snapshot before and after each command rejects mutation.
+Directory checks use filesystem snapshots and exact read-only declared mounts,
+including external references and controls, without invoking Git. They reject
+Git source projection rather than granting repository or copy authority.
+Normal and recovery cleanup rediscover current directory controls before
+deleting owned storage. Changed pointers into an allocation or unverifiable
+confinement retain both the allocation and its ownership record.
+Preparation, execution and subsequent boundary-check errors preserve that
+retention status so the live runner keeps its private lease handles for a
+same-instance cleanup retry before any new work.
+Persisted allocation ownership also preserves the run handle when configuration
+drift replaces the cleanup error with a safety pause. Saved configuration and
+workspace blockers reconcile owned execution and storage before returning;
+restoring controls permits cleanup but never replays the blocked checkpoint.
+Git snapshots reject workspace, index,
 history/ref, remote-configuration, or identity mutation, and the complete
 validation-infrastructure fingerprint is recomputed after trusted execution.
 Missing isolation, an unterminated process tree, skipped, changed,
@@ -3951,7 +4053,7 @@ have an incomplete tail; leased recovery truncates that tail and republishes
 lagging state and derived progress. Existing single-file journals load without
 migration of their records on read. Common-envelope version 21 and detached
 compatibility token `1:21` established the segmented format. New runs use
-version 23 (`1:23`); legacy runs require an explicit leased migration publishing
+version 24 (`1:24`); legacy runs require an explicit leased migration publishing
 a version-21-or-newer record in the original journal before rollover is permitted.
 Even if state replacement is interrupted, older readers reject that original
 journal instead of ignoring later segments and appending conflicting revisions.

@@ -1,5 +1,5 @@
 import * as filesystem from "node:fs/promises";
-import { relative, sep } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
 
 import {
   assertBindings,
@@ -15,7 +15,7 @@ import {
   WorkspaceSafetyError,
 } from "./paths.js";
 import { CONTROL_NAMES, discoverControls } from "./controls.js";
-import { capture, fingerprints } from "./snapshot.js";
+import { capture, fingerprints, readTextFile } from "./snapshot.js";
 
 const DECLARATIONS = [
   "workspacePath",
@@ -128,6 +128,14 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         ...(taskPath ? [taskPath] : []),
         ...controls,
       ]);
+      const nestedWorktrees = controls
+        .filter(
+          (path) =>
+            basename(path) === ".git" &&
+            within(workspacePath, path) &&
+            dirname(path) !== workspacePath,
+        )
+        .map((path) => dirname(path));
       for (const output of outputPaths) {
         assertSafe(
           output !== workspacePath &&
@@ -140,6 +148,10 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         assertSafe(
           !protectedPaths.some((path) => overlaps(path, output)),
           "Outputs overlap protected inputs, references, configuration, artifacts or controls.",
+        );
+        assertSafe(
+          !nestedWorktrees.some((path) => within(path, output)),
+          "Outputs cannot enter a nested Git worktree with a different exclusion key.",
         );
       }
       const bindings = [workspace];
@@ -172,6 +184,65 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
         ]),
         bindings,
       });
+    });
+  }
+
+  async function inspectLocalPath({ path, projectPath }) {
+    return boundary(async () => {
+      const root = location(process.cwd(), projectPath);
+      const resolved = location(root, path);
+      assertSafe(
+        resolved !== root && within(root, resolved),
+        "Path must remain inside the workspace.",
+      );
+      const binding = await inspectPath(fs, resolved, { missing: true });
+      return freeze({ ...binding, relativePath: relative(root, resolved) });
+    });
+  }
+
+  async function readFile({ path, projectPath, optional = false }) {
+    return boundary(async () => {
+      const binding = await inspectLocalPath({ path, projectPath });
+      if (!binding.exists && optional) return null;
+      assertSafe(binding.kind === "file", "Input must be a regular file.");
+      return readTextFile(fs, binding.path);
+    });
+  }
+
+  // Match the canonical worktree exclusion key without invoking Git. Linked
+  // worktrees have their own .git pointer and therefore their own key.
+  async function exclusionPath({ workspacePath }) {
+    return boundary(async () => {
+      workspacePath = location(process.cwd(), workspacePath);
+      assertSafe(
+        (await inspectPath(fs, workspacePath)).kind === "directory",
+        "Workspace must be an ordinary directory.",
+      );
+      for (let path = workspacePath; ; path = dirname(path)) {
+        const marker = await metadata(fs, join(path, ".git"));
+        if (marker) {
+          assertSafe(
+            marker.isDirectory() || marker.isFile(),
+            "Git controls must be ordinary paths.",
+          );
+          if (marker.isFile()) return path;
+          const [head, objects, refs, common] = await Promise.all([
+            metadata(fs, join(path, ".git", "HEAD")),
+            metadata(fs, join(path, ".git", "objects")),
+            metadata(fs, join(path, ".git", "refs")),
+            metadata(fs, join(path, ".git", "commondir")),
+          ]);
+          // Discovery and snapshots enforce confinement for control aliases.
+          if (
+            (head?.isFile() || head?.isSymbolicLink()) &&
+            (((objects?.isDirectory() || objects?.isSymbolicLink()) &&
+              (refs?.isDirectory() || refs?.isSymbolicLink())) ||
+              common?.isFile())
+          )
+            return path;
+        }
+        if (path === dirname(path)) return workspacePath;
+      }
     });
   }
 
@@ -272,5 +343,12 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     );
   }
 
-  return Object.freeze({ inspect, snapshot, assertUnchanged });
+  return Object.freeze({
+    inspect,
+    inspectPath: inspectLocalPath,
+    readFile,
+    exclusionPath,
+    snapshot,
+    assertUnchanged,
+  });
 }

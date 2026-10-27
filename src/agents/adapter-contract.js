@@ -44,6 +44,9 @@ const WORKSPACE_POLICY_PATHS = Object.freeze([
   "artifactPaths",
   "infrastructurePaths",
 ]);
+const MAX_WORKSPACE_PATHS = 256;
+const MAX_DIRECTORY_STORAGE_PATHS =
+  3 + WORKSPACE_POLICY_PATHS.length * MAX_WORKSPACE_PATHS;
 const EFFORT_VALUES = new Set(["current", "low", "medium", "high", "xhigh"]);
 export const EFFORT_DIAGNOSTIC_CLASS = "effort_unsupported";
 export const ADAPTER_FAILURE_CLASS = "adapter_failure";
@@ -743,7 +746,7 @@ export function createAdapterContract({
     if (value.taskPath !== undefined) result.taskPath = path(value.taskPath);
     for (const name of WORKSPACE_POLICY_PATHS) {
       const entries = value[name] === undefined ? [] : value[name];
-      if (!Array.isArray(entries) || entries.length > 256)
+      if (!Array.isArray(entries) || entries.length > MAX_WORKSPACE_PATHS)
         throw optionsError("Declared workspace paths are invalid.");
       result[name] = [...new Set(Array.from(entries, path))].sort();
     }
@@ -796,7 +799,10 @@ export function createAdapterContract({
         typeof value.onResource !== "function") ||
       (value.storageForbiddenPaths !== undefined &&
         (!Array.isArray(value.storageForbiddenPaths) ||
-          value.storageForbiddenPaths.length > 256 ||
+          value.storageForbiddenPaths.length >
+            (value.workspacePolicy === undefined
+              ? 256
+              : MAX_DIRECTORY_STORAGE_PATHS) ||
           value.storageForbiddenPaths.some(
             (path) =>
               typeof path !== "string" ||

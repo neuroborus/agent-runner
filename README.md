@@ -78,6 +78,11 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   without Git or commit readiness. Claude writes through sandboxed Bash to
   existing declared output roots. Directory
   workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
+- The runner lifecycle foundation selects workspace and lease requirements from
+  pipeline descriptors before Git inspection. Directory bindings, protected
+  inputs and output permissions survive recovery; repository-contained directory
+  work shares the enclosing worktree lease. The three public pipelines still
+  require Git. Missing Git never selects another completion contract.
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target
   repository.

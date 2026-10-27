@@ -280,6 +280,7 @@ async function writeVersion22Preparation(directory, runId) {
     event.schemaVersion = event.state.schemaVersion = 22;
     event.state.runtimeCompatibility.runStateVersion = 22;
     delete event.state.preservationRecords;
+    delete event.state.workspace;
   }
   const first = events.findIndex(({ state }) => state.preparation !== null);
   const prefix = events.slice(0, first);
@@ -666,6 +667,7 @@ async function rewriteRunAsLegacy(directoryPath) {
     previousActiveTurn = activeTurn;
     event.schemaVersion = 1;
     event.state.schemaVersion = 1;
+    delete event.state.workspace;
     delete event.state.clientAttribution;
     delete event.state.clientAttributionFingerprint;
     delete event.state.providerPolicies;
@@ -1491,6 +1493,7 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
   assert.deepEqual(trustedPreflights, [
     {
       projectPath: fixture.projectPath,
+      workspacePolicy: undefined,
       snapshot: durableSnapshot,
       storageForbiddenPaths: [
         fixture.projectPath,
@@ -1500,6 +1503,7 @@ test("resumes plan execution from its durable trusted-command snapshot", async (
     },
     {
       projectPath: fixture.projectPath,
+      workspacePolicy: undefined,
       snapshot: durableSnapshot,
       storageForbiddenPaths: [
         fixture.projectPath,

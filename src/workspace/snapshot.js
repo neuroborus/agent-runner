@@ -80,20 +80,20 @@ async function readRegularFile(fs, path, sourcePath, limit, retain) {
   }
 }
 
-export async function readControlFile(fs, path) {
+export async function readTextFile(fs, path, limit = Number.MAX_SAFE_INTEGER) {
   const parent = await openDirectory(fs, dirname(path));
   try {
     const result = await readRegularFile(
       fs,
       path,
       join(parent.anchor, basename(path)),
-      8192,
+      limit,
       true,
     );
     await assertBindings(fs, [parent.binding]);
     assertSafe(
       (await fs.realpath(parent.anchor)) === dirname(path),
-      "Control-file parent changed.",
+      "File parent changed during reading.",
       RACE,
     );
     return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
@@ -103,6 +103,8 @@ export async function readControlFile(fs, path) {
     await parent.handle.close();
   }
 }
+
+export const readControlFile = (fs, path) => readTextFile(fs, path, 8192);
 
 export async function capture(
   fs,

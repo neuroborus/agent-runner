@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,35 @@ async function fixture(t) {
 const unsafe = (code) => (error) =>
   error instanceof WorkspaceSafetyError &&
   (code === undefined || error.code === code);
+
+test("confined input reads reject leaf substitution before consuming content", async (t) => {
+  const f = await fixture(t);
+  const path = join(f.workspacePath, "task.md");
+  await fs.writeFile(path, "declared input\n");
+  const outside = join(f.root, "outside.md");
+  await fs.writeFile(outside, "undeclared input\n");
+  let opened = false;
+  const service = createWorkspaceService({
+    fileSystem: {
+      ...fs,
+      async open(candidate, flags) {
+        if (candidate.endsWith("/task.md")) {
+          opened = true;
+          assert.ok(flags & constants.O_NOFOLLOW);
+          assert.ok(flags & constants.O_NONBLOCK);
+          await fs.rm(path);
+          await fs.symlink(outside, path);
+        }
+        return fs.open(candidate, flags);
+      },
+    },
+  });
+  await assert.rejects(
+    service.readFile({ path, projectPath: f.workspacePath }),
+    unsafe("ERR_WORKSPACE_INSPECTION"),
+  );
+  assert.equal(opened, true);
+});
 
 test("ordinary directory snapshots bind external reads, preserve unrelated files and grant only declared outputs", async (t) => {
   const f = await fixture(t);

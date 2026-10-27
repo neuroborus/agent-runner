@@ -40,6 +40,44 @@ rejected write mounts, output substitution during allocation and admission,
 missing nested artifact/state exclusions, post-failure mutation guards,
 reconstruction and unsupported isolation. Controlled launchers preserve deterministic coverage;
 the operator-owned post-install Claude acceptance below remains separate.
+Retiring completed and failed turns retain Claude allocations when changed
+control pointers reference storage or cannot be inspected, then permit the same
+owner to clean up after restoring controls without replaying the turn.
+
+Fast `test/runner-directory.test.js` owns descriptor-selected Git-independent
+lifecycle composition: access-specific probes, frozen policy/configuration,
+task-input rejection before content reads or provider probes,
+near-limit declaration/storage-exclusion compatibility through the public adapter,
+confined clarification artifacts, interrupted output reconstruction, failed-turn
+mutation guards, canonical worktree contention (including confined Git control
+aliases against legacy root leases without scope records), rejection of outputs
+inside nested ordinary/linked worktrees under a held Git lease, operator pause/resume
+and filesystem-bound trusted checks with exact external read mounts. It also covers
+rejection of sibling state storage inside an enclosing repository before provider
+probes or state creation, and trusted cleanup retaining allocations and Runner
+lease handles after control-pointer overlap or malformed-pointer drift during
+execution or preparation, followed by same-instance recovery without replay.
+Coincident configuration drift exercises both `run()` and `resume()`, including
+saved-blocker cleanup with configuration still changed or restored and release
+of both leases without new provider work.
+Other cases cover parent/child output contention, concurrent admission across
+service instances, exact-key recovery of stale overlapping reservations, and retirement of owned
+process/resources before configuration/input-drift pauses and pending-stop
+settlement, including deleted inputs and actual confined storage cleanup.
+Interrupted Claude recovery retains allocations and same-instance lease handles
+when Git control pointers are malformed or reference owned storage, then permits
+cleanup after restoring the pointers without accepting frozen-input drift.
+Live cleanup failures also retain both Runner leases until same-instance
+recovery removes the allocation and persists the input-drift blocker without
+replaying the turn.
+Clarification submissions and resume also reject newly created optional task
+inputs without changing the transcript or pending authorization, or probing
+providers. Coincident and ancestor task roots retain drift protection for
+undeclared project content while allowing explicitly declared task artifacts.
+Frozen-input identity drift blocks trusted
+execution and capability preparation before service invocation. Injected
+descriptor workflows keep incomplete custom routes unregistered; selected
+trusted command execution is faked rather than invoking project checks.
 
 The fast state `preservation.test.js` suite owns unfinished-work capture and
 checked restoration through the public state/Git boundaries. Isolated

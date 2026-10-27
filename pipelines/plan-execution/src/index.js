@@ -1516,6 +1516,7 @@ export const planExecutionPipeline = Object.freeze({
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
+  workspace: Object.freeze({ kind: "git", lease: "exclusive" }),
   resolveActiveRoles,
   settings: SETTINGS,
   validateSettings: commitSizeThreshold,

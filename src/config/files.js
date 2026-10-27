@@ -25,6 +25,13 @@ const MAX_CONFIGURATION_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;
 const NONBLOCK = constants.O_NONBLOCK ?? 0;
 
+function assertWorkspaceKind(kind) {
+  if (!["git", "directory"].includes(kind))
+    throw new ConfigurationError("Project workspace kind is invalid.", {
+      code: "ERR_PROJECT_CONFIGURATION_READ",
+    });
+}
+
 function isWithin(parentPath, childPath) {
   const pathFromParent = relative(parentPath, childPath);
   return (
@@ -220,7 +227,9 @@ export async function loadProjectConfiguration({
   projectPath,
   providers = PROVIDER_REGISTRY,
   runnerConfiguration,
+  workspaceKind = "git",
 }) {
+  assertWorkspaceKind(workspaceKind);
   if (typeof inspectPath !== "function") {
     throw new ConfigurationError(
       "Project configuration path inspection is unavailable.",
@@ -250,7 +259,7 @@ export async function loadProjectConfiguration({
       { code: "ERR_PROJECT_CONFIGURATION_READ" },
     );
   }
-  if (inspection.tracked || !inspection.ignored) {
+  if (workspaceKind === "git" && (inspection.tracked || !inspection.ignored)) {
     throw new ConfigurationError(
       "Project configuration must be ignored and untracked.",
       { code: "ERR_PROJECT_CONFIGURATION_NOT_IGNORED" },
@@ -276,7 +285,9 @@ export async function assertProjectConfigurationProtected({
   inspectPath,
   projectPath,
   protection,
+  workspaceKind = "git",
 }) {
+  assertWorkspaceKind(workspaceKind);
   if (protection === null) return;
   try {
     const inspection = await inspectPath({
@@ -287,8 +298,7 @@ export async function assertProjectConfigurationProtected({
       !inspection.exists ||
       inspection.path !== protection.path ||
       inspection.relativePath !== protection.relativePath ||
-      inspection.tracked ||
-      !inspection.ignored
+      (workspaceKind === "git" && (inspection.tracked || !inspection.ignored))
     ) {
       throw new Error("Project configuration confinement changed.");
     }
