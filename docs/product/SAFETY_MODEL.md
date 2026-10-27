@@ -92,7 +92,8 @@ outputs with a native permission profile; Claude uses authenticated command
 mounts and omits native editing tools for directory turns. Both check protected
 content after every retired attempt, including failures before reconstruction. Directory
 access cannot request a Git commit, and unsupported providers fail closed.
-Directory workflows remain unexposed; see the
+Custom authoring uses read-only directory turns; directory execution remains
+unexposed. See the
 [filesystem contract](../ARCHITECTURE.md#root-runner-ownership).
 
 The runner can bind a descriptor-selected directory lifecycle without Git.
@@ -105,13 +106,17 @@ key; read-only nested worktrees remain supported. Recovery, stops and selected
 trusted checks use the filesystem capability; a directory role receives no Git
 effects. Resume retires verified owned execution before reporting frozen-content
 drift, then persists a blocker without probing or invoking providers. References and URLs confer no fetching authority: retrieval permissions
-remain empty. Legacy runs retain Git semantics. Public custom workflows remain
+remain empty. Legacy runs retain Git semantics. Explicit custom authoring uses read-only directory roles and frozen criteria
+and source bindings; intended outputs grant no authoring writes. Runner alone
+writes its task-owned clarification and plan artifacts. Custom execution remains
 unavailable.
 
 Task, plan, context, and clarification inputs are hashed and revalidated before
 recovery. Clarification writes occur only through a persisted one-shot editor
-or MCP authorization. Repository-local artifacts must be confined, ignored,
-and non-overlapping with protected inputs.
+or MCP authorization. Repository-local clarification artifacts must be confined,
+ignored, untracked and non-overlapping with protected inputs, including custom
+authoring. Ordinary-directory authoring uses confined task-owned artifacts;
+neither placement adds ignore rules.
 
 An optional project configuration is protected input for the lifetime of its
 run. Its parsed values and versioned protection evidence come from the same

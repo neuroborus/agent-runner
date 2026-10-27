@@ -652,6 +652,13 @@ test("serves protocol-clean STDIO discovery through the official SDK", async (t)
     /Recommend fresh for a long, multi-topic, or uncertain session/u,
   );
   assert.doesNotMatch(startTool.description, /by default/u);
+  assert.deepEqual(startTool.inputSchema.properties.planKind.enum, [
+    "commit",
+    "custom",
+  ]);
+  assert.equal(startTool.inputSchema.properties.criteriaPath.type, "string");
+  assert.equal(startTool.inputSchema.properties.sourceReferences.type, "array");
+  assert.equal(startTool.inputSchema.properties.outputPaths.type, "array");
   const modeSchema = startTool.inputSchema.properties.mode;
   assert.deepEqual(modeSchema.enum, ["independent", "lazy", "combined"]);
   assert.match(modeSchema.description, /default and recommended/u);

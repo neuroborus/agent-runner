@@ -4,4 +4,5 @@ export {
   parseCustomPlan,
   serializeCustomPlan,
   validateCustomPlan,
+  normalizeCustomCriteria,
 } from "./custom-plan.js";

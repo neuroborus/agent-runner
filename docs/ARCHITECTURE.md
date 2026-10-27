@@ -64,10 +64,11 @@ control discovery and guarded capture; `service.js` composes inspection and
 mutation guards.
 The runner's private `workspace.js` selects descriptor-owned workspace/lease
 requirements before Git inspection and binds directory policies through this
-capability. All three registered pipelines still explicitly select Git; custom
-entry points remain unavailable.
+capability. Authoring explicitly selects Git for commit plans or the directory
+lifecycle for custom plans; custom execution remains unavailable.
 It is the directory inspection foundation for custom planning/execution, audit
-and init; those workflows are not yet exposed. Git snapshots remain Git-owned.
+and init. Custom authoring consumes it; custom execution, audit and init remain
+unexposed. Git snapshots remain Git-owned.
 `inspect` accepts an existing `workspacePath`, external `stateRoot`, optional
 `taskPath`, and arrays of `inputPaths`, `sourcePaths`, `outputPaths`,
 `configurationPaths`, `artifactPaths` and `infrastructurePaths`. Relative paths
@@ -128,6 +129,11 @@ Workspace and protected-path identities remain pinned throughout capture.
 Results contain sorted metadata and hashes, never file bytes. Content
 fingerprints bind paths, kinds, modes, sizes and content; separate identity
 fingerprints also bind inodes and file timestamps.
+`snapshotInputs({paths, stateRoot})` captures only explicitly declared read trees
+with the same confined, race-checked reads and ancestor bindings. It rejects
+state overlap and grants no reads of unrelated workspace content. Supplemental
+commit-authoring criteria and sources use this narrower capture while Git owns
+the repository snapshot and mutation guards.
 `assertUnchanged({before, after})` rejects content or identity drift; explicit
 `allowOutputs: true` permits only declared outputs and newly required parent
 directories, preserving unrelated files and all protected inputs. Filesystem
@@ -507,8 +513,9 @@ pipeline-specific options remain in pipeline descriptors.
 
 V1 registers:
 
-- `plan-authoring`: produces a validated `plan.md` without changing target Git
-  history.
+- `plan-authoring`: produces a validated commit or explicitly selected custom
+  `plan.md` without changing project content or Git history outside its declared
+  task-owned artifacts.
 - `plan-execution`: consumes `plan.md` and implements one reviewed local commit
   per step.
 - `polishing`: polishes, finalizes, and reviews an existing dirty worktree, then
@@ -867,7 +874,8 @@ requiring a live native session. `status` remains lock-free.
 
 Descriptors declare `workspace.kind` (`git` or `directory`) and `workspace.lease`
 (`none` or `exclusive`), alongside their existing role-access inventory. An
-optional descriptor resolver selects those requirements from explicit run input;
+optional descriptor resolver selects those requirements from resolved explicit
+configuration and run overrides;
 MCP preflight and run creation supply the same normalized selections.
 Missing Git never selects a directory workflow. Directory lifecycles require
 exclusive ownership, use filesystem-only preflight/configuration/artifact
@@ -1147,7 +1155,11 @@ reconciled against the reserved run ID, current revision, submitted transcript
 hash, and execution lease before work is launched again.
 
 `run_start` persists the run before spawning `agent-run resume` as a detached
-child with no inherited standard streams. `run_respond` atomically writes the
+child with no inherited standard streams. An incomplete start first loads its
+reserved run and validates the request paths against that run's frozen workspace
+selection. Current configuration is resolved only when creating a new run;
+changed defaults cannot change a reserved run's workspace or plan kind.
+`run_respond` atomically writes the
 identified answers, records their transcript hash in run state, then launches
 the same detached continuation. `run_resume` normally accepts only an action
 applicable to the persisted pause. Two exact-revision, action-free recovery
@@ -4234,8 +4246,40 @@ and serializes canonically; analysis-only plans may declare no file outputs.
 Its [package contract](../packages/custom-plan/README.md) owns the exact syntax.
 Neither package owns prompts, roles, permissions, result acceptance or workflow
 transitions. Declarations grant no filesystem, retrieval or Git authority.
-Custom pipeline entry points remain unavailable, and no consumer dependency on
-the new package is declared until actual imports land.
+Plan authoring consumes both contracts with an explicit descriptor-owned
+`planKind` defaulting to `commit`. `criteriaPath`, `sourceReferences` and
+`outputPaths` resolve through the same precedence and freeze in authoring state.
+Dynamic workspace selection reads confined configuration through filesystem
+inspection before Git preflight, then enforces Git ignored/untracked rules for
+commit selection. Filesystem discovery checks configuration in the requested
+directory before using the repository-root fallback for preliminary commit
+selection. A local project configuration may select custom while retaining
+that directory and its relative declarations; the enclosing repository supplies
+only its canonical exclusion key. Commit selection canonicalizes the workspace
+and retains the exact selected configuration file. The configuration boundary
+resolves preliminary settings without requiring project-supplied role backends.
+Artifact binding checks the final merged declarations for overlap with inputs,
+sources and configuration; preliminary discovery cannot reject declarations
+superseded by project overrides. Directory bindings also protect inputs,
+infrastructure and controls before publication.
+The descriptor's optional `resolveTaskInputs` supplies exact
+additional read files; declared local sources bind content, identity and ancestors.
+Custom selection uses the directory capability, exclusively read-only roles and
+only task-owned artifact exclusions in long-lived baselines. Per-turn snapshots
+still permit no artifact mutation. Output declarations confer no write paths and
+retrieval permissions remain empty. Before creating a clarification transcript,
+the runner discovers any enclosing Git worktree and requires its resolved path
+to be ignored and untracked; ordinary-directory artifacts need no Git command.
+The bounded clarification output adds agreed result criteria, normalized through
+the shared contract before freezing. Canonical declarations and required step
+scaffolding must leave 4,000 characters for step content within the unchanged
+100,000-character draft budget before clarification can close. Deterministic
+publication matches the complete custom header to
+that frozen catalog and source/output selection. Authoring state version 7
+migrates legacy runs to commit-only defaults without changing authority or
+progress. Unchanged default commit inputs preserve existing session-context and
+pending source-fork recovery keys. Execution continues consuming only commit
+plans; custom execution entry points remain unavailable.
 
 ## Global Safety Policy
 

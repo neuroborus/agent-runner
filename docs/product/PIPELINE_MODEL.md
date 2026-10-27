@@ -7,9 +7,17 @@ pipeline never calls another.
 
 ## Plan authoring
 
-Plan authoring turns a task into a reviewed, commit-by-commit `plan.md`. It may
+Plan authoring turns a task into a reviewed `plan.md`. Omitted `planKind` stays
+`commit`, with exact Conventional Commit subjects. Explicit `custom` selects
+criterion-driven planning in a Git-independent directory workspace. Material
+missing criteria are resolved during bounded clarification; criteria may be
+ordinary Markdown. The reviewed custom plan carries agreed stable criterion
+references, observable results and input/output declarations. Sources remain
+read-only, URLs grant no retrieval, and declared outputs grant no authoring
+writes. Custom prompts inherit coding requirements only when selected by the
+user. Custom execution is not yet exposed. Plan authoring may
 clarify material requirements first, but it keeps the target project read-only
-apart from the resolved clarification and plan artifact paths. The resulting
+apart from the resolved clarification and plan artifact paths. Commit-plan
 headings contain the exact subject-only Conventional Commit messages that plan
 execution will later consume unchanged.
 

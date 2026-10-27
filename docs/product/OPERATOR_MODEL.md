@@ -13,6 +13,15 @@ validate, rewrite, discard, or commit resumable work manually.
 
 ## Configuration
 
+Authoring owns `planKind` (`commit` by default, or explicitly `custom`), optional
+`criteriaPath` and source/output arrays. CLI exposes `--plan-kind`, `--criteria`,
+repeatable `--source`/`--output`; MCP uses `planKind`, `criteriaPath`,
+`sourceReferences`/`outputPaths`. Selection follows the normal configuration
+precedence, freezes before work and cannot switch on resume. A criteria file or
+missing Git never implies custom. Custom planning requires user-supplied criteria
+agreed during clarification; its outputs are declarations, not write permissions.
+Commit authoring retains fixed coding/safety rules even with supplemental criteria.
+
 Execution's descriptor-owned `preferredCommitLineLimit` and
 `commitSizeAssessmentMultiplier` default to 900 and 3, resolve independently
 through root then project configuration and persist for resume. Positive safe

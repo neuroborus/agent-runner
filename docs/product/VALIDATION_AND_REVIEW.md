@@ -14,6 +14,13 @@ settle through verification.
 
 ## Authoring review
 
+Explicit custom authoring reviews agreed user criteria, completeness and feasible
+ordering through the same mode gates. Custom coding requirements apply only when
+selected. Deterministic validation enforces the custom step/reference format and
+exact frozen criterion/source/output declarations; only Runner writes the final
+plan. Commit planning keeps fixed coding and Git guarantees, with any supplied
+criteria as supplements. Custom execution remains inactive.
+
 Combined authoring requires two distinct approvals over the same durable draft:
 a mutation-free Planner clean confirmation after check/fix, then independent
 Reviewer approval. Deterministic plan validation and runner-owned artifact

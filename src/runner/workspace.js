@@ -22,6 +22,20 @@ const within = (root, path) => {
   );
 };
 
+function assertArtifactSeparation(artifacts, protectedPaths) {
+  if (
+    artifacts.some((artifact) =>
+      protectedPaths.some(
+        (path) => within(path, artifact) || within(artifact, path),
+      ),
+    )
+  )
+    throw new RunnerError(
+      "Runner artifacts must not overlap protected inputs, configuration or controls.",
+      { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+    );
+}
+
 export function workspaceSelection(pipeline, input) {
   if (pipeline === undefined)
     throw new RunnerError("Unknown pipeline.", {
@@ -118,6 +132,14 @@ export async function bindWorkspace({
   stateRoot,
   workspace,
 }) {
+  assertArtifactSeparation(
+    (selection.artifactPaths ?? []).map((path) => resolve(projectPath, path)),
+    [
+      ...(selection.inputPaths ?? []),
+      ...(selection.sourcePaths ?? []),
+      ...(configurationPath ? [configurationPath] : []),
+    ].map((path) => resolve(projectPath, path)),
+  );
   if (selection.kind === "git")
     return deepFreeze({
       schemaVersion: 1,
@@ -177,6 +199,13 @@ export async function bindWorkspace({
     taskPath,
     stateRoot: resolve(stateRoot),
   });
+  assertArtifactSeparation(inspection.artifactPaths, [
+    ...inspection.inputPaths,
+    ...inspection.sourcePaths,
+    ...inspection.configurationPaths,
+    ...inspection.infrastructurePaths,
+    ...inspection.controlPaths,
+  ]);
   const policy = {
     kind: "directory",
     workspacePath: projectPath,
@@ -234,20 +263,38 @@ export async function inspectBoundWorkspace(binding, workspace) {
 // Recovery coordinators consume the same snapshot/guard interface in either
 // workspace. A directory capability deliberately contains no Git effects.
 export function directorySafety(binding, workspace) {
+  function inspectedSnapshot(snapshot, allowedPaths) {
+    if (
+      !Array.isArray(allowedPaths) ||
+      allowedPaths.some((path) => !binding.policy.artifactPaths.includes(path))
+    )
+      throw new RunnerError(
+        "Only declared runner artifacts may be excluded from directory inspection.",
+        { code: "ERR_UNSAFE_WORKSPACE_ACCESS" },
+      );
+    return Object.freeze({
+      ...snapshot,
+      allowedPaths,
+      entries: snapshot.entries.filter(
+        ({ path }) => !allowedPaths.some((root) => within(root, path)),
+      ),
+      projectPath: binding.policy.workspacePath,
+    });
+  }
   return Object.freeze({
-    async snapshot() {
+    async snapshot({ allowedPaths = [] } = {}) {
       const { snapshot } = await inspectBoundWorkspace(binding, workspace);
-      return Object.freeze({
-        ...snapshot,
-        projectPath: binding.policy.workspacePath,
-      });
+      return inspectedSnapshot(snapshot, allowedPaths);
     },
     async assertUnchanged(before) {
       const { snapshot: after } = await inspectBoundWorkspace(
         binding,
         workspace,
       );
-      workspace.assertUnchanged({ before, after });
+      workspace.assertUnchanged({
+        before,
+        after: inspectedSnapshot(after, before.allowedPaths ?? []),
+      });
     },
     inspectPath: (request) => workspace.inspectPath(request),
   });

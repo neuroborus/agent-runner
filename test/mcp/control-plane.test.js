@@ -555,10 +555,7 @@ test("recorded dispatch inspection failures retain safe causes on identical-key 
           },
         );
         assert.equal(record.status, "intent");
-        assert.equal(
-          released,
-          boundary === "proof" ? tool !== "runStart" : tool === "runStart",
-        );
+        assert.equal(released, boundary === "proof" || tool === "runStart");
       }
     }
   }
@@ -706,4 +703,40 @@ test("retry-time lease and stop inspections retain correlated causes without com
       assert.equal(releases, stopTool ? 0 : attempt + 1);
     }
   }
+});
+
+test("MCP authoring selection reaches descriptor settings before start mutation", async () => {
+  let selection;
+  const inspected = new Error("Boundary inspected");
+  const control = createMcpControlPlane({
+    runStore: {
+      async readAction() {
+        return null;
+      },
+    },
+    runner: {
+      async validateBoundary(input) {
+        selection = input;
+        throw inspected;
+      },
+    },
+  });
+  const input = {
+    idempotencyKey: "custom-authoring",
+    pipelineId: "plan-authoring",
+    projectPath: "/workspace",
+    taskPath: "/task",
+    planKind: "custom",
+    criteriaPath: "criteria.md",
+    sourceReferences: ["sources/a.md"],
+    outputPaths: ["reports/a.md"],
+  };
+  await assert.rejects(control.runStart(input), (cause) => cause === inspected);
+  assert.deepEqual(selection.settingOverrides, {
+    planKind: "custom",
+    criteriaPath: "criteria.md",
+    sourceReferences: ["sources/a.md"],
+    outputPaths: ["reports/a.md"],
+  });
+  assert.equal(Object.hasOwn(selection, "planKind"), false);
 });

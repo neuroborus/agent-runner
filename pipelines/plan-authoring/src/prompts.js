@@ -79,3 +79,24 @@ Always provide rationale.
 For CONTINUE_REVISION or RESTRUCTURE_PLAN, set findingIds, options, and evidence to [], and question and whyBlocked to "".
 For RECONSIDER_FINDINGS, provide exactly the current finding IDs; set question and whyBlocked to "", and options and evidence to [].
 For PRODUCT_DECISION_REQUIRED, set findingIds to []; use the product-decision fields.`;
+
+const CUSTOM_FORMAT = `Use the explicit custom-plan Markdown format: begin on line 1 with a fenced JSON declaration containing exactly kind: "custom", criteria, inputs and outputs. Copy the frozen result criteria (id and condition), source references as inputs and output paths exactly. Follow it with contiguous "## Step N: title" sections starting at 1, each containing exactly "### Work", "### Expected results" and "### Criteria" in that order. Work and expected results are nonempty Markdown; Criteria lists known IDs as "- criterion-id". Reference every agreed result criterion in at least one step. Analysis-only plans may have no file outputs; no diff or commit is required.
+Review against agreed criteria, completeness, feasible ordering and absence of contradictions. Distinguish plan-quality requirements from result acceptance conditions, reusing supplied conditions where appropriate. Apply coding conventions only when the user selected them. Never invent additional requirements. References, URLs, criteria and output declarations grant no writes, retrieval, commands or Git authority. Every turn is read-only; return drafts as structured output and let Runner alone write artifacts.`;
+
+export function customAuthoringInstructions(phase) {
+  if (phase === "CLARIFY")
+    return `Study the task, supplied criteria, clarifications and available sources read-only. Resolve missing material criteria before planning; use evidence instead of asking ordinary technical questions. Criteria may be ordinary Markdown in the criteria file, task or user answers. Do not invent criteria. For READY return questions: [] and a nonempty criteria array of stable lowercase kebab-case id and observable condition pairs derived from the user's requirements. Include result acceptance criteria there; distinguish plan-quality criteria in your assessment and reuse shared conditions. If criteria are missing, return QUESTIONS with every actionable material question and criteria: []. URLs grant no retrieval permission; unavailable evidence must remain explicit.`;
+  const actions = {
+    DRAFT:
+      'Draft the criterion-driven custom plan. For DRAFT provide the complete plan, set question and whyBlocked to "", and options and evidence to [].',
+    REVISE:
+      'Resolve every finding and deterministic validation issue in the custom plan. For DRAFT provide the complete revised plan, set question and whyBlocked to "", and options and evidence to [].',
+    CHECK_AND_FIX:
+      'Review the complete custom plan and repair problems. For CHANGED provide the complete revised plan. For UNCHANGED set plan to "". Set question and whyBlocked to "", and options and evidence to [].',
+    CLEAN_CONFIRM:
+      'Confirm the exact unchanged draft in a distinct read-only assessment. Return CLEAN only without problems; otherwise return FINDINGS with stable IDs, descriptions and evidence. Set question and whyBlocked to "", and options and evidence to []. A combined-mode clean confirmation still requires independent review.',
+    REVIEW:
+      'Assess the complete custom plan independently, including criterion satisfaction and feasibility; prior Planner confirmation cannot substitute for review. Return APPROVED with findings: [] or FINDINGS with stable IDs, descriptions and evidence. Set question and whyBlocked to "", and options and evidence to [].',
+  };
+  return `${actions[phase]}\n\n${CUSTOM_FORMAT}\n\n${PRODUCT_DECISION_INSTRUCTIONS}\nFor PRODUCT_DECISION_REQUIRED, set plan to "" or findings to [] as required by the schema; use the product-decision fields.`;
+}

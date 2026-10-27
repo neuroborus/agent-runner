@@ -1588,3 +1588,48 @@ test("CLI rejects invalid effort before dispatch, including inactive roles", asy
     }
   }
 });
+
+test("authoring maps explicit kind and repeated declarations to descriptor settings", async () => {
+  const stdout = createSink();
+  const stderr = createSink();
+  let input;
+  const exit = await main(
+    [
+      "run",
+      "plan-authoring",
+      "--project",
+      "/workspace",
+      "--task",
+      "/task",
+      "--plan-kind",
+      "custom",
+      "--criteria",
+      "criteria.md",
+      "--source",
+      "sources/a.md",
+      "--source",
+      "https://example.invalid/b",
+      "--output",
+      "reports/a.md",
+      "--output",
+      "reports/b.md",
+    ],
+    {
+      stdout: stdout.stream,
+      stderr: stderr.stream,
+      runner: fakeRunner({
+        async run(value) {
+          input = value;
+          return commandResult({ pipelineId: "plan-authoring" });
+        },
+      }),
+    },
+  );
+  assert.equal(exit, 0, stderr.read());
+  assert.deepEqual(input.settingOverrides, {
+    planKind: "custom",
+    criteriaPath: "criteria.md",
+    sourceReferences: ["sources/a.md", "https://example.invalid/b"],
+    outputPaths: ["reports/a.md", "reports/b.md"],
+  });
+});

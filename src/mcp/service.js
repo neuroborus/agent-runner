@@ -175,6 +175,18 @@ function createRunStartSchema(providers) {
       taskPath: z.string().min(1),
       proactiveClarification: z.boolean().default(false),
       mode: pipelineMode.optional(),
+      planKind: z
+        .enum(["commit", "custom"])
+        .optional()
+        .describe(
+          "Authoring only; omitted kind remains commit. Custom requires agreed user criteria.",
+        ),
+      criteriaPath: z.string().min(1).max(4096).optional(),
+      sourceReferences: z
+        .array(z.string().min(1).max(4096))
+        .max(256)
+        .optional(),
+      outputPaths: z.array(z.string().min(1).max(4096)).max(256).optional(),
       profile: z.string().min(1).max(4_096).optional(),
       model: z.string().min(1).max(256).optional(),
       contextSize: z.string().min(1).max(64).optional(),
@@ -288,6 +300,10 @@ function runnerStartInput(input) {
     contextSize,
     effort,
     mode,
+    planKind,
+    criteriaPath,
+    sourceReferences,
+    outputPaths,
     ...runInput
   } = input;
   return {
@@ -298,7 +314,15 @@ function runnerStartInput(input) {
       ...(contextSize === undefined ? {} : { contextSize }),
       ...(effort === undefined ? {} : { effort }),
     },
-    settingOverrides: mode === undefined ? {} : { mode },
+    settingOverrides: Object.fromEntries(
+      Object.entries({
+        mode,
+        planKind,
+        criteriaPath,
+        sourceReferences,
+        outputPaths,
+      }).filter(([, value]) => value !== undefined),
+    ),
   };
 }
 
@@ -809,11 +833,9 @@ export function createMcpControlPlane(options = {}) {
     if (existing?.status === "completed") {
       return existing.result;
     }
-    let boundary =
-      existing &&
-      (await dispatchIsReady(existing.context, existing.context.runId))
-        ? null
-        : await runner.validateBoundary(runnerStartInput(input));
+    let boundary = existing
+      ? null
+      : await runner.validateBoundary(runnerStartInput(input));
     const context = { runId: runIdFactory() };
     const action = await runStore.beginAction({
       ...identity,
@@ -827,7 +849,6 @@ export function createMcpControlPlane(options = {}) {
       const completedReceipt = { runId: reservedRunId };
       if (await completeReadyDispatch(action, completedReceipt))
         return completedReceipt;
-      boundary ??= await runner.validateBoundary(runnerStartInput(input));
       let run;
       try {
         ({ run } = await inspectDetached(
@@ -835,10 +856,15 @@ export function createMcpControlPlane(options = {}) {
           action.record.context,
           () => runner.status(reservedRunId),
         ));
+        boundary = await runner.validateBoundary(
+          runnerStartInput(input),
+          run.workspace ?? { kind: "git" },
+        );
       } catch (cause) {
         if (cause?.code !== "ERR_RUN_NOT_FOUND") {
           throw cause;
         }
+        boundary ??= await runner.validateBoundary(runnerStartInput(input));
         ({ run } = await runner.create(runnerStartInput(input), {
           runId: reservedRunId,
         }));
@@ -855,7 +881,16 @@ export function createMcpControlPlane(options = {}) {
             : input.sourceSession.profile) ||
         run.pipelineState.proactiveClarification !==
           input.proactiveClarification ||
-        (input.mode !== undefined && resolvedMode(run) !== input.mode)
+        (input.mode !== undefined && resolvedMode(run) !== input.mode) ||
+        ["planKind", "criteriaPath", "sourceReferences", "outputPaths"].some(
+          (field) =>
+            input[field] !== undefined &&
+            !isDeepStrictEqual(
+              input[field],
+              run.pipelineState.settings?.[field] ??
+                (field === "planKind" ? "commit" : undefined),
+            ),
+        )
       ) {
         throw new Error("Reserved run does not match its MCP action intent.");
       }

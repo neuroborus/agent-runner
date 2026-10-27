@@ -4,7 +4,8 @@
 
 - Build a small local CLI that hosts explicit, independently owned agent pipelines.
 - Resolve material ambiguity in a bounded clarification phase before work begins.
-- Author reviewed commit-by-commit coding plans with the `plan-authoring` pipeline.
+- Author reviewed commit-by-commit coding or explicit criterion-driven custom
+  plans with the `plan-authoring` pipeline.
 - Execute predefined coding plans one verified local commit at a time with the `plan-execution` pipeline.
 - Polish, finalize, and apply the selected review gate to existing workspace
   changes without committing them with the `polishing` pipeline.
@@ -123,6 +124,12 @@ All pipelines additionally require:
   automatically.
 
 `plan-authoring` additionally requires:
+
+- Resolve explicit `planKind` before workspace inspection; omitted and legacy
+  kinds remain commit. Custom planning requires agreed user criteria, read-only
+  sources and frozen input/output declarations; outputs grant no authoring
+  writes or Git effects. Coding requirements apply to custom plans only when
+  selected by the user; commit criteria supplement fixed coding/safety rules.
 
 - In combined mode, converge the durable draft with Planner `CHECK_AND_FIX`
   and a distinct `CLEAN_CONFIRM`, then require the complete independent

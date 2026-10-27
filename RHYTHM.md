@@ -7,6 +7,15 @@ remain in the owning documentation.
 
 ## 2026-10-27
 
+- **Custom authoring requires explicit selection and agreed criteria.** The
+  authoring descriptor selects Git or directory lifecycle after configuration
+  resolution, preserving omitted/legacy commit semantics. Criteria may be
+  Markdown; bounded clarification freezes observable result conditions before
+  drafting. All modes review the same criterion-driven draft, and Runner alone
+  validates and publishes its exact frozen declarations. References grant no
+  retrieval or writes, planned outputs grant no authoring permissions, and
+  custom execution remains unavailable.
+
 - **Custom plans have their own deterministic contract.** The private
   `@agent-runner/custom-plan` package validates explicit kind, stable agreed
   criteria, input/output declarations and contiguous ordinary step titles.

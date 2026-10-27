@@ -141,6 +141,7 @@ test("workspace topology keeps pipelines independent", async () => {
 
   assert.deepEqual(planAuthoring.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",
+    "@agent-runner/custom-plan": "0.0.0",
   });
   assert.deepEqual(planExecution.dependencies, {
     "@agent-runner/commit-plan": "0.0.0",

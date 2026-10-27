@@ -40,8 +40,8 @@ New content can be created inside a declared output directory. Its native and
 restricted-host probes use ordinary directories without Git or commit preparation.
 The policy survives continuation and reconstruction with existing
 command/tool, network, observation and retirement safeguards. Unsupported adapters reject the
-declaration before provider work. This foundation does not yet expose directory
-pipelines. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
+declaration before provider work. Custom authoring uses read-only directory
+turns; directory execution remains unavailable. The [architecture contract](../ARCHITECTURE.md#agent-context-recovery)
 owns its exact fields and native mapping.
 
 The runner probes every declared directory access separately and pins their

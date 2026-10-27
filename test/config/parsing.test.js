@@ -102,6 +102,10 @@ test("minimal configuration uses pipeline-owned setting defaults", () => {
   assert.deepEqual(configuration.profiles, {});
   assert.deepEqual(configuration.trustedCommands, {});
   assert.deepEqual(configuration.pipelines["plan-authoring"], {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 900,

@@ -12,6 +12,12 @@ import {
   isOutputDiagnostic,
   resolveActiveRoles,
 } from "./workflow-contract.js";
+import {
+  LEGACY_PLAN_SETTINGS,
+  PLAN_SETTINGS,
+  resolveAuthoringTaskInputs,
+  resolveAuthoringWorkspace,
+} from "./plan-contract.js";
 
 export {
   CHECK_AND_FIX_INSTRUCTIONS,
@@ -56,6 +62,7 @@ const ROLE_ACCESS = Object.freeze({
   arbiter: Object.freeze(["read-only"]),
 });
 const SETTINGS = Object.freeze({
+  ...PLAN_SETTINGS,
   maxRevisionRounds: positiveIntegerSetting(20),
   mode: Object.freeze({
     defaultValue: "independent",
@@ -97,6 +104,8 @@ const PUBLIC_PAUSE_EXPLANATIONS = Object.freeze({
   proactive_clarification: "Optional proactive clarification input is pending.",
   project_configuration_changed:
     "The resolved project configuration changed; this run cannot continue.",
+  workspace_changed:
+    "Frozen workspace inputs or controls changed; this run cannot continue.",
   product_decision_required:
     "A material product decision is required before planning can continue.",
   read_only_mutation:
@@ -251,8 +260,12 @@ function projectStatus(run) {
 }
 
 function validateResumeAction(run, action) {
-  if (run.pause?.reason === "project_configuration_changed") {
-    throw new Error("A run with changed project configuration cannot resume.");
+  if (
+    ["project_configuration_changed", "workspace_changed"].includes(
+      run.pause?.reason,
+    )
+  ) {
+    throw new Error("A run with changed protected inputs cannot resume.");
   }
   if (
     run.pause?.reason === "operator_paused" &&
@@ -340,26 +353,52 @@ export function migratePlanAuthoringStateV5(run) {
   });
 }
 
+export function migratePlanAuthoringStateV6(run) {
+  return Object.freeze({
+    ...run.pipelineState,
+    settings:
+      run.pipelineState.settings === null
+        ? null
+        : Object.freeze({
+            ...run.pipelineState.settings,
+            ...LEGACY_PLAN_SETTINGS,
+          }),
+    agreedCriteria: Object.freeze([]),
+  });
+}
+
 export const planAuthoringPipeline = Object.freeze({
   id: PLAN_AUTHORING_PIPELINE_ID,
-  stateVersion: 6,
+  stateVersion: 7,
   migrations: Object.freeze({
     1: migratePlanAuthoringStateV1,
     2: migratePlanAuthoringStateV2,
     3: migratePlanAuthoringStateV3,
     4: migratePlanAuthoringStateV4,
     5: migratePlanAuthoringStateV5,
+    6: migratePlanAuthoringStateV6,
   }),
   roles: ROLES,
   roleAccess: ROLE_ACCESS,
   workspace: Object.freeze({ kind: "git", lease: "none" }),
+  resolveWorkspace: resolveAuthoringWorkspace,
+  resolveTaskInputs: resolveAuthoringTaskInputs,
   resolveActiveRoles,
   settings: SETTINGS,
   taskInputs: TASK_INPUTS,
-  runOptions: Object.freeze(["project", "task", "mode", ...ROLES]),
+  runOptions: Object.freeze([
+    "project",
+    "task",
+    "mode",
+    "plan-kind",
+    "criteria",
+    "source",
+    "output",
+    ...ROLES,
+  ]),
   requiredRunOptions: Object.freeze(["project", "task"]),
   description:
-    "Analyze a task, draft a commit plan, review it, and write plan.md.",
+    "Author and review an explicit commit or criterion-driven custom plan.md.",
   projections: Object.freeze({
     clarification: projectClarification,
     pause: projectPause,

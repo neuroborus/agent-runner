@@ -98,6 +98,23 @@ const OPTIONS = Object.freeze({
   ...Object.fromEntries(
     [...PIPELINE_RUN_OPTIONS].map((option) => [option, { type: "string" }]),
   ),
+  ...Object.fromEntries(
+    PIPELINES.flatMap((pipeline) =>
+      Object.entries(pipeline.settings).flatMap(([, definition]) =>
+        definition.option
+          ? [
+              [
+                definition.option,
+                {
+                  type: "string",
+                  ...(definition.multiple ? { multiple: true } : {}),
+                },
+              ],
+            ]
+          : [],
+      ),
+    ),
+  ),
   clarify: { type: "boolean" },
 });
 
@@ -108,7 +125,7 @@ const PIPELINE_USAGE = PIPELINES.map(
 const USAGE = `Agent Runner
 
 Usage:
-  agent-run run <pipeline> --project <repo> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
+  agent-run run <pipeline> --project <workspace> --task <task-dir> [--mode <independent|lazy|combined>] [--clarify] [--profile <alias>] [--fork-from <backend>:<session-id>]
   agent-run resume --run <run-id> [--expected-revision <revision>] [--extra-fix-rounds <count> | --override-finding <finding-id>]
   agent-run pause --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
   agent-run cancel --run <run-id> [--timing immediate|after-current-commit] [--expected-revision <revision> --idempotency-key <key>]
@@ -122,6 +139,10 @@ Pipelines:
 ${PIPELINE_USAGE}
 
 Options:
+      --plan-kind          Author commit (default) or custom plans explicitly
+      --criteria           Read user criteria from a local Markdown file
+      --source             Declare a source path or reference (repeatable; no retrieval)
+      --output             Declare an intended output path (repeatable; no authoring writes)
       --clarify            Open the clarification editor before agent questions
       --mode               Select a mode supported by the pipeline descriptor
                            independent is default and recommended for genuinely
@@ -134,7 +155,7 @@ Options:
                            lazy forks once into the primary role
       --fork-profile       Trusted profile alias used by the source session
       --profile            Set the run-wide trusted profile alias
-      --project-config     Load an explicit ignored project configuration
+      --project-config     Load an explicit confined project configuration
       --model              Set the run-wide backend-native model
       --effort             Set run-wide effort: current|low|medium|high|xhigh
                            current retains the provider default
@@ -445,13 +466,17 @@ function settingOverrides(pipeline, values) {
   return Object.freeze(
     Object.fromEntries(
       Object.entries(pipeline.settings).flatMap(([name, definition]) => {
-        if (!pipeline.runOptions.includes(name) || values[name] === undefined) {
+        const option = definition.option ?? name;
+        if (
+          !pipeline.runOptions.includes(option) ||
+          values[option] === undefined
+        ) {
           return [];
         }
-        if (!definition.validate(values[name])) {
-          throw new Error(`--${name} ${definition.errorMessage}.`);
+        if (!definition.validate(values[option])) {
+          throw new Error(`--${option} ${definition.errorMessage}.`);
         }
-        return [[name, values[name]]];
+        return [[name, values[option]]];
       }),
     ),
   );
@@ -575,7 +600,7 @@ export async function main(
     for (const token of parsed.tokens.filter(
       (token) => token.kind === "option",
     )) {
-      if (seen.has(token.name)) {
+      if (seen.has(token.name) && !OPTIONS[token.name]?.multiple) {
         stderr.write(`Option '--${token.name}' may be supplied only once.\n`);
         return 1;
       }

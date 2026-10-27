@@ -2,9 +2,12 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
-  parseCommitPlan,
-  serializeCommitPlan,
-} from "@agent-runner/commit-plan";
+  assertCustomAuthoringBudget,
+  canonicalAuthoringPlan,
+  MAX_PLAN_LENGTH,
+  normalizeAgreedCriteria,
+  PLAN_SETTINGS,
+} from "./plan-contract.js";
 
 import {
   authoringPolicy,
@@ -32,6 +35,7 @@ export const WORKFLOW_STATES = Object.freeze([
 
 const PIPELINE_STATE_FIELDS = new Set([
   "workflowState",
+  "agreedCriteria",
   "preflightComplete",
   "settings",
   "repositoryBaseline",
@@ -76,7 +80,6 @@ const PENDING_EDIT_FIELDS = new Set([
 const FINDING_ID_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
 const MAX_TEXT_LENGTH = 4_000;
-const MAX_PLAN_LENGTH = 100_000;
 const MAX_ITEMS = 32;
 const MAX_PRODUCT_DECISION_OPTIONS = 16;
 const MAX_STRUCTURED_RESULT_BYTES = 2 * 1024 * 1024;
@@ -354,7 +357,7 @@ function normalizeProductDecision(payload) {
   });
 }
 
-export function normalizeQuestions(payload) {
+export function normalizeQuestions(payload, { custom = false } = {}) {
   if (!isRecord(payload) || !["READY", "QUESTIONS"].includes(payload.status)) {
     throw outputError("Planner returned an invalid clarification result.");
   }
@@ -392,6 +395,13 @@ export function normalizeQuestions(payload) {
   ) {
     throw outputError("Clarification status does not match its questions.");
   }
+  if (
+    custom &&
+    payload.status === "QUESTIONS" &&
+    (!Array.isArray(payload.criteria) || payload.criteria.length !== 0)
+  ) {
+    throw outputError("Custom clarification questions require empty criteria.");
+  }
   return Object.freeze({ status: payload.status, questions });
 }
 
@@ -418,7 +428,7 @@ export function normalizePlannerResult(payload) {
     payload.plan.length > MAX_PLAN_LENGTH ||
     !emptyDecision(payload)
   ) {
-    throw outputError("Planner returned an invalid commit plan draft.");
+    throw outputError("Planner returned an invalid plan draft.");
   }
   return Object.freeze({ status: payload.status, plan: payload.plan });
 }
@@ -718,6 +728,30 @@ export function normalizePipelineState(value) {
   ) {
     throw workflowError("Plan-authoring state is invalid.");
   }
+  try {
+    const criteria = normalizeAgreedCriteria(value.agreedCriteria, {
+      allowEmpty:
+        !value.clarificationFrozen || value.settings?.planKind !== "custom",
+    });
+    if (
+      criteria.some(
+        ({ condition }, index) =>
+          condition !== value.agreedCriteria[index].condition,
+      )
+    )
+      throw workflowError("Plan-authoring agreed criteria are not canonical.");
+    if (value.clarificationFrozen && value.settings?.planKind === "custom")
+      assertCustomAuthoringBudget(criteria, value.settings);
+  } catch {
+    throw workflowError("Plan-authoring agreed criteria are invalid.");
+  }
+  if (
+    value.settings?.planKind !== "custom" &&
+    value.agreedCriteria.length !== 0
+  )
+    throw workflowError(
+      "Commit authoring cannot acquire custom criteria authority.",
+    );
   for (const field of [
     "preflightComplete",
     "proactiveClarification",
@@ -877,7 +911,11 @@ export function normalizePipelineState(value) {
   if (value.canonicalPlan !== null) {
     let expectedCanonicalPlan;
     try {
-      expectedCanonicalPlan = serializeCommitPlan(parseCommitPlan(value.draft));
+      expectedCanonicalPlan = canonicalAuthoringPlan(
+        value.draft,
+        value.settings,
+        value.agreedCriteria,
+      );
     } catch {
       throw workflowError("Canonical plan does not match the reviewed draft.");
     }
@@ -1164,6 +1202,7 @@ export function createPlanAuthoringState({
   }
   return Object.freeze({
     workflowState: "CLARIFY",
+    agreedCriteria: Object.freeze([]),
     preflightComplete: false,
     settings: settings === null ? null : Object.freeze({ ...settings }),
     repositoryBaseline: null,
@@ -1259,7 +1298,7 @@ export function assertRun(run) {
   if (
     !isRecord(run) ||
     run.pipelineId !== "plan-authoring" ||
-    run.pipelineStateVersion !== 6 ||
+    run.pipelineStateVersion !== 7 ||
     typeof run.projectPath !== "string" ||
     !isAbsolute(run.projectPath) ||
     resolve(run.projectPath) !== run.projectPath ||
@@ -1359,7 +1398,25 @@ export function assertRun(run) {
   ) {
     throw workflowError("Plan-authoring source-fork lineage is invalid.");
   }
-  if (pipelineState.repositoryBaseline !== null) {
+  const custom = pipelineState.settings?.planKind === "custom";
+  if (
+    custom &&
+    (run.workspace?.kind !== "directory" || run.workspace.lease !== "exclusive")
+  )
+    throw workflowError(
+      "Custom authoring requires a frozen directory workspace.",
+    );
+  if (!custom && run.workspace?.kind === "directory")
+    throw workflowError("Commit authoring requires Git workspace semantics.");
+  if (pipelineState.repositoryBaseline !== null && custom) {
+    if (
+      pipelineState.repositoryBaseline.schemaVersion !== 1 ||
+      pipelineState.repositoryBaseline.workspacePath !== run.projectPath ||
+      !Array.isArray(pipelineState.repositoryBaseline.entries)
+    )
+      throw workflowError("Plan-authoring directory baseline is invalid.");
+  }
+  if (pipelineState.repositoryBaseline !== null && !custom) {
     const baselineProjectPath = pipelineState.repositoryBaseline.projectPath;
     if (
       pipelineState.repositoryBaseline.schemaVersion !== 1 ||
@@ -1436,6 +1493,7 @@ export function assertRun(run) {
   if (pipelineState.workflowState === "WAITING_FOR_USER") {
     const configurationChanged =
       run.pause.reason === "project_configuration_changed";
+    const workspaceChanged = run.pause.reason === "workspace_changed";
     if (
       configurationChanged &&
       (!hasExactFields(run.pause, ["reason", "code"]) ||
@@ -1443,6 +1501,12 @@ export function assertRun(run) {
     ) {
       throw workflowError("Plan-authoring configuration pause is invalid.");
     }
+    if (
+      workspaceChanged &&
+      (!hasExactFields(run.pause, ["reason", "code"]) ||
+        run.pause.code !== "ERR_WORKSPACE_DRIFT")
+    )
+      throw workflowError("Plan-authoring workspace pause is invalid.");
     const expectedReason = {
       "clarification-answers": "clarification_answers_required",
       "product-decision": "product_decision_required",
@@ -1451,6 +1515,7 @@ export function assertRun(run) {
     const hasAuthorizationId = Object.hasOwn(run.pause, "authorizationId");
     if (
       !configurationChanged &&
+      !workspaceChanged &&
       ((pipelineState.pendingEdit === null && hasAuthorizationId) ||
         (pipelineState.pendingEdit !== null &&
           (run.pause.authorizationId !== pipelineState.pendingEdit.id ||
@@ -1543,16 +1608,29 @@ export function assertRun(run) {
     }
   }
   const hashFields = ["task", "context", "clarifications"];
+  const declaredHashFields = ["criteria", "declaredInputs"];
   const hashKeys = Object.keys(run.hashes);
+  const invalidDeclaredHashes = declaredHashFields.some(
+    (field) =>
+      run.hashes[field] != null && !HASH_PATTERN.test(run.hashes[field]),
+  );
+  const missingCriteriaBinding =
+    pipelineState.settings?.criteriaPath != null &&
+    (!HASH_PATTERN.test(run.hashes.criteria ?? "") ||
+      !HASH_PATTERN.test(run.hashes.declaredInputs ?? ""));
   if (
     (!pipelineState.preflightComplete && hashKeys.length !== 0) ||
     (pipelineState.preflightComplete &&
-      (hashKeys.length !== hashFields.length ||
+      (hashKeys.some(
+        (field) => ![...hashFields, ...declaredHashFields].includes(field),
+      ) ||
         hashFields.some((field) => !Object.hasOwn(run.hashes, field)) ||
         !HASH_PATTERN.test(run.hashes.task) ||
         (run.hashes.context !== null &&
           !HASH_PATTERN.test(run.hashes.context)) ||
-        !HASH_PATTERN.test(run.hashes.clarifications)))
+        !HASH_PATTERN.test(run.hashes.clarifications) ||
+        invalidDeclaredHashes ||
+        missingCriteriaBinding))
   ) {
     throw workflowError("Plan-authoring input hashes are invalid.");
   }
@@ -1587,6 +1665,7 @@ export function assertSettings(settings) {
     "mode",
     "preferredCommitLineLimit",
     "stagnationWindowRounds",
+    ...Object.keys(PLAN_SETTINGS),
   ];
   if (
     !isRecord(settings) ||
@@ -1595,22 +1674,28 @@ export function assertSettings(settings) {
   ) {
     throw workflowError("Plan-authoring settings are invalid.");
   }
+  for (const [name, definition] of Object.entries(PLAN_SETTINGS)) {
+    if (!definition.validate(settings[name]))
+      throw workflowError(`Plan-authoring setting ${name} is invalid.`);
+  }
   if (!["independent", "lazy", "combined"].includes(settings.mode)) {
     throw workflowError("Plan-authoring setting mode is invalid.");
   }
-  for (const field of fields.filter((field) => field !== "mode")) {
+  for (const field of fields.filter(
+    (field) => field !== "mode" && !Object.hasOwn(PLAN_SETTINGS, field),
+  )) {
     if (!Number.isSafeInteger(settings[field]) || settings[field] < 1) {
       throw workflowError(`Plan-authoring setting ${field} is invalid.`);
     }
   }
 }
 
-export function assertRuntime(runtime, activeRoles = ROLES) {
+export function assertRuntime(runtime, activeRoles = ROLES, directory = false) {
   if (
     !isRecord(runtime) ||
     !isRecord(runtime.adapters) ||
     !isRecord(runtime.clarifications) ||
-    !isRecord(runtime.git)
+    !isRecord(directory ? runtime.workspace : runtime.git)
   ) {
     throw workflowError("Plan-authoring runtime is invalid.");
   }
@@ -1631,8 +1716,12 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
       throw workflowError(`Plan-authoring runtime.${name} is invalid.`);
     }
   }
-  for (const name of ["assertUnchanged", "preflight", "snapshot"]) {
-    if (typeof runtime.git[name] !== "function") {
+  for (const name of directory
+    ? ["assertUnchanged", "snapshot"]
+    : ["assertUnchanged", "preflight", "snapshot"]) {
+    if (
+      typeof (directory ? runtime.workspace : runtime.git)[name] !== "function"
+    ) {
       throw workflowError(`Plan-authoring Git service.${name} is invalid.`);
     }
   }
@@ -1654,7 +1743,12 @@ export function assertRuntime(runtime, activeRoles = ROLES) {
   }
 }
 
-function assertInputFile(value, expectedPath, name, { optional = false } = {}) {
+function assertInputFile(
+  value,
+  expectedPath,
+  name,
+  { optional = false, allowEmpty = false } = {},
+) {
   if (value === null && optional) {
     return null;
   }
@@ -1662,7 +1756,7 @@ function assertInputFile(value, expectedPath, name, { optional = false } = {}) {
     !isRecord(value) ||
     value.path !== expectedPath ||
     typeof value.content !== "string" ||
-    (!optional && value.content.trim().length === 0) ||
+    (!optional && !allowEmpty && value.content.trim().length === 0) ||
     typeof value.hash !== "string" ||
     !HASH_PATTERN.test(value.hash) ||
     value.hash !== sha256(value.content)
@@ -1672,11 +1766,23 @@ function assertInputFile(value, expectedPath, name, { optional = false } = {}) {
   return value;
 }
 
-export function normalizeInputSnapshot(value, taskPath) {
-  if (!isRecord(value)) {
+export function normalizeInputSnapshot(value, taskPath, criteriaPath = null) {
+  if (
+    !isRecord(value) ||
+    (value.declaredInputsHash != null &&
+      (typeof value.declaredInputsHash !== "string" ||
+        !HASH_PATTERN.test(value.declaredInputsHash)))
+  ) {
     throw workflowError("Plan-authoring input snapshot is invalid.");
   }
   return Object.freeze({
+    declaredInputsHash: value.declaredInputsHash ?? null,
+    criteria:
+      criteriaPath === null
+        ? null
+        : assertInputFile(value.criteria, criteriaPath, "criteria", {
+            allowEmpty: true,
+          }),
     task: assertInputFile(value.task, join(taskPath, "task.md"), "task.md"),
     context: assertInputFile(
       value.context,

@@ -77,12 +77,13 @@ valid after initial acceptance. See the [execution specification](pipelines/plan
   writes in Codex 0.164.0 or newer and Claude Code 2.1.233 or newer on Linux,
   without Git or commit readiness. Claude writes through sandboxed Bash to
   existing declared output roots. Directory
-  workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
+  execution workflows remain unavailable; see the [provider contract](docs/product/PROVIDER_MODEL.md).
 - The runner lifecycle foundation selects workspace and lease requirements from
   pipeline descriptors before Git inspection. Directory bindings, protected
   inputs and output permissions survive recovery; repository-contained directory
-  work shares the enclosing worktree lease. The three public pipelines still
-  require Git. Missing Git never selects another completion contract.
+  work shares the enclosing worktree lease. Explicit custom authoring uses that
+  directory lifecycle; commit authoring, execution and polishing still require
+  Git. Missing Git never selects another completion contract.
 - `plan-authoring` confines writes to its resolved `clarifications.md` and
   `plan.md` artifact paths, including task directories inside the target
   repository.
@@ -176,8 +177,8 @@ change set.
 
 The separate [`@agent-runner/custom-plan`](packages/custom-plan/README.md)
 package defines criterion-driven `Step N` plans, including analysis-only results.
-It is currently a deterministic contract only; custom CLI/MCP workflows are not
-yet exposed.
+Explicit custom authoring is available through CLI/MCP/configuration; custom
+execution remains unavailable.
 
 ## Configuration
 
@@ -270,6 +271,10 @@ Pipeline settings use these defaults:
 
 | Pipeline         | Setting                          |       Default |
 | ---------------- | -------------------------------- | ------------: |
+| `plan-authoring` | `planKind`                       |      `commit` |
+| `plan-authoring` | `criteriaPath`                   |        `null` |
+| `plan-authoring` | `sourceReferences`               |          `[]` |
+| `plan-authoring` | `outputPaths`                    |          `[]` |
 | `plan-authoring` | `mode`                           | `independent` |
 | `plan-authoring` | `maxRevisionRounds`              |            20 |
 | `plan-authoring` | `preferredCommitLineLimit`       |           900 |
@@ -726,6 +731,36 @@ agent-run guidance edit --project /path/to/repository
 agent-run pipelines
 agent-run mcp
 ```
+
+Author criterion-driven custom plans explicitly, including in an ordinary directory:
+
+```bash
+agent-run run plan-authoring --project /path/to/workspace --task /path/to/task \
+  --plan-kind custom --criteria criteria.md \
+  --source sources/catalog.md --source https://example.invalid/reference \
+  --output reports/summary.md
+```
+
+Criteria may be ordinary Markdown in the selected file, task or clarification
+answers; missing material criteria are resolved before drafting. Relative paths
+resolve from the workspace. Sources remain read-only; URLs grant no retrieval,
+and unavailable evidence stays explicit. Intended outputs are plan declarations
+and receive no authoring write permission. Analysis-only plans may omit
+`--output`. All three review modes retain their gates; custom plans inherit
+coding requirements only when selected. Only Runner writes `clarifications.md`
+and the validated `plan.md`.
+
+Clarification artifacts inside a Git repository must already be ignored and
+untracked, including custom authoring; the runner never changes ignore rules.
+
+MCP `run_start` uses `planKind: "custom"`, `criteriaPath: "criteria.md"`,
+`sourceReferences: ["sources/catalog.md"]` and
+`outputPaths: ["reports/summary.md"]`. The same fields belong under
+`pipelines.plan-authoring` in global/project configuration. CLI/MCP overrides
+win; selections and read bindings freeze for resume. Omitted and legacy kinds
+remain `commit`, including with supplemental criteria. Unknown or mismatched
+kinds fail closed; absent Git never selects custom. Custom execution is not yet
+available.
 
 `guidance` prints the complete common operator guide and local additions.
 `guidance edit` opens the entire local Markdown in `$VISUAL`, then `$EDITOR`

@@ -2,13 +2,15 @@
 
 ## Goal
 
-Create a deterministic, reviewable `plan.md` that the `plan-execution` pipeline
-can consume without reinterpretation.
+Create a deterministic, reviewable `plan.md` of the explicitly selected kind.
+Commit execution consumes validated commit plans unchanged; custom authoring
+produces criterion-driven plans while custom execution remains unavailable.
 
 ## Inputs And Artifacts
 
-The pipeline receives a local Git repository, `task.md`, and optional
-`context.md`. It manages two declared artifacts in the task directory:
+The pipeline receives a workspace, `task.md`, and optional `context.md`.
+The explicit `planKind` selects `commit` (default, requiring Git) or `custom`
+(criterion-driven, valid in an ordinary directory). It manages two declared artifacts in the task directory:
 
 ```text
 task/
@@ -18,7 +20,7 @@ task/
 
 `clarifications.md` is the durable user/agent question-and-answer transcript in
 the common Markdown format defined by the root runtime. `plan.md` is the final
-validated commit plan. Drafts and review state live under the runner's external
+validated plan of the selected kind. Drafts and review state live under the runner's external
 state directory.
 
 Project content remains read-only except for these two resolved artifact paths,
@@ -28,10 +30,46 @@ rounds, the user answers through a text editor, and the runner writes the final
 plan atomically. No other tracked or untracked file, index entry, commit, or ref
 may change.
 
-The descriptor explicitly selects a Git workspace and no exclusive workspace lease.
-The root resolves that selection before Git-specific inspection; a missing Git
-repository never selects a directory workflow. Role access, ignored artifacts
-and this pipeline's completion contract retain their existing guarantees.
+The descriptor selects a Git workspace without an exclusive lease for commit
+plans, or a directory workspace with an exclusive canonical exclusion lease
+for custom plans. The root resolves configuration and explicit overrides before
+Git inspection. A missing repository, task wording, criteria alone or a draft's
+format never selects custom. Commit plans retain ignored-artifact and all Git
+guards. Repository-contained custom authoring shares the enclosing worktree's
+canonical lease and grants no Git effects.
+
+CLI `--plan-kind commit|custom`, `--criteria <file>`, repeated `--source
+<reference>` and `--output <path>` map to MCP `planKind`, `criteriaPath`,
+`sourceReferences` and `outputPaths` and the identically named descriptor settings.
+Root configuration, project overlay and explicit run overrides retain their
+normal precedence. Relative paths resolve from the frozen canonical workspace.
+Filesystem discovery first checks the requested directory for project
+configuration, allowing that file to select custom without expanding the
+workspace. When no local selection exists and preliminary settings select
+commit, discovery retains the repository-root configuration fallback. Only
+commit selection canonicalizes the workspace to the repository root; a selected
+local configuration stays bound to its exact file. Custom configurations remain
+confined to their selected directory workspace.
+A criteria file accepts ordinary Markdown, including an empty file requiring
+clarification; a supplied file must exist. Criteria may instead be supplied in
+`task.md` or authorized clarification answers. Commit criteria supplement fixed
+coding and safety requirements without changing kind.
+
+Local sources and criteria are confined read declarations, disjoint from the
+authoring artifact paths and pinned by content,
+identity and real ancestors. URLs remain references with empty retrieval
+permissions; unavailable evidence stays explicit. Intended outputs are frozen
+plan data and never writable authoring roots. Only the two task-owned artifacts
+may change through the runner. Artifact destinations must be disjoint from
+declared criteria, sources and resolved configuration. Overlap checks use the
+final merged configuration at workspace binding, after preliminary lifecycle
+selection. Directory bindings also reject overlaps with protected inputs,
+infrastructure and control paths before publication. Resume neither reloads
+selections nor adopts changed inputs. Directory workflows use the existing
+workspace drift guards; commit authoring additionally fingerprints declared
+read trees around turns without traversing unrelated Git content or ignored
+dependencies.
+Custom execution remains unavailable.
 
 ## Configuration
 
@@ -40,6 +78,10 @@ The pipeline descriptor declares the `planner`, `reviewer`, and on-demand
 
 ```text
 mode = independent
+planKind = commit
+criteriaPath = null
+sourceReferences = []
+outputPaths = []
 maxRevisionRounds = 20
 preferredCommitLineLimit = 900
 stagnationWindowRounds = 3
@@ -56,7 +98,7 @@ complete independent Reviewer gate. It resolves Planner, Reviewer, and on-demand
 Arbiter with independent checkpoint isolation. All three pipeline descriptors support combined review; each owns its
 workflow and gate requirements.
 
-`preferredCommitLineLimit` must be a positive safe integer. Planner and Plan
+`preferredCommitLineLimit` applies only to commit planning and must be a positive safe integer. Planner and Plan
 Reviewer prefer each proposed commit to stay within that anticipated additions
 plus deletions target, including tests and documentation; smaller cohesive
 commits are welcome. A larger commit remains valid when the plan states a
@@ -269,6 +311,15 @@ session lineage, and correction accounting. It neither reloads configuration
 nor infers a native child, and it prevents older readers from accepting the
 expanded durable vocabulary as version 5.
 
+Pipeline state version 7 adds the frozen plan-kind/input settings and agreed
+result criterion catalog. The ordered version-6 migration selects `commit`,
+null criteria path and empty source/output declarations and criteria, preserving
+progress, drafts, counters, sessions, artifacts and approvals without reloading
+configuration or granting directory authority. Null preflight settings stay null.
+Default commit inputs retain their existing session-context keys, including
+pending source-fork recovery bindings; adding selection metadata cannot refork
+the source or invalidate an unfinished checkpoint.
+
 ## Operator Pause And Cancellation
 
 The runner's durable stop protocol applies to every role, checkpoint, and mode.
@@ -309,6 +360,24 @@ an unchanged baseline and preserves the durable draft and declared artifacts.
 A read-only mutation remains a blocker after an operator pause is lifted.
 
 ## Clarification
+
+Custom clarification uses the same bounded read-only loop and returns an
+additional `criteria` array: READY requires nonempty stable `id`/observable
+`condition` pairs derived from user requirements; QUESTIONS carries `criteria: []`.
+An empty READY catalog routes to a material criteria question before drafting.
+Missing criteria cannot advance. Normalize criterion conditions through the shared
+contract before freezing the catalog with the clarification hash. Before closing
+clarification, the serialized declarations and required step scaffold/references
+must fit the unchanged 100,000-character draft limit with 4,000 characters left
+for step content. Oversized declarations are rejected before freezing; per-item
+limits alone do not establish a usable draft budget.
+Canonical publication must also fit that draft limit; serialization expansion
+is a deterministic correction finding rather than an invalid state transition.
+Distinguish plan-quality criteria from result acceptance criteria, reusing
+shared supplied conditions. Later drafting and every review/correction prompt
+carry the frozen selection. Custom prompts apply coding conventions only when
+the user selected them and review completeness, feasible order, criterion
+satisfaction and absence of contradictions.
 
 Before the first Planner turn in `CLARIFY`, the runner ensures the clarification
 artifact exists without overwriting an existing transcript. The Planner studies
@@ -609,7 +678,7 @@ stagnation directions. Fields that do not apply to the selected status remain
 present and empty so every object schema is strict and deterministic. The
 pipeline validates status-specific invariants after adapter validation.
 
-Only the Planner proposes the exact subject in each commit heading. The shared
+For commit plans, only the Planner proposes the exact subject in each commit heading. The shared
 `@agent-runner/commit-plan` package parses and validates every proposed subject
 and plan deterministically; neither the Reviewer, Arbiter, runner, nor execution
 pipeline generates or rewrites a subject.
@@ -649,9 +718,18 @@ pause with `plan_revision_limit_reached` and do not write `plan.md`. Arbitration
 does not reset or bypass this limit, and lazy mode never treats budget
 exhaustion as a clean result.
 
-The final artifact must pass
-[`@agent-runner/commit-plan`](../../../packages/commit-plan/README.md) validation
-before it is written atomically. This pipeline never changes Git history,
+Custom drafts use the exact format owned by
+[`@agent-runner/custom-plan`](../../../packages/custom-plan/README.md): fenced
+JSON declaration, contiguous ordinary `Step` titles, scoped work, expected
+results and criterion references. All modes retain structured drafts, bounded
+correction, and their selected independent/convergence gates. The runner verifies
+criteria, inputs and outputs match the frozen catalog/source/output selection
+exactly. Unknown kinds, mismatched formats or changed declarations cannot
+publish: deterministic issues return to correction. Analysis-only plans may have
+no output files or diff. Agents never write the plan.
+
+The final artifact must pass its selected shared plan contract's validation
+before Runner canonically serializes and writes it atomically. This pipeline never changes Git history,
 creates a commit, pushes, or changes remote configuration or Git identity.
 Immediately before every agent turn and the final write, re-read and compare the
 persisted hashes of `task.md`, optional `context.md`, and accepted
@@ -659,9 +737,10 @@ persisted hashes of `task.md`, optional `context.md`, and accepted
 and reviews. Preserve the preflight repository snapshot as the run baseline,
 compare it before and after every agent turn and around the final write, and
 also wrap each turn in its own full snapshot check. Any other repository
-mutation pauses instead of advancing. Before creating a repository-local
+mutation pauses instead of advancing. Before creating any repository-local
 clarification transcript, require `git check-ignore` evidence that its resolved
-path is ignored and untracked.
+path is ignored and untracked, including custom authoring. Ordinary-directory
+artifacts outside Git repositories require no Git inspection.
 
 ### Action-free ownership recovery
 

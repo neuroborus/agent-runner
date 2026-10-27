@@ -7,6 +7,7 @@ import {
   parseProjectConfiguration,
   parseRunnerConfiguration,
   resolvePipelineConfiguration,
+  resolvePipelineSettings,
 } from "../../src/config/index.js";
 import { getPipeline } from "../../src/pipeline-registry.js";
 
@@ -175,6 +176,10 @@ test("role resolution normalizes configuration objects", () => {
       },
     },
     settings: {
+      planKind: "commit",
+      criteriaPath: null,
+      sourceReferences: [],
+      outputPaths: [],
       maxRevisionRounds: 4,
       mode: "independent",
       preferredCommitLineLimit: 900,
@@ -954,5 +959,75 @@ test("provider inactivity timeout is strict, shared, and project-overridable wit
         { providerInactivityTimeoutMs: 1 },
       ),
     /not supported/u,
+  );
+});
+
+test("authoring plan selection resolves additively without inferring kind from criteria", () => {
+  const root = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      defaultBackend: "codex",
+      pipelines: {
+        "plan-authoring": {
+          criteriaPath: "criteria.md",
+          sourceReferences: ["sources/a.md"],
+        },
+      },
+    }),
+  );
+  assert.equal(
+    resolvePipelineConfiguration("plan-authoring", root).settings.planKind,
+    "commit",
+  );
+  const project = parseProjectConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: {
+        "plan-authoring": {
+          planKind: "custom",
+          outputPaths: ["reports/a.md"],
+        },
+      },
+    }),
+    root,
+  );
+  const resolved = resolvePipelineConfiguration(
+    "plan-authoring",
+    root,
+    {},
+    {},
+    null,
+    project,
+    { sourceReferences: ["sources/b.md"] },
+  );
+  assert.equal(resolved.settings.planKind, "custom");
+  assert.equal(resolved.settings.criteriaPath, "criteria.md");
+  assert.deepEqual(resolved.settings.sourceReferences, ["sources/b.md"]);
+  assert.deepEqual(resolved.settings.outputPaths, ["reports/a.md"]);
+  assert.throws(
+    () =>
+      resolvePipelineConfiguration("plan-execution", root, {}, {}, null, null, {
+        planKind: "custom",
+      }),
+    /planKind/u,
+  );
+});
+
+test("workspace discovery resolves settings before a project supplies role backends", () => {
+  const configuration = parseRunnerConfiguration(
+    JSON.stringify({
+      schemaVersion: 1,
+      pipelines: { "plan-authoring": { planKind: "custom" } },
+    }),
+  );
+  assert.equal(
+    resolvePipelineSettings("plan-authoring", configuration).planKind,
+    "custom",
+  );
+  assert.equal(
+    resolvePipelineSettings("plan-authoring", configuration, {
+      planKind: "commit",
+    }).planKind,
+    "commit",
   );
 });

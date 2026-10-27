@@ -11,6 +11,26 @@ Its development budget is approximately 60 seconds. The fast tier retains
 contract, policy, provider, Git, state, and focused integration checks.
 `npm test -- path/to/file.test.js` runs selected coverage.
 
+Fast `test/runner-authoring.test.js` owns public custom-authoring composition:
+configured selection before Git, read-only provider declarations, frozen criteria
+and source bindings, source-drift recovery, repository-local clarification ignore
+requirements, artifact-only publication and non-Git commit rejection.
+It also covers configuration/artifact collisions without byte replacement,
+protected control destinations and canonical repository-root configuration
+lookup when commit authoring starts from a subdirectory, while explicit,
+globally configured and project-selected custom authoring retain their supplied
+directory scope. Supplemental commit-authoring reads tolerate unrelated ignored
+external links while detecting declared source-tree drift.
+Artifact separation also covers effective project overrides of global
+declarations.
+MCP start recovery retains a reserved custom workspace after global plan-kind
+defaults change, while preserving exact-request idempotency.
+Pipeline-owned `workflow.test.js` covers all three
+custom authoring gates, missing criteria, declaration correction and legacy
+commit defaults with fake effects. Its regressions cover canonical criterion
+publication, aggregate serialized declaration budgets before freezing, and
+correctable canonical draft expansion. Custom execution remains inactive.
+
 Fast `packages/custom-plan/test/custom-plan.test.js` owns the pure custom-plan
 contract: analysis/output plans, immutable parsing, canonical round trips,
 closed declarations, explicit kind compatibility, sequential steps and complete
@@ -82,7 +102,7 @@ providers. Coincident and ancestor task roots retain drift protection for
 undeclared project content while allowing explicitly declared task artifacts.
 Frozen-input identity drift blocks trusted
 execution and capability preparation before service invocation. Injected
-descriptor workflows keep incomplete custom routes unregistered; selected
+descriptor workflows keep incomplete custom execution routes unregistered; selected
 trusted command execution is faked rather than invoking project checks.
 
 The fast state `preservation.test.js` suite owns unfinished-work capture and

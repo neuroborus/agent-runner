@@ -12,4 +12,7 @@ export {
   loadProjectConfiguration,
   loadRunnerConfiguration,
 } from "./files.js";
-export { resolvePipelineConfiguration } from "./resolution.js";
+export {
+  resolvePipelineConfiguration,
+  resolvePipelineSettings,
+} from "./resolution.js";

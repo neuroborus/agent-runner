@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, rename, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import {
@@ -12,9 +12,12 @@ import {
 import { createClarificationService } from "../clarifications/index.js";
 import {
   assertProjectConfigurationProtected,
+  DEFAULT_ARTIFACT_ROOT,
   loadProjectConfiguration,
   loadRunnerConfiguration,
+  PROJECT_CONFIG_FILENAME,
   resolvePipelineConfiguration,
+  resolvePipelineSettings,
 } from "../config/index.js";
 import { createGitService } from "../git/index.js";
 import {
@@ -108,21 +111,65 @@ async function inputFile(path, { optional = false, workspace, taskPath } = {}) {
     : Object.freeze({ path, content, hash: fileHash(content) });
 }
 
-async function readInputs(pipeline, taskPath, workspace) {
-  return Object.freeze(
-    Object.fromEntries(
+async function readInputs(
+  pipeline,
+  taskPath,
+  directoryWorkspace,
+  { workspace, settings, projectPath, stateRoot } = {},
+) {
+  const extra =
+    pipeline.resolveTaskInputs?.({ settings, projectPath, taskPath }) ?? {};
+  const inputs = Object.fromEntries(
+    await Promise.all(
+      Object.entries(extra).map(async ([name, definition]) => [
+        name,
+        await inputFile(definition.path, {
+          optional: definition.optional,
+          workspace,
+          taskPath: dirname(definition.path),
+        }),
+      ]),
+    ),
+  );
+  const selection = pipeline.resolveWorkspace?.({
+    settingOverrides: settings ?? {},
+    projectPath,
+    taskPath,
+  });
+  if (
+    selection &&
+    (selection.inputPaths?.length ?? 0) + (selection.sourcePaths?.length ?? 0) >
+      0
+  ) {
+    const snapshot = await workspace.snapshotInputs({
+      paths: [
+        ...(selection.inputPaths ?? []),
+        ...(selection.sourcePaths ?? []),
+      ],
+      stateRoot: resolve(stateRoot),
+    });
+    inputs.declaredInputsHash = fileHash(
+      JSON.stringify({
+        bindings: snapshot.bindings,
+        entries: snapshot.entries,
+      }),
+    );
+  }
+  return Object.freeze({
+    ...inputs,
+    ...Object.fromEntries(
       await Promise.all(
         Object.entries(pipeline.taskInputs).map(async ([name, definition]) => [
           name,
           await inputFile(join(taskPath, definition.filename), {
             optional: definition.optional,
-            workspace,
+            workspace: directoryWorkspace,
             taskPath,
           }),
         ]),
       ),
     ),
-  );
+  });
 }
 
 async function writePlan(taskPath, options) {
@@ -657,7 +704,33 @@ export function createRunner(options = {}) {
                 },
               ]),
             ),
-      clarifications,
+      clarifications:
+        run.workspace?.kind !== "directory"
+          ? clarifications
+          : Object.freeze({
+              ...clarifications,
+              async ensureTranscript(request) {
+                const root = await workspace.exclusionPath({
+                  workspacePath: request.artifactRoot,
+                });
+                const marker = await workspace.inspectPath({
+                  projectPath: root,
+                  path: join(root, ".git"),
+                });
+                if (marker.exists) {
+                  const artifact = await git.inspectPath({
+                    projectPath: root,
+                    path: request.transcriptPath,
+                  });
+                  if (artifact.tracked || !artifact.ignored)
+                    throw new RunnerError(
+                      "Repository-local artifact path must be ignored and untracked.",
+                      { code: "ERR_REPOSITORY_ARTIFACT_NOT_IGNORED" },
+                    );
+                }
+                return clarifications.ensureTranscript(request);
+              },
+            }),
       workspace: Object.freeze({
         kind: run.workspace?.kind ?? "git",
         policy: run.workspace?.policy ?? null,
@@ -808,6 +881,12 @@ export function createRunner(options = {}) {
           pipeline,
           taskPath,
           run.workspace?.kind === "directory" ? workspace : undefined,
+          {
+            workspace,
+            settings: run.pipelineState.settings,
+            projectPath: run.projectPath,
+            stateRoot: runStore.rootPath,
+          },
         ),
       async startAgentTurn(activeTurn, { pipelineState } = {}) {
         try {
@@ -1368,12 +1447,95 @@ export function createRunner(options = {}) {
     }
   }
 
+  async function discoverWorkspaceBoundary(pipeline, input, configuration) {
+    const boundary = await runStore.validateStateBoundary(input);
+    const settings = resolvePipelineSettings(
+      pipeline.id,
+      configuration,
+      input.settingOverrides,
+      providers,
+    );
+    const selection = workspaceSelection(pipeline, {
+      ...input,
+      ...boundary,
+      settingOverrides: settings,
+    });
+    if (selection.kind === "directory") return boundary;
+    const configurationPath = resolve(
+      boundary.projectPath,
+      input.projectConfigurationPath ??
+        join(DEFAULT_ARTIFACT_ROOT, PROJECT_CONFIG_FILENAME),
+    );
+    const localPath = relative(boundary.projectPath, configurationPath);
+    if (
+      localPath !== "" &&
+      !isAbsolute(localPath) &&
+      localPath !== ".." &&
+      !localPath.startsWith(`..${sep}`) &&
+      (
+        await workspace.inspectPath({
+          projectPath: boundary.projectPath,
+          path: configurationPath,
+        })
+      ).exists
+    )
+      return boundary;
+    return runStore.validateStateBoundary({
+      ...boundary,
+      projectPath: await workspace.exclusionPath({
+        workspacePath: boundary.projectPath,
+      }),
+    });
+  }
+
   async function validateBoundary(input, selection) {
     const projectPath = assertNonEmptyString(
       input?.projectPath,
       "run.projectPath",
     );
     const taskPath = assertNonEmptyString(input?.taskPath, "run.taskPath");
+    if (
+      selection === undefined &&
+      getPipeline(input.pipelineId)?.resolveWorkspace
+    ) {
+      const normalized = normalizeRunInput(input, providers);
+      const pipeline = getPipeline(input.pipelineId);
+      const configuration = await loadConfiguration();
+      const boundary = await discoverWorkspaceBoundary(
+        pipeline,
+        normalized,
+        configuration,
+      );
+      const project = await loadProjectConfiguration({
+        configurationPath: normalized.projectConfigurationPath,
+        inspectPath: (request) => workspace.inspectPath(request),
+        workspaceKind: "directory",
+        projectPath: boundary.projectPath,
+        providers,
+        runnerConfiguration: configuration,
+      });
+      const resolved = resolvePipelineConfiguration(
+        pipeline.id,
+        configuration,
+        normalized.roleOverrides,
+        normalized.executionOverrides,
+        normalized.sourceSession,
+        project?.configuration ?? null,
+        normalized.settingOverrides,
+        providers,
+      );
+      selection = workspaceSelection(pipeline, {
+        ...normalized,
+        ...boundary,
+        settingOverrides: resolved.settings,
+      });
+      return validateBoundary(
+        selection.kind === "directory"
+          ? normalized
+          : { ...normalized, ...boundary },
+        selection,
+      );
+    }
     selection ??=
       input.pipelineId === undefined
         ? { kind: "git" }
@@ -1582,13 +1744,18 @@ export function createRunner(options = {}) {
         code: "ERR_UNKNOWN_PIPELINE",
       });
     }
-    const selection = workspaceSelection(pipeline, normalized);
-    const { projectPath, taskPath } = await validateBoundary(
-      normalized,
-      selection,
-    );
+    let selection = pipeline.resolveWorkspace
+      ? { kind: "directory" }
+      : workspaceSelection(pipeline, normalized);
+    const initialBoundary = pipeline.resolveWorkspace
+      ? null
+      : await validateBoundary(normalized, selection);
     const configuration = await loadConfiguration();
-    const projectConfiguration = await loadProjectConfiguration({
+    const boundary =
+      initialBoundary ??
+      (await discoverWorkspaceBoundary(pipeline, normalized, configuration));
+    let { projectPath, taskPath } = boundary;
+    let projectConfiguration = await loadProjectConfiguration({
       configurationPath: normalized.projectConfigurationPath,
       inspectPath: (options) =>
         (selection.kind === "directory" ? workspace : git).inspectPath(options),
@@ -1598,8 +1765,8 @@ export function createRunner(options = {}) {
       runnerConfiguration: configuration,
     });
     let resolved;
-    try {
-      resolved = resolvePipelineConfiguration(
+    const resolveConfiguration = () =>
+      resolvePipelineConfiguration(
         pipeline.id,
         configuration,
         normalized.roleOverrides,
@@ -1609,6 +1776,56 @@ export function createRunner(options = {}) {
         normalized.settingOverrides,
         providers,
       );
+    try {
+      resolved = resolveConfiguration();
+      selection = workspaceSelection(pipeline, {
+        ...normalized,
+        projectPath,
+        taskPath,
+        settingOverrides: resolved.settings,
+      });
+      const selectedBoundary = await validateBoundary(
+        selection.kind === "directory"
+          ? normalized
+          : { ...normalized, ...boundary },
+        selection,
+      );
+      projectPath = selectedBoundary.projectPath;
+      taskPath = selectedBoundary.taskPath;
+      if (
+        pipeline.resolveWorkspace &&
+        (selection.kind === "git" ||
+          (projectConfiguration !== null &&
+            projectConfiguration.protection.projectPath !== projectPath))
+      ) {
+        projectConfiguration = await loadProjectConfiguration({
+          configurationPath:
+            projectConfiguration?.path ?? normalized.projectConfigurationPath,
+          inspectPath: (request) =>
+            (selection.kind === "directory" ? workspace : git).inspectPath(
+              request,
+            ),
+          workspaceKind: selection.kind,
+          projectPath,
+          providers,
+          runnerConfiguration: configuration,
+        });
+        resolved = resolveConfiguration();
+        selection = workspaceSelection(pipeline, {
+          ...normalized,
+          projectPath,
+          taskPath,
+          settingOverrides: resolved.settings,
+        });
+        const rebound = await validateBoundary(
+          selection.kind === "directory"
+            ? normalized
+            : { ...normalized, ...boundary },
+          selection,
+        );
+        projectPath = rebound.projectPath;
+        taskPath = rebound.taskPath;
+      }
     } catch (cause) {
       if (cause?.code !== "ERR_SOURCE_BACKEND_MISMATCH") {
         throw cause;

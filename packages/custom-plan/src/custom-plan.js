@@ -85,22 +85,13 @@ function validateList(value, path, issues, { required = false } = {}) {
   return [...seen];
 }
 
-export function validateCustomPlan(plan) {
-  if (!isRecord(plan)) return Object.freeze(["Custom plan must be an object."]);
-
+function inspectCriteria(criteria) {
   const issues = [];
-  rejectUnknownFields(plan, PLAN_FIELDS, "Custom plan", issues);
-  if (plan.kind !== "custom") {
-    issues.push('Custom plan kind must be explicitly "custom".');
-  }
-  validateList(plan.inputs, "Custom plan inputs", issues);
-  validateList(plan.outputs, "Custom plan outputs", issues);
-
   const criterionIds = new Set();
-  if (!Array.isArray(plan.criteria) || plan.criteria.length === 0) {
+  if (!Array.isArray(criteria) || criteria.length === 0) {
     issues.push("Custom plan criteria must be a nonempty array.");
   } else {
-    for (const [index, criterion] of plan.criteria.entries()) {
+    for (const [index, criterion] of criteria.entries()) {
       const path = `Criterion ${index + 1}`;
       if (!isRecord(criterion)) {
         issues.push(`${path} must be an object.`);
@@ -126,6 +117,35 @@ export function validateCustomPlan(plan) {
       }
     }
   }
+
+  return { issues, criterionIds };
+}
+
+export function normalizeCustomCriteria(criteria) {
+  const { issues } = inspectCriteria(criteria);
+  if (issues.length > 0) throw new CustomPlanValidationError(issues);
+  return Object.freeze(
+    criteria.map(({ id, condition }) =>
+      Object.freeze({ id, condition: normalizeText(condition) }),
+    ),
+  );
+}
+
+export function validateCustomPlan(plan) {
+  if (!isRecord(plan)) return Object.freeze(["Custom plan must be an object."]);
+
+  const issues = [];
+  rejectUnknownFields(plan, PLAN_FIELDS, "Custom plan", issues);
+  if (plan.kind !== "custom") {
+    issues.push('Custom plan kind must be explicitly "custom".');
+  }
+  validateList(plan.inputs, "Custom plan inputs", issues);
+  validateList(plan.outputs, "Custom plan outputs", issues);
+
+  const { issues: criterionIssues, criterionIds } = inspectCriteria(
+    plan.criteria,
+  );
+  issues.push(...criterionIssues);
 
   const usedCriteria = new Set();
   if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
@@ -192,10 +212,7 @@ export function assertCustomPlan(plan) {
 function normalizedHeader(plan) {
   return {
     kind: plan.kind,
-    criteria: plan.criteria.map(({ id, condition }) => ({
-      id,
-      condition: normalizeText(condition),
-    })),
+    criteria: normalizeCustomCriteria(plan.criteria),
     inputs: [...plan.inputs],
     outputs: [...plan.outputs],
   };

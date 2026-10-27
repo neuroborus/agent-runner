@@ -3,8 +3,8 @@
 `@agent-runner/custom-plan` owns deterministic parsing, validation and
 serialization of criterion-driven plans. It is a pure contract for authoring
 and execution, separate from the commit-specific `@agent-runner/commit-plan`.
-The registered pipelines currently consume only commit plans; this package
-does not expose custom execution through CLI, MCP or configuration.
+Plan authoring consumes this contract only after explicit custom selection.
+Custom execution remains unavailable; declarations grant no runtime authority.
 
 ## Representation
 
@@ -92,6 +92,9 @@ and freeze actual paths and permissions before using them.
 ## Public API
 
 - `parseCustomPlan(source)` returns a deeply frozen plan.
+- `normalizeCustomCriteria(criteria)` validates the same closed criterion catalog
+  before a draft exists and returns deeply frozen criteria with canonical line
+  endings and surrounding blank lines removed, as in plan serialization.
 - `validateCustomPlan(plan)` returns a frozen array of structural issues.
 - `assertCustomPlan(plan)` returns the supplied plan or throws
   `CustomPlanValidationError` (`ERR_INVALID_CUSTOM_PLAN`) with frozen `issues`.

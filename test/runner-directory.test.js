@@ -100,7 +100,8 @@ async function fixture(t, { contained = false, storeOptions = {} } = {}) {
         outputPaths: ["out"],
         artifactPaths: [join(taskPath, "clarifications.md")],
       },
-      ...(selection ? { resolveWorkspace: selection } : {}),
+      resolveWorkspace: selection,
+      resolveTaskInputs: undefined,
       roleAccess: { planner: ["read-only", "workspace-write"] },
       projections: { status: () => ({}), pause: () => null },
       validateResumeAction() {},
@@ -1803,16 +1804,24 @@ test("public commit pipelines still reject ordinary directories before probing",
   assert.equal(f.probes.length, 0);
 });
 
-test("MCP workspace preflight and creation use the same normalized selection input", async (t) => {
+test("MCP workspace preflight and creation use the same resolved selection settings", async (t) => {
   const f = await fixture(t);
   const configurationPath = join(f.projectPath, "project.json");
   await writeFile(configurationPath, JSON.stringify({ schemaVersion: 1 }));
+  const expectedSettings = {
+    ...Object.fromEntries(
+      Object.entries(planAuthoringPipeline.settings).map(
+        ([name, definition]) => [name, definition.defaultValue],
+      ),
+    ),
+    mode: "lazy",
+  };
   let selections = 0;
   const runner = f.runner(async () => {}, {
     selection(input) {
       selections += 1;
       assert.equal(input.projectConfigurationPath, configurationPath);
-      assert.deepEqual(input.settingOverrides, { mode: "lazy" });
+      assert.deepEqual(input.settingOverrides, expectedSettings);
       assert.equal(input.proactiveClarification, false);
       assert.equal(input.sourceSession, null);
       return { kind: "directory", lease: "exclusive" };
@@ -1837,11 +1846,14 @@ test("MCP workspace preflight and creation use the same normalized selection inp
     }),
     (cause) => cause === prepared,
   );
+  const preflightSelections = selections;
+  assert.ok(preflightSelections > 0);
   const { run } = await runner.create({
     ...f.input,
     projectConfigurationPath: configurationPath,
     settingOverrides: { mode: "lazy" },
   });
   assert.equal(run.workspace.kind, "directory");
-  assert.equal(selections, 2);
+  assert.deepEqual(run.pipelineState.settings, expectedSettings);
+  assert.ok(selections > preflightSelections);
 });

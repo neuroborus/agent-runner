@@ -875,6 +875,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
     effort: "xhigh",
   });
   assert.deepEqual(paused.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 650,
@@ -928,6 +932,10 @@ test("runs and resumes a registered pipeline from persisted configuration", asyn
   assert.ok(adapter.calls.every(({ effort }) => effort === "xhigh"));
   assert.ok(adapter.probes.every(({ effort }) => effort === "xhigh"));
   assert.deepEqual(completed.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 20,
     mode: "independent",
     preferredCommitLineLimit: 650,
@@ -1914,6 +1922,10 @@ test("persists project overrides and blocks later configuration changes", async 
 
   assert.equal(paused.run.pipelineState.workflowState, "WAITING_FOR_USER");
   assert.deepEqual(paused.run.pipelineState.settings, {
+    planKind: "commit",
+    criteriaPath: null,
+    sourceReferences: [],
+    outputPaths: [],
     maxRevisionRounds: 4,
     mode: "independent",
     preferredCommitLineLimit: 450,

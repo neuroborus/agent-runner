@@ -314,6 +314,35 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     });
   }
 
+  // Supplemental reads must not impose directory-workspace rules on unrelated
+  // Git content, including ignored dependencies and their external links.
+  async function snapshotInputs({ paths, stateRoot }) {
+    return boundary(async () => {
+      assertSafe(Array.isArray(paths), "Input paths must be an array.");
+      const roots = compactPaths(
+        paths.map((path) => location(process.cwd(), path)),
+      );
+      const statePath = location(process.cwd(), stateRoot);
+      assertSafe(
+        roots.every((path) => !overlaps(path, statePath)),
+        "Declared read trees must be disjoint from state storage.",
+      );
+      const bindings = await Promise.all(
+        roots.map((path) => inspectPath(fs, path)),
+      );
+      const entries = await capture(fs, roots, [], roots, async () => {
+        await assertBindings(fs, bindings);
+        for (const binding of bindings)
+          assertSafe(
+            same(binding, await inspectPath(fs, binding.path)),
+            "Declared input bindings changed during snapshot.",
+            "ERR_WORKSPACE_SNAPSHOT_RACE",
+          );
+      });
+      return freeze({ bindings, entries });
+    });
+  }
+
   function assertUnchanged({ before, after, allowOutputs = false }) {
     assertSafe(
       typeof allowOutputs === "boolean" &&
@@ -349,6 +378,7 @@ export function createWorkspaceService({ fileSystem = filesystem } = {}) {
     readFile,
     exclusionPath,
     snapshot,
+    snapshotInputs,
     assertUnchanged,
   });
 }
