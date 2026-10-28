@@ -390,6 +390,15 @@ inherited audit sessions. Refusal cleanup validates its independent root verifie
 before custody closure, then observes custodian exit before final verification.
 Their acknowledgement/signal cases replace the obsolete intermediate self-exec
 fault-session exception; generic startup exec still requires its fixture-main marker.
+The fault setup body also models the cited SDK declaration rule from the real
+helper preamble: a missing directory record with the correct actual process group
+must pass, while failed/empty/wrong/additional groups, failed NPROC reads and either
+incorrect limit refuse. Restoring the extended declaration reproduces the missing
+directory regression without weakening the sole-GID/both-32 predicate.
+Creator observation fixtures execute the actual stderr writer and nested identity
+and input bodies, preserving native results, call ordering, errno, SIGPIPE state,
+bounded/failed capture and primary versus independent cleanup outcomes. Bulk
+settlement retains alias coverage without emitting each discovered port/member.
 
 The removed constructor/cache/census fixtures have these executable replacements:
 
@@ -969,6 +978,10 @@ malformed x64 headers, missing signatures and substituted loaders. Injected buil
 also reject native signature-verification failure, changed verified bytes and
 missing image UUIDs before admitting a helper. Successful records bind the exact
 UUID/image digest and installed loader/signature-verifier bytes.
+Selected-SDK declaration fixtures cover both real helper variants, the ordinary
+versus explicit extended selection, mismatched declarations/types, malformed
+capture and compiler refusal before publication. Compile-only AST observations
+remain native build diagnostics and add no local required-check entry.
 These checks execute no Darwin tool and compile no macOS code. Fresh matching
 external macOS
 must supply selected SDK/library export and ABI inspection, actual compilation,

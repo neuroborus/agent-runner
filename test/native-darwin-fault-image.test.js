@@ -660,6 +660,17 @@ test("fault trusted setup applies policy and complete closure before the direct 
     new URL("../ci/native/darwin/feasibility-domain.h", import.meta.url),
     "utf8",
   );
+  const helper = await readFile(
+    new URL("../ci/native/darwin/feasibility-helper.c", import.meta.url),
+    "utf8",
+  );
+  // Apple's Libc include/unistd.h selects directory-backed __getgroups for
+  // either explicit opt-in. Model that declaration rule from the real preamble;
+  // restoring the macro must fail the missing-directory-record regression.
+  const extended =
+    /^\s*#\s*define\s+(?:_DARWIN_C_SOURCE|_DARWIN_UNLIMITED_GETGROUPS)\b/mu.test(
+      helper.split("#include")[0],
+    );
   const start = source.indexOf(
     '    char *arguments[] = {domain_helper, "fault", NULL};',
   );
@@ -690,7 +701,20 @@ test("fault trusted setup applies policy and complete closure before the direct 
     .replace("sizeof(birth)", "128")
     .replace("&group", "{set value(v){group=v}}")
     .replace("arguments, environ", "arguments_, environ");
-  for (const fault of [null, "prepare", "policy", "closure"]) {
+  for (const fault of [
+    null,
+    "missing-directory",
+    "prepare",
+    "policy",
+    "closure",
+    "groups-failed",
+    "groups-empty",
+    "groups-wrong",
+    "groups-additional",
+    "nproc-failed",
+    "nproc-soft",
+    "nproc-hard",
+  ]) {
     const events = [],
       api = {
         domain_helper: "/sealed/helper",
@@ -717,7 +741,7 @@ test("fault trusted setup applies policy and complete closure before the direct 
         failure() {
           throw new Error("prepare refused");
         },
-        invariant: (ok) => assert.ok(ok),
+        invariant: (ok, operation) => assert.ok(ok, operation),
         posix_check: (value) => assert.equal(value, 0),
         audit_fresh() {
           events.push("audit");
@@ -726,13 +750,31 @@ test("fault trusted setup applies policy and complete closure before the direct 
         setgroups: () => 0,
         setgid: () => 0,
         setuid: () => 0,
-        getgroups(_count, group) {
-          group.value = 90002;
-          return 1;
+        getgroups(capacity, group) {
+          assert.equal(capacity, 1);
+          if (
+            fault === "groups-failed" ||
+            (extended && fault === "missing-directory")
+          )
+            return -1;
+          const actual =
+            fault === "groups-empty"
+              ? []
+              : fault === "groups-wrong"
+                ? [90003]
+                : fault === "groups-additional"
+                  ? [90002, 90003]
+                  : [90002];
+          if (actual.length > capacity) return -1;
+          if (actual.length) group.value = actual[0];
+          return actual.length;
         },
         getrlimit(_kind, value) {
-          Object.assign(value, { rlim_cur: 32, rlim_max: 32 });
-          return 0;
+          Object.assign(value, {
+            rlim_cur: fault === "nproc-soft" ? 31 : 32,
+            rlim_max: fault === "nproc-hard" ? 33 : 32,
+          });
+          return fault === "nproc-failed" ? -1 : 0;
         },
         policy() {
           events.push("policy");
@@ -757,12 +799,19 @@ test("fault trusted setup applies policy and complete closure before the direct 
         },
       };
     const run = () => new Script(body).runInNewContext(api);
-    if (fault) assert.throws(run);
+    const refused = fault && fault !== "missing-directory";
+    if (refused)
+      assert.throws(
+        run,
+        fault.startsWith("groups-") || fault.startsWith("nproc-")
+          ? /fault-image-credentials/u
+          : undefined,
+      );
     else {
       run();
       assert.deepEqual(events, ["audit", "policy", "closure", "X"]);
     }
-    if (fault) assert.ok(!events.includes("X"));
+    if (refused) assert.ok(!events.includes("X"));
   }
 });
 

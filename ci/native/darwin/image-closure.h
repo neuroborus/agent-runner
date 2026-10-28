@@ -21,18 +21,25 @@ static void image_copy(struct image_closure *value, mach_port_t port) {
 }
 static bool image_closure_release(struct image_closure *value) {
   bool ok = true;
+  kern_return_t settlement = KERN_SUCCESS;
+  IMAGE_NOTE("mach_port_deallocate/held-copies", true, 0, 0);
   for (unsigned i = 0; i < value->count; i++) {
     mach_port_t port = value->copies[i]; value->copies[i] = MACH_PORT_NULL;
     if (MACH_PORT_VALID(port)) {
       kern_return_t released = mach_port_deallocate(mach_task_self(), port);
+      if (released != KERN_SUCCESS) settlement = released;
       ok = domain_bootstrap_check(&value->outcome, released == KERN_SUCCESS, "image-copy-release", "mach", released, true) && ok;
     }
   }
-  value->count = 0; return ok;
+  value->count = 0;
+  IMAGE_NOTE("mach_port_deallocate/held-copies", false, settlement, errno);
+  return ok;
 }
 static bool image_special(struct image_closure *value, task_t task, int slot, mach_port_t *port) {
   *port = MACH_PORT_NULL;
-  kern_return_t got = task_get_special_port(task, slot, port);
+  const char *operation = slot == TASK_HOST_PORT ? "special/host" : slot == TASK_ACCESS_PORT ? "special/access" :
+    slot == TASK_BOOTSTRAP_PORT ? "special/bootstrap" : slot == TASK_DEBUG_CONTROL_PORT ? "special/debug" : "special/resource";
+  kern_return_t got = IMAGE_CALL(operation, task_get_special_port(task, slot, port));
   if (slot == TASK_RESOURCE_NOTIFY_PORT && got == KERN_INVALID_ARGUMENT) {
     value->resource_unsupported = true; return true;
   }
@@ -44,14 +51,14 @@ static bool image_access(struct image_closure *value) {
   mach_port_t port = value->access;
   if (!MACH_PORT_VALID(port)) return true;
   mach_port_type_t type = MACH_PORT_TYPE_NONE;
-  kern_return_t got = mach_port_type(mach_task_self(), port, &type);
+  kern_return_t got = IMAGE_CALL("access/type", mach_port_type(mach_task_self(), port, &type));
   if (got == KERN_SUCCESS && !(type & (MACH_PORT_TYPE_SEND | MACH_PORT_TYPE_SEND_ONCE | MACH_PORT_TYPE_DEAD_NAME)))
     value->copies[value->count - 1] = MACH_PORT_NULL; /* rejected unowned receive */
   if (!image_mach(value, got, "image-access-type")) return false;
   if (type == MACH_PORT_TYPE_DEAD_NAME) return true;
   if (!image_assert(value, type == MACH_PORT_TYPE_SEND, "image-access-authority")) return false;
   natural_t kind = ~0U; mach_vm_address_t object = 0;
-  return image_mach(value, mach_port_kobject(mach_task_self(), port, &kind, &object), "image-access-object") &&
+  return image_mach(value, IMAGE_CALL("access/object", mach_port_kobject(mach_task_self(), port, &kind, &object)), "image-access-object") &&
     image_assert(value, kind == 0, "image-access-service");
 }
 static bool image_exceptions(struct image_closure *value, task_t task, thread_t thread) {
@@ -61,8 +68,8 @@ static bool image_exceptions(struct image_closure *value, task_t task, thread_t 
     mach_port_t ports[EXC_TYPES_COUNT] = {0}; exception_behavior_t behaviors[EXC_TYPES_COUNT];
     thread_state_flavor_t flavors[EXC_TYPES_COUNT]; mach_msg_type_number_t count = EXC_TYPES_COUNT;
     kern_return_t got = which
-      ? thread_get_exception_ports(thread, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors)
-      : task_get_exception_ports(task, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors);
+      ? IMAGE_CALL("exceptions/thread", thread_get_exception_ports(thread, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors))
+      : IMAGE_CALL("exceptions/task", task_get_exception_ports(task, DOMAIN_EXCEPTION_MASK, masks, &count, ports, behaviors, flavors));
     if (!image_mach(value, got, "image-exceptions-get")) { ok = false; continue; }
     bool empty = count > 0 && count <= EXC_TYPES_COUNT;
     for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
@@ -79,9 +86,9 @@ static bool image_closure_read(struct image_closure *value, task_t task, thread_
   mach_port_t port; natural_t kind = ~0U; mach_vm_address_t object = 0;
   if (!image_special(value, task, TASK_HOST_PORT, &value->host)) return false;
   mach_port_type_t type = 0;
-  if (!image_mach(value, mach_port_type(mach_task_self(), value->host, &type), "image-host-type") ||
+  if (!image_mach(value, IMAGE_CALL("host/type", mach_port_type(mach_task_self(), value->host, &type)), "image-host-type") ||
       !image_assert(value, type == MACH_PORT_TYPE_SEND, "image-host-send") ||
-      !image_mach(value, mach_port_kobject(mach_task_self(), value->host, &kind, &object), "image-host-object") ||
+      !image_mach(value, IMAGE_CALL("host/object", mach_port_kobject(mach_task_self(), value->host, &kind, &object)), "image-host-object") ||
       !image_assert(value, kind == 3, "image-host-ordinary") ||
       !image_special(value, task, TASK_ACCESS_PORT, &value->access) || !image_access(value)) return false;
   const int slots[] = {TASK_BOOTSTRAP_PORT, TASK_DEBUG_CONTROL_PORT, TASK_RESOURCE_NOTIFY_PORT};
@@ -92,20 +99,24 @@ static bool image_closure_read(struct image_closure *value, task_t task, thread_
     if (got) ok = image_assert(value, port == MACH_PORT_NULL, "image-special-empty") && ok;
   }
   mach_port_array_t registered = NULL; mach_msg_type_number_t count = 0;
-  kern_return_t got = mach_ports_lookup(task, &registered, &count);
+  kern_return_t got = IMAGE_CALL("registered/get", mach_ports_lookup(task, &registered, &count));
   if (image_mach(value, got, "image-registered-get")) {
     bool empty = count <= 32 && (!count || registered);
     for (unsigned i = 0; registered && i < count; i++) if (registered[i] != MACH_PORT_NULL) empty = false;
     ok = image_assert(value, empty, "image-registered-empty") && ok;
+    kern_return_t settlement = KERN_SUCCESS;
+    IMAGE_NOTE("mach_port_deallocate/registered-copies", true, 0, 0);
     /* Each successful getter copy owns a reference, even with aliases. */
     for (unsigned i = 0; registered && i < count; i++) {
       if (MACH_PORT_VALID(registered[i])) {
         kern_return_t release = mach_port_deallocate(mach_task_self(), registered[i]);
+        if (release != KERN_SUCCESS) settlement = release;
         ok = domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-registered-release", "mach", release, true) && ok;
       }
     }
+    IMAGE_NOTE("mach_port_deallocate/registered-copies", false, settlement, errno);
     if (registered) {
-      kern_return_t release = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)registered, count * sizeof(*registered));
+      kern_return_t release = IMAGE_CALL("registered/array-release", mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)registered, count * sizeof(*registered)));
       ok = domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-registered-array-release", "mach", release, true) && ok;
     }
   } else ok = false;

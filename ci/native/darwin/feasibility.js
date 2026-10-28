@@ -1682,9 +1682,55 @@ export async function buildDarwinFeasibility(
       recipes.map(({ name, args }) => ({
         name,
         run: async () => {
-          operation = `${name}-compile-link`;
           let result;
           try {
+            if (name === "helper") {
+              // Inspect the real translation unit, including its preamble and
+              // selected SDK, in each actual helper variant. No image is made.
+              for (const extended of [false, true]) {
+                operation = `helper-getgroups-${extended ? "extended" : "ordinary"}-declaration`;
+                const observed = await run(
+                  clang,
+                  [
+                    ...args.slice(0, -3),
+                    ...(extended ? ["-D_DARWIN_C_SOURCE=1"] : []),
+                    "-fsyntax-only",
+                    "-Xclang",
+                    "-ast-dump=json",
+                    "-Xclang",
+                    "-ast-dump-filter",
+                    "-Xclang",
+                    "getgroups",
+                    args.at(-1),
+                  ],
+                  60000,
+                );
+                const declaration = JSON.parse(observed.stdout);
+                // Clang can prefix an explicit asm label with its LLVM marker.
+                const reference =
+                  typeof declaration.mangledName === "string"
+                    ? declaration.mangledName.replace(/^\u0001/u, "")
+                    : null;
+                need(
+                  declaration.kind === "FunctionDecl" &&
+                    declaration.name === "getgroups" &&
+                    declaration.type?.qualType === "int (int, gid_t *)" &&
+                    (extended
+                      ? /^(?:_{2,3}getgroups|_?getgroups\$DARWIN_EXTSN)$/u
+                      : /^_?getgroups(?:\$UNIX2003)?$/u
+                    ).test(reference),
+                );
+                nativeDiagnostic("darwin-getgroups-declaration", {
+                  stderr: JSON.stringify({
+                    variant: commandObservation ? "command" : "feasibility",
+                    selection: extended ? "directory" : "process-credentials",
+                    declaration: declaration.type.qualType,
+                    reference,
+                  }),
+                });
+              }
+            }
+            operation = `${name}-compile-link`;
             result = await run(clang, args, 60000);
           } catch (error) {
             firstCompileOperation ??= operation;

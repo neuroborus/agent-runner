@@ -4,6 +4,13 @@
 #include <stdbool.h>
 #include <time.h>
 #include <poll.h>
+/* Only the ordinary creator inspection supplies these passive observations. */
+#ifndef IMAGE_CALL
+#define IMAGE_CALL(operation, call) ((void)(operation), (call))
+#endif
+#ifndef IMAGE_NOTE
+#define IMAGE_NOTE(operation, entry, result, error) ((void)(result))
+#endif
 /* EXC_MASK_ALL omits the public CRASH and CORPSE_NOTIFY classes. */
 #define DOMAIN_EXCEPTION_MASK (EXC_MASK_ALL | EXC_MASK_CRASH | EXC_MASK_CORPSE_NOTIFY)
 struct domain_bootstrap_issue {
@@ -48,13 +55,17 @@ static void domain_spawn_settle(struct domain_bootstrap_fork *out, posix_spawn_f
  * Counts are untrusted; initialized bounded storage is the only cleanup input. */
 static bool domain_exception_settle(struct domain_bootstrap_fork *out, mach_port_t handlers[EXC_TYPES_COUNT], mach_msg_type_number_t count, int releases[EXC_TYPES_COUNT]) {
   bool ok = true;
+  kern_return_t settlement = KERN_SUCCESS;
+  IMAGE_NOTE("mach_port_deallocate/exception-copies", true, 0, 0);
   for (unsigned i = 0; i < count && i < EXC_TYPES_COUNT; i++) {
     releases[i] = -1;
     if (MACH_PORT_VALID(handlers[i])) {
       releases[i] = mach_port_deallocate(mach_task_self(), handlers[i]);
+      if (releases[i] != KERN_SUCCESS) settlement = releases[i];
       ok = domain_bootstrap_check(out, releases[i] == KERN_SUCCESS, "exception-copy-release", "mach", releases[i], true) && ok;
     }
   }
+  IMAGE_NOTE("mach_port_deallocate/exception-copies", false, settlement, errno);
   return ok;
 }
 /* XNU can skip individual MAC actions while a setter returns success. Both
@@ -707,20 +718,20 @@ static inline void developer_paths(const char *sdk, char developer[PATH_MAX], ch
 static struct identity inspect(pid_t pid) {
   struct identity value = {0}; struct proc_bsdinfo after; audit_token_t again;
   mach_port_t task = MACH_PORT_NULL; mach_msg_type_number_t count = TASK_AUDIT_TOKEN_COUNT;
-  need(proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &value.bsd, sizeof(value.bsd)) == (int)sizeof(value.bsd) &&
-       task_name_for_pid(mach_task_self(), pid, &task) == KERN_SUCCESS && task != MACH_PORT_NULL &&
-       task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&value.token, &count) == KERN_SUCCESS &&
+  need(IMAGE_CALL("inspect/bsd-before", proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &value.bsd, sizeof(value.bsd))) == (int)sizeof(value.bsd) &&
+       IMAGE_CALL("inspect/task-name", task_name_for_pid(mach_task_self(), pid, &task)) == KERN_SUCCESS && task != MACH_PORT_NULL &&
+       IMAGE_CALL("inspect/token-before", task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&value.token, &count)) == KERN_SUCCESS &&
        count == TASK_AUDIT_TOKEN_COUNT);
   count = TASK_AUDIT_TOKEN_COUNT;
-  need(proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after)) == (int)sizeof(after) &&
-       task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&again, &count) == KERN_SUCCESS &&
+  need(IMAGE_CALL("inspect/bsd-after", proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, &after, sizeof(after))) == (int)sizeof(after) &&
+       IMAGE_CALL("inspect/token-after", task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&again, &count)) == KERN_SUCCESS &&
        count == TASK_AUDIT_TOKEN_COUNT && !memcmp(&again, &value.token, sizeof(again)) &&
        after.pbi_start_tvsec == value.bsd.pbi_start_tvsec && after.pbi_start_tvusec == value.bsd.pbi_start_tvusec &&
        after.pbi_svuid == value.bsd.pbi_svuid && after.pbi_svgid == value.bsd.pbi_svgid &&
        value.token.val[5] == (unsigned)pid &&
        value.token.val[1] == after.pbi_uid && value.token.val[2] == after.pbi_gid &&
        value.token.val[3] == after.pbi_ruid && value.token.val[4] == after.pbi_rgid &&
-       mach_port_deallocate(mach_task_self(), task) == KERN_SUCCESS);
+       IMAGE_CALL("inspect/name-release", mach_port_deallocate(mach_task_self(), task)) == KERN_SUCCESS);
   int inspected_errno = errno;
   if (pid == getpid()) signature_caller = value;
   errno = inspected_errno;

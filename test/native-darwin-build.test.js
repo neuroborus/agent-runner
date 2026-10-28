@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { Script } from "node:vm";
+import { withNativeDiagnostics } from "../ci/native/index.js";
 import {
   buildDarwinFeasibility,
   darwinFeasibilityCause,
@@ -38,6 +39,7 @@ test("Darwin fork fences registered and bootstrap slots and settles only getter 
     ).exec(source)?.[1];
     assert.ok(body, name);
     return `function ${name}(${args}) {${body
+      .replace(/^\s*IMAGE_NOTE\([^\n]*\);/gmu, "")
       .replaceAll("->", ".")
       .replace(
         "(struct domain_bootstrap_issue){operation, kind, value, cleanup}",
@@ -851,6 +853,7 @@ test("Darwin exception readback requires every public class and settles independ
     ).exec(header)?.[1];
     assert.ok(body, name);
     return `function ${name}(${args}) {${body
+      .replace(/^\s*IMAGE_NOTE\([^\n]*\);/gmu, "")
       .replaceAll("->", ".")
       .replace(
         "(struct domain_bootstrap_issue){operation, kind, value, cleanup}",
@@ -3669,6 +3672,31 @@ function effects({
       }
       assert.equal(file, "/fixture/clang");
       assert.equal(options.timeout, 60000);
+      if (args.includes("-fsyntax-only")) {
+        assert.deepEqual(args.slice(0, 5), [
+          "-std=c11",
+          "-arch",
+          "x86_64",
+          "-isysroot",
+          "/fixture/sdk",
+        ]);
+        assert.equal(
+          args.at(-1),
+          new URL("feasibility-helper.c", SOURCE).pathname,
+        );
+        assert.ok(!args.includes("-o"));
+        return {
+          stdout: JSON.stringify({
+            kind: "FunctionDecl",
+            name: "getgroups",
+            type: { qualType: "int (int, gid_t *)" },
+            mangledName: args.includes("-D_DARWIN_C_SOURCE=1")
+              ? "__getgroups"
+              : "getgroups",
+          }),
+          stderr: "",
+        };
+      }
       assert.deepEqual(args.slice(0, 5), [
         "-std=c11",
         "-arch",
@@ -3697,7 +3725,11 @@ test("Darwin feasibility attempts later independent compiles and retains the ori
     execute = injected.executeFile,
     attempted = [];
   injected.executeFile = async (file, args, options) => {
-    if (file === "/fixture/clang" && args[0] !== "--version") {
+    if (
+      file === "/fixture/clang" &&
+      args[0] !== "--version" &&
+      !args.includes("-fsyntax-only")
+    ) {
       attempted.push(args.at(-2));
       throw attempted.length === 1 ? first : second;
     }
@@ -3713,6 +3745,96 @@ test("Darwin feasibility attempts later independent compiles and retains the ori
     "/fixture/run/build/helper",
     "/fixture/run/build/argv-fixture",
   ]);
+});
+
+test("selected SDK declarations contrast ordinary and extended getgroups in both real helper variants", async () => {
+  for (const commandObservation of [false, true]) {
+    for (const fault of [
+      null,
+      "asm-label",
+      "ordinary",
+      "extended",
+      "type",
+      "capture",
+      "compiler",
+    ]) {
+      const injected = effects(),
+        execute = injected.executeFile,
+        observations = [],
+        diagnostics = [];
+      let published = false;
+      injected.fs.writeFile = async () => {
+        published = true;
+      };
+      injected.executeFile = async (file, args, options) => {
+        const result = await execute(file, args, options);
+        if (!args.includes("-fsyntax-only")) return result;
+        observations.push(args);
+        assert.equal(
+          args.includes("-DNATIVE_FEASIBILITY_COMMAND"),
+          commandObservation,
+        );
+        assert.ok(args.includes("-ast-dump=json"));
+        assert.deepEqual(args.slice(-4), [
+          "-ast-dump-filter",
+          "-Xclang",
+          "getgroups",
+          new URL("feasibility-helper.c", SOURCE).pathname,
+        ]);
+        const extended = args.includes("-D_DARWIN_C_SOURCE=1");
+        if (fault === "compiler")
+          throw Object.assign(new Error("declaration refused"), {
+            code: 1,
+            signal: null,
+          });
+        if (fault === "capture") return { stdout: "truncated JSON" };
+        const declaration = JSON.parse(result.stdout);
+        if (fault === "asm-label")
+          declaration.mangledName =
+            "\u0001" + (extended ? "___getgroups" : "_getgroups");
+        if (fault === (extended ? "extended" : "ordinary"))
+          declaration.mangledName = extended ? "getgroups" : "__getgroups";
+        if (fault === "type") declaration.type.qualType = "int (void)";
+        return { ...result, stdout: JSON.stringify(declaration) };
+      };
+      const run = () =>
+        withNativeDiagnostics(
+          () =>
+            buildDarwinFeasibility("/fixture/run", [], {
+              ...injected,
+              commandObservation,
+            }),
+          (owner, value) => {
+            if (owner === "darwin-getgroups-declaration")
+              diagnostics.push(JSON.parse(value.stderr));
+          },
+        );
+      if (fault && fault !== "asm-label") {
+        await assert.rejects(run, (error) =>
+          /helper-getgroups-/u.test(error.feasibilityCause.detail),
+        );
+        assert.equal(published, false);
+      } else {
+        await run();
+        assert.equal(observations.length, 2);
+        assert.deepEqual(
+          diagnostics.map(({ selection }) => selection),
+          ["process-credentials", "directory"],
+        );
+        assert.deepEqual(
+          diagnostics.map(({ variant }) => variant),
+          Array(2).fill(commandObservation ? "command" : "feasibility"),
+        );
+        assert.ok(
+          diagnostics.every(
+            (record) =>
+              Buffer.byteLength(JSON.stringify(record)) < 256 &&
+              !record.reference.includes("\u0001"),
+          ),
+        );
+      }
+    }
+  }
 });
 
 test("Darwin command builds opt into libbsm with the actual finite-operation source identity", async () => {
@@ -3744,7 +3866,11 @@ test("Darwin command builds opt into libbsm with the actual finite-operation sou
     if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
   };
   injected.executeFile = (file, args, options) => {
-    if (file === "/fixture/clang" && args[0] !== "--version")
+    if (
+      file === "/fixture/clang" &&
+      args[0] !== "--version" &&
+      !args.includes("-fsyntax-only")
+    )
       commands.push(args);
     return run(file, args, options);
   };
@@ -3829,7 +3955,12 @@ test("Darwin command builds refuse shared handoff drift before and after compila
         : source;
     };
     injected.executeFile = async (file, args, options) => {
-      if (file === "/fixture/clang" && args[0] !== "--version") compiled++;
+      if (
+        file === "/fixture/clang" &&
+        args[0] !== "--version" &&
+        !args.includes("-fsyntax-only")
+      )
+        compiled++;
       return run(file, args, options);
     };
     injected.fs.writeFile = async (file) => {
@@ -4119,7 +4250,11 @@ test("Darwin build binds the optional policy SPI from actual source bytes and re
     if (file.endsWith("/evidence/build.json")) report = JSON.parse(bytes);
   };
   injected.executeFile = async (file, args, options) => {
-    if (file === "/fixture/clang" && args[0] !== "--version") {
+    if (
+      file === "/fixture/clang" &&
+      args[0] !== "--version" &&
+      !args.includes("-fsyntax-only")
+    ) {
       builds.push(args);
       for (const flag of [
         "-w",

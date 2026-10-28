@@ -35,6 +35,327 @@ const helper = {
 const target = { ...creator, pidVersion: 2 };
 const executable = { sha256: "a".repeat(64), cdhash: "b".repeat(40) };
 const hash = (bytes) => createHash("sha256").update(bytes).digest("hex");
+// Existing body fixtures model the default no-op observations. Dedicated creator
+// fixtures below execute the observation implementation and call expansion.
+function passiveObservations(api) {
+  api.IMAGE_CALL ??= (_, result) => result;
+  api.IMAGE_NOTE ??= () => {};
+  api.errno ??= 0;
+  return api;
+}
+function expandImageCalls(body, macro) {
+  for (;;) {
+    const match = /IMAGE_CALL\(([^,]+),\s*/u.exec(body);
+    if (!match) return body;
+    const start = match.index + match[0].length;
+    let end = start,
+      depth = 1;
+    while (depth) {
+      const char = body[end++];
+      assert.notEqual(char, undefined);
+      if (char === "(") depth++;
+      if (char === ")") depth--;
+    }
+    const expression = body.slice(start, end - 1);
+    const expanded = macro
+      .replace(/\boperation\b/gu, () => match[1])
+      .replace(/\bcall\b/gu, () => expression);
+    body = body.slice(0, match.index) + expanded + body.slice(end);
+  }
+}
+
+test("creator stderr observations preserve native results, errno and SIGPIPE state even on capture failure", async () => {
+  const source = await readFile(
+    new URL("../ci/native/darwin/custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const macro = /^#define IMAGE_CALL\(operation, call\) (.+)$/mu.exec(
+    source,
+  )[1];
+  const note = /static void image_note[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("char bytes[256];", "const bytes={};")
+    .replace(
+      "sigset_t blocked, previous, pending;",
+      "const blocked={},previous={},pending={};",
+    )
+    .replaceAll(/\((?:unsigned long long|int|size_t|void)\)/gu, "")
+    .replaceAll("sizeof(bytes)", "256")
+    .replaceAll(/&(blocked|previous|pending)\b/gu, "$1")
+    .replace("&received", "{set value(v){received=v}}")
+    .replaceAll("NULL", "null")
+    .replace(/\b(?:int|bool|ssize_t) /gu, "let ");
+  const result = /static long image_result[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(source)[1]
+    .replace("int error", "const error");
+  const script = new Script(
+    `function image_note(operation,entry,result,error){${note}} function image_result(operation,result){${result}}`,
+  );
+  for (const fault of [
+    null,
+    "short",
+    "pipe",
+    "ignored-pipe",
+    "pending-pipe",
+    "blocked",
+    "format",
+    "mask",
+    "pending",
+  ]) {
+    const events = [],
+      records = [];
+    const originallyBlocked = fault === "blocked" || fault === "pending-pipe";
+    let blocked = originallyBlocked,
+      pending = fault === "pending-pipe",
+      waits = 0;
+    const api = {
+      errno: 77,
+      image_diagnostic_active: true,
+      image_diagnostic_failed: false,
+      image_diagnostic_records: 0,
+      image_diagnostic_sequence: 61,
+      image_diagnostic_identity: {
+        token: { val: [0, 0, 0, 0, 0, 123, 5, 2] },
+        bsd: { pbi_start_tvsec: 100, pbi_start_tvusec: 2 },
+      },
+      SIGPIPE: 13,
+      SIG_BLOCK: 1,
+      SIG_SETMASK: 2,
+      STDERR_FILENO: 2,
+      EPIPE: 32,
+      snprintf(out, size, format, ...values) {
+        assert.equal(size, 256);
+        assert.match(format, /^native-darwin-image-call:/u);
+        assert.deepEqual(values.slice(0, 6), [61, 123, 2, 5, 100, 2]);
+        out.record = values.slice(6);
+        api.errno = 90;
+        return fault === "format" ? 256 : 150;
+      },
+      sigemptyset: () => 0,
+      sigaddset: () => 0,
+      sigprocmask(how, mask, previous) {
+        api.errno = 91;
+        if (how === 1) {
+          if (fault === "mask") return -1;
+          previous.blocked = blocked;
+          blocked = true;
+        } else blocked = mask.blocked;
+        return 0;
+      },
+      sigpending(out) {
+        out.pending = pending;
+        return fault === "pending" ? -1 : 0;
+      },
+      sigismember: (mask) => Number(mask.pending),
+      sigwait(_, out) {
+        waits++;
+        pending = false;
+        out.value = 13;
+        return 0;
+      },
+      write(fd, bytes, length) {
+        assert.equal(fd, 2);
+        assert.equal(length, 150);
+        assert.equal(blocked, true);
+        events.push(bytes.record[1]);
+        records.push(bytes.record);
+        api.errno = 32;
+        if (fault?.includes("pipe")) {
+          if (fault !== "ignored-pipe") pending = true;
+          return -1;
+        }
+        return fault === "short" ? 1 : length;
+      },
+      native() {
+        events.push("native");
+        api.errno = 55;
+        return -9;
+      },
+    };
+    script.runInNewContext(api);
+    assert.equal(
+      new Script(
+        expandImageCalls('IMAGE_CALL("control/get", native())', macro),
+      ).runInNewContext(api),
+      -9,
+    );
+    assert.equal(api.errno, 55, fault);
+    assert.equal(blocked, originallyBlocked, fault);
+    assert.equal(pending, fault === "pending-pipe", fault);
+    assert.equal(waits, fault === "pipe" ? 1 : 0, fault);
+    assert.equal(events.filter((event) => event === "native").length, 1);
+    if (!fault || fault === "blocked") {
+      assert.deepEqual(events, ["entry", "native", "return"]);
+      assert.deepEqual(records, [
+        ["control/get", "entry", 0, 0],
+        ["control/get", "return", -9, 55],
+      ]);
+      for (let i = 0; i < 200; i++) api.image_note("bounded", true, 0, 0);
+      assert.equal(records.length, 128);
+      api.image_diagnostic_active = false;
+      api.image_diagnostic_records = 0;
+      api.image_note("inactive", true, 0, 0);
+      assert.equal(records.length, 128);
+    } else {
+      assert.equal(api.image_diagnostic_failed, true);
+      const count = records.length;
+      assert.equal(api.image_result("cleanup", 5), 5);
+      assert.equal(
+        records.length,
+        count,
+        "failed capture is not retried or treated as a new primary failure",
+      );
+    }
+  }
+  const dispatch =
+    /\} else if \(!strcmp\(tokens\[0\], "image-creator"\)\) \{([\s\S]*?)\n    \} else if \(!strcmp\(tokens\[0\], "image-exec"/u.exec(
+      source,
+    )[1];
+  const events = [],
+    subject = { token: { val: [0, 0, 0, 0, 0, 123] } };
+  const api = {
+    n: 2,
+    sequence: 61,
+    case_audit: { subject },
+    image_diagnostic_identity: null,
+    image_diagnostic_sequence: 0,
+    image_diagnostic_records: 99,
+    image_diagnostic_failed: true,
+    image_diagnostic_active: false,
+    need: (ok) => assert.ok(ok),
+    errno: 7,
+    IMAGE_NOTE(operation, entry) {
+      events.push([
+        operation,
+        entry,
+        api.image_diagnostic_active,
+        api.image_diagnostic_sequence,
+        api.image_diagnostic_identity.token.val[5],
+      ]);
+    },
+    image_begin() {
+      events.push(["begin", api.image_diagnostic_active]);
+    },
+  };
+  new Script(dispatch).runInNewContext(api);
+  assert.deepEqual(events, [
+    ["image-creator-dispatch", true, true, 61, 123],
+    ["begin", true],
+    ["image-creator-dispatch", false, true, 61, 123],
+  ]);
+  assert.equal(api.image_diagnostic_active, false);
+  assert.equal(api.image_diagnostic_records, 0);
+  assert.equal(api.image_diagnostic_failed, false);
+});
+
+test("nested creator identity observations distinguish each native call without retrying a refusal", async () => {
+  const [header, reader] = await Promise.all(
+    ["custody.h", "custody-reader.c"].map((name) =>
+      readFile(new URL("../ci/native/darwin/" + name, import.meta.url), "utf8"),
+    ),
+  );
+  const macro = /^#define IMAGE_CALL\(operation, call\) (.+)$/mu.exec(
+    reader,
+  )[1];
+  const body = /static struct identity inspect[^\n]+\{([\s\S]*?)\n\}/u
+    .exec(header)[1]
+    .replace(
+      "struct identity value = {0}; struct proc_bsdinfo after; audit_token_t again;",
+      "const value={bsd:{},token:{}},after={},again={};",
+    )
+    .replaceAll(/sizeof\((?:value.bsd|after)\)/gu, "64")
+    .replaceAll("sizeof(again)", "32")
+    .replaceAll(/\((?:int|unsigned|task_info_t)\)/gu, "")
+    .replaceAll(/&(?:value.bsd|value.token|after|again)\b/gu, (value) =>
+      value.slice(1),
+    )
+    .replaceAll(
+      /&(task|count)\b/gu,
+      (_, name) => `{get value(){return ${name}},set value(v){${name}=v}}`,
+    )
+    .replace(/\b(?:mach_port_t|mach_msg_type_number_t|int) /gu, "let ");
+  const operations = [
+    "inspect/bsd-before",
+    "inspect/task-name",
+    "inspect/token-before",
+    "inspect/bsd-after",
+    "inspect/token-after",
+    "inspect/name-release",
+  ];
+  for (const fault of [-1, 0, 1, 2, 3, 4, 5]) {
+    const calls = [];
+    let native = 0;
+    const token = { val: [0, 90001, 90002, 90001, 90002, 123, 5, 2] };
+    const invoke = (result) => {
+      api.errno = 40 + native;
+      return native++ === fault ? -1 : result;
+    };
+    const api = {
+      pid: 123,
+      errno: 7,
+      MACH_PORT_NULL: 0,
+      KERN_SUCCESS: 0,
+      TASK_AUDIT_TOKEN_COUNT: 8,
+      TASK_AUDIT_TOKEN: 1,
+      PROC_PIDTBSDINFO: 2,
+      signature_caller: null,
+      getpid: () => 1,
+      mach_task_self: () => 1,
+      need: (ok) => assert.ok(ok),
+      memcmp: (a, b) => Number(JSON.stringify(a) !== JSON.stringify(b)),
+      proc_pidinfo(pid, kind, _, out) {
+        assert.equal(pid, 123);
+        assert.equal(kind, 2);
+        Object.assign(out, {
+          pbi_start_tvsec: 100,
+          pbi_start_tvusec: 2,
+          pbi_svuid: 90001,
+          pbi_svgid: 90002,
+          pbi_uid: 90001,
+          pbi_gid: 90002,
+          pbi_ruid: 90001,
+          pbi_rgid: 90002,
+        });
+        return invoke(64);
+      },
+      task_name_for_pid(_, pid, out) {
+        assert.equal(pid, 123);
+        out.value = 9;
+        return invoke(0);
+      },
+      task_info(task, _, out, count) {
+        assert.equal(task, 9);
+        Object.assign(out, token);
+        count.value = 8;
+        return invoke(0);
+      },
+      mach_port_deallocate: () => invoke(0),
+      image_note: (operation, entry, result, error) =>
+        calls.push({ operation, entry, result, error }),
+      image_result(operation, result) {
+        api.image_note(operation, false, result, api.errno);
+        return result;
+      },
+    };
+    const run = () =>
+      new Script(`(()=>{${expandImageCalls(body, macro)}})()`).runInNewContext(
+        api,
+      );
+    if (fault >= 0) assert.throws(run);
+    else assert.deepEqual(run().token.val, token.val);
+    const reached = operations.slice(0, fault < 0 ? 6 : fault + 1);
+    assert.deepEqual(
+      calls.map(({ operation, entry }) => [operation, entry]),
+      reached.flatMap((operation) => [
+        [operation, true],
+        [operation, false],
+      ]),
+    );
+    assert.equal(native, reached.length);
+    assert.equal(calls.at(-1).result, fault < 0 ? 0 : -1);
+    assert.equal(calls.at(-1).error, 40 + reached.length - 1);
+  }
+});
 function fixture(fault) {
   const events = [],
     records = [],
@@ -176,6 +497,13 @@ test("native access validation retains exact alternatives and cleanup ownership 
     new URL("../ci/native/darwin/image-closure.h", import.meta.url),
     "utf8",
   );
+  const reader = await readFile(
+    new URL("../ci/native/darwin/custody-reader.c", import.meta.url),
+    "utf8",
+  );
+  const macro = /^#define IMAGE_CALL\(operation, call\) (.+)$/mu.exec(
+    reader,
+  )[1];
   const body = /static bool image_access[^\n]+\{([\s\S]*?)\n\}/u
     .exec(source)[1]
     .replaceAll("->", ".")
@@ -203,6 +531,7 @@ test("native access validation retains exact alternatives and cleanup ownership 
     [8, SEND, 0, 3, 0, false, true],
     [8, SEND, 0, 0, 9, false, true],
   ]) {
+    const calls = [];
     const value = {
       access: port,
       count: port > 0 ? 1 : 0,
@@ -229,9 +558,30 @@ test("native access validation retains exact alternatives and cleanup ownership 
       image_mach: (_, result) => result === 0,
       image_assert: (_, ok) => ok,
     };
+    api.image_note = (operation, entry) => calls.push([operation, entry]);
+    api.image_result = (operation, result) => {
+      api.image_note(operation, false);
+      return result;
+    };
     assert.equal(
-      new Script(`(()=>{${body}})()`).runInNewContext(api),
+      new Script(`(()=>{${expandImageCalls(body, macro)}})()`).runInNewContext(
+        passiveObservations(api),
+      ),
       accepted,
+    );
+    const reached =
+      port > 0
+        ? [
+            "access/type",
+            ...(query === 0 && type === SEND ? ["access/object"] : []),
+          ]
+        : [];
+    assert.deepEqual(
+      calls,
+      reached.flatMap((operation) => [
+        [operation, true],
+        [operation, false],
+      ]),
     );
     assert.equal(
       value.copies.some((p) => p === port && p > 0),
@@ -525,7 +875,8 @@ test("native closure releases aliased acquisitions once and retains primary and 
     .replace(/\b(?:bool|unsigned|mach_port_t|kern_return_t) /gu, "let ")
     .replaceAll("&value.outcome", "value.outcome");
   for (const failure of [false, true]) {
-    const releases = [],
+    const observations = [],
+      releases = [],
       value = {
         count: 4,
         copies: [8, 8, 0, 9],
@@ -533,6 +884,7 @@ test("native closure releases aliased acquisitions once and retains primary and 
       };
     const api = {
       value,
+      IMAGE_NOTE: (...record) => observations.push(record),
       MACH_PORT_NULL: 0,
       KERN_SUCCESS: 0,
       MACH_PORT_VALID: (p) => p > 0,
@@ -547,10 +899,16 @@ test("native closure releases aliased acquisitions once and retains primary and 
       },
     };
     const script = new Script(`(()=>{${body}})()`);
-    assert.equal(script.runInNewContext(api), !failure);
+    assert.equal(script.runInNewContext(passiveObservations(api)), !failure);
     assert.deepEqual(releases, [8, 8, 9]);
-    assert.equal(script.runInNewContext(api), true);
+    assert.equal(script.runInNewContext(passiveObservations(api)), true);
     assert.deepEqual(releases, [8, 8, 9]);
+    assert.deepEqual(observations, [
+      ["mach_port_deallocate/held-copies", true, 0, 0],
+      ["mach_port_deallocate/held-copies", false, failure ? 5 : 0, 0],
+      ["mach_port_deallocate/held-copies", true, 0, 0],
+      ["mach_port_deallocate/held-copies", false, 0, 0],
+    ]);
     assert.equal(value.outcome.issues[0], "primary-query");
     assert.equal(value.outcome.issues.length, failure ? 4 : 1);
   }
@@ -651,11 +1009,11 @@ test("JavaScript admission refusals settle held native references before fenced 
         );
         if (failedRelease) {
           assert.throws(
-            () => script.runInNewContext(api),
+            () => script.runInNewContext(passiveObservations(api)),
             /native cleanup refused/u,
           );
           assert.deepEqual(closed, []);
-        } else script.runInNewContext(api);
+        } else script.runInNewContext(passiveObservations(api));
         assert.deepEqual(releases, [10, 8, 8, 9]);
         assert.equal(inspected.count + inherited.count, 0);
         const issues = [
@@ -666,10 +1024,10 @@ test("JavaScript admission refusals settle held native references before fenced 
         assert.ok(issues.every(({ cleanup }) => cleanup));
         if (failedRelease)
           assert.throws(
-            () => script.runInNewContext(api),
+            () => script.runInNewContext(passiveObservations(api)),
             /native cleanup refused/u,
           );
-        else script.runInNewContext(api);
+        else script.runInNewContext(passiveObservations(api));
         assert.deepEqual(releases, [10, 8, 8, 9]);
       }
 });
@@ -742,7 +1100,7 @@ test("native closure requires complete nonoverlapping public exception masks and
       },
     };
     assert.equal(
-      new Script(`(()=>{${body}})()`).runInNewContext(api),
+      new Script(`(()=>{${body}})()`).runInNewContext(passiveObservations(api)),
       fault === null,
     );
     assert.deepEqual(getters, ["task", "thread"]);
@@ -1029,6 +1387,9 @@ test("native control inspection binds the audit epoch before thread access and s
     new URL("../ci/native/darwin/custody-reader.c", import.meta.url),
     "utf8",
   );
+  const macro = /^#define IMAGE_CALL\(operation, call\) (.+)$/mu.exec(
+    source,
+  )[1];
   const body = /static void image_inputs[^\n]+\{([\s\S]*?)\n\}/u
     .exec(source)[1]
     .replace(
@@ -1063,6 +1424,7 @@ test("native control inspection binds the audit epoch before thread access and s
     "array-release",
   ]) {
     const events = [],
+      calls = [],
       releases = [],
       issues = [],
       value = { copies: [], outcome: {} },
@@ -1132,8 +1494,43 @@ test("native control inspection binds the audit epoch before thread access and s
       inspect: () => expected,
       audit_identity_same: () => true,
     };
-    if (fault) assert.throws(() => new Script(body).runInNewContext(api));
-    else new Script(body).runInNewContext(api);
+    api.image_note = (operation, entry, result, error) =>
+      calls.push({ operation, entry, result, error });
+    api.IMAGE_NOTE = api.image_note;
+    api.image_result = (operation, result) => {
+      api.image_note(operation, false, result, api.errno);
+      return result;
+    };
+    const inspected = expandImageCalls(body, macro);
+    if (fault)
+      assert.throws(() =>
+        new Script(inspected).runInNewContext(passiveObservations(api)),
+      );
+    else new Script(inspected).runInNewContext(passiveObservations(api));
+    assert.deepEqual(
+      calls.slice(0, 3).map(({ operation, entry }) => [operation, entry]),
+      [
+        ["image_inputs", true],
+        ["control/get", true],
+        ["control/get", false],
+      ],
+    );
+    assert.equal(calls[2].result, fault === "control" ? 5 : 0);
+    if (!fault)
+      assert.deepEqual(
+        calls
+          .filter(({ operation }) => operation !== "image_inputs")
+          .map(({ operation, entry }) => [operation, entry]),
+        [
+          "control/get",
+          "control/token",
+          "control/threads",
+          "threads/array-release",
+        ].flatMap((operation) => [
+          [operation, true],
+          [operation, false],
+        ]),
+      );
     assert.ok(
       events.indexOf("own:99") < events.indexOf("token") || fault === "control",
     );

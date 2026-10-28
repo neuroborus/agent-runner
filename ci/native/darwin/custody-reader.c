@@ -45,6 +45,12 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #define NATIVE_AUDIT_DOMAIN 1
+#ifdef NATIVE_CI_EXPERIMENT
+static void image_note(const char *operation, bool entry, long result, int error);
+static long image_result(const char *operation, long result);
+#define IMAGE_NOTE image_note
+#define IMAGE_CALL(operation, call) (image_note(operation, true, 0, 0), image_result(operation, (call)))
+#endif
 #include "custody.h"
 #include "file-identity.h"
 #include "feasibility-sandbox.h"
@@ -54,6 +60,9 @@ static char image_cdhash[41];
 static unsigned image_policy_index;
 static bool image_recovering;
 static struct image_closure image_inherited, image_inspected;
+static bool image_diagnostic_active, image_diagnostic_failed;
+static unsigned image_diagnostic_records, image_diagnostic_sequence;
+static struct identity image_diagnostic_identity;
 static bool image_settle(void) {
   bool ok = image_closure_release(&image_inspected);
   ok = image_closure_release(&image_inherited) && ok;
@@ -2684,52 +2693,106 @@ static void file_name(struct entry *root, unsigned pair) {
 static unsigned image_phase;
 static struct identity image_creator, image_target;
 static struct timespec image_started;
+/* At most 128 fixed records of 256 bytes per creator inspection. A failed or
+ * partial observation is inconclusive, never an admission/cleanup outcome.
+ * Block only our write's SIGPIPE, consuming only a newly pending instance;
+ * leave an already pending signal and the caller's disposition/mask intact. */
+static void image_note(const char *operation, bool entry, long result, int error) {
+  int saved = errno;
+  if (!image_diagnostic_active || image_diagnostic_failed || image_diagnostic_records >= 128) return;
+  char bytes[256];
+  int length = snprintf(bytes, sizeof(bytes), "native-darwin-image-call: sequence=%u pid=%u epoch=%u asid=%u birth=%llu.%llu operation=%s phase=%s result=%ld errno=%d\n",
+    image_diagnostic_sequence, image_diagnostic_identity.token.val[5], image_diagnostic_identity.token.val[7],
+    image_diagnostic_identity.token.val[6], (unsigned long long)image_diagnostic_identity.bsd.pbi_start_tvsec,
+    (unsigned long long)image_diagnostic_identity.bsd.pbi_start_tvusec, operation, entry ? "entry" : "return", result, error);
+  sigset_t blocked, previous, pending;
+  if (length <= 0 || length >= (int)sizeof(bytes) || sigemptyset(&blocked) || sigaddset(&blocked, SIGPIPE) ||
+      sigprocmask(SIG_BLOCK, &blocked, &previous)) {
+    image_diagnostic_failed = true; errno = saved; return;
+  }
+  if (sigpending(&pending)) image_diagnostic_failed = true;
+  else {
+    bool was_pending = sigismember(&pending, SIGPIPE) == 1;
+    image_diagnostic_records++;
+    ssize_t written = write(STDERR_FILENO, bytes, (size_t)length); int write_error = errno;
+    image_diagnostic_failed = written != length;
+    if (written < 0 && write_error == EPIPE && !was_pending) {
+      int received;
+      if (sigpending(&pending)) image_diagnostic_failed = true;
+      else if (sigismember(&pending, SIGPIPE) == 1) (void)sigwait(&blocked, &received);
+    }
+  }
+  if (sigprocmask(SIG_SETMASK, &previous, NULL)) image_diagnostic_failed = true;
+  errno = saved;
+}
+static long image_result(const char *operation, long result) {
+  int error = errno;
+  image_note(operation, false, result, error);
+  errno = error; return result;
+}
 static void image_deadline(void) {
   struct timespec now; need(!clock_gettime(CLOCK_MONOTONIC, &now));
   need(now.tv_sec > image_started.tv_sec || now.tv_nsec >= image_started.tv_nsec);
   need(now.tv_sec - image_started.tv_sec < 30);
 }
 static void image_inputs(struct image_closure *value, struct identity expected) {
+  IMAGE_NOTE("image_inputs", true, 0, 0);
   task_t task = MACH_PORT_NULL; thread_act_array_t threads = NULL; mach_msg_type_number_t count = 0;
-  kern_return_t got = task_for_pid(mach_task_self(), expected.token.val[5], &task);
+  kern_return_t got = IMAGE_CALL("control/get", task_for_pid(mach_task_self(), expected.token.val[5], &task));
   if (got == KERN_SUCCESS) image_copy(value, task);
   bool ok = image_mach(value, got, "image-control-get");
   audit_token_t token = {{0}}; mach_msg_type_number_t size = TASK_AUDIT_TOKEN_COUNT;
-  if (ok) ok = image_mach(value, task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&token, &size), "image-control-epoch") &&
+  if (ok) ok = image_mach(value, IMAGE_CALL("control/token", task_info(task, TASK_AUDIT_TOKEN, (task_info_t)&token, &size)), "image-control-epoch") &&
     image_assert(value, size == TASK_AUDIT_TOKEN_COUNT && !memcmp(&token, &expected.token, sizeof(token)), "image-control-binding");
   if (ok) {
-    got = task_threads(task, &threads, &count);
+    got = IMAGE_CALL("control/threads", task_threads(task, &threads, &count));
     ok = image_mach(value, got, "image-threads-get");
     if (got == KERN_SUCCESS) {
       bool single = count == 1 && threads;
       ok = image_assert(value, single, "image-single-thread") && ok;
       if (single) image_copy(value, threads[0]);
-      else for (unsigned i = 0; threads && i < count; i++) {
-        kern_return_t release = mach_port_deallocate(mach_task_self(), threads[i]);
-        domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-thread-release", "mach", release, true);
+      else {
+        kern_return_t settlement = KERN_SUCCESS;
+        IMAGE_NOTE("mach_port_deallocate/thread-copies", true, 0, 0);
+        for (unsigned i = 0; threads && i < count; i++) {
+          kern_return_t release = mach_port_deallocate(mach_task_self(), threads[i]);
+          if (release != KERN_SUCCESS) settlement = release;
+          domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-thread-release", "mach", release, true);
+        }
+        IMAGE_NOTE("mach_port_deallocate/thread-copies", false, settlement, errno);
       }
       if (ok) ok = image_closure_read(value, task, threads[0]);
       if (threads) {
-        kern_return_t release = mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)threads, count * sizeof(*threads));
+        kern_return_t release = IMAGE_CALL("threads/array-release", mach_vm_deallocate(mach_task_self(), (mach_vm_address_t)threads, count * sizeof(*threads)));
         ok = domain_bootstrap_check(&value->outcome, release == KERN_SUCCESS, "image-threads-array-release", "mach", release, true) && ok;
       }
     }
   }
   if (!ok) { image_failure_cleanup(); image_closure_require(value, false); }
   need(audit_identity_same(expected, inspect(expected.token.val[5])));
+  IMAGE_NOTE("image_inputs", false, 1, errno);
 }
 static void image_begin(void) {
+  IMAGE_NOTE("image_begin", true, 0, 0);
   need(case_mode && !case_fenced && (!image_phase || image_phase == 4) && case_audit.ready && !case_audit.closed);
-  reservation_guard(); image_creator = case_audit.subject;
+  IMAGE_NOTE("creator/reservation", true, 0, 0);
+  reservation_guard();
+  IMAGE_NOTE("creator/reservation", false, 1, errno);
+  image_creator = case_audit.subject;
   need(case_audit.source.token.val[5] == (unsigned)(operation_mode ? git_pid : case_pid));
+  IMAGE_NOTE("creator/identities", true, 0, 0);
   need(audit_identity_same(case_audit.source, inspect(case_audit.source.token.val[5])) &&
     audit_identity_same(image_creator, inspect(image_creator.token.val[5])));
-  char path[PATH_MAX]; need(proc_pidpath(image_creator.token.val[5], path, sizeof(path)) > 0 && !strcmp(path, entries[4].path));
+  IMAGE_NOTE("creator/identities", false, 1, errno);
+  char path[PATH_MAX]; need(IMAGE_CALL("creator/path", proc_pidpath(image_creator.token.val[5], path, sizeof(path))) > 0 && !strcmp(path, entries[4].path));
+  IMAGE_NOTE("creator/credentials", true, 0, 0);
   need(image_creator.token.val[0] == subject_uid && image_creator.token.val[1] == subject_uid && image_creator.token.val[2] == subject_gid);
+  IMAGE_NOTE("creator/credentials", false, 1, errno);
   memset(&image_inherited, 0, sizeof(image_inherited)); memset(&image_target, 0, sizeof(image_target));
   image_inputs(&image_inherited, image_creator);
-  need(!clock_gettime(CLOCK_MONOTONIC, &image_started)); image_phase = 1;
+  need(!IMAGE_CALL("creator/clock", clock_gettime(CLOCK_MONOTONIC, &image_started))); image_phase = 1;
   fputs("{\"version\":2,\"creator\":", stdout); emit(image_creator); fputs(",\"closed\":true}", stdout);
+  IMAGE_NOTE("image_begin", false, 1, errno);
 }
 static void image_exec(void) {
   need(image_phase == 1 && !case_fenced); image_deadline();
@@ -3017,7 +3080,13 @@ int main(int argc, char **argv) {
 #ifdef NATIVE_CI_EXPERIMENT
     } else if (!strcmp(tokens[0], "image-recover")) {
       need(n == 26); image_recover(&tokens[2]);
-    } else if (!strcmp(tokens[0], "image-creator")) { need(n == 2); image_begin();
+    } else if (!strcmp(tokens[0], "image-creator")) {
+      image_diagnostic_identity = case_audit.subject; image_diagnostic_sequence = sequence;
+      image_diagnostic_records = 0; image_diagnostic_failed = false; image_diagnostic_active = true;
+      IMAGE_NOTE("image-creator-dispatch", true, 0, 0);
+      need(n == 2); image_begin();
+      IMAGE_NOTE("image-creator-dispatch", false, 1, errno);
+      image_diagnostic_active = false;
     } else if (!strcmp(tokens[0], "image-exec")) { need(n == 2); image_exec();
     } else if (!strcmp(tokens[0], "image-read")) { need(n == 2); image_read();
     } else if (!strcmp(tokens[0], "image-continue")) { need(n == 4); image_continue(number(tokens[2]), tokens[3]);

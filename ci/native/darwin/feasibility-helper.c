@@ -1,5 +1,5 @@
 /* Bounded feasibility experiment; complete fault evidence has separate custody. */
-#define _DARWIN_C_SOURCE 1
+/* Default SDK getgroups reads process credentials, not directory membership. */
 #define __APPLE_API_PRIVATE 1
 #if !defined(__APPLE__) || !defined(__x86_64__)
 #error The experiment helper requires the matching macOS x64 SDK.

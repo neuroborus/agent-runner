@@ -4603,7 +4603,53 @@ Current source inventories pin both transitive headers before and
 after compilation; old source/admission records retain recovery-only bindings.
 These portable/source changes establish no native PASS.
 
+Creator inspection alone emits `native-darwin-image-call` entry/return records
+through the existing custody-reader stderr capture. Fixed labels cover dispatch,
+reservation/identity/path checks, nested identity APIs, control/token/thread reads,
+closure getters and reference settlement. Records use the command sequence and
+already-bound identity, with native return/errno values; bulk reference releases
+have one pair rather than a record per port/member. Each inspection emits at most
+128 records of at most 256 bytes. Observation writes are not retried, preserve
+errno and the caller's SIGPIPE disposition/mask/pending state, and cannot replace
+primary failures or interrupt independent cleanup. No handler or new channel is
+installed, and native admission and call order remain unchanged.
+
+The retained helper SIGSEGV after creator custody has no established failing API;
+launcher command-read EOF and child handoff-read are secondary. Usable paired
+observations joined to that original helper's termination can locate the immediate
+in-flight call for source inspection, but a missing return alone establishes no
+causal attribution. Failed, truncated, exhausted or ambiguous capture remains
+inconclusive. A returned refusal retains its own failure and cleanup evidence.
+Complete return or non-reproduction establishes no crash repair; a disproved
+hypothesis stops here. A functional correction requires source-supported causality
+and a new bounded repair plan. These diagnostics supply no native PASS.
+
 #### Suspended fault images and original-domain recovery
+
+The feasibility helper uses the SDK's ordinary `getgroups` declaration, matching
+the launcher: neither `_DARWIN_C_SOURCE` nor `_DARWIN_UNLIMITED_GETGROUPS` is
+explicitly enabled. Apple's [getgroups(2) manual](https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getgroups.2.html),
+[Libc declaration](https://github.com/apple-oss-distributions/Libc/blob/main/include/unistd.h)
+and [extended implementation](https://github.com/apple-oss-distributions/Libc/blob/main/sys/getgroups.c)
+distinguish process credentials from extended directory membership obtained through
+`getpwuid`/`getgrouplist`. Explicit feature macros select the latter at declaration
+level; undefining a function-name macro cannot reverse that symbol binding.
+Synthetic fault UIDs need no directory record. Matching-family XNU
+[credential reads](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_prot.c)
+include the effective primary GID, and its
+[resource limits](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_resource.c)
+remain separate evidence. The guard still requires exactly one actual reserved
+GID and successful NPROC readback with both limits exactly 32; `setgroups(0)`
+does not imply an empty final kernel list.
+
+Each actual feasibility/command helper build performs bounded compile-only Clang
+AST inspection of the real translation unit with its selected SDK and flags.
+The selected declaration/reference must be ordinary, and explicitly enabling
+`_DARWIN_C_SOURCE` must select the extended implementation. Full syntax checking
+also checks declaration visibility after removing the opt-in. Bounded observations
+use existing build diagnostics, without a new executable, receipt schema or local
+check assignment. Mismatch stops this hypothesis; portable fixtures cannot prove
+the actual SDK selection, which remains pending until matching native execution.
 
 Both `cancel` and `owner-loss` reuse `image-closure.h`, the one-shot handoff and
 ordinary inherited-service rules above. The trusted child installs and verifies
