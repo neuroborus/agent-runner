@@ -417,6 +417,12 @@ Existing image and preparation fixtures cover probe descriptor preservation and
 closure, fixed-entry guards, unchanged custody across rounds and interrupted
 recovery without publication/probe replay. Tier ownership stays unchanged;
 matching macOS CI must independently establish actual mapping and retirement.
+The build suite additionally executes actual fixture production and five-record
+snapshot bodies through native shape/read/hash/emission predicates with injected
+OS effects. It reproduces the third-object `0444`/generic-`0600` refusal and covers
+explicit fixture shape, ordinary file/directory limits, reads above 64 KiB and at
+16 MiB/overflow, incomplete reads, substitution/stability, close failures and full
+digests beyond the mapped prefix. This stays in fast discovery and proves no native PASS.
 Creator readbacks reject unexpected real, effective or saved credentials and
 inherited audit sessions. Refusal cleanup validates its independent root verifier
 before custody closure, then observes custodian exit before final verification.

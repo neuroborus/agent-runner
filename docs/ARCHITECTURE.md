@@ -2178,6 +2178,13 @@ mapping control rounds and retains its original workspace and status contract;
 ordinary Git snapshots retain the fixture. Intrinsic non-file errors and query
 returns cannot prove mapping isolation. Fork/control queries and separate T/X
 gates remain; matching native evidence is still required for acceptance.
+Feasibility's fixed five-object snapshot selects only its third object, the
+exclusive signed-byte `workspace/map-fixture`, for the explicit regular-file
+`0444`, one-link, positive-size ≤16777216 contract. Bounded production and
+independent reads join full-byte native heap hashing, stable metadata/identity,
+ACL and checked-close observations. Generic `0700`/`0600` inspection retains its
+65536-byte limit and held-unlinked semantics. Ordered snapshots, independent
+digests, lock absence and all baseline/before/after/cleanup comparisons remain.
 
 Fenced recovery retains original audit custody across unpublished epochs,
 persistence failures and uncertain continuation. Complete censuses, journal-before-

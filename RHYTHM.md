@@ -5,6 +5,15 @@ sections are added immediately below this introduction. Entries describe the
 resulting behavior, rationale, and important consequences; current contracts
 remain in the owning documentation.
 
+## 2026-10-28 — Select the exact feasibility mapping-fixture snapshot contract
+
+Five-record feasibility snapshots now select the signed `0444` mapping fixture
+explicitly, with a positive 16 MiB bound, bounded production/reads and full-byte
+heap hashing through the existing identity/emission owners. Generic `0600`/`0700`
+inspection and held-unlinked storage retain their contracts. Stable metadata,
+ACL/identity checks, independent digests and every snapshot comparison remain.
+Portable regressions establish no native PASS or repair of separate system failures.
+
 ## 2026-10-28 — Bind Darwin mapping isolation to regular files
 
 The existing handoff/custody owners now require outside executable mapping,

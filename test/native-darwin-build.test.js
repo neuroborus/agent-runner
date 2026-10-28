@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import path from "node:path";
 import test from "node:test";
 import { Script } from "node:vm";
 import { withNativeDiagnostics } from "../ci/native/index.js";
@@ -11,6 +12,419 @@ import {
 
 const SOURCE = new URL("../ci/native/darwin/", import.meta.url);
 const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
+
+test("Darwin fixture production and complete snapshots enforce the selected native file contract", async () => {
+  const [source, helper] = await Promise.all(
+    ["feasibility.js", "feasibility-helper.c"].map((name) =>
+      readFile(new URL(name, SOURCE), "utf8"),
+    ),
+  );
+  const body = (name) =>
+    new RegExp(
+      `static (?:void|bool) ${name}\\([^\\n]*\\) \\{([\\s\\S]*?)\\n\\}`,
+      "u",
+    ).exec(helper)[1];
+  // Translate declarations and pointer outputs; shape, read, hash, stability,
+  // emission and dispatch predicates are the actual C bodies. Only OS effects
+  // (including the already covered ACL/volume APIs) are injected.
+  const translate = (text) =>
+    text
+      .replaceAll("->", ".")
+      .replace("struct stat st; struct statfs fs;", "let st = {}, fs = {};")
+      .replaceAll(
+        /struct stat (st, after|held, named);/gu,
+        (_match, names) => `let ${names.replaceAll(", ", " = {}, ")} = {};`,
+      )
+      .replace(/struct attrlist attrs = [^\n]+;/u, "let attrs = {};")
+      .replace(
+        "struct { uint32_t length; unsigned char uuid[16]; } volume;",
+        "let volume = {};",
+      )
+      .replace(/_Static_assert\([^\n]+;/u, "")
+      .replace(
+        '"%u:%u:%u:%" PRIu64 ":%lld:%ld:%u:%u:%o:%s"',
+        '"%u:%u:%u:%llu:%lld:%ld:%u:%u:%o:%s"',
+      )
+      .replace(
+        "unsigned char *data = malloc((size_t)st.st_size + 1), hash[CC_SHA256_DIGEST_LENGTH];",
+        "let data = malloc(st.st_size + 1), hash = Buffer.alloc(32);",
+      )
+      .replace(
+        /char (id|again|hex)\[(256|33)\];/gu,
+        "let $1 = Buffer.alloc($2);",
+      )
+      .replace("snprintf(hex + 2*i,", "snprintf(hex.subarray(2*i),")
+      .replaceAll(/&(st|fs|attrs|volume|after|held|named)\b/gu, "$1")
+      .replaceAll("sizeof(volume)", "20")
+      .replaceAll("sizeof(hash)", "32")
+      .replaceAll(/\((?:size_t|CC_LONG|unsigned|long long)\)/gu, "")
+      .replaceAll(/\b(?:unsigned|int|ssize_t|bool) /gu, "let ");
+  const dispatch = helper.slice(
+    helper.indexOf('    bool snapshot = !strcmp(argv[1], "snapshot-files")'),
+    helper.indexOf('  } else if ((!strcmp(argv[1], "remove")'),
+  );
+  const nativeScript = new Script(
+    [
+      ...Object.entries({
+        same_file_stat: "a,b",
+        object_identity_links: "fd,out,links,mode",
+        emit_file_links: "fd,links,mode,limit",
+      }).map(
+        ([name, args]) =>
+          `function ${name}(${args}) {${translate(body(name))}}`,
+      ),
+      `function emit_file(fd) {${/^static void emit_file\(int fd\) \{ (.*) \}$/mu.exec(helper)[1]}}`,
+      `({files: (argv) => {let argc = argv.length; ${translate(dispatch)}}, cleanup: (leaf, match) => {${/; (emit_file_links\(leaf, match \? 0 : 1[^;]+;)/u.exec(helper)[1]}}})`,
+    ].join("\n"),
+  );
+  const snapshotSource = source.slice(
+    source.indexOf("async function snapshotBytes("),
+    source.indexOf("/** Fixed startup controls"),
+  );
+  const producer = source.slice(
+    source.indexOf("async function prepareFixture("),
+    source.indexOf("/** Preparation tracks"),
+  );
+  const script = new Script(
+    `${snapshotSource}\n${producer}\n({prepareFixture, snapshots, original: ${snapshotSource.slice(snapshotSource.indexOf("async function snapshots(")).replace('"snapshot-files"', '"files"')}})`,
+  );
+  const root = "/fixture/run",
+    file = (name) => path.join(root, name),
+    limit = 16777216;
+  for (const [size, fault, patch] of [
+    [1],
+    [65537],
+    [limit],
+    [0, "production"],
+    [limit + 1, "production"],
+    ...[
+      "short-native",
+      "grow-native",
+      "drift-native",
+      "substitute-native",
+      "close-native",
+      "malloc",
+      "acl",
+      "short-js",
+      "grow-js",
+      "drift-js",
+      "substitute-js",
+      "close-js",
+      "digest",
+    ].map((fault) => [65537, fault]),
+    ...[
+      { st_mode: 0o100600 },
+      { st_mode: 0o100644 },
+      { st_mode: 0o40444 },
+      { st_nlink: 2 },
+      { st_size: 0 },
+      { st_size: limit + 1 },
+      { st_uid: 2 },
+      { st_gid: 2 },
+    ].map((patch) => [1, "shape", patch]),
+  ]) {
+    const label = `${size}/${fault ?? "clean"}/${JSON.stringify(patch)}`,
+      files = new Map(),
+      fds = new Map(),
+      allocations = [],
+      closed = [];
+    let inode = 0,
+      output = "";
+    const put = (name, bytes, mode = 0o600, kind = 0o100000) => {
+      const value = {
+        bytes: Buffer.from(bytes),
+        st: {
+          st_dev: 1,
+          st_ino: ++inode,
+          st_uid: 1,
+          st_gid: 1,
+          st_mode: kind | mode,
+          st_nlink: kind === 0o40000 ? 2 : 1,
+          st_size: bytes.length,
+        },
+      };
+      for (const key of ["st_birthtimespec", "st_mtimespec", "st_ctimespec"])
+        value.st[key] = { tv_sec: 1, tv_nsec: 2 };
+      files.set(file(name), value);
+      return value;
+    };
+    put("", "", 0o700, 0o40000);
+    put("build/argv-fixture", Buffer.alloc(size, 42), 0o500);
+    const target = file("workspace/map-fixture"),
+      isTarget = (fd) => fds.get(fd).path === target;
+    const guard = Symbol("guard"),
+      closeFailure = new Error("close");
+    const need = (ok, operation = "guard") => {
+      if (!ok)
+        throw Object.assign(new Error(`${label}/${operation}`), {
+          [guard]: true,
+        });
+    };
+    const refused = (error) => error[guard] === true || error === closeFailure;
+    const format = (text, args) => {
+      let index = 0;
+      return text.replace(/%(?:02x|llu|lld|ld|u|o|s)/gu, (tag) => {
+        const value = args[index++];
+        return tag === "%02x"
+          ? value.toString(16).padStart(2, "0")
+          : tag === "%o"
+            ? value.toString(8)
+            : String(value).replace(/\0.*$/su, "");
+      });
+    };
+    const native = async (_root, operation, ...names) => {
+      output = "";
+      fds.clear();
+      const effects = {
+        Buffer,
+        need,
+        invariant: need,
+        posix_check: (result) => need(result >= 0),
+        S_ISDIR: (mode) => (mode & 0o170000) === 0o40000,
+        S_ISREG: (mode) => (mode & 0o170000) === 0o100000,
+        getuid: () => 1,
+        getgid: () => 1,
+        O_RDONLY: 0,
+        O_NOFOLLOW: 1,
+        O_CLOEXEC: 2,
+        open(name) {
+          const fd = fds.size;
+          assert.ok(files.has(name), name);
+          fds.set(fd, { path: name, value: files.get(name) });
+          return fd;
+        },
+        fstat(fd, out) {
+          Object.assign(out, structuredClone(fds.get(fd).value.st));
+          return 0;
+        },
+        fstatfs(_fd, out) {
+          out.f_fsid = { val: [1, 2] };
+          return 0;
+        },
+        fgetattrlist(_fd, _attrs, out) {
+          Object.assign(out, { length: 20, uuid: Buffer.alloc(16, 1) });
+          return 0;
+        },
+        no_acl(fd) {
+          need(!(isTarget(fd) && fault === "acl"));
+        },
+        snprintf(out, bound, text, ...args) {
+          const value = format(text, args);
+          out.write(value.slice(0, bound - 1));
+          return value.length;
+        },
+        strcmp: (a, b) => (String(a) === String(b) ? 0 : 1),
+        printf: (text, ...args) => {
+          output += format(text, args);
+        },
+        putchar: (text) => {
+          output += text;
+        },
+        puts: (text) => {
+          output += text;
+        },
+        malloc(bound) {
+          assert.ok(bound <= limit + 1, label);
+          allocations.push(bound);
+          return fault === "malloc" && bound > 65536
+            ? null
+            : Buffer.alloc(bound);
+        },
+        free() {},
+        pread(fd, out, bound, offset) {
+          const value = fds.get(fd).value;
+          assert.equal(offset, 0);
+          assert.equal(bound, value.st.st_size + 1);
+          value.bytes.copy(out);
+          if (isTarget(fd) && fault === "drift-native")
+            value.st.st_mtimespec.tv_nsec++;
+          return (
+            value.bytes.length +
+            (isTarget(fd) && fault === "grow-native"
+              ? 1
+              : isTarget(fd) && fault === "short-native"
+                ? -1
+                : 0)
+          );
+        },
+        CC_SHA256(bytes, count, out) {
+          createHash("sha256")
+            .update(bytes.subarray(0, count))
+            .digest()
+            .copy(out);
+          return out;
+        },
+        lstat(name, out) {
+          Object.assign(out, structuredClone(files.get(name).st));
+          if (name === target && fault === "substitute-native") out.st_ino++;
+          return 0;
+        },
+        close(fd) {
+          closed.push(fds.get(fd).path);
+          return isTarget(fd) && fault === "close-native" ? -1 : 0;
+        },
+      };
+      const inspect = nativeScript.runInNewContext(effects);
+      native.cleanup = (name) => {
+        output = "";
+        const fd = effects.open(name);
+        files.delete(name);
+        fds.get(fd).value.st.st_nlink = 0;
+        inspect.cleanup(fd, true);
+        assert.equal(effects.close(fd), 0);
+        return JSON.parse(output);
+      };
+      inspect.files(["helper", operation, ...names]);
+      return JSON.parse(output);
+    };
+    const stats = (value) => ({
+      isFile: () => (value.st.st_mode & 0o170000) === 0o100000,
+      ...Object.fromEntries(
+        ["dev", "ino", "uid", "gid", "mode", "nlink", "size"].map((key) => [
+          key,
+          BigInt(value.st[`st_${key}`]),
+        ]),
+      ),
+      ...Object.fromEntries(
+        ["birth", "m", "c"].map((key) => [
+          `${key}timeNs`,
+          BigInt(value.st[`st_${key}timespec`].tv_nsec),
+        ]),
+      ),
+    });
+    const runtime = script.runInNewContext({
+      Buffer,
+      BigInt,
+      path,
+      need,
+      digest,
+      constants: { O_RDONLY: 0, O_NOFOLLOW: 1, O_NONBLOCK: 2 },
+      native,
+      nativeException() {},
+      async mkdir(name) {
+        put(path.relative(root, name), "", 0o700, 0o40000);
+      },
+      async writeFile(name, bytes, options) {
+        assert.equal(options.flag, "wx");
+        assert.equal(files.has(name), false);
+        put(path.relative(root, name), bytes, options.mode);
+      },
+      async command(_tool, args) {
+        if (args.includes("commit")) {
+          put("workspace/.git/index", "index");
+          put("workspace/.git/refs/heads/fixture", "ref");
+        }
+      },
+      async chmod(name, mode) {
+        if (files.has(name))
+          files.get(name).st.st_mode =
+            (files.get(name).st.st_mode & 0o170000) | mode;
+      },
+      async lstat(name) {
+        if (!files.has(name))
+          throw Object.assign(new Error(), { code: "ENOENT" });
+        const out = stats(files.get(name));
+        if (name === target && fault === "substitute-js") out.ino++;
+        return out;
+      },
+      async open(name, flags) {
+        assert.equal(flags, 3);
+        const value = files.get(name);
+        return {
+          async stat() {
+            return stats(value);
+          },
+          async read(out, offset, bound, position) {
+            assert.equal(offset, 0);
+            assert.equal(position, 0);
+            assert.equal(bound, value.bytes.length + 1);
+            value.bytes.copy(out);
+            if (name === target && fault === "drift-js")
+              value.st.st_ctimespec.tv_nsec++;
+            if (name === target && fault === "digest") out[4097] ^= 1;
+            return {
+              bytesRead:
+                value.bytes.length +
+                (name === target && fault === "grow-js"
+                  ? 1
+                  : name === target && fault === "short-js"
+                    ? -1
+                    : 0),
+            };
+          },
+          async close() {
+            closed.push(name);
+            if (name === target && fault === "close-js") throw closeFailure;
+          },
+        };
+      },
+    });
+    if (fault === "production") {
+      await assert.rejects(
+        () => runtime.prepareFixture(root, "nonce"),
+        refused,
+      );
+      assert.equal(files.has(target), false);
+      assert.ok(closed.includes(file("build/argv-fixture")));
+      continue;
+    }
+    await runtime.prepareFixture(root, "nonce");
+    const fixture = files.get(target);
+    Object.assign(fixture.st, patch);
+    assert.deepEqual(
+      fixture.bytes,
+      files.get(file("build/argv-fixture")).bytes,
+    );
+    if (patch?.st_size !== undefined)
+      fixture.bytes = Buffer.alloc(patch.st_size);
+    if (fault) {
+      await assert.rejects(() => runtime.snapshots(root), refused);
+      continue;
+    }
+    await assert.rejects(() => runtime.original(root), /file-shape/u);
+    assert.equal(JSON.parse(output.slice(0, -1) + "]").length, 2);
+    const baseline = JSON.parse(JSON.stringify(await runtime.snapshots(root)));
+    assert.equal(baseline.lockAbsent, true);
+    assert.deepEqual(
+      baseline.records.map(({ sha256 }) => sha256),
+      ["index", "ref", fixture.bytes, "nonce", "nonce"].map(digest),
+    );
+    assert.ok(closed.includes(target));
+    assert.ok(allocations.includes(size + 1));
+    if (size === 65537) {
+      for (const phase of ["before", "after", "cleanup"])
+        assert.deepEqual(
+          JSON.parse(JSON.stringify(await runtime.snapshots(root))),
+          baseline,
+          phase,
+        );
+      fixture.bytes[4097] ^= 1;
+      assert.notEqual(
+        (await runtime.snapshots(root)).records[2].sha256,
+        baseline.records[2].sha256,
+      );
+      put("workspace/.git/index.lock", "lock");
+      assert.equal((await runtime.snapshots(root)).lockAbsent, false);
+      put("ordinary", Buffer.alloc(65536));
+      await native(root, "files", file("ordinary"));
+      put("ordinary", Buffer.alloc(65537));
+      await assert.rejects(
+        () => native(root, "files", file("ordinary")),
+        refused,
+      );
+      put("ordinary", "");
+      await native(root, "files", file("ordinary"));
+      put("ordinary", "owned");
+      assert.equal(native.cleanup(file("ordinary")).sha256, digest("owned"));
+      assert.equal(files.has(file("ordinary")), false);
+      put("ordinary", "", 0o755, 0o40000);
+      await assert.rejects(
+        () => native(root, "files", file("ordinary")),
+        refused,
+      );
+    }
+  }
+});
 
 test("Darwin fork fences registered and bootstrap slots and settles only getter copies", async () => {
   const [header, domain] = await Promise.all(

@@ -4766,6 +4766,13 @@ non-file mmap failure. In particular, the workspace directory query returning 0
 and observed errno 2 establish neither regular-file mapping permission nor denial.
 
 The existing signed argv bytes also supply one held workspace map fixture.
+Feasibility snapshots explicitly select that exact third object as a regular
+`0444`, single-link file of 1–16777216 bytes. Signed-source production and
+independent snapshot reads are bounded; native hashing uses bounded heap storage
+and checks complete reads, stable metadata/identity, ACLs and descriptor closure.
+Generic inspection retains `0700` directories, `0600` files and its 65536-byte
+limit, including held-unlinked storage. All five ordered records, independent
+full-byte digests, lock absence and baseline/before/after/cleanup comparisons remain.
 Experimental declarations append it after existing assets, preserving the fixed
 prefix, entry11/12 and historical receipt sizes. Existing per-object copy/read
 and recovery custody bind it to its source, parent, inode, size, hash and signature.

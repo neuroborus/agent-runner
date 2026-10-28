@@ -1,12 +1,14 @@
 import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { once } from "node:events";
+import { constants } from "node:fs";
 import {
   chown,
   chmod,
   lstat,
   mkdir,
   mkdtemp,
+  open,
   readFile,
   realpath,
   rename,
@@ -1958,6 +1960,41 @@ export async function buildDarwinFeasibility(
   }
 }
 
+async function snapshotBytes(file, limit) {
+  const held = await open(
+    file,
+    constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+  );
+  try {
+    const before = await held.stat({ bigint: true });
+    need(before.isFile() && before.size >= 0n && before.size <= BigInt(limit));
+    const bytes = Buffer.alloc(Number(before.size) + 1);
+    const { bytesRead } = await held.read(bytes, 0, bytes.length, 0);
+    const after = await held.stat({ bigint: true }),
+      named = await lstat(file, { bigint: true });
+    need(
+      bytesRead === Number(before.size) &&
+        [
+          "dev",
+          "ino",
+          "mode",
+          "uid",
+          "gid",
+          "nlink",
+          "size",
+          "birthtimeNs",
+          "mtimeNs",
+          "ctimeNs",
+        ].every(
+          (key) => before[key] === after[key] && before[key] === named[key],
+        ),
+    );
+    return bytes.subarray(0, bytesRead);
+  } finally {
+    await held.close();
+  }
+}
+
 async function snapshots(root) {
   const files = [
     "workspace/.git/index",
@@ -1968,13 +2005,19 @@ async function snapshots(root) {
   ];
   const records = await native(
     root,
-    "files",
+    "snapshot-files",
     ...files.map((file) => path.join(root, file)),
   );
   need(Array.isArray(records) && records.length === files.length);
   for (let i = 0; i < files.length; i++)
     need(
-      records[i].sha256 === digest(await readFile(path.join(root, files[i]))),
+      records[i].sha256 ===
+        digest(
+          await snapshotBytes(
+            path.join(root, files[i]),
+            i === 2 ? 16777216 : 65536,
+          ),
+        ),
     );
   let lockAbsent = false;
   try {
@@ -3556,11 +3599,15 @@ async function prepareFixture(root, nonce) {
   ])
     await writeFile(path.join(root, name), nonce, { flag: "wx", mode: 0o600 });
   const workspace = path.join(root, "workspace");
-  await writeFile(
-    path.join(workspace, "map-fixture"),
-    await readFile(path.join(root, "build/argv-fixture")),
-    { flag: "wx", mode: 0o444 },
+  const image = await snapshotBytes(
+    path.join(root, "build/argv-fixture"),
+    16777216,
   );
+  need(image.length > 0);
+  await writeFile(path.join(workspace, "map-fixture"), image, {
+    flag: "wx",
+    mode: 0o444,
+  });
   for (const args of [
     ["init", "--initial-branch=fixture"],
     ["add", "inspection.txt"],

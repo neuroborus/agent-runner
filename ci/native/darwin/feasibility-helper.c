@@ -356,11 +356,11 @@ done:
   if (security) filesec_free(security);
   if (!ok) failure(code);
 }
-static void object_identity_links(int fd, char out[256], unsigned links) {
+static void object_identity_links(int fd, char out[256], unsigned links, mode_t mode) {
   struct stat st; struct statfs fs; posix_check(fstat(fd, &st), "file-stat"); posix_check(fstatfs(fd, &fs), "volume-stat");
   invariant(st.st_uid == getuid(), "file-owner"); invariant(st.st_gid == getgid(), "file-group");
   invariant(st.st_ino && st.st_birthtimespec.tv_sec > 0 &&
-    (S_ISDIR(st.st_mode) ? (st.st_mode & 07777) == 0700 : S_ISREG(st.st_mode) && (st.st_mode & 07777) == 0600 && st.st_nlink == links), "file-shape");
+    (mode == 0600 && S_ISDIR(st.st_mode) ? (st.st_mode & 07777) == 0700 : S_ISREG(st.st_mode) && (st.st_mode & 07777) == mode && st.st_nlink == links), "file-shape");
   no_acl(fd, &st);
   struct attrlist attrs = {.bitmapcount = ATTR_BIT_MAP_COUNT, .volattr = ATTR_VOL_INFO | ATTR_VOL_UUID};
   struct { uint32_t length; unsigned char uuid[16]; } volume;
@@ -375,24 +375,30 @@ static void object_identity_links(int fd, char out[256], unsigned links) {
     (long long)st.st_birthtimespec.tv_sec, st.st_birthtimespec.tv_nsec, st.st_uid, st.st_gid, st.st_mode, hex);
   need(n > 0 && n < 256);
 }
-static void object_identity(int fd, char out[256]) { object_identity_links(fd, out, 1); }
+static void object_identity(int fd, char out[256]) { object_identity_links(fd, out, 1, 0600); }
 static int directory(const char *path) {
   int fd = open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC); char id[256];
   posix_check(fd, "directory-open"); object_identity(fd, id); return fd;
 }
-static void emit_file_links(int fd, unsigned links) {
-  char id[256]; object_identity_links(fd, id, links); struct stat st; need(!fstat(fd, &st));
+static void emit_file_links(int fd, unsigned links, mode_t mode, size_t limit) {
+  struct stat st, after; need(!fstat(fd, &st));
+  char id[256]; object_identity_links(fd, id, links, mode);
   printf("{\"identity\":\"%s\",\"sha256\":", id);
   if (S_ISDIR(st.st_mode)) printf("null");
   else {
-    need(st.st_size >= 0 && st.st_size <= 65536); unsigned char data[65537], hash[CC_SHA256_DIGEST_LENGTH];
-    ssize_t n = pread(fd, data, sizeof(data), 0); need(n == st.st_size && CC_SHA256(data, (CC_LONG)n, hash));
+    need(st.st_size >= (mode == 0444 ? 1 : 0) && (size_t)st.st_size <= limit);
+    unsigned char *data = malloc((size_t)st.st_size + 1), hash[CC_SHA256_DIGEST_LENGTH]; need(data);
+    ssize_t n = pread(fd, data, (size_t)st.st_size + 1, 0);
+    bool ok = n == st.st_size && CC_SHA256(data, (CC_LONG)n, hash); free(data); need(ok);
+    need(!fstat(fd, &after) && same_file_stat(&st, &after) && st.st_size == after.st_size &&
+      st.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec && st.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec &&
+      st.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec && st.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec);
     putchar('"'); for (unsigned i = 0; i < sizeof(hash); i++) printf("%02x", hash[i]); putchar('"');
-    char again[256]; object_identity_links(fd, again, links); need(!strcmp(id, again));
+    char again[256]; object_identity_links(fd, again, links, mode); need(!strcmp(id, again));
   }
   putchar('}');
 }
-static void emit_file(int fd) { emit_file_links(fd, 1); }
+static void emit_file(int fd) { emit_file_links(fd, 1, 0600, 65536); }
 static void storage(const char *parent_path) {
   int parent = directory(parent_path); admitted_effects = true;
   need(!flock(parent, LOCK_EX | LOCK_NB) && !mkdirat(parent, "allocation", 0700));
@@ -404,7 +410,7 @@ static void storage(const char *parent_path) {
   int named = openat(base, "leaf", O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(named >= 0);
   char actual[256]; object_identity(named, actual); bool match = !strcmp(expected, actual);
   if (command == 'N') need(match && !unlinkat(base, "leaf", 0)); else need(!match);
-  printf("{\"event\":\"cleanup\",\"removed\":%s,\"held\":", match ? "true" : "false"); emit_file_links(leaf, match ? 0 : 1); puts("}");
+  printf("{\"event\":\"cleanup\",\"removed\":%s,\"held\":", match ? "true" : "false"); emit_file_links(leaf, match ? 0 : 1, 0600, 65536); puts("}");
   need(!close(named) && !close(leaf) && !close(base) && !close(parent));
 }
 static void remove_owned(char **args, bool is_directory) {
@@ -652,9 +658,14 @@ int main(int argc, char **argv) {
     need(active == expected && live(value)); printf("{\"sandboxed\":%s}\n", expected ? "true" : "false");
   } else if (!strcmp(argv[1], "image") && argc == 15) {
     image_identity(parse_identity(argv + 2), argv[14]);
-  } else if (!strcmp(argv[1], "files") && argc >= 3 && argc <= 10) {
+  } else if (!strcmp(argv[1], "files") || !strcmp(argv[1], "snapshot-files")) {
+    bool snapshot = !strcmp(argv[1], "snapshot-files"); need(snapshot ? argc == 7 : argc >= 3 && argc <= 10);
     putchar('['); for (int i = 2; i < argc; i++) { int fd = open(argv[i], O_RDONLY | O_NOFOLLOW | O_CLOEXEC); need(fd >= 0);
-      if (i > 2) putchar(','); emit_file(fd); need(!close(fd)); } puts("]");
+      struct stat held, named; if (snapshot) need(!fstat(fd, &held));
+      if (i > 2) putchar(',');
+      if (snapshot && i == 4) emit_file_links(fd, 1, 0444, 16777216); else emit_file(fd);
+      if (snapshot) need(!lstat(argv[i], &named) && same_file_stat(&held, &named));
+      need(!close(fd)); } puts("]");
   } else if ((!strcmp(argv[1], "remove") || !strcmp(argv[1], "remove-dir")) && argc == 6) remove_owned(argv + 2, !strcmp(argv[1], "remove-dir"));
   else if (!strcmp(argv[1], "storage") && argc == 3) storage(argv[2]);
   else if (!strcmp(argv[1], "control") && argc == 5) { need(strlen(argv[4]) == 32);
